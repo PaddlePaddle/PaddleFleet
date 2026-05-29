@@ -1055,6 +1055,190 @@ class CompressedSparseAttention(FleetLayer):
         else:
             self.indexer = None
 
+    def _compute_indexer_compressed_topk_idxs(
+        self,
+        query: Tensor,
+        x: Tensor,
+        qr: Tensor,
+        compressed_kv: Tensor,
+        n_compressed: int,
+        offset: int,
+    ) -> tuple[Tensor, Tensor | None, tuple | None]:
+        """Build indexer-selected compressed KV indices and loss state."""
+        b, sq, np_heads, _ = query.shape
+        indexer_loss = None
+        tilelang_indexer_loss_state = None
+
+        x_det = x.detach()
+        qr_det = qr.detach()
+        if self.training:
+            x_det.stop_gradient = False
+            qr_det.stop_gradient = False
+
+        # Loss and main attention intentionally use different top-k widths
+        # during phase 2. ``dsa_indexer_use_sparse_loss=False`` expands only
+        # the indexer loss to the full compressed range; the main CSA attention
+        # remains sparse and consumes ``min(index_topk, n_compressed)``.
+        use_tilelang_indexer = _resolve_csa_tilelang_switch(
+            self.config,
+            "csa_tilelang_enable_indexer",
+        )
+        # The fused TileLang indexer-loss path is only active during the
+        # grad-enabled forward. Full recompute runs the first forward under
+        # no_grad; that pass should only materialize main-attention indices.
+        use_tilelang_loss_path = (
+            use_tilelang_indexer and self.training and paddle.is_grad_enabled()
+        )
+        loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
+            self.config,
+            self.indexer.index_topk,
+            n_compressed,
+        )
+        attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
+            self.indexer.index_topk,
+            n_compressed,
+        )
+
+        causal_mask = _build_compressed_causal_mask(
+            self.compress_ratio,
+            b,
+            sq,
+            n_compressed,
+        )
+
+        if use_tilelang_loss_path:
+            # Fused TileLang fwd + selected-set KL + TileLang bwd. The returned
+            # indices may be wider than main attention top-k during phase 2 and
+            # are trimmed below before sparse attention consumes them.
+            indexer_loss_coeff = getattr(
+                self.config, "dsa_indexer_loss_coeff", 0.0
+            )
+            q_indexer_bf, k_indexer_bf, weights_indexer_bf = (
+                self.indexer.forward_before_topk(x_det, qr_det)
+            )
+            # compressed_kv is shared across query heads; pass it directly to
+            # the target/reducesum path instead of materializing [B,S,H,D].
+            key_comp_mla = compressed_kv.detach()
+            (
+                indexer_loss,
+                topk_indices_compressed,
+                topk_probs,
+                target,
+            ) = _compute_tilelang_csa_indexer_loss_forward(
+                q_indexer_bf,
+                weights_indexer_bf,
+                k_indexer_bf,
+                query.detach(),
+                key_comp_mla,
+                int(self.compress_ratio),
+                int(loss_topk_effective),
+                float(self.softmax_scale),
+                float(indexer_loss_coeff),
+                self.tp_group,
+            )
+            tilelang_indexer_loss_state = (
+                q_indexer_bf,
+                weights_indexer_bf,
+                k_indexer_bf,
+                topk_indices_compressed,
+                topk_probs,
+                target,
+                float(indexer_loss_coeff),
+            )
+            if indexer_loss_coeff > 0:
+                DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                    loss=indexer_loss,
+                    layer_number=self.layer_number,
+                    num_layers=self.config.num_hidden_layers,
+                )
+        elif self.training and not use_tilelang_indexer:
+            q_indexer, k_indexer, weights_indexer = (
+                self.indexer.forward_before_topk(x_det, qr_det)
+            )
+            indexer_loss_coeff = getattr(
+                self.config, "dsa_indexer_loss_coeff", 0.0
+            )
+            key_for_loss = (
+                compressed_kv.transpose([1, 0, 2])
+                .unsqueeze(2)
+                .expand([-1, -1, np_heads, -1])
+            )
+
+            q_sf = q_indexer.transpose([1, 0, 2, 3])
+            k_sf = (
+                k_indexer.transpose([1, 0, 2])
+                if k_indexer.ndim == 3
+                else k_indexer.transpose([1, 0, 2, 3])
+            )
+            weights_sf = (
+                weights_indexer * self.indexer.softmax_scale
+            ).transpose([1, 0, 2])
+            query_sf = query.transpose([1, 0, 2, 3]).detach()
+            mask_for_loss = causal_mask.unsqueeze(1)
+
+            indexer_loss = FusedDSAIndexerLoss.apply(
+                q_sf,
+                weights_sf,
+                k_sf,
+                query_sf,
+                key_for_loss.detach(),
+                self.softmax_scale,
+                min(self.indexer.index_topk, n_compressed),
+                indexer_loss_coeff,
+                mask_for_loss,
+                getattr(self.config, "dsa_indexer_use_sparse_loss", True),
+                self.tp_group,
+            )
+            topk_indices_compressed = FusedDSAIndexerLoss._last_topk_indices
+
+            if indexer_loss_coeff > 0:
+                DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                    loss=indexer_loss,
+                    layer_number=self.layer_number,
+                    num_layers=self.config.num_hidden_layers,
+                )
+        elif not use_tilelang_indexer:
+            _, topk_indices_compressed = self.indexer(
+                x_det,
+                qr_det,
+                mask=causal_mask,
+            )
+
+        # Optionally replace topk producer with TileLang fused compressed
+        # indexer forward. This only swaps the indices fed to sparse attention.
+        if use_tilelang_indexer and not use_tilelang_loss_path:
+            from paddlefleet.tilelang_ops import (
+                csa_indexer_topk_fwd,
+            )
+
+            with paddle.no_grad():
+                q_indexer_tl, k_indexer_tl, weights_indexer_tl = (
+                    self.indexer.forward_before_topk(x_det, qr_det)
+                )
+                tl_topk_indices, _tl_topk_scores = csa_indexer_topk_fwd(
+                    q_indexer_tl,
+                    k_indexer_tl,
+                    weights_indexer_tl,
+                    ratio=self.compress_ratio,
+                    topk_effective=attn_topk_effective,
+                )
+
+            topk_indices_compressed = tl_topk_indices
+
+        if topk_indices_compressed.shape[-1] > attn_topk_effective:
+            topk_indices_compressed = topk_indices_compressed[
+                ..., :attn_topk_effective
+            ].contiguous()
+
+        compress_topk_idxs = _map_compressed_topk_to_kv_full(
+            topk_indices_compressed,
+            sq,
+            self.compress_ratio,
+            offset,
+        )
+
+        return compress_topk_idxs, indexer_loss, tilelang_indexer_loss_state
+
     def forward(
         self,
         query: Tensor,
@@ -1106,197 +1290,16 @@ class CompressedSparseAttention(FleetLayer):
 
         if self.compress_ratio > 1 and n_compressed > 0:
             if self.indexer is not None:
-                x_det = x.detach()
-                qr_det = qr.detach()
-                if self.training:
-                    x_det.stop_gradient = False
-                    qr_det.stop_gradient = False
-
-                # Loss and main attention intentionally use different top-k
-                # widths during phase 2. ``dsa_indexer_use_sparse_loss=False``
-                # expands only the indexer loss to the full compressed range;
-                # the main CSA attention remains sparse and consumes
-                # ``min(index_topk, n_compressed)`` compressed blocks, matching
-                # the Paddle FusedDSAIndexerLoss path.
-                use_tilelang_indexer = _resolve_csa_tilelang_switch(
-                    self.config,
-                    "csa_tilelang_enable_indexer",
-                )
-                # The fused TileLang indexer-loss path is only active during
-                # the grad-enabled forward. Full recompute runs the first
-                # forward under no_grad; that pass should only materialize the
-                # indices consumed by main attention.
-                # Otherwise we fall back to:
-                #   * Paddle FusedDSAIndexerLoss during training, or
-                #   * Paddle/TileLang forward-only top-k during inference.
-                use_tilelang_loss_path = (
-                    use_tilelang_indexer
-                    and self.training
-                    and paddle.is_grad_enabled()
-                )
-                loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
-                    self.config,
-                    self.indexer.index_topk,
+                (
+                    compress_topk_idxs,
+                    indexer_loss,
+                    tilelang_indexer_loss_state,
+                ) = self._compute_indexer_compressed_topk_idxs(
+                    query,
+                    x,
+                    qr,
+                    compressed_kv,
                     n_compressed,
-                )
-                attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
-                    self.indexer.index_topk,
-                    n_compressed,
-                )
-
-                causal_mask = _build_compressed_causal_mask(
-                    self.compress_ratio,
-                    b,
-                    sq,
-                    n_compressed,
-                )
-
-                if use_tilelang_loss_path:
-                    # Fused TileLang fwd + selected-set KL + TileLang bwd in
-                    # one PyLayer. The returned indices may be wider than the
-                    # main attention top-k during phase 2 and are trimmed below
-                    # before sparse attention consumes them.
-                    indexer_loss_coeff = getattr(
-                        self.config, "dsa_indexer_loss_coeff", 0.0
-                    )
-                    q_indexer_bf, k_indexer_bf, weights_indexer_bf = (
-                        self.indexer.forward_before_topk(x_det, qr_det)
-                    )
-                    # compressed_kv is shared across query heads; pass it
-                    # directly to the target/reducesum path instead of
-                    # materializing [B, S_comp, heads, D]. DETACH keeps the
-                    # indexer loss disconnected from the main attention graph.
-                    key_comp_mla = compressed_kv.detach()
-                    (
-                        indexer_loss,
-                        topk_indices_compressed,
-                        topk_probs,
-                        target,
-                    ) = _compute_tilelang_csa_indexer_loss_forward(
-                        q_indexer_bf,
-                        weights_indexer_bf,
-                        k_indexer_bf,
-                        query.detach(),
-                        key_comp_mla,
-                        int(self.compress_ratio),
-                        int(loss_topk_effective),
-                        float(self.softmax_scale),
-                        float(indexer_loss_coeff),
-                        self.tp_group,
-                    )
-                    tilelang_indexer_loss_state = (
-                        q_indexer_bf,
-                        weights_indexer_bf,
-                        k_indexer_bf,
-                        topk_indices_compressed,
-                        topk_probs,
-                        target,
-                        float(indexer_loss_coeff),
-                    )
-                    if indexer_loss_coeff > 0:
-                        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                            loss=indexer_loss,
-                            layer_number=self.layer_number,
-                            num_layers=self.config.num_hidden_layers,
-                        )
-                elif self.training and not use_tilelang_indexer:
-                    q_indexer, k_indexer, weights_indexer = (
-                        self.indexer.forward_before_topk(x_det, qr_det)
-                    )
-                    indexer_loss_coeff = getattr(
-                        self.config, "dsa_indexer_loss_coeff", 0.0
-                    )
-                    # compressed_kv: [b, n, hn] -> expand for loss: [n, b, np, hn]
-                    key_for_loss = (
-                        compressed_kv.transpose([1, 0, 2])
-                        .unsqueeze(2)
-                        .expand([-1, -1, np_heads, -1])
-                    )
-
-                    # Convert batch-first to seq-first for FusedDSAIndexerLoss
-                    q_sf = q_indexer.transpose([1, 0, 2, 3])  # [sq, b, h, d]
-                    k_sf = (
-                        k_indexer.transpose([1, 0, 2])
-                        if k_indexer.ndim == 3
-                        else k_indexer.transpose([1, 0, 2, 3])
-                    )  # [n_compressed, b, d]
-                    weights_sf = (
-                        weights_indexer * self.indexer.softmax_scale
-                    ).transpose([1, 0, 2])  # [sq, b, h]
-                    query_sf = query.transpose(
-                        [1, 0, 2, 3]
-                    ).detach()  # [sq, b, np, hn]
-
-                    # causal_mask for FusedDSAIndexerLoss: [b, 1, sq, n_compressed]
-                    mask_for_loss = causal_mask.unsqueeze(1)
-
-                    indexer_loss = FusedDSAIndexerLoss.apply(
-                        q_sf,
-                        weights_sf,
-                        k_sf,
-                        query_sf,
-                        key_for_loss.detach(),
-                        self.softmax_scale,
-                        min(self.indexer.index_topk, n_compressed),
-                        indexer_loss_coeff,
-                        mask_for_loss,
-                        getattr(
-                            self.config, "dsa_indexer_use_sparse_loss", True
-                        ),
-                        self.tp_group,
-                    )
-                    topk_indices_compressed = (
-                        FusedDSAIndexerLoss._last_topk_indices
-                    )
-
-                    if indexer_loss_coeff > 0:
-                        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                            loss=indexer_loss,
-                            layer_number=self.layer_number,
-                            num_layers=self.config.num_hidden_layers,
-                        )
-                elif not use_tilelang_indexer:
-                    _, topk_indices_compressed = self.indexer(
-                        x_det,
-                        qr_det,
-                        mask=causal_mask,
-                    )
-
-                # Optionally replace topk producer with TileLang fused
-                # compressed indexer forward. The indexer loss path is left
-                # untouched here; this only swaps the indices fed to sparse
-                # attention. Runs under no_grad so it never enters the
-                # autograd graph. Skipped when the fused TileLang loss path
-                # already produced TileLang indices (use_tilelang_loss_path).
-                if use_tilelang_indexer and not use_tilelang_loss_path:
-                    from paddlefleet.tilelang_ops import (
-                        csa_indexer_topk_fwd,
-                    )
-
-                    with paddle.no_grad():
-                        q_indexer_tl, k_indexer_tl, weights_indexer_tl = (
-                            self.indexer.forward_before_topk(x_det, qr_det)
-                        )
-                        tl_topk_indices, _tl_topk_scores = csa_indexer_topk_fwd(
-                            q_indexer_tl,
-                            k_indexer_tl,
-                            weights_indexer_tl,
-                            ratio=self.compress_ratio,
-                            topk_effective=attn_topk_effective,
-                        )
-
-                    topk_indices_compressed = tl_topk_indices
-
-                if topk_indices_compressed.shape[-1] > attn_topk_effective:
-                    topk_indices_compressed = topk_indices_compressed[
-                        ..., :attn_topk_effective
-                    ].contiguous()
-
-                # Filter invalid indices and shift to kv_full space
-                compress_topk_idxs = _map_compressed_topk_to_kv_full(
-                    topk_indices_compressed,
-                    sq,
-                    self.compress_ratio,
                     offset,
                 )
             else:
