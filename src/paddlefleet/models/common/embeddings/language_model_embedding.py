@@ -73,11 +73,22 @@ class LanguageModelEmbedding(FleetLayer):
                 "must be set to True."
             )
         self.tp_group = get_tensor_model_parallel_group_if_none(tp_group)
+
+        # Byte embedding flag (read early for reduce_scatter decision)
+        self.byte_embedding_enabled = getattr(
+            config, "byte_embedding_enabled", False
+        )
+
+        # When byte embedding is enabled, we must disable the early
+        # reduce_scatter inside VocabParallelEmbedding, because byte signal
+        # is computed in [B, S, H] layout and must be fused before any
+        # transpose/scatter. The scatter will happen later in forward().
         self.reduce_scatter_embeddings = (
             (not self.add_position_embedding)
             and self.num_tokentypes <= 0
             and self.sequence_parallel
             and self.scatter_to_sequence_parallel
+            and not self.byte_embedding_enabled
         )
 
         # Word embeddings (parallel).
@@ -113,6 +124,13 @@ class LanguageModelEmbedding(FleetLayer):
                 )
         else:
             self.tokentype_embeddings = None
+
+        # Byte-Level Embedding
+        if self.byte_embedding_enabled:
+            from paddlefleet.models.common.embeddings.byte_embedding import ByteEmbedding
+            self.byte_embedding = ByteEmbedding(
+                config=config, vocab_size=self.vocab_size
+            )
 
         # Embeddings dropout
         self.embedding_dropout = paddle.nn.Dropout(
@@ -151,6 +169,12 @@ class LanguageModelEmbedding(FleetLayer):
             Tensor: The output embeddings
         """
         embed_tokens = self.embed_tokens(input_ids)
+
+        # Byte-Level Embedding injection
+        if self.byte_embedding_enabled:
+            byte_signal = self.byte_embedding(input_ids)
+            embed_tokens = (embed_tokens + byte_signal) / 2
+
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
             embeddings = embed_tokens + position_embeddings
