@@ -26,12 +26,13 @@ Components:
 from __future__ import annotations
 
 import functools
+import queue
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
-from paddle import Tensor, nn
+from paddle import Tensor, framework, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet.models.common.embeddings.rope_utils import (
@@ -39,7 +40,6 @@ from paddlefleet.models.common.embeddings.rope_utils import (
 )
 from paddlefleet.transformer import FleetLayer
 from paddlefleet.transformer.dsa_attention import (
-    DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
     FusedDSAIndexerLoss,
     fused_qk_topk_naive,
@@ -759,6 +759,7 @@ class CompressedSparseAttention(FleetLayer):
                 compress_ratio=self.compress_ratio,
                 rotary_pos_emb=rotary_pos_emb,
             )
+            self.indexer_rr_queue = queue.Queue()
         else:
             self.indexer = None
 
@@ -811,102 +812,33 @@ class CompressedSparseAttention(FleetLayer):
         )
 
         # Step 4: Compressed indices
-        indexer_loss = None
-
         if self.compress_ratio > 1 and n_compressed > 0:
             if self.indexer is not None:
-                x_det = x.detach()
-                qr_det = qr.detach()
-                if self.training:
-                    x_det.stop_gradient = False
-                    qr_det.stop_gradient = False
-
-                # Build causal mask for compressed positions: [b, sq, n_compressed]
-                compressed_ids = paddle.arange(n_compressed).unsqueeze(
-                    0
-                )  # [1, n_compressed]
-                positions = paddle.arange(1, sq + 1).unsqueeze(1)  # [sq, 1]
-                causal_mask = paddle.where(
-                    compressed_ids >= (positions // self.compress_ratio),
-                    paddle.full([1], float("-inf"), dtype="float32"),
-                    paddle.zeros([1], dtype="float32"),
-                )  # [sq, n_compressed]
-                causal_mask = causal_mask.unsqueeze(0).expand(
-                    [b, sq, n_compressed]
-                )  # [b, sq, n_compressed]
-
-                if self.training:
-                    q_indexer, k_indexer, weights_indexer = (
-                        self.indexer.forward_before_topk(x_det, qr_det)
-                    )
-                    indexer_loss_coeff = getattr(
-                        self.config, "dsa_indexer_loss_coeff", 0.0
-                    )
-                    # compressed_kv: [b, n, hn] -> expand for loss: [n, b, np, hn]
-                    key_for_loss = (
-                        compressed_kv.transpose([1, 0, 2])
-                        .unsqueeze(2)
-                        .expand([-1, -1, np_heads, -1])
-                    )
-
-                    # Convert batch-first to seq-first for FusedDSAIndexerLoss
-                    q_sf = q_indexer.transpose([1, 0, 2, 3])  # [sq, b, h, d]
-                    k_sf = (
-                        k_indexer.transpose([1, 0, 2])
-                        if k_indexer.ndim == 3
-                        else k_indexer.transpose([1, 0, 2, 3])
-                    )  # [n_compressed, b, d]
-                    weights_sf = (
-                        weights_indexer * self.indexer.softmax_scale
-                    ).transpose([1, 0, 2])  # [sq, b, h]
-                    query_sf = query.transpose(
-                        [1, 0, 2, 3]
-                    ).detach()  # [sq, b, np, hn]
-
-                    # causal_mask for FusedDSAIndexerLoss: [b, 1, sq, n_compressed]
-                    mask_for_loss = causal_mask.unsqueeze(1)
-
-                    indexer_loss = FusedDSAIndexerLoss.apply(
-                        q_sf,
-                        weights_sf,
-                        k_sf,
-                        query_sf,
-                        key_for_loss.detach(),
-                        self.softmax_scale,
-                        min(self.indexer.index_topk, n_compressed),
-                        indexer_loss_coeff,
-                        mask_for_loss,
-                        getattr(
-                            self.config, "dsa_indexer_use_sparse_loss", True
-                        ),
-                        None,  # tp_group
-                    )
-                    topk_indices_compressed = (
-                        FusedDSAIndexerLoss._last_topk_indices
-                    )
-
-                    if indexer_loss_coeff > 0:
-                        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                            loss=indexer_loss,
-                            layer_number=self.layer_number,
-                            num_layers=self.config.num_hidden_layers,
-                        )
-                else:
-                    _, topk_indices_compressed = self.indexer(
-                        x_det, qr_det, mask=causal_mask
-                    )
-
-                # Filter invalid indices and shift to kv_full space
-                n_valid_per_pos = (
-                    paddle.arange(1, sq + 1).unsqueeze(1) // self.compress_ratio
-                )  # [sq, 1]
-                n_valid_per_pos = n_valid_per_pos.unsqueeze(0)  # [1, sq, 1]
-                valid = topk_indices_compressed < n_valid_per_pos
-                compress_topk_idxs = paddle.where(
-                    valid,
-                    topk_indices_compressed + offset,
-                    paddle.full_like(topk_indices_compressed, -1),
+                indexer_forward_func = functools.partial(
+                    self.indexer_forward,
+                    x.detach(),
+                    qr.detach(),
+                    query,
+                    compressed_kv,
+                    n_compressed,
+                    offset,
+                    batch_size=b,
+                    seq_length=sq,
+                    num_attention_heads=np_heads,
                 )
+
+                if self.training:
+                    if not framework._dygraph_tracer()._has_grad:
+                        with paddle.enable_grad():
+                            compress_topk_idxs, indexer_loss = (
+                                indexer_forward_func()
+                            )
+                        indexer_loss.backward()
+                        self.indexer_rr_queue.put(compress_topk_idxs)
+                    else:
+                        compress_topk_idxs = self.indexer_rr_queue.get_nowait()
+                else:
+                    compress_topk_idxs, _ = indexer_forward_func()
             else:
                 # ratio=128: attend to all compressed positions
                 compress_topk_idxs = get_compress_topk_idxs(
@@ -933,10 +865,6 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs,
             self.softmax_scale,
         )
-
-        # Step 6: Attach indexer loss
-        if indexer_loss is not None and self.training:
-            output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
 
         return output
 
@@ -965,3 +893,96 @@ class CompressedSparseAttention(FleetLayer):
                 softmax_scale,
             )
         return output
+
+    def indexer_forward(
+        self,
+        x_det: Tensor,
+        qr_det: Tensor,
+        query: Tensor,
+        compressed_kv: Tensor,
+        n_compressed: int,
+        offset: int,
+        batch_size: int,
+        seq_length: int,
+        num_attention_heads: int,
+    ) -> tuple[Tensor, Tensor | None]:
+        if self.training:
+            x_det.stop_gradient = False
+            qr_det.stop_gradient = False
+
+        compressed_ids = paddle.arange(n_compressed).unsqueeze(0)
+        positions = paddle.arange(1, seq_length + 1).unsqueeze(1)
+        causal_mask = paddle.where(
+            compressed_ids >= (positions // self.compress_ratio),
+            paddle.full([1], float("-inf"), dtype="float32"),
+            paddle.zeros([1], dtype="float32"),
+        )
+        causal_mask = causal_mask.unsqueeze(0).expand(
+            [batch_size, seq_length, n_compressed]
+        )
+
+        indexer_loss = None
+        if self.training:
+            q_indexer, k_indexer, weights_indexer = (
+                self.indexer.forward_before_topk(x_det, qr_det)
+            )
+            indexer_loss_coeff = getattr(
+                self.config, "dsa_indexer_loss_coeff", 0.0
+            )
+            key_for_loss = (
+                compressed_kv.transpose([1, 0, 2])
+                .unsqueeze(2)
+                .expand([-1, -1, num_attention_heads, -1])
+            )
+
+            q_sf = q_indexer.transpose([1, 0, 2, 3])
+            k_sf = (
+                k_indexer.transpose([1, 0, 2])
+                if k_indexer.ndim == 3
+                else k_indexer.transpose([1, 0, 2, 3])
+            )
+            weights_sf = (
+                weights_indexer * self.indexer.softmax_scale
+            ).transpose([1, 0, 2])
+            query_sf = query.transpose([1, 0, 2, 3]).detach()
+            mask_for_loss = causal_mask.unsqueeze(1)
+
+            indexer_loss = FusedDSAIndexerLoss.apply(
+                q_sf,
+                weights_sf,
+                k_sf,
+                query_sf,
+                key_for_loss.detach(),
+                self.softmax_scale,
+                min(self.indexer.index_topk, n_compressed),
+                indexer_loss_coeff,
+                mask_for_loss,
+                getattr(self.config, "dsa_indexer_use_sparse_loss", True),
+                None,
+            )
+            topk_indices_compressed = FusedDSAIndexerLoss._last_topk_indices
+
+            if indexer_loss_coeff > 0:
+                DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                    loss=indexer_loss,
+                    layer_number=self.layer_number,
+                    num_layers=self.config.num_hidden_layers,
+                )
+        else:
+            _, topk_indices_compressed = self.indexer(
+                x_det, qr_det, mask=causal_mask
+            )
+
+        # Filter invalid indices and shift to kv_full space
+        n_valid_per_pos = (
+            paddle.arange(1, seq_length + 1).unsqueeze(1) // self.compress_ratio
+        )
+        n_valid_per_pos = n_valid_per_pos.unsqueeze(0)
+        valid = topk_indices_compressed < n_valid_per_pos
+        compress_topk_idxs = paddle.where(
+            valid,
+            topk_indices_compressed + offset,
+            paddle.full_like(topk_indices_compressed, -1),
+        )
+
+        return compress_topk_idxs, indexer_loss
