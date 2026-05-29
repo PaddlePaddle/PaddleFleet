@@ -573,6 +573,15 @@ class TransformerConfig(ModelParallelConfig):
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
 
     ####################
+    # SmearGate
+    ####################
+    smear_gate_enabled: bool = False
+    """Enable SmearGate: per-dim gated blending of current and previous token embeddings."""
+
+    smear_gate_init_value: float = 3.0
+    """Initial gate logit value. sigmoid(3.0) ≈ 0.95 (near-identity start)."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.
