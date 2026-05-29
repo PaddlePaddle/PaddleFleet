@@ -402,6 +402,51 @@ def _compute_attn_target_on_selected_set(
     return target
 
 
+def _compute_tilelang_csa_indexer_loss_forward(
+    index_q: Tensor,
+    weights: Tensor,
+    index_k_comp: Tensor,
+    query_mla: Tensor,
+    key_comp_mla: Tensor,
+    ratio: int,
+    topk_effective: int,
+    softmax_scale: float,
+    loss_coeff: float,
+    tp_group=None,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    from paddlefleet.tilelang_ops import (
+        csa_attn_target_reducesum,
+        csa_indexer_topk_fwd,
+    )
+
+    topk_indices, topk_probs = csa_indexer_topk_fwd(
+        index_q,
+        index_k_comp,
+        weights,
+        ratio=int(ratio),
+        topk_effective=int(topk_effective),
+    )
+
+    if tp_group is not None and getattr(tp_group, "nranks", 1) > 1:
+        target = _compute_attn_target_on_selected_set(
+            query_mla, key_comp_mla, topk_indices, softmax_scale, tp_group
+        )
+    else:
+        target = csa_attn_target_reducesum(
+            query_mla,
+            key_comp_mla,
+            topk_indices,
+            softmax_scale,
+        )
+
+    eps = 1e-10
+    kl_per_elem = target * (
+        paddle.log(target + eps) - paddle.log(topk_probs + eps)
+    )
+    loss = kl_per_elem.sum(axis=-1).mean() * float(loss_coeff)
+    return loss, topk_indices, topk_probs, target
+
+
 class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
     """Selected-topk KL loss using TileLang CSA Indexer fwd/bwd kernels.
 
@@ -460,41 +505,28 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
         # PyLayer treats this as a single fused op: forward materializes only
         # the selected ``[B,S,topk_effective]`` tensors and backward never
         # touches the full ``[B,S,S_comp]`` logits.
-        from paddlefleet.tilelang_ops import (
-            csa_attn_target_reducesum,
-            csa_indexer_topk_fwd,
-        )
-
-        topk_indices, topk_probs = csa_indexer_topk_fwd(
-            index_q,
-            index_k_comp,
-            weights,
-            ratio=int(ratio),
-            topk_effective=int(topk_effective),
-        )
-
-        if tp_group is not None and getattr(tp_group, "nranks", 1) > 1:
-            target = _compute_attn_target_on_selected_set(
-                query_mla, key_comp_mla, topk_indices, softmax_scale, tp_group
-            )
-        else:
-            target = csa_attn_target_reducesum(
+        loss, topk_indices, topk_probs, target = (
+            _compute_tilelang_csa_indexer_loss_forward(
+                index_q,
+                weights,
+                index_k_comp,
                 query_mla,
                 key_comp_mla,
-                topk_indices,
+                ratio,
+                topk_effective,
                 softmax_scale,
+                loss_coeff,
+                tp_group,
             )
-
-        # KL(p || q) on selected set; invalid slots have target == 0 so the
-        # ``target * log(target / q)`` term contributes 0 by convention.
-        eps = 1e-10
-        kl_per_elem = target * (
-            paddle.log(target + eps) - paddle.log(topk_probs + eps)
         )
-        loss = kl_per_elem.sum(axis=-1).mean() * float(loss_coeff)
 
         ctx.save_for_backward(
-            index_q, weights, index_k_comp, topk_indices, topk_probs, target
+            index_q.detach(),
+            weights.detach(),
+            index_k_comp.detach(),
+            topk_indices.detach(),
+            topk_probs.detach(),
+            target.detach(),
         )
         ctx.loss_coeff = float(loss_coeff)
         ctx.num_rows = float(target.shape[0] * target.shape[1])
@@ -530,7 +562,98 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
             grad_index_scores,
         )
 
-        return grad_q, grad_weights, grad_k, None, None
+        if grad_q.dtype != index_q.dtype:
+            grad_q = grad_q.cast(index_q.dtype)
+        if grad_weights.dtype != weights.dtype:
+            grad_weights = grad_weights.cast(weights.dtype)
+        if grad_k.dtype != index_k_comp.dtype:
+            grad_k = grad_k.cast(index_k_comp.dtype)
+
+        return (
+            grad_q,
+            grad_weights,
+            grad_k,
+            None,
+            None,
+        )
+
+
+class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
+    """Attach TileLang CSA indexer loss gradients to the main output.
+
+    This is the TileLang analogue of ``DSAIndexerLossAutoScaler``. It avoids
+    chaining a scalar-loss PyLayer behind another PyLayer in the full training
+    graph while preserving the same gradient scale semantics.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        output: Tensor,
+        index_q: Tensor,
+        weights: Tensor,
+        index_k_comp: Tensor,
+        topk_indices: Tensor,
+        topk_probs: Tensor,
+        target: Tensor,
+        loss_coeff: float,
+    ) -> Tensor:
+        ctx.save_for_backward(
+            index_q.detach(),
+            weights.detach(),
+            index_k_comp.detach(),
+            topk_indices.detach(),
+            topk_probs.detach(),
+            target.detach(),
+        )
+        ctx.loss_coeff = float(loss_coeff)
+        ctx.num_rows = float(target.shape[0] * target.shape[1])
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        from paddlefleet.tilelang_ops import csa_indexer_bwd
+
+        (
+            index_q,
+            weights,
+            index_k_comp,
+            topk_indices,
+            topk_probs,
+            target,
+        ) = ctx.saved_tensor()
+
+        grad_index_scores = (topk_probs - target) * (
+            ctx.loss_coeff / max(ctx.num_rows, 1.0)
+        )
+        scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
+        if scale is not None:
+            grad_index_scores = grad_index_scores * scale
+
+        grad_q, grad_weights, grad_k = csa_indexer_bwd(
+            index_q,
+            weights,
+            index_k_comp,
+            topk_indices,
+            grad_index_scores,
+        )
+
+        if grad_q.dtype != index_q.dtype:
+            grad_q = grad_q.cast(index_q.dtype)
+        if grad_weights.dtype != weights.dtype:
+            grad_weights = grad_weights.cast(weights.dtype)
+        if grad_k.dtype != index_k_comp.dtype:
+            grad_k = grad_k.cast(index_k_comp.dtype)
+
+        return (
+            grad_output,
+            grad_q,
+            grad_weights,
+            grad_k,
+            None,
+            None,
+            None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -979,6 +1102,7 @@ class CompressedSparseAttention(FleetLayer):
 
         # Step 4: Compressed indices
         indexer_loss = None
+        tilelang_indexer_loss_state = None
 
         if self.compress_ratio > 1 and n_compressed > 0:
             if self.indexer is not None:
@@ -999,11 +1123,17 @@ class CompressedSparseAttention(FleetLayer):
                     "csa_tilelang_enable_indexer",
                 )
                 # The fused TileLang indexer-loss path is only active during
-                # training when the CSA TileLang indexer path is enabled.
+                # the grad-enabled forward. Full recompute runs the first
+                # forward under no_grad; that pass should only materialize the
+                # indices consumed by main attention.
                 # Otherwise we fall back to:
                 #   * Paddle FusedDSAIndexerLoss during training, or
                 #   * Paddle/TileLang forward-only top-k during inference.
-                use_tilelang_loss_path = use_tilelang_indexer and self.training
+                use_tilelang_loss_path = (
+                    use_tilelang_indexer
+                    and self.training
+                    and paddle.is_grad_enabled()
+                )
                 loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
                     self.config,
                     self.indexer.index_topk,
@@ -1037,19 +1167,31 @@ class CompressedSparseAttention(FleetLayer):
                     # materializing [B, S_comp, heads, D]. DETACH keeps the
                     # indexer loss disconnected from the main attention graph.
                     key_comp_mla = compressed_kv.detach()
-                    indexer_loss, topk_indices_compressed = (
-                        TileLangCSAIndexerLoss.apply(
-                            q_indexer_bf,
-                            weights_indexer_bf,
-                            k_indexer_bf,
-                            query.detach(),
-                            key_comp_mla,
-                            int(self.compress_ratio),
-                            int(loss_topk_effective),
-                            float(self.softmax_scale),
-                            float(indexer_loss_coeff),
-                            self.tp_group,
-                        )
+                    (
+                        indexer_loss,
+                        topk_indices_compressed,
+                        topk_probs,
+                        target,
+                    ) = _compute_tilelang_csa_indexer_loss_forward(
+                        q_indexer_bf,
+                        weights_indexer_bf,
+                        k_indexer_bf,
+                        query.detach(),
+                        key_comp_mla,
+                        int(self.compress_ratio),
+                        int(loss_topk_effective),
+                        float(self.softmax_scale),
+                        float(indexer_loss_coeff),
+                        self.tp_group,
+                    )
+                    tilelang_indexer_loss_state = (
+                        q_indexer_bf,
+                        weights_indexer_bf,
+                        k_indexer_bf,
+                        topk_indices_compressed,
+                        topk_probs,
+                        target,
+                        float(indexer_loss_coeff),
                     )
                     if indexer_loss_coeff > 0:
                         DSAIndexerLossLoggingHelper.save_loss_to_tracker(
@@ -1057,7 +1199,7 @@ class CompressedSparseAttention(FleetLayer):
                             layer_number=self.layer_number,
                             num_layers=self.config.num_hidden_layers,
                         )
-                elif self.training:
+                elif self.training and not use_tilelang_indexer:
                     q_indexer, k_indexer, weights_indexer = (
                         self.indexer.forward_before_topk(x_det, qr_det)
                     )
@@ -1113,7 +1255,7 @@ class CompressedSparseAttention(FleetLayer):
                             layer_number=self.layer_number,
                             num_layers=self.config.num_hidden_layers,
                         )
-                else:
+                elif not use_tilelang_indexer:
                     _, topk_indices_compressed = self.indexer(
                         x_det,
                         qr_det,
@@ -1186,7 +1328,12 @@ class CompressedSparseAttention(FleetLayer):
         )
 
         # Step 6: Attach indexer loss
-        if indexer_loss is not None and self.training:
+        if tilelang_indexer_loss_state is not None and self.training:
+            output = TileLangCSAIndexerLossAutoScaler.apply(
+                output,
+                *tilelang_indexer_loss_state,
+            )
+        elif indexer_loss is not None and self.training:
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
 
         return output
