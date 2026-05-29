@@ -16,6 +16,7 @@ from .fused_mla_yarn_rope_apply import (
     fused_apply_mla_rope_for_kv,
     fused_apply_mla_rope_for_q,
 )
+from .gen_m_indices_fusion import gen_m_indices_fusion
 from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
 from .rms_norm_fusion import RMSNormFusionTriton
 from .sigmoid_gate_fusion import SigmoidGateFusionTriton
@@ -28,6 +29,7 @@ __all__ = [
     "RMSNormFusionTriton",
     "MoETopkFusion",
     "routing_map_fusion_forward",
+    "gen_m_indices_fusion",
     "SigmoidGateFusionTriton",
     "FuseStackUe8m0ScaleTransposeTriton",
     "fuse_stack_ue8m0_scale_transpose",

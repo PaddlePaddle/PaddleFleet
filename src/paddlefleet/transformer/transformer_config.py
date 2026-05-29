@@ -341,6 +341,9 @@ class TransformerConfig(ModelParallelConfig):
     sigmoid_gate_fusion: bool = False
     """If True, use Triton fused sigmoid gate kernel."""
 
+    gen_m_indices_fusion: bool = False
+    """If True, use Triton fused gen_m_indices kernel."""
+
     ####################
     # activation recomputation
     ####################
