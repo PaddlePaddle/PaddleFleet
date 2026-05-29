@@ -68,11 +68,6 @@ class TransformerConfig(ModelParallelConfig):
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
 
-    enable_mtp_magic_send: bool = False
-    """When True, use magic send mechanism for MTP: broadcast input_ids to last PP stage
-    and re-embed there, instead of pre-computing shifted embeddings at first stage
-    and concatenating them through the pipeline."""
-
     experimental_dataflow: bool = False
     """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
     separate input instead of being appended to attn_mask_startend_row_indices.
@@ -884,11 +879,6 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
-        if self.enable_mtp_magic_send:
-            assert self.num_nextn_predict_layers == 1, (
-                "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
-            )
-
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
 

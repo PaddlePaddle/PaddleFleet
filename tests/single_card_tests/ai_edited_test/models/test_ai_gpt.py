@@ -40,7 +40,6 @@ class Config:
         self.model_type = model_type
         self.gpt_model_use_experimental_version = experimental
         self.num_nextn_predict_layers = nextn_layers
-        self.enable_mtp_magic_send = False
 
 
 class LightweightGPTModel(gpt_model.GPTModel):

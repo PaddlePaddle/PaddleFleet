@@ -205,21 +205,19 @@ class GPTEmbedding(FleetLayer):
                 assert not self.multimodal_embedding, (
                     "MTP not support mm for now."
                 )
+                num_nextn_predict_layers = self.config.num_nextn_predict_layers
                 # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
                 if input_ids_for_moe_mask is not None:
                     # Main backbone input_ids: [B, max_seq]
                     # Use .contiguous() because slices are non-contiguous and PP P2P send requires contiguous tensors.
                     input_ids_for_moe_mask = input_ids[
-                        :, : -self.config.num_nextn_predict_layers
+                        :, :-num_nextn_predict_layers
                     ].contiguous()
                     # Construct per-depth MTP input_ids: for depth k, use
                     # input_ids[:, (k+1):(k+1+max_seq)] matching embedding shift
-                    seq_length = (
-                        input_ids.shape[1]
-                        - self.config.num_nextn_predict_layers
-                    )
+                    seq_length = input_ids.shape[1] - num_nextn_predict_layers
                     mtp_ids_list = []
-                    for depth in range(self.config.num_nextn_predict_layers):
+                    for depth in range(num_nextn_predict_layers):
                         mtp_ids_list.append(
                             input_ids[:, (depth + 1) : (depth + 1 + seq_length)]
                         )
@@ -227,100 +225,66 @@ class GPTEmbedding(FleetLayer):
                     mtp_input_ids_for_moe_mask = paddle.stack(
                         mtp_ids_list, axis=1
                     )
+                inputs_embeds_extra = decoder_input[
+                    :, -self.config.num_nextn_predict_layers :, :
+                ]  # [B, S, H]
+                inputs_embeds = decoder_input[
+                    :, : -self.config.num_nextn_predict_layers, :
+                ]
+                inputs_embeds_ori = inputs_embeds
+                batch_size, seq_length, hidden_size = inputs_embeds.shape
 
-                if self.config.enable_mtp_magic_send:
-                    # Magic send: only truncate, skip shifted embedding pre-computation.
-                    # input_ids will be broadcast to the last stage for re-embedding.
-                    decoder_input = decoder_input[
-                        :, : -self.config.num_nextn_predict_layers, :
-                    ]
+                if (
+                    get_context_parallel_world_size() > 1
+                    and self.config.experimental_dataflow
+                ):
+                    # In EB data flow, main input embed apply CP scatter here
+                    inputs_embeds = ContextParallelScatterOp.apply(
+                        inputs_embeds, axis=1
+                    )
 
-                    # Apply the same SP scatter as the non-magic-send path to ensure
-                    # bit-for-bit identical main embedding output.
-                    if (
-                        get_context_parallel_world_size() > 1
-                        and self.config.experimental_dataflow
-                    ):
-                        decoder_input = ContextParallelScatterOp.apply(
-                            decoder_input, axis=1
-                        )
-
-                    if self.sequence_parallel:
-                        batch_size, seq_length, hidden_size = (
-                            decoder_input.shape
-                        )
-                        decoder_input = decoder_input.reshape(
-                            [-1, decoder_input.shape[-1]]
-                        )
-                        decoder_input = ScatterOp.apply(decoder_input)
-                        decoder_input = (
-                            decoder_input.reshape([batch_size, -1, hidden_size])
-                            .permute(1, 0, 2)
-                            .contiguous()
-                        )  # change to [S/tp, B, H]
-                else:
-                    inputs_embeds_extra = decoder_input[
-                        :, -self.config.num_nextn_predict_layers :, :
-                    ]  # [B, S, H]
-                    inputs_embeds = decoder_input[
-                        :, : -self.config.num_nextn_predict_layers, :
-                    ]
-                    inputs_embeds_ori = inputs_embeds
-                    batch_size, seq_length, hidden_size = inputs_embeds.shape
+                if self.sequence_parallel:
+                    inputs_embeds = inputs_embeds.reshape(
+                        [-1, inputs_embeds.shape[-1]]
+                    )
+                    inputs_embeds = ScatterOp.apply(inputs_embeds)
+                    inputs_embeds = (
+                        inputs_embeds.reshape([batch_size, -1, hidden_size])
+                        .permute(1, 0, 2)
+                        .contiguous()
+                    )  # change to [S, B, H]
+                mtp_emb_res = [inputs_embeds]
+                for depth in range(self.config.num_nextn_predict_layers):
+                    inputs_embeds_mtp = paddle.concat(
+                        [
+                            inputs_embeds_ori[:, (depth + 1) :, :],
+                            inputs_embeds_extra[:, : (depth + 1), :],
+                        ],
+                        axis=1,
+                    )
 
                     if (
                         get_context_parallel_world_size() > 1
                         and self.config.experimental_dataflow
                     ):
-                        # In EB data flow, main input embed apply CP scatter here
-                        inputs_embeds = ContextParallelScatterOp.apply(
-                            inputs_embeds, axis=1
+                        # In EB data flow, mtp input embed apply CP scatter here
+                        inputs_embeds_mtp = ContextParallelScatterOp.apply(
+                            inputs_embeds_mtp, axis=1
                         )
 
                     if self.sequence_parallel:
-                        inputs_embeds = inputs_embeds.reshape(
-                            [-1, inputs_embeds.shape[-1]]
+                        inputs_embeds_mtp = inputs_embeds_mtp.reshape(
+                            [-1, inputs_embeds_mtp.shape[-1]]
                         )
-                        inputs_embeds = ScatterOp.apply(inputs_embeds)
-                        inputs_embeds = (
-                            inputs_embeds.reshape([batch_size, -1, hidden_size])
+                        inputs_embeds_mtp = ScatterOp.apply(inputs_embeds_mtp)
+                        inputs_embeds_mtp = (
+                            inputs_embeds_mtp.reshape(
+                                [batch_size, -1, hidden_size]
+                            )
                             .permute(1, 0, 2)
                             .contiguous()
                         )  # change to [S, B, H]
-                    mtp_emb_res = [inputs_embeds]
-                    for depth in range(self.config.num_nextn_predict_layers):
-                        inputs_embeds_mtp = paddle.concat(
-                            [
-                                inputs_embeds_ori[:, (depth + 1) :, :],
-                                inputs_embeds_extra[:, : (depth + 1), :],
-                            ],
-                            axis=1,
-                        )
-
-                        if (
-                            get_context_parallel_world_size() > 1
-                            and self.config.experimental_dataflow
-                        ):
-                            # In EB data flow, mtp input embed apply CP scatter here
-                            inputs_embeds_mtp = ContextParallelScatterOp.apply(
-                                inputs_embeds_mtp, axis=1
-                            )
-
-                        if self.sequence_parallel:
-                            inputs_embeds_mtp = inputs_embeds_mtp.reshape(
-                                [-1, inputs_embeds_mtp.shape[-1]]
-                            )
-                            inputs_embeds_mtp = ScatterOp.apply(
-                                inputs_embeds_mtp
-                            )
-                            inputs_embeds_mtp = (
-                                inputs_embeds_mtp.reshape(
-                                    [batch_size, -1, hidden_size]
-                                )
-                                .permute(1, 0, 2)
-                                .contiguous()
-                            )  # change to [S, B, H]
-                        mtp_emb_res.append(inputs_embeds_mtp)
+                    mtp_emb_res.append(inputs_embeds_mtp)
 
             if self.multimodal_embedding:
                 image_embeds = dict_args.get("image_embeds", None)

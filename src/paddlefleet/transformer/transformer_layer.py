@@ -455,7 +455,6 @@ class TransformerLayer(nn.Layer):
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
             and not self.config.mtp_load_weight_only
-            and not self.config.enable_mtp_magic_send
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -642,7 +641,6 @@ class TransformerLayer(nn.Layer):
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
             and not self.config.mtp_load_weight_only
-            and not self.config.enable_mtp_magic_send
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
