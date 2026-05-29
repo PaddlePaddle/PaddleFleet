@@ -201,8 +201,7 @@ class MLP(FleetLayer):
                         intermediate_parallel,
                         bias_parallel,
                         per_token_scale.unsqueeze(-1),
-                        self.config.activation_func_fp8_input_store,
-                        self.config.activation_func_clamp_value,
+                        clamp_value=self.config.activation_func_clamp_value,
                     )
                 elif (
                     self.hidden_act == quick_gelu
@@ -212,9 +211,8 @@ class MLP(FleetLayer):
                         intermediate_parallel,
                         bias_parallel,
                         per_token_scale.unsqueeze(-1),
-                        self.config.activation_func_fp8_input_store,
-                        self.config.glu_linear_offset,
-                        self.config.activation_func_clamp_value,
+                        linear_offset=self.config.glu_linear_offset,
+                        clamp_value=self.config.activation_func_clamp_value,
                     )
                 else:
                     raise ValueError(
@@ -245,7 +243,9 @@ class MLP(FleetLayer):
                     )
                     """
                     intermediate_parallel = bias_swiglu_impl(
-                        intermediate_parallel, bias_parallel
+                        intermediate_parallel,
+                        bias_parallel,
+                        clamp_value=self.config.activation_func_clamp_value,
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")

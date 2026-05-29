@@ -79,12 +79,15 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         Returns:
             H_res: [..., n, n] - doubly stochastic matrix
         """
-        # Stabilized exp: subtract row-wise max to prevent overflow
-        M_init = paddle.exp(
-            H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
-        )
+        with paddle.amp.auto_cast(enable=False):
+            # Stabilized exp: subtract row-wise max to prevent overflow.
+            # Keep this outside AMP so the Paddle native path preserves the
+            # BF16 contract used by Megatron's torch implementation.
+            M_init = paddle.exp(
+                H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+            )
 
-        M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations)
+            M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations)
 
         # Save initial M for backward recomputation
         ctx.save_for_backward(M_init)
@@ -210,9 +213,15 @@ class HyperConnectionModule(nn.Layer):
             x: [..., n*C] - n-stream hidden states
         """
         nC = x.shape[-1]
+        weight = self.mapping_proj.weight
         r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
-        r = 1.0 / (r + self.norm_eps)  # [..., 1]
-        proj = self.mapping_proj(x)  # [..., n^2 + 2n]
+        r = (1.0 / (r + self.norm_eps)).astype(x.dtype)  # [..., 1]
+        # Match Megatron clean path: torch.matmul(x, weight.t()).  Paddle
+        # nn.Linear uses a different BF16 cuBLAS path for this shape and drifts
+        # before the first HC BDA.
+        x_2d = x.reshape([-1, nC])
+        proj_2d = paddle.matmul(x_2d, weight.t(), transpose_y=True)
+        proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
         return proj, r
 
     def _compute_h(
@@ -241,10 +250,12 @@ class HyperConnectionModule(nn.Layer):
         h = r * proj * alpha_ + self.bias
         # H_pre = σ(α_pre * (θ_pre @ x̃) + b_pre)
         h_pre = h[..., : self.n].sigmoid()  # [..., n]
+        h_pre = h_pre.astype(proj.dtype)
 
         # H_post = 2σ(α_post * (θ_post @ x̃) + b_post)
         h_post = h[..., self.n : 2 * self.n].sigmoid() * 2  # [..., n]
         h_res = h[..., 2 * self.n :]
+        h_post = h_post.astype(proj.dtype)
         return h_pre, h_post, h_res
 
     def compute_mappings(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -292,6 +303,8 @@ class HyperConnectionModule(nn.Layer):
 
         # Weighted sum: [..., n, C] * [..., n, 1] -> sum over n -> [..., C]
         aggregated = (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
+        if aggregated.dtype != x.dtype:
+            aggregated = aggregated.astype(x.dtype)
 
         return aggregated
 
@@ -310,8 +323,8 @@ class HyperConnectionModule(nn.Layer):
         C = self.hidden_size
         num_tokens = math.prod(leading_shape)
 
-        # Reshape for bmm: [..., n, n] -> [batch, n, n]
-        h_res_batched = h_res.reshape([num_tokens, n, n])
+        # Megatron clean path applies H_res.T to residual.
+        h_res_batched = h_res.astype(residual.dtype).transpose([0, 1, 3, 2]).reshape([num_tokens, n, n])
         # [..., n*C] -> [..., n, C] -> [batch, n, C]
         residual_batched = residual.reshape([num_tokens, n, C])
 
@@ -477,7 +490,13 @@ class HyperConnectionModule(nn.Layer):
         rsqrt = paddle.rsqrt(
             hidden_states.square().mean(-1, keepdim=True) + eps
         )
-        mixes = F.linear(hidden_states, head_fn) * rsqrt
+        # Match Torch F.linear(x, weight[out,in]) kernel selection. Paddle
+        # F.linear(x, weight[in,out]) uses a different cuBLAS path and causes
+        # BF16 ulp drift in DSv4 final output contraction.
+        head_fn_out_in = head_fn.transpose([1, 0]).contiguous()
+        with paddle.amp.auto_cast(False):
+            proj = paddle.matmul(hidden_states, head_fn_out_in, transpose_y=True)
+        mixes = proj * rsqrt
         pre = F.sigmoid(mixes * scale + base) + eps
         y = paddle.sum(
             pre.unsqueeze(-1)

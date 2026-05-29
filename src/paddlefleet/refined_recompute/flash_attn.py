@@ -29,13 +29,18 @@ from paddlefleet.context_parallel_utils import (
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
 if paddle.cuda.get_device_capability()[0] == 10:
-    from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
-        FlashMaskInfoPaddle,
-    )
-    from paddlefleet_ops.flash_mask.cute.interface import (
-        _flash_attn_bwd,
-        _flash_attn_fwd,
-    )
+    try:
+        from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
+            FlashMaskInfoPaddle,
+        )
+        from paddlefleet_ops.flash_mask.cute.interface import (
+            _flash_attn_bwd,
+            _flash_attn_fwd,
+        )
+    except Exception:
+        FlashMaskInfoPaddle = None
+        _flash_attn_bwd = None
+        _flash_attn_fwd = None
 
 logger = logging.getLogger(__name__)
 

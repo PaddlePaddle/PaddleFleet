@@ -80,10 +80,15 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
         Hadamard-transformed tensor of the same shape.
     """
     original_shape = x.shape
+    output_dtype = x.dtype
     dim = original_shape[-1]
     assert dim > 0 and (dim & (dim - 1)) == 0, (
         f"hadamard_transform requires dim to be a power of 2, got {dim}"
     )
+
+    # Megatron uses fast_hadamard_transform, whose bf16 path accumulates in fp32
+    # and casts back to bf16. Keep the same numeric contract here.
+    x = x.cast("float32")
 
     # Flatten batch dims: (..., dim) -> (batch, dim)
     x = x.reshape([-1, dim])
@@ -97,7 +102,7 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
         x = x.reshape([-1, dim])
         h *= 2
 
-    return x.reshape(original_shape) * scale
+    return (x.reshape(original_shape) * scale).cast(output_dtype)
 
 
 def rotate_activation(x: Tensor) -> Tensor:
@@ -949,37 +954,40 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         Returns:
             indexer_loss: scalar KL divergence loss
         """
-        # Step 1: Compute index_scores from (q, weights, k)
-        index_scores = _compute_index_scores_fused(q, weights, k)  # [b, sq, sk]
+        with paddle.amp.auto_cast(False):
+            # Step 1: Compute index_scores from (q, weights, k)
+            index_scores = _compute_index_scores_fused(
+                q, weights, k
+            )  # [b, sq, sk]
 
-        # Step 2: Apply mask and select topk
-        mask = _normalize_dsa_mask(mask)
-        if mask is not None:
-            masked_scores = index_scores + mask
-        else:
-            masked_scores = index_scores
-        topk_k = min(topk, masked_scores.shape[-1])
-        topk_indices = paddle.topk(masked_scores, k=topk_k, axis=-1)[1]
-        # Clamp indices to valid range: paddle.topk may return garbage indices
-        # for -inf input values
-        topk_indices = paddle.clip(
-            topk_indices, min=0, max=masked_scores.shape[-1] - 1
-        )
+            # Step 2: Apply mask and select topk
+            mask = _normalize_dsa_mask(mask)
+            if mask is not None:
+                masked_scores = index_scores + mask
+            else:
+                masked_scores = index_scores
+            topk_k = min(topk, masked_scores.shape[-1])
+            topk_indices = paddle.topk(masked_scores, k=topk_k, axis=-1)[1]
+            # Clamp indices to valid range: paddle.topk may return garbage indices
+            # for -inf input values
+            topk_indices = paddle.clip(
+                topk_indices, min=0, max=masked_scores.shape[-1] - 1
+            )
 
-        FusedDSAIndexerLoss._last_topk_indices = topk_indices.detach()
+            FusedDSAIndexerLoss._last_topk_indices = topk_indices.detach()
 
-        # Step 3: Compute KL loss (use masked_scores)
-        indexer_loss = _compute_dsa_indexer_loss(
-            masked_scores,
-            topk_indices,
-            query,
-            key,
-            softmax_scale,
-            loss_coeff,
-            sparse_loss,
-            tp_group,
-            causal_mask_override=mask,
-        )
+            # Step 3: Compute KL loss (use masked_scores)
+            indexer_loss = _compute_dsa_indexer_loss(
+                masked_scores,
+                topk_indices,
+                query,
+                key,
+                softmax_scale,
+                loss_coeff,
+                sparse_loss,
+                tp_group,
+                causal_mask_override=mask,
+            )
 
         ctx.save_for_backward(q, weights, k, query, key, topk_indices)
         ctx.softmax_scale = softmax_scale
@@ -1000,20 +1008,21 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         """
         q, weights, k, query, key, topk_indices = ctx.saved_tensor()
 
-        grad_q, grad_weights, grad_k = _bwd_fused_indexer_loss(
-            q,
-            weights,
-            k,
-            query,
-            key,
-            topk_indices,
-            ctx.softmax_scale,
-            ctx.loss_coeff,
-            ctx.sparse_loss,
-            grad_loss,
-            ctx.tp_group,
-            causal_mask_override=ctx.causal_mask_override,
-        )
+        with paddle.amp.auto_cast(False):
+            grad_q, grad_weights, grad_k = _bwd_fused_indexer_loss(
+                q,
+                weights,
+                k,
+                query,
+                key,
+                topk_indices,
+                ctx.softmax_scale,
+                ctx.loss_coeff,
+                ctx.sparse_loss,
+                grad_loss,
+                ctx.tp_group,
+                causal_mask_override=ctx.causal_mask_override,
+            )
 
         return grad_q, grad_weights, grad_k, None, None, None
 

@@ -14,6 +14,7 @@
 
 
 import functools
+import os
 
 import numpy as np
 import paddle
@@ -37,6 +38,29 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+def _dsv4_loss_md5_enabled() -> bool:
+    return os.environ.get("LOG_LOSS_MD5", "0") == "1"
+
+
+def _dsv4_tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
+    import hashlib
+
+    tensor_for_md5 = tensor.detach().cast(dtype)
+    return hashlib.md5(tensor_for_md5.numpy().tobytes()).hexdigest()
+
+
+def _dsv4_print_scalar_loss_md5(prefix: str, name: str, loss: Tensor) -> None:
+    if not _dsv4_loss_md5_enabled():
+        return
+    rank = paddle.distributed.get_rank()
+    loss_tensor = loss.detach().cast("float32").reshape([1])
+    print(
+        f"[{prefix}] rank={rank} {name}={loss_tensor.item():.20f} "
+        f"{name}_md5={_dsv4_tensor_md5(loss_tensor)}",
+        flush=True,
+    )
 
 
 class DistributedSoftmaxOp(PyLayer):
@@ -347,6 +371,29 @@ class LanguageLoss(FleetLayer):
                         flush=True,
                     )
 
+            if _dsv4_loss_md5_enabled():
+                rank = paddle.distributed.get_rank()
+                loss_float = loss.cast("float32").reshape([-1])
+                valid_count = lossmask.sum().item()
+                loss_sum_tensor = paddle.sum(
+                    loss_float * lossmask
+                ).detach().cast("float32").reshape([1])
+                valid_count_tensor = lossmask.sum().detach().cast("float32").reshape([1])
+                final_loss_tensor = (
+                    loss_sum_tensor / valid_count_tensor
+                    if valid_count
+                    else paddle.full([1], float("nan"), dtype="float32")
+                )
+                loss_sum_val = loss_sum_tensor.item()
+                final_loss_val = final_loss_tensor.item()
+                print(
+                    f"[LOSS_PATH_MD5] rank={rank} loss_sum={loss_sum_val:.20f} "
+                    f"loss_sum_md5={_dsv4_tensor_md5(loss_sum_tensor)} "
+                    f"final_loss={final_loss_val:.20f} "
+                    f"final_loss_md5={_dsv4_tensor_md5(final_loss_tensor)}",
+                    flush=True,
+                )
+
             # EC-compat: line-wise loss (per-sample mean then average across samples)
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
@@ -546,6 +593,11 @@ class LanguageLoss(FleetLayer):
                 LanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
                     loss_val.detach()
                 )
+                _dsv4_print_scalar_loss_md5(
+                    "MTP_LOSS_PATH_MD5",
+                    f"mtp{i + 1}.final_loss",
+                    loss_val,
+                )
 
             def add_loss(main_loss, loss):
                 if self.config.add_mtp_loss:
@@ -621,6 +673,11 @@ class MainLanguageLoss(LanguageLoss):
         for i, loss_val in enumerate(mtp_loss):
             MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
                 loss_val.detach()
+            )
+            _dsv4_print_scalar_loss_md5(
+                "MTP_LOSS_PATH_MD5",
+                f"mtp{i + 1}.final_loss",
+                loss_val,
             )
 
         def add_loss(main_loss, loss):

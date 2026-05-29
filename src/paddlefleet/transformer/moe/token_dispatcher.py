@@ -15,6 +15,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,19 @@ from .moe_utils import (
 
 HAVE_HYBRID_EP = False
 HYBRID_EP_LOAD_CACHED_KERNELS = True
+
+
+def _dsv4_expert_scale_before_down_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_EXPERT_SCALE_BEFORE_DOWN", "0") == "1"
+
+
+def _sort_chunks_like_tokens(
+    input: paddle.Tensor,
+    split_sizes: paddle.Tensor,
+    sorted_idxs: paddle.Tensor,
+) -> paddle.Tensor:
+    chunks = paddle.split(input, split_sizes.tolist(), axis=0)
+    return paddle.cat([chunks[i] for i in sorted_idxs.tolist()], axis=0)
 
 try:
     from paddlefleet_ops import is_hybrid_ep_available
@@ -966,6 +980,18 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
         ) = permute(reshaped_input, self.routing_map)
+        if _dsv4_expert_scale_before_down_enabled():
+            routing_map = self.routing_map.cast(paddle.bool).T.contiguous()
+            flat_sorted = paddle.argsort(
+                routing_map.reshape([-1]).cast("int32"),
+                descending=True,
+                stable=True,
+            )[: int(tokens_per_expert.sum().item())]
+            self.permuted_local_probs = paddle.index_select(
+                self.probs.T.contiguous().reshape([-1]),
+                flat_sorted,
+                axis=0,
+            )
         self.permutated_local_input_tokens_shape = (
             permutated_local_input_tokens.shape
         )
@@ -987,6 +1013,17 @@ class AllToAllTokenDispatcher(nn.Layer):
             in_split_sizes=self.input_split_sizes,
             group=self.moe_group,
         )
+        if _dsv4_expert_scale_before_down_enabled():
+            # Match Megatron's all-to-all backward numerics by routing probs through a
+            # 2D [tokens, 1] tensor, like hidden-state dispatch.
+            global_input_probs_2d = _AllToAll.apply(
+                [self.output_shape_tokens[0], 1],
+                self.permuted_local_probs.unsqueeze(-1),
+                out_split_sizes=self.output_splits,
+                in_split_sizes=self.input_split_sizes,
+                group=self.moe_group,
+            )
+            self.global_input_probs = global_input_probs_2d.squeeze(-1)
 
         return global_input_tokens, None
 
@@ -1010,6 +1047,12 @@ class AllToAllTokenDispatcher(nn.Layer):
                 self.num_global_tokens_per_local_expert.ravel(),
                 self.sort_input_by_local_experts,
             )
+            if _dsv4_expert_scale_before_down_enabled():
+                self.global_input_probs = _sort_chunks_like_tokens(
+                    self.global_input_probs,
+                    self.num_global_tokens_per_local_expert.ravel(),
+                    self.sort_input_by_local_experts,
+                )
         sorted_tokens = global_input_tokens
         self.tokens_per_expert_post_gather = self.tokens_per_expert
         return sorted_tokens, self.tokens_per_expert_post_gather
@@ -1043,7 +1086,11 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.reshaped_input_shape,
-            probs=self.probs,
+            probs=(
+                None
+                if _dsv4_expert_scale_before_down_enabled()
+                else self.probs
+            ),
             routing_map=self.routing_map,
         )
 

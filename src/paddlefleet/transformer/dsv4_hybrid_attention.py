@@ -128,14 +128,14 @@ class DSv4HybridAttention(Attention):
         if compress_ratio > 1:
             rope_base = config.csa_compress_rotary_base
 
-        rope_type = getattr(config, "rope_type", "yarn")
-        if rope_type == "rope":
+        use_compressed_yarn = compress_ratio > 1
+        if not use_compressed_yarn:
             self.rotary_pos_emb = RotaryEmbedding(
                 self.qk_pos_emb_head_dim,
                 rotary_percent=getattr(config, "rotary_percent", 1.0),
                 rotary_base=rope_base,
             )
-        elif rope_type == "yarn":
+        else:
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.qk_pos_emb_head_dim,
                 rotary_base=rope_base,
@@ -148,8 +148,6 @@ class DSv4HybridAttention(Attention):
                 mscale=getattr(config, "mscale", 1.0),
                 mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
             )
-        else:
-            raise ValueError(f"Unsupported rope_type: {rope_type}")
 
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
@@ -246,6 +244,8 @@ class DSv4HybridAttention(Attention):
                 freqs, mscale = _rope_result
             else:
                 freqs, mscale = _rope_result, 1.0
+            # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
+            mscale = 1.0
 
             content_part = core_attn_out[..., :nope_dim]
             rot_part = core_attn_out[..., nope_dim:]
@@ -337,7 +337,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             sublayers_spec.q_layernorm,
             config=config,
             hidden_size=config.q_lora_rank,
-            eps=getattr(config, "layernorm_epsilon", 1e-5),
+            eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
         # Q up projection: q_lora_rank -> num_heads * q_head_dim (column parallel)
@@ -373,7 +373,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             sublayers_spec.kv_layernorm,
             config=config,
             hidden_size=config.v_head_dim,
-            eps=getattr(config, "layernorm_epsilon", 1e-5),
+            eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
     def get_query_key_value_tensors(
@@ -401,7 +401,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
 
         q, _ = self.linear_q_up_proj(q_compressed)  # [b, sq, n * v_head_dim]
         q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
-        q = _q_rms_norm(q, getattr(self.config, "layernorm_epsilon", 1e-5))
+        q = _q_rms_norm(q, getattr(self.config, "rms_norm_eps", 1e-5))
 
         # KV path
         kv, _ = self.linear_kv_proj(hidden_states)  # [b, sq, v_head_dim]
@@ -418,6 +418,8 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
                 freqs, mscale = _rope_result
             else:
                 freqs, mscale = _rope_result, 1.0
+            # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
+            mscale = 1.0
 
             # Q RoPE: split nope/pe, apply RoPE to pe part
             q_nope = q[..., :nope_dim]

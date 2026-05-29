@@ -12,9 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import paddle
 import paddle.nn.functional as F
 from paddle.nn.functional import swiglu
+
+
+def _dsv4_megatron_scale_wgrad_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_SWIGLU_SCALE_WGRAD_MEGATRON", "0") == "1"
+
+
+def _dsv4_megatron_scale_wgrad(x, scale, out_grad, clamp_value=None):
+    dtype = x.dtype
+    scale_dtype = scale.dtype
+    if clamp_value is not None:
+        hidden = x.shape[-1] // 2
+        gate, value = paddle.chunk(x.cast(paddle.float32), 2, axis=-1)
+        gate = paddle.clip(gate, max=clamp_value)
+        value = paddle.clip(value, min=-clamp_value, max=clamp_value)
+        swiglu_val = (F.silu(gate) * value).cast(dtype)
+    else:
+        swiglu_val = swiglu(x)
+    return paddle.sum(
+        swiglu_val * out_grad.cast(scale_dtype), axis=-1, keepdim=True
+    ).cast(scale_dtype)
 
 
 def fused_swiglu_scale_forward(x, scale, clamp_value=None):
@@ -51,13 +73,21 @@ def fused_swiglu_scale_backward(x, scale, out_grad, clamp_value=None):
         if clamp_value is not None:
             from paddlefleet_ops import fused_swiglu_scale_clamp_bwd
 
-            return fused_swiglu_scale_clamp_bwd(
+            d_x, d_scale = fused_swiglu_scale_clamp_bwd(
                 x, scale, out_grad, float(clamp_value)
             )
+            if _dsv4_megatron_scale_wgrad_enabled():
+                d_scale = _dsv4_megatron_scale_wgrad(
+                    x, scale, out_grad, clamp_value
+                )
+            return d_x, d_scale
         else:
             from paddlefleet_ops import fused_swiglu_scale_bwd
 
-            return fused_swiglu_scale_bwd(x, scale, out_grad)
+            d_x, d_scale = fused_swiglu_scale_bwd(x, scale, out_grad)
+            if _dsv4_megatron_scale_wgrad_enabled():
+                d_scale = _dsv4_megatron_scale_wgrad(x, scale, out_grad)
+            return d_x, d_scale
 
     # ----------------------------
     # XPU / CPU fallback

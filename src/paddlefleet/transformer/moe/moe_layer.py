@@ -55,6 +55,9 @@ from .token_dispatcher import (
 
 logger = logging.getLogger(__name__)
 
+def _dsv4_expert_scale_before_down_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_EXPERT_SCALE_BEFORE_DOWN", "0") == "1"
+
 # MD5 logging for MoE precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
@@ -160,6 +163,7 @@ class MoELayer(nn.Layer):
                 moe_routed_expert_use_bias,
             )
         self.pg_collection = pg_collection
+        self.is_mtp_layer = False
         self.hidden_size = config.hidden_size
         self.moe_intermediate_size = config.moe_intermediate_size
         self.num_experts = config.n_routed_experts
@@ -537,13 +541,29 @@ class MoELayer(nn.Layer):
         chunks = paddle.split(
             dispatched_input, num_or_sections=tokens_per_expert, axis=0
         )
+        scale_chunks = None
+        if _dsv4_expert_scale_before_down_enabled():
+            per_token_scale = getattr(
+                self.token_dispatcher, "global_input_probs", None
+            )
+            assert per_token_scale is not None, (
+                "DSV4_FLEET_EXPERT_SCALE_BEFORE_DOWN requires dispatched "
+                "router probabilities from the token dispatcher."
+            )
+            scale_chunks = paddle.split(
+                per_token_scale, num_or_sections=tokens_per_expert, axis=0
+            )
         for i, chunk in enumerate(chunks):
             if tokens_per_expert[i] == 0:
                 continue
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            outputs += [expert(chunk)[0]]
+            if scale_chunks is None:
+                expert_output = expert(chunk)[0]
+            else:
+                expert_output = expert(chunk, per_token_scale=scale_chunks[i])[0]
+            outputs += [expert_output]
 
         if not outputs:
             return dispatched_input
@@ -927,7 +947,7 @@ class MoELayer(nn.Layer):
         hidden_states, aux_loss, z_loss, residuals = args
         if self.use_latent_moe:
             hidden_states = self.fc2_latent_proj(hidden_states)
-        if self.training and self.router_aux_loss_coef:
+        if self.training and self.router_aux_loss_coef and aux_loss is not None:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(hidden_states, aux_loss)
         else:
@@ -1038,8 +1058,7 @@ class MoELayer(nn.Layer):
                 output = self.fc2_latent_proj(output)
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
-
-        if self.training and self.router_aux_loss_coef:
+        if self.training and self.router_aux_loss_coef and aux_loss is not None:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(output, aux_loss)
 
@@ -1335,11 +1354,12 @@ class MoELayer(nn.Layer):
             return True
         return False
 
-    def set_layer_number(self, layer_number):
+    def set_layer_number(self, layer_number, is_mtp_layer=False):
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         assert hasattr(self.gate, "set_layer_number"), (
             "expect gate has method 'set_layer_number'"
         )
         # Hash routing activation (moe_n_hash_layers) is decided by the router
         # itself based on layer_number. See TopKRouter._setup_hash_layer.
-        self.gate.set_layer_number(layer_number)
+        self.gate.set_layer_number(layer_number, is_mtp_layer)
