@@ -1067,5 +1067,854 @@ class TestCSAAttnTargetReducesum(unittest.TestCase):
         )
 
 
+# =========================================================================
+# Input validation tests (cover error-raising branches in wrapper/interface)
+# =========================================================================
+
+
+class TestCSAIndexerInputValidation(unittest.TestCase):
+    """Cover TypeError/ValueError branches in csa_indexer.py validation."""
+
+    def test_validate_indexer_inputs_non_tensor_q(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_indexer_inputs,
+        )
+
+        k = paddle.empty([1, 4, 16])
+        w = paddle.empty([1, 8, 16])
+        with self.assertRaises(TypeError):
+            _validate_indexer_inputs("not_a_tensor", k, w)
+
+    def test_validate_indexer_inputs_non_tensor_k(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_indexer_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        w = paddle.empty([1, 8, 16])
+        with self.assertRaises(TypeError):
+            _validate_indexer_inputs(q, [1, 2, 3], w)
+
+    def test_validate_indexer_inputs_non_tensor_w(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_indexer_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        k = paddle.empty([1, 4, 32])
+        with self.assertRaises(TypeError):
+            _validate_indexer_inputs(q, k, None)
+
+    def test_validate_indexer_inputs_wrong_q_ndim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_indexer_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16])  # 3D instead of 4D
+        k = paddle.empty([1, 4, 16])
+        w = paddle.empty([1, 8, 16])
+        with self.assertRaises(ValueError):
+            _validate_indexer_inputs(q, k, w)
+
+    def test_validate_indexer_inputs_wrong_k_ndim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_indexer_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        k = paddle.empty([1, 4, 32, 1])  # 4D instead of 3D
+        w = paddle.empty([1, 8, 16])
+        with self.assertRaises(ValueError):
+            _validate_indexer_inputs(q, k, w)
+
+    def test_validate_indexer_inputs_wrong_w_ndim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_indexer_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        k = paddle.empty([1, 4, 32])
+        w = paddle.empty([1, 8])  # 2D instead of 3D
+        with self.assertRaises(ValueError):
+            _validate_indexer_inputs(q, k, w)
+
+    def test_validate_indexer_inputs_shape_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_indexer_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        k = paddle.empty([1, 4, 32])
+        w = paddle.empty([1, 8, 8])  # heads=8 != q heads=16
+        with self.assertRaises(ValueError):
+            _validate_indexer_inputs(q, k, w)
+
+    def test_validate_topk_and_grad_non_tensor_topk(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_topk_and_grad,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        grad = paddle.empty([1, 8, 4])
+        with self.assertRaises(TypeError):
+            _validate_topk_and_grad(q, "not_tensor", grad)
+
+    def test_validate_topk_and_grad_non_tensor_grad(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_topk_and_grad,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        topk = paddle.empty([1, 8, 4], dtype="int32")
+        with self.assertRaises(TypeError):
+            _validate_topk_and_grad(q, topk, 42)
+
+    def test_validate_topk_and_grad_wrong_topk_ndim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_topk_and_grad,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        topk = paddle.empty([1, 8, 4, 1], dtype="int32")  # 4D
+        grad = paddle.empty([1, 8, 4])
+        with self.assertRaises(ValueError):
+            _validate_topk_and_grad(q, topk, grad)
+
+    def test_validate_topk_and_grad_wrong_grad_ndim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_topk_and_grad,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        topk = paddle.empty([1, 8, 4], dtype="int32")
+        grad = paddle.empty([1, 8])  # 2D
+        with self.assertRaises(ValueError):
+            _validate_topk_and_grad(q, topk, grad)
+
+    def test_validate_topk_and_grad_shape_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_topk_and_grad,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        topk = paddle.empty([1, 8, 4], dtype="int32")
+        grad = paddle.empty([1, 8, 3])  # topk_dim=3 != 4
+        with self.assertRaises(ValueError):
+            _validate_topk_and_grad(q, topk, grad)
+
+    def test_validate_topk_and_grad_batch_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _validate_topk_and_grad,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        topk = paddle.empty([2, 8, 4], dtype="int32")  # batch=2 != 1
+        grad = paddle.empty([2, 8, 4])
+        with self.assertRaises(ValueError):
+            _validate_topk_and_grad(q, topk, grad)
+
+    def test_prepare_forward_inputs_zero_topk(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _prepare_forward_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        k = paddle.empty([1, 4, 32])
+        w = paddle.empty([1, 8, 16])
+        with self.assertRaises(ValueError):
+            _prepare_forward_inputs(q, k, w, topk_effective=0)
+
+    def test_prepare_forward_inputs_casts_weights(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _prepare_forward_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        k = paddle.empty([1, 4, 32])
+        w = paddle.empty([1, 8, 16], dtype="float16")  # not fp32
+        _, _, w_out, _ = _prepare_forward_inputs(q, k, w, topk_effective=2)
+        self.assertEqual(w_out.dtype, paddle.float32)
+
+    def test_prepare_backward_inputs_casts_types(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            _prepare_backward_inputs,
+        )
+
+        q = paddle.empty([1, 8, 16, 32])
+        k = paddle.empty([1, 4, 32])
+        w = paddle.empty([1, 8, 16], dtype="float16")
+        topk = paddle.empty([1, 8, 2], dtype="int64")  # not int32
+        grad = paddle.empty([1, 8, 2], dtype="float16")  # not fp32
+        _, w_out, _, topk_out, grad_out = _prepare_backward_inputs(
+            q, w, k, topk, grad
+        )
+        self.assertEqual(w_out.dtype, paddle.float32)
+        self.assertEqual(topk_out.dtype, paddle.int32)
+        self.assertEqual(grad_out.dtype, paddle.float32)
+
+    def test_csa_attn_target_wrapper_type_checks(self):
+        """Cover TypeError branches in csa_attn_target_reducesum wrapper."""
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            csa_attn_target_reducesum,
+        )
+
+        q = paddle.empty([1, 4, 8, 32])
+        k = paddle.empty([1, 2, 32])
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+
+        with self.assertRaises(TypeError):
+            csa_attn_target_reducesum("bad", k, topk, 1.0)
+        with self.assertRaises(TypeError):
+            csa_attn_target_reducesum(q, "bad", topk, 1.0)
+        with self.assertRaises(TypeError):
+            csa_attn_target_reducesum(q, k, "bad", 1.0)
+
+    def test_csa_attn_target_wrapper_ndim_checks(self):
+        """Cover ValueError branches for ndim in csa_attn_target_reducesum."""
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            csa_attn_target_reducesum,
+        )
+
+        with self.assertRaises(ValueError):
+            csa_attn_target_reducesum(
+                paddle.empty([1, 4, 32]),  # 3D query
+                paddle.empty([1, 2, 32]),
+                paddle.empty([1, 4, 2], dtype="int32"),
+                1.0,
+            )
+        with self.assertRaises(ValueError):
+            csa_attn_target_reducesum(
+                paddle.empty([1, 4, 8, 32]),
+                paddle.empty([1, 2, 32, 1]),  # 4D key
+                paddle.empty([1, 4, 2], dtype="int32"),
+                1.0,
+            )
+        with self.assertRaises(ValueError):
+            csa_attn_target_reducesum(
+                paddle.empty([1, 4, 8, 32]),
+                paddle.empty([1, 2, 32]),
+                paddle.empty([1, 4, 2, 1], dtype="int32"),  # 4D topk
+                1.0,
+            )
+
+    def test_csa_attn_target_wrapper_batch_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            csa_attn_target_reducesum,
+        )
+
+        with self.assertRaises(ValueError):
+            csa_attn_target_reducesum(
+                paddle.empty([1, 4, 8, 32]),
+                paddle.empty([2, 2, 32]),  # batch=2
+                paddle.empty([1, 4, 2], dtype="int32"),
+                1.0,
+            )
+
+    def test_csa_attn_target_wrapper_seq_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            csa_attn_target_reducesum,
+        )
+
+        with self.assertRaises(ValueError):
+            csa_attn_target_reducesum(
+                paddle.empty([1, 4, 8, 32]),
+                paddle.empty([1, 2, 32]),
+                paddle.empty([1, 3, 2], dtype="int32"),  # seq=3 != 4
+                1.0,
+            )
+
+    def test_csa_attn_target_wrapper_dim_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer import (
+            csa_attn_target_reducesum,
+        )
+
+        with self.assertRaises(ValueError):
+            csa_attn_target_reducesum(
+                paddle.empty([1, 4, 8, 32]),
+                paddle.empty([1, 2, 16]),  # dim=16 != 32
+                paddle.empty([1, 4, 2], dtype="int32"),
+                1.0,
+            )
+
+
+class TestCSAIndexerFwdInterfaceValidation(unittest.TestCase):
+    """Cover error branches in csa_indexer_fwd.py interface validation."""
+
+    def test_rejects_non_contiguous(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([2, 4, 8, 16], dtype="bfloat16").transpose(
+            [0, 2, 1, 3]
+        )  # non-contiguous
+        k = paddle.empty([2, 2, 16], dtype="bfloat16")
+        w = paddle.empty([2, 4, 8], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, w, 2, 32, 0)
+
+    def test_rejects_wrong_ndim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([2, 4, 128], dtype="bfloat16")  # 3D
+        k = paddle.empty([2, 2, 128], dtype="bfloat16")
+        w = paddle.empty([2, 4, 64], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, w, 2, 32, 0)
+
+    def test_rejects_heads_not_multiple_of_8(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 7, 16], dtype="bfloat16")  # heads=7
+        k = paddle.empty([1, 2, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 7], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, w, 2, 32, 0)
+
+    def test_rejects_zero_topk(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16")
+        k = paddle.empty([1, 2, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 8], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, w, 0, 32, 0)
+
+    def test_rejects_nonzero_num_stages(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16")
+        k = paddle.empty([1, 2, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 8], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, w, 2, 32, 1)
+
+    def test_tilelang_dtype_fp16(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            _tilelang_dtype,
+        )
+
+        t = paddle.empty([1], dtype="float16")
+        self.assertEqual(_tilelang_dtype(t), "float16")
+
+    def test_tilelang_dtype_rejects_fp32(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            _tilelang_dtype,
+        )
+
+        t = paddle.empty([1], dtype="float32")
+        with self.assertRaises(TypeError):
+            _tilelang_dtype(t)
+
+    def test_next_power_of_2_edge_cases(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_fwd import (
+            _next_power_of_2,
+        )
+
+        self.assertEqual(_next_power_of_2(0), 1)
+        self.assertEqual(_next_power_of_2(1), 1)
+        self.assertEqual(_next_power_of_2(3), 4)
+        self.assertEqual(_next_power_of_2(32), 32)
+        self.assertEqual(_next_power_of_2(33), 64)
+
+
+class TestCSAIndexerBwdInterfaceValidation(unittest.TestCase):
+    """Cover error branches in csa_indexer_bwd.py interface validation."""
+
+    def test_rejects_non_contiguous(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16").transpose(
+            [0, 2, 1, 3]
+        )
+        w = paddle.empty([1, 4, 8], dtype="float32")
+        k = paddle.empty([1, 2, 16], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        grad = paddle.empty([1, 4, 2], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, w, k, topk, grad, 32, 0)
+
+    def test_rejects_wrong_ndim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 128], dtype="bfloat16")  # 3D
+        w = paddle.empty([1, 4, 64], dtype="float32")
+        k = paddle.empty([1, 2, 128], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        grad = paddle.empty([1, 4, 2], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, w, k, topk, grad, 32, 0)
+
+    def test_rejects_heads_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 16], dtype="float32")  # heads=16 != 8
+        k = paddle.empty([1, 2, 16], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        grad = paddle.empty([1, 4, 2], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, w, k, topk, grad, 32, 0)
+
+    def test_rejects_dim_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 8], dtype="float32")
+        k = paddle.empty([1, 2, 32], dtype="bfloat16")  # dim=32 != 16
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        grad = paddle.empty([1, 4, 2], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, w, k, topk, grad, 32, 0)
+
+    def test_rejects_topk_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 8], dtype="float32")
+        k = paddle.empty([1, 2, 16], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        grad = paddle.empty([1, 4, 3], dtype="float32")  # topk=3 != 2
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, w, k, topk, grad, 32, 0)
+
+    def test_rejects_nonzero_num_stages(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 16], dtype="bfloat16")
+        w = paddle.empty([1, 4, 8], dtype="float32")
+        k = paddle.empty([1, 2, 16], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        grad = paddle.empty([1, 4, 2], dtype="float32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, w, k, topk, grad, 32, 1)
+
+    def test_tilelang_dtype_fp16(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            _tilelang_dtype,
+        )
+
+        t = paddle.empty([1], dtype="float16")
+        self.assertEqual(_tilelang_dtype(t), "float16")
+
+    def test_tilelang_dtype_rejects_fp32(self):
+        from paddlefleet.tilelang_ops.indexer.csa_indexer_bwd import (
+            _tilelang_dtype,
+        )
+
+        t = paddle.empty([1], dtype="float32")
+        with self.assertRaises(TypeError):
+            _tilelang_dtype(t)
+
+
+class TestCSAAttnTargetInterfaceValidation(unittest.TestCase):
+    """Cover error branches in csa_attn_target.py interface validation."""
+
+    def test_rejects_non_contiguous(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 32], dtype="bfloat16").transpose(
+            [0, 2, 1, 3]
+        )
+        k = paddle.empty([1, 2, 32], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, topk, 32, 0)
+
+    def test_rejects_wrong_ndim(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 32], dtype="bfloat16")  # 3D
+        k = paddle.empty([1, 2, 32], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, topk, 32, 0)
+
+    def test_rejects_dim_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 32], dtype="bfloat16")
+        k = paddle.empty([1, 2, 16], dtype="bfloat16")  # dim=16 != 32
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, topk, 32, 0)
+
+    def test_rejects_batch_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 32], dtype="bfloat16")
+        k = paddle.empty([2, 2, 32], dtype="bfloat16")  # batch=2
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, topk, 32, 0)
+
+    def test_rejects_seq_mismatch(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 32], dtype="bfloat16")
+        k = paddle.empty([1, 2, 32], dtype="bfloat16")
+        topk = paddle.empty([1, 3, 2], dtype="int32")  # seq=3 != 4
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, topk, 32, 0)
+
+    def test_rejects_heads_not_multiple_of_64(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 65, 32], dtype="bfloat16")  # heads=65
+        k = paddle.empty([1, 2, 32], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, topk, 32, 0)
+
+    def test_rejects_nonzero_num_stages(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _validate_interface_inputs,
+        )
+
+        q = paddle.empty([1, 4, 8, 32], dtype="bfloat16")
+        k = paddle.empty([1, 2, 32], dtype="bfloat16")
+        topk = paddle.empty([1, 4, 2], dtype="int32")
+        with self.assertRaises(ValueError):
+            _validate_interface_inputs(q, k, topk, 32, 1)
+
+    def test_tilelang_dtype_fp16(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _tilelang_dtype,
+        )
+
+        t = paddle.empty([1], dtype="float16")
+        self.assertEqual(_tilelang_dtype(t), "float16")
+
+    def test_tilelang_dtype_rejects_fp32(self):
+        from paddlefleet.tilelang_ops.indexer.csa_attn_target import (
+            _tilelang_dtype,
+        )
+
+        t = paddle.empty([1], dtype="float32")
+        with self.assertRaises(TypeError):
+            _tilelang_dtype(t)
+
+
+# =========================================================================
+# TileLangCSAIndexerLossAutoScaler backward path test
+# =========================================================================
+
+
+@unittest.skipUnless(
+    paddle.device.is_compiled_with_cuda()
+    and paddle.device.cuda.device_count() > 0,
+    "TileLang CSA Indexer kernel requires CUDA",
+)
+class TestTileLangCSAIndexerLossAutoScaler(unittest.TestCase):
+    """Test that TileLangCSAIndexerLossAutoScaler correctly backprops.
+
+    This covers the backward() method of TileLangCSAIndexerLossAutoScaler
+    (csa_attention.py lines 609-646) which hooks indexer loss gradients into
+    the main output's backward graph.
+    """
+
+    def test_auto_scaler_backward_produces_correct_grads(self):
+        from paddlefleet.transformer.csa_attention import (
+            TileLangCSAIndexerLossAutoScaler,
+        )
+        from paddlefleet.transformer.dsa_attention import (
+            DSAIndexerLossAutoScaler,
+        )
+
+        paddle.set_device("gpu")
+        b, sq, h_i, d_i, sk = 1, 16, 64, 128, 4
+        ratio = 4
+        loss_coeff = 1.0
+
+        paddle.seed(5050)
+        index_q = paddle.randn([b, sq, h_i, d_i]).astype("bfloat16")
+        index_k_comp = paddle.randn([b, sk, d_i]).astype("bfloat16")
+        weights = paddle.randn([b, sq, h_i]).astype("float32")
+
+        # Get topk and compute target to build the state tuple
+        from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
+
+        topk_indices, topk_probs = csa_indexer_topk_fwd(
+            index_q,
+            index_k_comp,
+            weights,
+            ratio=ratio,
+            topk_effective=sk,
+        )
+
+        # Simulate target (random normalized distribution)
+        paddle.seed(5051)
+        target_raw = paddle.rand([b, sq, sk])
+        target_raw = paddle.where(
+            topk_indices >= 0, target_raw, paddle.zeros_like(target_raw)
+        )
+        target = target_raw / target_raw.sum(axis=-1, keepdim=True).clip(
+            min=1e-10
+        )
+
+        # Make non-leaf tensors by passing through identity ops.
+        # Paddle PyLayer doesn't allow inplace strategy on leaf vars.
+        output_leaf = paddle.randn([b, sq, 128]).astype("bfloat16")
+        output_leaf.stop_gradient = False
+        output = output_leaf + 0  # non-leaf
+
+        index_q_leaf = index_q.detach()
+        index_q_leaf.stop_gradient = False
+        index_q_d = index_q_leaf + 0  # non-leaf
+
+        weights_leaf = weights.detach()
+        weights_leaf.stop_gradient = False
+        weights_d = weights_leaf + 0  # non-leaf
+
+        index_k_leaf = index_k_comp.detach()
+        index_k_leaf.stop_gradient = False
+        index_k_d = index_k_leaf + 0  # non-leaf
+
+        DSAIndexerLossAutoScaler._main_loss_backward_scale = None
+        result = TileLangCSAIndexerLossAutoScaler.apply(
+            output,
+            index_q_d,
+            weights_d,
+            index_k_d,
+            topk_indices.detach(),
+            topk_probs.detach(),
+            target.detach(),
+            loss_coeff,
+        )
+        # Backward through the auto-scaler
+        result.sum().backward()
+
+        # Verify: output grad should be passed through (identity)
+        self.assertTrue(
+            paddle.allclose(
+                output_leaf.grad.cast("float32"),
+                paddle.ones_like(output_leaf).cast("float32"),
+                atol=1e-5,
+            ).item(),
+            "output gradient should be ones (identity pass-through)",
+        )
+        # Verify: indexer param grads should be non-zero
+        self.assertGreater(
+            index_q_leaf.grad.cast("float32").abs().max().item(),
+            0.0,
+            "index_q grad should be non-zero",
+        )
+        self.assertGreater(
+            weights_leaf.grad.cast("float32").abs().max().item(),
+            0.0,
+            "weights grad should be non-zero",
+        )
+        self.assertGreater(
+            index_k_leaf.grad.cast("float32").abs().max().item(),
+            0.0,
+            "index_k grad should be non-zero",
+        )
+        # Verify: no NaN/Inf
+        for name, g in [
+            ("dQ", index_q_leaf.grad),
+            ("dW", weights_leaf.grad),
+            ("dK", index_k_leaf.grad),
+        ]:
+            self.assertTrue(
+                paddle.isfinite(g.cast("float32")).all().item(),
+                f"{name} contains NaN/Inf",
+            )
+
+
+# =========================================================================
+# TileLang forward-only (no loss) path in CompressedSparseAttention.forward()
+# =========================================================================
+
+
+@unittest.skipUnless(
+    paddle.device.is_compiled_with_cuda()
+    and paddle.device.cuda.device_count() > 0,
+    "TileLang CSA kernel requires CUDA",
+)
+class TestCSAForwardTileLangFwdOnlyPath(unittest.TestCase):
+    """Cover the TileLang fwd-only indexer path (csa_attention.py ~1209-1226).
+
+    When csa_tilelang_enable_indexer=True but training=False (or loss_coeff=0),
+    the code enters the fwd-only branch that calls csa_indexer_topk_fwd under
+    no_grad and uses its indices for sparse attention.
+    """
+
+    def test_fwd_only_tilelang_matches_paddle_indexer(self):
+        import types
+
+        from paddle import nn
+        from paddle.distributed.fleet.meta_parallel import LayerSpec
+
+        from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+            RotaryEmbedding,
+        )
+        from paddlefleet.transformer.csa_attention import (
+            CompressedSparseAttention,
+            CompressedSparseAttentionSublayersSpec,
+            Compressor,
+            CompressorSublayersSpec,
+            CSAIndexer,
+            CSAIndexerSublayersSpec,
+        )
+
+        paddle.set_device("gpu")
+
+        class _Lin(nn.Layer):
+            def __init__(self, input_size, output_size, **kwargs):
+                super().__init__()
+                self.weight = self.create_parameter(
+                    shape=[output_size, input_size],
+                    dtype="bfloat16",
+                    default_initializer=nn.initializer.Normal(std=0.02),
+                )
+
+            def forward(self, x):
+                return paddle.matmul(x, self.weight.T), None
+
+        class _Norm(nn.Layer):
+            def __init__(self, hidden_size=None, **kwargs):
+                super().__init__()
+                self.weight = self.create_parameter(
+                    shape=[hidden_size],
+                    dtype="float32",
+                    default_initializer=nn.initializer.Constant(1.0),
+                )
+
+            def forward(self, x):
+                return (
+                    x
+                    * paddle.rsqrt(x.square().mean(-1, keepdim=True) + 1e-5)
+                    * self.weight.cast(x.dtype)
+                )
+
+        head_dim, hidden_size, ratio = 64, 256, 4
+        config = types.SimpleNamespace(
+            num_attention_heads=8,
+            v_head_dim=head_dim,
+            hidden_size=hidden_size,
+            q_lora_rank=64,
+            qk_pos_emb_head_dim=32,
+            csa_window_size=64,
+            csa_compress_ratios=[ratio],
+            csa_dense_mode=False,
+            dsa_index_n_heads=16,
+            dsa_index_head_dim=32,
+            dsa_index_topk=16,
+            dsa_indexer_loss_coeff=0.0,
+            dsa_indexer_use_sparse_loss=False,
+            csa_tilelang_enable_indexer=True,
+            csa_tilelang_enable_sparse_attn=False,
+            init_method=None,
+            init_method_std=0.02,
+            layernorm_epsilon=1e-5,
+            num_hidden_layers=1,
+        )
+        rope = RotaryEmbedding(32, rotary_percent=1.0, rotary_base=160000)
+
+        comp_spec = CompressorSublayersSpec(
+            linear_wkv=_Lin, linear_wgate=_Lin, norm=_Norm
+        )
+        idx_comp_spec = CompressorSublayersSpec(
+            linear_wkv=_Lin, linear_wgate=_Lin, norm=_Norm
+        )
+        idx_spec = CSAIndexerSublayersSpec(
+            linear_wq_b=_Lin,
+            linear_weights_proj=_Lin,
+            compressor=LayerSpec(
+                layer=Compressor, sublayers_spec=idx_comp_spec
+            ),
+        )
+        attn_spec = CompressedSparseAttentionSublayersSpec(
+            compressor=LayerSpec(layer=Compressor, sublayers_spec=comp_spec),
+            indexer=LayerSpec(layer=CSAIndexer, sublayers_spec=idx_spec),
+        )
+
+        # Build two instances with same seed: one with tilelang, one without
+        paddle.seed(9999)
+        csa_tl = CompressedSparseAttention(
+            config=config,
+            sublayers_spec=attn_spec,
+            layer_number=1,
+            attn_mask_type=None,
+            attention_type="self",
+            k_channels=head_dim,
+            v_channels=head_dim,
+            compress_ratio=ratio,
+            rotary_pos_emb=rope,
+        )
+        csa_tl.eval()
+
+        config_no_tl = types.SimpleNamespace(**vars(config))
+        config_no_tl.csa_tilelang_enable_indexer = False
+
+        paddle.seed(9999)
+        csa_ref = CompressedSparseAttention(
+            config=config_no_tl,
+            sublayers_spec=attn_spec,
+            layer_number=1,
+            attn_mask_type=None,
+            attention_type="self",
+            k_channels=head_dim,
+            v_channels=head_dim,
+            compress_ratio=ratio,
+            rotary_pos_emb=rope,
+        )
+        csa_ref.eval()
+
+        # Run forward
+        b, sq = 1, 64
+        paddle.seed(8888)
+        query = paddle.randn([b, sq, 8, head_dim], dtype="bfloat16")
+        key = paddle.randn([b, sq, 1, head_dim], dtype="bfloat16")
+        x = paddle.randn([b, sq, hidden_size], dtype="bfloat16")
+        qr = paddle.randn([b, sq, 64], dtype="bfloat16")
+
+        out_tl = csa_tl(query, key, key, None, x=x, qr=qr)
+        out_ref = csa_ref(query, key, key, None, x=x, qr=qr)
+
+        # They should match (same indexer weights → same topk → same attention)
+        diff = (
+            (out_tl.cast("float32") - out_ref.cast("float32"))
+            .abs()
+            .max()
+            .item()
+        )
+        self.assertLess(
+            diff, 0.1, f"TileLang fwd-only vs Paddle mismatch: {diff}"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
