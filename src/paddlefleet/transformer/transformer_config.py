@@ -190,6 +190,12 @@ class TransformerConfig(ModelParallelConfig):
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
     first half and second half (LLaMa style). Default to False."""
 
+    use_vha_attention: bool = False
+    """If True, enables VHA premix/postmix extensions in standard self-attention."""
+
+    vha_postmix_rank: int | None = None
+    """Rank of the VHA postmix low-rank head mixing matrices."""
+
     attention_value_scale: float | None = None
     """Scale factor applied to the value tensor before attention computation. If None, no scaling
     is applied. Used in architectures like MiMo that scale V for training stability."""

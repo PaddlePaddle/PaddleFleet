@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
     from .transformer_config import TransformerConfig
 
 import paddle
-from paddle import Tensor
+from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
@@ -216,6 +217,9 @@ class Attention(FleetLayer, ABC):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
         self.is_mtp_layer = is_mtp_layer
+        self.use_vha_attention = (
+            attention_type == "self" and self.config.use_vha_attention
+        )
 
         self.is_swa = False
 
@@ -259,7 +263,12 @@ class Attention(FleetLayer, ABC):
             self.num_attention_heads = self.config.num_attention_heads
             self.num_key_value_heads = self.config.num_key_value_heads
 
-        self.query_projection_size = self.head_dim * self.num_attention_heads
+        self.query_projection_size = (
+            self.head_dim
+            * (self.num_attention_heads // self.num_key_value_heads)
+            if self.use_vha_attention
+            else self.head_dim * self.num_attention_heads
+        )
         self.key_projection_size = self.head_dim * self.num_key_value_heads
         self.value_projection_size = self.v_head_dim * self.num_key_value_heads
         self.out_projection_size = self.v_head_dim * self.num_attention_heads
@@ -290,17 +299,29 @@ class Attention(FleetLayer, ABC):
         # Per attention head and per partition values
         world_size = get_pg_size(self.pg_collection.tp)
         self.hidden_size_per_attention_head = divide(
-            self.query_projection_size, self.num_attention_heads
+            self.query_projection_size,
+            (self.num_attention_heads // self.num_key_value_heads)
+            if self.use_vha_attention
+            else self.num_attention_heads,
         )
+
         self.value_hidden_size_per_attention_head = divide(
             self.value_projection_size, self.num_key_value_heads
         )
         self.num_attention_heads_per_partition = divide(
-            self.num_attention_heads, world_size
+            (self.num_attention_heads // self.num_key_value_heads)
+            if self.use_vha_attention
+            else self.num_attention_heads,
+            world_size,
         )
         self.num_query_groups_per_partition = divide(
             self.num_key_value_heads, world_size
         )
+
+        if self.use_vha_attention:
+            assert world_size == 1, (
+                "VHA attention currently requires tensor_model_parallel_size == 1"
+            )
 
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
@@ -386,6 +407,69 @@ class Attention(FleetLayer, ABC):
             skip_bias_add=True,
             is_expert=False,
             tp_group=self.pg_collection.tp,
+        )
+
+        if self.use_vha_attention:
+            eye = paddle.eye(self.head_dim)
+            init_mats = paddle.stack(
+                [
+                    eye
+                    + paddle.randn([self.head_dim, self.head_dim])
+                    * (0.1 / math.sqrt(self.head_dim))
+                    for _ in range(self.num_key_value_heads)
+                ]
+            )
+            self.vha_premix_weight = self.create_parameter(
+                shape=[
+                    self.num_key_value_heads,
+                    self.head_dim,
+                    self.head_dim,
+                ],
+                default_initializer=nn.initializer.Assign(init_mats),
+            )
+            vha_postmix_rank = self.config.vha_postmix_rank
+            if vha_postmix_rank is None:
+                vha_postmix_rank = self.num_attention_heads // 4
+            self.vha_postmix_U = self.create_parameter(
+                shape=[self.num_attention_heads, vha_postmix_rank],
+                default_initializer=nn.initializer.Normal(mean=0.0, std=0.01),
+            )
+            self.vha_postmix_V = self.create_parameter(
+                shape=[self.num_attention_heads, vha_postmix_rank],
+                default_initializer=nn.initializer.Constant(0.0),
+            )
+
+    def _apply_vha_premix(self, query: Tensor) -> Tensor:
+        q_expanded = paddle.einsum(
+            "bthd,kde->btkhe", query, self.vha_premix_weight
+        )
+        return q_expanded.reshape(
+            [
+                query.shape[0],
+                query.shape[1],
+                self.num_attention_heads,
+                self.head_dim,
+            ]
+        )
+
+    def _apply_vha_postmix(self, attn_out: Tensor) -> Tensor:
+        mixed = attn_out.reshape(
+            [
+                attn_out.shape[0],
+                attn_out.shape[1],
+                self.num_attention_heads,
+                self.v_head_dim,
+            ]
+        )
+        z = paddle.einsum("bthd,hr->btrd", mixed, self.vha_postmix_U)
+        delta = paddle.einsum("btrd,hr->bthd", z, self.vha_postmix_V)
+        mixed = mixed + delta
+        return mixed.reshape(
+            [
+                attn_out.shape[0],
+                attn_out.shape[1],
+                self.num_attention_heads * self.v_head_dim,
+            ]
         )
 
     @abstractmethod
@@ -684,6 +768,9 @@ class Attention(FleetLayer, ABC):
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
 
+        if self.use_vha_attention:
+            core_attn_out = self._apply_vha_postmix(core_attn_out)
+
         # Apply gated attention: gate the attention output before output projection
         if gate is not None:
             core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
@@ -826,7 +913,9 @@ class SelfAttention(Attention):
 
         if self.gated_attention:
             gate_dim = (
-                heads_per_group * self.value_hidden_size_per_attention_head
+                heads_per_group
+                * (self.num_key_value_heads if self.use_vha_attention else 1)
+                * self.value_hidden_size_per_attention_head
             )
 
         if self.gated_attention:
@@ -887,33 +976,48 @@ class SelfAttention(Attention):
         ):
             # per_layer qk_norm: normalize across all heads jointly
 
-            # Flatten to [b, sq, np * hn] / [b, sq, ng * hn]
-            query = query.reshape(*query.shape[:2], -1)
-            key = key.reshape(*key.shape[:2], -1)
+            if self.use_vha_attention:
+                query = query.reshape(
+                    query.shape[0],
+                    query.shape[1],
+                    -1,
+                    self.hidden_size_per_attention_head,
+                )
+                query = self._apply_vha_premix(query)
+                query = query.reshape(*query.shape[:2], -1)
+                key = key.reshape(*key.shape[:2], -1)
+                if self.q_norm is not None:
+                    query = self.q_norm(query)
+                if self.k_norm is not None:
+                    key = self.k_norm(key)
+            else:
+                # Flatten to [b, sq, np * hn] / [b, sq, ng * hn]
+                query = query.reshape(*query.shape[:2], -1)
+                key = key.reshape(*key.shape[:2], -1)
 
-            # TP gather: collect all TP shards so norm sees the full dimension
-            enable_tp = get_pg_size(self.pg_collection.tp) > 1
-            if enable_tp:
-                query = gather_from_tensor_model_parallel_region(
-                    query, group=self.pg_collection.tp
-                )
-                key = gather_from_tensor_model_parallel_region(
-                    key, group=self.pg_collection.tp
-                )
+                # TP gather: collect all TP shards so norm sees the full dimension
+                enable_tp = get_pg_size(self.pg_collection.tp) > 1
+                if enable_tp:
+                    query = gather_from_tensor_model_parallel_region(
+                        query, group=self.pg_collection.tp
+                    )
+                    key = gather_from_tensor_model_parallel_region(
+                        key, group=self.pg_collection.tp
+                    )
 
-            if self.q_norm is not None:
-                query = self.q_norm(query)
-            if self.k_norm is not None:
-                key = self.k_norm(key)
+                if self.q_norm is not None:
+                    query = self.q_norm(query)
+                if self.k_norm is not None:
+                    key = self.k_norm(key)
 
-            # TP scatter: split back to per-rank shards
-            if enable_tp:
-                query = scatter_to_tensor_model_parallel_region(
-                    query, group=self.pg_collection.tp
-                )
-                key = scatter_to_tensor_model_parallel_region(
-                    key, group=self.pg_collection.tp
-                )
+                # TP scatter: split back to per-rank shards
+                if enable_tp:
+                    query = scatter_to_tensor_model_parallel_region(
+                        query, group=self.pg_collection.tp
+                    )
+                    key = scatter_to_tensor_model_parallel_region(
+                        key, group=self.pg_collection.tp
+                    )
 
             # Reshape to per-head layout [b, sq, np, hn] / [b, sq, ng, hn]
             query = query.reshape(
@@ -937,6 +1041,9 @@ class SelfAttention(Attention):
                 -1,
                 self.hidden_size_per_attention_head,
             )
+
+            if self.use_vha_attention:
+                query = self._apply_vha_premix(query)
 
             if self.q_norm is not None:
                 query = self.q_norm(query)
