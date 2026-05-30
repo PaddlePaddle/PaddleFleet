@@ -183,7 +183,6 @@ class TestSelfAttentionRecompute(unittest.TestCase):
         config.init_method = MagicMock()
         config.output_layer_init_method = MagicMock()
         config.tensor_model_parallel_size = 1
-        config.sliding_window = None
 
         spec = SelfAttentionSublayersSpec(
             qkv_proj=MagicMock(),
@@ -225,7 +224,6 @@ class TestSelfAttentionRecompute(unittest.TestCase):
         config.init_method = MagicMock()
         config.output_layer_init_method = MagicMock()
         config.tensor_model_parallel_size = 1
-        config.sliding_window = None
         # Required for need_recompute_in_block
         config.num_empty_layers_add_in_head = 0
         config.num_hidden_layers = 2
@@ -275,7 +273,6 @@ class TestSelfAttentionGatedAttention(unittest.TestCase):
         config.init_method = MagicMock()
         config.output_layer_init_method = MagicMock()
         config.tensor_model_parallel_size = 1
-        config.sliding_window = None
 
         spec = SelfAttentionSublayersSpec(
             qkv_proj=MagicMock(),

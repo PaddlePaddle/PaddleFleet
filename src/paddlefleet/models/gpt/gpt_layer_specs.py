@@ -151,10 +151,7 @@ def get_attention_spec(
     if attention_layer_type == "self_attention":
         return LayerSpec(
             layer=SelfAttention,
-            extra_kwargs={
-                "attn_mask_type": attn_mask_type,
-                "is_mtp_layer": is_mtp_layer,
-            },
+            extra_kwargs={"attn_mask_type": attn_mask_type},
             sublayers_spec=SelfAttentionSublayersSpec(
                 qkv_proj=backend.column_parallel_linear(),
                 core_attention=backend.core_attention(),
@@ -230,7 +227,6 @@ def get_attention_spec(
             layer=attn_cls,
             extra_kwargs={
                 "attn_mask_type": attn_mask_type,
-                "is_mtp_layer": is_mtp_layer,
             },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
@@ -404,14 +400,12 @@ def get_gpt_layer_local_spec(
             config=config,
             attention_layer_type="multi_latent_attention",
             attn_mask_type=AttnMaskType.causal,
-            is_mtp_layer=is_mtp_layer,
         )
     else:
         self_attn_spec = get_attention_spec(
             config=config,
             attention_layer_type=attention_layer_type,
             attn_mask_type=attn_mask_type,
-            is_mtp_layer=is_mtp_layer,
         )
 
     # mHC: build HC LayerSpec for sublayers_spec
@@ -623,7 +617,6 @@ def get_gpt_spec(
     ] = "learned_absolute",
     rotary_percent: float = 1.0,
     rotary_base: int = 10000,
-    swa_rotary_base: int = 10000,
     rope_scaling: bool = False,
     parallel_output: bool = False,
     tie_word_embeddings: bool = False,
@@ -646,7 +639,6 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
-            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
         }
         embedding_extra_kwargs = {
@@ -658,7 +650,6 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
-            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
         }
         embedding_extra_kwargs = {
@@ -672,7 +663,6 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
-            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
             "mrope_section": config.mrope_section,
         }

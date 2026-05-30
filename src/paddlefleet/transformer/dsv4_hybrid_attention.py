@@ -161,8 +161,6 @@ class DSv4HybridAttention(Attention):
             softmax_scale=getattr(config, "softmax_scale", None),
             k_channels=self.q_head_dim,
             v_channels=self.v_head_dim,
-            num_attention_heads=self.num_attention_heads,
-            num_key_value_heads=1,
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
             compress_ratio=compress_ratio,

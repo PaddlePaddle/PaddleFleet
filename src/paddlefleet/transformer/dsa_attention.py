@@ -1187,10 +1187,6 @@ class DSAttention(FleetLayer):
         softmax_scale: float,
         k_channels: int | None = None,
         v_channels: int | None = None,
-        is_mtp_layer: bool = False,
-        is_swa: bool = False,
-        num_attention_heads: int | None = None,
-        num_key_value_heads: int | None = None,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
     ):

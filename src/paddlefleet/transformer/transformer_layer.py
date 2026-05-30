@@ -585,9 +585,6 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
             rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
             rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
-            swa_rotary_pos_emb = dict_args.get("swa_rotary_pos_emb", None)
-            swa_rotary_pos_cos = dict_args.get("swa_rotary_pos_cos", None)
-            swa_rotary_pos_sin = dict_args.get("swa_rotary_pos_sin", None)
             position_ids = dict_args.get("position_ids", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
@@ -609,15 +606,6 @@ class TransformerLayer(nn.Layer):
                 else None,
                 rotary_pos_sin=rotary_pos_sin.clone()  # Clone is necessary!
                 if rotary_pos_sin is not None
-                else None,
-                swa_rotary_pos_emb=swa_rotary_pos_emb.clone()  # Clone is necessary!
-                if swa_rotary_pos_emb is not None
-                else None,
-                swa_rotary_pos_cos=swa_rotary_pos_cos.clone()  # Clone is necessary!
-                if swa_rotary_pos_cos is not None
-                else None,
-                swa_rotary_pos_sin=swa_rotary_pos_sin.clone()  # Clone is necessary!
-                if swa_rotary_pos_sin is not None
                 else None,
                 position_ids=position_ids.clone()  # Clone is necessary!
                 if position_ids is not None
@@ -703,9 +691,6 @@ class TransformerLayer(nn.Layer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
-        swa_rotary_pos_emb: Tensor | None = None,
-        swa_rotary_pos_cos: Tensor | None = None,
-        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -765,9 +750,6 @@ class TransformerLayer(nn.Layer):
                         rotary_pos_emb=rotary_pos_emb,
                         rotary_pos_cos=rotary_pos_cos,
                         rotary_pos_sin=rotary_pos_sin,
-                        swa_rotary_pos_emb=swa_rotary_pos_emb,
-                        swa_rotary_pos_cos=swa_rotary_pos_cos,
-                        swa_rotary_pos_sin=swa_rotary_pos_sin,
                         position_ids=position_ids,
                         attention_bias=attention_bias,
                         packed_seq_params=packed_seq_params,
@@ -816,9 +798,6 @@ class TransformerLayer(nn.Layer):
                         rotary_pos_emb=rotary_pos_emb,
                         rotary_pos_cos=rotary_pos_cos,
                         rotary_pos_sin=rotary_pos_sin,
-                        swa_rotary_pos_emb=swa_rotary_pos_emb,
-                        swa_rotary_pos_cos=swa_rotary_pos_cos,
-                        swa_rotary_pos_sin=swa_rotary_pos_sin,
                         position_ids=position_ids,
                         attention_bias=attention_bias,
                         packed_seq_params=packed_seq_params,
@@ -846,9 +825,6 @@ class TransformerLayer(nn.Layer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         rope_freqs_cis: Tensor | None = None,
-        swa_rotary_pos_emb: Tensor | None = None,
-        swa_rotary_pos_cos: Tensor | None = None,
-        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -871,9 +847,6 @@ class TransformerLayer(nn.Layer):
             rotary_pos_cos (Tensor | None): Rotary embedding cosine.
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
             rope_freqs_cis (Tensor | None): Rotary embedding frequency.
-            swa_rotary_pos_emb (Tensor | None): Sliding Window Rotary positional embeddings.
-            swa_rotary_pos_cos (Tensor | None): Sliding Window Rotary embedding cosine.
-            swa_rotary_pos_sin (Tensor | None): Sliding Window Rotary embedding sine.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
 
@@ -921,9 +894,6 @@ class TransformerLayer(nn.Layer):
                 rotary_pos_emb=rotary_pos_emb,
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
-                swa_rotary_pos_emb=swa_rotary_pos_emb,
-                swa_rotary_pos_cos=swa_rotary_pos_cos,
-                swa_rotary_pos_sin=swa_rotary_pos_sin,
                 position_ids=position_ids,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,

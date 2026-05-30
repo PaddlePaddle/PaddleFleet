@@ -154,8 +154,6 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         config.perform_initialization = True
         config.params_dtype = "float32"
         config.init_method = MagicMock()
-        config.add_full_attention_sink_bias = False
-        config.add_swa_attention_sink_bias = False
 
         with self.assertRaises(ValueError):
             DotProductAttention(

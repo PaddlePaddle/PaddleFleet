@@ -13,7 +13,6 @@
 # limitations under the License.
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -65,7 +64,6 @@ class GPTEmbedding(FleetLayer):
         ] = "learned_absolute",
         rotary_percent: float = 1.0,
         rotary_base: int = 10000,
-        swa_rotary_base: int = 10000,
         rope_scaling: bool = False,
         mrope_section: list[int] | None = None,
     ):
@@ -101,7 +99,6 @@ class GPTEmbedding(FleetLayer):
             )
 
         self.rotary_pos_emb = None
-        self.swa_rotary_pos_emb = None
         self.mrope_section = mrope_section
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
@@ -113,22 +110,6 @@ class GPTEmbedding(FleetLayer):
                 rotary_base=rotary_base,
                 rope_scaling=rope_scaling,
             )
-
-            if config.sliding_window is not None:
-                if config.window_attn_skip_freq is None:
-                    warnings.warn(
-                        "sliding_window is set but window_attn_skip_freq is None. "
-                        "is_layer_window_attention() will return True for all layers, "
-                        "meaning all layers will use sliding window attention (SWA)."
-                    )
-                self.swa_rotary_pos_emb = build_spec_layer(
-                    sublayers_spec.rope_embedding,
-                    head_dim=config.swa_head_dim,
-                    rotary_percent=rotary_percent,
-                    rotary_interleaved=config.rotary_interleaved,
-                    rotary_base=swa_rotary_base,
-                    rope_scaling=rope_scaling,
-                )
 
     @property
     def embedding_weight(self):
@@ -407,9 +388,6 @@ class GPTEmbedding(FleetLayer):
         rotary_pos_emb = None
         rotary_pos_cos = None
         rotary_pos_sin = None
-        swa_rotary_pos_emb = None
-        swa_rotary_pos_cos = None
-        swa_rotary_pos_sin = None
 
         # For MTP mode: truncate position_ids to match the actual sequence length
         # MTP reduces sequence length by num_nextn_predict_layers
@@ -463,45 +441,6 @@ class GPTEmbedding(FleetLayer):
                         [1, 0, 2, 3]
                     ).contiguous()
 
-        if (
-            self.position_embedding_type == "rope"
-            and self.swa_rotary_pos_emb is not None
-        ):
-            rope_base = decoder_input if mtp_emb_res is None else mtp_emb_res[0]
-            rotary_seq_len = self.swa_rotary_pos_emb.get_rotary_seq_len(
-                rope_base, self.config, packed_seq_params
-            )
-            swa_rotary_pos_emb = self.swa_rotary_pos_emb(
-                rotary_seq_len,
-                packed_seq=packed_seq_params is not None
-                and packed_seq_params.qkv_format == "thd",
-                position_ids=position_ids,
-            )
-
-        elif (
-            self.position_embedding_type == "mrope"
-            and self.swa_rotary_pos_emb is not None
-        ):
-            swa_rotary_pos_emb = self.swa_rotary_pos_emb(
-                position_ids, self.mrope_section
-            )
-
-        if swa_rotary_pos_emb is not None:
-            if self.config.apply_rope_fusion:
-                swa_rotary_pos_cos = paddle.cos(swa_rotary_pos_emb)
-                swa_rotary_pos_sin = paddle.sin(swa_rotary_pos_emb)
-            if self.config.sequence_parallel:
-                if self.position_embedding_type == "mrope":
-                    # MRoPE: [B, S, head_dim] -> [S, B, head_dim]
-                    swa_rotary_pos_emb = swa_rotary_pos_emb.transpose(
-                        [1, 0, 2]
-                    ).contiguous()
-                else:
-                    # RoPE: [1, S, 1, head_dim] -> [S, 1, 1, head_dim]
-                    swa_rotary_pos_emb = swa_rotary_pos_emb.transpose(
-                        [1, 0, 2, 3]
-                    ).contiguous()
-
         if paddle.core._has_grad():
             decoder_input.stop_gradient = False  # Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
 
@@ -512,9 +451,6 @@ class GPTEmbedding(FleetLayer):
             "rotary_pos_emb": rotary_pos_emb,
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
-            "swa_rotary_pos_emb": swa_rotary_pos_emb,
-            "swa_rotary_pos_cos": swa_rotary_pos_cos,
-            "swa_rotary_pos_sin": swa_rotary_pos_sin,
             "position_ids": position_ids,
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,

@@ -100,7 +100,7 @@ class TestDotProductAttentionConstructor(unittest.TestCase):
             attn_mask_type=AttnMaskType.causal,
             attention_type="self",
         )
-        self.assertEqual(attn.layer_number, 0)
+        self.assertEqual(attn.layer_number, 1)
 
     def test_softmax_scale_default(self):
         config = _make_config()

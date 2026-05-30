@@ -149,15 +149,15 @@ class TestIsLayerWindowAttention(unittest.TestCase):
         self.assertFalse(result)
 
     def test_sliding_window_list_skip_freq_true(self):
-        result = is_layer_window_attention((3, 3), [1, 0, 1], 0)
+        result = is_layer_window_attention((3, 3), [1, 0, 1], 1)
         self.assertTrue(result)
 
     def test_sliding_window_list_skip_freq_false(self):
-        result = is_layer_window_attention((3, 3), [1, 0, 1], 1)
+        result = is_layer_window_attention((3, 3), [1, 0, 1], 2)
         self.assertFalse(result)
 
     def test_sliding_window_list_all_true(self):
-        result = is_layer_window_attention((3, 3), [True, True, True], 2)
+        result = is_layer_window_attention((3, 3), [True, True, True], 3)
         self.assertTrue(result)
 
     def test_sliding_window_list_all_false(self):

@@ -190,38 +190,6 @@ class TransformerConfig(ModelParallelConfig):
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
     first half and second half (LLaMa style). Default to False."""
 
-    attention_value_scale: float | None = None
-    """Scale factor applied to the value tensor before attention computation. If None, no scaling
-    is applied. Used in architectures like MiMo that scale V for training stability."""
-
-    add_full_attention_sink_bias: bool = False
-    """Whether to add a learnable attention sink bias for full (non-SWA) attention layers.
-    When True, softmax_type is promoted to 'learnable' for full attention layers."""
-
-    add_swa_attention_sink_bias: bool = True
-    """Whether to add a learnable attention sink bias for sliding window attention (SWA) layers.
-    When True, softmax_type is promoted to 'learnable' for SWA layers."""
-
-    swa_head_dim: int = 192
-    """Dimension of query/key heads for sliding window attention layers."""
-
-    swa_v_head_dim: int = 128
-    """Dimension of value heads for sliding window attention layers."""
-
-    swa_num_attention_heads: int = 64
-    """Number of attention heads for sliding window attention layers."""
-
-    swa_num_key_value_heads: int = 8
-    """Number of key/value heads (GQA groups) for sliding window attention layers."""
-
-    swa_rope_theta: float = 10000
-    """The base period of the RoPE embeddings for sliding window attention layers."""
-
-    head_wise_swa_ratio: float = 0.0
-    """Ratio of KV heads that use sliding window attention within an SWA layer.
-    0.0 means all heads use SWA; values between 0 and 1 create a mix where
-    the first (1 - ratio) * num_heads are full attention and the rest are SWA."""
-
     multi_latent_attention: bool = False
     """Whether to use multi-latent attention."""
 
@@ -650,7 +618,7 @@ class TransformerConfig(ModelParallelConfig):
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
 
-    v_head_dim: int | None = None
+    v_head_dim: int = 128
     """Dimension of the head in the V projection."""
 
     rope_type: str = "yarn"
@@ -885,9 +853,6 @@ class TransformerConfig(ModelParallelConfig):
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
 
-        if self.v_head_dim is None:
-            self.v_head_dim = self.head_dim
-
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
 
@@ -1078,54 +1043,3 @@ class TransformerConfig(ModelParallelConfig):
                     f"num_experts_per_tok ({self.num_experts_per_tok}) "
                     f"when moe_n_hash_layers > 0."
                 )
-
-        if self.window_attn_skip_freq is not None:
-            if (
-                isinstance(self.window_attn_skip_freq, int)
-                and self.window_attn_skip_freq <= 0
-            ):
-                raise ValueError(
-                    f"window_attn_skip_freq must be a positive integer when "
-                    f"specified as int, but got {self.window_attn_skip_freq}."
-                )
-
-        if (
-            self.num_nextn_predict_layers > 0
-            and self.window_attn_skip_freq is not None
-        ):
-            if not isinstance(self.window_attn_skip_freq, list):
-                raise TypeError(
-                    f"window_attn_skip_freq must be a list of length "
-                    f"num_hidden_layers + num_nextn_predict_layers "
-                    f"({self.num_hidden_layers} + {self.num_nextn_predict_layers} = "
-                    f"{self.num_hidden_layers + self.num_nextn_predict_layers}) "
-                    f"when num_nextn_predict_layers > 0, "
-                    f"but got {type(self.window_attn_skip_freq).__name__} instead."
-                )
-            if (
-                len(self.window_attn_skip_freq)
-                != self.num_hidden_layers + self.num_nextn_predict_layers
-            ):
-                raise ValueError(
-                    f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
-                    f"must equal num_hidden_layers + num_nextn_predict_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
-                )
-
-        if (
-            self.num_nextn_predict_layers == 0
-            and self.window_attn_skip_freq is not None
-        ):
-            if (
-                isinstance(self.window_attn_skip_freq, list)
-                and len(self.window_attn_skip_freq) != self.num_hidden_layers
-            ):
-                raise ValueError(
-                    f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
-                    f"must equal num_hidden_layers ({self.num_hidden_layers})."
-                )
-
-        if not (0.0 <= self.head_wise_swa_ratio <= 1.0):
-            raise ValueError(
-                f"head_wise_swa_ratio must be between 0.0 and 1.0, "
-                f"but got {self.head_wise_swa_ratio}."
-            )
