@@ -60,7 +60,7 @@ class TestDotProductAttentionEagerMode(unittest.TestCase):
         config.window_attn_skip_freq = None
         config.softmax_type = "vanilla"
         config.perform_initialization = True
-        config.params_dtype = "float32"
+        config.params_dtype = "bfloat16"
         config.init_method = MagicMock()
         config._attn_implementation = "eager"
 
@@ -108,7 +108,7 @@ class TestDotProductAttentionQueryKeyLayerScaling(unittest.TestCase):
         config.window_attn_skip_freq = None
         config.softmax_type = "vanilla"
         config.perform_initialization = True
-        config.params_dtype = "float32"
+        config.params_dtype = "bfloat16"
         config.init_method = MagicMock()
 
         attn = DotProductAttention(
@@ -152,7 +152,7 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         config.window_attn_skip_freq = None
         config.softmax_type = "invalid_type"
         config.perform_initialization = True
-        config.params_dtype = "float32"
+        config.params_dtype = "bfloat16"
         config.init_method = MagicMock()
         config.add_full_attention_sink_bias = False
         config.add_swa_attention_sink_bias = False
@@ -189,7 +189,7 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         config.window_attn_skip_freq = None
         config.softmax_type = "off-by-one"
         config.perform_initialization = True
-        config.params_dtype = "float32"
+        config.params_dtype = "bfloat16"
         config.init_method = MagicMock()
 
         attn = DotProductAttention(

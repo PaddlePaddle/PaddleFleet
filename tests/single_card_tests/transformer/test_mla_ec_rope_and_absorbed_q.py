@@ -225,6 +225,7 @@ class TestECRopeBranchFullGPT(unittest.TestCase):
         random.seed(seed)
         np.random.seed(seed)
         paddle.manual_seed(seed)
+        paddle.set_default_dtype("bfloat16")
 
     def test_forward_ec_rope_full_gpt(self):
         """Full GPT forward with gpt_model_use_experimental_version=True."""
@@ -614,6 +615,7 @@ class TestCombinedECRopeAndAbsorbedQFullGPT(unittest.TestCase):
         random.seed(seed)
         np.random.seed(seed)
         paddle.manual_seed(seed)
+        paddle.set_default_dtype("bfloat16")
 
     def test_forward_ec_rope_and_decode_mode_full_gpt(self):
         """Full GPT forward with both EC rope and decode-mode active."""
