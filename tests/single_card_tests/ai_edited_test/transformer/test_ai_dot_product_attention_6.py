@@ -46,6 +46,7 @@ class TestDotProductAttentionEagerMode(unittest.TestCase):
         """Eager mode should reject packed_seq_params."""
         mock_pg.return_value = MagicMock(tp=MagicMock(world_size=1, rank=0))
         config = MagicMock()
+        config.gpt_model_use_experimental_version = False
         config.context_parallel_size = 1
         config.head_dim = 64
         config.num_attention_heads = 8
@@ -94,6 +95,7 @@ class TestDotProductAttentionQueryKeyLayerScaling(unittest.TestCase):
         """apply_query_key_layer_scaling should divide softmax_scale by layer_number."""
         mock_pg.return_value = MagicMock(tp=MagicMock(world_size=1, rank=0))
         config = MagicMock()
+        config.gpt_model_use_experimental_version = False
         config.context_parallel_size = 1
         config.head_dim = 64
         config.num_attention_heads = 8
@@ -138,6 +140,7 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         """Invalid softmax_type should raise ValueError."""
         mock_pg.return_value = MagicMock(tp=MagicMock(world_size=1, rank=0))
         config = MagicMock()
+        config.gpt_model_use_experimental_version = False
         config.context_parallel_size = 1
         config.head_dim = 64
         config.num_attention_heads = 8
@@ -175,6 +178,7 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         """off-by-one softmax_type should create softmax_offset tensor."""
         mock_pg.return_value = MagicMock(tp=MagicMock(world_size=1, rank=0))
         config = MagicMock()
+        config.gpt_model_use_experimental_version = False
         config.context_parallel_size = 1
         config.head_dim = 64
         config.num_attention_heads = 8
