@@ -371,7 +371,7 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
 class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
     @staticmethod
     # bias is an optional argument
-    def forward(ctx, input, weights, fp8_input_store, clamp_value):
+    def forward(ctx, input, weights, fp8_input_store, clamp_value=None):
         input_for_backward = (
             input.to(paddle.float8_e4m3fn) if fp8_input_store else input
         )

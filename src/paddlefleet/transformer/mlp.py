@@ -201,7 +201,11 @@ class MLP(FleetLayer):
                         intermediate_parallel,
                         bias_parallel,
                         per_token_scale.unsqueeze(-1),
-                        self.config.activation_func_fp8_input_store,
+                        getattr(
+                            self.config,
+                            "activation_func_fp8_input_store",
+                            False,
+                        ),
                         self.config.activation_func_clamp_value,
                     )
                 elif (
@@ -212,7 +216,11 @@ class MLP(FleetLayer):
                         intermediate_parallel,
                         bias_parallel,
                         per_token_scale.unsqueeze(-1),
-                        self.config.activation_func_fp8_input_store,
+                        getattr(
+                            self.config,
+                            "activation_func_fp8_input_store",
+                            False,
+                        ),
                         self.config.glu_linear_offset,
                         self.config.activation_func_clamp_value,
                     )
@@ -234,19 +242,15 @@ class MLP(FleetLayer):
                 elif (
                     self.hidden_act == F.silu and self.config.gated_linear_unit
                 ):
-                    """
                     intermediate_parallel = bias_swiglu_impl(
                         intermediate_parallel,
                         bias_parallel,
-                        self.config.activation_func_fp8_input_store,
-                        self.config.cpu_offloading
-                        and self.config.cpu_offloading_activations
-                        and False,
-                    )
-                    """
-                    intermediate_parallel = bias_swiglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
+                        fp8_input_store=getattr(
+                            self.config,
+                            "activation_func_fp8_input_store",
+                            False,
+                        ),
+                        cpu_offload_input=False,
                         clamp_value=self.config.activation_func_clamp_value,
                     )
                 else:
