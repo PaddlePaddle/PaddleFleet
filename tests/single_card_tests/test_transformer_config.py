@@ -189,5 +189,126 @@ class TestMoETokenDispatcherConfig(unittest.TestCase):
         self.assertTrue(config.moe_use_fusion_node)
 
 
+class TestUseMagicWeightInit(unittest.TestCase):
+    """Tests for the use_magic_weight_init functionality in TransformerConfig."""
+
+    def test_use_magic_weight_init_false_default_behavior(self):
+        """When use_magic_weight_init is False (default), normal init methods should be used."""
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=768,
+            use_magic_weight_init=False,
+        )
+        # When False, init_method should be set but not the magic init
+        self.assertIsNotNone(config.init_method)
+        self.assertIsNotNone(config.output_layer_init_method)
+
+    def test_use_magic_weight_init_true_sigma_calculation(self):
+        """When use_magic_weight_init is True, sigma should be sqrt(0.3333 / hidden_size)."""
+        import math
+
+        hidden_size = 768
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=hidden_size,
+            use_magic_weight_init=True,
+        )
+        expected_sigma = math.sqrt(0.3333 / hidden_size)
+        self.assertAlmostEqual(config.init_method_std, expected_sigma, places=6)
+
+    def test_use_magic_weight_init_true_all_methods_same(self):
+        """When use_magic_weight_init is True, all init methods should be the same."""
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=768,
+            use_magic_weight_init=True,
+        )
+        # All init methods should be the same function
+        self.assertIs(config.init_method, config.output_layer_init_method)
+        self.assertIs(config.init_method, config.embedding_init_method)
+
+    def test_use_magic_weight_init_true_different_hidden_sizes(self):
+        """Test sigma calculation with different hidden sizes."""
+        import math
+
+        for hidden_size in [512, 768, 1024, 2048, 4096]:
+            config = TransformerConfig(
+                num_hidden_layers=12,
+                hidden_size=hidden_size,
+                use_magic_weight_init=True,
+            )
+            expected_sigma = math.sqrt(0.3333 / hidden_size)
+            self.assertAlmostEqual(
+                config.init_method_std, expected_sigma, places=6
+            )
+
+    def test_use_magic_weight_init_true_init_method_matches_erniecore(self):
+        """When use_magic_weight_init is True, init method should match erniecore_init_method_normal."""
+        import math
+
+        from paddlefleet.utils import erniecore_init_method_normal
+
+        hidden_size = 768
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=hidden_size,
+            use_magic_weight_init=True,
+        )
+
+        # Create test weight
+        weight = paddle.randn([100, 100])
+
+        # Apply config's init method
+        config.init_method(weight)
+
+        # Calculate expected using erniecore_init_method_normal
+        expected_sigma = math.sqrt(0.3333 / hidden_size)
+        erniecore_init = erniecore_init_method_normal(expected_sigma)
+        expected_weight = paddle.randn([100, 100])
+        erniecore_init(expected_weight)
+
+        # Compare results using same random seed
+        paddle.seed(1234)
+        weight1 = paddle.randn([100, 100])
+        config.init_method(weight1)
+
+        paddle.seed(1234)
+        weight2 = paddle.randn([100, 100])
+        erniecore_init(weight2)
+
+        paddle.testing.assert_close(weight1, weight2, rtol=1e-6, atol=1e-6)
+
+    def test_use_magic_weight_init_false_uses_normal_init(self):
+        """When use_magic_weight_init is False, normal init methods should be used."""
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=768,
+            use_magic_weight_init=False,
+        )
+        # Should have init_method_std set to normal value
+        self.assertIsNotNone(config.init_method_std)
+        # Should be a reasonable value for normal init (not the magic init value)
+        import math
+
+        magic_sigma = math.sqrt(0.3333 / 768)
+        self.assertNotAlmostEqual(config.init_method_std, magic_sigma, places=6)
+
+    def test_use_magic_weight_init_true_with_moe(self):
+        """Test use_magic_weight_init works correctly with MoE models."""
+        import math
+
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=768,
+            n_routed_experts=8,
+            use_magic_weight_init=True,
+        )
+        expected_sigma = math.sqrt(0.3333 / 768)
+        self.assertAlmostEqual(config.init_method_std, expected_sigma, places=6)
+        # All init methods should still be the same
+        self.assertIs(config.init_method, config.output_layer_init_method)
+        self.assertIs(config.init_method, config.embedding_init_method)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,13 +18,18 @@
 from __future__ import annotations
 
 import functools
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
 
 from ..model_parallel_config import ModelParallelConfig
-from ..utils import init_method_normal, scaled_init_method_normal
+from ..utils import (
+    erniecore_init_method_normal,
+    init_method_normal,
+    scaled_init_method_normal,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -757,6 +762,9 @@ class TransformerConfig(ModelParallelConfig):
     routing_map_fusion: bool = False
     """If True, use Triton fused routing map kernel for MoE routing."""
 
+    use_magic_weight_init: bool = False
+    """Use the same parameter initialization method as ernie-core, with aligned distribution and variance."""
+
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
         # DSA field mapping
@@ -867,7 +875,11 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if self.init_method is None:
+        if self.use_magic_weight_init:
+            sigma = math.sqrt(0.3333 / self.hidden_size)
+            self.init_method = erniecore_init_method_normal(sigma)
+            self.init_method_std = sigma
+        elif self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
 
         if (
@@ -924,7 +936,9 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.output_layer_init_method is None:
+        if self.use_magic_weight_init:
+            self.output_layer_init_method = self.init_method
+        elif self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
                 self.init_method_std,
                 self.num_hidden_layers,
@@ -936,7 +950,10 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.embedding_init_method is None:
+        if self.use_magic_weight_init:
+            self.embedding_init_method = self.init_method
+            self.embedding_init_method_std = self.init_method_std
+        elif self.embedding_init_method is None:
             if self.init_method is None or (
                 self.embedding_init_method_std != self.init_method_std
             ):
