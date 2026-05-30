@@ -26,7 +26,7 @@ import paddle.nn.functional as F
 
 from ..model_parallel_config import ModelParallelConfig
 from ..utils import (
-    erniecore_init_method_normal,
+    get_magic_init_method,
     init_method_normal,
     scaled_init_method_normal,
 )
@@ -762,8 +762,8 @@ class TransformerConfig(ModelParallelConfig):
     routing_map_fusion: bool = False
     """If True, use Triton fused routing map kernel for MoE routing."""
 
-    use_magic_weight_init: bool = False
-    """Use the same parameter initialization method as ernie-core, with aligned distribution and variance."""
+    magic_init: bool = False
+    """Use the magic initialization method."""
 
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
@@ -875,9 +875,13 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if self.use_magic_weight_init:
+        if self.magic_init:
+            if self.hidden_size == 0:
+                raise ValueError(
+                    "hidden_size must be non-zero when magic_init is True."
+                )
             sigma = math.sqrt(0.3333 / self.hidden_size)
-            self.init_method = erniecore_init_method_normal(sigma)
+            self.init_method = get_magic_init_method(sigma)
             self.init_method_std = sigma
         elif self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
@@ -936,7 +940,7 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.use_magic_weight_init:
+        if self.magic_init:
             self.output_layer_init_method = self.init_method
         elif self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
@@ -950,7 +954,7 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.use_magic_weight_init:
+        if self.magic_init:
             self.embedding_init_method = self.init_method
             self.embedding_init_method_std = self.init_method_std
         elif self.embedding_init_method is None:

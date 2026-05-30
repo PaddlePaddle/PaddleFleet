@@ -143,16 +143,13 @@ def scaled_init_method_normal(sigma, num_layers, multiplier=2.0):
     return functools.partial(paddle.nn.init.normal_, mean=0.0, std=std)
 
 
-def erniecore_init_method_normal(sigma):
-    """Init method aligned with ernie-core: randn(...).scale(sigma) under fp32 default dtype guard."""
+def get_magic_init_method(sigma):
+    """Magic init method: randn(...).scale(sigma) under fp32 default dtype guard."""
 
     def init_method(weight):
-        dtype = paddle.get_default_dtype()
-        paddle.set_default_dtype("float32")
         weight.set_value(
             paddle.randn(weight.shape, dtype=weight.dtype).scale(sigma)
         )
-        paddle.set_default_dtype(dtype)
 
     return init_method
 
