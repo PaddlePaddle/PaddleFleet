@@ -700,7 +700,7 @@ class TestFP8UtilsClampBF16(unittest.TestCase):
         )
 
     def test_fwd_down_bf16_clamp_calls_clamp_forward(self):
-        """Lines 631-634: fwd_down_bf16 calls fused_swiglu_scale_clamp_forward
+        """fwd_down_bf16 calls fused_swiglu_scale_forward with clamp_value
         when clamp_value is set. Return zero-sized tensor to skip GEMM."""
         node = self._make_node(clamp_value=5.0)
 
@@ -709,7 +709,7 @@ class TestFP8UtilsClampBF16(unittest.TestCase):
             return_value=paddle.empty([0, 64], dtype=paddle.bfloat16)
         )
         with patch(
-            "paddlefleet.transformer.moe.fp8_utils.fused_swiglu_scale_clamp_forward",
+            "paddlefleet.transformer.moe.fp8_utils.fused_swiglu_scale_forward",
             mock_forward,
         ):
             o1 = paddle.randn([4, 128], dtype=paddle.bfloat16)

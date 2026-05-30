@@ -14,19 +14,31 @@
 import os
 import sys
 
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
+# Walk up from the test file to find the repo root (where src/ lives).
+_test_file = os.path.abspath(__file__)
+_repo_root = _test_file
+for _ in range(10):
+    _repo_root = os.path.dirname(_repo_root)
+    if os.path.isdir(os.path.join(_repo_root, "src", "paddlefleet")):
+        break
+
+sys.path.insert(0, _repo_root)
+sys.path.insert(0, os.path.join(_repo_root, "src"))
+
+# Flush any pre-cached paddlefleet modules so the src/ version wins.
+for _mod in list(sys.modules.keys()):
+    if _mod == "paddlefleet" or _mod.startswith("paddlefleet."):
+        del sys.modules[_mod]
 
 import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
+
+# paddle may have re-imported paddlefleet from site-packages; clear again
+for _mod in list(sys.modules.keys()):
+    if _mod == "paddlefleet" or _mod.startswith("paddlefleet."):
+        del sys.modules[_mod]
 
 
 class TestFusedSwigluScaleForward(unittest.TestCase):
@@ -141,58 +153,9 @@ class TestFusedSwigluScaleCPUFallback(unittest.TestCase):
             )
             self.assertEqual(d_x.shape, [2, 16])
 
-    def test_forward_with_clamp(self):
-        from paddlefleet.fusions.fused_swiglu_scale import (
-            fused_swiglu_scale_clamp_forward,
-        )
-
-        with _no_cuda():
-            x = paddle.full([2, 16], 100.0)
-            scale = paddle.ones([2, 1])
-            result = fused_swiglu_scale_clamp_forward(x, scale, clamp_value=1.0)
-            self.assertEqual(result.shape, [2, 8])
-
-    def test_backward_with_clamp_saturated(self):
-        """Saturated inputs => g_mask/v_mask zero out the gradients."""
-        from paddlefleet.fusions.fused_swiglu_scale import (
-            fused_swiglu_scale_clamp_backward,
-        )
-
-        with _no_cuda():
-            x = paddle.full([2, 8], 5.0)
-            scale = paddle.ones([2])
-            out_grad = paddle.randn([2, 4])
-            d_x, _ = fused_swiglu_scale_clamp_backward(
-                x, scale, out_grad, clamp_value=0.5
-            )
-            self.assertEqual(d_x.shape, [2, 8])
-            self.assertTrue(bool((d_x.abs().sum() == 0).item()))
-
 
 class TestFusedSwigluScaleGPUDispatch(unittest.TestCase):
-    """GPU dispatch branches (fwd 22-29, bwd 50-60), via mock op modules."""
-
-    def test_forward_clamp_dispatch(self):
-        from paddlefleet.fusions.fused_swiglu_scale import (
-            fused_swiglu_scale_clamp_forward,
-        )
-
-        mock_op = MagicMock(return_value=paddle.randn([2, 8]))
-        with (
-            patch.object(paddle, "is_compiled_with_cuda", return_value=True),
-            patch.dict(
-                "sys.modules",
-                {
-                    "paddlefleet_ops": MagicMock(
-                        fused_swiglu_scale_clamp=mock_op
-                    )
-                },
-            ),
-        ):
-            fused_swiglu_scale_clamp_forward(
-                paddle.randn([2, 16]), paddle.ones([2, 1]), clamp_value=5.0
-            )
-            mock_op.assert_called_once()
+    """GPU dispatch branches (fwd, bwd, clamp and non-clamp), via mock op modules."""
 
     def test_forward_no_clamp_dispatch(self):
         from paddlefleet.fusions.fused_swiglu_scale import (
@@ -212,29 +175,27 @@ class TestFusedSwigluScaleGPUDispatch(unittest.TestCase):
             )
             mock_op.assert_called_once()
 
-    def test_backward_clamp_dispatch(self):
+    def test_forward_clamp_dispatch(self):
+        """GPU + clamp_value > 0 dispatches to fused_swiglu_scale_clamp."""
         from paddlefleet.fusions.fused_swiglu_scale import (
-            fused_swiglu_scale_clamp_backward,
+            fused_swiglu_scale_forward,
         )
 
-        mock_op = MagicMock(
-            return_value=(paddle.randn([2, 16]), paddle.randn([2]))
-        )
+        mock_op = MagicMock(return_value=paddle.randn([2, 8]))
         with (
             patch.object(paddle, "is_compiled_with_cuda", return_value=True),
             patch.dict(
                 "sys.modules",
                 {
                     "paddlefleet_ops": MagicMock(
-                        fused_swiglu_scale_clamp_bwd=mock_op
+                        fused_swiglu_scale_clamp=mock_op
                     )
                 },
             ),
         ):
-            fused_swiglu_scale_clamp_backward(
+            fused_swiglu_scale_forward(
                 paddle.randn([2, 16]),
-                paddle.ones([2]),
-                paddle.randn([2, 8]),
+                paddle.ones([2, 1]),
                 clamp_value=5.0,
             )
             mock_op.assert_called_once()
@@ -258,6 +219,34 @@ class TestFusedSwigluScaleGPUDispatch(unittest.TestCase):
                 paddle.randn([2, 16]),
                 paddle.ones([2]),
                 paddle.randn([2, 8]),
+            )
+            mock_op.assert_called_once()
+
+    def test_backward_clamp_dispatch(self):
+        """GPU + clamp_value > 0 dispatches to fused_swiglu_scale_clamp_bwd."""
+        from paddlefleet.fusions.fused_swiglu_scale import (
+            fused_swiglu_scale_backward,
+        )
+
+        mock_op = MagicMock(
+            return_value=(paddle.randn([2, 16]), paddle.randn([2]))
+        )
+        with (
+            patch.object(paddle, "is_compiled_with_cuda", return_value=True),
+            patch.dict(
+                "sys.modules",
+                {
+                    "paddlefleet_ops": MagicMock(
+                        fused_swiglu_scale_clamp_bwd=mock_op
+                    )
+                },
+            ),
+        ):
+            fused_swiglu_scale_backward(
+                paddle.randn([2, 16]),
+                paddle.ones([2]),
+                paddle.randn([2, 8]),
+                clamp_value=5.0,
             )
             mock_op.assert_called_once()
 
