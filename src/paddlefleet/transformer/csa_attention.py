@@ -54,6 +54,16 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.enums import AttnMaskType
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
+# CP utilities are imported lazily inside _forward_cp to avoid circular imports
+# at module load time. The public symbols are re-exported here for convenience.
+from paddlefleet.transformer.cp_utils import (
+    all_gather_cp,
+    build_causal_mask_cp,
+    get_compress_topk_idxs_cp,
+    get_window_topk_idxs_cp,
+    map_compressed_topk_to_kv_full_cp,
+)
+
 # ---------------------------------------------------------------------------
 # Helper functions for index computation
 # ---------------------------------------------------------------------------
@@ -370,6 +380,7 @@ def _apply_rope(
     rotary_seq_len: int,
     ratio: int = 1,
     doc_lens_cutoff: Tensor | None = None,
+    position_offset: int = 0,
 ) -> Tensor:
     """Apply RoPE to the last pos_dim dims, leaving first nope_dim unchanged.
 
@@ -385,6 +396,7 @@ def _apply_rope(
         rotary_seq_len: sequence length for this tensor
         ratio: compression ratio for position subsampling
         doc_lens_cutoff: per-doc cutoff lengths for compressed RoPE (ratio > 1)
+        position_offset: global position offset for CP (cp_rank * sq_local)
     """
     if doc_lens_cutoff is not None:
         assert ratio > 1, (
@@ -395,7 +407,11 @@ def _apply_rope(
         max_cutoff_doc_len = max_compressed_doc_len * ratio
         result = rotary_pos_emb_module(max_cutoff_doc_len, packed_seq=False)
     else:
-        total_seq_len = rotary_seq_len * ratio if ratio > 1 else rotary_seq_len
+        total_seq_len = (
+            (rotary_seq_len + position_offset) * ratio
+            if ratio > 1
+            else (rotary_seq_len + position_offset)
+        )
         result = rotary_pos_emb_module(total_seq_len, packed_seq=False)
     if isinstance(result, tuple):
         freqs, mscale = result
@@ -429,7 +445,9 @@ def _apply_rope(
             )
         freqs = freqs[:, :rotary_seq_len, :, :]
     elif ratio > 1:
-        freqs = freqs[:, :total_seq_len:ratio, :][:, :rotary_seq_len, :]
+        freqs = freqs[:, position_offset * ratio :total_seq_len: ratio, :][
+            :, :rotary_seq_len, :
+        ]
 
     squeeze_head = x.ndim == 3
     if squeeze_head:
@@ -679,6 +697,7 @@ def _compute_tilelang_csa_indexer_loss_forward(
     softmax_scale: float,
     loss_coeff: float,
     tp_group=None,
+    seq_offset: int = 0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     from paddlefleet.tilelang_ops import (
         csa_attn_target_reducesum,
@@ -692,6 +711,7 @@ def _compute_tilelang_csa_indexer_loss_forward(
         ratio=int(ratio),
         topk_effective=int(topk_effective),
         valid_range=valid_range,
+        seq_offset=int(seq_offset),
     )
 
     if tp_group is not None and getattr(tp_group, "nranks", 1) > 1:
@@ -766,6 +786,7 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
         softmax_scale: float,
         loss_coeff: float,
         tp_group=None,
+        seq_offset: int = 0,
     ) -> Tensor:
         # The TileLang kernel applies its own ``dim**-0.5`` scale on index_q
         # and consumes raw weights, so we pass them through unmodified. The
@@ -785,6 +806,7 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
                 softmax_scale,
                 loss_coeff,
                 tp_group,
+                seq_offset=seq_offset,
             )
         )
 
@@ -1059,6 +1081,8 @@ class Compressor(nn.Layer):
         self,
         x: Tensor,
         startend_row_indices: Tensor | None = None,
+        position_offset: int = 0,
+        cp_group=None,
     ) -> Tensor | None:
         """Compress hidden states into shorter KV sequence.
 
@@ -1066,9 +1090,14 @@ class Compressor(nn.Layer):
             x: [b, sq, hidden_size]
             startend_row_indices: [batch_size, h, seqlen, 1] tensor for
                 varlen document boundaries, or None for simple causal mode.
+            position_offset: global position offset for CP (cp_rank * sq_local).
+                When non-zero, all-gathers projected KV before pooling so that
+                the compressor sees the full global context.
+            cp_group: CP process group. Required when position_offset > 0.
 
         Returns:
             compressed_kv: [b, sq // ratio, head_dim] or None if too short.
+            In CP mode, returns the local rank's slice of the global compressed KV.
         """
         b, sq, _ = x.shape
         ratio = self.compress_ratio
@@ -1079,6 +1108,48 @@ class Compressor(nn.Layer):
         kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
         score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
 
+        # CP: gather projected KV globally before pooling (Miles pattern).
+        # This lets the compressor pool across the full sequence while keeping
+        # communication cheap (projected dim << hidden_size).
+        if cp_group is not None and getattr(cp_group, "nranks", 1) > 1:
+            kv = all_gather_cp(kv, dim=1, group=cp_group)
+            score = all_gather_cp(score, dim=1, group=cp_group)
+            b, sq_global, _ = kv.shape
+            # Pool globally, then slice back to local rank's range
+            cutoff = (sq_global // ratio) * ratio
+            if cutoff < sq_global:
+                kv = kv[:, :cutoff, :]
+                score = score[:, :cutoff, :]
+            n_compressed = cutoff // ratio
+            kv = kv.reshape([b, n_compressed, ratio, -1])
+            score = score.reshape([b, n_compressed, ratio, -1])
+            score = score + self.ape.reshape([1, 1, ratio, -1])
+            if self.overlap:
+                kv = self._overlap_transform(kv, fill_value=0)
+                score = self._overlap_transform(score, fill_value=float("-inf"))
+            kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
+            kv = self.norm(kv.cast(x.dtype))
+            if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
+                kv = _apply_rope(
+                    kv,
+                    self.head_dim - self.qk_pos_emb_head_dim,
+                    self.qk_pos_emb_head_dim,
+                    self.rotary_pos_emb,
+                    self.config,
+                    n_compressed,
+                    ratio=ratio,
+                    position_offset=0,  # global compressed KV starts at 0
+                )
+            if self.rotate:
+                kv = rotate_activation(kv)
+            # Slice back to local rank's compressed range
+            cp_size = cp_group.nranks
+            n_comp_local = n_compressed // cp_size
+            cp_rank = cp_group.rank
+            kv = kv[:, cp_rank * n_comp_local : (cp_rank + 1) * n_comp_local, :]
+            return kv
+
+        # Non-CP path (original logic)
         if startend_row_indices is not None:
             # per-document cutoff, with padding at tail for CP
             doc_lens = get_doc_lens(startend_row_indices)
@@ -1163,6 +1234,7 @@ class Compressor(nn.Layer):
                 n_compressed,
                 ratio=ratio,
                 doc_lens_cutoff=doc_lens_cutoff,
+                position_offset=position_offset,
             )
 
         if self.rotate:
@@ -1258,8 +1330,14 @@ class CSAIndexer(nn.Layer):
         x: Tensor,  # [b, sq, hidden_size]
         qr: Tensor,  # [b, sq, q_lora_rank]
         startend_row_indices: Tensor | None = None,
+        position_offset: int = 0,
+        cp_group=None,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Compute Q, compressed K, and weights before top-k selection."""
+        """Compute Q, compressed K, and weights before top-k selection.
+
+        In CP mode, position_offset and cp_group are forwarded to the internal
+        compressor so that indexer K is computed over the full global sequence.
+        """
         b, sq, _ = x.shape
 
         # Q path
@@ -1274,12 +1352,13 @@ class CSAIndexer(nn.Layer):
                 self.config,
                 sq,
                 ratio=1,
+                position_offset=position_offset,
             )
         q = rotate_activation(q)
 
         # K path: own compressor (already applies RoPE and rotation internally)
         k = self.compressor(
-            x, startend_row_indices
+            x, startend_row_indices=startend_row_indices, position_offset=position_offset, cp_group=cp_group,
         )  # [b, n_compressed, index_head_dim]
 
         # Weights
@@ -1373,6 +1452,19 @@ class CompressedSparseAttention(FleetLayer):
         self.v_head_dim = config.v_head_dim
         self.n_local_heads = config.num_attention_heads
         self.softmax_scale = config.v_head_dim**-0.5
+
+        # CP state: derived from pg_collection.cp; cp_size=1 means CP disabled
+        cp_pg = pg_collection.cp if pg_collection is not None else None
+        if cp_pg is not None and getattr(cp_pg, "nranks", 1) > 1:
+            self.cp_group = cp_pg
+            self.cp_size = cp_pg.nranks
+            self.cp_rank = cp_pg.rank
+            self.cp_enabled = True
+        else:
+            self.cp_group = None
+            self.cp_size = 1
+            self.cp_rank = 0
+            self.cp_enabled = False
 
         # Learnable attention sink per head
         self.attn_sink = self.create_parameter(
@@ -1631,6 +1723,9 @@ class CompressedSparseAttention(FleetLayer):
         Returns:
             output: [b, sq, np * v_head_dim]
         """
+        if self.cp_enabled:
+            return self._forward_cp(query, key, x, qr)
+
         b, sq, np_heads, hn = query.shape
 
         # Step 1: Prepare single-head KV
@@ -1711,6 +1806,282 @@ class CompressedSparseAttention(FleetLayer):
             output = TileLangCSAIndexerLossAutoScaler.apply(
                 output,
                 *tilelang_indexer_loss_state,
+            )
+        elif indexer_loss is not None and self.training:
+            output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
+
+        return output
+
+    def _forward_cp(
+        self,
+        query: Tensor,
+        key: Tensor,
+        x: Tensor,
+        qr: Tensor,
+    ) -> Tensor:
+        """CP-aware forward: local compress + all-gather, sparse attention.
+
+        Mirrors the non-CP forward() structure exactly, with CP adaptations:
+          1. All-gather KV + compress (Miles pattern: gather projected, pool globally)
+          2. Indexer topk + fused loss (same three-branch logic as non-CP)
+          3. Sparse attention (same compressed_sparse_attn dispatch)
+          4. Attach loss (TileLangCSAIndexerLossAutoScaler or DSAIndexerLossAutoScaler)
+
+        Gradient correctness:
+          - all_gather_cp backward (reduce-scatter) routes attention/loss grads
+          - indexer_loss / cp_size corrects local-mean to global-mean scaling
+          - param grads are partial (each rank sees local Q); production ZeRO
+            reduce_scatter(SUM) + optimizer x cp_size aggregates them correctly
+        """
+        b, sq, np_heads, hn = query.shape
+        sq_global = sq * self.cp_size
+        position_offset = self.cp_rank * sq
+        q_positions = paddle.arange(
+            position_offset, position_offset + sq, dtype="int64"
+        )
+
+        # Step 1: Window topk (CP-aware: uses global q_positions)
+        window_idxs = get_window_topk_idxs_cp(
+            q_positions, self.window_size, b, sq_global
+        )
+
+        # Step 2: All-gather KV + compress
+        kv_local = key.squeeze(2)  # [b, sq, hn]
+        kv_global = all_gather_cp(kv_local, dim=1, group=self.cp_group)
+
+        compressed_kv_global = None
+        n_compressed_local = 0
+        if (
+            self.compressor is not None
+            and self.compress_ratio > 1
+            and sq >= self.compress_ratio
+        ):
+            assert sq % self.compress_ratio == 0, (
+                f"CP requires sq_local ({sq}) divisible by compress_ratio ({self.compress_ratio})"
+            )
+            n_compressed_local = sq // self.compress_ratio
+        n_compressed_global = n_compressed_local * self.cp_size
+        offset = sq_global  # compressed indices follow vanilla KV in kv_full
+
+        if (
+            self.compressor is not None
+            and self.compress_ratio > 1
+            and n_compressed_local > 0
+        ):
+            # Miles pattern: project locally, gather projected, pool globally, slice back
+            compressed_kv_local = self.compressor(
+                x, position_offset=position_offset, cp_group=self.cp_group
+            )
+            compressed_kv_global = all_gather_cp(
+                compressed_kv_local, dim=1, group=self.cp_group
+            )
+            kv_full = paddle.concat([kv_global, compressed_kv_global], axis=1)
+        else:
+            kv_full = kv_global
+
+        # Step 3: Compressed topk + optional fused indexer loss
+        indexer_loss = None
+        tilelang_indexer_loss_state = None
+
+        if self.compress_ratio > 1 and n_compressed_global > 0:
+            if self.indexer is not None:
+                x_det = x.detach()
+                qr_det = qr.detach()
+                if self.training:
+                    x_det.stop_gradient = False
+                    qr_det.stop_gradient = False
+
+                use_tilelang_indexer = _resolve_csa_tilelang_switch(
+                    self.config, "csa_tilelang_enable_indexer"
+                )
+                use_tilelang_loss_path = (
+                    use_tilelang_indexer
+                    and self.training
+                    and paddle.is_grad_enabled()
+                )
+                loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
+                    self.config, self.indexer.index_topk, n_compressed_global
+                )
+                attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
+                    self.indexer.index_topk, n_compressed_global
+                )
+
+                q_indexer_bf, k_indexer_local, weights_indexer_bf = (
+                    self.indexer.forward_before_topk(
+                        x_det,
+                        qr_det,
+                        position_offset=position_offset,
+                        cp_group=self.cp_group,
+                    )
+                )
+                # Gather indexer K globally (local K is already the local slice
+                # from the compressor's CP path)
+                k_indexer_global = all_gather_cp(
+                    k_indexer_local, dim=1, group=self.cp_group
+                )
+
+                indexer_loss_coeff = getattr(
+                    self.config, "dsa_indexer_loss_coeff", 0.0
+                )
+
+                if use_tilelang_loss_path:
+                    # Fused TileLang: single PyLayer produces topk + loss.
+                    # key_comp_mla is 3D [b, n_comp_global, hn] (shared across heads).
+                    key_comp_mla = compressed_kv_global.detach()
+                    (
+                        indexer_loss,
+                        topk_indices_compressed,
+                        topk_probs,
+                        target,
+                    ) = _compute_tilelang_csa_indexer_loss_forward(
+                        q_indexer_bf,
+                        weights_indexer_bf,
+                        k_indexer_global,
+                        query.detach(),
+                        key_comp_mla,
+                        int(self.compress_ratio),
+                        int(loss_topk_effective),
+                        float(self.softmax_scale),
+                        float(indexer_loss_coeff),
+                        self.tp_group,
+                        seq_offset=position_offset,
+                    )
+                    tilelang_indexer_loss_state = (
+                        q_indexer_bf,
+                        weights_indexer_bf,
+                        k_indexer_global,
+                        topk_indices_compressed,
+                        topk_probs,
+                        target,
+                        float(indexer_loss_coeff),
+                    )
+                    if indexer_loss_coeff > 0:
+                        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                            loss=indexer_loss,
+                            layer_number=self.layer_number,
+                            num_layers=self.config.num_hidden_layers,
+                        )
+                    # Scale: each rank's loss is mean over sq_local;
+                    # global loss is mean over sq_global = sq_local * cp_size.
+                    indexer_loss = indexer_loss / self.cp_size
+
+                elif self.training and not use_tilelang_indexer:
+                    # Paddle reference loss path
+                    key_for_loss = (
+                        compressed_kv_global.detach()
+                        .transpose([1, 0, 2])
+                        .unsqueeze(2)
+                        .expand([-1, -1, np_heads, -1])
+                    )
+                    causal_mask = build_causal_mask_cp(
+                        q_positions, n_compressed_global, self.compress_ratio, b
+                    )
+                    q_sf = q_indexer_bf.transpose([1, 0, 2, 3])
+                    k_sf = (
+                        k_indexer_global.transpose([1, 0, 2])
+                        if k_indexer_global.ndim == 3
+                        else k_indexer_global.transpose([1, 0, 2, 3])
+                    )
+                    weights_sf = (
+                        weights_indexer_bf * self.indexer.softmax_scale
+                    ).transpose([1, 0, 2])
+                    query_sf = query.transpose([1, 0, 2, 3]).detach()
+                    mask_for_loss = causal_mask.unsqueeze(1)
+
+                    indexer_loss = FusedDSAIndexerLoss.apply(
+                        q_sf,
+                        weights_sf,
+                        k_sf,
+                        query_sf,
+                        key_for_loss.detach(),
+                        self.softmax_scale,
+                        min(self.indexer.index_topk, n_compressed_global),
+                        indexer_loss_coeff,
+                        mask_for_loss,
+                        getattr(
+                            self.config, "dsa_indexer_use_sparse_loss", True
+                        ),
+                        self.tp_group,
+                    )
+                    topk_indices_compressed = (
+                        FusedDSAIndexerLoss._last_topk_indices
+                    )
+                    if indexer_loss_coeff > 0:
+                        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                            loss=indexer_loss,
+                            layer_number=self.layer_number,
+                            num_layers=self.config.num_hidden_layers,
+                        )
+                    indexer_loss = indexer_loss / self.cp_size
+
+                elif not use_tilelang_indexer:
+                    # Inference-only Paddle topk (use already-gathered global K)
+                    causal_mask = build_causal_mask_cp(
+                        q_positions, n_compressed_global, self.compress_ratio, b
+                    )
+                    _, topk_indices_compressed = fused_qk_topk_naive(
+                        q_indexer_bf,
+                        k_indexer_global,
+                        weights_indexer_bf,
+                        attn_topk_effective,
+                        causal_mask,
+                    )
+
+                # TileLang fwd-only topk (no loss, or loss already produced above)
+                if use_tilelang_indexer and not use_tilelang_loss_path:
+                    from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
+
+                    with paddle.no_grad():
+                        tl_topk_indices, _ = csa_indexer_topk_fwd(
+                            q_indexer_bf,
+                            k_indexer_global,
+                            weights_indexer_bf,
+                            ratio=self.compress_ratio,
+                            topk_effective=attn_topk_effective,
+                            seq_offset=position_offset,
+                        )
+                    topk_indices_compressed = tl_topk_indices
+
+                if topk_indices_compressed.shape[-1] > attn_topk_effective:
+                    topk_indices_compressed = topk_indices_compressed[
+                        ..., :attn_topk_effective
+                    ].contiguous()
+
+                compress_topk_idxs = map_compressed_topk_to_kv_full_cp(
+                    topk_indices_compressed,
+                    q_positions,
+                    self.compress_ratio,
+                    offset,
+                )
+            else:
+                # HCA path: attend to all compressed positions
+                compress_topk_idxs = get_compress_topk_idxs_cp(
+                    q_positions,
+                    self.compress_ratio,
+                    b,
+                    offset,
+                    n_compressed_global,
+                )
+
+            if compress_topk_idxs.dtype != window_idxs.dtype:
+                compress_topk_idxs = compress_topk_idxs.cast(window_idxs.dtype)
+            topk_idxs = paddle.concat(
+                [window_idxs, compress_topk_idxs], axis=-1
+            )
+        else:
+            topk_idxs = window_idxs
+
+        topk_idxs = topk_idxs.cast("int32")
+
+        # Step 4: Sparse attention (same dispatch as non-CP)
+        output = self.compressed_sparse_attn(
+            query, kv_full, self.attn_sink, topk_idxs, self.softmax_scale
+        )
+
+        # Step 5: Attach indexer loss
+        if tilelang_indexer_loss_state is not None and self.training:
+            output = TileLangCSAIndexerLossAutoScaler.apply(
+                output, *tilelang_indexer_loss_state
             )
         elif indexer_loss is not None and self.training:
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
