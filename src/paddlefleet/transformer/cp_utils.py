@@ -85,7 +85,7 @@ def _cp_reduce_scatter(grad_full: Tensor, dim: int, group) -> Tensor:
     ]
     dist.stream.alltoall(bufs, list(chunks), group=group, use_calc_stream=True)
 
-    result = paddle.stack(bufs).cast("float32").sum(0).cast(grad_full.dtype)
+    result = paddle.stack(bufs).sum(0).cast(grad_full.dtype)
 
     if dim != 0:
         result = result.transpose(perm)
@@ -199,15 +199,17 @@ def map_compressed_topk_to_kv_full_cp(
         [b, sq_local, topk_eff] int32 indices into kv_full, -1 for invalid.
     """
     n_valid = (
-        ((q_positions + 1) // ratio).unsqueeze(0).unsqueeze(2)
-    )  # [1, sq_local, 1]
-    indices_i64 = topk_indices_compressed.cast("int64")
-    valid = (indices_i64 >= 0) & (indices_i64 < n_valid)
+        ((q_positions + 1) // ratio)
+        .unsqueeze(0)
+        .unsqueeze(2)
+        .cast(topk_indices_compressed.dtype)
+    )  # [1, sq_local, 1], same dtype as input
+    valid = (topk_indices_compressed >= 0) & (topk_indices_compressed < n_valid)
     return paddle.where(
         valid,
         topk_indices_compressed + offset,
         paddle.full_like(topk_indices_compressed, -1),
-    ).cast("int32")
+    )
 
 
 def build_causal_mask_cp(
