@@ -743,16 +743,20 @@ class MoELayer(nn.Layer):
                 )
 
         with profile("combine"):
+            combine_kwargs = {}
+            if (
+                fp8_combine_grad_handle is not None
+                and not self._use_hybrid_ep_fusion()
+            ):
+                combine_kwargs["combine_grad_quant_func"] = (
+                    make_sonic_fp8_combine_grad_payload
+                )
+                combine_kwargs["combine_grad_handle"] = fp8_combine_grad_handle
             hidden_states = self.token_dispatcher._comm_manager.combine(
                 hidden_states,
                 combine_overlap_handle,
                 use_rr_deepep_combine=self.use_rr_deepep_combine,
-                combine_grad_quant_func=(
-                    make_sonic_fp8_combine_grad_payload
-                    if fp8_combine_grad_handle is not None
-                    else None
-                ),
-                combine_grad_handle=fp8_combine_grad_handle,
+                **combine_kwargs,
             )
 
         # Latent MoE: project back from latent space to hidden_size

@@ -2261,14 +2261,11 @@ def _slice_optional_fp8_payload(payload, start, end):
 
 
 def _slice_optional_fp8_handle(handle, start, end):
+    del start, end
     if handle is None:
         return None
-    sliced = dict(handle)
-    if handle.get("data") is not None:
-        sliced["data"] = handle["data"][start:end]
-    if handle.get("scale") is not None:
-        sliced["scale"] = handle["scale"][start:end]
-    return sliced
+    # Chunk-local routing indices cannot safely consume a full combine-grad side channel.
+    return None
 
 
 def _sonic_moe_safe_chunk_rows(T, K, E, block):

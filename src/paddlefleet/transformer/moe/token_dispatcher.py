@@ -850,11 +850,14 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         combine_grad_quant_func=None,
         combine_grad_handle=None,
     ):
+        combine_kwargs = {}
+        if isinstance(self._comm_manager, _DeepEPManager):
+            combine_kwargs["combine_grad_quant_func"] = combine_grad_quant_func
+            combine_kwargs["combine_grad_handle"] = combine_grad_handle
         return self._comm_manager.combine(
             hidden_states,
             async_finish=async_finish,
-            combine_grad_quant_func=combine_grad_quant_func,
-            combine_grad_handle=combine_grad_handle,
+            **combine_kwargs,
         )
 
     def combine_postprocess(self, hidden_states: paddle.Tensor):

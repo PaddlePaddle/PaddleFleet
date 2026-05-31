@@ -485,7 +485,13 @@ class DeepEPCombine(PyLayer):
     ):
         """Forward pass of fused combine."""
         combined_x = fused_combine_forward_func(
-            x, group, states, previous_event, moe_ep_barrier=moe_ep_barrier
+            x,
+            group,
+            states,
+            previous_event,
+            async_finish,
+            allocate_on_comm_stream,
+            moe_ep_barrier=moe_ep_barrier,
         )
 
         ctx.handle = states["handle"]
