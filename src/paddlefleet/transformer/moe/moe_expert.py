@@ -33,7 +33,11 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from .fusion_layer_utils import run_sonic_moe
+from .fusion_layer_utils import (
+    attach_sonic_fp8_weight_payload,
+    make_sonic_fp8_weight_payload,
+    run_sonic_moe,
+)
 from .moe_utils import (
     k_grouped_bf16_gemm_tn_contiguous_aligned,
 )
@@ -423,8 +427,29 @@ class SonicMoEExpert(FleetLayer):
 
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
+        self.fp8_weight_payload = None
 
-    def forward(self, hidden_states, topk_indices, topk_scores, use_fp8=False):
+    def fp8_quant_weight(self):
+        self.fp8_weight_payload = make_sonic_fp8_weight_payload(
+            self.weight1,
+            self.weight2,
+        )
+        attach_sonic_fp8_weight_payload(
+            self.weight1,
+            self.weight2,
+            self.fp8_weight_payload,
+        )
+
+    def forward(
+        self,
+        hidden_states,
+        topk_indices,
+        topk_scores,
+        use_fp8=False,
+        fp8_activation_payload=None,
+        fp8_combine_grad_handle=None,
+        tokens_per_expert=None,
+    ):
         hidden_states = run_sonic_moe(
             hidden_states,
             topk_indices,
@@ -434,6 +459,9 @@ class SonicMoEExpert(FleetLayer):
             self.weight1,
             self.weight2,
             use_fp8,
+            fp8_activation_payload=fp8_activation_payload,
+            fp8_combine_grad_handle=fp8_combine_grad_handle,
+            tokens_per_expert=tokens_per_expert,
         )
         return hidden_states
 

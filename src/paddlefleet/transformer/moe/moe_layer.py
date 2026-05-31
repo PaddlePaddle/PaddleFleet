@@ -45,6 +45,8 @@ from .fused_a2a import configure_buffer
 from .fusion_layer_utils import (
     FusionMoePyLayer,
     HybridEPMoePyLayer,
+    make_sonic_fp8_combine_grad_payload,
+    make_sonic_fp8_dispatch_payload,
 )
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
@@ -173,6 +175,9 @@ class MoELayer(nn.Layer):
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
         self.fp8_dispatch = bool(config.fp8) and not self.using_sonic_moe
+        sonic_fp8_enabled = bool(config.fp8) and self.using_sonic_moe
+        self.sonic_fp8_dispatch_forward = sonic_fp8_enabled
+        self.sonic_fp8_combine_backward = sonic_fp8_enabled
         self.fp8_wgrad = config.fp8_wgrad
         self.moe_expert_fusion = config.moe_expert_fusion
         self.moe_subbatch_token_num_after_dispatch = (
@@ -574,12 +579,18 @@ class MoELayer(nn.Layer):
         hidden_states = self.token_dispatcher.dispatch_preprocess(
             hidden_states, probs, routing_map, topk_weights, topk_indices
         )
+        prequant_dispatch_payload = None
+        if self.sonic_fp8_dispatch_forward:
+            prequant_dispatch_payload = make_sonic_fp8_dispatch_payload(
+                hidden_states
+            )
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
                 hidden_states,
                 self.fp8_dispatch,
                 async_finish=async_finish,
                 use_ue8m0=self.use_ue8m0,
+                prequant_dispatch_payload=prequant_dispatch_payload,
             )
         )
         return hidden_states, fp8_dispatched_handle
@@ -677,6 +688,11 @@ class MoELayer(nn.Layer):
         )
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
+        use_sonic_fp8_combine_grad = (
+            self.sonic_fp8_combine_backward and combine_overlap_handle is None
+        )
+        fp8_combine_grad_handle = {} if use_sonic_fp8_combine_grad else None
+
         with profile("fusion_mlp"):
             if self._use_hybrid_ep_fusion():
                 hidden_states = self._run_hybrid_ep_fusion(
@@ -686,11 +702,22 @@ class MoELayer(nn.Layer):
                 )
             elif self.using_sonic_moe:
                 use_fp8 = self.fp8 is not None
+                fp8_activation_payload = None
+                if fp8_dispatched_handle is not None:
+                    fp8_activation_payload = (
+                        fp8_dispatched_handle.get(
+                            "data", dispatched_hidden_states
+                        ),
+                        fp8_dispatched_handle["scale"],
+                    )
                 hidden_states = self.grouped_gemm_experts(
                     dispatched_hidden_states,
                     dispatched_indices,
                     dispatched_probs,
                     use_fp8,
+                    fp8_activation_payload=fp8_activation_payload,
+                    fp8_combine_grad_handle=fp8_combine_grad_handle,
+                    tokens_per_expert=self.token_dispatcher._comm_manager.tokens_per_expert,
                 )
             else:
                 hidden_states = FusionMoePyLayer.apply(
@@ -720,6 +747,12 @@ class MoELayer(nn.Layer):
                 hidden_states,
                 combine_overlap_handle,
                 use_rr_deepep_combine=self.use_rr_deepep_combine,
+                combine_grad_quant_func=(
+                    make_sonic_fp8_combine_grad_payload
+                    if fp8_combine_grad_handle is not None
+                    else None
+                ),
+                combine_grad_handle=fp8_combine_grad_handle,
             )
 
         # Latent MoE: project back from latent space to hidden_size
@@ -1167,6 +1200,10 @@ class MoELayer(nn.Layer):
                     weight_obj.fp8_scale_stacked_transpose = converted_scale
 
         if hasattr(self, "grouped_gemm_experts"):
+            if self.using_sonic_moe:
+                self.grouped_gemm_experts.fp8_quant_weight()
+                return
+
             if batch_mode:
                 expert_w1 = self.grouped_gemm_experts.weight1
                 expert_w2 = self.grouped_gemm_experts.weight2

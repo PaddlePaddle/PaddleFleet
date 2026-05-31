@@ -127,6 +127,7 @@ class _DispatchManager(ABC):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool,
+        prequant_dispatch_payload=None,
     ) -> paddle.Tensor:
         """Dispatch the hidden_states according to the routing_map."""
         pass
@@ -303,8 +304,9 @@ class _HybridEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        prequant_dispatch_payload=None,
     ) -> paddle.Tensor:
-        del async_finish
+        del async_finish, prequant_dispatch_payload
         self.token_indices = token_indices
         self.token_probs = token_weights
         hidden_states, self.dispatched_probs, scale = hybrid_ep_dispatch(
@@ -382,6 +384,7 @@ class _HybridEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        prequant_dispatch_payload=None,
     ) -> paddle.Tensor:
         return self.dispatch_overlap(
             hidden_states,
@@ -389,6 +392,7 @@ class _HybridEPManager(_DispatchManager):
             self.token_probs,
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
+            prequant_dispatch_payload=prequant_dispatch_payload,
         )
 
     def combine(
@@ -510,6 +514,7 @@ class _DeepEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        prequant_dispatch_payload=None,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -520,6 +525,7 @@ class _DeepEPManager(_DispatchManager):
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
             use_ue8m0=use_ue8m0,
+            prequant_dispatch_payload=prequant_dispatch_payload,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -534,6 +540,7 @@ class _DeepEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        prequant_dispatch_payload=None,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -545,6 +552,7 @@ class _DeepEPManager(_DispatchManager):
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
             use_ue8m0=use_ue8m0,
+            prequant_dispatch_payload=prequant_dispatch_payload,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -599,6 +607,8 @@ class _DeepEPManager(_DispatchManager):
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
         use_rr_deepep_combine: bool = False,
+        combine_grad_quant_func=None,
+        combine_grad_handle=None,
     ) -> paddle.Tensor:
         if combine_overlap_handle is not None and use_rr_deepep_combine:
             if self._rr_fusedcombined is None:
@@ -619,6 +629,8 @@ class _DeepEPManager(_DispatchManager):
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
             use_rr_deepep_combine=use_rr_deepep_combine,
+            combine_grad_quant_func=combine_grad_quant_func,
+            combine_grad_handle=combine_grad_handle,
         )
         # Release the handle after combine operation
         self.handle = None
@@ -785,6 +797,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         fp8_dispatch: bool,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        prequant_dispatch_payload=None,
     ):
         return self._comm_manager.dispatch_overlap(
             hidden_states,
@@ -793,6 +806,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             fp8_dispatch,
             async_finish,
             use_ue8m0=use_ue8m0,
+            prequant_dispatch_payload=prequant_dispatch_payload,
         )
 
     def token_dispatch(
@@ -801,9 +815,14 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         fp8_dispatch: bool,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        prequant_dispatch_payload=None,
     ):
         return self._comm_manager.dispatch(
-            hidden_states, fp8_dispatch, async_finish, use_ue8m0=use_ue8m0
+            hidden_states,
+            fp8_dispatch,
+            async_finish,
+            use_ue8m0=use_ue8m0,
+            prequant_dispatch_payload=prequant_dispatch_payload,
         )
 
     def dispatch_postprocess(
@@ -824,9 +843,18 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             hidden_states
         )
 
-    def token_combine(self, hidden_states: paddle.Tensor, async_finish=False):
+    def token_combine(
+        self,
+        hidden_states: paddle.Tensor,
+        async_finish=False,
+        combine_grad_quant_func=None,
+        combine_grad_handle=None,
+    ):
         return self._comm_manager.combine(
-            hidden_states, async_finish=async_finish
+            hidden_states,
+            async_finish=async_finish,
+            combine_grad_quant_func=combine_grad_quant_func,
+            combine_grad_handle=combine_grad_handle,
         )
 
     def combine_postprocess(self, hidden_states: paddle.Tensor):
@@ -1028,6 +1056,8 @@ class AllToAllTokenDispatcher(nn.Layer):
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
+        combine_grad_quant_func=None,
+        combine_grad_handle=None,
     ):
         permutated_local_input_tokens = _AllToAll.apply(
             self.permutated_local_input_tokens_shape,

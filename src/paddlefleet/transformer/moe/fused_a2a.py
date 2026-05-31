@@ -380,9 +380,25 @@ class DeepEPDispatch(PyLayer):
         allocate_on_comm_stream: bool = False,
         moe_ep_barrier: bool = True,
         use_ue8m0: bool = False,
+        prequant_dispatch_fp8=None,
+        prequant_dispatch_scale=None,
     ):
         """Forward pass of fused dispatch."""
-        if fp8_dispatch:
+        dispatch_payload = x
+        if (
+            prequant_dispatch_fp8 is not None
+            or prequant_dispatch_scale is not None
+        ):
+            if prequant_dispatch_fp8 is None or prequant_dispatch_scale is None:
+                raise ValueError(
+                    "prequant dispatch fp8 data and scale must be provided together"
+                )
+            if fp8_dispatch:
+                raise ValueError(
+                    "fp8_dispatch and prequant_dispatch_payload are mutually exclusive"
+                )
+            dispatch_payload = (prequant_dispatch_fp8, prequant_dispatch_scale)
+        elif fp8_dispatch:
             x_fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
                 x,
                 quant_method="1x128",
@@ -392,9 +408,9 @@ class DeepEPDispatch(PyLayer):
                 using_ue8m0_scale=use_ue8m0,
             )
             scale = scale.T.contiguous()
-            x = (x_fp8, scale)
+            dispatch_payload = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
-            x,
+            dispatch_payload,
             token_indices,
             token_probs,
             num_experts,
@@ -412,24 +428,43 @@ class DeepEPDispatch(PyLayer):
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
         ctx.set_grad_in_dtype_consistent(False)
         ctx.moe_ep_barrier = moe_ep_barrier
-        if fp8_dispatch:
+        ctx.has_prequant_dispatch_payload = prequant_dispatch_fp8 is not None
+        if fp8_dispatch or prequant_dispatch_fp8 is not None:
             recv_x, scale = recv_x
+            if prequant_dispatch_fp8 is not None:
+                recv_fp8 = recv_x
+                recv_x = paddle.empty(recv_fp8.shape, dtype=x.dtype)
+                return (
+                    recv_x,
+                    recv_token_probs,
+                    states,
+                    {
+                        "data": recv_fp8,
+                        "scale": scale,
+                    },
+                )
             return recv_x, recv_token_probs, states, {"scale": scale}
         return recv_x, recv_token_probs, states, None
 
     @staticmethod
     def backward(ctx, grad_output, grad_token_probs):
         """Backward pass of fused dispatch."""
-        return fused_dispatch_backward_func(
-            grad_output,
-            grad_token_probs,
-            ctx.group,
-            ctx.handle,
-            None,  # previous_event
-            ctx.async_finish,
-            ctx.allocate_on_comm_stream,
-            moe_ep_barrier=ctx.moe_ep_barrier,
+        grad_x, grad_token_indices, grad_token_probs = (
+            fused_dispatch_backward_func(
+                grad_output,
+                grad_token_probs,
+                ctx.group,
+                ctx.handle,
+                None,  # previous_event
+                ctx.async_finish,
+                ctx.allocate_on_comm_stream,
+                moe_ep_barrier=ctx.moe_ep_barrier,
+            )
         )
+        grads = [grad_x, grad_token_indices, grad_token_probs]
+        if ctx.has_prequant_dispatch_payload:
+            grads.extend([None, None])
+        return tuple(grads)
 
 
 class DeepEPCombine(PyLayer):
@@ -445,6 +480,8 @@ class DeepEPCombine(PyLayer):
         async_finish=False,
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
+        combine_grad_quant_func=None,
+        combine_grad_handle=None,
     ):
         """Forward pass of fused combine."""
         combined_x = fused_combine_forward_func(
@@ -457,14 +494,20 @@ class DeepEPCombine(PyLayer):
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
         ctx.moe_ep_barrier = moe_ep_barrier
+        ctx.combine_grad_quant_func = combine_grad_quant_func
+        ctx.combine_grad_handle = combine_grad_handle
+        ctx.set_grad_in_dtype_consistent(False)
 
         return combined_x
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward pass of fused combine."""
-        return fused_combine_backward_func(
-            grad_output,
+        grad_payload = grad_output
+        if ctx.combine_grad_quant_func is not None:
+            grad_payload = ctx.combine_grad_quant_func(grad_output)
+        grad_x = fused_combine_backward_func(
+            grad_payload,
             ctx.group,
             ctx.handle,
             ctx.previous_event,
@@ -472,6 +515,13 @@ class DeepEPCombine(PyLayer):
             ctx.allocate_on_comm_stream,
             moe_ep_barrier=ctx.moe_ep_barrier,
         )
+        if isinstance(grad_x, tuple):
+            grad_x, grad_scale = grad_x
+            if ctx.combine_grad_handle is not None:
+                ctx.combine_grad_handle["data"] = grad_x
+                ctx.combine_grad_handle["scale"] = grad_scale
+                return paddle.empty(grad_x.shape, dtype=grad_output.dtype)
+        return grad_x
 
 
 class DeepEPCombineAsync(PyLayer):
@@ -641,6 +691,7 @@ if HAVE_DEEP_EP:
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
         use_ue8m0: bool = False,
+        prequant_dispatch_payload=None,
     ):
         """Perform fused dispatch operation if deep_ep is available.
 
@@ -656,8 +707,15 @@ if HAVE_DEEP_EP:
         Returns:
             Result of DeepEPDispatch
         """
+        prequant_fp8 = None
+        prequant_scale = None
+        if prequant_dispatch_payload is not None:
+            prequant_fp8, prequant_scale = prequant_dispatch_payload
+            x_for_dispatch = x
+        else:
+            x_for_dispatch = x if x.is_contiguous() else x.contiguous()
         return DeepEPDispatch.apply(
-            x.contiguous(),
+            x_for_dispatch,
             token_indices,
             token_probs,
             num_experts,
@@ -668,6 +726,8 @@ if HAVE_DEEP_EP:
             allocate_on_comm_stream,
             moe_ep_barrier,
             use_ue8m0,
+            prequant_fp8,
+            prequant_scale,
         )
 
     def fused_combine(
@@ -681,6 +741,8 @@ if HAVE_DEEP_EP:
         async_finish=False,
         moe_ep_barrier: bool = True,
         use_rr_deepep_combine: bool = False,
+        combine_grad_quant_func=None,
+        combine_grad_handle=None,
     ):
         """Perform fused combine operation if deep_ep is available.
 
@@ -710,7 +772,10 @@ if HAVE_DEEP_EP:
                 states,
                 previous_event,
                 async_finish,
-                moe_ep_barrier=moe_ep_barrier,
+                False,
+                moe_ep_barrier,
+                combine_grad_quant_func,
+                combine_grad_handle,
             )
         else:
             if previous_event is not None:

@@ -33,9 +33,7 @@ if paddlefleet_ops.is_sonic_moe_available():
     from paddlefleet_ops.sonicmoe.enums import ActivationType
     from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
         deepep_topk_to_sonic_metadata,
-    )
-    from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
-        _differentiable_router_scores,
+        deepep_topk_to_sonic_metadata_from_topk,
     )
     from paddlefleet_ops.sonicmoe.functional import (
         _DownProjection,
@@ -43,6 +41,10 @@ if paddlefleet_ops.is_sonic_moe_available():
         _UpProjection,
     )
     from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+    from paddlefleet_ops.sonicmoe.quack_utils import (
+        quantize_activation_blockscaled_fast,
+        quantize_native_fp8_weights,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -2175,56 +2177,216 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         return hidden_states_grad, dispatched_probs_grad
 
 
+def make_sonic_fp8_dispatch_payload(hidden_states):
+    if not hidden_states.is_contiguous():
+        hidden_states = hidden_states.contiguous()
+    x_fp8, raw_scales = quantize_activation_blockscaled_fast(
+        hidden_states, scale_dtype=paddle.int32
+    )
+    return x_fp8, raw_scales
+
+
+def make_sonic_fp8_combine_grad_payload(grad_output):
+    if not grad_output.is_contiguous():
+        grad_output = grad_output.contiguous()
+    grad_fp8, raw_scales = quantize_activation_blockscaled_fast(
+        grad_output, scale_dtype=paddle.int32
+    )
+    return grad_fp8, raw_scales
+
+
+def pack_sonic_fp8_dispatch_scales(raw_scales):
+    return raw_scales
+
+
+def make_sonic_fp8_weight_payload(w1, w2):
+    native_payload = quantize_native_fp8_weights(
+        w1.permute([1, 2, 0]),
+        w2.permute([1, 2, 0]),
+        iso32=False,
+    )
+    if native_payload["format"] != "1x32":
+        raise ValueError("Sonic Fleet FP8 weight payload requires 1x32 format")
+    w1_fused_fp8, w1_fused_scales, w1T_varlen_fp8, w1T_varlen_scales = (
+        native_payload["w1"]
+    )
+    w2_varlen_fp8, w2_varlen_scales, w2_dgated_fp8, w2_dgated_scales = (
+        native_payload["w2"]
+    )
+    return {
+        "format": "1x32",
+        "w1_fused": (w1_fused_fp8.mT, w1_fused_scales),
+        "w1T_varlen": (w1T_varlen_fp8, w1T_varlen_scales),
+        "w2_varlen": (w2_varlen_fp8, w2_varlen_scales),
+        "w2_dgated": (w2_dgated_fp8, w2_dgated_scales),
+    }
+
+
+def attach_sonic_fp8_weight_payload(w1, w2, payload):
+    if payload.get("format") != "1x32":
+        raise ValueError("Sonic Fleet FP8 weight payload requires 1x32 format")
+    w1.sonic_fp8_weight_format = payload["format"]
+    w1.sonic_fp8_w1_fused = payload["w1_fused"]
+    w1.sonic_fp8_w1T_varlen = payload["w1T_varlen"]
+    w2.sonic_fp8_weight_format = payload["format"]
+    w2.sonic_fp8_w2_varlen = payload["w2_varlen"]
+    w2.sonic_fp8_w2_dgated = payload["w2_dgated"]
+
+
+def get_sonic_fp8_weight_payload(w1, w2):
+    required = (
+        hasattr(w1, "sonic_fp8_w1_fused")
+        and hasattr(w1, "sonic_fp8_w1T_varlen")
+        and hasattr(w2, "sonic_fp8_w2_varlen")
+        and hasattr(w2, "sonic_fp8_w2_dgated")
+    )
+    if not required:
+        raise RuntimeError(
+            "Sonic FP8 weight payload is missing; call fp8_quant_weight() before FP8 forward"
+        )
+    return {
+        "format": getattr(w1, "sonic_fp8_weight_format", "1x32"),
+        "w1_fused": w1.sonic_fp8_w1_fused,
+        "w1T_varlen": w1.sonic_fp8_w1T_varlen,
+        "w2_varlen": w2.sonic_fp8_w2_varlen,
+        "w2_dgated": w2.sonic_fp8_w2_dgated,
+    }
+
+
+def _slice_optional_fp8_payload(payload, start, end):
+    if payload is None:
+        return None
+    data, scales = payload
+    return data[start:end], scales[start:end]
+
+
+def _slice_optional_fp8_handle(handle, start, end):
+    if handle is None:
+        return None
+    sliced = dict(handle)
+    if handle.get("data") is not None:
+        sliced["data"] = handle["data"][start:end]
+    if handle.get("scale") is not None:
+        sliced["scale"] = handle["scale"][start:end]
+    return sliced
+
+
+def _sonic_moe_safe_chunk_rows(T, K, E, block):
+    int32_max = 2**31 - 1
+    max_by_flat = int32_max // max(int(K), 1)
+    max_by_padded = (int32_max - int(E) * (int(block) - 1)) // max(int(K), 1)
+    safe = max(1, min(max_by_flat, max_by_padded))
+    return min(int(T), safe)
+
+
 def run_sonic_moe(
-    hidden_states, topk_indices, topk_scores, K, E, w1, w2, fp8=False
+    hidden_states,
+    topk_indices,
+    topk_scores,
+    K,
+    E,
+    w1,
+    w2,
+    fp8=False,
+    fp8_activation_payload=None,
+    fp8_combine_grad_handle=None,
+    tokens_per_expert=None,
 ):
     T = hidden_states.shape[0]
+    block = 128 if fp8 else 1
+    chunk_rows = _sonic_moe_safe_chunk_rows(T, K, E, block)
+    if chunk_rows < T:
+        outs = []
+        for start in range(0, T, chunk_rows):
+            end = min(start + chunk_rows, T)
+            outs.append(
+                run_sonic_moe(
+                    hidden_states[start:end],
+                    topk_indices[start:end],
+                    topk_scores[start:end],
+                    K,
+                    E,
+                    w1,
+                    w2,
+                    fp8=fp8,
+                    fp8_activation_payload=_slice_optional_fp8_payload(
+                        fp8_activation_payload, start, end
+                    ),
+                    fp8_combine_grad_handle=_slice_optional_fp8_handle(
+                        fp8_combine_grad_handle, start, end
+                    ),
+                    tokens_per_expert=None,
+                )
+            )
+        return paddle.concat(outs, axis=0)
+
     stream_id = paddle.device.current_stream()
 
-    valid = topk_indices >= 0
-    valid_experts = topk_indices[valid].cast(paddle.int32)
-    tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
-        paddle.int32
-    )
-
-    (
-        expert_frequency_offset,
-        x_gather_idx,
-        s_scatter_idx,
-        s_reverse_scatter_idx,
-        num_activated_expert_per_token_offset,
-        _router_scores,
-        TK_padded,
-        total_pad_rows,
-        _N_recv,
-        _score_src_idx,
-    ) = deepep_topk_to_sonic_metadata(
-        topk_indices.cast(paddle.int32),
-        topk_scores,
-        tokens_per_expert,
-        E,
-        block=128 if fp8 else 1,
-    )
+    if tokens_per_expert is not None:
+        (
+            expert_frequency_offset,
+            x_gather_idx,
+            s_scatter_idx,
+            s_reverse_scatter_idx,
+            num_activated_expert_per_token_offset,
+            _router_scores,
+            TK_padded,
+            total_pad_rows,
+            _N_recv,
+            _score_src_idx,
+            expert_order_scores,
+        ) = deepep_topk_to_sonic_metadata(
+            topk_indices,
+            topk_scores,
+            tokens_per_expert,
+            E,
+            block=128 if fp8 else 1,
+        )
+    else:
+        (
+            expert_frequency_offset,
+            x_gather_idx,
+            s_scatter_idx,
+            s_reverse_scatter_idx,
+            num_activated_expert_per_token_offset,
+            _router_scores,
+            TK_padded,
+            total_pad_rows,
+            _N_recv,
+            _score_src_idx,
+            expert_order_scores,
+        ) = deepep_topk_to_sonic_metadata_from_topk(
+            topk_indices,
+            topk_scores,
+            E,
+            block=128 if fp8 else 1,
+        )
 
     s_scatter_idx.stop_gradient = True
     activation_type = ActivationType("swiglu")
 
     total_expert_freq = TK_padded
-    scores_for_down = _differentiable_router_scores(
-        topk_scores,
-        topk_indices.cast(paddle.int32),
-        num_activated_expert_per_token_offset,
-        TK_padded - total_pad_rows,
-        TK_padded,
-        E,
-        score_src_idx=_score_src_idx,
-    )
+    scores_for_down = topk_scores
+    scores_for_down.stop_gradient = False
+
+    prequant_activation_payload = None
+    if fp8_activation_payload is not None:
+        fp8_data, raw_scales = fp8_activation_payload
+        prequant_activation_payload = (
+            fp8_data,
+            pack_sonic_fp8_dispatch_scales(raw_scales),
+        )
 
     with enable_fp8(fp8):
         _refresh_fp8_config()
+        fp8_weight_payload = (
+            get_sonic_fp8_weight_payload(w1, w2) if fp8 else None
+        )
+        w1_sonic = w1.permute([1, 2, 0])
+        w2_sonic = w2.permute([1, 2, 0])
         y1, z = _UpProjection.apply(
             hidden_states,
-            w1.permute([1, 2, 0]),
+            w1_sonic,
             None,
             expert_frequency_offset,
             total_expert_freq,
@@ -2236,13 +2398,15 @@ def run_sonic_moe(
             num_activated_expert_per_token_offset,
             True,  # is_varlen_k
             activation_type,
-            is_inference_mode_enabled=False,
-            use_low_precision_postact_buffer=False,
+            False,  # is_inference_mode_enabled
+            False,  # use_low_precision_postact_buffer
+            prequant_activation_payload,
+            fp8_weight_payload,
         )
         hidden_states = _DownProjection.apply(
             y1,
             z,
-            w2.permute([1, 2, 0]),
+            w2_sonic,
             None,
             scores_for_down,
             s_scatter_idx,
@@ -2257,6 +2421,11 @@ def run_sonic_moe(
             True,  # is_varlen_k
             activation_type,
             None,
+            fp8_combine_grad_handle,
+            fp8_weight_payload,
+            expert_order_scores,
+            _router_scores,
+            _score_src_idx,
         )
 
     return hidden_states
