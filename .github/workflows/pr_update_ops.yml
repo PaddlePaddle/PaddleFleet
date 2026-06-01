@@ -88,13 +88,6 @@ jobs:
           cd dist
           mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
           python ../../bos/BosClient.py paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
-          cd ../.. && mkdir fleet-310 && cd fleet-310
-          wget -q https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet-310.tar.gz
-          tar -xf paddlefleet-310.tar.gz --strip-components=1
-          git config --global --add safe.directory .
-          cd dist
-          mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
-          python ../../bos/BosClient.py paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
 
   clone:
