@@ -775,6 +775,12 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
   }
   // Launch kernel
 
+  // Skip kernel launch on empty input. CUDA rejects launches with grid.x == 0
+  // or grid.y == 0 (cudaErrorInvalidValue from cudaLaunchKernel)
+  if (rows == 0 || cols == 0) {
+    return {out, scale};
+  }
+
   if (use_ue8m0 && cols % 8 == 0) {
     dispatch_fused_spaq<phi::float8_e4m3fn, true, kHasClamp>(x_data,
                                                              prob_data,
