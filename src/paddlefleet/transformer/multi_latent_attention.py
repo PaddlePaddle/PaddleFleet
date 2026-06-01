@@ -248,6 +248,7 @@ class MultiLatentAttention(Attention):
         attention_type: str,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -256,11 +257,13 @@ class MultiLatentAttention(Attention):
             attention_type=attention_type,
             attn_mask_type=attn_mask_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
+        self.num_attention_heads = self.config.num_attention_heads
 
         self.query_projection_size = (
-            self.config.v_head_dim * self.config.num_attention_heads
+            self.config.v_head_dim * self.num_attention_heads
         )
 
         self.q_head_dim = (
@@ -308,6 +311,8 @@ class MultiLatentAttention(Attention):
             softmax_scale=self.softmax_scale,
             k_channels=self.q_head_dim,
             v_channels=self.config.v_head_dim,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=1,
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
         )
@@ -612,6 +617,7 @@ class MLASelfAttention(MultiLatentAttention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
     ):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -624,6 +630,7 @@ class MLASelfAttention(MultiLatentAttention):
             attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         if self.config.q_lora_rank is None:
