@@ -464,6 +464,7 @@ jobs:
       - name: Build wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          set -e
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
           git submodule update --init --recursive
@@ -473,8 +474,11 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          pip install packaging "setuptools>=66.1.0" wheel
-          pip install "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          /usr/bin/python -m pip install --break-system-packages packaging "setuptools>=66.1.0" wheel
+          /usr/bin/python -m pip install --break-system-packages "nvidia-nvshmem-cu13>=3.3.9,<3.5"
+          # HybridEP links against NVML by soname; install dev stubs for libnvidia-ml.so.1.
+          apt-get update && apt-get install -y --no-install-recommends libnvidia-ml-dev
+          rm -rf /var/lib/apt/lists/*
           uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v --python /usr/bin/python
           '
 
@@ -495,7 +499,7 @@ jobs:
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl
-            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
