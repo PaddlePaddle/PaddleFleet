@@ -48,6 +48,7 @@ from paddlefleet.models.gpt.lm_head import (
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
+from paddlefleet.models.gpt.mtp_embedding_layer import MTPEmbeddingLayer
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
@@ -765,6 +766,14 @@ def get_gpt_spec(
             HyperConnectionExpandLayer,
         )
 
+    # MTP magic send: re-embed input_ids at the last stage
+    mtp_embedding_spec = None
+    if config.enable_mtp_magic_send and config.num_nextn_predict_layers > 0:
+        mtp_embedding_spec = LayerSpec(
+            layer=MTPEmbeddingLayer,
+            extra_kwargs={"config": config},
+        )
+
     return LayerSpec(
         layer=GPTModel,
         extra_kwargs={
@@ -793,6 +802,7 @@ def get_gpt_spec(
             else None,
             tail_empty_layers=tail_empty_layers_spec,
             mtp=mtp_layers_spec,
+            mtp_embedding=mtp_embedding_spec,
             mtp_lm_head=mtp_lm_head_spec,
             mtp_loss=mtp_loss_spec,
             layer_norm=LayerSpec(
