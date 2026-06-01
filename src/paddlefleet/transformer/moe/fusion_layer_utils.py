@@ -2253,29 +2253,6 @@ def get_sonic_fp8_weight_payload(w1, w2):
     }
 
 
-def _slice_optional_fp8_payload(payload, start, end):
-    if payload is None:
-        return None
-    data, scales = payload
-    return data[start:end], scales[start:end]
-
-
-def _slice_optional_fp8_handle(handle, start, end):
-    del start, end
-    if handle is None:
-        return None
-    # Chunk-local routing indices cannot safely consume a full combine-grad side channel.
-    return None
-
-
-def _sonic_moe_safe_chunk_rows(T, K, E, block):
-    int32_max = 2**31 - 1
-    max_by_flat = int32_max // max(int(K), 1)
-    max_by_padded = (int32_max - int(E) * (int(block) - 1)) // max(int(K), 1)
-    safe = max(1, min(max_by_flat, max_by_padded))
-    return min(int(T), safe)
-
-
 def run_sonic_moe(
     hidden_states,
     topk_indices,
@@ -2290,33 +2267,6 @@ def run_sonic_moe(
     tokens_per_expert=None,
 ):
     T = hidden_states.shape[0]
-    block = 128 if fp8 else 1
-    chunk_rows = _sonic_moe_safe_chunk_rows(T, K, E, block)
-    if chunk_rows < T:
-        outs = []
-        for start in range(0, T, chunk_rows):
-            end = min(start + chunk_rows, T)
-            outs.append(
-                run_sonic_moe(
-                    hidden_states[start:end],
-                    topk_indices[start:end],
-                    topk_scores[start:end],
-                    K,
-                    E,
-                    w1,
-                    w2,
-                    fp8=fp8,
-                    fp8_activation_payload=_slice_optional_fp8_payload(
-                        fp8_activation_payload, start, end
-                    ),
-                    fp8_combine_grad_handle=_slice_optional_fp8_handle(
-                        fp8_combine_grad_handle, start, end
-                    ),
-                    tokens_per_expert=None,
-                )
-            )
-        return paddle.concat(outs, axis=0)
-
     stream_id = paddle.device.current_stream()
 
     if tokens_per_expert is not None:

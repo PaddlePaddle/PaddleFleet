@@ -526,7 +526,7 @@ class DeepEPCombine(PyLayer):
             if ctx.combine_grad_handle is not None:
                 ctx.combine_grad_handle["data"] = grad_x
                 ctx.combine_grad_handle["scale"] = grad_scale
-                return paddle.empty(grad_x.shape, dtype=grad_output.dtype)
+            return grad_x
         return grad_x
 
 

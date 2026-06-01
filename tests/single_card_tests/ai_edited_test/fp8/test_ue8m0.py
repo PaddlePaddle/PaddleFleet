@@ -233,7 +233,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
         self.probs = probs
 
         # Each token is assigned 1~topk experts, always include expert 0
-        indices_np = np.full([self.seq_len, self.topk], -1, dtype=np.int64)
+        indices_np = np.zeros([self.seq_len, self.topk], dtype=np.int64)
         tokens_per_expert = [0] * self.n_routed_experts
         for i in range(self.seq_len):
             chosen = np.array([0])
@@ -336,6 +336,9 @@ class TestUe8m0CodePaths(unittest.TestCase):
             "fp8_dispatched_handle": {"scale": self.scale},
         }
         params.update(kwargs)
+
+        self.assertGreaterEqual(int(self.indices.min().item()), 0)
+        self.assertLess(int(self.indices.max().item()), self.n_routed_experts)
 
         hidden_states = FusionMoePyLayer.apply(
             self.hidden_states,
@@ -446,6 +449,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
         obj.moe_use_fusion_node = True
         obj.fp8 = "e4m3"
         obj.use_ue8m0 = True
+        obj.using_sonic_moe = False
         obj.grouped_gemm_experts = self._create_moe_layer(
             moe_deep_gemm=True
         ).grouped_gemm_experts
@@ -698,6 +702,7 @@ class TestUe8m0CodePaths(unittest.TestCase):
         obj.moe_use_fusion_node = True
         obj.fp8 = "e4m3"
         obj.use_ue8m0 = True
+        obj.using_sonic_moe = False
         obj.grouped_gemm_experts = self._create_moe_layer(
             moe_deep_gemm=True
         ).grouped_gemm_experts

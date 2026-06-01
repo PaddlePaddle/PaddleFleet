@@ -174,10 +174,7 @@ class MoELayer(nn.Layer):
         self.use_ue8m0 = config.use_ue8m0
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
-        self.fp8_dispatch = bool(config.fp8) and not self.using_sonic_moe
-        sonic_fp8_enabled = bool(config.fp8) and self.using_sonic_moe
-        self.sonic_fp8_dispatch_forward = sonic_fp8_enabled
-        self.sonic_fp8_combine_backward = sonic_fp8_enabled
+        self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
         self.moe_expert_fusion = config.moe_expert_fusion
         self.moe_subbatch_token_num_after_dispatch = (
@@ -580,14 +577,16 @@ class MoELayer(nn.Layer):
             hidden_states, probs, routing_map, topk_weights, topk_indices
         )
         prequant_dispatch_payload = None
-        if self.sonic_fp8_dispatch_forward:
+        use_fused_fp8_dispatch = self.fp8_dispatch
+        if self.using_sonic_moe and self.fp8_dispatch:
             prequant_dispatch_payload = make_sonic_fp8_dispatch_payload(
                 hidden_states
             )
+            use_fused_fp8_dispatch = False
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
                 hidden_states,
-                self.fp8_dispatch,
+                use_fused_fp8_dispatch,
                 async_finish=async_finish,
                 use_ue8m0=self.use_ue8m0,
                 prequant_dispatch_payload=prequant_dispatch_payload,
@@ -689,7 +688,9 @@ class MoELayer(nn.Layer):
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
 
         use_sonic_fp8_combine_grad = (
-            self.sonic_fp8_combine_backward and combine_overlap_handle is None
+            self.using_sonic_moe
+            and self.fp8_dispatch
+            and combine_overlap_handle is None
         )
         fp8_combine_grad_handle = {} if use_sonic_fp8_combine_grad else None
 
@@ -812,14 +813,22 @@ class MoELayer(nn.Layer):
     def compute_dispatch(self, args, async_finish=False):
         hidden_states, token_indices, token_weights = args
         if self.moe_use_fusion_node:
+            prequant_dispatch_payload = None
+            use_fused_fp8_dispatch = self.fp8_dispatch
+            if self.using_sonic_moe and self.fp8_dispatch:
+                prequant_dispatch_payload = make_sonic_fp8_dispatch_payload(
+                    hidden_states
+                )
+                use_fused_fp8_dispatch = False
             dispatched_hidden_states, fp8_dispatched_handle = (
                 self.token_dispatcher.token_dispatch_overlap(
                     hidden_states,
                     token_indices,
                     token_weights,
-                    self.fp8_dispatch,
+                    use_fused_fp8_dispatch,
                     async_finish=async_finish,
                     use_ue8m0=self.use_ue8m0,
+                    prequant_dispatch_payload=prequant_dispatch_payload,
                 )
             )
             dispatched_probs = (

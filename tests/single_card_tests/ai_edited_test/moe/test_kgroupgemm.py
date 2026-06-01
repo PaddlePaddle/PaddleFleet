@@ -241,7 +241,7 @@ class TestKGroupGemm(unittest.TestCase):
         self.probs = probs
 
         # Each token is assigned 1~topk experts, always include expert 0
-        indices_np = np.full([self.seq_len, self.topk], -1, dtype=np.int32)
+        indices_np = np.zeros([self.seq_len, self.topk], dtype=np.int64)
         tokens_per_expert = [0] * self.n_routed_experts
         for i in range(self.seq_len):
             chosen = np.array([0])
@@ -287,6 +287,9 @@ class TestKGroupGemm(unittest.TestCase):
             "fp8_dispatched_handle": {"scale": self.scale},
         }
         params.update(kwargs)
+
+        self.assertGreaterEqual(int(self.indices.min().item()), 0)
+        self.assertLess(int(self.indices.max().item()), self.n_routed_experts)
 
         hidden_states = FusionMoePyLayer.apply(
             self.hidden_states,
@@ -899,6 +902,7 @@ class TestMoELayerFp8QuantWeightBranches(unittest.TestCase):
         obj.moe_use_fusion_node = True  # pass the guard
         obj.fp8 = "e4m3"  # pass the guard
         obj.use_ue8m0 = False
+        obj.using_sonic_moe = False
         obj.grouped_gemm_experts = self._make_grouped_experts()
 
         # Call the real method as an unbound function on the stub
@@ -948,6 +952,7 @@ class TestMoELayerFp8QuantWeightBranches(unittest.TestCase):
         obj.moe_use_fusion_node = True
         obj.fp8 = "e4m3"
         obj.use_ue8m0 = False
+        obj.using_sonic_moe = False
         obj.grouped_gemm_experts = self._make_grouped_experts()
 
         MoELayer.fp8_quant_weight(obj, batch_mode=True, quant_transpose=False)
