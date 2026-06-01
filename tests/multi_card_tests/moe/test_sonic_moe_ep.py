@@ -271,52 +271,6 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
         )
 
     @staticmethod
-    def _split_to_sonic_interleaved(weight):
-        gate, up = paddle.chunk(weight, 2, axis=-1)
-        gate = gate.transpose([0, 2, 1])
-        up = up.transpose([0, 2, 1])
-        return paddle.stack([gate, up], axis=2).reshape(
-            [weight.shape[0], -1, weight.shape[1]]
-        )
-
-    @staticmethod
-    def _sonic_interleaved_to_split_grad(grad):
-        grad = grad.reshape([grad.shape[0], -1, 2, grad.shape[2]])
-        gate = grad[:, :, 0, :].transpose([0, 2, 1])
-        up = grad[:, :, 1, :].transpose([0, 2, 1])
-        return paddle.concat([gate, up], axis=-1)
-
-    @classmethod
-    def _aligned_grad_for_compare(
-        cls, name, grad, transpose_grouped_gemm=False
-    ):
-        if not transpose_grouped_gemm:
-            return grad
-        if "grouped_gemm_experts.weight1" in name:
-            return cls._sonic_interleaved_to_split_grad(grad)
-        if "grouped_gemm_experts.weight2" in name:
-            return grad.transpose([0, 2, 1])
-        return grad
-
-    @classmethod
-    def _copy_weights(cls, src_layer, dst_layer, transpose_grouped_gemm=False):
-        src_params = dict(src_layer.named_parameters())
-        for name, dst_param in dst_layer.named_parameters():
-            src_param = src_params[name]
-            if (
-                transpose_grouped_gemm
-                and "grouped_gemm_experts.weight1" in name
-            ):
-                dst_param.set_value(cls._split_to_sonic_interleaved(src_param))
-            elif (
-                transpose_grouped_gemm
-                and "grouped_gemm_experts.weight2" in name
-            ):
-                dst_param.set_value(src_param.transpose([0, 2, 1]))
-            else:
-                dst_param.set_value(src_param.clone())
-
-    @staticmethod
     def _expert_slice_for_rank(tensor, ep_rank, ep_size):
         chunk_size = tensor.shape[0] // ep_size
         return tensor[ep_rank * chunk_size : (ep_rank + 1) * chunk_size]
@@ -365,6 +319,31 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             if param.grad is not None:
                 param.grad.zero_()
 
+    def _flush_sonic_expert_layout(self, moe_layer):
+        expert = getattr(moe_layer, "grouped_gemm_experts", None)
+        if not hasattr(expert, "flush_to_grouped_layout"):
+            return
+
+        weight_ptrs = (expert.weight1.data_ptr(), expert.weight2.data_ptr())
+        grad_ptrs = []
+        for param in (expert.weight1, expert.weight2):
+            grad = getattr(param, "main_grad", None)
+            if grad is None:
+                grad = param.grad
+            grad_ptrs.append(None if grad is None else grad.data_ptr())
+
+        expert.flush_to_grouped_layout()
+
+        self.assertEqual(expert.weight1.data_ptr(), weight_ptrs[0])
+        self.assertEqual(expert.weight2.data_ptr(), weight_ptrs[1])
+        for param, grad_ptr in zip((expert.weight1, expert.weight2), grad_ptrs):
+            if grad_ptr is None:
+                continue
+            grad = getattr(param, "main_grad", None)
+            if grad is None:
+                grad = param.grad
+            self.assertEqual(grad.data_ptr(), grad_ptr)
+
     def _run_forward_backward(self, moe_layer, input_data):
         moe_layer = paddle.amp.decorate(
             models=moe_layer,
@@ -381,6 +360,7 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             loss = output.sum()
             # loss = paddle.mean(paddle.square(output.cast("float32")))
         loss.backward()
+        self._flush_sonic_expert_layout(moe_layer)
         return (
             output.detach().clone(),
             loss.item(),
@@ -399,6 +379,7 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
                 loss = paddle.mean(paddle.square(output.cast("float32")))
             loss.backward()
             outputs.append(output.detach().clone())
+        self._flush_sonic_expert_layout(moe_layer)
         return outputs[-1], self._collect_grads(moe_layer)
 
     def _assert_loss_close(self, lhs, rhs, tol, title):
@@ -421,7 +402,6 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
         rhs_grads,
         tol,
         title,
-        transpose_grouped_gemm=False,
     ):
         lhs_names = set(lhs_grads)
         rhs_names = set(rhs_grads)
@@ -436,14 +416,9 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
         )
         self.assertTrue(lhs_names, f"No grad tensors found for {title}")
         for name in sorted(lhs_names):
-            lhs_grad = self._aligned_grad_for_compare(
-                name,
-                lhs_grads[name],
-                transpose_grouped_gemm=transpose_grouped_gemm,
-            )
             grad_tol = tol[name] if isinstance(tol, dict) else tol
             self._assert_tensor_diff_less(
-                lhs_grad,
+                lhs_grads[name],
                 rhs_grads[name],
                 tol=grad_tol,
                 title=f"{title} grad {name}",
@@ -497,7 +472,6 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             grads_base,
             tol=1e-2,
             title="Sonic-MoE BF16 vs Baseline accumulated grad",
-            transpose_grouped_gemm=True,
         )
 
         fp8_tol = 5e-3
