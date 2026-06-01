@@ -204,17 +204,9 @@ jobs:
             echo "No analysis result generated." >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Report to monitor
-        if: always()
-        env:
-          PR_NUMBER: ${{ needs.check-and-collect.outputs.pr_number }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          FAILED_RUN_IDS: ${{ needs.check-and-collect.outputs.failed_run_ids }}
-        run: |
-          python /home/paddle-1/paddle_ci_bot/report_monitor.py "$TASK_ID"
-
       - name: Post or update PR comment
         if: always()
+        id: post_comment
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           REPO: ${{ github.repository }}
@@ -244,12 +236,14 @@ jobs:
               body = "⚠️ 未生成分析结果，请手动查看 Action 日志。"
 
           run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
-          comment = (
+          comment_body = (
               f"{marker}\n"
               f"## PaddleFleet Log Analysis\n\n"
               f"> Run [`#{run_id}`]({run_url}) · Attempt `{run_attempt}`\n\n"
               f"{body}\n\n"
               f"---\n"
+              f"> 🔍 **准确性记录**：请点击评论底部 😊 图标，"
+              f"选择 👍（准确）或 👎（有误），将自动记录到 CI 监控系统\n\n"
               f"<sub>🔄 每次 Re-run 后自动更新</sub>"
           )
 
@@ -281,9 +275,27 @@ jobs:
           )
 
           if existing:
-              res = gh("PATCH", f"{base}/issues/comments/{existing}", {"body": comment})
+              res = gh("PATCH", f"{base}/issues/comments/{existing}", {"body": comment_body})
+              comment_id = existing
               print(f"Updated comment: {res.get('html_url')}")
           else:
-              res = gh("POST", f"{base}/issues/{pr_number}/comments", {"body": comment})
+              res = gh("POST", f"{base}/issues/{pr_number}/comments", {"body": comment_body})
+              comment_id = res.get("id", 0)
               print(f"Created comment: {res.get('html_url')}")
+
+          # ── 写入 GITHUB_OUTPUT，供 report-to-monitor 步骤读取 ──────────
+          gh_output = os.environ.get("GITHUB_OUTPUT", "")
+          if gh_output:
+              with open(gh_output, "a") as f:
+                  f.write(f"comment_id={comment_id}\n")
           PYEOF
+
+      - name: Report to monitor
+        if: always()
+        env:
+          PR_NUMBER: ${{ needs.check-and-collect.outputs.pr_number }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          FAILED_RUN_IDS: ${{ needs.check-and-collect.outputs.failed_run_ids }}
+          BOT_COMMENT_ID: ${{ steps.post_comment.outputs.comment_id }}
+        run: |
+          python /home/paddle-1/paddle_ci_bot/report_monitor.py "$TASK_ID"
