@@ -158,6 +158,9 @@ def _apply_rope(
         freqs, mscale = result
     else:
         freqs, mscale = result, 1.0
+    # DSv4 reference RoPE is norm-preserving. Yarn's concentration scale is not
+    # applied in the Megatron DSv4 CSA path, so keep Paddle CSA identical here.
+    mscale = 1.0
     # freqs: [1, total_seq_len, pos_dim]
     if ratio > 1:
         freqs = freqs[:, :total_seq_len:ratio, :][:, :rotary_seq_len, :]
@@ -225,38 +228,34 @@ def unfused_compressed_sparse_attn(
         dim=2,
         index=safe_indices_exp,
     )
+    with paddle.amp.auto_cast(False):
+        # Compute attention scores: [b, np, sq, topk]
+        q = query.transpose([0, 2, 1, 3]).cast("float32")  # [b, np, sq, hn]
+        kv_g = kv_gathered.cast("float32")
+        scores = (
+            paddle.einsum("bnsh,bskh->bnsk", q, kv_g) * softmax_scale
+        )  # [b, np, sq, topk]
+        # Mask invalid positions (topk_indices < 0) with -inf
+        invalid_mask = (topk_indices < 0).unsqueeze(1)  # [b, 1, sq, topk]
+        scores = scores.masked_fill(invalid_mask, float("-inf"))
 
-    # Compute attention scores: [b, np, sq, topk]
-    q = query.transpose([0, 2, 1, 3])  # [b, np, sq, hn]
-    # scores = einsum("bnsh,bskh->bnsk", q, kv_gathered)
-    scores = (
-        paddle.einsum(
-            "bnsh,bskh->bnsk", q.cast("float32"), kv_gathered.cast("float32")
-        )
-        * softmax_scale
-    )  # [b, np, sq, topk]
+        # Softmax with attention sink
+        # sink: [np] -> [1, np, 1, 1]
+        sink = attn_sink.reshape([1, np_heads, 1, 1])
+        # Compute stable softmax: max over scores and sink
+        scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
+        scores_max = paddle.maximum(scores_max, sink)
 
-    # Mask invalid positions (topk_indices < 0) with -inf
-    invalid_mask = (topk_indices < 0).unsqueeze(1)  # [b, 1, sq, topk]
-    scores = scores.masked_fill(invalid_mask, float("-inf"))
+        exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
+        exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
 
-    # Softmax with attention sink
-    # sink: [np] -> [1, np, 1, 1]
-    sink = attn_sink.reshape([1, np_heads, 1, 1])
-    # Compute stable softmax: max over scores and sink
-    scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
-    scores_max = paddle.maximum(scores_max, sink)
+        sum_exp = (
+            exp_scores.sum(axis=-1, keepdim=True) + exp_sink
+        )  # [b, np, sq, 1]
+        attn_weights = exp_scores / sum_exp  # [b, np, sq, topk]
 
-    exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
-    exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
-
-    sum_exp = exp_scores.sum(axis=-1, keepdim=True) + exp_sink  # [b, np, sq, 1]
-    attn_weights = exp_scores / sum_exp  # [b, np, sq, topk]
-
-    # Weighted sum: [b, np, sq, topk] x [b, sq, topk, hn] -> [b, np, sq, hn]
-    output = paddle.einsum(
-        "bnsk,bskh->bnsh", attn_weights, kv_gathered.cast("float32")
-    )
+        # Weighted sum: [b, np, sq, topk] x [b, sq, topk, hn] -> [b, np, sq, hn]
+        output = paddle.einsum("bnsk,bskh->bnsh", attn_weights, kv_g)
     output = output.cast(query.dtype)
 
     # Reshape: [b, np, sq, hn] -> [b, sq, np * hn]
@@ -740,7 +739,7 @@ class Compressor(nn.Layer):
             sublayers_spec.norm,
             config=config,
             hidden_size=head_dim,
-            eps=getattr(config, "layernorm_epsilon", 1e-5),
+            eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
     def _overlap_transform(
@@ -801,10 +800,9 @@ class Compressor(nn.Layer):
             kv = self._overlap_transform(kv, fill_value=0)
             score = self._overlap_transform(score, fill_value=float("-inf"))
 
-        # Gated pooling: softmax over the pool_dim, weighted sum
-        kv = (kv * F.softmax(score, axis=2)).sum(
-            axis=2
-        )  # [b, n_compressed, head_dim]
+        # Gated pooling: softmax over the pool_dim, weighted sum.
+        weights = F.softmax(score, axis=2).cast(kv.dtype)
+        kv = (kv * weights).sum(axis=2)  # [b, n_compressed, head_dim]
 
         kv = self.norm(kv.cast(x.dtype))
 
