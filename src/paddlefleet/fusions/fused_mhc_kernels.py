@@ -723,10 +723,9 @@ if _CUTILE_AVAILABLE:
     # -- Proj RMS kernels ----------------------------------------------------
 
     @ct.function
-    def _ct_rms_dnorm(a_tile, norm_tile, dr_tile, K):
+    def _ct_rms_dnorm(a_tile, norm_tile, dr_tile, K, eps):
         inv_norm = ct.where(norm_tile > 0, 1.0 / norm_tile, 0.0)
         inv_sqrt_k = 1.0 / ct.sqrt(K)
-        eps = 1e-8
         u = norm_tile * inv_sqrt_k + eps
         coeff = -(1.0 / (u * u)) * inv_sqrt_k
         return dr_tile * coeff * a_tile * inv_norm
@@ -788,6 +787,7 @@ if _CUTILE_AVAILABLE:
         M: int,
         N: int,
         K: int,
+        eps: float,
         TILE_SIZE_M: ConstInt,
         TILE_SIZE_N: ConstInt,
         TILE_SIZE_K: ConstInt,
@@ -821,7 +821,7 @@ if _CUTILE_AVAILABLE:
                 padding_mode=zero_pad,
             )
             accumulator_da = accumulator_da + _ct_rms_dnorm(
-                a_tile, norm_tile, dr_tile, K
+                a_tile, norm_tile, dr_tile, K, eps
             )
             b_tile = ct.load(
                 B,
@@ -867,6 +867,7 @@ if _CUTILE_AVAILABLE:
         M: int,
         N: int,
         K: int,
+        eps: float,
         TILE_N_SIZE: ConstInt,
     ):
         zero_pad = ct.PaddingMode.ZERO
@@ -933,7 +934,7 @@ if _CUTILE_AVAILABLE:
                     padding_mode=zero_pad,
                 )
                 accumulator_da = accumulator_da + _ct_rms_dnorm(
-                    a_tile.astype(ct.float32), norm_tile, dr_tile, K
+                    a_tile.astype(ct.float32), norm_tile, dr_tile, K, eps
                 )
                 b_tile = ct.load(
                     B,
@@ -1037,6 +1038,7 @@ if _CUTILE_AVAILABLE:
                     M,
                     N,
                     K,
+                    eps,
                     TILE_SIZE_M,
                     TILE_SIZE_N,
                     TILE_SIZE_K,
@@ -1059,6 +1061,7 @@ if _CUTILE_AVAILABLE:
                     M,
                     N,
                     K,
+                    eps,
                     TILE_SIZE_N,
                 ),
             )
