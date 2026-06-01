@@ -766,6 +766,10 @@ class TestCustomForwardLatent(unittest.TestCase):
         if use_latent_moe:
             stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)
             stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
+        # _latent_hidden is None by default; without this MagicMock would
+        # auto-create a non-None mock object and custom_forward would
+        # mistakenly consume it as a pre-computed latent projection.
+        stub._latent_hidden = None
         stub.dispatch.return_value = (
             paddle.randn([bs_seq, expert_out_size]),
             None,

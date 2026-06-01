@@ -187,7 +187,7 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
         self.assertEqual(model.gate.layer_number, 11)
 
         model.gate = object()
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(AttributeError):
             MoELayer.set_layer_number(model, 12)
 
 

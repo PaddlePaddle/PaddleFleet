@@ -206,7 +206,7 @@ class TestMoELayerInitExpertParallelParse(unittest.TestCase):
         pg_collection = _make_pg_collection(moe_world_size=4)
 
         sublayers = _make_moe_sublayers()
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             MoELayer(config, sublayers=sublayers, pg_collection=pg_collection)
 
     @patch("paddlefleet.transformer.moe.moe_layer.paddle.version")
@@ -230,7 +230,7 @@ class TestMoELayerInitExpertParallelParse(unittest.TestCase):
         pg_collection = _make_pg_collection(moe_world_size=3)
 
         sublayers = _make_moe_sublayers()
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             MoELayer(config, sublayers=sublayers, pg_collection=pg_collection)
 
 

@@ -413,7 +413,13 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
+    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'.
+
+    - 'allgather': every expert is sharded along ``moe_intermediate_size``
+      into ``EP`` partitions and every rank holds one shard of every expert.
+      Inputs are AllGathered across the EP group before expert compute and
+      partial outputs are ReduceScattered back. Requires ``EP > 1``,
+      ``moe_grouped_gemm=True`` and ``moe_intermediate_size % EP == 0``."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -526,6 +532,12 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""
+
+    moe_allgather_gate_overlap: bool = False
+    """Whether to overlap AllGather of hidden_states with gate computation in the
+    AllGather MoE dispatcher. When True, the AllGather is issued asynchronously on
+    the comm stream before the gate runs on the calc stream. When False, the
+    AllGather runs synchronously inside dispatch_preprocess (no overlap)."""
 
     moe_latent_size: int | None = None
     """The latent dimension size for latent MoE. Positive values enable latent MoE."""

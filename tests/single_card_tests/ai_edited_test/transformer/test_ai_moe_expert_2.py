@@ -93,7 +93,7 @@ class TestGroupedMLPExpertConstruction(unittest.TestCase):
     def test_construction_bias_not_supported(self):
         """Test that use_bias=True raises assertion."""
         config = _make_config(use_bias=True)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             GroupedMLPExpert(
                 num_local_experts=2,
                 config=config,
