@@ -562,7 +562,10 @@ def cp_flashmask_allgatherkv_balance_forward(
         causal (bool): Whether to use causal attention
         is_training (bool): Whether in training mode
     Returns:
-        tuple: (output, log_sum_exp, processed_indices)
+        tuple: (output, log_sum_exp, processed_indices, fa_version)
+            ``fa_version`` is the effective FlashAttention version actually
+            used by the forward kernel and must be passed to the backward
+            counterpart to keep fwd/bwd consistent.
     """
     paddle.base.core.nvprof_nvtx_push(
         "cp_flashmask_allgatherkv_balance_forward"
@@ -593,6 +596,18 @@ def cp_flashmask_allgatherkv_balance_forward(
     fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
         "FLAGS_flash_attn_version"
     ]
+    # Apply deterministic override here so forward and backward use the same
+    # effective fa_version (mirrors backward's previous logic and the
+    # framework flashmask_attention's internal deterministic fallback).
+    deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+        "FLAGS_cudnn_deterministic"
+    ]
+    if "block_mask" in inspect.signature(flashmask_attention).parameters:
+        if deterministic and query.shape[-1] > 128:
+            fa_version = 2
+    elif deterministic:
+        fa_version = 2
+
     if fa_version == 4 and _flash_mask_available:
         output, log_sum_exp = _flash_attn_fwd(
             query,
@@ -615,11 +630,10 @@ def cp_flashmask_allgatherkv_balance_forward(
         )
 
     paddle.base.core.nvprof_nvtx_pop()
-    return output, log_sum_exp, startend_row_indices
+    return output, log_sum_exp, startend_row_indices, fa_version
 
 
 def cp_flashmask_allgatherkv_balance_backward(
-    config,
     query,
     key,
     value,
@@ -629,6 +643,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     output_grad,
     group,
     causal,
+    fa_version: int,
 ):
     """
     Backward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -644,6 +659,9 @@ def cp_flashmask_allgatherkv_balance_backward(
         output_grad (paddle.Tensor): Gradient of output
         group (paddle.distributed.Group): Communication group
         causal (bool): Whether causal attention was used
+        fa_version (int): FlashAttention version that was actually used by the
+            forward kernel. Must be propagated from the forward call to keep
+            fwd/bwd consistent (do not re-derive from external config here).
     Returns:
         tuple: (query_grad, key_grad, value_grad)
     """
@@ -655,12 +673,6 @@ def cp_flashmask_allgatherkv_balance_backward(
     key_gathered = all_gather_balance(key, axis=1, group=group)
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
-    fa_version = config.fa_version
-    if "block_mask" in inspect.signature(flashmask_attention).parameters:
-        if config.deterministic_mode and query.shape[-1] > 128:
-            fa_version = 2
-    elif config.deterministic_mode:
-        fa_version = 2
     if fa_version == 2:
         # Create seed offset tensor (required for gradient computation)
         seed_offset = paddle.zeros(
@@ -951,7 +963,7 @@ class FlashMaskContextParallel(PyLayer):
         )
 
         # Perform forward pass
-        output, log_sum_exp, startend_row_indices = (
+        output, log_sum_exp, startend_row_indices, fa_version = (
             cp_flashmask_allgatherkv_balance_forward(
                 query, key, value, startend_row_indices, group, causal, training
             )
@@ -963,7 +975,7 @@ class FlashMaskContextParallel(PyLayer):
         )
         ctx.group = group
         ctx.causal = causal
-        ctx.config = config
+        ctx.fa_version = fa_version
 
         return output
 
@@ -983,12 +995,11 @@ class FlashMaskContextParallel(PyLayer):
         )
         group = ctx.group
         causal = ctx.causal
-        config = ctx.config
+        fa_version = ctx.fa_version
 
         # Compute gradients
         query_grad, key_grad, value_grad = (
             cp_flashmask_allgatherkv_balance_backward(
-                config,
                 query,
                 key,
                 value,
@@ -998,6 +1009,7 @@ class FlashMaskContextParallel(PyLayer):
                 output_grad,
                 group,
                 causal,
+                fa_version,
             )
         )
 
