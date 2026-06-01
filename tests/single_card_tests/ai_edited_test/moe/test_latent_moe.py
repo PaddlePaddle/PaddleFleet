@@ -766,6 +766,10 @@ class TestCustomForwardLatent(unittest.TestCase):
         if use_latent_moe:
             stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)
             stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
+        # _latent_hidden is None by default; without this MagicMock would
+        # auto-create a non-None mock object and custom_forward would
+        # mistakenly consume it as a pre-computed latent projection.
+        stub._latent_hidden = None
         stub.dispatch.return_value = (
             paddle.randn([bs_seq, expert_out_size]),
             None,
@@ -833,6 +837,25 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         stub.token_dispatcher._comm_manager.combine.return_value = paddle.randn(
             [bs_seq, expert_out_size]
         )
+        stub.token_dispatcher._comm_manager.dispatched_indices = paddle.randint(
+            0, 4, [bs_seq, 2]
+        )
+        stub.token_dispatcher._comm_manager.dispatched_probs = paddle.randn(
+            [bs_seq, 2]
+        )
+        stub.token_dispatcher._comm_manager.tokens_per_expert = (
+            paddle.to_tensor([1, 2, 3, 4], dtype="int64")
+        )
+        stub.token_dispatcher.get_dispatched_routing.return_value = (
+            stub.token_dispatcher._comm_manager.dispatched_indices,
+            stub.token_dispatcher._comm_manager.dispatched_probs,
+            stub.token_dispatcher._comm_manager.tokens_per_expert,
+        )
+        # Bind real _project_to_latent so fusion_moe_forward can call it.
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        stub._latent_hidden = None
+        stub._project_to_latent = MoELayer._project_to_latent.__get__(stub)
         return stub, bs_seq
 
     def test_fusion_moe_forward_applies_fc1_fc2_when_latent(self):

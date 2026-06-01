@@ -138,15 +138,29 @@ class GroupedMLPExpert(FleetLayer):
         config: TransformerConfig,
         moe_deep_gemm,
         pg_collection: ProcessGroupCollection | None = None,
+        intermediate_size_per_partition: int | None = None,
     ):
         super().__init__(config=config)
         self.config: TransformerConfig = config
         self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
-        assert not config.use_bias, (
-            "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
+
+        self.using_sonic_moe = self.config.using_sonic_moe
+        # Intermediate size for the local shard of every expert. When using the
+        # 'allgather' MoE dispatcher every expert is sharded along its
+        # intermediate dim across the EP group, so this can be smaller than
+        # ``config.moe_intermediate_size``.
+        self.intermediate_size_per_partition = (
+            intermediate_size_per_partition
+            if intermediate_size_per_partition is not None
+            else self.config.moe_intermediate_size
         )
+
+        if config.use_bias:
+            raise ValueError(
+                "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
+            )
 
         self.ep_group = pg_collection.ep if pg_collection else None
         self.expert_parallel = (
@@ -176,13 +190,13 @@ class GroupedMLPExpert(FleetLayer):
             )
 
         # No tensor parallel - full sizes
-        fc1_output_size = self.config.moe_intermediate_size
+        fc1_output_size = self.intermediate_size_per_partition
         if config.gated_linear_unit:
             # Project to 4h. If using swiglu double the output width,
             # see https://arxiv.org/pdf/2002.05202.pdf
             fc1_output_size *= 2
 
-        fc2_input_size = self.config.moe_intermediate_size
+        fc2_input_size = self.intermediate_size_per_partition
 
         dtype = "bfloat16"
         w1_shape = [
@@ -261,7 +275,11 @@ class GroupedMLPExpert(FleetLayer):
                     )
         else:
             # No token is allocated for local experts.
-            assert paddle.count_nonzero(tokens_per_expert) == 0
+            if paddle.count_nonzero(tokens_per_expert) != 0:
+                raise RuntimeError(
+                    "Expected all-zero tokens_per_expert when no tokens "
+                    "are allocated for local experts."
+                )
 
             # Make sure params of experts still have gradients even given zero tokens.
             w1 = self.weight1.reshape(self.config.hidden_size, -1)
@@ -287,7 +305,95 @@ class GroupedMLPExpert(FleetLayer):
         self,
         structured_name_prefix: str = "",
     ):
+        # Two distinct EP weight layouts coexist:
+        #
+        # * Standard: every rank owns a disjoint subset of experts at full
+        #   intermediate width. ``weight1`` is ``[E_local, H, 2*I_full]``
+        #   and ``weight2`` is ``[E_local, I_full, H]``. Sharding axis=0
+        #   stitches the per-rank slabs along the expert dim into the
+        #   global tensor.
+        #
+        # * AllGather token dispatcher: every rank owns *every* expert
+        #   with the intermediate dim sharded across EP. ``weight1`` is
+        #   ``[E, H, 2*I_local]`` and ``weight2`` is ``[E, I_local, H]``.
+        #   Sharding must therefore happen along the intermediate dim,
+        #   not the expert dim. ``weight1``'s last dim is the gated
+        #   ``[gate_r(I_local) ; up_r(I_local)]`` concat — naively
+        #   AllGathering it would interleave gate/up chunks per rank
+        #   (``[gate_r0; up_r0; gate_r1; up_r1; ...]``) rather than
+        #   producing the canonical ``[gate_full; up_full]`` order. We
+        #   reshape to expose the gate/up split as its own axis before
+        #   sharding so flex_checkpoint reassembles the global tensor as
+        #   ``[E, H, 2, I_full]``; loaders can reshape that to
+        #   ``[E, H, 2*I_full]`` losslessly.
+        is_intermediate_sharded = (
+            self.intermediate_size_per_partition
+            != self.config.moe_intermediate_size
+        )
+
         state_dict = self.state_dict(structured_name_prefix="")
+
+        if is_intermediate_sharded:
+            if self.ep_group is None:
+                raise ValueError(
+                    "intermediate-sharded layout requires an EP group; "
+                    f"got ep_group=None. Check moe_token_dispatcher_type "
+                    f"({self.config.moe_token_dispatcher_type!r}) and EP "
+                    f"initialisation."
+                )
+            if not self.config.gated_linear_unit:
+                raise ValueError(
+                    "intermediate-sharded layout currently assumes a gated "
+                    "linear unit (weight1 last dim = 2 * intermediate); "
+                    "non-gated MLP support is not implemented."
+                )
+            ep_size = self.ep_group.nranks
+            if (
+                self.intermediate_size_per_partition * ep_size
+                != self.config.moe_intermediate_size
+            ):
+                raise ValueError(
+                    "intermediate-sharded layout inconsistency: "
+                    f"intermediate_size_per_partition="
+                    f"{self.intermediate_size_per_partition} * ep_size="
+                    f"{ep_size} != moe_intermediate_size="
+                    f"{self.config.moe_intermediate_size}"
+                )
+            E = state_dict["weight1"].shape[0]
+            H = state_dict["weight1"].shape[1]
+            I_local = self.intermediate_size_per_partition
+            expected_last = 2 * I_local
+            if state_dict["weight1"].shape[-1] != expected_last:
+                raise ValueError(
+                    f"weight1 last dim {state_dict['weight1'].shape[-1]} "
+                    f"!= 2 * intermediate_size_per_partition "
+                    f"({expected_last}); cannot reshape to [E, H, 2, "
+                    f"I_local]"
+                )
+            w1 = state_dict["weight1"].reshape([E, H, 2, I_local])
+            w1.name = self.weight1.name
+            w2 = state_dict["weight2"]  # [E, I_local, H]
+            w2.name = self.weight2.name
+
+            sharded_dict = {}
+            full_key1 = f"{structured_name_prefix}weight1"
+            full_key2 = f"{structured_name_prefix}weight2"
+            sharded_dict[full_key1] = shard_weight(
+                key=full_key1,
+                weight=w1,
+                axis=3,  # I_local — intermediate dim per rank
+                group=self.ep_group,
+            )
+            sharded_dict[full_key1].grouped_gemm_param = True
+            sharded_dict[full_key2] = shard_weight(
+                key=full_key2,
+                weight=w2,
+                axis=1,  # I_local — intermediate dim per rank
+                group=self.ep_group,
+            )
+            sharded_dict[full_key2].grouped_gemm_param = True
+            return sharded_dict
+
         model_type = getattr(self.config, "model_type", "none")
         if "qwen3_vl" not in model_type and "qwen3_5" not in model_type:
             w1 = state_dict["weight1"].reshape(-1, self.weight1.shape[-1])
@@ -360,15 +466,18 @@ class SonicMoEExpert(GroupedMLPExpert):
         topk: int,
         config: TransformerConfig,
         pg_collection: ProcessGroupCollection | None = None,
+        intermediate_size_per_partition: int | None = None,
     ):
-        assert config.gated_linear_unit is True, (
-            "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
-        )
+        if config.gated_linear_unit is not True:
+            raise ValueError(
+                "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
+            )
         super().__init__(
             num_local_experts=num_local_experts,
             config=config,
             moe_deep_gemm=False,
             pg_collection=pg_collection,
+            intermediate_size_per_partition=intermediate_size_per_partition,
         )
         self.hidden_size = self.config.hidden_size
         self.K = topk
