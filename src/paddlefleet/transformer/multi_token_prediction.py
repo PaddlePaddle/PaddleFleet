@@ -42,6 +42,7 @@ from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -359,8 +360,15 @@ class MultiTokenPredictionLayer(FleetLayer):
             self.hc_head_fn = self.create_parameter(
                 shape=[hc_dim, n],
                 dtype=self.config.params_dtype,
-                default_initializer=nn.initializer.XavierUniform(),
+                default_initializer=nn.initializer.Constant(0.0),
             )
+            # Use model-parallel RNG tracker for Xavier init so that the
+            # initialization is independent of pipeline layer_index.
+            if paddle.distributed.get_world_size() <= 1:
+                nn.initializer.XavierUniform()(self.hc_head_fn)
+            else:
+                with get_cuda_rng_tracker().fork():
+                    nn.initializer.XavierUniform()(self.hc_head_fn)
             self.hc_head_base = self.create_parameter(
                 shape=[n],
                 dtype=self.config.params_dtype,
@@ -690,6 +698,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         # hidden_states is pure backbone output (not concatenated); mtp_input_embeds provided by MTPEmbeddingLayer
         if self.config.enable_mtp_magic_send:
             hidden_states = dict_args["hidden_states"]
+            mhc_multistream = dict_args.pop("mhc_multistream", None)
             # Save backbone output for downstream GPTMainLMHead (main logits computation)
             dict_args["_backbone_hidden_states"] = hidden_states
             mtp_input_embeds = dict_args.get("mtp_input_embeds", None)
@@ -806,7 +815,11 @@ class MultiTokenPredictionLayer(FleetLayer):
                 dict_args.pop("input_ids", None)
 
             # Set hidden_states and decoder_input, call _proj_and_transformer_layer
-            dict_args["hidden_states"] = hidden_states
+            # mHC: use multi-stream hidden states for MTP computation
+            if self.mhc_enabled and mhc_multistream is not None:
+                dict_args["hidden_states"] = mhc_multistream
+            else:
+                dict_args["hidden_states"] = hidden_states
             dict_args["decoder_input"] = decoder_input
 
             if self.config.recompute_granularity == "full" and self.training:
@@ -818,6 +831,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                 hidden_states = self._proj_and_transformer_layer(
                     **dict_args,
                 )
+
+            # mHC: contract multi-stream output to single-stream for loss computation
+            if self.mhc_enabled and mhc_multistream is not None:
+                hidden_states = self._postprocess(hidden_states)
 
             # Write back result
             dict_args.pop("decoder_input", None)

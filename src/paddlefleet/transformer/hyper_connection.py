@@ -30,6 +30,7 @@ import paddle
 import paddle.nn.functional as F
 from paddle import Tensor, nn
 
+from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -276,8 +277,17 @@ class HyperConnectionModule(nn.Layer):
 
     def _init_weights(self) -> None:
         """Initialize weights for stable training."""
-        # Xavier uniform for mapping projection
-        nn.initializer.XavierUniform()(self.mapping_proj.weight)
+        # Xavier uniform for mapping projection.
+        # Use the model-parallel RNG tracker so that the initialization is
+        # controlled by PaddleFleet's RNG state (seeded once at model init)
+        # rather than the per-layer pipeline seed (base_seed + layer_index).
+        # This prevents layer_index shifts (e.g. from MTPEmbeddingLayer insertion
+        # in magic_send mode) from changing the weights.
+        if paddle.distributed.get_world_size() <= 1:
+            nn.initializer.XavierUniform()(self.mapping_proj.weight)
+        else:
+            with get_cuda_rng_tracker().fork():
+                nn.initializer.XavierUniform()(self.mapping_proj.weight)
 
         # Set sequence_parallel attribute on parameters for gradient synchronization
         if self.config.sequence_parallel:
@@ -677,6 +687,7 @@ class HyperConnectionContractLayer(FleetLayer):
         )
 
         self.num_mtp = getattr(config, "num_nextn_predict_layers", 0) or 0
+        self.magic_send = getattr(config, "enable_mtp_magic_send", False)
 
         # Learned contraction parameters (DSv4 style, always used)
         n = self.n
@@ -709,27 +720,43 @@ class HyperConnectionContractLayer(FleetLayer):
         if self.mtp_enabled and self.num_mtp > 0:
             dict_args["mhc_multistream"] = hidden_states
 
-            # Split into main backbone + MTP chunks
-            chunks = paddle.split(hidden_states, self.num_mtp + 1)
+            if self.magic_send:
+                # magic_send: hidden_states is pure backbone [B, S, n*H]
+                # Magic send: backbone processes only main sequence, no MTP chunks concatenated.
+                # Simply contract the entire tensor.
+                dict_args["hidden_states"] = (
+                    HyperConnectionModule.learned_output_contract(
+                        hidden_states,
+                        self.hc_head_fn,
+                        self.hc_head_base,
+                        self.hc_head_scale,
+                        self.n,
+                        self.config.rms_norm_eps,
+                    )
+                )
+            else:
+                # Non-magic_send: backbone output is [backbone_chunk | mtp_chunks...] concatenated.
+                # Split, contract main backbone, slice MTP chunks.
+                chunks = paddle.split(hidden_states, self.num_mtp + 1)
 
-            # Main backbone: learned contraction [s, b, n*h] -> [s, b, h]
-            main_contracted = HyperConnectionModule.learned_output_contract(
-                chunks[0],
-                self.hc_head_fn,
-                self.hc_head_base,
-                self.hc_head_scale,
-                self.n,
-                self.config.rms_norm_eps,
-            )
+                # Main backbone: learned contraction [s, b, n*h] -> [s, b, h]
+                main_contracted = HyperConnectionModule.learned_output_contract(
+                    chunks[0],
+                    self.hc_head_fn,
+                    self.hc_head_base,
+                    self.hc_head_scale,
+                    self.n,
+                    self.config.rms_norm_eps,
+                )
 
-            # 为了后面MTP slice、取shape的时候兼容,原本也是expand过来的[[s,b,h]...]
-            mtp_contracted = [
-                c[..., : c.shape[-1] // self.n] for c in chunks[1:]
-            ]
+                # 为了后面MTP slice、取shape的时候兼容,原本也是expand过来的[[s,b,h]...]
+                mtp_contracted = [
+                    c[..., : c.shape[-1] // self.n] for c in chunks[1:]
+                ]
 
-            dict_args["hidden_states"] = paddle.concat(
-                [main_contracted, *mtp_contracted]
-            )
+                dict_args["hidden_states"] = paddle.concat(
+                    [main_contracted, *mtp_contracted]
+                )
 
         else:
             # Learned output contraction: [s, b, n*h] -> [s, b, h]
