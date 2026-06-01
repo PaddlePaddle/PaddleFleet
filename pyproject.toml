@@ -76,6 +76,7 @@ test = [
     "pytest",
     "pyyaml",
     "parameterized",
+    "tilelang-paddle",
 ]
 build = [
     "pip",
