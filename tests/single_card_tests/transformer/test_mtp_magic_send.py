@@ -124,6 +124,10 @@ def _build_mtp_layer(config, layer_number=0):
             "paddlefleet.transformer.multi_token_prediction.ProcessGroupCollection.use_mpu_process_groups",
             return_value=mock_pg,
         ),
+        patch(
+            "paddlefleet.transformer.multi_token_prediction.paddle.distributed.get_world_size",
+            return_value=1,
+        ),
     ):
         layer = MultiTokenPredictionLayer(
             config=config,
@@ -729,6 +733,228 @@ class TestTransformerLayerCondition(unittest.TestCase):
         self.assertFalse(
             should_split(_cfg(enable_mtp_magic_send=False), is_mtp=True)
         )
+
+
+class TestHyperConnectionModuleInitWeights(unittest.TestCase):
+    """HyperConnectionModule._init_weights: RNG tracker usage by world_size."""
+
+    def test_init_weights_rng_tracker_dispatch(self):
+        from paddlefleet.transformer.hyper_connection import (
+            HyperConnectionModule,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_residual_streams=4,
+            enable_hyper_connections=True,
+            tensor_model_parallel_size=1,
+            use_fused_mhc=False,
+        )
+        tracker_mock = MagicMock()
+        tracker_mock.fork.return_value = nullcontext()
+
+        # world_size=1: no RNG tracker
+        with (
+            patch(
+                "paddlefleet.transformer.hyper_connection.paddle.distributed.get_world_size",
+                return_value=1,
+            ),
+            patch(
+                "paddlefleet.transformer.hyper_connection.get_cuda_rng_tracker",
+                return_value=tracker_mock,
+            ),
+        ):
+            m1 = HyperConnectionModule(config, layer_number=0)
+        tracker_mock.fork.assert_not_called()
+        self.assertFalse((m1.mapping_proj.weight.numpy() == 0).all())
+
+        # world_size=2: uses RNG tracker
+        tracker_mock.reset_mock()
+        with (
+            patch(
+                "paddlefleet.transformer.hyper_connection.paddle.distributed.get_world_size",
+                return_value=2,
+            ),
+            patch(
+                "paddlefleet.transformer.hyper_connection.get_cuda_rng_tracker",
+                return_value=tracker_mock,
+            ),
+        ):
+            m2 = HyperConnectionModule(config, layer_number=0)
+        tracker_mock.fork.assert_called_once()
+        self.assertFalse((m2.mapping_proj.weight.numpy() == 0).all())
+
+
+class TestHyperConnectionContractLayerMagicSend(unittest.TestCase):
+    """HyperConnectionContractLayer.forward: magic_send branch."""
+
+    def _build(self, magic_send, num_mtp=1):
+        from paddlefleet.transformer.hyper_connection import (
+            HyperConnectionContractLayer,
+        )
+
+        return HyperConnectionContractLayer(
+            TransformerConfig(
+                hidden_size=64,
+                num_residual_streams=4,
+                enable_mtp_magic_send=magic_send,
+                num_nextn_predict_layers=num_mtp,
+                tensor_model_parallel_size=1,
+            )
+        )
+
+    def test_magic_send_contracts_entire_tensor(self):
+        layer = self._build(magic_send=True)
+        B, S, H, n = 2, 8, 64, 4
+        result = layer.forward({"hidden_states": paddle.randn([B, S, H * n])})
+        self.assertEqual(result["hidden_states"].shape, [B, S, H])
+        self.assertEqual(result["mhc_multistream"].shape, [B, S, H * n])
+        self.assertTrue(layer.magic_send)
+
+    def test_non_magic_send_splits_then_contracts(self):
+        layer = self._build(magic_send=False)
+        B, S, H, n = 2, 8, 64, 4
+        result = layer.forward(
+            {"hidden_states": paddle.randn([B * 2, S, H * n])}
+        )
+        self.assertEqual(result["hidden_states"].shape, [B * 2, S, H])
+        self.assertIn("mhc_multistream", result)
+        self.assertFalse(layer.magic_send)
+
+    def test_magic_send_matches_learned_output_contract(self):
+        from paddlefleet.transformer.hyper_connection import (
+            HyperConnectionModule,
+        )
+
+        layer = self._build(magic_send=True)
+        x = paddle.randn([1, 4, 64 * 4])
+        expected = HyperConnectionModule.learned_output_contract(
+            x,
+            layer.hc_head_fn,
+            layer.hc_head_base,
+            layer.hc_head_scale,
+            4,
+            layer.config.rms_norm_eps,
+        )
+        result = layer.forward({"hidden_states": x.clone()})
+        self.assertTrue(
+            paddle.allclose(result["hidden_states"], expected, atol=1e-5).item()
+        )
+
+
+class TestMTPLayerMHC(unittest.TestCase):
+    """MultiTokenPredictionLayer: mHC init + forward with mhc_multistream."""
+
+    def test_hc_head_fn_init_rng_dispatch(self):
+        """world_size=1 uses direct Xavier; world_size>1 uses RNG tracker fork."""
+        from paddlefleet.transformer.multi_token_prediction import (
+            MultiTokenPredictionLayer,
+        )
+
+        config = _cfg(enable_hyper_connections=True, num_residual_streams=4)
+
+        # world_size=1: direct init
+        layer = _build_mtp_layer(config)
+        self.assertFalse((layer.hc_head_fn.numpy() == 0).all())
+
+        # world_size=2: tracker.fork() called
+        spec = _FakeMTPSpec()
+        mock_pg = MagicMock(cp=None, tp=None)
+        tracker_mock = MagicMock()
+        tracker_mock.fork.return_value = nullcontext()
+        with (
+            patch(
+                "paddlefleet.transformer.multi_token_prediction.build_spec_layer",
+                side_effect=lambda s, *a, **kw: _FakeTransformerLayer()
+                if s is spec.transformer_layer
+                else _FakeNorm(),
+            ),
+            patch(
+                "paddlefleet.transformer.multi_token_prediction.ProcessGroupCollection.use_mpu_process_groups",
+                return_value=mock_pg,
+            ),
+            patch(
+                "paddlefleet.transformer.multi_token_prediction.paddle.distributed.get_world_size",
+                return_value=2,
+            ),
+            patch(
+                "paddlefleet.transformer.multi_token_prediction.get_cuda_rng_tracker",
+                return_value=tracker_mock,
+            ),
+        ):
+            MultiTokenPredictionLayer(
+                config=config,
+                sublayers_spec=spec,
+                layer_number=0,
+                pg_collection=mock_pg,
+            )
+        tracker_mock.fork.assert_called()
+
+    def test_mhc_multistream_forward(self):
+        """mhc_multistream replaces hidden_states, triggers _postprocess, gets popped."""
+        config = _cfg(enable_hyper_connections=True, num_residual_streams=4)
+        layer = _build_mtp_layer(config)
+        B, S, H, n = 2, 8, 64, 4
+        captured = {}
+        postprocess_called = [False]
+        orig_postprocess = layer._postprocess
+
+        def proj_override(hidden_states, decoder_input, **kw):
+            captured["hs_shape"] = list(hidden_states.shape)
+            return hidden_states
+
+        def mock_postprocess(hs):
+            postprocess_called[0] = True
+            return orig_postprocess(hs)
+
+        with (
+            patch.object(layer, "_postprocess", side_effect=mock_postprocess),
+            _mtp_forward_ctx(proj_override=proj_override, layer=layer),
+        ):
+            result = layer.forward(
+                {
+                    "hidden_states": paddle.randn([B, S, H]),
+                    "mhc_multistream": paddle.randn([B, S, H * n]),
+                    "mtp_input_embeds": paddle.randn([B, S + 1, H]),
+                    "labels": paddle.randint(0, 100, [B, S]),
+                }
+            )
+
+        self.assertEqual(captured["hs_shape"], [B, S, H * n])
+        self.assertTrue(postprocess_called[0])
+        self.assertNotIn("mhc_multistream", result)
+        self.assertEqual(set(result.keys()), {"hidden_states", "labels"})
+
+    def test_mhc_multistream_absent_skips_postprocess(self):
+        """Without mhc_multistream, regular hidden_states used, _postprocess skipped."""
+        config = _cfg(enable_hyper_connections=True, num_residual_streams=4)
+        layer = _build_mtp_layer(config)
+        B, S, H = 2, 8, 64
+        captured = {}
+        postprocess_called = [False]
+
+        def proj_override(hidden_states, decoder_input, **kw):
+            captured["hs_shape"] = list(hidden_states.shape)
+            return hidden_states
+
+        def mock_pp(hs):
+            postprocess_called[0] = True
+            return hs
+
+        with (
+            patch.object(layer, "_postprocess", side_effect=mock_pp),
+            _mtp_forward_ctx(proj_override=proj_override, layer=layer),
+        ):
+            layer.forward(
+                {
+                    "hidden_states": paddle.randn([B, S, H]),
+                    "mtp_input_embeds": paddle.randn([B, S + 1, H]),
+                    "labels": paddle.randint(0, 100, [B, S]),
+                }
+            )
+
+        self.assertEqual(captured["hs_shape"], [B, S, H])
+        self.assertFalse(postprocess_called[0])
 
 
 if __name__ == "__main__":
