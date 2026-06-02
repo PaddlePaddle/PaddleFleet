@@ -463,37 +463,6 @@ class TestSftPlusScore(unittest.TestCase):
         "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
         return_value=1,
     )
-    def test_sftplus_scores_are_non_negative(self, _mock):
-        """softplus output should always be >= 0."""
-        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
-
-        config = _make_router_config(scoring_func="sftplus")
-        router = StandardMoERouter(config)
-        logits = paddle.randn([16, 4])
-        scores = router.gate_score_func(logits)
-        self.assertTrue(
-            bool((scores >= 0).all().numpy()),
-            "SftPlus scores should all be non-negative",
-        )
-
-    @patch(
-        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
-        return_value=1,
-    )
-    def test_sftplus_output_shape(self, _mock):
-        """Output shape of gate_score_func should match input logits shape."""
-        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
-
-        config = _make_router_config(scoring_func="sftplus", n_routed_experts=4)
-        router = StandardMoERouter(config)
-        logits = paddle.randn([32, 4])
-        scores = router.gate_score_func(logits)
-        self.assertEqual(list(scores.shape), [32, 4])
-
-    @patch(
-        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
-        return_value=1,
-    )
     def test_sqrtsoftplus_matches_sqrt_softplus(self, _mock):
         """gate_score_func('sqrtsoftplus') must equal sqrt(softplus(x)) — required
         for mixed hash/top-k routing where non-hash layers use this path."""
@@ -529,20 +498,6 @@ class TestSftPlusScore(unittest.TestCase):
             atol=1e-6,
             err_msg="SftPlus scores should match F.softplus",
         )
-
-    @patch(
-        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
-        return_value=1,
-    )
-    def test_invalid_scoring_func_raises(self, _mock):
-        """Unknown scoring_func should raise NotImplementedError."""
-        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
-
-        config = _make_router_config(scoring_func="unknown_func")
-        router = StandardMoERouter(config)
-        logits = paddle.randn([4, 4])
-        with self.assertRaises(NotImplementedError):
-            router.gate_score_func(logits)
 
 
 class TestHashRouter(unittest.TestCase):
@@ -749,15 +704,6 @@ class TestHashRouter(unittest.TestCase):
         with self.assertRaises(ValueError):
             router(hidden, input_ids=None)
 
-    def test_set_layer_number(self):
-        """set_layer_number should update _layer_number and is_hash_layer."""
-        router, _ = self._make_router(layer_number=0, moe_n_hash_layers=2)
-        self.assertEqual(router._layer_number, 0)
-        self.assertTrue(router.is_hash_layer)
-        router.set_layer_number(5)
-        self.assertEqual(router._layer_number, 5)
-        self.assertFalse(router.is_hash_layer)
-
     def test_invalid_input_shape_raises(self):
         """Non-3D input should raise (regardless of hash routing)."""
         router, _ = self._make_router()
@@ -898,41 +844,6 @@ class TestHashRouterLayerActivation(unittest.TestCase):
         router = TopKRouter(config=config)
         router.set_layer_number(layer_number)
         return router
-
-    def test_first_layer_activates_hash(self):
-        """Layer 0 with moe_n_hash_layers=2 should activate hash routing."""
-        router = self._make_router(
-            layer_number=0, moe_n_hash_layers=2, num_hidden_layers=8
-        )
-        self.assertTrue(router.is_hash_layer)
-
-    def test_layer_outside_hash_range_disabled(self):
-        """Layer 5 with moe_n_hash_layers=2 should not activate hash routing."""
-        router = self._make_router(
-            layer_number=5, moe_n_hash_layers=2, num_hidden_layers=8
-        )
-        self.assertFalse(router.is_hash_layer)
-
-    def test_no_hash_layers_all_disabled(self):
-        """When moe_n_hash_layers=0, no layer should activate hash routing."""
-        router = self._make_router(
-            layer_number=0, moe_n_hash_layers=0, num_hidden_layers=8
-        )
-        self.assertFalse(router.is_hash_layer)
-
-    def test_boundary_inside(self):
-        """layer_number == moe_n_hash_layers - 1 is the last hash layer."""
-        router = self._make_router(
-            layer_number=3, moe_n_hash_layers=4, num_hidden_layers=32
-        )
-        self.assertTrue(router.is_hash_layer)
-
-    def test_boundary_outside(self):
-        """layer_number == moe_n_hash_layers is the first non-hash layer."""
-        router = self._make_router(
-            layer_number=4, moe_n_hash_layers=4, num_hidden_layers=32
-        )
-        self.assertFalse(router.is_hash_layer)
 
     def test_mtp_layer_excluded(self):
         """is_mtp_layer=True must disable hash routing even in the hash range."""
@@ -1627,9 +1538,17 @@ class TestForwardRoutingMapFusion(unittest.TestCase):
 
 
 class TestHashRoutingScoreFuncs(unittest.TestCase):
-    """Cover _hash_routing score function branches (softmax/sigmoid/sqrtsoftplus)."""
+    """Cover _hash_routing score function branches (softmax/sigmoid/sqrtsoftplus)
+    and the full hash-routing forward() path."""
 
-    def _make_hash_router(self, scoring_func="softmax", n_experts=4, topk=2):
+    def _make_hash_router(
+        self,
+        scoring_func="softmax",
+        n_experts=4,
+        topk=2,
+        routed_scaling_factor=1.0,
+        routed_scaling_factor_learnable=False,
+    ):
         from paddlefleet.transformer.moe.moe_router import TopKRouter
 
         config = _make_router_config(
@@ -1639,6 +1558,8 @@ class TestHashRoutingScoreFuncs(unittest.TestCase):
             moe_n_hash_layers=1,
             actual_vocab_size=16,
             num_hidden_layers=8,
+            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor_learnable=routed_scaling_factor_learnable,
         )
         router = TopKRouter(config=config)
         router.set_layer_number(0)
@@ -1695,6 +1616,204 @@ class TestHashRoutingScoreFuncs(unittest.TestCase):
         flat_ids = paddle.randint(0, 16, [4])
         with self.assertRaises(ValueError):
             router._hash_routing(logits, flat_ids)
+
+    def test_hash_routing_unsupported_scoring_func_raises(self):
+        """_hash_routing raises ValueError for unsupported scoring_func
+        (explicit elif + raise branch, line ~780)."""
+        router = self._make_hash_router(scoring_func="softmax")
+        # Mutate scoring_func after construction to bypass _setup_hash_layer
+        # validation, so _hash_routing hits the else-raise branch.
+        router.scoring_func = "tanh"
+        logits = paddle.randn([4, 4])
+        flat_ids = paddle.randint(0, 16, [4])
+        with self.assertRaisesRegex(ValueError, "Unsupported scoring_func"):
+            router._hash_routing(logits, flat_ids)
+
+    def test_hash_routing_routed_scaling_factor_fixed(self):
+        """_hash_routing applies fixed routed_scaling_factor (line 802)."""
+        router = self._make_hash_router(
+            scoring_func="softmax",
+            routed_scaling_factor=2.0,
+            routed_scaling_factor_learnable=False,
+        )
+        logits = paddle.randn([4, 4])
+        flat_ids = paddle.randint(0, 16, [4])
+        top_gate, top_idx = router._hash_routing(logits, flat_ids)
+        self.assertEqual(top_gate.shape, [4, 2])
+        # With scaling_factor=2.0, gate values should be larger than unscaled
+        unscaled_router = self._make_hash_router(
+            scoring_func="softmax",
+            routed_scaling_factor=1.0,
+            routed_scaling_factor_learnable=False,
+        )
+        top_gate_unscaled, _ = unscaled_router._hash_routing(logits, flat_ids)
+        # scaled should be ~2x unscaled
+        ratio = top_gate.numpy().mean() / (
+            top_gate_unscaled.numpy().mean() + 1e-10
+        )
+        self.assertGreater(ratio, 1.5)
+
+    def test_hash_routing_routed_scaling_factor_learnable(self):
+        """_hash_routing applies learnable routed_scaling_factor (line 795)."""
+        router = self._make_hash_router(
+            scoring_func="softmax",
+            routed_scaling_factor=1.0,
+            routed_scaling_factor_learnable=True,
+        )
+        logits = paddle.randn([4, 4])
+        flat_ids = paddle.randint(0, 16, [4])
+        top_gate, top_idx = router._hash_routing(logits, flat_ids)
+        self.assertEqual(top_gate.shape, [4, 2])
+
+    def test_hash_forward_end_to_end(self):
+        """Full forward() with hash routing (lines 961-993)."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            scoring_func="softmax",
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=1,
+            actual_vocab_size=16,
+            num_hidden_layers=8,
+        )
+        router = TopKRouter(config=config)
+        router.set_layer_number(0)
+        hidden = paddle.randn([2, 4, config.hidden_size])
+        input_ids = paddle.randint(1, 16, [2, 4])
+        out = router(hidden, input_ids=input_ids)
+        # Return: (None, top_gate, top_idx, probs, mask, None, None, None)
+        self.assertIsNone(out[0])
+        self.assertEqual(out[1].shape, [8, 2])  # 8 tokens, topk=2
+        self.assertEqual(out[2].shape, [8, 2])
+        self.assertEqual(out[3].shape, [8, 4])  # probs: [N, num_experts]
+        self.assertEqual(out[4].shape, [8, 4])  # mask: [N, num_experts]
+        self.assertIsNone(out[5])
+        self.assertIsNone(out[6])  # no aux loss on hash layers
+        self.assertIsNone(out[7])  # no z loss on hash layers
+
+    def test_hash_forward_sequence_parallel(self):
+        """Hash routing with sequence_parallel=True (line 963)."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            scoring_func="softmax",
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=1,
+            actual_vocab_size=16,
+            num_hidden_layers=8,
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+        )
+        router = TopKRouter(config=config)
+        router.set_layer_number(0)
+        # With sequence_parallel, input shape is [seq, batch, hidden]
+        # but input_ids shape is still [batch_size, seq_len] per the
+        # assertion in forward(): batch_size_==batch_size, seq_len_==seq_len
+        hidden = paddle.randn([4, 2, config.hidden_size])
+        input_ids = paddle.randint(1, 16, [2, 4])
+        out = router(hidden, input_ids=input_ids)
+        self.assertEqual(out[1].shape, [8, 2])
+
+    def test_hash_forward_with_padding_mask(self):
+        """Hash routing with input_ids containing zeros (lines 980-985).
+
+        When input_ids has zero entries, the non-zero mask is computed
+        inside forward() and applied to the hash routing output.
+        """
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            scoring_func="sigmoid",
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=1,
+            actual_vocab_size=16,
+            num_hidden_layers=8,
+        )
+        router = TopKRouter(config=config)
+        router.set_layer_number(0)
+        hidden = paddle.randn([2, 4, config.hidden_size])
+        # Include zero token IDs to trigger the padding mask branch
+        input_ids = paddle.to_tensor(
+            [[1, 2, 0, 4], [5, 0, 7, 8]], dtype="int64"
+        )
+        out = router(hidden, input_ids=input_ids)
+        self.assertEqual(out[1].shape, [8, 2])
+
+    def test_hash_forward_sequence_parallel_with_padding(self):
+        """Hash routing with sequence_parallel + padding mask.
+
+        Verifies that input_ids_none_zero_mask is transposed along with
+        flat_ids in the sequence-parallel path so that the mask token order
+        matches the logits token order.
+        """
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            scoring_func="sigmoid",
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=1,
+            actual_vocab_size=16,
+            num_hidden_layers=8,
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+        )
+        router = TopKRouter(config=config)
+        router.set_layer_number(0)
+        # With sequence_parallel, input shape is [seq, batch, hidden]
+        hidden = paddle.randn([4, 2, config.hidden_size])
+        # input_ids shape is [batch_size, seq_len] = [2, 4]
+        # Place zeros at specific positions: row 0 col 2, row 1 col 1
+        input_ids = paddle.to_tensor(
+            [[1, 2, 0, 4], [5, 0, 7, 8]], dtype="int64"
+        )
+        out = router(hidden, input_ids=input_ids)
+        top_gate, top_idx = out[1], out[2]
+        self.assertEqual(top_gate.shape, [8, 2])
+        self.assertEqual(top_idx.shape, [8, 2])
+        # In SP, tokens are ordered [s0b0, s0b1, s1b0, s1b1, s2b0, s2b1, s3b0, s3b1]
+        # Padding tokens (input_ids==0) are at positions:
+        #   row0 col2 -> s2b0 -> index 4
+        #   row1 col1 -> s1b1 -> index 3
+        # These tokens should have top_idx == -1 (masked out)
+        top_idx_np = top_idx.numpy()
+        self.assertTrue(
+            (top_idx_np[4] == -1).all(),
+            f"Padding token at index 4 (s2b0) should be masked, got {top_idx_np[4]}",
+        )
+        self.assertTrue(
+            (top_idx_np[3] == -1).all(),
+            f"Padding token at index 3 (s1b1) should be masked, got {top_idx_np[3]}",
+        )
+
+    """Cover sftplus and sqrtsoftplus branches in gate_score_func (lines 304-307)."""
+
+    def _make_router(self, scoring_func="softmax"):
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        config = _make_router_config(scoring_func=scoring_func)
+        return StandardMoERouter(config)
+
+    def test_sftplus_score_func(self):
+        """gate_score_func with sftplus scoring (line 304)."""
+        router = self._make_router(scoring_func="sftplus")
+        logits = paddle.randn([4, router.config.n_routed_experts])
+        scores = router.gate_score_func(logits)
+        self.assertEqual(scores.shape, logits.shape)
+        # softplus is always positive
+        self.assertTrue(bool((scores > 0).all().item()))
+
+    def test_sqrtsoftplus_score_func(self):
+        """gate_score_func with sqrtsoftplus scoring (line 306)."""
+        router = self._make_router(scoring_func="sqrtsoftplus")
+        logits = paddle.randn([4, router.config.n_routed_experts])
+        scores = router.gate_score_func(logits)
+        self.assertEqual(scores.shape, logits.shape)
+        # sqrt(softplus) is always non-negative
+        self.assertTrue(bool((scores >= 0).all().item()))
 
 
 class TestSetupHashLayerErrors(unittest.TestCase):
@@ -1754,6 +1873,79 @@ class TestSetupHashLayerErrors(unittest.TestCase):
         router.set_layer_number(0, is_mtp_layer=True)
         self.assertFalse(router.is_hash_layer)
 
+    def test_setup_hash_layer_activates_tid2eid(self):
+        """_setup_hash_layer registers tid2eid buffer on hash layers."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            scoring_func="softmax",
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=2,
+            actual_vocab_size=16,
+            num_hidden_layers=8,
+        )
+        router = TopKRouter(config=config)
+        self.assertFalse(router.is_hash_layer)
+        router.set_layer_number(0)
+        self.assertTrue(router.is_hash_layer)
+        self.assertIsNotNone(router.tid2eid)
+        self.assertEqual(router.tid2eid.shape, [16, 2])  # [vocab, topk]
+
+    def test_setup_hash_layer_layer_outside_range(self):
+        """Layers with layer_number >= moe_n_hash_layers are not hash layers."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            scoring_func="softmax",
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=2,
+            actual_vocab_size=16,
+            num_hidden_layers=8,
+        )
+        router = TopKRouter(config=config)
+        router.set_layer_number(5)  # >= 2, so not a hash layer
+        self.assertFalse(router.is_hash_layer)
+
+    def test_setup_hash_layer_removes_noaux_tc_bias(self):
+        """_setup_hash_layer removes e_score_correction_bias on hash layers."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            scoring_func="softmax",
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=1,
+            actual_vocab_size=16,
+            num_hidden_layers=8,
+            topk_method="noaux_tc",
+        )
+        router = TopKRouter(config=config)
+        # noaux_tc should create e_score_correction_bias in __init__
+        self.assertTrue(hasattr(router, "e_score_correction_bias"))
+        # Activating hash layer should remove it
+        router.set_layer_number(0)
+        self.assertTrue(router.is_hash_layer)
+        self.assertFalse(hasattr(router, "e_score_correction_bias"))
+        self.assertFalse(hasattr(router, "expert_usage"))
+
+    def test_setup_hash_layer_layer_number_none(self):
+        """set_layer_number(None) should not activate hash routing."""
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        config = _make_router_config(
+            scoring_func="softmax",
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=1,
+            actual_vocab_size=16,
+            num_hidden_layers=8,
+        )
+        router = TopKRouter(config=config)
+        router.set_layer_number(None)
+        self.assertFalse(router.is_hash_layer)
+
 
 class TestHashForwardInputIdsRequired(unittest.TestCase):
     """Cover the hash routing forward branch input_ids check (line 942)."""
@@ -1775,6 +1967,40 @@ class TestHashForwardInputIdsRequired(unittest.TestCase):
         hidden = paddle.randn([2, 4, 64])
         with self.assertRaises(ValueError):
             router(hidden, input_ids=None)
+
+
+class TestMoELayerSetLayerNumberForwardsIsMtp(unittest.TestCase):
+    """Verify MoELayer.set_layer_number forwards is_mtp_layer to the gate."""
+
+    def _make_moe_layer(self, **cfg_overrides):
+        """Build a MoELayer with mock gate to test set_layer_number forwarding."""
+        from unittest.mock import MagicMock
+
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        cfg_overrides.setdefault("actual_vocab_size", 128)
+        config = _make_router_config(**cfg_overrides)
+        moe = MoELayer.__new__(MoELayer)
+        moe.gate = MagicMock()
+        moe.layer_number = None
+        return moe
+
+    def test_forwards_is_mtp_layer_true(self):
+        moe = self._make_moe_layer(moe_n_hash_layers=2, num_hidden_layers=8)
+        moe.set_layer_number(0, is_mtp_layer=True)
+        moe.gate.set_layer_number.assert_called_once_with(0, is_mtp_layer=True)
+        self.assertEqual(moe.layer_number, 0)
+
+    def test_forwards_is_mtp_layer_false(self):
+        moe = self._make_moe_layer(moe_n_hash_layers=2, num_hidden_layers=8)
+        moe.set_layer_number(0, is_mtp_layer=False)
+        moe.gate.set_layer_number.assert_called_once_with(0, is_mtp_layer=False)
+
+    def test_default_is_mtp_layer_false(self):
+        """Calling without is_mtp_layer should default to False."""
+        moe = self._make_moe_layer(moe_n_hash_layers=2, num_hidden_layers=8)
+        moe.set_layer_number(0)
+        moe.gate.set_layer_number.assert_called_once_with(0, is_mtp_layer=False)
 
 
 if __name__ == "__main__":

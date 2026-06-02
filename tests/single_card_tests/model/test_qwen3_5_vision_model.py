@@ -457,6 +457,29 @@ class Qwen3_5Model(FleetLayer):
             self.rope_deltas = rope_deltas
             return position_ids
 
+        # Handle text-only case: generate 3D position_ids with identical values across all three dimensions
+        if input_ids is not None and (
+            image_grid_thw is None and video_grid_thw is None
+        ):
+            batch_size, seq_length = input_ids.shape
+            if attention_mask is not None:
+                position_ids = attention_mask.astype("int64").cumsum(-1) - 1
+                position_ids = paddle.where(
+                    attention_mask == 0,
+                    paddle.zeros_like(position_ids),
+                    position_ids,
+                )
+                position_ids = position_ids.reshape([1, batch_size, -1]).tile(
+                    [3, 1, 1]
+                )
+            else:
+                position_ids = (
+                    paddle.arange(seq_length)
+                    .reshape([1, 1, -1])
+                    .expand([3, batch_size, -1])
+                )
+            return position_ids
+
         if self.rope_deltas is not None and inputs_embeds is not None:
             batch_size, seq_length, _ = inputs_embeds.shape
             if attention_mask is not None:
@@ -689,6 +712,9 @@ class TestQwen3_5Model(unittest.TestCase):
         vision_model = vision_config.provide()
 
         # Step 2: Create language_config and GPTModel
+        # head_dim = VL_LM_HIDDEN_SIZE // NUM_HEADS = 24
+        # mrope_section: [T, H, W] sections for interleaved MRoPE
+        # Sum of sections should equal head_dim // 2 = 12
         language_config = GPTConfig(
             num_hidden_layers=VL_NUM_LM_LAYERS,
             hidden_size=VL_LM_HIDDEN_SIZE,
@@ -702,7 +728,7 @@ class TestQwen3_5Model(unittest.TestCase):
             apply_rope_fusion=False,
             vocab_size=VL_VOCAB_SIZE,
             max_sequence_length=1024,
-            position_embedding_type="rope",
+            position_embedding_type="mrope",
             rotary_percent=1.0,
             rotary_base=10000,
             rope_scaling=False,
@@ -711,6 +737,8 @@ class TestQwen3_5Model(unittest.TestCase):
             layer_types=["full_attention", "linear_attention"],
             gated_attention=True,
         )
+        # Set mrope_section after creation since GPTConfig doesn't define this field
+        language_config.mrope_section = [8, 2, 2]
         self.language_config = language_config
         self.language_config.model_type = "qwen3_5"
 

@@ -375,10 +375,15 @@ class LanguageLoss(FleetLayer):
                 rank = paddle.distributed.get_rank()
                 loss_float = loss.cast("float32").reshape([-1])
                 valid_count = lossmask.sum().item()
-                loss_sum_tensor = paddle.sum(
-                    loss_float * lossmask
-                ).detach().cast("float32").reshape([1])
-                valid_count_tensor = lossmask.sum().detach().cast("float32").reshape([1])
+                loss_sum_tensor = (
+                    paddle.sum(loss_float * lossmask)
+                    .detach()
+                    .cast("float32")
+                    .reshape([1])
+                )
+                valid_count_tensor = (
+                    lossmask.sum().detach().cast("float32").reshape([1])
+                )
                 final_loss_tensor = (
                     loss_sum_tensor / valid_count_tensor
                     if valid_count
@@ -601,23 +606,20 @@ class LanguageLoss(FleetLayer):
 
             def add_loss(main_loss, loss):
                 if self.config.add_mtp_loss:
-                    return main_loss + loss - loss.detach()
+                    return main_loss + loss
                 else:
-                    return main_loss
+                    return main_loss + loss - loss.detach()
 
             if self.config.gpt_model_use_experimental_version:
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
                 loss = lm_loss
-                if self.config.add_mtp_loss:
-                    num_mtp = len(mtp_loss)
-                    for mtp_l in mtp_loss:
-                        loss = (
-                            loss
-                            + self.config.mtp_loss_scaling_factor
-                            * mtp_l
-                            / num_mtp
-                        )
+                num_mtp = len(mtp_loss)
+                for mtp_l in mtp_loss:
+                    loss = add_loss(
+                        loss,
+                        self.config.mtp_loss_scaling_factor * mtp_l / num_mtp,
+                    )
             else:
                 loss = add_loss(
                     lm_loss,
@@ -682,9 +684,9 @@ class MainLanguageLoss(LanguageLoss):
 
         def add_loss(main_loss, loss):
             if self.config.add_mtp_loss:
-                return main_loss + loss - loss.detach()
+                return main_loss + loss
             else:
-                return main_loss
+                return main_loss + loss - loss.detach()
 
         loss = add_loss(
             lm_loss,

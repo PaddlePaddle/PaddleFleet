@@ -777,11 +777,13 @@ class StandardMoERouter(nn.Layer):
             scores = F.softmax(logits_fp32, axis=-1).cast(orig_dtype)
         elif score_function == "sigmoid":
             scores = F.sigmoid(logits_fp32).cast(orig_dtype)
-        else:
-            # _setup_hash_layer guarantees scoring_func is one of
-            # {softmax, sigmoid, sqrtsoftplus}, so this is sqrtsoftplus.
+        elif score_function == "sqrtsoftplus":
             scores = paddle.sqrt(F.softplus(logits_fp32) + 1e-20).cast(
                 orig_dtype
+            )
+        else:
+            raise ValueError(
+                f"Unsupported scoring_func in hash routing: {score_function!r}"
             )
 
         top_idx = self.tid2eid[flat_ids].cast(paddle.int64)  # [N, topk]
@@ -926,7 +928,12 @@ class TopKRouter(StandardMoERouter):
                 # so we need to scatter input_ids here to avid the assertion below
                 input_ids = ContextParallelScatterOp.apply(input_ids, axis=1)
             if input_ids is not None:
-                input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
+                if self.sequence_parallel:
+                    input_ids_none_zero_mask = (
+                        (input_ids != 0).transpose([1, 0]).reshape([-1, 1])
+                    )
+                else:
+                    input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
                 batch_size_, seq_len_ = input_ids.shape
                 assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
                     f"input_ids shape mismatch with input: "
@@ -978,6 +985,7 @@ class TopKRouter(StandardMoERouter):
 
             # Apply padding (input_ids == 0):
             # routing_map = routing_map & ~padding_mask.
+            # input_ids_none_zero_mask shape: [N, 1], broadcast over expert/topk dim.
             if input_ids_none_zero_mask is not None:
                 valid_mask = input_ids_none_zero_mask.cast(mask.dtype)
                 mask = mask * valid_mask

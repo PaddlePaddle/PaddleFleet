@@ -143,6 +143,17 @@ def scaled_init_method_normal(sigma, num_layers, multiplier=2.0):
     return functools.partial(paddle.nn.init.normal_, mean=0.0, std=std)
 
 
+def get_magic_init_method(sigma):
+    """Magic init method: randn(...).scale(sigma) under fp32 default dtype guard."""
+
+    def init_method(weight):
+        weight.set_value(
+            paddle.randn(weight.shape, dtype=weight.dtype).scale(sigma)
+        )
+
+    return init_method
+
+
 def get_pg_size(group=None):
     """Get world size for a distributed group.
 

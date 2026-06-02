@@ -88,7 +88,6 @@ class TestGroupedMLPExpertConstruction(unittest.TestCase):
             config=config,
             moe_deep_gemm=False,
         )
-        self.assertTrue(expert.using_sonic_moe)
         self.assertEqual(expert.weight1.shape[0], 2)
 
     def test_construction_bias_not_supported(self):

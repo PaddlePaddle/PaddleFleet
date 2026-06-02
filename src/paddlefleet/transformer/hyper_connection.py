@@ -324,7 +324,11 @@ class HyperConnectionModule(nn.Layer):
         num_tokens = math.prod(leading_shape)
 
         # Megatron clean path applies H_res.T to residual.
-        h_res_batched = h_res.astype(residual.dtype).transpose([0, 1, 3, 2]).reshape([num_tokens, n, n])
+        h_res_batched = (
+            h_res.astype(residual.dtype)
+            .transpose([0, 1, 3, 2])
+            .reshape([num_tokens, n, n])
+        )
         # [..., n*C] -> [..., n, C] -> [batch, n, C]
         residual_batched = residual.reshape([num_tokens, n, C])
 
@@ -495,7 +499,9 @@ class HyperConnectionModule(nn.Layer):
         # BF16 ulp drift in DSv4 final output contraction.
         head_fn_out_in = head_fn.transpose([1, 0]).contiguous()
         with paddle.amp.auto_cast(False):
-            proj = paddle.matmul(hidden_states, head_fn_out_in, transpose_y=True)
+            proj = paddle.matmul(
+                hidden_states, head_fn_out_in, transpose_y=True
+            )
         mixes = proj * rsqrt
         pre = F.sigmoid(mixes * scale + base) + eps
         y = paddle.sum(

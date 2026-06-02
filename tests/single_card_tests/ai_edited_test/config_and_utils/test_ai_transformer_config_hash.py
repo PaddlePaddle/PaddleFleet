@@ -121,5 +121,87 @@ class TestTransformerConfigHashRoutingValidation(unittest.TestCase):
         self.assertEqual(config.moe_n_hash_layers, 0)
 
 
+class TestTransformerConfigHashPostInit(unittest.TestCase):
+    """Cover __post_init__ hash validation paths directly.
+
+    Python's coverage tool sometimes loses line-tracking for code executed
+    inside the dataclass-generated ``__init__``.  Calling ``__post_init__``
+    explicitly ensures the validation lines are attributed correctly.
+    """
+
+    def _make_minimal_obj(self, **overrides):
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        defaults = {
+            "moe_n_hash_layers": 1,
+            "actual_vocab_size": 128,
+            "num_hidden_layers": 8,
+            "scoring_func": "softmax",
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 2,
+        }
+        defaults.update(overrides)
+        obj = TransformerConfig.__new__(TransformerConfig)
+        for k, v in defaults.items():
+            setattr(obj, k, v)
+        return obj
+
+    def test_post_init_missing_vocab_size(self):
+        """__post_init__ raises when actual_vocab_size is None."""
+        obj = self._make_minimal_obj(actual_vocab_size=None)
+        with self.assertRaises(ValueError):
+            obj.__post_init__()
+
+    def test_post_init_negative_vocab_size(self):
+        """__post_init__ raises when actual_vocab_size <= 0."""
+        obj = self._make_minimal_obj(actual_vocab_size=-1)
+        with self.assertRaises(ValueError):
+            obj.__post_init__()
+
+    def test_post_init_too_many_hash_layers(self):
+        """__post_init__ raises when moe_n_hash_layers > num_hidden_layers."""
+        obj = self._make_minimal_obj(moe_n_hash_layers=100, num_hidden_layers=8)
+        with self.assertRaises(ValueError):
+            obj.__post_init__()
+
+    def test_post_init_invalid_scoring_func(self):
+        """__post_init__ raises for unsupported scoring_func."""
+        obj = self._make_minimal_obj(scoring_func="relu")
+        with self.assertRaises(ValueError):
+            obj.__post_init__()
+
+    def test_post_init_no_topk(self):
+        """__post_init__ raises when num_experts_per_tok <= 0."""
+        obj = self._make_minimal_obj(num_experts_per_tok=0)
+        with self.assertRaises(ValueError):
+            obj.__post_init__()
+
+    def test_post_init_too_few_routed_experts(self):
+        """__post_init__ raises when n_routed_experts < num_experts_per_tok."""
+        obj = self._make_minimal_obj(n_routed_experts=1, num_experts_per_tok=2)
+        with self.assertRaises(ValueError):
+            obj.__post_init__()
+
+    def test_post_init_valid_config(self):
+        """__post_init__ passes for a valid hash routing config."""
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        obj = self._make_minimal_obj()
+        # Should not raise — but __post_init__ for TransformerConfig
+        # may need additional fields. Use the constructor instead.
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            intermediate_size=256,
+            num_hidden_layers=8,
+            n_routed_experts=4,
+            num_experts_per_tok=2,
+            moe_n_hash_layers=1,
+            actual_vocab_size=128,
+            scoring_func="softmax",
+        )
+        self.assertEqual(config.moe_n_hash_layers, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

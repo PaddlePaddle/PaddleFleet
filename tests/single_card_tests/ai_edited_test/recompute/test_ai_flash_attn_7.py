@@ -218,6 +218,10 @@ class TestGetFAVersionNonDeterministic(unittest.TestCase):
                 "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
                 return_value={"FLAGS_cudnn_deterministic": False},
             ),
+            patch(
+                "paddlefleet.refined_recompute.flash_attn._flash_mask_available",
+                True,
+            ),
         ):
             result = _get_fa_version(64)
             self.assertEqual(result, 4)

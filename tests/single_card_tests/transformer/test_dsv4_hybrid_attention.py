@@ -23,13 +23,19 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_mtp_layers_spec,
 )
+from paddlefleet.tilelang_ops import csa_sparse_attn
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
-    _get_doc_start,
+    _resolve_csa_indexer_attn_topk_effective,
+    _resolve_csa_indexer_loss_topk_effective,
+    _resolve_csa_tilelang_switch,
     get_compress_topk_idxs,
     get_window_topk_idxs,
+    unfused_compressed_sparse_attn,
 )
-from paddlefleet.transformer.dsa_attention import fused_qk_topk_naive
+from paddlefleet.transformer.dsa_attention import (
+    fused_qk_topk_naive,
+)
 from paddlefleet.transformer.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
 )
@@ -58,6 +64,9 @@ def _make_config(
     apply_rope_fusion=False,
     multi_latent_attention=True,
     num_nextn_predict_layers=0,
+    csa_tilelang_backend=None,
+    csa_tilelang_enable_indexer=None,
+    csa_tilelang_enable_sparse_attn=None,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -98,6 +107,9 @@ def _make_config(
         attention_softmax_in_fp32=True,
         masked_softmax_fusion=False,
         softmax_type="vanilla",
+        csa_tilelang_backend=csa_tilelang_backend,
+        csa_tilelang_enable_indexer=csa_tilelang_enable_indexer,
+        csa_tilelang_enable_sparse_attn=csa_tilelang_enable_sparse_attn,
     )
 
 
@@ -142,74 +154,93 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[2])
 
+    def test_csa_tilelang_backend_switches_and_overrides(self):
+        paddle_config = _make_config()
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                paddle_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                paddle_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        tilelang_config = _make_config(
+            csa_tilelang_backend="attention_paddle_compat"
+        )
+        self.assertTrue(
+            _resolve_csa_tilelang_switch(
+                tilelang_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertTrue(
+            _resolve_csa_tilelang_switch(
+                tilelang_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        override_config = _make_config(
+            csa_tilelang_backend="attention_paddle_compat",
+            csa_tilelang_enable_indexer=False,
+            csa_tilelang_enable_sparse_attn=False,
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                override_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                override_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "csa_tilelang_enable_indexer=True requires"
+        ):
+            _make_config(csa_tilelang_enable_indexer=True)
+
+        with self.assertRaisesRegex(
+            ValueError, "csa_tilelang_enable_sparse_attn=True requires"
+        ):
+            _make_config(csa_tilelang_enable_sparse_attn=True)
+
+    def test_phase2_loss_topk_does_not_expand_attention_topk(self):
+        config = _make_config(
+            dsa_index_topk=2,
+        )
+        n_compressed = 8
+
+        self.assertEqual(
+            _resolve_csa_indexer_loss_topk_effective(
+                config, config.dsa_index_topk, n_compressed
+            ),
+            n_compressed,
+        )
+        self.assertEqual(
+            _resolve_csa_indexer_attn_topk_effective(
+                config.dsa_index_topk, n_compressed
+            ),
+            config.dsa_index_topk,
+        )
+
+        config.dsa_indexer_use_sparse_loss = True
+        self.assertEqual(
+            _resolve_csa_indexer_loss_topk_effective(
+                config, config.dsa_index_topk, n_compressed
+            ),
+            config.dsa_index_topk,
+        )
+
 
 class TestCSAIndexHelpers(unittest.TestCase):
-    def test_doc_start_accepts_1d_and_2d_masks(self):
-        mask_1d = paddle.to_tensor([4, 4, 4, 4, 8, 8, 8, 8], dtype="int64")
-        doc_start_1d = _get_doc_start(mask_1d, seqlen=8)
-        self.assertEqual(
-            doc_start_1d.numpy().tolist(), [0, 0, 0, 0, 4, 4, 4, 4]
-        )
-
-        mask_2d = paddle.stack([mask_1d, mask_1d])
-        doc_start_2d = _get_doc_start(mask_2d, seqlen=8)
-        self.assertEqual(
-            doc_start_2d.numpy().tolist(),
-            [[0, 0, 0, 0, 4, 4, 4, 4], [0, 0, 0, 0, 4, 4, 4, 4]],
-        )
-
-    def test_window_and_compress_indices_with_document_boundaries(self):
-        boundaries = paddle.to_tensor(
-            [[[[4], [4], [4], [4], [8], [8], [8], [8]]]], dtype="int64"
-        )
-
-        window = get_window_topk_idxs(
-            window_size=3,
-            batch_size=1,
-            seqlen=8,
-            attn_mask_startend_row_indices=boundaries,
-        )
-        self.assertEqual(
-            window.numpy().tolist()[0],
-            [
-                [0, -1, -1],
-                [0, 1, -1],
-                [0, 1, 2],
-                [1, 2, 3],
-                [4, -1, -1],
-                [4, 5, -1],
-                [4, 5, 6],
-                [5, 6, 7],
-            ],
-        )
-
-        compressed = get_compress_topk_idxs(
-            ratio=4,
-            batch_size=1,
-            seqlen=8,
-            offset=8,
-            attn_mask_startend_row_indices=boundaries,
-        )
-        self.assertEqual(
-            compressed.numpy().tolist()[0],
-            [
-                [-1, -1],
-                [-1, -1],
-                [-1, -1],
-                [8, -1],
-                [-1, -1],
-                [-1, -1],
-                [-1, -1],
-                [-1, 9],
-            ],
-        )
-
-    def test_window_and_compress_indices_without_document_boundaries(self):
+    def test_window_and_compress_indices(self):
         window = get_window_topk_idxs(
             window_size=3,
             batch_size=2,
             seqlen=4,
-            attn_mask_startend_row_indices=None,
         )
         self.assertEqual(list(window.shape), [2, 4, 3])
         self.assertEqual(
@@ -222,7 +253,6 @@ class TestCSAIndexHelpers(unittest.TestCase):
             batch_size=2,
             seqlen=8,
             offset=8,
-            attn_mask_startend_row_indices=None,
         )
         self.assertEqual(list(compressed.shape), [2, 8, 2])
         self.assertEqual(
@@ -382,6 +412,92 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
             list(attn.linear_o_group_proj.shape), [expected_out, expected_in]
         )
         self.assertFalse(attn.linear_o_group_proj.stop_gradient)
+
+
+class TestDSv4HybridFusedSparseAttention(unittest.TestCase):
+    def test_fused_matches_unfused_forward_backward(self):
+        old_flag = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]
+        paddle.set_flags({"FLAGS_cudnn_deterministic": 0})
+        try:
+            paddle.seed(_SEED)
+            batch_size = 1
+            seq_len = 128
+            num_heads = 16
+            head_dim = 128
+            topk = 64
+            softmax_scale = head_dim**-0.5
+
+            query = paddle.randn(
+                [batch_size, seq_len, num_heads, head_dim],
+                dtype=paddle.bfloat16,
+            )
+            kv_full = paddle.randn(
+                [batch_size, seq_len, head_dim], dtype=paddle.bfloat16
+            )
+            attn_sink = paddle.randn([num_heads], dtype=paddle.float32)
+            topk_idxs = (
+                paddle.arange(topk, dtype="int32")
+                .reshape([1, 1, topk])
+                .expand([batch_size, seq_len, topk])
+            )
+
+            query.stop_gradient = False
+            kv_full.stop_gradient = False
+            attn_sink.stop_gradient = False
+            fused_out = csa_sparse_attn(
+                query, kv_full, attn_sink, topk_idxs, softmax_scale
+            )
+            fused_loss = fused_out.cast("float32").sum()
+            fused_loss.backward()
+            fused_query_grad = query.grad.clone()
+            fused_kv_grad = kv_full.grad.clone()
+            fused_attn_sink_grad = attn_sink.grad.clone()
+
+            query.clear_gradient()
+            kv_full.clear_gradient()
+            attn_sink.clear_gradient()
+            unfused_out = unfused_compressed_sparse_attn(
+                query, kv_full, attn_sink, topk_idxs, softmax_scale
+            )
+            unfused_loss = unfused_out.cast("float32").sum()
+            unfused_loss.backward()
+
+            self.assertTrue(
+                paddle.allclose(
+                    fused_out.cast("float32"),
+                    unfused_out.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_query_grad.cast("float32"),
+                    query.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_kv_grad.cast("float32"),
+                    kv_full.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_attn_sink_grad.cast("float32"),
+                    attn_sink.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+        finally:
+            paddle.set_flags({"FLAGS_cudnn_deterministic": old_flag})
 
 
 class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):

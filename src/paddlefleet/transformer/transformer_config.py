@@ -18,13 +18,18 @@
 from __future__ import annotations
 
 import functools
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
 
 from ..model_parallel_config import ModelParallelConfig
-from ..utils import init_method_normal, scaled_init_method_normal
+from ..utils import (
+    get_magic_init_method,
+    init_method_normal,
+    scaled_init_method_normal,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -67,6 +72,11 @@ class TransformerConfig(ModelParallelConfig):
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
+
+    enable_mtp_magic_send: bool = False
+    """When True, use magic send mechanism for MTP: broadcast input_ids to last PP stage
+    and re-embed there, instead of pre-computing shifted embeddings at first stage
+    and concatenating them through the pipeline."""
 
     experimental_dataflow: bool = False
     """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
@@ -354,7 +364,8 @@ class TransformerConfig(ModelParallelConfig):
 
     scoring_func: str = "softmax"
     """Score function for MoE routing. Options: "softmax", "sigmoid", "tanh",
-    "relu", "gelu", "leaky_relu", "sftplus" (softplus, non-negative unbounded)."""
+    "relu", "gelu", "leaky_relu", "sftplus" (softplus, non-negative unbounded),
+    "sqrtsoftplus" (sqrt(softplus), non-negative unbounded)."""
 
     moe_intermediate_size: int | None = None
     """MoE Feed-Forward Network hidden size"""
@@ -579,12 +590,9 @@ class TransformerConfig(ModelParallelConfig):
     mhc_init_gating_factor: float = 0.01
     """Initial value of Gating Factor (alpha in paper)."""
 
-    mhc_recompute_layer_num: int | None = None
-    """Number of layers per mHC recompute block.
-
-    When set, every `mhc_recompute_layer_num` layers form a recompute block.
-    If None, all layers in the transformer block share a single recompute block.
-    Must be a positive integer when set."""
+    use_fused_mhc: bool = False
+    """Use fused triton kernels for mHC operations (sinkhorn, h_aggregate, h_post_bda, proj_rms).
+    Requires cuTile to be available."""
 
     ####################
     # miscellaneous
@@ -756,6 +764,30 @@ class TransformerConfig(ModelParallelConfig):
     Useful for debugging or ablation studies.
     """
 
+    csa_tilelang_backend: str | None = None
+    """Optional CSA TileLang backend.
+
+    None keeps the default Paddle implementation. 'attention_paddle_compat'
+    enables the TileLang indexer and sparse attention paths by default while
+    preserving Paddle-compatible tensor layouts and algorithm semantics.
+    """
+
+    csa_tilelang_enable_indexer: bool | None = None
+    """Optional override for the CSA TileLang indexer path.
+
+    None follows csa_tilelang_backend. True requires
+    csa_tilelang_backend='attention_paddle_compat'. False disables only the
+    CSA indexer TileLang path.
+    """
+
+    csa_tilelang_enable_sparse_attn: bool | None = None
+    """Optional override for the CSA TileLang sparse attention path.
+
+    None follows csa_tilelang_backend. True requires
+    csa_tilelang_backend='attention_paddle_compat'. False disables only the
+    final sparse MQA attention TileLang path.
+    """
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.
@@ -779,6 +811,9 @@ class TransformerConfig(ModelParallelConfig):
     routing_map_fusion: bool = False
     """If True, use Triton fused routing map kernel for MoE routing."""
 
+    magic_init: bool = False
+    """Use the magic initialization method."""
+
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
         # DSA field mapping
@@ -794,6 +829,9 @@ class TransformerConfig(ModelParallelConfig):
         "csa_compress_ratios": "csa_compress_ratios",
         "csa_compress_rotary_base": "csa_compress_rotary_base",
         "csa_dense_mode": "csa_dense_mode",
+        "csa_tilelang_backend": "csa_tilelang_backend",
+        "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
+        "csa_tilelang_enable_sparse_attn": "csa_tilelang_enable_sparse_attn",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -850,6 +888,11 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.enable_mtp_magic_send:
+            assert self.num_nextn_predict_layers == 1, (
+                "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
+            )
+
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
 
@@ -889,7 +932,15 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if self.init_method is None:
+        if self.magic_init:
+            if self.hidden_size == 0:
+                raise ValueError(
+                    "hidden_size must be non-zero when magic_init is True."
+                )
+            sigma = math.sqrt(0.3333 / self.hidden_size)
+            self.init_method = get_magic_init_method(sigma)
+            self.init_method_std = sigma
+        elif self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
 
         if (
@@ -946,7 +997,9 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.output_layer_init_method is None:
+        if self.magic_init:
+            self.output_layer_init_method = self.init_method
+        elif self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
                 self.init_method_std,
                 self.num_hidden_layers,
@@ -958,7 +1011,10 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.embedding_init_method is None:
+        if self.magic_init:
+            self.embedding_init_method = self.init_method
+            self.embedding_init_method_std = self.init_method_std
+        elif self.embedding_init_method is None:
             if self.init_method is None or (
                 self.embedding_init_method_std != self.init_method_std
             ):
@@ -973,16 +1029,6 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
-
-        # Hyper-connection (mHC) validation
-        if self.enable_hyper_connections:
-            if self.mhc_recompute_layer_num is not None and (
-                not isinstance(self.mhc_recompute_layer_num, int)
-                or self.mhc_recompute_layer_num < 1
-            ):
-                raise ValueError(
-                    "mhc_recompute_layer_num must be a positive integer."
-                )
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
@@ -1006,6 +1052,28 @@ class TransformerConfig(ModelParallelConfig):
                         f"csa_compress_ratios[{i}]={r} is invalid. "
                         f"Must be one of {valid_ratios}."
                     )
+
+            valid_tilelang_backends = {None, "attention_paddle_compat"}
+            if self.csa_tilelang_backend not in valid_tilelang_backends:
+                raise ValueError(
+                    f"csa_tilelang_backend={self.csa_tilelang_backend!r} is invalid. "
+                    f"Must be one of {valid_tilelang_backends}."
+                )
+            if (
+                self.csa_tilelang_backend is None
+                and self.csa_tilelang_enable_indexer
+            ):
+                raise ValueError(
+                    "csa_tilelang_enable_indexer=True requires csa_tilelang_backend='attention_paddle_compat'."
+                )
+            if (
+                self.csa_tilelang_backend is None
+                and self.csa_tilelang_enable_sparse_attn
+            ):
+                raise ValueError(
+                    "csa_tilelang_enable_sparse_attn=True requires csa_tilelang_backend='attention_paddle_compat'."
+                )
+
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
             if self.actual_vocab_size is None:

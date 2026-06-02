@@ -46,6 +46,7 @@ class TestDotProductAttentionEagerMode(unittest.TestCase):
         """Eager mode should reject packed_seq_params."""
         mock_pg.return_value = MagicMock(tp=MagicMock(world_size=1, rank=0))
         config = MagicMock()
+        config.gpt_model_use_experimental_version = False
         config.context_parallel_size = 1
         config.head_dim = 64
         config.num_attention_heads = 8
@@ -60,7 +61,7 @@ class TestDotProductAttentionEagerMode(unittest.TestCase):
         config.window_attn_skip_freq = None
         config.softmax_type = "vanilla"
         config.perform_initialization = True
-        config.params_dtype = "float32"
+        config.params_dtype = "bfloat16"
         config.init_method = MagicMock()
         config._attn_implementation = "eager"
 
@@ -94,6 +95,7 @@ class TestDotProductAttentionQueryKeyLayerScaling(unittest.TestCase):
         """apply_query_key_layer_scaling should divide softmax_scale by layer_number."""
         mock_pg.return_value = MagicMock(tp=MagicMock(world_size=1, rank=0))
         config = MagicMock()
+        config.gpt_model_use_experimental_version = False
         config.context_parallel_size = 1
         config.head_dim = 64
         config.num_attention_heads = 8
@@ -108,7 +110,7 @@ class TestDotProductAttentionQueryKeyLayerScaling(unittest.TestCase):
         config.window_attn_skip_freq = None
         config.softmax_type = "vanilla"
         config.perform_initialization = True
-        config.params_dtype = "float32"
+        config.params_dtype = "bfloat16"
         config.init_method = MagicMock()
 
         attn = DotProductAttention(
@@ -138,6 +140,7 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         """Invalid softmax_type should raise ValueError."""
         mock_pg.return_value = MagicMock(tp=MagicMock(world_size=1, rank=0))
         config = MagicMock()
+        config.gpt_model_use_experimental_version = False
         config.context_parallel_size = 1
         config.head_dim = 64
         config.num_attention_heads = 8
@@ -152,7 +155,7 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         config.window_attn_skip_freq = None
         config.softmax_type = "invalid_type"
         config.perform_initialization = True
-        config.params_dtype = "float32"
+        config.params_dtype = "bfloat16"
         config.init_method = MagicMock()
 
         with self.assertRaises(ValueError):
@@ -173,6 +176,7 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         """off-by-one softmax_type should create softmax_offset tensor."""
         mock_pg.return_value = MagicMock(tp=MagicMock(world_size=1, rank=0))
         config = MagicMock()
+        config.gpt_model_use_experimental_version = False
         config.context_parallel_size = 1
         config.head_dim = 64
         config.num_attention_heads = 8
@@ -187,7 +191,7 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
         config.window_attn_skip_freq = None
         config.softmax_type = "off-by-one"
         config.perform_initialization = True
-        config.params_dtype = "float32"
+        config.params_dtype = "bfloat16"
         config.init_method = MagicMock()
 
         attn = DotProductAttention(

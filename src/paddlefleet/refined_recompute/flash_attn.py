@@ -28,8 +28,12 @@ from paddlefleet.context_parallel_utils import (
 )
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
-if paddle.cuda.get_device_capability()[0] == 10:
-    try:
+_flash_mask_available = False
+try:
+    if (
+        paddle.cuda.is_available()
+        and paddle.cuda.get_device_capability()[0] == 10
+    ):
         from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
             FlashMaskInfoPaddle,
         )
@@ -37,10 +41,10 @@ if paddle.cuda.get_device_capability()[0] == 10:
             _flash_attn_bwd,
             _flash_attn_fwd,
         )
-    except Exception:
-        FlashMaskInfoPaddle = None
-        _flash_attn_bwd = None
-        _flash_attn_fwd = None
+
+        _flash_mask_available = True
+except (ImportError, AttributeError):
+    _flash_mask_available = False
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +73,16 @@ def _get_fa_version(hdim):
         "FLAGS_cudnn_deterministic"
     ]:
         return 2
-    return paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
+    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
         "FLAGS_flash_attn_version"
     ]
+    # Fall back to version 3 if flash_mask is not available
+    if fa_version == 4 and not _flash_mask_available:
+        logger.warning(
+            "FlashMask (fa_version=4) is not available, falling back to fa_version=3"
+        )
+        return 3
+    return fa_version
 
 
 def flashattn_auto_cast(q, k, v, dtype=paddle.bfloat16):
@@ -809,11 +820,12 @@ class FlashMaskAttnCpFunctor(PyLayer):
         result_attention = hold_tensors["result_attention"]
         softmax_lse = hold_tensors["softmax_lse"]
         startend_row_indices = hold_tensors["startend_row_indices"]
+        fa_version = hold_tensors["fa_version"]
         group = hold_tensors["group"]
         causal = hold_tensors["causal"]
 
+        ctx.fa_version = fa_version
         ctx.save_for_backward(
-            config,
             q,
             k,
             v,
@@ -834,7 +846,6 @@ class FlashMaskAttnCpFunctor(PyLayer):
         """
         # Retrieve saved tensors
         (
-            config,
             q,
             k,
             v,
@@ -844,11 +855,11 @@ class FlashMaskAttnCpFunctor(PyLayer):
             group,
             causal,
         ) = ctx.saved_tensor()
+        fa_version = ctx.fa_version
 
         # Compute gradients
         query_grad, key_grad, value_grad = (
             cp_flashmask_allgatherkv_balance_backward(
-                config,
                 q,
                 k,
                 v,
@@ -858,6 +869,7 @@ class FlashMaskAttnCpFunctor(PyLayer):
                 grad,
                 group,
                 causal,
+                fa_version,
             )
         )
 
@@ -965,7 +977,7 @@ class RefinedRcomputeFlashMaskCpAttention:
             f"Current query sequence length: {query_states.shape[1]}"
         )
 
-        result_attention, softmax_lse, startend_row_indices = (
+        result_attention, softmax_lse, startend_row_indices, fa_version = (
             cp_flashmask_allgatherkv_balance_forward(
                 query_states,
                 key_states,
@@ -981,6 +993,7 @@ class RefinedRcomputeFlashMaskCpAttention:
             "result_attention": result_attention,
             "softmax_lse": softmax_lse,
             "startend_row_indices": startend_row_indices,
+            "fa_version": fa_version,
             "group": group,
             "causal": causal,
         }

@@ -240,6 +240,13 @@ import_custom_ops(
     global_ns=globals(),
 )
 
+# 别名：算子注册名改为 paddlefleet_fused_swiglu_probs_bwd 以避免与 FusedQuantOps 冲突，
+# 但对外仍保持 fused_swiglu_probs_bwd 的导入接口。
+if "paddlefleet_fused_swiglu_probs_bwd" in globals():
+    globals()["fused_swiglu_probs_bwd"] = globals()[
+        "paddlefleet_fused_swiglu_probs_bwd"
+    ]
+
 blocked_import_messages: dict[str, str] = {}
 
 if paddle.is_compiled_with_cuda():
@@ -276,7 +283,10 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet_ops.hybrid_ep"] = error
 
     if is_sonic_moe_available():
-        paddle.enable_compat(scope={"sonicmoe", "quack", "triton"}, silent=True)
+        paddle.enable_compat(
+            scope={"sonicmoe", "quack", "triton"},
+            silent=True,
+        )
         _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
     else:
         warning, error = _sonic_moe_requirement(

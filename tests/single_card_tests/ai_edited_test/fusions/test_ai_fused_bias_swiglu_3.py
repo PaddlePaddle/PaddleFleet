@@ -33,13 +33,10 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     SwiGLUFunction,
     WeightedSwiGLUFunction,
     bias_swiglu,
-    bias_swiglu_back,
     bias_swiglu_impl,
     swiglu,
-    swiglu_back,
     weighted_bias_swiglu_impl,
     weighted_swiglu,
-    weighted_swiglu_back,
 )
 
 
@@ -95,44 +92,6 @@ class TestWeightedSwiglu(unittest.TestCase):
         weights = paddle.randn([2, 1], dtype=paddle.float32)
         result = weighted_swiglu(x, weights)
         self.assertEqual(result.dtype, paddle.float32)
-
-
-class TestSwigluBack(unittest.TestCase):
-    """Tests for swiglu_back function."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_swiglu_back_not_implemented_cpu(self, mock_cuda):
-        """Test swiglu_back raises NotImplementedError on CPU."""
-        g = paddle.randn([2, 4])
-        y = paddle.randn([2, 8])
-        with self.assertRaises(NotImplementedError):
-            swiglu_back(g, y)
-
-
-class TestBiasSwigluBack(unittest.TestCase):
-    """Tests for bias_swiglu_back function."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_bias_swiglu_back_cpu(self, mock_cuda):
-        """Test bias_swiglu_back raises on CPU."""
-        g = paddle.randn([2, 4])
-        y = paddle.randn([2, 8])
-        bias = paddle.randn([8])
-        with self.assertRaises(NotImplementedError):
-            bias_swiglu_back(g, y, bias)
-
-
-class TestWeightedSwigluBack(unittest.TestCase):
-    """Tests for weighted_swiglu_back function."""
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    def test_weighted_swiglu_back_cpu_raises(self, mock_cuda):
-        """Test weighted_swiglu_back raises on CPU."""
-        g = paddle.randn([2, 4])
-        y = paddle.randn([2, 8])
-        weights = paddle.randn([2, 1])
-        with self.assertRaises(NotImplementedError):
-            weighted_swiglu_back(g, y, weights)
 
 
 class TestBiasSwiGLUFunction(unittest.TestCase):

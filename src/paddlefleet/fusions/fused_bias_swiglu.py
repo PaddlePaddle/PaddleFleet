@@ -34,6 +34,7 @@ def _dsv4_megatron_swiglu_enabled() -> bool:
 def _dsv4_megatron_swiglu_wgrad_enabled() -> bool:
     return os.environ.get("DSV4_FLEET_MEGATRON_SWIGLU_WGRAD", "0") == "1"
 
+
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
 
@@ -87,19 +88,10 @@ def swiglu_back(g, y):
 
     Returns:
         paddle.Tensor: Gradient with respect to the input tensor, computed using the
-            chain rule and the derivative of the SiLU activation function.
+            Paddle native SwiGLU gradient operator.
     """
-    if paddle.is_compiled_with_cuda():
-        from paddlefleet_ops import fused_swiglu_bwd
-
-        return fused_swiglu_bwd(g, y)
-    elif paddle.is_compiled_with_xpu():
-        dx, _ = paddle._C_ops.swiglu_grad(y, None, g)
-        return dx
-    else:
-        raise NotImplementedError(
-            "fused_swiglu_bwd is not implemented for non-CUDA backends."
-        )
+    dx, _ = paddle._C_ops.swiglu_grad(y, None, g)
+    return dx
 
 
 @jit_fuser
@@ -158,6 +150,10 @@ def clamped_swiglu_back(g, y, clamp_value):
     """Backward pass for clamped_swiglu.
 
     Gradient is zeroed out where inputs were clamped.
+    Computation is performed in float32; g is used in its
+    original dtype so auto-promotion to float32 occurs naturally through
+    the float32 terms; masks are cast to g.dtype matching
+    ``.to(g.dtype)`` in the reference implementation.
 
     Args:
         g (paddle.Tensor): Upstream gradient.
@@ -190,6 +186,46 @@ def clamped_swiglu_back(g, y, clamp_value):
 
 
 @jit_fuser
+def clamped_bias_swiglu(y, bias, clamp_value):
+    """Clamped SwiGLU with bias addition.
+
+    Adds bias to the input tensor, then applies clamped SwiGLU activation.
+    Gate (y1) is clamped to (-inf, clamp_value] and value (y2) to
+    [-clamp_value, clamp_value] before computing SiLU(y1) * y2.
+
+    Args:
+        y (paddle.Tensor): Input tensor, split into gate/value halves along last dim.
+        bias (paddle.Tensor): Bias tensor added to input before activation.
+        clamp_value (float): Clamp bound for numerical stability.
+
+    Returns:
+        paddle.Tensor: clamped_swiglu(y + bias), same dtype as y.
+    """
+    y = y + bias
+    return clamped_swiglu(y, clamp_value)
+
+
+@jit_fuser
+def clamped_bias_swiglu_back(g, y, bias, clamp_value):
+    """Backward pass for clamped_bias_swiglu.
+
+    Adds bias to the input tensor and delegates to clamped_swiglu_back
+    which zeros out gradients where inputs were clamped in the forward pass.
+
+    Args:
+        g (paddle.Tensor): Upstream gradient.
+        y (paddle.Tensor): Original (un-clamped) input tensor from forward pass.
+        bias (paddle.Tensor): Bias tensor that was added in the forward pass.
+        clamp_value (float): Clamp bound used in forward pass.
+
+    Returns:
+        paddle.Tensor: Gradient w.r.t. (y + bias), same dtype as y.
+    """
+    y = y + bias
+    return clamped_swiglu_back(g, y, clamp_value)
+
+
+@jit_fuser
 def clamped_weighted_swiglu(y, weights, clamp_value):
     """ClampedSwiGLU with per-token weight scaling.
 
@@ -210,10 +246,21 @@ def clamped_weighted_swiglu(y, weights, clamp_value):
 def clamped_weighted_swiglu_back(g, y, weights, clamp_value):
     """Backward pass for clamped_weighted_swiglu.
 
+    Delegates to clamped_swiglu_back for input grad and recomputes
+    clamped_swiglu(y) for weights grad. This re-executes one SwiGLU forward
+    (clip + sigmoid + silu) in the backward — a conscious trade-off:
+    correctness and code clarity take priority over the marginal FLOPs,
+    matching the reference implementation structure. The overhead is ~1
+    SwiGLU forward which is negligible compared to the main matmul.
+
+    Precision note: ``paddle.sum`` internally accumulates bf16 inputs in
+    float32, matching the CUDA kernel's ``float`` accumulation for
+    ``local_d_probs_sum`` in the same-type branch.
+
     Args:
         g (paddle.Tensor): Upstream gradient.
         y (paddle.Tensor): Original input tensor from forward pass.
-        weights (paddle.Tensor): Per-token weights from forward pass.
+        weights (paddle.Tensor): Per-token weights, broadcastable to g's shape.
         clamp_value (float): Clamp bound used in forward pass.
 
     Returns:
@@ -232,7 +279,9 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
 
     @staticmethod
     @nvtx_decorator()
-    def forward(ctx, input, bias, fp8_input_store, cpu_offload_input, clamp_value=None):
+    def forward(
+        ctx, input, bias, fp8_input_store, cpu_offload_input, clamp_value=None
+    ):
         """Forward pass of biased SwiGLU activation.
 
         Args:
@@ -240,6 +289,10 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
             input (paddle.Tensor): Input tensor to apply SwiGLU to.
             bias (paddle.Tensor): Bias tensor to be added to input before SwiGLU.
             fp8_input_store (bool): If True, stores intermediate values in FP8 format.
+            cpu_offload_input (bool): If True, enables CPU activation offloading.
+            clamp_value (float, optional): If provided and > 0, clamps gate to
+                (-inf, clamp_value] and value to [-clamp_value, clamp_value] for
+                numerical stability.
 
         Returns:
             paddle.Tensor: Result of applying bias addition followed by SwiGLU activation.
@@ -271,12 +324,13 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
             tuple: Tuple containing:
                 - Gradient with respect to the input tensor
                 - Gradient with respect to the bias tensor
-                - None for fp8_input_store parameter
         """
         input, bias = ctx.saved_tensor()
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         if ctx.clamp_value is not None and ctx.clamp_value > 0:
-            tmp = clamped_swiglu_back(grad_output, input + bias, ctx.clamp_value)
+            tmp = clamped_swiglu_back(
+                grad_output, input + bias, ctx.clamp_value
+            )
         else:
             tmp = bias_swiglu_back(grad_output, input, bias)
         return tmp, tmp, None, None, None
@@ -287,13 +341,19 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
 
     @staticmethod
     @nvtx_decorator()
-    def forward(ctx, input, fp8_input_store, cpu_offload_input, clamp_value=None):
+    def forward(
+        ctx, input, fp8_input_store, cpu_offload_input, clamp_value=None
+    ):
         """Forward pass of SwiGLU activation.
 
         Args:
             ctx: Autograd context object for saving tensors for backward pass.
             input (paddle.Tensor): Input tensor to apply SwiGLU to.
             fp8_input_store (bool): If True, stores intermediate values in FP8 format.
+            cpu_offload_input (bool): If True, enables CPU activation offloading.
+            clamp_value (float, optional): If provided and > 0, clamps gate to
+                (-inf, clamp_value] and value to [-clamp_value, clamp_value] for
+                numerical stability.
 
         Returns:
             paddle.Tensor: Result of applying SwiGLU activation.
@@ -321,9 +381,7 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
             grad_output (paddle.Tensor): Gradient of the loss with respect to the output.
 
         Returns:
-            tuple: Tuple containing:
-                - Gradient with respect to the input tensor
-                - None for fp8_input_store parameter
+            paddle.Tensor: Gradient with respect to the input tensor.
         """
         input = ctx.saved_tensor()[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
@@ -346,18 +404,19 @@ class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
         ctx.clamp_value = clamp_value
-        if clamp_value is not None:
-            return clamped_weighted_swiglu(input, weights, clamp_value)
-        return weighted_swiglu(input, weights)
+        if clamp_value is not None and clamp_value > 0:
+            res = clamped_weighted_swiglu(input, weights, clamp_value)
+        else:
+            res = weighted_swiglu(input, weights)
+        return res
 
     @staticmethod
     def backward(ctx, grad_output):
         input, weights = ctx.saved_tensor()
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
-        clamp_value = ctx.clamp_value
-        if clamp_value is not None:
+        if ctx.clamp_value is not None and ctx.clamp_value > 0:
             tmp, wgrad = clamped_weighted_swiglu_back(
-                grad_output, input, weights, clamp_value
+                grad_output, input, weights, ctx.clamp_value
             )
         else:
             tmp, wgrad = weighted_swiglu_back(grad_output, input, weights)
@@ -365,7 +424,11 @@ class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
 
 
 def bias_swiglu_impl(
-    input, bias, fp8_input_store=False, cpu_offload_input=False, clamp_value=None
+    input,
+    bias,
+    fp8_input_store=False,
+    cpu_offload_input=False,
+    clamp_value=None,
 ):
     """Implementation of biased SwiGLU that handles different input shapes.
 
@@ -378,6 +441,11 @@ def bias_swiglu_impl(
             uses the bias-free SwiGLU variant.
         fp8_input_store (bool, optional): Whether to store intermediate values in FP8 format.
             Defaults to False.
+        cpu_offload_input (bool, optional): If True, enables CPU activation offloading.
+            Defaults to False.
+        clamp_value (float, optional): If provided and > 0, clamps gate to
+            (-inf, clamp_value] and value to [-clamp_value, clamp_value] for
+            numerical stability.
 
     Returns:
         paddle.Tensor: Result of biased SwiGLU activation.
@@ -393,7 +461,9 @@ def bias_swiglu_impl(
             input, bias, fp8_input_store, cpu_offload_input, clamp_value
         )
     else:
-        output = SwiGLUFunction.apply(input, fp8_input_store, cpu_offload_input, clamp_value)
+        output = SwiGLUFunction.apply(
+            input, fp8_input_store, cpu_offload_input, clamp_value
+        )
 
     return (
         output
@@ -413,11 +483,15 @@ def weighted_bias_swiglu_impl(
         bias: Optional bias (not supported for weighted variant).
         weights: Per-token weights, shape [..., 1].
         fp8_input_store (bool): Whether to store intermediate values in FP8 format.
-        clamp_value (float, optional): If provided, use ClampedSwiGLU instead of standard SwiGLU.
+        clamp_value (float, optional): If provided and > 0, clamps gate to
+            (-inf, clamp_value] and value to [-clamp_value, clamp_value] for
+            numerical stability.
     """
     ori_shape = input.shape
     assert len(ori_shape) in [2, 3]
     input = input.view(-1, ori_shape[-1])
+    if len(ori_shape) == 3:
+        weights = weights.view(-1, weights.shape[-1])
     if bias is not None:
         raise NotImplementedError(
             "Bias is not supported for weighted swiglu fusion"

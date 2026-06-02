@@ -232,16 +232,6 @@ class MLP(FleetLayer):
                 elif (
                     self.hidden_act == F.silu and self.config.gated_linear_unit
                 ):
-                    """
-                    intermediate_parallel = bias_swiglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
-                        self.config.activation_func_fp8_input_store,
-                        self.config.cpu_offloading
-                        and self.config.cpu_offloading_activations
-                        and False,
-                    )
-                    """
                     intermediate_parallel = bias_swiglu_impl(
                         intermediate_parallel,
                         bias_parallel,

@@ -52,7 +52,7 @@ class Gate:
         self.calls.append((hidden_states, input_ids))
         return "gate-output"
 
-    def set_layer_number(self, layer_number):
+    def set_layer_number(self, layer_number, is_mtp_layer=False):
         self.layer_number = layer_number
 
 
