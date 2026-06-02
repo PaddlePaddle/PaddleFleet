@@ -594,7 +594,7 @@ class TransformerConfig(ModelParallelConfig):
     """Use fused triton kernels for mHC operations (sinkhorn, h_aggregate, h_post_bda, proj_rms).
     Requires cuTile to be available."""
 
-    high_precision_mhc: bool = False
+    high_precision_mhc: bool = True
     """Use high precision (float32) for mHC forward and backward computation."""
 
     ####################

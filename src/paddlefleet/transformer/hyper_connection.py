@@ -84,12 +84,11 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
             H_res: [..., n, n] - doubly stochastic matrix
         """
         # Stabilized exp: subtract row-wise max to prevent overflow
-        with paddle.amp.auto_cast(enable=False):
-            M_init = paddle.exp(
-                H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
-            )
+        M_init = paddle.exp(
+            H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+        )
 
-            M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
+        M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
 
         # Save initial M for backward recomputation
         ctx.save_for_backward(M_init)
@@ -144,8 +143,7 @@ def native_proj_rms(
     nC = x.shape[-1]
     r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)
     r = 1.0 / (r + eps)
-    with paddle.amp.auto_cast(enable=False):
-        proj = paddle.matmul(x, weight)
+    proj = paddle.matmul(x, weight)
     return proj, r
 
 
@@ -481,13 +479,14 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (for fused kernel)
             h_post: [..., n] - expansion weights
         """
-        # Compute mappings
-        if self.config.high_precision_mhc:
-            hidden_states = hidden_states.astype("float32")
-        h_pre, h_post, h_res = self.compute_mappings(hidden_states)
+        with paddle.amp.auto_cast(enable=False):
+            # Compute mappings
+            if self.config.high_precision_mhc:
+                hidden_states = hidden_states.astype("float32")
+            h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
-        # Aggregate for layer input
-        aggregated = self.aggregate(hidden_states, h_pre)
+            # Aggregate for layer input
+            aggregated = self.aggregate(hidden_states, h_pre)
 
         return aggregated, h_res, h_post
 
@@ -615,35 +614,40 @@ class HyperConnectionModule(nn.Layer):
         Returns:
             output: [..., n*C] - final output after all operations
         """
-        x, bias = layer_output_with_bias
+        with paddle.amp.auto_cast(enable=False):
+            x, bias = layer_output_with_bias
 
-        # Fast path: no dropout — use fused/native h_post_bda kernel
-        if dropout_prob == 0.0 or not training:
-            leading_shape = original_residual.shape[:-1]
-            n = self.n
-            C = self.hidden_size
-            orig_reshaped = original_residual.reshape([*leading_shape, n, C])
-            if self.config.high_precision_mhc:
-                orig_reshaped = orig_reshaped.astype("float32")
-                x = x.astype("float32")
-                if bias is not None:
-                    bias = bias.astype("float32")
-            output = self._h_post_bda_op(h_res, orig_reshaped, h_post, x, bias)
-            return output.reshape([*leading_shape, n * C])
+            # Fast path: no dropout — use fused/native h_post_bda kernel
+            if dropout_prob == 0.0 or not training:
+                leading_shape = original_residual.shape[:-1]
+                n = self.n
+                C = self.hidden_size
+                orig_reshaped = original_residual.reshape(
+                    [*leading_shape, n, C]
+                )
+                if self.config.high_precision_mhc:
+                    orig_reshaped = orig_reshaped.astype("float32")
+                    x = x.astype("float32")
+                    if bias is not None:
+                        bias = bias.astype("float32")
+                output = self._h_post_bda_op(
+                    h_res, orig_reshaped, h_post, x, bias
+                )
+                return output.reshape([*leading_shape, n * C])
 
-        # Slow path: dropout required — sequential ops
-        mixed = self.apply_h_res(h_res, original_residual)
-        x_expanded = self._apply_h_post(x, h_post)
-        bias_expanded = (
-            self._apply_h_post(bias, h_post) if bias is not None else None
-        )
+            # Slow path: dropout required — sequential ops
+            mixed = self.apply_h_res(h_res, original_residual)
+            x_expanded = self._apply_h_post(x, h_post)
+            bias_expanded = (
+                self._apply_h_post(bias, h_post) if bias is not None else None
+            )
 
-        if bias_expanded is not None:
-            x_expanded = x_expanded + bias_expanded
-        out = paddle.nn.functional.dropout(
-            x_expanded, p=dropout_prob, training=training
-        )
-        output = out + mixed
+            if bias_expanded is not None:
+                x_expanded = x_expanded + bias_expanded
+            out = paddle.nn.functional.dropout(
+                x_expanded, p=dropout_prob, training=training
+            )
+            output = out + mixed
 
         return output
 
