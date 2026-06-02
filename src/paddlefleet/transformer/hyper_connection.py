@@ -717,7 +717,11 @@ class HyperConnectionContractLayer(FleetLayer):
         hidden_states = dict_args["hidden_states"]
 
         # When MTP is enabled, preserve multi-stream for MTP input
-        if self.mtp_enabled and self.num_mtp > 0:
+        if (
+            self.mtp_enabled
+            and self.num_mtp > 0
+            and not getattr(self.config, "mtp_load_weight_only", False)
+        ):
             dict_args["mhc_multistream"] = hidden_states
 
             if self.magic_send:
