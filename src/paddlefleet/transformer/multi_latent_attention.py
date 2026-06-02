@@ -260,11 +260,8 @@ class MultiLatentAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
-        self.num_attention_heads = self.config.num_attention_heads
 
-        self.query_projection_size = (
-            self.config.v_head_dim * self.num_attention_heads
-        )
+        self.out_projection_size = self.v_head_dim * self.num_attention_heads
 
         self.q_head_dim = (
             self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
@@ -308,9 +305,11 @@ class MultiLatentAttention(Attention):
             layer_number=self.layer_number,
             attn_mask_type=self.attn_mask_type,
             attention_type=self.attention_type,
+            is_mtp_layer=self.is_mtp_layer,
+            is_swa=self.is_swa,
             softmax_scale=self.softmax_scale,
             k_channels=self.q_head_dim,
-            v_channels=self.config.v_head_dim,
+            v_channels=self.v_head_dim,
             num_attention_heads=self.num_attention_heads,
             num_key_value_heads=1,
             cp_comm_type=cp_comm_type,
@@ -320,7 +319,7 @@ class MultiLatentAttention(Attention):
         # Output.
         self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
-            self.query_projection_size,
+            self.out_projection_size,
             self.config.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,
@@ -338,7 +337,7 @@ class MultiLatentAttention(Attention):
             self.gate_proj = build_spec_layer(
                 sublayers_spec.gate_proj,
                 self.config.hidden_size,
-                self.query_projection_size,
+                self.out_projection_size,
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
@@ -378,7 +377,7 @@ class MultiLatentAttention(Attention):
         qk_nope_head_dim = self.config.qk_nope_head_dim
         qk_rope_head_dim = self.config.qk_rope_head_dim
         kv_lora_rank = self.config.kv_lora_rank
-        v_head_dim = self.config.v_head_dim
+        v_head_dim = self.v_head_dim
         num_heads = self.num_attention_heads_per_partition
 
         # Split query into nope and rope parts
@@ -638,7 +637,7 @@ class MLASelfAttention(MultiLatentAttention):
             self.q_proj = build_spec_layer(
                 sublayers_spec.q_proj,
                 self.config.hidden_size,
-                self.config.num_attention_heads * self.q_head_dim,
+                self.num_attention_heads * self.q_head_dim,
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
@@ -666,7 +665,7 @@ class MLASelfAttention(MultiLatentAttention):
             self.q_b_proj = build_spec_layer(
                 sublayers_spec.q_b_proj,
                 self.config.q_lora_rank,
-                self.config.num_attention_heads * self.q_head_dim,
+                self.num_attention_heads * self.q_head_dim,
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
@@ -694,8 +693,8 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
-            self.config.num_attention_heads
-            * (self.config.qk_nope_head_dim + self.config.v_head_dim),
+            self.num_attention_heads
+            * (self.config.qk_nope_head_dim + self.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -930,7 +929,7 @@ class MLASelfAttention(MultiLatentAttention):
             kv = kv.view(
                 *kv.size()[:-1],
                 self.num_attention_heads_per_partition,
-                self.config.qk_nope_head_dim + self.config.v_head_dim,
+                self.config.qk_nope_head_dim + self.v_head_dim,
             )
 
             # if self.layer_number == 0:
@@ -986,7 +985,7 @@ class MLASelfAttention(MultiLatentAttention):
                     sin,
                     self.config.qk_rope_head_dim,
                     self.config.qk_nope_head_dim,
-                    self.config.v_head_dim,
+                    self.v_head_dim,
                     cu_seqlens_kv,
                     cp_rank,
                     cp_size,
@@ -1046,7 +1045,7 @@ class MLASelfAttention(MultiLatentAttention):
                 # value: [num_tokens, n, v_head_dim]
                 k_no_pe, value = paddle.split(
                     kv,
-                    [self.config.qk_nope_head_dim, self.config.v_head_dim],
+                    [self.config.qk_nope_head_dim, self.v_head_dim],
                     axis=-1,
                 )
 

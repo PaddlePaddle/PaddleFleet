@@ -155,6 +155,10 @@ class TestMultiLatentAttentionRopeTypeValidation(unittest.TestCase):
         def patched_attention_init(self_inner, *a, **kw):
             paddle.nn.Layer.__init__(self_inner)
             self_inner.config = config
+            self_inner.v_head_dim = config.v_head_dim
+            self_inner.num_attention_heads = config.num_attention_heads
+            self_inner.is_swa = False
+            self_inner.is_mtp_layer = False
 
         with (
             patch(
