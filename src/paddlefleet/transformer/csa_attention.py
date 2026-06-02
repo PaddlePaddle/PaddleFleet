@@ -1688,9 +1688,12 @@ class CompressedSparseAttention(FleetLayer):
         # The fused TileLang indexer-loss path is only active during the
         # grad-enabled forward. Full recompute runs the first forward under
         # no_grad; that pass should only materialize main-attention indices.
-        # When cuDNN indexer is enabled it takes precedence over TileLang loss path.
+        # cuDNN backend overrides: skip fused loss path, use cuDNN topk only.
         use_tilelang_loss_path = (
-            use_tilelang_indexer and not use_cudnn_indexer and self.training and paddle.is_grad_enabled()
+            use_tilelang_indexer
+            and indexer_backend != "cudnn"
+            and self.training
+            and paddle.is_grad_enabled()
         )
         loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
             self.config,
