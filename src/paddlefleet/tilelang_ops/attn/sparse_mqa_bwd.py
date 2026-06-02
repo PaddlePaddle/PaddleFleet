@@ -14,9 +14,22 @@
 
 # Refer to https://github.com/radixark/miles/pull/1045/
 
+import os
+
 import paddle
 import tilelang
 from tilelang import language as T
+
+# Try to import cuDNN DSA for fallback
+try:
+    from paddlefleet.cudnn_ops.sparse_attention import (
+        is_cudnn_dsa_available,
+        sparse_mqa_bwd_interface as sparse_mqa_bwd_cudnn,
+    )
+
+    _cudnn_available = True
+except Exception:
+    _cudnn_available = False
 
 
 @tilelang.jit(out_idx=[-1])
@@ -313,6 +326,12 @@ def sparse_mqa_bwd_interface(
 ):
     """Backward interface for DSv4 sparse MQA attention.
 
+    Automatically uses cuDNN DSA if available and enabled, otherwise falls back
+    to TileLang implementation.
+
+    When cuDNN DSA backward is used, FlashMLA forward must be used for LSE
+    format compatibility. Set USE_FLASH_MLA=true to enable.
+
     Args:
         q:         [B, S, H, D] bf16
         kv:        [B, S_kv, D] bf16
@@ -327,7 +346,55 @@ def sparse_mqa_bwd_interface(
         dq:         [B, S, H, D] bf16
         dkv:        [B, S_kv, D] bf16
         d_attn_sink: [H] fp32
+
+    Raises:
+        AssertionError: If cuDNN DSA is used but USE_FLASH_MLA is not true.
     """
+    # Use cuDNN DSA if explicitly requested via environment variable
+    use_cudnn_dsa = os.getenv("USE_CUDNN_DSA", "false").lower() == "true"
+    if use_cudnn_dsa:
+        if not _cudnn_available:
+            raise RuntimeError(
+                "USE_CUDNN_DSA=true but cuDNN DSA is not available. "
+                "Failed to import paddlefleet.cudnn_ops.sparse_attention. "
+                "Please check your cuDNN installation or set USE_CUDNN_DSA=false."
+            )
+        if not is_cudnn_dsa_available():
+            raise RuntimeError(
+                "USE_CUDNN_DSA=true but is_cudnn_dsa_available() returned False. "
+                "Please check your cuDNN DSA configuration or set USE_CUDNN_DSA=false."
+            )
+        # cuDNN DSA backward requires FlashMLA forward for LSE compatibility
+        assert os.getenv("USE_FLASH_MLA", "false").lower() == "true", (
+            "cuDNN DSA backward requires FlashMLA forward. "
+            "Set USE_FLASH_MLA=true to enable FlashMLA forward, "
+            "or set USE_CUDNN_DSA=false to use TileLang backward instead."
+        )
+        return sparse_mqa_bwd_cudnn(
+            q=q,
+            kv=kv,
+            attn_sink=attn_sink,
+            o=o,
+            do=do,
+            topk_idxs=topk_idxs,
+            lse=lse,
+            sm_scale=sm_scale,
+        )
+    elif _cudnn_available and is_cudnn_dsa_available():
+        try:
+            return sparse_mqa_bwd_cudnn(
+                q=q,
+                kv=kv,
+                attn_sink=attn_sink,
+                o=o,
+                do=do,
+                topk_idxs=topk_idxs,
+                lse=lse,
+                sm_scale=sm_scale,
+            )
+        except Exception:
+            pass
+
     assert q.is_contiguous() and kv.is_contiguous()
     assert topk_idxs.is_contiguous() and lse.is_contiguous()
     deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
@@ -341,7 +408,11 @@ def sparse_mqa_bwd_interface(
     topk = topk_idxs.shape[-1]
 
     # Pad topk to next multiple of block_size (kernel requires divisibility)
-    block_size = 32
+    # Aligned with Megatron: SM90=128, SM100=64
+    gpu_props = paddle.device.get_device_properties("gpu:0")
+    major = gpu_props.major  # 10 for SM100, 9 for SM90
+    block_size = 64 if major >= 10 else 128
+
     padded_topk = (topk + block_size - 1) // block_size * block_size
     if padded_topk != topk:
         pad = paddle.full([B, S, padded_topk - topk], -1, dtype=topk_idxs.dtype)
