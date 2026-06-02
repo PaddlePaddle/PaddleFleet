@@ -892,6 +892,9 @@ class TransformerConfig(ModelParallelConfig):
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
             )
+            assert self.pipeline_model_parallel_size > 1, (
+                "enable_mtp_magic_send requires pipeline_model_parallel_size > 1"
+            )
 
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size

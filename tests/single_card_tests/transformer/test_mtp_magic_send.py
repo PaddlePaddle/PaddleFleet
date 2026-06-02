@@ -56,6 +56,7 @@ def _cfg(**kw):
             **_BASE_CFG,
             "enable_mtp_magic_send": True,
             "num_nextn_predict_layers": 1,
+            "pipeline_model_parallel_size": 2,
             **kw,
         }
     )
@@ -255,12 +256,22 @@ class TestTransformerConfig(unittest.TestCase):
         self.assertFalse(TransformerConfig().enable_mtp_magic_send)
         self.assertTrue(
             TransformerConfig(
-                enable_mtp_magic_send=True, num_nextn_predict_layers=1
+                enable_mtp_magic_send=True,
+                num_nextn_predict_layers=1,
+                pipeline_model_parallel_size=2,
             ).enable_mtp_magic_send
         )
         with self.assertRaises(AssertionError):
             TransformerConfig(
-                enable_mtp_magic_send=True, num_nextn_predict_layers=2
+                enable_mtp_magic_send=True,
+                num_nextn_predict_layers=2,
+                pipeline_model_parallel_size=2,
+            )
+        with self.assertRaises(AssertionError):
+            TransformerConfig(
+                enable_mtp_magic_send=True,
+                num_nextn_predict_layers=1,
+                pipeline_model_parallel_size=1,
             )
 
 
@@ -314,6 +325,7 @@ class TestWrappedPaddleNormPipe(unittest.TestCase):
         cfg_on = TransformerConfig(
             enable_mtp_magic_send=True,
             num_nextn_predict_layers=1,
+            pipeline_model_parallel_size=2,
             hidden_size=64,
             normalization="RMSNorm",
             tensor_model_parallel_size=1,
@@ -799,6 +811,7 @@ class TestHyperConnectionContractLayerMagicSend(unittest.TestCase):
                 num_residual_streams=4,
                 enable_mtp_magic_send=magic_send,
                 num_nextn_predict_layers=num_mtp,
+                pipeline_model_parallel_size=2 if magic_send else 1,
                 tensor_model_parallel_size=1,
             )
         )
