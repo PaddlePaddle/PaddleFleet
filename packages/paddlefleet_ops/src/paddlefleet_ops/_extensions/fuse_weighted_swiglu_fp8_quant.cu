@@ -725,8 +725,6 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
   paddle::Tensor out;
   paddle::Tensor scale;
 
-  
-
   if (use_ue8m0) {
     auto input_dim = x.dims();
     const int64_t token_num = input_dim[0];
