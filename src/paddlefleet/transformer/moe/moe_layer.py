@@ -62,6 +62,25 @@ logger = logging.getLogger(__name__)
 
 # MD5 logging for MoE precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
+# Sonic FP8 EP bf16-payload controls. Both are intranode-only optimizations: on a single
+# node DeepEP over NVLink the all-to-all is latency/barrier-bound (NOT bandwidth-bound), so
+# doubling the payload bytes (fp8 1B -> bf16 2B) is ~free, while it removes an exposed
+# fp8->f32->fp8 double-quant and keeps the tensor bf16 through the lossless all-to-all
+# (precision win). On multinode IB the all-to-all IS bandwidth-bound, so keep these gated
+# (default OFF). Forward and backward are managed independently:
+#
+#   _SONIC_BF16_X_DISPATCH   -- FORWARD activation x over EP dispatch. When ON, ship bf16 x
+#       instead of pre-quantized rowwise fp8; the receiver does a single colwise quant from
+#       bf16 in wgrad (the ~162us floor) instead of the exposed ~403us double-quant.
+#   _SONIC_BF16_GRAD_COMBINE -- BACKWARD gradient dout over EP combine. When ON, ship bf16
+#       dout instead of pre-quantizing it to rowwise fp8 in the combine backward; the
+#       receiver quantizes dout once from bf16 (fused_dual_colwise_quantize) instead of the
+#       exposed dequant_colwise_quantize_and_pack_from_isa double-quant. This is the same
+#       code path already used when combine_overlap_handle is not None.
+_SONIC_BF16_X_DISPATCH = os.environ.get("SONIC_MOE_BF16_X_DISPATCH", "0") == "1"
+_SONIC_BF16_GRAD_COMBINE = (
+    os.environ.get("SONIC_MOE_BF16_GRAD_COMBINE", "0") == "1"
+)
 
 
 def _log_moe_md5(tensor, name, layer_idx=None):
@@ -579,9 +598,10 @@ class MoELayer(nn.Layer):
         prequant_dispatch_payload = None
         use_fused_fp8_dispatch = self.fp8_dispatch
         if self.using_sonic_moe and self.fp8_dispatch:
-            prequant_dispatch_payload = make_sonic_fp8_dispatch_payload(
-                hidden_states
-            )
+            if not _SONIC_BF16_X_DISPATCH:
+                prequant_dispatch_payload = make_sonic_fp8_dispatch_payload(
+                    hidden_states
+                )
             use_fused_fp8_dispatch = False
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
@@ -691,6 +711,7 @@ class MoELayer(nn.Layer):
             self.using_sonic_moe
             and self.fp8_dispatch
             and combine_overlap_handle is None
+            and not _SONIC_BF16_GRAD_COMBINE
         )
         fp8_combine_grad_handle = {} if use_sonic_fp8_combine_grad else None
 
@@ -816,9 +837,10 @@ class MoELayer(nn.Layer):
             prequant_dispatch_payload = None
             use_fused_fp8_dispatch = self.fp8_dispatch
             if self.using_sonic_moe and self.fp8_dispatch:
-                prequant_dispatch_payload = make_sonic_fp8_dispatch_payload(
-                    hidden_states
-                )
+                if not _SONIC_BF16_X_DISPATCH:
+                    prequant_dispatch_payload = make_sonic_fp8_dispatch_payload(
+                        hidden_states
+                    )
                 use_fused_fp8_dispatch = False
             dispatched_hidden_states, fp8_dispatched_handle = (
                 self.token_dispatcher.token_dispatch_overlap(
