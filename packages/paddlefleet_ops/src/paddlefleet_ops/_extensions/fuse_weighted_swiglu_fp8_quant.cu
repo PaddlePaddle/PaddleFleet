@@ -725,6 +725,8 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
   paddle::Tensor out;
   paddle::Tensor scale;
 
+  
+
   if (use_ue8m0) {
     auto input_dim = x.dims();
     const int64_t token_num = input_dim[0];
@@ -755,10 +757,16 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
                        {1, padded_token_num},
                        paddle::DataType::INT32,
                        x.place());
+    if (token_num == 0 || hidden_size == 0) {
+      return {out, scale};
+    }
   } else {
     scale = GetEmptyTensor(
         {rows, (cols / 2 + 127) / 128}, phi::DataType::FLOAT32, place);
     out = GetEmptyTensor({rows, cols / 2}, phi::DataType::FLOAT8_E4M3FN, place);
+    if (rows == 0 || cols == 0) {
+      return {out, scale};
+    }
   }
 
   // Get data pointers
@@ -774,12 +782,6 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
     scale_data = static_cast<void*>(scale.data<float>());
   }
   // Launch kernel
-
-  // Skip kernel launch on empty input. CUDA rejects launches with grid.x == 0
-  // or grid.y == 0 (cudaErrorInvalidValue from cudaLaunchKernel)
-  if (rows == 0 || cols == 0) {
-    return {out, scale};
-  }
 
   if (use_ue8m0 && cols % 8 == 0) {
     dispatch_fused_spaq<phi::float8_e4m3fn, true, kHasClamp>(x_data,
