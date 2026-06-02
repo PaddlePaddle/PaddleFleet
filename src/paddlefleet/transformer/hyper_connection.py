@@ -84,11 +84,12 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
             H_res: [..., n, n] - doubly stochastic matrix
         """
         # Stabilized exp: subtract row-wise max to prevent overflow
-        M_init = paddle.exp(
-            H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
-        )
+        with paddle.amp.auto_cast(enable=False):
+            M_init = paddle.exp(
+                H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+            )
 
-        M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
+            M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
 
         # Save initial M for backward recomputation
         ctx.save_for_backward(M_init)
@@ -143,7 +144,8 @@ def native_proj_rms(
     nC = x.shape[-1]
     r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)
     r = 1.0 / (r + eps)
-    proj = paddle.matmul(x, weight)
+    with paddle.amp.auto_cast(enable=False):
+        proj = paddle.matmul(x, weight)
     return proj, r
 
 
@@ -294,7 +296,12 @@ class HyperConnectionModule(nn.Layer):
         Args:
             x: [..., n*C] - n-stream hidden states
         """
-        proj, r = self._proj_rms_op(x, self.mapping_proj.weight, self.norm_eps)
+        ori_dtype = x.dtype
+        proj, r = self._proj_rms_op(
+            x, self.mapping_proj.weight.astype(ori_dtype), self.norm_eps
+        )
+        if not self.config.high_precision_mhc:
+            r = r.astype(ori_dtype)
         return proj, r
 
     def _compute_h(
@@ -373,7 +380,11 @@ class HyperConnectionModule(nn.Layer):
         # Reshape to [..., n, C]
         x_streams = x.reshape([*leading_shape, self.n, C])
 
-        return self._h_aggregate_op(x_streams, h_pre)
+        aggregated = self._h_aggregate_op(x_streams, h_pre)
+        if aggregated.dtype != x.dtype:
+            aggregated = aggregated.astype(x.dtype)
+
+        return aggregated
 
     def apply_h_res(self, h_res: Tensor, residual: Tensor) -> Tensor:
         """
@@ -471,7 +482,8 @@ class HyperConnectionModule(nn.Layer):
             h_post: [..., n] - expansion weights
         """
         # Compute mappings
-        hidden_states = hidden_states.astype("float32")
+        if self.config.high_precision_mhc:
+            hidden_states = hidden_states.astype("float32")
         h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
         # Aggregate for layer input
@@ -610,12 +622,12 @@ class HyperConnectionModule(nn.Layer):
             leading_shape = original_residual.shape[:-1]
             n = self.n
             C = self.hidden_size
-            orig_reshaped = original_residual.reshape(
-                [*leading_shape, n, C]
-            ).astype("float32")
-            x = x.astype("float32")
-            if bias is not None:
-                bias = bias.astype("float32")
+            orig_reshaped = original_residual.reshape([*leading_shape, n, C])
+            if self.config.high_precision_mhc:
+                orig_reshaped = orig_reshaped.astype("float32")
+                x = x.astype("float32")
+                if bias is not None:
+                    bias = bias.astype("float32")
             output = self._h_post_bda_op(h_res, orig_reshaped, h_post, x, bias)
             return output.reshape([*leading_shape, n * C])
 
