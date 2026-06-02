@@ -348,6 +348,7 @@ def sparse_mqa_bwd_interface(
         d_attn_sink: [H] fp32
 
     Raises:
+        RuntimeError: If USE_CUDNN_DSA=true but cuDNN DSA is not available.
         AssertionError: If cuDNN DSA is used but USE_FLASH_MLA is not true.
     """
     # Use cuDNN DSA if explicitly requested via environment variable
@@ -380,20 +381,6 @@ def sparse_mqa_bwd_interface(
             lse=lse,
             sm_scale=sm_scale,
         )
-    elif _cudnn_available and is_cudnn_dsa_available():
-        try:
-            return sparse_mqa_bwd_cudnn(
-                q=q,
-                kv=kv,
-                attn_sink=attn_sink,
-                o=o,
-                do=do,
-                topk_idxs=topk_idxs,
-                lse=lse,
-                sm_scale=sm_scale,
-            )
-        except Exception:
-            pass
 
     assert q.is_contiguous() and kv.is_contiguous()
     assert topk_idxs.is_contiguous() and lse.is_contiguous()
