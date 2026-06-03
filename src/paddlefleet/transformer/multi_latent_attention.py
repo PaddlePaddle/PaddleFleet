@@ -990,6 +990,9 @@ class MLASelfAttention(MultiLatentAttention):
                     cp_rank,
                     cp_size,
                 )
+
+                # dynamic_inference not supported for now
+                k_pe = None
             else:
                 # Determine seq length:
                 #   packed 3D [t, n, d]      -> dim 0
