@@ -14,6 +14,7 @@
 
 
 import functools
+import hashlib
 import os
 
 import numpy as np
@@ -58,8 +59,6 @@ def _tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
     Note: internally calls .numpy() which triggers GPU→CPU synchronization
     and blocks the async training pipeline. Do NOT use in the forward pass.
     """
-    import hashlib
-
     tensor_for_md5 = tensor.detach().cast(dtype)
     return hashlib.md5(tensor_for_md5.numpy().tobytes()).hexdigest()
 
@@ -591,7 +590,9 @@ class LanguageLoss(FleetLayer):
 
             def add_loss(main_loss, loss):
                 if _use_accuracy_compatible_kernel():
-                    # Megatron-aligned behavior: don't include MTP loss value in total loss
+                    # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
+                    # This matches Megatron's behavior where MTP contributes to training
+                    # gradients without affecting the reported loss value.
                     if self.config.add_mtp_loss:
                         return main_loss + loss - loss.detach()
                     else:
@@ -609,8 +610,8 @@ class LanguageLoss(FleetLayer):
                 loss = lm_loss
                 if _use_accuracy_compatible_kernel():
                     # Megatron-aligned: only add MTP loss when add_mtp_loss=True.
-                    # Use loss + val - val.detach() so loss VALUE doesn't increase,
-                    # only gradient flows (matches add_loss() semantics).
+                    # Use add_loss() to keep single maintenance point for compat
+                    # behavior (loss + val - val.detach() for gradient-only flow).
                     if self.config.add_mtp_loss:
                         num_mtp = len(mtp_loss)
                         for mtp_l in mtp_loss:
@@ -619,7 +620,7 @@ class LanguageLoss(FleetLayer):
                                 * mtp_l
                                 / num_mtp
                             )
-                            loss = loss + mtp_val - mtp_val.detach()
+                            loss = add_loss(loss, mtp_val)
                 else:
                     # Original behavior: always use add_loss
                     num_mtp = len(mtp_loss)
@@ -694,7 +695,8 @@ class MainLanguageLoss(LanguageLoss):
 
         def add_loss(main_loss, loss):
             if _use_accuracy_compatible_kernel():
-                # Megatron-aligned behavior: don't include MTP loss value in total loss
+                # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
+                # This matches Megatron's behavior
                 if self.config.add_mtp_loss:
                     return main_loss + loss - loss.detach()
                 else:

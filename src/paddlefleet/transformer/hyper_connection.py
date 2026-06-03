@@ -702,7 +702,7 @@ class HyperConnectionModule(nn.Layer):
             output = self._h_post_bda_op(h_res, orig_reshaped, h_post, x, bias)
             return output.reshape([*leading_shape, n * C])
 
-        # Sequential path: used when dropout required OR accuracy-compatible kernel enabled
+        # Sequential path: used when dropout required OR accuracy-compatible kernel is NOT enabled
         mixed = self.apply_h_res(h_res, original_residual)
 
         x_expanded = self._apply_h_post(x, h_post)
