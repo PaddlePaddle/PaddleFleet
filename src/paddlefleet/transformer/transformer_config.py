@@ -20,7 +20,7 @@ from __future__ import annotations
 import functools
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, Optional
 
 import paddle.nn.functional as F
 
@@ -248,6 +248,20 @@ class TransformerConfig(ModelParallelConfig):
     """If not None, then will use sliding window attention. The size of the window is specified by
     the numbers inside the tuple; -1 is special value meaning "infinite window size"."""
 
+    mtp_window_size: int = None
+    """Sliding window size used only by MTP (multi-token prediction) layers.
+    - If None: MTP layers use global attention (sliding_window=None), regardless of the backbone.
+    - If int: MTP layers use causal sliding window attention with size mtp_window_size
+      (equivalent to sliding_window=(mtp_window_size, 0)). The backbone's sliding_window is
+      unaffected."""
+
+    mtp_reuse_last_layer: bool = False
+    """If True, alias every MTP TransformerLayer's parameters to the last backbone
+    TransformerLayer on the same PP rank. This is parameter sharing (not module
+    replacement) and saves memory by avoiding a duplicate set of layer weights for MTP.
+    Limitation: cross-stage aliasing is not supported (PP > 1 layouts where the
+    backbone-last layer and the MTP layer live on different pipeline stages)."""
+
     window_attn_skip_freq: int | list[int] = None
     """Frequency of full attention layers among sliding window attention layers. Accepts either:
     - An integer N: Represents a (N-1):1 ratio, one full attention layer after (N-1) SWA layers.
@@ -279,6 +293,22 @@ class TransformerConfig(ModelParallelConfig):
 
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
+
+    multimax: Optional[Literal["lm_head", "attn", "all"]] = None
+    """Apply learnable SeLU-style modulation before softmax.
+    - ``None`` / ``null`` (default): disabled. An unset key, an empty value
+      (``multimax:``), or an explicit ``null`` in YAML/JSON all map to Python
+      ``None``, so the feature is opt-in and safe to leave out of model
+      configs.
+    - "lm_head": apply SeLU(x, ranges, ts) on the LM-head logits before the
+      language-modeling softmax/cross-entropy. Adds two [4]-shape learnable
+      parameters (multimax_ranges, multimax_ts) to the LM head. These are
+      excluded from weight decay via the "multimax" substring filter in the
+      trainer's no-decay rule.
+    - "attn": apply on attention scores before softmax (not implemented yet).
+    - "all": apply on both LM head and attention (not implemented yet, only
+      the lm_head branch will take effect).
+    """
 
     gated_attention: bool = False
     """If True, enables gated attention where a learnable sigmoid gate is applied to the
@@ -1209,3 +1239,26 @@ class TransformerConfig(ModelParallelConfig):
                 f"head_wise_swa_ratio must be between 0.0 and 1.0, "
                 f"but got {self.head_wise_swa_ratio}."
             )
+
+        # Multimax validation + grep-friendly confirmation banner.
+        # Operators can verify the setting reached the model with:
+        #   grep MULTIMAX <train.log>
+        import warnings as _warnings
+
+        _multimax = getattr(self, "multimax", None)
+        # Allow yaml/json to leave the field unset, set to ``null``, or pass an
+        # empty string -- all map to the canonical disabled sentinel ``None``.
+        if _multimax == "":
+            _multimax = None
+            self.multimax = None
+        if _multimax is not None and _multimax not in ("lm_head", "attn", "all"):
+            raise ValueError(
+                f"multimax must be one of None, 'lm_head', 'attn', 'all', "
+                f"got {_multimax!r}."
+            )
+        if _multimax in ("attn", "all"):
+            _warnings.warn(
+                f"[MULTIMAX-CONFIG] multimax={_multimax}: 'attn' branch is "
+                "not implemented yet; only the lm_head modulation will take effect."
+            )
+        _warnings.warn(f"[MULTIMAX-CONFIG] multimax={_multimax}")
