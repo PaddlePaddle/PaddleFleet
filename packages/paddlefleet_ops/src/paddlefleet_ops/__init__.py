@@ -87,9 +87,7 @@ if paddle.is_compiled_with_cuda():
         "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 10.0 (Blackwell) to enable."
     )
 
-    CUDNN_FRONTEND_HINT = (
-        "For developers: guard imports with `is_cudnn_frontend_available()` and only call `paddlefleet_ops.cudnn` when flag branch enabled."
-    )
+    CUDNN_FRONTEND_HINT = "For developers: guard imports with `is_cudnn_frontend_available()` and only call `paddlefleet_ops.cudnn` when flag branch enabled."
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
     DEEP_EP_HINT = "deep_ep is not supported on XPU backend."
@@ -120,6 +118,13 @@ def _hopper_requirement(
         f"{lib_module} requires GPU compute capability >= 9.0 (Hopper). "
         f"Current capability: {_capability_str}."
     )
+    return _build_notice(lib_module, reason, hint_for_error=hint)
+
+
+def _cutedsl_requirement(
+    lib_module: str, hint: str | None = None
+) -> tuple[str, str]:
+    reason = f"{lib_module} requires Python 3.12. Current Python version: {_python_version_str}."
     return _build_notice(lib_module, reason, hint_for_error=hint)
 
 
@@ -320,7 +325,7 @@ if paddle.is_compiled_with_cuda():
         paddle.enable_compat(scope={"cudnn"}, silent=True)
         _safe_load_ecosystem_lib("cudnn", ops_dir, globals())
     else:
-        warning, error = _hopper_requirement(
+        warning, error = _cutedsl_requirement(
             "paddlefleet_ops.cudnn", hint=CUDNN_FRONTEND_HINT
         )
         logger.warning(warning)
