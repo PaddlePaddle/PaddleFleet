@@ -244,6 +244,9 @@ class TestHyperConnectionModule(unittest.TestCase):
             with self.subTest(high_precision_mhc=high_precision_mhc):
                 config = _make_hc_config(high_precision_mhc=high_precision_mhc)
                 module = HyperConnectionModule(config=config, layer_number=1)
+                module = paddle.amp.decorate(
+                    models=module, level="O2", dtype="bfloat16"
+                )
                 x = paddle.randn([2, 4, self.n * self.C]).astype("bfloat16")
 
                 aggregated, h_res, h_post = module(x)
@@ -450,6 +453,9 @@ class TestHyperConnectionModule(unittest.TestCase):
             with self.subTest(high_precision_mhc=high_precision_mhc):
                 config = _make_hc_config(high_precision_mhc=high_precision_mhc)
                 module = HyperConnectionModule(config=config, layer_number=1)
+                module = paddle.amp.decorate(
+                    models=module, level="O2", dtype="bfloat16"
+                )
                 x = paddle.randn([B, S, self.n * self.C]).astype("bfloat16")
                 _, h_res, h_post = module(x)
                 layer_output = paddle.randn([B, S, self.C]).astype("bfloat16")
