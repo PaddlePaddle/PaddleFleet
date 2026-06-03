@@ -233,6 +233,21 @@ class TestHyperConnectionModule(unittest.TestCase):
         self.assertEqual(list(h_res.shape), [10, self.n, self.n])
         self.assertEqual(list(h_post.shape), [10, self.n])
 
+    def test_forward_high_precision_mhc_casts_to_float32(self):
+        """high_precision_mhc should compute mHC mappings in float32."""
+        config = _make_hc_config(high_precision_mhc=False)
+        module = HyperConnectionModule(config=config, layer_number=1)
+        x = paddle.randn([2, 4, self.n * self.C]).astype("float16")
+
+        aggregated, h_res, h_post = module(x)
+
+        self.assertEqual(aggregated.dtype, paddle.float32)
+        self.assertEqual(h_res.dtype, paddle.float32)
+        self.assertEqual(h_post.dtype, paddle.float32)
+        self.assertEqual(list(aggregated.shape), [2, 4, self.C])
+        self.assertEqual(list(h_res.shape), [2, 4, self.n, self.n])
+        self.assertEqual(list(h_post.shape), [2, 4, self.n])
+
     # ---------- compute_mappings ----------
 
     def test_compute_mappings_shapes(self):
@@ -412,6 +427,30 @@ class TestHyperConnectionModule(unittest.TestCase):
             training=False,
             fused=False,
         )
+        self.assertFalse(paddle.isnan(result).any().item())
+
+    def test_fused_h_res_h_post_bda_high_precision_fast_path(self):
+        """high_precision_mhc should cast fast-path BDA inputs to float32."""
+        B, S = 2, 4
+        config = _make_hc_config(high_precision_mhc=False)
+        module = HyperConnectionModule(config=config, layer_number=1)
+        x = paddle.randn([B, S, self.n * self.C]).astype("float16")
+        _, h_res, h_post = module(x)
+        layer_output = paddle.randn([B, S, self.C]).astype("float16")
+        bias = paddle.randn([self.C]).astype("float16")
+
+        result = module.fused_h_res_h_post_bda(
+            h_res=h_res,
+            original_residual=x,
+            h_post=h_post,
+            layer_output_with_bias=(layer_output, bias),
+            dropout_prob=0.0,
+            training=False,
+            fused=False,
+        )
+
+        self.assertEqual(result.dtype, paddle.float32)
+        self.assertEqual(list(result.shape), [B, S, self.n * self.C])
         self.assertFalse(paddle.isnan(result).any().item())
 
     # ---------- input_expand / output_contract ----------
