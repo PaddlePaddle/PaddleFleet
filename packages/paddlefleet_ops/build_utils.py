@@ -448,4 +448,13 @@ def get_libs():
                 ],
             )
         )
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="cudnn",
+                source_rel_path="third_party/cudnn-frontend",
+                artifacts=[
+                    Artifact("cudnn", "cudnn"),
+                ],
+            )
+        )
     return LIBRARIES
