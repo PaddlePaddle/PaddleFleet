@@ -277,14 +277,14 @@ class MultiLatentAttention(Attention):
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=1.0,
-                rotary_base=self.config.rope_theta,
+                rotary_base=self.rope_theta,
                 cp_group=self.pg_collection.cp,
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
-                rotary_base=self.config.rope_theta,
+                rotary_base=self.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
                 original_max_position_embeddings=self.config.original_max_position_embeddings,
                 beta_fast=self.config.beta_fast,
@@ -1069,7 +1069,7 @@ class MLASelfAttention(MultiLatentAttention):
                         q_pos_emb,
                         k_pos_emb,
                         q_len,
-                        rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
+                        rope_base=self.rope_theta,  # Must match EC's config.rope_theta
                         position_offset=start_pos,
                         position_ids=position_ids,
                     )
