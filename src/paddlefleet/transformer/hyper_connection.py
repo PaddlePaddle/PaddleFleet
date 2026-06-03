@@ -24,6 +24,7 @@ Reference: mHC paper - Manifold-Constrained Hyper-Connections for transformers.
 from __future__ import annotations
 
 import math
+import os
 from typing import TYPE_CHECKING
 
 import paddle
@@ -35,6 +36,19 @@ from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+_ACCURACY_COMPATIBLE_KERNEL: bool = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
+
+
+def _use_accuracy_compatible_kernel() -> bool:
+    """Switch for Megatron-aligned (accuracy-compatible) numeric paths.
+
+    Controlled by the ``FLAGS_use_accuracy_compatible_kernel`` env variable.
+    """
+    return _ACCURACY_COMPATIBLE_KERNEL
 
 
 class SinkhornKnopp(paddle.autograd.PyLayer):
@@ -84,12 +98,23 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         Returns:
             H_res: [..., n, n] - doubly stochastic matrix
         """
-        # Stabilized exp: subtract row-wise max to prevent overflow
-        M_init = paddle.exp(
-            H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
-        )
-
-        M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
+        # Stabilized exp: subtract row-wise max to prevent overflow.
+        # Under FLAGS_use_accuracy_compatible_kernel, force this outside AMP
+        # so the Paddle native path preserves the BF16 contract used by
+        # Megatron's torch implementation.
+        if _use_accuracy_compatible_kernel():
+            with paddle.amp.auto_cast(enable=False):
+                M_init = paddle.exp(
+                    H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+                )
+                M = SinkhornKnopp._sinkhorn_normalize(
+                    M_init, num_iterations, eps
+                )
+        else:
+            M_init = paddle.exp(
+                H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+            )
+            M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
 
         # Save initial M for backward recomputation
         ctx.save_for_backward(M_init)
@@ -304,7 +329,22 @@ class HyperConnectionModule(nn.Layer):
         Args:
             x: [..., n*C] - n-stream hidden states
         """
-        proj, r = self._proj_rms_op(x, self.mapping_proj.weight, self.norm_eps)
+        if _use_accuracy_compatible_kernel():
+            nC = x.shape[-1]
+            weight = self.mapping_proj.weight
+            r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
+            r = (1.0 / (r + self.norm_eps)).astype(x.dtype)  # [..., 1]
+            # Match Megatron clean path: torch.matmul(x, weight.t()). Paddle
+            # nn.Linear uses a different BF16 cuBLAS path for this shape and
+            # drifts before the first HC BDA.
+            x_2d = x.reshape([-1, nC])
+            weight_out_in = weight.t().contiguous()
+            proj_2d = paddle.matmul(x_2d, weight_out_in, transpose_y=True)
+            proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
+        else:
+            proj, r = self._proj_rms_op(
+                x, self.mapping_proj.weight, self.norm_eps
+            )
         return proj, r
 
     def _compute_h(
@@ -333,10 +373,12 @@ class HyperConnectionModule(nn.Layer):
         h = r * proj * alpha_ + self.bias
         # H_pre = σ(α_pre * (θ_pre @ x̃) + b_pre)
         h_pre = h[..., : self.n].sigmoid()  # [..., n]
-
         # H_post = 2σ(α_post * (θ_post @ x̃) + b_post)
         h_post = h[..., self.n : 2 * self.n].sigmoid() * 2  # [..., n]
         h_res = h[..., 2 * self.n :]
+        if _use_accuracy_compatible_kernel():
+            h_pre = h_pre.astype(proj.dtype)
+            h_post = h_post.astype(proj.dtype)
         return h_pre, h_post, h_res
 
     def compute_mappings(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -383,6 +425,12 @@ class HyperConnectionModule(nn.Layer):
         # Reshape to [..., n, C]
         x_streams = x.reshape([*leading_shape, self.n, C])
 
+        if _use_accuracy_compatible_kernel():
+            # Weighted sum: [..., n, C] * [..., n, 1] -> sum over n -> [..., C]
+            aggregated = (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
+            if aggregated.dtype != x.dtype:
+                aggregated = aggregated.astype(x.dtype)
+            return aggregated
         return self._h_aggregate_op(x_streams, h_pre)
 
     def apply_h_res(self, h_res: Tensor, residual: Tensor) -> Tensor:
@@ -400,8 +448,18 @@ class HyperConnectionModule(nn.Layer):
         C = self.hidden_size
         num_tokens = math.prod(leading_shape)
 
-        # Reshape for bmm: [..., n, n] -> [batch, n, n]
-        h_res_batched = h_res.reshape([num_tokens, n, n])
+        if _use_accuracy_compatible_kernel():
+            # Megatron clean path applies H_res.T to residual.
+            ndim = h_res.ndim
+            perm = [*list(range(ndim - 2)), ndim - 1, ndim - 2]
+            h_res_batched = (
+                h_res.astype(residual.dtype)
+                .transpose(perm)
+                .reshape([num_tokens, n, n])
+            )
+        else:
+            # Reshape for bmm: [..., n, n] -> [batch, n, n]
+            h_res_batched = h_res.reshape([num_tokens, n, n])
         # [..., n*C] -> [..., n, C] -> [batch, n, C]
         residual_batched = residual.reshape([num_tokens, n, C])
 
@@ -568,7 +626,18 @@ class HyperConnectionModule(nn.Layer):
         rsqrt = paddle.rsqrt(
             hidden_states.square().mean(-1, keepdim=True) + eps
         )
-        mixes = F.linear(hidden_states, head_fn) * rsqrt
+        if _use_accuracy_compatible_kernel():
+            # Match Torch F.linear(x, weight[out,in]) kernel selection. Paddle
+            # F.linear(x, weight[in,out]) uses a different cuBLAS path and
+            # causes BF16 ulp drift in DSv4 final output contraction.
+            head_fn_out_in = head_fn.transpose([1, 0]).contiguous()
+            with paddle.amp.auto_cast(False):
+                proj = paddle.matmul(
+                    hidden_states, head_fn_out_in, transpose_y=True
+                )
+            mixes = proj * rsqrt
+        else:
+            mixes = F.linear(hidden_states, head_fn) * rsqrt
         pre = F.sigmoid(mixes * scale + base) + eps
         y = paddle.sum(
             pre.unsqueeze(-1)
