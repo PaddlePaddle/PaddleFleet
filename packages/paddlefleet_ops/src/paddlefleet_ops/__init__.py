@@ -86,11 +86,17 @@ if paddle.is_compiled_with_cuda():
         "For developers: guard imports with `is_sonicmoe_available()` and only call `paddlefleet_ops.sonicmoe` when flag branch enabled.\n"
         "For users: set `using_sonic_moe=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 10.0 (Blackwell) to enable."
     )
+
+    CUDNN_FRONTEND_HINT = (
+        "For developers: guard imports with `is_cudnn_frontend_available()` and only call `paddlefleet_ops.cudnn_frontend` when flag branch enabled.\n"
+        "For users: set `use_cudnn_frontend=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 10.0 (Blackwell) to enable."
+    )
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
     DEEP_EP_HINT = "deep_ep is not supported on XPU backend."
     HYBRID_EP_HINT = "hybrid_ep is not supported on XPU backend."
     SONIC_MOE_HINT = "sonicmoe is not supported on XPU backend."
+    CUDNN_FRONTEND_HINT = "cudnn frontend is not supported on XPU backend."
 
 FLASH_MASK_HINT = (
     "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet_ops.flash_mask` when flag branch enabled.\n"
@@ -151,6 +157,7 @@ _DEEP_EP_AVAILABLE = False
 _HYBRID_EP_AVAILABLE = False
 _SONIC_MOE_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
+_CUDNN_FRONTEND_AVAILABLE = False
 
 if paddle.is_compiled_with_cuda():
     if paddle.cuda.get_device_capability()[0] >= 9:
@@ -166,6 +173,7 @@ if paddle.is_compiled_with_cuda():
         and _cuda_version >= (12, 9)
     ):
         _SONIC_MOE_AVAILABLE = True
+        _CUDNN_FRONTEND_AVAILABLE = True
 
 if paddle.is_compiled_with_xpu():
     _DEEP_EP_AVAILABLE = True
@@ -189,6 +197,10 @@ def is_sonic_moe_available():
 
 def is_flash_mask_available():
     return _FLASH_MASK_AVAILABLE
+
+
+def is_cudnn_frontend_available():
+    return _CUDNN_FRONTEND_AVAILABLE
 
 
 def _try_load_nvshmem(ops_dir: Path):
@@ -303,6 +315,16 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.flash_mask"] = error
+
+    if is_cudnn_frontend_available():
+        paddle.enable_compat(scope={"cudnn"}, silent=True)
+        _safe_load_ecosystem_lib("cudnn", ops_dir, globals())
+    else:
+        warning, error = _hopper_requirement(
+            "paddlefleet_ops.cudnn", hint=CUDNN_FRONTEND_HINT
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet_ops.cudnn"] = error
 
     if blocked_import_messages:
         sys.meta_path.insert(
