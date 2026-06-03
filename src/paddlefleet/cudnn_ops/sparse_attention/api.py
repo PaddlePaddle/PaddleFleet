@@ -161,6 +161,7 @@ def sparse_attention_backward(
 
     # 5. Call cuDNN backward (unified API handles SM90/SM100 internally)
     # Aligned with Megatron's call: no block_tile parameter
+    paddle.device.synchronize()
     result = DSA.sparse_attention_backward_wrapper(
         q=q_torch,
         kv=kv_torch,
