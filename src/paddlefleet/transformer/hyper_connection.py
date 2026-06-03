@@ -325,7 +325,12 @@ class HyperConnectionModule(nn.Layer):
             ],
             axis=-1,
         )
-        h = r * proj * alpha_ + self.bias
+        if not self.config.high_precision_mhc:
+            alpha_ = alpha_.astype(proj.dtype)
+            bias = self.bias.astype(proj.dtype)
+        else:
+            bias = self.bias
+        h = r * proj * alpha_ + bias
         # H_pre = σ(α_pre * (θ_pre @ x̃) + b_pre)
         h_pre = h[..., : self.n].sigmoid()  # [..., n]
 
@@ -356,6 +361,8 @@ class HyperConnectionModule(nn.Layer):
             self.sinkhorn_iterations,
             self.norm_eps,
         )  # [..., n, n]
+        if not self.config.high_precision_mhc:
+            h_res = h_res.astype(x.dtype)
 
         return h_pre, h_post, h_res
 
@@ -633,6 +640,8 @@ class HyperConnectionModule(nn.Layer):
                 output = self._h_post_bda_op(
                     h_res, orig_reshaped, h_post, x, bias
                 )
+                if not self.config.high_precision_mhc:
+                    output = output.astype(original_residual.dtype)
                 return output.reshape([*leading_shape, n * C])
 
             # Slow path: dropout required — sequential ops

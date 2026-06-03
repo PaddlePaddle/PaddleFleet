@@ -235,16 +235,16 @@ class TestHyperConnectionModule(unittest.TestCase):
         self.assertEqual(list(h_post.shape), [10, self.n])
 
     def test_forward_high_precision_mhc_switch(self):
-        """high_precision_mhc should cover both forward branches."""
+        """high_precision_mhc should choose float32 or bfloat16 compute output."""
         cases = (
-            (True, "float16", paddle.float32),
-            (False, "float32", paddle.float32),
+            (True, paddle.float32),
+            (False, paddle.bfloat16),
         )
-        for high_precision_mhc, input_dtype, expected_dtype in cases:
+        for high_precision_mhc, expected_dtype in cases:
             with self.subTest(high_precision_mhc=high_precision_mhc):
                 config = _make_hc_config(high_precision_mhc=high_precision_mhc)
                 module = HyperConnectionModule(config=config, layer_number=1)
-                x = paddle.randn([2, 4, self.n * self.C]).astype(input_dtype)
+                x = paddle.randn([2, 4, self.n * self.C]).astype("bfloat16")
 
                 aggregated, h_res, h_post = module(x)
 
@@ -440,20 +440,20 @@ class TestHyperConnectionModule(unittest.TestCase):
         self.assertFalse(paddle.isnan(result).any().item())
 
     def test_fused_h_res_h_post_bda_high_precision_fast_path(self):
-        """high_precision_mhc should cover both fast-path BDA branches."""
+        """high_precision_mhc should choose float32 or bfloat16 BDA output."""
         B, S = 2, 4
         cases = (
-            (True, "float16", paddle.float32),
-            (False, "float32", paddle.float32),
+            (True, paddle.float32),
+            (False, paddle.bfloat16),
         )
-        for high_precision_mhc, input_dtype, expected_dtype in cases:
+        for high_precision_mhc, expected_dtype in cases:
             with self.subTest(high_precision_mhc=high_precision_mhc):
                 config = _make_hc_config(high_precision_mhc=high_precision_mhc)
                 module = HyperConnectionModule(config=config, layer_number=1)
-                x = paddle.randn([B, S, self.n * self.C]).astype(input_dtype)
+                x = paddle.randn([B, S, self.n * self.C]).astype("bfloat16")
                 _, h_res, h_post = module(x)
-                layer_output = paddle.randn([B, S, self.C]).astype(input_dtype)
-                bias = paddle.randn([self.C]).astype(input_dtype)
+                layer_output = paddle.randn([B, S, self.C]).astype("bfloat16")
+                bias = paddle.randn([self.C]).astype("bfloat16")
 
                 result = module.fused_h_res_h_post_bda(
                     h_res=h_res,
@@ -470,7 +470,9 @@ class TestHyperConnectionModule(unittest.TestCase):
                 )
                 self.assertEqual(result.dtype, expected_dtype)
                 self.assertEqual(list(result.shape), [B, S, self.n * self.C])
-                self.assertFalse(paddle.isnan(result).any().item())
+                self.assertFalse(
+                    paddle.isnan(result.astype("float32")).any().item()
+                )
 
     # ---------- input_expand / output_contract ----------
 
