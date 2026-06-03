@@ -445,6 +445,7 @@ class MultiTokenPredictionLayer(FleetLayer):
 
             # Apply mask if needed
             if mtp_hidden_inputs_mask is not None:
+                # [B, 1, S] -> [B, S, 1]
                 mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
                     [0, 2, 1]
                 ).astype(hs_streams.dtype)
@@ -454,6 +455,18 @@ class MultiTokenPredictionLayer(FleetLayer):
                 ):
                     mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
                         mtp_hidden_inputs_mask, axis=1
+                    )
+                # when sp enable
+                if self.sequence_parallel:
+                    # [B, S/CP, 1] -> [S/CP, B, 1]
+                    mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
+                        [1, 0, 2]
+                    )
+                    # [S/CP, B, 1] -> [S/CP/TP, B, 1]
+                    mtp_hidden_inputs_mask = (
+                        scatter_to_sequence_parallel_region(
+                            mtp_hidden_inputs_mask
+                        )
                     )
                 hs_streams = hs_streams * mtp_hidden_inputs_mask.unsqueeze(-1)
 
@@ -505,6 +518,17 @@ class MultiTokenPredictionLayer(FleetLayer):
                         mtp_hidden_inputs_mask, axis=1
                     )
 
+                # when sp enable
+                if self.sequence_parallel:
+                    # [B, S/CP, 1] -> [S/CP, B, 1]
+                    mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
+                        [1, 0, 2]
+                    )
+                    mtp_hidden_inputs_mask = (
+                        scatter_to_sequence_parallel_region(
+                            mtp_hidden_inputs_mask
+                        )
+                    )
                 hidden_states = hidden_states * mtp_hidden_inputs_mask
             # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
             # and the (i + K)-th token's embedding, and combine them with linear projection.

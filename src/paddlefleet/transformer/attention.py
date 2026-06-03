@@ -253,6 +253,7 @@ class Attention(FleetLayer, ABC):
             self.v_head_dim = self.config.swa_v_head_dim
             self.num_attention_heads = self.config.swa_num_attention_heads
             self.num_key_value_heads = self.config.swa_num_key_value_heads
+            self.rope_theta = self.config.swa_rope_theta
         else:
             self.head_dim = self.config.head_dim
             self.v_head_dim = (
@@ -262,6 +263,7 @@ class Attention(FleetLayer, ABC):
             )
             self.num_attention_heads = self.config.num_attention_heads
             self.num_key_value_heads = self.config.num_key_value_heads
+            self.rope_theta = self.config.rope_theta
 
         self.query_projection_size = (
             self.head_dim
