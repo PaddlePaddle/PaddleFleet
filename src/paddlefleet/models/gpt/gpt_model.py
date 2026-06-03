@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -197,6 +198,107 @@ class GPTModel(PipelineLayer):
                     shared_embed_weight = layer.embedding_weight
                 if isinstance(layer, GPTLMHead):
                     layer.weight = shared_embed_weight
+
+        # MTP parameter reuse: alias each MultiTokenPredictionLayer's
+        # transformer_layer parameters to the last backbone TransformerLayer's
+        # parameters on this PP rank (Option A — parameter-level aliasing,
+        # NOT module reference replacement, so the LayerDesc tree is preserved
+        # and checkpoint save via AOA still emits per-MTP keys).
+        if getattr(self.config, "mtp_reuse_last_layer", False):
+            self._alias_mtp_to_last_backbone_layer()
+
+    def _alias_mtp_to_last_backbone_layer(self):
+        """Replace parameters of every MultiTokenPredictionLayer.transformer_layer
+        on this PP rank with the corresponding parameters of the last backbone
+        TransformerLayer on the same rank.
+
+        Cross-stage aliasing is NOT supported (would need SharedLayerDesc); in
+        that case this is a no-op on the rank that lacks the backbone-last
+        layer, and a clear warning is emitted so operators can grep the log.
+
+        Grep tags:
+          [MTP-REUSE-LAST-LAYER-CONFIRM]   alias succeeded for one MTP depth
+          [MTP-REUSE-LAST-LAYER-SKIP]      stage lacks one of the two endpoints
+          [MTP-REUSE-LAST-LAYER-WARN]      partial / shape-mismatched alias
+        """
+        last_backbone = None
+        mtp_layers = []
+        for layer in self.run_function:
+            if isinstance(layer, TransformerLayer):
+                last_backbone = layer
+            elif isinstance(layer, MultiTokenPredictionLayer):
+                mtp_layers.append(layer)
+
+        if last_backbone is None or not mtp_layers:
+            warnings.warn(
+                "[MTP-REUSE-LAST-LAYER-SKIP] not applied on this PP rank: "
+                f"has_last_backbone={last_backbone is not None}, "
+                f"num_mtp_layers={len(mtp_layers)}. If pipeline_model_parallel_size>1 "
+                "and backbone-last and MTP are on different stages, parameter-level "
+                "aliasing cannot bridge stages — use SharedLayerDesc instead."
+            )
+            return
+
+        src_params = dict(last_backbone.named_parameters())
+
+        # Pre-flight: parameter-level aliasing cannot bridge dense MTP MLP to a
+        # MoE experts/router tree. If backbone-last is MoE while use_dense_mtp
+        # is True, the alias would be partial (silent memory waste + half-shared
+        # gradients). Fail loudly instead of warning.
+        backbone_is_moe = any(
+            (".experts." in n) or ("experts." in n) or (".router." in n) or ("router." in n)
+            for n in src_params
+        )
+        if backbone_is_moe and getattr(self.config, "use_dense_mtp", False):
+            raise ValueError(
+                "[MTP-REUSE-LAST-LAYER] Incompatible configuration: backbone-last "
+                "TransformerLayer is MoE (params under experts.*/router.*) but "
+                "use_dense_mtp=True. Parameter aliasing cannot bridge a dense MTP "
+                "MLP to MoE experts/router — the dense MLP params would stay "
+                "independent, defeating the memory-saving purpose of "
+                "mtp_reuse_last_layer. Resolution: set use_dense_mtp=False to "
+                "make MTP MoE-shaped (full reuse), or set "
+                "mtp_reuse_last_layer=False to disable aliasing."
+            )
+
+        for mtp in mtp_layers:
+            dst_module = mtp.transformer_layer
+            dst_named = list(dst_module.named_parameters())
+            aliased = 0
+            shape_mismatch = 0
+            missing = 0
+            for dotted_name, dst_param in dst_named:
+                src_param = src_params.get(dotted_name)
+                if src_param is None:
+                    missing += 1
+                    continue
+                if tuple(src_param.shape) != tuple(dst_param.shape):
+                    shape_mismatch += 1
+                    continue
+                # Walk to the parent submodule and overwrite the entry in its
+                # _parameters dict so the Parameter object identity is shared.
+                parts = dotted_name.split(".")
+                owner = dst_module
+                for p in parts[:-1]:
+                    owner = getattr(owner, p)
+                attr_name = parts[-1]
+                if attr_name in owner._parameters:
+                    owner._parameters[attr_name] = src_param
+                else:
+                    setattr(owner, attr_name, src_param)
+                aliased += 1
+
+            total = len(dst_named)
+            tag = "[MTP-REUSE-LAST-LAYER-CONFIRM]"
+            if missing or shape_mismatch:
+                tag = "[MTP-REUSE-LAST-LAYER-WARN]"
+            warnings.warn(
+                f"{tag} mtp_layer_number={mtp.layer_number} "
+                f"aliased={aliased}/{total} params to last backbone TransformerLayer "
+                f"(missing_in_backbone={missing}, shape_mismatch={shape_mismatch}). "
+                "missing/shape_mismatch>0 typically means use_dense_mtp=True "
+                "while backbone-last is MoE — set use_dense_mtp=False to fully reuse."
+            )
 
     def _get_weight_only_params(self):
         """Get all parameters marked with is_weight_only_mtp flag."""

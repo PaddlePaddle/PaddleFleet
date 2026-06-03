@@ -405,9 +405,10 @@ class MultiTokenPredictionLayer(FleetLayer):
             self.e_proj = None
             self.h_proj = None
 
+        mtp_transformer_config = self._build_mtp_transformer_config()
         self.transformer_layer = build_spec_layer(
             self.sublayers_spec.transformer_layer,
-            config=self._build_mtp_transformer_config(),
+            config=mtp_transformer_config,
             is_mtp_layer=True,
         )
         if not self.config.gpt_model_use_experimental_version:
@@ -460,8 +461,17 @@ class MultiTokenPredictionLayer(FleetLayer):
         if hasattr(tl_spec, "extra_kwargs") and isinstance(
             tl_spec.extra_kwargs, dict
         ):
+            # Defensive copy: if multiple MTP layers share the same LayerSpec
+            # object (e.g. a cached `get_mtp_layer_spec_for_backend`), an
+            # in-place write here would let later layers clobber earlier ones.
+            # Shallow-copy the spec and its extra_kwargs dict so each MTP
+            # layer's config override is isolated.
+            tl_spec = copy.copy(tl_spec)
+            tl_spec.extra_kwargs = dict(tl_spec.extra_kwargs)
             tl_spec.extra_kwargs["config"] = mtp_config
             tl_spec.extra_kwargs["is_mtp_layer"] = True
+            self.sublayers_spec = copy.copy(self.sublayers_spec)
+            self.sublayers_spec.transformer_layer = tl_spec
         # Visible banner so operators can grep the training log to confirm MTP
         # sliding-window attention is actually configured as expected.
         # Grep-friendly tag: "[MTP-SWA-CONFIRM]".
