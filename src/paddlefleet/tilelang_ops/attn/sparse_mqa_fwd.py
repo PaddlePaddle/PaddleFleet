@@ -155,15 +155,22 @@ def sparse_mqa_fwd(
                     S_shared, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullRow
                 )
 
+            # Update max to include sink logit for numerical stability
             for h_i in T.Parallel(H_per_block):
-                sumexp[h_i] += T.exp2(
-                    AttnSink[H0 + h_i] * 1.44269504 - m_i[h_i] * sm_scale
+                m_i_prev[h_i] = T.max(
+                    m_i[h_i] * sm_scale,
+                    AttnSink[H0 + h_i] * 1.44269504,
                 )
-
-            for h_i, d_i in T.Parallel(H_per_block, D):
-                acc_o[h_i, d_i] /= sumexp[h_i]
             for h_i in T.Parallel(H_per_block):
-                sumexp[h_i] = T.log2(sumexp[h_i]) + m_i[h_i] * sm_scale
+                alpha[h_i] = T.exp2(m_i[h_i] * sm_scale - m_i_prev[h_i])
+            for h_i in T.Parallel(H_per_block):
+                sumexp[h_i] = sumexp[h_i] * alpha[h_i] + T.exp2(
+                    AttnSink[H0 + h_i] * 1.44269504 - m_i_prev[h_i]
+                )
+            for h_i, d_i in T.Parallel(H_per_block, D):
+                acc_o[h_i, d_i] = acc_o[h_i, d_i] * alpha[h_i] / sumexp[h_i]
+            for h_i in T.Parallel(H_per_block):
+                sumexp[h_i] = T.log2(sumexp[h_i]) + m_i_prev[h_i]
 
             T.copy(acc_o, Output[b_i, s_i, H0:H1, :])
             T.copy(sumexp, Lse[b_i, s_i, H0:H1])
