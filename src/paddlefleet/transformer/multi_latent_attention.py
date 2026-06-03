@@ -992,6 +992,11 @@ class MLASelfAttention(MultiLatentAttention):
                 )
 
                 # dynamic_inference not supported for now
+                if not self.training:
+                    raise NotImplementedError(
+                        "apply_rope_fusion does not support dynamic inference yet."
+                    )
+
                 k_pe = None
             else:
                 # Determine seq length:
