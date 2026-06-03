@@ -247,12 +247,18 @@ class LanguageLoss(FleetLayer):
                 LigerFusedLinearCrossEntropyFunction,
             )
 
-            hidden_states, weight, bias = logits
+            hidden_states, weight, bias = logits[:3]
+            # Multimax lm_head fused path: GPTLMHead emits a 5-tuple
+            # (hidden_states, weight, bias, multimax_ranges, multimax_ts)
+            # so SeLU is applied inside the chunked CE kernel without
+            # materializing full [B, S, V] logits.
+            multimax_ranges = logits[3] if len(logits) > 3 else None
+            multimax_ts = logits[4] if len(logits) > 4 else None
             B, S, H = hidden_states.shape
             _input = hidden_states.reshape([-1, H])
             _labels = labels.reshape([-1])
 
-            loss_1d = LigerFusedLinearCrossEntropyFunction.apply(
+            apply_args = [
                 _input,
                 weight,
                 _labels,
@@ -263,7 +269,11 @@ class LanguageLoss(FleetLayer):
                 getattr(
                     self.config, "gpt_model_use_experimental_version", False
                 ),
-            )
+            ]
+            if multimax_ranges is not None and multimax_ts is not None:
+                apply_args.append(multimax_ranges)
+                apply_args.append(multimax_ts)
+            loss_1d = LigerFusedLinearCrossEntropyFunction.apply(*apply_args)
             # Reshape back to [B, S] so downstream CP gather / lossmask
             # handling matches the non-fused path exactly.
             loss = loss_1d.reshape([B, S])
