@@ -29,20 +29,36 @@ from .vmm_utils import (
     tokens_zip_unique_add_with_subbatch,
 )
 
+# Defensive sonic_moe import: paddlefleet_ops.is_sonic_moe_available() reflects
+# hardware/Python/CUDA capability, but in some environments the package's own
+# sonicmoe.ernie_compat re-exports `from sonicmoe...` at the top level, which
+# fails outside its loader's ModuleContext. Wrap in try/except so module load
+# never crashes; a NameError will surface only if run_sonic_moe is actually
+# invoked, where we raise a clearer message.
+_SONIC_MOE_USABLE = False
 if paddlefleet_ops.is_sonic_moe_available():
-    from paddlefleet_ops.sonicmoe.enums import ActivationType
-    from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
-        deepep_topk_to_sonic_metadata,
-    )
-    from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
-        _differentiable_router_scores,
-    )
-    from paddlefleet_ops.sonicmoe.functional import (
-        _DownProjection,
-        _refresh_fp8_config,
-        _UpProjection,
-    )
-    from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+    try:
+        from paddlefleet_ops.sonicmoe.enums import ActivationType
+        from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
+            deepep_topk_to_sonic_metadata,
+        )
+        from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
+            _differentiable_router_scores,
+        )
+        from paddlefleet_ops.sonicmoe.functional import (
+            _DownProjection,
+            _refresh_fp8_config,
+            _UpProjection,
+        )
+        from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+        _SONIC_MOE_USABLE = True
+    except ImportError as _e:
+        import warnings as _warnings
+        _warnings.warn(
+            f"paddlefleet_ops.is_sonic_moe_available()=True but sonicmoe "
+            f"imports failed ({_e!r}); run_sonic_moe will be unavailable. "
+            f"Set using_sonic_moe=False or fix the paddlefleet_ops install."
+        )
 
 logger = logging.getLogger(__name__)
 
@@ -2178,6 +2194,14 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
 def run_sonic_moe(
     hidden_states, topk_indices, topk_scores, K, E, w1, w2, fp8=False
 ):
+    if not _SONIC_MOE_USABLE:
+        raise RuntimeError(
+            "run_sonic_moe was called but sonic_moe symbols are not available. "
+            "paddlefleet_ops.is_sonic_moe_available()="
+            f"{paddlefleet_ops.is_sonic_moe_available()}; either set "
+            "using_sonic_moe=False in the model config, or fix the "
+            "paddlefleet_ops install so its sonicmoe submodules import cleanly."
+        )
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
 
