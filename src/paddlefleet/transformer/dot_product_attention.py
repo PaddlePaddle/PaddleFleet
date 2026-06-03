@@ -622,8 +622,10 @@ class DotProductAttention(FleetLayer):
             query,
             key,
             beta=0.0,
-            alpha=self.softmax_scale,
-        )
+            alpha=self.softmax_scale
+            if self.softmax_scale is not None
+            else query.shape[-1] ** (-0.5),
+        )  # if softmax_scale is not set, we should fallback to default softmax_scale
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.reshape(*output_size)
