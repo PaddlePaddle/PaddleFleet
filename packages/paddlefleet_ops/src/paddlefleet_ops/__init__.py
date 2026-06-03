@@ -88,8 +88,7 @@ if paddle.is_compiled_with_cuda():
     )
 
     CUDNN_FRONTEND_HINT = (
-        "For developers: guard imports with `is_cudnn_frontend_available()` and only call `paddlefleet_ops.cudnn_frontend` when flag branch enabled.\n"
-        "For users: set `use_cudnn_frontend=False` or upgrade to Python >= 3.12, CUDA >= 12.9, and a GPU with compute capability >= 10.0 (Blackwell) to enable."
+        "For developers: guard imports with `is_cudnn_frontend_available()` and only call `paddlefleet_ops.cudnn` when flag branch enabled."
     )
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
@@ -173,6 +172,7 @@ if paddle.is_compiled_with_cuda():
         and _cuda_version >= (12, 9)
     ):
         _SONIC_MOE_AVAILABLE = True
+    if sys.version_info >= (3, 12):
         _CUDNN_FRONTEND_AVAILABLE = True
 
 if paddle.is_compiled_with_xpu():
