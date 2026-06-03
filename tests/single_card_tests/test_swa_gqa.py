@@ -293,11 +293,11 @@ class TestTransformerConfigSWAFields(unittest.TestCase):
     def test_default_swa_fields(self):
         """SWA fields should have correct defaults."""
         config = TransformerConfig(num_hidden_layers=4)
-        self.assertEqual(config.swa_head_dim, 192)
-        self.assertEqual(config.swa_v_head_dim, 128)
-        self.assertEqual(config.swa_num_attention_heads, 64)
-        self.assertEqual(config.swa_num_key_value_heads, 8)
-        self.assertEqual(config.swa_rope_theta, 10000)
+        self.assertIsNone(config.swa_head_dim)
+        self.assertIsNone(config.swa_v_head_dim)
+        self.assertIsNone(config.swa_num_attention_heads)
+        self.assertIsNone(config.swa_num_key_value_heads)
+        self.assertIsNone(config.swa_rope_theta)
         self.assertEqual(config.head_wise_swa_ratio, 0.0)
         self.assertIsNone(config.attention_value_scale)
         self.assertFalse(config.add_full_attention_sink_bias)

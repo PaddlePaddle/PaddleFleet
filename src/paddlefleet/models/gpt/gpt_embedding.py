@@ -123,10 +123,18 @@ class GPTEmbedding(FleetLayer):
                     )
                 self.swa_rotary_pos_emb = build_spec_layer(
                     sublayers_spec.rope_embedding,
-                    head_dim=config.swa_head_dim,
+                    head_dim=(
+                        config.swa_head_dim
+                        if config.swa_head_dim is not None
+                        else config.head_dim
+                    ),
                     rotary_percent=rotary_percent,
                     rotary_interleaved=config.rotary_interleaved,
-                    rotary_base=swa_rotary_base,
+                    rotary_base=(
+                        swa_rotary_base
+                        if swa_rotary_base is not None
+                        else rotary_base
+                    ),
                     rope_scaling=rope_scaling,
                 )
 

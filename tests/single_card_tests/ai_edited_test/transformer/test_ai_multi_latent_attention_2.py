@@ -83,6 +83,7 @@ class TestMLASelfAttentionBackwardDW(unittest.TestCase):
 
             mla = MLASelfAttention.__new__(MLASelfAttention)
             mla.config = config
+            object.__setattr__(mla, "q_lora_rank", q_lora_rank)
             mla.kv_b_proj = MagicMock()
             mla.kv_a_proj_with_mqa = MagicMock()
             mla.o_proj = MagicMock()

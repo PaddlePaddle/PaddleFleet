@@ -49,6 +49,7 @@ from paddlefleet.tensor_parallel.mappings import (
 )
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.utils import (
+    get_real_layer_idx_for_swa,
     is_layer_window_attention,
 )
 from paddlefleet.utils import divide, get_pg_rank, get_pg_size
@@ -224,22 +225,12 @@ class Attention(FleetLayer, ABC):
         self.is_swa = False
 
         if self.config.sliding_window is not None:
-            if self.is_mtp_layer:
-                for_swa_layer_number = (
-                    self.layer_number + self.config.num_hidden_layers
-                )
-            else:
-                # for non-mtp layer, layer_number add num_empty_layers_add_in_head in
-                # src/paddlefleet/models/gpt/gpt_layer_specs.py#L533
-                # real_layer_number = layer_number + config.num_empty_layers_add_in_head
-                for_swa_layer_number = (
-                    self.layer_number - self.config.num_empty_layers_add_in_head
-                )
-                assert for_swa_layer_number >= 0, (
-                    f"for_swa_layer_number must be non-negative, but got {for_swa_layer_number} "
-                    f"(layer_number={self.layer_number}, "
-                    f"num_empty_layers_add_in_head={self.config.num_empty_layers_add_in_head})"
-                )
+            for_swa_layer_number = get_real_layer_idx_for_swa(
+                self.layer_number,
+                self.config.num_empty_layers_add_in_head,
+                is_mtp=self.is_mtp_layer,
+                num_hidden_layers=self.config.num_hidden_layers,
+            )
 
             if is_layer_window_attention(
                 self.config.sliding_window,
@@ -249,11 +240,51 @@ class Attention(FleetLayer, ABC):
                 self.is_swa = True
 
         if self.is_swa:
-            self.head_dim = self.config.swa_head_dim
-            self.v_head_dim = self.config.swa_v_head_dim
-            self.num_attention_heads = self.config.swa_num_attention_heads
-            self.num_key_value_heads = self.config.swa_num_key_value_heads
-            self.rope_theta = self.config.swa_rope_theta
+            if not self.config.multi_latent_attention:
+                self.head_dim = (
+                    self.config.swa_head_dim
+                    if self.config.swa_head_dim is not None
+                    else self.config.head_dim
+                )
+                self.v_head_dim = (
+                    self.config.swa_v_head_dim
+                    if self.config.swa_v_head_dim is not None
+                    else (
+                        self.config.v_head_dim
+                        if isinstance(self.config.v_head_dim, int)
+                        else self.config.head_dim
+                    )
+                )
+                self.num_attention_heads = (
+                    self.config.swa_num_attention_heads
+                    if self.config.swa_num_attention_heads is not None
+                    else self.config.num_attention_heads
+                )
+                self.num_key_value_heads = (
+                    self.config.swa_num_key_value_heads
+                    if self.config.swa_num_key_value_heads is not None
+                    else self.config.num_key_value_heads
+                )
+                self.rope_theta = (
+                    self.config.swa_rope_theta
+                    if self.config.swa_rope_theta is not None
+                    else self.config.rope_theta
+                )
+            else:
+                # MLA-SWA is still an SWA layer for mask/window semantics, but
+                # ordinary swa_* structural overrides are only for non-MLA attention.
+                # Use full-attention defaults here only as temporary base Attention
+                # dims; MultiLatentAttention applies MLA-specific effective dims,
+                # including MLA-SWA overrides, after super().__init__.
+                self.head_dim = self.config.head_dim
+                self.v_head_dim = (
+                    self.config.v_head_dim
+                    if isinstance(self.config.v_head_dim, int)
+                    else self.config.head_dim
+                )
+                self.num_attention_heads = self.config.num_attention_heads
+                self.num_key_value_heads = self.config.num_key_value_heads
+                self.rope_theta = self.config.rope_theta
         else:
             self.head_dim = self.config.head_dim
             self.v_head_dim = (

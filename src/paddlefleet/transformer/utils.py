@@ -69,7 +69,7 @@ def is_layer_window_attention(
     window_attn_skip_freq: int | list,
     layer_number: int,
 ) -> bool:
-    # layer_number is 0-indexed
+    # layer_number is 0-indexed (the real layer index, without num_empty_layers_add_in_head offset)
     if not sliding_window:
         return False
     if window_attn_skip_freq is None:
@@ -83,6 +83,42 @@ def is_layer_window_attention(
         f"Invalid `window_attn_skip_freq`: {type(window_attn_skip_freq)}, "
         f"{window_attn_skip_freq}"
     )
+
+
+def get_real_layer_idx_for_swa(
+    layer_number: int,
+    num_empty_layers_add_in_head: int,
+    is_mtp: bool = False,
+    num_hidden_layers: int = 0,
+) -> int:
+    """Convert internal layer_number to the 0-indexed real layer index for SWA decisions.
+
+    In Fleet runtime, layer_number includes the num_empty_layers_add_in_head offset
+    (added in gpt_layer_specs.py). This helper strips that offset so that
+    is_layer_window_attention() receives a consistent 0-indexed layer number.
+
+    For MTP layers, layer_number is relative to the MTP block, so we add
+    num_hidden_layers to get the global layer index.
+
+    Args:
+        layer_number: The layer_number as seen in Attention.__init__ (may include offset).
+        num_empty_layers_add_in_head: The offset added in gpt_layer_specs.
+        is_mtp: Whether this is an MTP (multi-token prediction) layer.
+        num_hidden_layers: Total number of hidden layers (needed for MTP offset).
+
+    Returns:
+        0-indexed real layer index for use with is_layer_window_attention().
+    """
+    if is_mtp:
+        return layer_number + num_hidden_layers
+    else:
+        real_idx = layer_number - num_empty_layers_add_in_head
+        assert real_idx >= 0, (
+            f"real_layer_idx must be non-negative, but got {real_idx} "
+            f"(layer_number={layer_number}, "
+            f"num_empty_layers_add_in_head={num_empty_layers_add_in_head})"
+        )
+        return real_idx
 
 
 def startend_row_indices_add_sliding_window(

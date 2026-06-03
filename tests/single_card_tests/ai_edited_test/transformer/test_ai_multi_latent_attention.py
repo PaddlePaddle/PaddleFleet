@@ -142,6 +142,17 @@ class TestMultiLatentAttentionRopeTypeValidation(unittest.TestCase):
         config.qk_nope_head_dim = 8
         config.qk_rope_head_dim = 8
         config.q_lora_rank = 8
+        config.hidden_size = 64
+        config.get_effective_mla_dims.return_value = {
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "qk_nope_head_dim": 8,
+            "qk_rope_head_dim": 8,
+            "kv_lora_rank": 16,
+            "q_lora_rank": 8,
+            "v_head_dim": 16,
+            "rope_theta": 10000.0,
+        }
 
         spec = MLASelfAttentionSublayersSpec(
             q_a_layernorm=MagicMock(),
@@ -157,6 +168,10 @@ class TestMultiLatentAttentionRopeTypeValidation(unittest.TestCase):
             self_inner.config = config
             self_inner.v_head_dim = config.v_head_dim
             self_inner.num_attention_heads = config.num_attention_heads
+            self_inner.layer_number = 1
+            self_inner.attn_mask_type = MagicMock()
+            self_inner.attention_type = "self"
+            self_inner.pg_collection = MagicMock(tp=None, cp=None)
             self_inner.is_swa = False
             self_inner.is_mtp_layer = False
 

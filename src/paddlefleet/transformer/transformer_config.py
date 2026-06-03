@@ -218,20 +218,32 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to add a learnable attention sink bias for sliding window attention (SWA) layers.
     When True, softmax_type is promoted to 'learnable' for SWA layers."""
 
-    swa_head_dim: int = 192
-    """Dimension of query/key heads for sliding window attention layers."""
+    swa_head_dim: int | None = None
+    """Dimension of query/key heads for sliding window attention layers. If None, inherit head_dim."""
 
-    swa_v_head_dim: int = 128
-    """Dimension of value heads for sliding window attention layers."""
+    swa_v_head_dim: int | None = None
+    """Dimension of value heads for sliding window attention layers. If None, inherit v_head_dim."""
 
-    swa_num_attention_heads: int = 64
-    """Number of attention heads for sliding window attention layers."""
+    swa_num_attention_heads: int | None = None
+    """Number of attention heads for sliding window attention layers. If None, inherit num_attention_heads."""
 
-    swa_num_key_value_heads: int = 8
-    """Number of key/value heads (GQA groups) for sliding window attention layers."""
+    swa_num_key_value_heads: int | None = None
+    """Number of key/value heads (GQA groups) for sliding window attention layers. If None, inherit num_key_value_heads."""
 
-    swa_rope_theta: float = 10000
-    """The base period of the RoPE embeddings for sliding window attention layers."""
+    swa_rope_theta: float | None = None
+    """The base period of the RoPE embeddings for sliding window attention layers. If None, inherit rope_theta."""
+
+    swa_qk_nope_head_dim: int | None = None
+    """Dimension of non-positional QK heads for MLA sliding window attention layers. If None, inherit qk_nope_head_dim."""
+
+    swa_qk_rope_head_dim: int | None = None
+    """Dimension of RoPE QK heads for MLA sliding window attention layers. If None, inherit qk_rope_head_dim."""
+
+    swa_kv_lora_rank: int | None = None
+    """Rank of KV low-rank representation for MLA sliding window attention layers. If None, inherit kv_lora_rank."""
+
+    swa_q_lora_rank: int | None = None
+    """Rank of Q low-rank representation for MLA sliding window attention layers. If None, inherit q_lora_rank."""
 
     head_wise_swa_ratio: float = 0.0
     """Ratio of KV heads that use sliding window attention within an SWA layer.
@@ -920,6 +932,90 @@ class TransformerConfig(ModelParallelConfig):
     def get(self, key: str, default=None):
         return getattr(self, key, default)
 
+    def get_effective_mla_dims(self, is_swa: bool) -> dict:
+        """Return layer-wise MLA dimensions, with SWA fields inheriting full MLA by default."""
+        if not is_swa:
+            return {
+                "num_attention_heads": self.num_attention_heads,
+                "num_key_value_heads": self.num_key_value_heads,
+                "qk_nope_head_dim": self.qk_nope_head_dim,
+                "qk_rope_head_dim": self.qk_rope_head_dim,
+                "kv_lora_rank": self.kv_lora_rank,
+                "q_lora_rank": self.q_lora_rank,
+                "v_head_dim": self.v_head_dim,
+                "rope_theta": self.rope_theta,
+            }
+
+        def inherit_swa(swa_key: str, full_key: str):
+            value = getattr(self, swa_key)
+            if value is None:
+                return getattr(self, full_key)
+            return value
+
+        return {
+            "num_attention_heads": inherit_swa(
+                "swa_num_attention_heads", "num_attention_heads"
+            ),
+            "num_key_value_heads": inherit_swa(
+                "swa_num_key_value_heads", "num_key_value_heads"
+            ),
+            "qk_nope_head_dim": inherit_swa(
+                "swa_qk_nope_head_dim", "qk_nope_head_dim"
+            ),
+            "qk_rope_head_dim": inherit_swa(
+                "swa_qk_rope_head_dim", "qk_rope_head_dim"
+            ),
+            "kv_lora_rank": inherit_swa("swa_kv_lora_rank", "kv_lora_rank"),
+            "q_lora_rank": inherit_swa("swa_q_lora_rank", "q_lora_rank"),
+            "v_head_dim": inherit_swa("swa_v_head_dim", "v_head_dim"),
+            "rope_theta": inherit_swa("swa_rope_theta", "rope_theta"),
+        }
+
+    def mla_swa_uses_overridden_dims(self) -> bool:
+        full_dims = self.get_effective_mla_dims(is_swa=False)
+        swa_dims = self.get_effective_mla_dims(is_swa=True)
+        return any(full_dims[key] != swa_dims[key] for key in full_dims)
+
+    def _validate_effective_mla_dims(self, is_swa: bool) -> dict:
+        dims = self.get_effective_mla_dims(is_swa=is_swa)
+        layer_type = "SWA" if is_swa else "full"
+        for key in (
+            "num_attention_heads",
+            "num_key_value_heads",
+            "qk_nope_head_dim",
+            "qk_rope_head_dim",
+            "kv_lora_rank",
+            "v_head_dim",
+        ):
+            if dims[key] is None or dims[key] <= 0:
+                raise ValueError(
+                    f"MLA {layer_type} {key} must be positive, got {dims[key]}."
+                )
+        if dims["q_lora_rank"] is not None and dims["q_lora_rank"] <= 0:
+            raise ValueError(
+                f"MLA {layer_type} q_lora_rank must be positive or None, got {dims['q_lora_rank']}."
+            )
+        if dims["rope_theta"] is None or dims["rope_theta"] <= 0:
+            raise ValueError(
+                f"MLA {layer_type} rope_theta must be positive, got {dims['rope_theta']}."
+            )
+        if dims["num_attention_heads"] % self.tensor_model_parallel_size != 0:
+            raise ValueError(
+                f"MLA {layer_type} num_attention_heads ({dims['num_attention_heads']}) must be a multiple of "
+                f"tensor_model_parallel_size ({self.tensor_model_parallel_size})."
+            )
+        if dims["num_key_value_heads"] % self.tensor_model_parallel_size != 0:
+            raise ValueError(
+                f"MLA {layer_type} num_key_value_heads ({dims['num_key_value_heads']}) must be a multiple of "
+                f"tensor_model_parallel_size ({self.tensor_model_parallel_size})."
+            )
+        if dims["num_attention_heads"] % dims["num_key_value_heads"] != 0:
+            raise ValueError(
+                f"MLA {layer_type} num_attention_heads ({dims['num_attention_heads']}) must be divisible by "
+                f"num_key_value_heads ({dims['num_key_value_heads']})."
+            )
+        return dims
+
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.
         See https://docs.python.org/3/library/dataclasses.html#post-init-processing for more
@@ -1073,6 +1169,32 @@ class TransformerConfig(ModelParallelConfig):
                 #  init method for this layer. Since we are here after an OR we know that
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
+
+        # MLA + SWA validation and sliding_window normalization
+        if self.sliding_window is not None:
+            left, right = self.sliding_window
+            if left == -1 and right == -1:
+                # Both sides infinite = no window constraint
+                self.sliding_window = None
+
+        if self.multi_latent_attention and self.sliding_window is not None:
+            if self.context_parallel_size > 1:
+                raise NotImplementedError(
+                    "MLA+SWA does not support context parallel yet. "
+                    "Please disable CP or disable sliding_window."
+                )
+            swa_dims = self._validate_effective_mla_dims(is_swa=True)
+            if (
+                self.swa_head_dim is not None
+                and self.swa_head_dim
+                != swa_dims["qk_nope_head_dim"] + swa_dims["qk_rope_head_dim"]
+            ):
+                raise ValueError(
+                    "swa_head_dim must equal effective SWA MLA qk_nope_head_dim + "
+                    "qk_rope_head_dim when configured, but got "
+                    f"{self.swa_head_dim} vs "
+                    f"{swa_dims['qk_nope_head_dim']} + {swa_dims['qk_rope_head_dim']}."
+                )
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":

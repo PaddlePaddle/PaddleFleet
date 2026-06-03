@@ -157,7 +157,7 @@ class TestDotProductAttentionSlidingWindow(unittest.TestCase):
     def test_sliding_window_construction(self):
         """Test construction with sliding window."""
         config = _make_config(
-            sliding_window=2,
+            sliding_window=(2, 0),
             window_attn_skip_freq=None,
         )
         attn = DotProductAttention(

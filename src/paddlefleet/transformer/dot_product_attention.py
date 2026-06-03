@@ -291,6 +291,7 @@ class DotProductAttention(FleetLayer):
             )
 
         use_eager = self.config._attn_implementation == "eager"
+        use_sdpa = self.config._attn_implementation == "sdpa"
 
         if use_eager and packed_seq_params is not None:
             raise ValueError(
@@ -340,6 +341,17 @@ class DotProductAttention(FleetLayer):
             else:
                 flashmask_attention_func = flashmask_attention
 
+            # Apply sliding window to packed sequence path
+            if self.sliding_window is not None:
+                attn_mask_startend_row_indices = (
+                    startend_row_indices_add_sliding_window(
+                        attn_mask_startend_row_indices,
+                        self.sliding_window,
+                        self.head_wise_swa_ratio,
+                        value.shape[2],
+                    )
+                )
+
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -354,7 +366,15 @@ class DotProductAttention(FleetLayer):
             (query.dtype == paddle.bfloat16 or query.dtype == paddle.float16)
             and attn_mask_startend_row_indices is None
             and not use_eager
+            and (self.sliding_window is None or use_sdpa)
         ):
+            if self.sliding_window is not None:
+                raise NotImplementedError(
+                    '_attn_implementation="sdpa" does not support SWA because '
+                    "the SDPA path does not construct a sliding-window mask. "
+                    'Use _attn_implementation="default" or "eager" for SWA.'
+                )
+
             # KV cache support for inference
             if use_cache and past_key_values is not None:
                 key, value = past_key_values.update(key, value, layer_idx)
@@ -451,6 +471,12 @@ class DotProductAttention(FleetLayer):
             attn_output = attn_output.reshape([bsz, q_len, -1])
 
             return attn_output
+
+        if self.sliding_window is not None and self.head_wise_swa_ratio != 0.0:
+            raise NotImplementedError(
+                "head-wise SWA is only supported by flashmask startend paths; "
+                "raw attention does not support per-head sliding-window masks."
+            )
 
         # ===================================
         # Raw attention scores. [b, n/p, s, s]

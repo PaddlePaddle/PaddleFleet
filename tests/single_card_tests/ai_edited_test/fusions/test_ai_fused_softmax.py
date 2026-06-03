@@ -75,17 +75,22 @@ class TestSoftmaxOneForward(unittest.TestCase):
                 "paddle.softmax compat API does not accept 'axis' in this version"
             )
 
-    def test_output_sums_approximately_one(self):
-        """Test that output rows sum approximately to 1."""
+    def test_output_sums_exclude_sink_probability(self):
+        """Test that output rows sum to one minus the off-by-one sink probability."""
         np_dim = 1
-        layer = SoftmaxOne(denominator_offset=paddle.to_tensor([1.0] * np_dim))
+        offset = paddle.to_tensor([1.0] * np_dim)
+        layer = SoftmaxOne(denominator_offset=offset)
         x = paddle.randn([1, np_dim, 1, 8])
         try:
             result = layer(x)
-            row_sum = result.sum(axis=-1)
+            sink = offset.reshape([1, -1, 1, 1]).expand([1, np_dim, 1, 1])
+            expected = paddle.nn.functional.softmax(
+                paddle.concat([x, sink], axis=-1), axis=-1
+            )[..., :-1]
             np.testing.assert_allclose(
-                row_sum.numpy(), np.ones([1, np_dim, 1]), atol=1e-5
+                result.numpy(), expected.numpy(), atol=1e-5
             )
+            self.assertTrue((result.sum(axis=-1) < 1.0).all())
         except TypeError:
             self.skipTest(
                 "paddle.softmax compat API does not accept 'axis' in this version"
