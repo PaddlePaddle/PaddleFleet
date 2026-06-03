@@ -271,7 +271,9 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
                 paddle.isnan(t.grad).any().item(), f"{name}.grad has NaN"
             )
 
-    @unittest.skip("sink attention not yet supported on FlashMask path (FA2/FA3)")
+    @unittest.skip(
+        "sink attention not yet supported on FlashMask path (FA2/FA3)"
+    )
     def test_path_C_flashmask_causal(self):
         """Path C: bf16 + startend_row_indices (causal 2-col format)."""
         config = _make_config(bf16=True, softmax_type="learnable")
@@ -320,7 +322,9 @@ class TestDPASinkForwardFusedPaths(_SinkTestBase):
                 paddle.isnan(t.grad).any().item(), f"{name}.grad has NaN"
             )
 
-    @unittest.skip("sink attention not yet supported on packed-seq FlashMask path (FA2/FA3)")
+    @unittest.skip(
+        "sink attention not yet supported on packed-seq FlashMask path (FA2/FA3)"
+    )
     def test_path_A_packed_seq(self):
         """Path A: packed_seq_params triggers block-diagonal flashmask.
 
@@ -540,7 +544,9 @@ class TestDPASinkGQA(_SinkTestBase):
         )
         assert_close(out, ref, atol=2e-2, rtol=2e-2, msg="GQA SDPA+sink")
 
-    @unittest.skip("sink attention not yet supported on FlashMask path (FA2/FA3)")
+    @unittest.skip(
+        "sink attention not yet supported on FlashMask path (FA2/FA3)"
+    )
     def test_flashmask_gqa(self):
         config = _make_config(
             bf16=True,
@@ -602,7 +608,9 @@ class TestDPASinkShape(_SinkTestBase):
 class TestDPASinkFlashMaskNonCausal(_SinkTestBase):
     """FlashMask path with sink and non-causal attn_mask_type."""
 
-    @unittest.skip("sink attention not yet supported on FlashMask path (FA2/FA3)")
+    @unittest.skip(
+        "sink attention not yet supported on FlashMask path (FA2/FA3)"
+    )
     def test_flashmask_non_causal(self):
         """Path C variant: startend_row_indices + attn_mask_type != causal."""
         config = _make_config(bf16=True, softmax_type="learnable")
@@ -613,15 +621,23 @@ class TestDPASinkFlashMaskNonCausal(_SinkTestBase):
         self._set_sink(attn, sink)
 
         # 4-column startend_row_indices for non-causal (full attention)
-        idx = paddle.stack(
-            [
-                paddle.full([self.SEQ], self.SEQ, dtype=paddle.int32),  # lower_start
-                paddle.full([self.SEQ], self.SEQ, dtype=paddle.int32),  # lower_end
-                paddle.zeros([self.SEQ], dtype=paddle.int32),           # upper_start
-                paddle.zeros([self.SEQ], dtype=paddle.int32),           # upper_end
-            ],
-            axis=-1,
-        ).unsqueeze(0).unsqueeze(0)  # [1, 1, SEQ, 4]
+        idx = (
+            paddle.stack(
+                [
+                    paddle.full(
+                        [self.SEQ], self.SEQ, dtype=paddle.int32
+                    ),  # lower_start
+                    paddle.full(
+                        [self.SEQ], self.SEQ, dtype=paddle.int32
+                    ),  # lower_end
+                    paddle.zeros([self.SEQ], dtype=paddle.int32),  # upper_start
+                    paddle.zeros([self.SEQ], dtype=paddle.int32),  # upper_end
+                ],
+                axis=-1,
+            )
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )  # [1, 1, SEQ, 4]
 
         out = attn(
             q,
@@ -638,7 +654,9 @@ class TestDPASinkFlashMaskNonCausal(_SinkTestBase):
 
         # Non-causal full attention ref (no mask)
         ref = naive_attn_sink(q, k, v, sink, None, self.scaling)
-        assert_close(out, ref, atol=2e-2, rtol=2e-2, msg="FlashMask non-causal+sink")
+        assert_close(
+            out, ref, atol=2e-2, rtol=2e-2, msg="FlashMask non-causal+sink"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -658,9 +676,7 @@ class TestDPASinkInit(_SinkTestBase):
 
         self.assertIsNotNone(attn.softmax_offset)
         self.assertIsInstance(attn.softmax_offset, paddle.nn.Parameter)
-        self.assertEqual(
-            list(attn.softmax_offset.shape), [self.NUM_HEADS]
-        )
+        self.assertEqual(list(attn.softmax_offset.shape), [self.NUM_HEADS])
         # Should be initialized (not all zeros since normal_ was applied)
         # Note: with very small sigma there's a tiny chance of all zeros,
         # but practically this never happens.

@@ -14,6 +14,7 @@
 
 
 import paddle
+
 paddle.enable_compat(scope={"tilelang"})
 import tilelang
 import tilelang.language as T
@@ -29,6 +30,7 @@ if paddle.cuda.get_device_capability()[0] == 10:
         _flash_attn_bwd,
         _flash_attn_fwd,
     )
+
 
 def _get_fa_version(hdim: int) -> int:
     """Pick the FlashAttention version for the given query head dim.
@@ -59,7 +61,6 @@ def _get_fa_version(hdim: int) -> int:
         return 2
 
     return fa_version
-
 
 
 def _flash_attention_forward_dispatch(
@@ -176,7 +177,9 @@ def _flash_attention_backward_dispatch(
     fa_version = _get_fa_version(query.shape[-1])
 
     if fa_version == 2:
-        assert softmax_scale is None, "flashmask do not support softmax_scale when using FA2 as backend"
+        assert softmax_scale is None, (
+            "flashmask do not support softmax_scale when using FA2 as backend"
+        )
         seed_offset = paddle.zeros(shape=[2], dtype="int64")
         if hasattr(paddle.base.libpaddle.pir.ops, "flash_attn_grad"):
             grad_q, grad_k, grad_v = _C_ops.flash_attn_grad(
@@ -262,8 +265,12 @@ def _flashmask_attention_forward_dispatch(
     fa_version = _get_fa_version(query.shape[-1])
 
     if fa_version == 2:
-        assert softmax_scale is None, "flashmask do not support softmax_scale when using FA2 as backend"
-        assert sink is None, "currently FlashMask doesn't support learnable sink when using FA2 as backend"
+        assert softmax_scale is None, (
+            "flashmask do not support softmax_scale when using FA2 as backend"
+        )
+        assert sink is None, (
+            "currently FlashMask doesn't support learnable sink when using FA2 as backend"
+        )
         output, log_sum_exp = paddle.nn.functional.flashmask_attention(
             query,
             key,
@@ -275,7 +282,9 @@ def _flashmask_attention_forward_dispatch(
             training=training,
         )
     elif fa_version == 3:
-        assert sink is None, "currently FlashMask doesn't support learnable sink when using FA3 as backend"
+        assert sink is None, (
+            "currently FlashMask doesn't support learnable sink when using FA3 as backend"
+        )
         output, log_sum_exp = paddle.nn.functional.flashmask_attention(
             query,
             key,
@@ -321,7 +330,9 @@ def _flashmask_attention_backward_dispatch(
     fa_version = _get_fa_version(query.shape[-1])
     if fa_version == 2:
         seed_offset = paddle.zeros(shape=[2], dtype="int64")
-        assert softmax_scale is None, "flashmask do not support softmax_scale when using FA2 as backend"
+        assert softmax_scale is None, (
+            "flashmask do not support softmax_scale when using FA2 as backend"
+        )
         if hasattr(paddle.base.libpaddle.pir.ops, "flashmask_attention_grad"):
             grad_q, grad_k, grad_v = _C_ops.flashmask_attention_grad(
                 query,
@@ -394,7 +405,9 @@ def _flashmask_attention_backward_dispatch(
 
 
 @tilelang.jit(out_idx=-1)
-def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: T.dtype = T.float16):
+def flashattn_bwd_dsink(
+    batch, heads, seq_len, block=128, dtype: T.dtype = T.float16
+):
     accum_dtype = T.float32
     shape = [batch, heads, seq_len]
 
@@ -405,20 +418,38 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: T.dtype = T.flo
         lse: T.Tensor(shape, accum_dtype),  # type: ignore
         dsink: T.Tensor(shape, accum_dtype),  # type: ignore
     ):
-        with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=128) as (bx, by, bz):
+        with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=128) as (
+            bx,
+            by,
+            bz,
+        ):
             lse_fragment = T.alloc_fragment([block], accum_dtype)
             delta_fragment = T.alloc_fragment([block], accum_dtype)
             dsink_fragment = T.alloc_fragment([block], accum_dtype)
 
             sink_value = sink[bx]
-            T.copy(lse[bz, bx, by * block : (by + 1) * block], lse_fragment, disable_tma=True)
-            T.copy(delta[bz, bx, by * block : (by + 1) * block], delta_fragment, disable_tma=True)
+            T.copy(
+                lse[bz, bx, by * block : (by + 1) * block],
+                lse_fragment,
+                disable_tma=True,
+            )
+            T.copy(
+                delta[bz, bx, by * block : (by + 1) * block],
+                delta_fragment,
+                disable_tma=True,
+            )
             for i in T.Parallel(block):
-                dsink_fragment[i] = -T.exp2(sink_value * 1.44269504 - lse_fragment[i]) * delta_fragment[i]
-            T.copy(dsink_fragment, dsink[bz, bx, by * block : (by + 1) * block], disable_tma=True)
+                dsink_fragment[i] = (
+                    -T.exp2(sink_value * 1.44269504 - lse_fragment[i])
+                    * delta_fragment[i]
+                )
+            T.copy(
+                dsink_fragment,
+                dsink[bz, bx, by * block : (by + 1) * block],
+                disable_tma=True,
+            )
 
     return flash_bwd_dsink
-
 
 
 def _sink_attention_grad_sink(query, sink, output, lse, grad_output):
@@ -428,7 +459,13 @@ def _sink_attention_grad_sink(query, sink, output, lse, grad_output):
     delta = delta.transpose(perm=[0, 2, 1]).contiguous()
     lse_log2 = (lse * 1.44269504).contiguous()
     batch_size, seq_len, num_heads, _ = query.shape
-    dtype = T.float32 if sink.dtype == paddle.float32 else T.float16 if sink.dtype == paddle.float16 else T.bfloat16
+    dtype = (
+        T.float32
+        if sink.dtype == paddle.float32
+        else T.float16
+        if sink.dtype == paddle.float16
+        else T.bfloat16
+    )
     kernel_dsink = flashattn_bwd_dsink(
         batch_size, num_heads, seq_len, dtype=dtype
     )
@@ -514,7 +551,7 @@ class FlashMaskSinkPyLayer(PyLayer):
                 training=training,
                 name=name,
                 softmax_scale=softmax_scale,
-                sink=sink
+                sink=sink,
             )
         else:
             output, lse = _flashmask_attention_forward_dispatch(
@@ -572,34 +609,30 @@ class FlashMaskSinkPyLayer(PyLayer):
         grad_output = grad_output.to(query.dtype)
 
         if startend_row_indices is None:
-            grad_q, grad_k, grad_v = (
-                _flash_attention_backward_dispatch(
-                    grad_output,
-                    query,
-                    key,
-                    value,
-                    output,
-                    lse,
-                    dropout=dropout,
-                    attention_mask=attention_mask,
-                    causal=causal,
-                    softmax_scale=scale,
-                )
+            grad_q, grad_k, grad_v = _flash_attention_backward_dispatch(
+                grad_output,
+                query,
+                key,
+                value,
+                output,
+                lse,
+                dropout=dropout,
+                attention_mask=attention_mask,
+                causal=causal,
+                softmax_scale=scale,
             )
         else:
-            grad_q, grad_k, grad_v = (
-                _flashmask_attention_backward_dispatch(
-                    grad_output,
-                    query,
-                    key,
-                    value,
-                    output,
-                    lse,
-                    startend_row_indices,
-                    dropout,
-                    causal,
-                    scale,
-                )
+            grad_q, grad_k, grad_v = _flashmask_attention_backward_dispatch(
+                grad_output,
+                query,
+                key,
+                value,
+                output,
+                lse,
+                startend_row_indices,
+                dropout,
+                causal,
+                scale,
             )
 
         grad_sink = _sink_attention_grad_sink(

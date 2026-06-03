@@ -26,6 +26,7 @@ from paddlefleet.transformer.sink_impl import (
     sink_attention,
 )
 
+
 def gen_dense_mask_from_startend_row_indices(
     attn_mask_startend_row_indices: paddle.Tensor,
     dtype: paddle.dtype = paddle.bfloat16,

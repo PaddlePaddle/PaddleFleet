@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -400,16 +399,20 @@ class DotProductAttention(FleetLayer):
                 )  # [1, 1, seq_len, 4]
 
             if use_rr_flash_attention:
-                assert self.softmax_offset is None, "sink attention is not supported when using rr_attention"
+                assert self.softmax_offset is None, (
+                    "sink attention is not supported when using rr_attention"
+                )
                 flashmask_attention_func = self.rr_flashmask_attention_func
             elif self.config.flashmask_use_varlen:
-                assert self.softmax_offset is None, "sink attention is not supported when using rr_attention"
+                assert self.softmax_offset is None, (
+                    "sink attention is not supported when using rr_attention"
+                )
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
                 )
             else:
                 flashmask_attention_func = flashmask_attention
-            
+
             if self.softmax_offset is not None:
                 flashmask_attention_func = partial(
                     sink_attention, sink=self.softmax_offset
@@ -449,7 +452,9 @@ class DotProductAttention(FleetLayer):
                 is_causal = True
                 attn_mask_kv = attention_mask
 
-            assert self.softmax_offset is None, "sink attention is not supported when using sdpa"
+            assert self.softmax_offset is None, (
+                "sink attention is not supported when using sdpa"
+            )
 
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
@@ -487,16 +492,20 @@ class DotProductAttention(FleetLayer):
                 )
                 assert attn_mask_startend_row_indices.shape[-1] == 2
             elif use_rr_flash_attention:
-                assert self.softmax_offset is None, "sink attention is not supported when using rr_attention"
+                assert self.softmax_offset is None, (
+                    "sink attention is not supported when using rr_attention"
+                )
                 flashmask_attention_func = self.rr_flashmask_attention_func
             elif self.config.flashmask_use_varlen:
-                assert self.softmax_offset is None, "sink attention is not supported when using rr_attention"
+                assert self.softmax_offset is None, (
+                    "sink attention is not supported when using rr_attention"
+                )
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
                 )
             else:
                 flashmask_attention_func = flashmask_attention
-            
+
             if self.softmax_offset is not None:
                 flashmask_attention_func = partial(
                     sink_attention, sink=self.softmax_offset
@@ -829,7 +838,9 @@ class CPDotProductAttention(FleetLayer):
             else flashmask_attention_cp
         )
         if self.softmax_offset is not None:
-            raise NotImplementedError("sink attention for cp is not supported yet.")
+            raise NotImplementedError(
+                "sink attention for cp is not supported yet."
+            )
             flashmask_attention_func = partial(
                 flashmask_attention_cp, sink=self.softmax_offset_offset
             )
