@@ -70,6 +70,9 @@ class TransformerConfig(ModelParallelConfig):
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
+    mtp_reuse_last_layer: bool = False
+    """When True, MTP layers reuse the last backbone TransformerLayer parameters."""
+
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
 

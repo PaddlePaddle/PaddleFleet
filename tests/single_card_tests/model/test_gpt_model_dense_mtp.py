@@ -19,10 +19,14 @@ import unittest
 
 import numpy as np
 import paddle
+import paddlefleet_ops
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
 import paddlefleet.parallel_state as ps
+
+paddlefleet_ops.is_sonic_moe_available = lambda: False
+
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer.mlp import MLP
@@ -214,6 +218,56 @@ class TestDenseMTP(unittest.TestCase):
         assert isinstance(inner_mlp, MoELayer), (
             f"MTP layer's MLP should be MoELayer when use_dense_mtp=False, "
             f"got {type(inner_mlp).__name__}"
+        )
+
+    def test_mtp_reuse_last_layer_aliases_params(self):
+        """When mtp_reuse_last_layer=True, MTP transformer params should reuse last backbone params."""
+        config = GPTConfig(
+            num_hidden_layers=2,
+            hidden_size=512,
+            vocab_size=100,
+            max_sequence_length=64,
+            num_attention_heads=4,
+            intermediate_size=1024,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            use_bias=False,
+            rotary_percent=1.0,
+            rotary_base=10000,
+            rope_scaling=1.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            tie_word_embeddings=True,
+            use_qk_norm=True,
+            num_nextn_predict_layers=1,
+            use_dense_mtp=True,
+            mtp_reuse_last_layer=True,
+        )
+        model = gpt_builder(config, num_stages=1)
+
+        decoder_layers = self._find_decoder_layers(model)
+        mtp_layer = self._find_mtp_layer(model)
+        assert decoder_layers, "Model should have decoder layers"
+        assert mtp_layer is not None, (
+            "Model should contain a MultiTokenPredictionLayer"
+        )
+
+        backbone_params = dict(decoder_layers[-1].named_parameters())
+        mtp_params = dict(mtp_layer.transformer_layer.named_parameters())
+        not_shared = []
+        for param_name, mtp_param in mtp_params.items():
+            backbone_param = backbone_params.get(param_name)
+            if backbone_param is not mtp_param:
+                not_shared.append(param_name)
+
+        assert len(mtp_params) > 0, "MTP transformer should have parameters"
+        assert not not_shared, (
+            f"MTP params should reuse last backbone params, not_shared={not_shared[:5]}"
         )
 
 
