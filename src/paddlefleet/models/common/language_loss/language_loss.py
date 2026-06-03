@@ -14,6 +14,7 @@
 
 
 import functools
+import os
 
 import numpy as np
 import paddle
@@ -37,6 +38,42 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+def _loss_md5_enabled() -> bool:
+    return os.environ.get("LOG_LOSS_MD5", "0") == "1"
+
+
+def _use_accuracy_compatible_kernel() -> bool:
+    """Switch for Megatron-aligned (accuracy-compatible) numeric paths.
+
+    Controlled by the ``FLAGS_use_accuracy_compatible_kernel`` env variable.
+    """
+    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+
+
+def _tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
+    """Calculate MD5 hash of a tensor, **for debugging only**.
+
+    Note: internally calls .numpy() which triggers GPU→CPU synchronization
+    and blocks the async training pipeline. Do NOT use in the forward pass.
+    """
+    import hashlib
+
+    tensor_for_md5 = tensor.detach().cast(dtype)
+    return hashlib.md5(tensor_for_md5.numpy().tobytes()).hexdigest()
+
+
+def _print_scalar_loss_md5(prefix: str, name: str, loss: Tensor) -> None:
+    if not _loss_md5_enabled():
+        return
+    rank = paddle.distributed.get_rank()
+    loss_tensor = loss.detach().cast("float32").reshape([1])
+    print(
+        f"[{prefix}] rank={rank} {name}={loss_tensor.item():.20f} "
+        f"{name}_md5={_tensor_md5(loss_tensor)}",
+        flush=True,
+    )
 
 
 class DistributedSoftmaxOp(PyLayer):
@@ -546,23 +583,53 @@ class LanguageLoss(FleetLayer):
                 LanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
                     loss_val.detach()
                 )
+                _print_scalar_loss_md5(
+                    "MTP_LOSS_PATH_MD5",
+                    f"mtp{i + 1}.final_loss",
+                    loss_val,
+                )
 
             def add_loss(main_loss, loss):
-                if self.config.add_mtp_loss:
-                    return main_loss + loss
+                if _use_accuracy_compatible_kernel():
+                    # Megatron-aligned behavior: don't include MTP loss value in total loss
+                    if self.config.add_mtp_loss:
+                        return main_loss + loss - loss.detach()
+                    else:
+                        return main_loss
                 else:
-                    return main_loss + loss - loss.detach()
+                    # Original behavior
+                    if self.config.add_mtp_loss:
+                        return main_loss + loss
+                    else:
+                        return main_loss + loss - loss.detach()
 
             if self.config.gpt_model_use_experimental_version:
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
                 loss = lm_loss
-                num_mtp = len(mtp_loss)
-                for mtp_l in mtp_loss:
-                    loss = add_loss(
-                        loss,
-                        self.config.mtp_loss_scaling_factor * mtp_l / num_mtp,
-                    )
+                if _use_accuracy_compatible_kernel():
+                    # Megatron-aligned: only add MTP loss when add_mtp_loss=True.
+                    # Use loss + val - val.detach() so loss VALUE doesn't increase,
+                    # only gradient flows (matches add_loss() semantics).
+                    if self.config.add_mtp_loss:
+                        num_mtp = len(mtp_loss)
+                        for mtp_l in mtp_loss:
+                            mtp_val = (
+                                self.config.mtp_loss_scaling_factor
+                                * mtp_l
+                                / num_mtp
+                            )
+                            loss = loss + mtp_val - mtp_val.detach()
+                else:
+                    # Original behavior: always use add_loss
+                    num_mtp = len(mtp_loss)
+                    for mtp_l in mtp_loss:
+                        loss = add_loss(
+                            loss,
+                            self.config.mtp_loss_scaling_factor
+                            * mtp_l
+                            / num_mtp,
+                        )
             else:
                 loss = add_loss(
                     lm_loss,
@@ -619,12 +686,25 @@ class MainLanguageLoss(LanguageLoss):
             MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
                 loss_val.detach()
             )
+            _print_scalar_loss_md5(
+                "MTP_LOSS_PATH_MD5",
+                f"mtp{i + 1}.final_loss",
+                loss_val,
+            )
 
         def add_loss(main_loss, loss):
-            if self.config.add_mtp_loss:
-                return main_loss + loss
+            if _use_accuracy_compatible_kernel():
+                # Megatron-aligned behavior: don't include MTP loss value in total loss
+                if self.config.add_mtp_loss:
+                    return main_loss + loss - loss.detach()
+                else:
+                    return main_loss
             else:
-                return main_loss + loss - loss.detach()
+                # Original behavior
+                if self.config.add_mtp_loss:
+                    return main_loss + loss
+                else:
+                    return main_loss + loss - loss.detach()
 
         loss = add_loss(
             lm_loss,

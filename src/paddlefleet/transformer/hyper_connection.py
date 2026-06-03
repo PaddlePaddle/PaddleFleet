@@ -539,7 +539,8 @@ class HyperConnectionModule(nn.Layer):
             h_post: [..., n] - expansion weights
         """
         # Compute mappings
-        hidden_states = hidden_states.astype("float32")
+        if not _use_accuracy_compatible_kernel():
+            hidden_states = hidden_states.astype("float32")
         h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
         # Aggregate for layer input
@@ -685,7 +686,10 @@ class HyperConnectionModule(nn.Layer):
         x, bias = layer_output_with_bias
 
         # Fast path: no dropout — use fused/native h_post_bda kernel
-        if dropout_prob == 0.0 or not training:
+        # Only use fast path when accuracy-compatible kernel is NOT enabled
+        if not _use_accuracy_compatible_kernel() and (
+            dropout_prob == 0.0 or not training
+        ):
             leading_shape = original_residual.shape[:-1]
             n = self.n
             C = self.hidden_size
@@ -698,8 +702,9 @@ class HyperConnectionModule(nn.Layer):
             output = self._h_post_bda_op(h_res, orig_reshaped, h_post, x, bias)
             return output.reshape([*leading_shape, n * C])
 
-        # Slow path: dropout required — sequential ops
+        # Sequential path: used when dropout required OR accuracy-compatible kernel enabled
         mixed = self.apply_h_res(h_res, original_residual)
+
         x_expanded = self._apply_h_post(x, h_post)
         bias_expanded = (
             self._apply_h_post(bias, h_post) if bias is not None else None
