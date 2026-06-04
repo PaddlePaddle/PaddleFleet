@@ -933,6 +933,16 @@ class TransformerConfig(ModelParallelConfig):
             assert self.pipeline_model_parallel_size > 1, (
                 "enable_mtp_magic_send requires pipeline_model_parallel_size > 1"
             )
+            if (
+                self.virtual_pipeline_model_parallel_size is not None
+                and self.virtual_pipeline_model_parallel_size > 1
+            ):
+                assert self.overlap_p2p_comm, (
+                    "enable_mtp_magic_send with vpp requires overlap_p2p_comm=True"
+                )
+                assert self.variable_seq_lengths, (
+                    "enable_mtp_magic_send with vpp requires variable_seq_lengths=True"
+                )
 
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size

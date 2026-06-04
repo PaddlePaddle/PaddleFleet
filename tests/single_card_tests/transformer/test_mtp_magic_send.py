@@ -274,6 +274,51 @@ class TestTransformerConfig(unittest.TestCase):
                 pipeline_model_parallel_size=1,
             )
 
+    def test_magic_send_vpp_requires_overlap_and_variable_seq(self):
+        # vpp + overlap_p2p_comm + variable_seq_lengths => OK
+        cfg = TransformerConfig(
+            enable_mtp_magic_send=True,
+            num_nextn_predict_layers=1,
+            pipeline_model_parallel_size=2,
+            virtual_pipeline_model_parallel_size=2,
+            overlap_p2p_comm=True,
+            variable_seq_lengths=True,
+        )
+        self.assertTrue(cfg.enable_mtp_magic_send)
+
+        # vpp without overlap_p2p_comm => AssertionError
+        with self.assertRaises(AssertionError):
+            TransformerConfig(
+                enable_mtp_magic_send=True,
+                num_nextn_predict_layers=1,
+                pipeline_model_parallel_size=2,
+                virtual_pipeline_model_parallel_size=2,
+                overlap_p2p_comm=False,
+                variable_seq_lengths=True,
+            )
+
+        # vpp without variable_seq_lengths => AssertionError
+        with self.assertRaises(AssertionError):
+            TransformerConfig(
+                enable_mtp_magic_send=True,
+                num_nextn_predict_layers=1,
+                pipeline_model_parallel_size=2,
+                virtual_pipeline_model_parallel_size=2,
+                overlap_p2p_comm=True,
+                variable_seq_lengths=False,
+            )
+
+        # vpp without both => AssertionError
+        with self.assertRaises(AssertionError):
+            TransformerConfig(
+                enable_mtp_magic_send=True,
+                num_nextn_predict_layers=1,
+                pipeline_model_parallel_size=2,
+                virtual_pipeline_model_parallel_size=2,
+                overlap_p2p_comm=False,
+                variable_seq_lengths=False,
+            )
+
 
 class TestMTPEmbeddingLayer(unittest.TestCase):
     def setUp(self):
