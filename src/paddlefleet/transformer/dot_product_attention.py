@@ -710,25 +710,6 @@ class CPDotProductAttention(FleetLayer):
         self.attention_type = attention_type  # unused for now
         self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
 
-        # Sliding-window attention is not yet supported on the context-parallel
-        # path: `flashmask_attention_cp` / `FlashMaskContextParallel` do not
-        # accept a `window_size` argument, and the DualChunkSwap query reorder
-        # used by the CP kernel would make a naive (left, right) window produce
-        # incorrect masks. Fail loud here instead of silently ignoring
-        # `mtp_window_size` / backbone `sliding_window` so users don't think
-        # SWA is active when it isn't. Set config.sliding_window=None (e.g.
-        # unset `mtp_window_size` for MTP) if you need CP>1.
-        cp_sliding_window = getattr(self.config, "sliding_window", None)
-        if cp_sliding_window is not None:
-            raise NotImplementedError(
-                f"[SWA-CP-UNSUPPORTED] layer_number={layer_number} "
-                f"sliding_window={cp_sliding_window} was requested but "
-                f"CPDotProductAttention (context_parallel_size>1) has no "
-                f"kernel-level SWA support. Either disable sliding window "
-                f"(set mtp_window_size=None / sliding_window=None) or run "
-                f"with context_parallel_size=1."
-            )
-
     def forward(
         self,
         query: Tensor,
