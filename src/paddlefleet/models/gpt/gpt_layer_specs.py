@@ -148,6 +148,8 @@ def get_attention_spec(
 
     use_qk_norm = getattr(config, "use_qk_norm", False)
     qk_l2_norm = getattr(config, "qk_l2_norm", False)
+    gated_attention = getattr(config, "gated_attention", False)
+    align_mode = getattr(config, "gpt_model_use_experimental_version", None)
 
     if attention_layer_type == "self_attention":
         return LayerSpec(
@@ -160,6 +162,9 @@ def get_attention_spec(
                 qkv_proj=backend.column_parallel_linear(),
                 core_attention=backend.core_attention(),
                 o_proj=backend.row_parallel_linear(),
+                gate_proj=backend.column_parallel_linear()
+                if gated_attention and align_mode
+                else IdentityOp,
                 q_norm=(
                     L2Norm
                     if qk_l2_norm

@@ -426,9 +426,16 @@ class LanguageLoss(FleetLayer):
                                 labels_cur_depth, axis=1
                             )
 
-                        loss_matrix_cur_depth = self.loss_func(
-                            logits_cur_depth.cast("float32"), labels_cur_depth
-                        )
+                        if self.config.fused_linear_ce_loss_chunk > 0:
+                            loss_matrix_cur_depth = self._forward(
+                                logits_cur_depth,
+                                labels_cur_depth,
+                            )
+                        else:
+                            loss_matrix_cur_depth = self.loss_func(
+                                logits_cur_depth.cast("float32"),
+                                labels_cur_depth,
+                            )
 
                         if get_context_parallel_world_size() > 1:
                             # In EB data flow and CP size > 1, loss and labels need to be gathered back.

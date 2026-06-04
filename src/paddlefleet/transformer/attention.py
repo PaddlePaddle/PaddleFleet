@@ -32,11 +32,15 @@ from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet import tensor_parallel
+from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 from paddlefleet.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
+)
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
@@ -125,7 +129,8 @@ def _apply_ec_complex_3d_mrope(
 
     freqs_cis = paddle.polar(paddle.ones_like(freqs), freqs)
     freqs_cis = freqs_cis.unsqueeze(2)
-
+    if get_context_parallel_world_size() > 1:
+        freqs_cis = ContextParallelScatterOp.apply(freqs_cis, axis=1)
     if _LOG_LAYER_MD5:
         logger = logging.getLogger(__name__)
         rank = paddle.distributed.get_rank()
@@ -177,6 +182,7 @@ class SelfAttentionSublayersSpec:
     o_proj: LayerSpec | type = None
     q_norm: LayerSpec | type = None
     k_norm: LayerSpec | type = None
+    gate_proj: LayerSpec | type = None
 
 
 @dataclass
@@ -785,8 +791,23 @@ class Attention(FleetLayer, ABC):
             logging.getLogger(__name__).info(
                 f"[MD5 Probe PF] Rank={_rank} Layer={self.layer_number} core_attn_out MD5={_ca_md5} shape={list(core_attn_out.shape)}"
             )
-
-        output, bias = self.o_proj(core_attn_out)
+        if (
+            self.config.gpt_model_use_experimental_version
+            and self.o_proj.bias is not None
+            and self.config.tensor_model_parallel_size == 1
+        ):
+            orig_shape = core_attn_out.shape
+            core_attn_out = core_attn_out.reshape([-1, core_attn_out.shape[-1]])
+            # Use fused_linear to match EC's FusedLinear behavior (fused_gemm_epilogue)
+            output = paddle.incubate.nn.functional.fused_linear(
+                core_attn_out, self.o_proj.weight, self.o_proj.bias
+            )
+            output = output.reshape(
+                [orig_shape[0], orig_shape[1], output.shape[-1]]
+            )
+            bias = None
+        else:
+            output, bias = self.o_proj(core_attn_out)
 
         if self.config.gpt_model_use_experimental_version and _LOG_LAYER_MD5:
             _out = output
@@ -836,22 +857,50 @@ class SelfAttention(Attention):
         gate_projection_size = (
             self.out_projection_size if self.gated_attention else 0
         )
-
-        self.qkv_proj = build_spec_layer(
-            sublayers_spec.qkv_proj,
-            self.config.hidden_size,
-            self.query_projection_size
-            + self.key_projection_size
-            + self.value_projection_size
-            + gate_projection_size,
-            config=self.config,
-            init_method=self.config.init_method,
-            gather_output=False,
-            bias=self.config.use_bias or self.config.attention_bias,
-            skip_bias_add=False,
-            is_expert=False,
-            tp_group=self.pg_collection.tp,
-        )
+        if not self.config.gpt_model_use_experimental_version:
+            self.qkv_proj = build_spec_layer(
+                sublayers_spec.qkv_proj,
+                self.config.hidden_size,
+                self.query_projection_size
+                + self.key_projection_size
+                + self.value_projection_size
+                + gate_projection_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=self.config.use_bias or self.config.attention_bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_group=self.pg_collection.tp,
+            )
+        else:
+            self.qkv_proj = build_spec_layer(
+                sublayers_spec.qkv_proj,
+                self.config.hidden_size,
+                self.query_projection_size
+                + self.key_projection_size
+                + self.value_projection_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=self.config.use_bias or self.config.attention_bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_group=self.pg_collection.tp,
+            )
+            if self.gated_attention:
+                self.gate_proj = build_spec_layer(
+                    sublayers_spec.gate_proj,
+                    self.config.hidden_size,
+                    gate_projection_size,
+                    config=self.config,
+                    init_method=self.config.init_method,
+                    gather_output=False,
+                    bias=self.config.use_bias or self.config.attention_bias,
+                    skip_bias_add=False,
+                    is_expert=False,
+                    tp_group=self.pg_collection.tp,
+                )
 
         # For per_layer qk_norm, norm operates on gathered (full) tensors,
         # so input_is_parallel should be False to avoid extra allreduce.
@@ -907,68 +956,102 @@ class SelfAttention(Attention):
         # Attention heads [b, sq, h] --> [b, sq, ng * group_dim]
         mixed_qkv, _ = self.qkv_proj(hidden_states)
 
+        if self.config.gpt_model_use_experimental_version:
+            if self.gated_attention:
+                gate_output = self.gate_proj(hidden_states)
+                gate = (
+                    gate_output[0]
+                    if isinstance(gate_output, tuple)
+                    else gate_output
+                )
+            else:
+                gate = None
+
         heads_per_group = (
             self.num_attention_heads_per_partition
             // self.num_query_groups_per_partition
         )
         q_dim = heads_per_group * self.hidden_size_per_attention_head
 
-        if self.gated_attention:
-            gate_dim = (
-                heads_per_group
-                * (self.num_key_value_heads if self.use_vha_attention else 1)
-                * self.value_hidden_size_per_attention_head
-            )
-
-        if self.gated_attention:
-            # Per group: Q + Gate + K + V
-            group_dim = (
-                q_dim
-                + gate_dim
-                + self.hidden_size_per_attention_head
-                + self.value_hidden_size_per_attention_head
-            )
-        else:
-            # Per group: Q + K + V
-            group_dim = (
-                q_dim
-                + self.hidden_size_per_attention_head
-                + self.value_hidden_size_per_attention_head
-            )
-
-        # [b, sq, hp] --> [b, sq, ng, group_dim]
-        new_tensor_shape = (
-            *mixed_qkv.shape[:-1],
-            self.num_query_groups_per_partition,
-            group_dim,
-        )
-        mixed_qkv = mixed_qkv.reshape(*new_tensor_shape)
-
-        if self.gated_attention:
-            split_arg_list = [
-                q_dim,
-                gate_dim,
+        # EC-compatible QKV split: EC uses non-interleaved layout [all_Q | all_K | all_V]
+        # while PF default uses per-group interleaved layout [G0: Q,K,V | G1: Q,K,V | ...]
+        if self.config.gpt_model_use_experimental_version:
+            # EC-style: reshape to [b, sq, num_heads + 2*num_kv_heads, head_dim], split on axis=2
+            num_heads = self.num_attention_heads_per_partition
+            num_kv_heads = self.num_query_groups_per_partition
+            mixed_qkv = mixed_qkv.reshape(
+                *mixed_qkv.shape[:-1],
+                num_heads + 2 * num_kv_heads,
                 self.hidden_size_per_attention_head,
-                self.value_hidden_size_per_attention_head,
-            ]
+            )
+
+            if not split_qkv:
+                split_arg_list = [num_heads, num_kv_heads, num_kv_heads]
+                return mixed_qkv, split_arg_list
+            query, key, value = paddle.split(
+                mixed_qkv, [num_heads, num_kv_heads, num_kv_heads], axis=2
+            )
         else:
-            split_arg_list = [
-                q_dim,
-                self.hidden_size_per_attention_head,
-                self.value_hidden_size_per_attention_head,
-            ]
+            if self.gated_attention:
+                gate_dim = (
+                    heads_per_group
+                    * (
+                        self.num_key_value_heads
+                        if self.use_vha_attention
+                        else 1
+                    )
+                    * self.value_hidden_size_per_attention_head
+                )
 
-        # Return unsplit mixed_qkv and split_arg_list
-        if not split_qkv:
-            return mixed_qkv, split_arg_list
+            if self.gated_attention:
+                # Per group: Q + Gate + K + V
+                group_dim = (
+                    q_dim
+                    + gate_dim
+                    + self.hidden_size_per_attention_head
+                    + self.value_hidden_size_per_attention_head
+                )
+            else:
+                # Per group: Q + K + V
+                group_dim = (
+                    q_dim
+                    + self.hidden_size_per_attention_head
+                    + self.value_hidden_size_per_attention_head
+                )
 
-        parts = paddle.split(mixed_qkv, split_arg_list, axis=3)
+            # [b, sq, hp] --> [b, sq, ng, group_dim]
+            new_tensor_shape = (
+                *mixed_qkv.shape[:-1],
+                self.num_query_groups_per_partition,
+                group_dim,
+            )
+            mixed_qkv = mixed_qkv.reshape(*new_tensor_shape)
 
-        if self.gated_attention:
-            query, gate, key, value = parts
-        else:
-            query, key, value = parts
-            gate = None
+            if self.gated_attention:
+                split_arg_list = [
+                    q_dim,
+                    gate_dim,
+                    self.hidden_size_per_attention_head,
+                    self.value_hidden_size_per_attention_head,
+                ]
+            else:
+                split_arg_list = [
+                    q_dim,
+                    self.hidden_size_per_attention_head,
+                    self.value_hidden_size_per_attention_head,
+                ]
+
+            # Return unsplit mixed_qkv and split_arg_list
+            if not split_qkv:
+                return mixed_qkv, split_arg_list
+
+            parts = paddle.split(mixed_qkv, split_arg_list, axis=3)
+
+            if self.gated_attention:
+                query, gate, key, value = parts
+            else:
+                query, key, value = parts
+                gate = None
 
         if self.v_scale is not None:
             value = value * self.v_scale
