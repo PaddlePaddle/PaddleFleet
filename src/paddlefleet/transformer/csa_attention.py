@@ -783,12 +783,40 @@ class Compressor(nn.Layer):
         kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
         score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
 
-        cutoff = (sq // ratio) * ratio
-        if cutoff < sq:
-            kv = kv[:, :cutoff, :]
-            score = score[:, :cutoff, :]
+        # per-document cutoff, with padding at tail for CP
+        doc_lens = get_doc_lens()
+        doc_starts = get_doc_starts()
 
-        n_compressed = cutoff // ratio
+        doc_lens_cutoff = get_cutoff_doc_lens()
+        doc_starts_cutoff = get_cutoff_doc_starts()
+
+        assert len(doc_lens) == len(doc_starts)
+        assert len(doc_lens) == len(doc_lens_cutoff)
+        assert len(doc_lens) == len(doc_starts_cutoff)
+
+        # a // ratio + b // ratio <= (a + b) // ratio
+        n_compressed = sq // ratio
+        coff_head_dim = kv.shape[-1]
+        kv_cutoff = paddle.full(
+            shape=[b, n_compressed * ratio, coff_head_dim],
+            fill_value=0,
+            dtype=kv.dtype
+        )
+        score_cutoff = paddle.full(
+            shape=[b, n_compressed * ratio, coff_head_dim],
+            fill_value=float("-inf"),
+            dtype=score.dtype
+        )
+        for i in len(doc_lens):
+          doc_len = doc_lens[i]
+          doc_start = doc_starts[i]
+          doc_len_cutoff = doc_lens_cutoff[i]
+          doc_start_cutoff = doc_starts_cutoff[i]
+          kv_cutoff[:, doc_start_cutoff:doc_len_cutoff, :] = kv[:, doc_start:doc_len_cutoff, :]
+          score_cutoff[:, doc_start_cutoff:doc_len_cutoff, :] = score[:, doc_start:doc_len_cutoff, :]
+
+        kv = kv_cutoff
+        score = score_cutoff
 
         # Reshape: [b, n_compressed, ratio, coff * head_dim]
         kv = kv.reshape([b, n_compressed, ratio, -1])
