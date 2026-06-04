@@ -342,7 +342,7 @@ jobs:
           if [[ ${{ matrix.cuda.bos_CUDA }} == "cu129" ]]; then
             pip install "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           elif [[ ${{ matrix.cuda.bos_CUDA }} == "cu130" || ${{ matrix.cuda.bos_CUDA }} == "cu132" ]]; then
-            pip install "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+            pip install "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
           else
             pip install "nvidia-nvshmem-cu12>=3.3.9,<3.5"
           fi
