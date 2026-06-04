@@ -190,26 +190,43 @@ def get_compress_topk_idxs(
 
 
 @functools.lru_cache(maxsize=8)
-def _get_window_topk_idxs_cached(
-    window_size: int, seqlen: int, device_str: str
-) -> Tensor:
-    """Compute sliding window indices for a single sequence (cached)."""
-    base = paddle.arange(seqlen).unsqueeze(1)  # [seqlen, 1]
-    offsets = paddle.arange(window_size)  # [window_size]
-    matrix = paddle.clip(base - window_size + 1, min=0) + offsets
-    matrix = paddle.where(matrix > base, paddle.full_like(matrix, -1), matrix)
-    return matrix
-
-
 def get_window_topk_idxs(
     window_size: int,
     batch_size: int,
     seqlen: int,
-    device=None,
+    startend_row_indices: Tensor,
 ) -> Tensor:
-    """Get sliding window indices: [b, seqlen, window_size]."""
-    indices = _get_window_topk_idxs_cached(window_size, seqlen, "gpu")
-    return indices.unsqueeze(0).expand([batch_size, -1, -1])
+    """Get varlen-aware sliding window indices: [seqlen, window_size].
+
+    The sliding window resets at document boundaries and padding positions
+    (positions beyond the last document's end) output all -1.
+    """
+    mask = startend_row_indices.flatten().cast("int64")
+    positions = paddle.arange(seqlen, dtype="int64")
+
+    is_boundary = paddle.zeros([seqlen], dtype="int64")
+    is_boundary[0] = 1
+    is_boundary[1:] = ((positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])).cast("int64")
+
+    start_marker = is_boundary * positions
+    doc_start = paddle.cummax(start_marker, axis=0).values
+
+    pos_in_doc = positions - doc_start
+    doc_len = mask - doc_start
+    is_padding = pos_in_doc >= doc_len
+
+    win_start = paddle.maximum(doc_start, positions - window_size + 1)
+
+    offsets = paddle.arange(window_size, dtype="int64").unsqueeze(0)
+    indices = win_start.unsqueeze(1) + offsets
+
+    beyond_pos = indices > positions.unsqueeze(1)
+    below_doc_start = indices < doc_start.unsqueeze(1)
+    padding_mask = is_padding.unsqueeze(1).expand_as(indices)
+
+    invalid = beyond_pos | below_doc_start | padding_mask
+    result = paddle.where(invalid, paddle.full_like(indices, -1), indices)
+    return result
 
 
 def _build_compressed_causal_mask(
@@ -1379,6 +1396,7 @@ class CompressedSparseAttention(FleetLayer):
         query: Tensor,
         key: Tensor,
         value: Tensor,
+        startend_row_indices: Tensor,
         attention_mask: Tensor | None,
         x: Tensor = None,
         qr: Tensor = None,
@@ -1417,7 +1435,7 @@ class CompressedSparseAttention(FleetLayer):
         offset = sq  # compressed indices start after original positions
 
         # Step 3: Window indices
-        window_idxs = get_window_topk_idxs(self.window_size, b, sq)
+        window_idxs = get_window_topk_idxs(self.window_size, b, sq, startend_row_indices)
 
         # Step 4: Compressed indices
         indexer_loss = None
