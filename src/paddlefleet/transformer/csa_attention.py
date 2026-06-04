@@ -56,18 +56,18 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def get_doc_lens(attn_mask_startend_row_indices: Tensor) -> Tensor:
-    """Derive document lengths from attn_mask_startend_row_indices.
+def get_doc_lens(startend_row_indices: Tensor) -> Tensor:
+    """Derive document lengths from startend_row_indices.
 
     Args:
-        attn_mask_startend_row_indices: [batch_size, h, seqlen, 1] tensor where
+        startend_row_indices: [batch_size, h, seqlen, 1] tensor where
             each value is the end boundary (exclusive) of the document that
             position belongs to.
 
     Returns:
         doc_lens: [n_docs] int32 tensor of document lengths.
     """
-    mask = attn_mask_startend_row_indices.flatten().cast("int64")
+    mask = startend_row_indices.flatten().cast("int64")
     seqlen = mask.shape[0]
     positions = paddle.arange(seqlen, dtype="int64")
 
@@ -133,7 +133,7 @@ def get_compress_topk_idxs(
     batch_size: int,
     seqlen: int,
     offset: int,
-    attn_mask_startend_row_indices: Tensor,
+    startend_row_indices: Tensor,
 ) -> Tensor:
     """Get compressed indices for variable-length documents: [seqlen, seqlen // ratio].
 
@@ -146,13 +146,13 @@ def get_compress_topk_idxs(
         batch_size: batch size (must be 1).
         seqlen: sequence length.
         offset: offset added to column indices to produce KV indices.
-        attn_mask_startend_row_indices: [batch_size, h, seqlen, 1] tensor.
+        startend_row_indices: [batch_size, h, seqlen, 1] tensor.
 
     Returns:
         result: [seqlen, seqlen // ratio] int32 tensor.
     """
     n_compressed = seqlen // ratio
-    mask = attn_mask_startend_row_indices.flatten().cast("int64")
+    mask = startend_row_indices.flatten().cast("int64")
     positions = paddle.arange(seqlen, dtype="int64")
 
     is_boundary = paddle.zeros([seqlen], dtype="int64")
@@ -871,6 +871,7 @@ class Compressor(nn.Layer):
     def forward(
         self,
         x: Tensor,
+        startend_row_indices: Tensor,
     ) -> Tensor | None:
         """Compress hidden states into shorter KV sequence.
 
@@ -890,11 +891,11 @@ class Compressor(nn.Layer):
         score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
 
         # per-document cutoff, with padding at tail for CP
-        doc_lens = get_doc_lens()
-        doc_starts = get_doc_starts()
+        doc_lens = get_doc_lens(startend_row_indices)
+        doc_starts = get_doc_starts(doc_lens)
 
-        doc_lens_cutoff = get_cutoff_doc_lens()
-        doc_starts_cutoff = get_cutoff_doc_starts()
+        doc_lens_cutoff = get_cutoff_doc_lens(doc_lens)
+        doc_starts_cutoff = get_cutoff_doc_starts(doc_lens_cutoff)
 
         assert len(doc_lens) == len(doc_starts)
         assert len(doc_lens) == len(doc_lens_cutoff)
