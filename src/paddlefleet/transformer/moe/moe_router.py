@@ -62,6 +62,21 @@ def _get_moe_topk_fusion():
 _moe_router_logger = logging.getLogger(__name__)
 
 
+def _dsv4_router_fp32_wgrad_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_ROUTER_FP32_WGRAD", "0") == "1"
+
+
+def _dsv4_accumulate_router_fp32_wgrad(weight, w_grad):
+    if not _dsv4_router_fp32_wgrad_enabled() or w_grad is None:
+        return
+    w_grad = w_grad.detach().cast(paddle.float32)
+    prev = getattr(weight, "_dsv4_router_gate_fp32_wgrad", None)
+    if prev is None:
+        weight._dsv4_router_gate_fp32_wgrad = w_grad
+    else:
+        weight._dsv4_router_gate_fp32_wgrad = prev + w_grad
+
+
 def _log_moe_md5(tensor, name, layer_idx=None):
     """Log MD5 of a tensor for MoE precision alignment debugging."""
     from paddlefleet.transformer.transformer_layer import TransformerLayer
@@ -95,6 +110,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         """
         ctx.dw_p2p_overlap = dw_p2p_overlap
         ctx.dtype = paddle.float32
+        ctx.weight_ref = w
         ctx.save_for_backward(x, w)
         w = w.T
         return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
@@ -105,6 +121,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         backward
         """
         x, w = ctx.saved_tensor()
+        weight_ref = getattr(ctx, "weight_ref", w)
         assert ctx.dtype == y_grad.dtype, "dtype not match"
 
         w_stop_grad = w.stop_gradient
@@ -112,9 +129,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
 
         def _compute_weight_grad(x_cast, y_grad, weight):
             with paddle.amp.auto_cast(False):
-                w_grad = paddle.matmul(
+                w_grad_fp32 = paddle.matmul(
                     x_cast, y_grad, transpose_x=True
                 ).T  # 始终先算梯度
+                _dsv4_accumulate_router_fp32_wgrad(weight, w_grad_fp32)
+                w_grad = w_grad_fp32.cast("bfloat16").cast(paddle.float32)
 
             if hasattr(weight, "main_grad"):
                 if weight.main_grad is None:
@@ -147,13 +166,14 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                         _compute_weight_grad,
                         x_cast.detach(),
                         y_grad.detach(),
-                        w,
+                        weight_ref,
                     )
                 )
                 WeightGradStore.enabled = False
                 return x_grad, None
         else:
-            w = w.T
+            weight = weight_ref
+            w = weight.T
             x_g, w_g = matmul_grad(
                 x.cast(ctx.dtype),
                 w.cast(ctx.dtype),
@@ -163,9 +183,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             )
 
             x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
-            w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
-            if w_grad is not None:
-                w_grad = w_grad.T
+            w_grad = None
+            if not w_stop_grad:
+                w_grad_fp32 = w_g.T
+                _dsv4_accumulate_router_fp32_wgrad(weight, w_grad_fp32)
+                w_grad = w_grad_fp32.cast("bfloat16").cast(weight.dtype)
 
             return x_grad, w_grad
 
@@ -222,8 +244,6 @@ class StandardMoERouter(nn.Layer):
         self.topk_method = config.topk_method
         self.num_experts_per_tok = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
-        # force keep in float32 when using amp
-        self._cast_to_low_precision = False
 
         self.n_group = config.n_group
 
@@ -250,7 +270,7 @@ class StandardMoERouter(nn.Layer):
         # Initialize gate weight with Normal distribution aligned with Megatron.
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
+            dtype=config.params_dtype or "float32",
             default_initializer=paddle.nn.initializer.Constant(0.0),
         )
         config.init_method(self.weight)
@@ -843,6 +863,7 @@ class StandardMoERouter(nn.Layer):
 
     def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         self._setup_hash_layer(layer_number, is_mtp_layer)
 
     def _setup_hash_layer(self, layer_number, is_mtp_layer: bool = False):
@@ -922,6 +943,7 @@ class TopKRouter(StandardMoERouter):
     def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self._layer_number = layer_number
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
     def forward(self, input, input_ids=None):
@@ -952,6 +974,8 @@ class TopKRouter(StandardMoERouter):
                     f"input_ids=[{batch_size_}, {seq_len_}], "
                     f"expected [batch_size={batch_size}, seq_len={seq_len}]"
                 )
+                if self.is_mtp_layer:
+                    input_ids_none_zero_mask = None
             else:
                 input_ids_none_zero_mask = None
         elif len(input.shape) == 2:

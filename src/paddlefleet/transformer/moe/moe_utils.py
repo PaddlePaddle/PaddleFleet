@@ -141,7 +141,12 @@ def permute(
     sorted_indices = token_indices.masked_select(routing_map)
 
     # use the mapping to permute the tokens
-    permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+    if _dsv4_fleet_moe_fp32_accum_enabled():
+        permuted_input = tokens.cast("float32").index_select(
+            axis=0, index=sorted_indices
+        ).cast(tokens.dtype)
+    else:
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
 
     return permuted_input, sorted_indices
 

@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import os
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -227,7 +228,6 @@ class GPTEmbedding(FleetLayer):
                     mtp_input_ids_for_moe_mask = paddle.stack(
                         mtp_ids_list, axis=1
                     )
-
                 if self.config.enable_mtp_magic_send:
                     # Magic send: only truncate, skip shifted embedding pre-computation.
                     # input_ids will be broadcast to the last stage for re-embedding.
@@ -244,7 +244,6 @@ class GPTEmbedding(FleetLayer):
                         decoder_input = ContextParallelScatterOp.apply(
                             decoder_input, axis=1
                         )
-
                     if self.sequence_parallel:
                         batch_size, seq_length, hidden_size = (
                             decoder_input.shape
@@ -289,13 +288,53 @@ class GPTEmbedding(FleetLayer):
                         )  # change to [S, B, H]
                     mtp_emb_res = [inputs_embeds]
                     for depth in range(self.config.num_nextn_predict_layers):
-                        inputs_embeds_mtp = paddle.concat(
-                            [
-                                inputs_embeds_ori[:, (depth + 1) :, :],
-                                inputs_embeds_extra[:, : (depth + 1), :],
-                            ],
-                            axis=1,
-                        )
+                        if (
+                            paddle.core._has_grad()
+                            and os.getenv("DSV4_FLEET_MTP_SEPARATE_EMBEDDING", "0")
+                            == "1"
+                        ):
+                            shifted_input_ids = input_ids[
+                                :, (depth + 1) : seq_length
+                            ]
+                            shifted_position_ids = None
+                            if (
+                                not self.multimodal_embedding
+                                and position_ids is not None
+                            ):
+                                shifted_position_ids = position_ids[
+                                    :, (depth + 1) : seq_length
+                                ]
+                            pad_input_ids = paddle.zeros(
+                                [batch_size, depth + 1], dtype=input_ids.dtype
+                            )
+                            pad_position_ids = None
+                            if (
+                                not self.multimodal_embedding
+                                and position_ids is not None
+                            ):
+                                pad_position_ids = paddle.zeros(
+                                    [batch_size, depth + 1],
+                                    dtype=position_ids.dtype,
+                                )
+                            shifted_embeds = self.embedding(
+                                input_ids=shifted_input_ids,
+                                position_ids=shifted_position_ids,
+                            )
+                            pad_embeds = self.embedding(
+                                input_ids=pad_input_ids,
+                                position_ids=pad_position_ids,
+                            )
+                            inputs_embeds_mtp = paddle.concat(
+                                [shifted_embeds, pad_embeds], axis=1
+                            )
+                        else:
+                            inputs_embeds_mtp = paddle.concat(
+                                [
+                                    inputs_embeds_ori[:, (depth + 1) :, :],
+                                    inputs_embeds_extra[:, : (depth + 1), :],
+                                ],
+                                axis=1,
+                            )
 
                         if (
                             get_context_parallel_world_size() > 1

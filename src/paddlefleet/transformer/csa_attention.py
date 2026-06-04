@@ -26,6 +26,7 @@ Components:
 from __future__ import annotations
 
 import functools
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -192,6 +193,75 @@ def _apply_rope(
 # ---------------------------------------------------------------------------
 
 
+def _dsv4_import_torch_for_csa_sink_softmax():
+    site_packages = os.environ.get(
+        "DSV4_FLEET_CSA_TORCH_SITE_PACKAGES",
+        os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES", ""),
+    )
+    if site_packages and site_packages not in os.sys.path:
+        os.sys.path.insert(0, site_packages)
+    import torch
+    import torch.utils.dlpack
+
+    return torch
+
+
+def _dsv4_csa_sink_softmax_torch_bwd_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_CSA_SINK_SOFTMAX_TORCH_BWD", "0") == "1"
+
+
+def _dsv4_csa_sink_softmax_paddle(scores: Tensor, sink: Tensor) -> Tensor:
+    scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
+    scores_max = paddle.maximum(scores_max, sink)
+    exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
+    exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
+    sum_exp = exp_scores.sum(axis=-1, keepdim=True) + exp_sink  # [b, np, sq, 1]
+    return exp_scores / sum_exp  # [b, np, sq, topk]
+
+
+class _DSV4CSASinkSoftmaxTorchBackward(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, scores: Tensor, sink: Tensor):
+        ctx.save_for_backward(scores, sink)
+        return _dsv4_csa_sink_softmax_paddle(scores, sink)
+
+    @staticmethod
+    def backward(ctx, grad_attn_weights: Tensor):
+        torch = _dsv4_import_torch_for_csa_sink_softmax()
+        scores, sink = ctx.saved_tensor()
+        scores_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(scores.detach().contiguous())
+        )
+        sink_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(sink.detach().contiguous())
+        )
+        grad_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(
+                grad_attn_weights.detach().contiguous()
+            )
+        )
+
+        with torch.enable_grad():
+            scores_t = scores_t.detach().requires_grad_(True)
+            sink_t = sink_t.detach().requires_grad_(True)
+            scores_max_t = torch.maximum(
+                scores_t.max(dim=-1, keepdim=True).values, sink_t
+            )
+            exp_scores_t = torch.exp(scores_t - scores_max_t)
+            exp_sink_t = torch.exp(sink_t - scores_max_t)
+            sum_exp_t = exp_scores_t.sum(dim=-1, keepdim=True) + exp_sink_t
+            attn_weights_t = exp_scores_t / sum_exp_t
+            attn_weights_t.backward(grad_t)
+
+        grad_scores = paddle.utils.dlpack.from_dlpack(
+            torch.utils.dlpack.to_dlpack(scores_t.grad.contiguous())
+        )
+        grad_sink = paddle.utils.dlpack.from_dlpack(
+            torch.utils.dlpack.to_dlpack(sink_t.grad.contiguous())
+        )
+        return grad_scores, grad_sink
+
+
 def unfused_compressed_sparse_attn(
     query: Tensor,
     kv_full: Tensor,
@@ -241,18 +311,11 @@ def unfused_compressed_sparse_attn(
 
         # Softmax with attention sink
         # sink: [np] -> [1, np, 1, 1]
-        sink = attn_sink.reshape([1, np_heads, 1, 1])
-        # Compute stable softmax: max over scores and sink
-        scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
-        scores_max = paddle.maximum(scores_max, sink)
-
-        exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
-        exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
-
-        sum_exp = (
-            exp_scores.sum(axis=-1, keepdim=True) + exp_sink
-        )  # [b, np, sq, 1]
-        attn_weights = exp_scores / sum_exp  # [b, np, sq, topk]
+        sink = attn_sink.reshape([1, np_heads, 1, 1]).cast("float32")
+        if _dsv4_csa_sink_softmax_torch_bwd_enabled():
+            attn_weights = _DSV4CSASinkSoftmaxTorchBackward.apply(scores, sink)
+        else:
+            attn_weights = _dsv4_csa_sink_softmax_paddle(scores, sink)
 
         # Weighted sum: [b, np, sq, topk] x [b, sq, topk, hn] -> [b, np, sq, hn]
         output = paddle.einsum("bnsk,bskh->bnsh", attn_weights, kv_g)
@@ -801,7 +864,7 @@ class Compressor(nn.Layer):
             score = self._overlap_transform(score, fill_value=float("-inf"))
 
         # Gated pooling: softmax over the pool_dim, weighted sum.
-        weights = F.softmax(score, axis=2).cast(kv.dtype)
+        weights = F.softmax(score, axis=2, dtype="float32").cast(kv.dtype)
         kv = (kv * weights).sum(axis=2)  # [b, n_compressed, head_dim]
 
         kv = self.norm(kv.cast(x.dtype))

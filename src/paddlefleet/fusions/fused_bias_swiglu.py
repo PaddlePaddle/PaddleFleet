@@ -16,6 +16,7 @@
 # pylint: disable=missing-function-docstring, missing-class-docstring
 
 import logging
+import os
 
 import paddle
 import paddle.nn.functional as F
@@ -24,6 +25,25 @@ from paddlefleet.jit import jit_fuser
 from paddlefleet.utils import nvtx_decorator
 
 logger = logging.getLogger(__name__)
+
+
+def _dsv4_megatron_swiglu_wgrad_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_MEGATRON_SWIGLU_WGRAD", "0") == "1"
+
+
+def _dsv4_sum_like_megatron_for_small_chunks(value: paddle.Tensor) -> paddle.Tensor:
+    if (
+        not _dsv4_megatron_swiglu_wgrad_enabled()
+        or len(value.shape) != 2
+        or value.shape[0] >= 16
+    ):
+        return paddle.sum(value, axis=-1, keepdim=True)
+    pad_rows = 16 - value.shape[0]
+    if pad_rows <= 0:
+        return paddle.sum(value, axis=-1, keepdim=True)
+    padding = paddle.zeros([pad_rows, value.shape[1]], dtype=value.dtype)
+    padded = paddle.concat([value, padding], axis=0)
+    return paddle.sum(padded, axis=-1, keepdim=True)[: value.shape[0]]
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
@@ -105,7 +125,7 @@ def weighted_swiglu_back(g, y, weights):
     input_grad = swiglu_back(g * weights, y)
     # precision of w may be higher than y and g, so we need to cast g to w_dtype
     weights_grad = swiglu(y) * g.to(w_dtype)
-    weights_grad = paddle.sum(weights_grad, dim=-1, keepdim=True)
+    weights_grad = _dsv4_sum_like_megatron_for_small_chunks(weights_grad)
     return input_grad.to(input_dtype), weights_grad.to(w_dtype)
 
 
@@ -251,7 +271,7 @@ def clamped_weighted_swiglu_back(g, y, weights, clamp_value):
     w_dtype = weights.dtype
     input_grad = clamped_swiglu_back(g * weights, y, clamp_value)
     weights_grad = clamped_swiglu(y, clamp_value) * g.cast(w_dtype)
-    weights_grad = paddle.sum(weights_grad, axis=-1, keepdim=True)
+    weights_grad = _dsv4_sum_like_megatron_for_small_chunks(weights_grad)
     return input_grad.cast(input_dtype), weights_grad.cast(w_dtype)
 
 
