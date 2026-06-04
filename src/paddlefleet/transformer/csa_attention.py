@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.enums import AttnMaskType
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
+
 # ---------------------------------------------------------------------------
 # Helper functions for index computation
 # ---------------------------------------------------------------------------
@@ -498,6 +499,7 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
         softmax_scale: float,
         loss_coeff: float,
         tp_group=None,
+        indexer_backend: str = "tilelang",
     ) -> Tensor:
         # The TileLang kernel applies its own ``dim**-0.5`` scale on index_q
         # and consumes raw weights, so we pass them through unmodified. The
@@ -528,15 +530,13 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
             target.detach(),
         )
         ctx.loss_coeff = float(loss_coeff)
-        ctx.num_rows = float(target.shape[0] * target.shape[1])
+        ctx.indexer_backend = str(indexer_backend)
+        if ctx.indexer_backend == "tilelang":
+            ctx.num_rows = float(target.shape[0] * target.shape[1])
         return loss, topk_indices.detach()
 
     @staticmethod
     def backward(ctx, grad_loss: Tensor, grad_topk_indices: Tensor = None):
-        from paddlefleet.tilelang_ops import (
-            csa_indexer_bwd,
-        )
-
         (
             index_q,
             weights,
@@ -546,20 +546,44 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
             target,
         ) = ctx.saved_tensor()
 
-        # Treat the forward eps as numerical protection only and use the
-        # fused softmax + KL gradient w.r.t. the selected logits.
-        scale = ctx.loss_coeff / max(ctx.num_rows, 1.0)
-        grad_index_scores = (topk_probs - target) * scale
-        if grad_loss is not None:
-            grad_index_scores = grad_index_scores * grad_loss
+        if ctx.indexer_backend == "cudnn":
+            from paddlefleet.cudnn_ops import csa_indexer_bwd
 
-        grad_q, grad_weights, grad_k = csa_indexer_bwd(
-            index_q,
-            weights,
-            index_k_comp,
-            topk_indices,
-            grad_index_scores,
-        )
+            # cuDNN does the (predict - target) * (loss_coeff/(B*Sq)) score-grad
+            # precompute internally and multiplies the result by ``grad_loss``
+            # in the GEMM kernel. ``num_rows == B * Sq`` matches cuDNN's
+            # built-in ``grad_scale = loss_coeff / (B*Sq)``.
+            grad_q, grad_weights, grad_k = csa_indexer_bwd(
+                index_q,
+                weights,
+                index_k_comp,
+                target,
+                topk_probs,
+                topk_indices,
+                loss_coeff=ctx.loss_coeff,
+                grad_loss=grad_loss,
+            )
+        elif ctx.indexer_backend == "tilelang":
+            from paddlefleet.tilelang_ops import csa_indexer_bwd
+
+            # Treat the forward eps as numerical protection only and use the
+            # fused softmax + KL gradient w.r.t. the selected logits.
+            scale = ctx.loss_coeff / max(ctx.num_rows, 1.0)
+            grad_index_scores = (topk_probs - target) * scale
+            if grad_loss is not None:
+                grad_index_scores = grad_index_scores * grad_loss
+
+            grad_q, grad_weights, grad_k = csa_indexer_bwd(
+                index_q,
+                weights,
+                index_k_comp,
+                topk_indices,
+                grad_index_scores,
+            )
+        else:
+            raise NotImplementedError(
+                f"CSA indexer backend {ctx.indexer_backend!r} not implemented."
+            )
 
         if grad_q.dtype != index_q.dtype:
             grad_q = grad_q.cast(index_q.dtype)
@@ -596,6 +620,7 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         topk_probs: Tensor,
         target: Tensor,
         loss_coeff: float,
+        indexer_backend: str = "tilelang",
     ) -> Tensor:
         ctx.save_for_backward(
             index_q.detach(),
@@ -606,13 +631,13 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
             target.detach(),
         )
         ctx.loss_coeff = float(loss_coeff)
-        ctx.num_rows = float(target.shape[0] * target.shape[1])
+        ctx.indexer_backend = str(indexer_backend)
+        if ctx.indexer_backend == "tilelang":
+            ctx.num_rows = float(target.shape[0] * target.shape[1])
         return output
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
-        from paddlefleet.tilelang_ops import csa_indexer_bwd
-
         (
             index_q,
             weights,
@@ -622,20 +647,52 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
             target,
         ) = ctx.saved_tensor()
 
-        grad_index_scores = (topk_probs - target) * (
-            ctx.loss_coeff / max(ctx.num_rows, 1.0)
-        )
         scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
-        if scale is not None:
-            grad_index_scores = grad_index_scores * scale
 
-        grad_q, grad_weights, grad_k = csa_indexer_bwd(
-            index_q,
-            weights,
-            index_k_comp,
-            topk_indices,
-            grad_index_scores,
-        )
+        if ctx.indexer_backend == "cudnn":
+            from paddlefleet.cudnn_ops import csa_indexer_bwd
+
+            # cuDNN multiplies its internal score-grad by ``grad_loss`` in
+            # the GEMM kernel; pass the externally-set scaler as ``grad_loss``.
+            if scale is None:
+                grad_loss_arg = None
+            elif isinstance(scale, paddle.Tensor):
+                grad_loss_arg = scale
+            else:
+                grad_loss_arg = paddle.to_tensor(
+                    float(scale), dtype=paddle.float32
+                )
+
+            grad_q, grad_weights, grad_k = csa_indexer_bwd(
+                index_q,
+                weights,
+                index_k_comp,
+                target,
+                topk_probs,
+                topk_indices,
+                loss_coeff=ctx.loss_coeff,
+                grad_loss=grad_loss_arg,
+            )
+        elif ctx.indexer_backend == "tilelang":
+            from paddlefleet.tilelang_ops import csa_indexer_bwd
+
+            grad_index_scores = (topk_probs - target) * (
+                ctx.loss_coeff / max(ctx.num_rows, 1.0)
+            )
+            if scale is not None:
+                grad_index_scores = grad_index_scores * scale
+
+            grad_q, grad_weights, grad_k = csa_indexer_bwd(
+                index_q,
+                weights,
+                index_k_comp,
+                topk_indices,
+                grad_index_scores,
+            )
+        else:
+            raise NotImplementedError(
+                f"CSA indexer backend {ctx.indexer_backend!r} not implemented."
+            )
 
         if grad_q.dtype != index_q.dtype:
             grad_q = grad_q.cast(index_q.dtype)
@@ -1142,6 +1199,7 @@ class CompressedSparseAttention(FleetLayer):
                 topk_probs,
                 target,
                 float(indexer_loss_coeff),
+                str(getattr(self.config, "csa_indexer_backend", "tilelang")),
             )
             if indexer_loss_coeff > 0:
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
@@ -1205,9 +1263,7 @@ class CompressedSparseAttention(FleetLayer):
         # Optionally replace topk producer with TileLang fused compressed
         # indexer forward. This only swaps the indices fed to sparse attention.
         if use_tilelang_indexer and not use_tilelang_loss_path:
-            from paddlefleet.tilelang_ops import (
-                csa_indexer_topk_fwd,
-            )
+            from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
 
             with paddle.no_grad():
                 q_indexer_tl, k_indexer_tl, weights_indexer_tl = (

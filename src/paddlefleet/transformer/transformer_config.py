@@ -826,6 +826,16 @@ class TransformerConfig(ModelParallelConfig):
     final sparse MQA attention TileLang path.
     """
 
+    csa_indexer_backend: str = "tilelang"
+    """CSA indexer backward backend.
+
+    One of {"tilelang", "cudnn"}; "triton" is reserved for future work.
+    Default "tilelang" preserves the legacy path. "cudnn" requires the
+    TileLang indexer forward (csa_tilelang_enable_indexer=True or
+    csa_tilelang_backend='attention_paddle_compat') because the cuDNN
+    backward consumes the TileLang forward's saved tensors.
+    """
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.
@@ -870,6 +880,7 @@ class TransformerConfig(ModelParallelConfig):
         "csa_tilelang_backend": "csa_tilelang_backend",
         "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
         "csa_tilelang_enable_sparse_attn": "csa_tilelang_enable_sparse_attn",
+        "csa_indexer_backend": "csa_indexer_backend",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -1116,6 +1127,11 @@ class TransformerConfig(ModelParallelConfig):
             ):
                 raise ValueError(
                     "csa_tilelang_enable_sparse_attn=True requires csa_tilelang_backend='attention_paddle_compat'."
+                )
+            if self.csa_indexer_backend not in {"tilelang", "cudnn", "triton"}:
+                raise ValueError(
+                    f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
+                    "Must be one of {'tilelang', 'cudnn'}."
                 )
 
         # Hash-based MoE routing consistency checks.
