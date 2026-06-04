@@ -377,9 +377,10 @@ class MultiLatentAttention(Attention):
         num_heads = self.num_attention_heads_per_partition
 
         # Split query into nope and rope parts
-        q_nope, q_pe = paddle.split(
-            query, [qk_nope_head_dim, qk_rope_head_dim], axis=-1
-        )  # [b, s, heads, qk_nope_head_dim], [b, s, heads, qk_rope_head_dim]
+        q_nope = query[
+            ..., :qk_nope_head_dim
+        ]  # [b, s, heads, qk_nope_head_dim]
+        q_pe = query[..., qk_nope_head_dim:]  # [b, s, heads, qk_rope_head_dim]
 
         # Get kv_b_proj weight and reshape to per-head form
         # kv_b_proj.weight: [kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)]
