@@ -286,12 +286,13 @@ class TestMLAGatedForward(unittest.TestCase):
 
 
 class TestGetAttentionSpecGate(unittest.TestCase):
-    def _make_mock_config(self, gated=False):
+    def _make_mock_config(self, gated=False, align_mode=None):
         config = MagicMock()
         config.gated_attention = gated
         config.normalization = "RMSNorm"
         config.use_qk_norm = False
         config.qk_l2_norm = False
+        config.gpt_model_use_experimental_version = align_mode
         return config
 
     def test_mla_gated_has_gate_proj(self):
@@ -330,13 +331,15 @@ class TestGetAttentionSpecGate(unittest.TestCase):
 
     def test_self_attention_type_unaffected(self):
         from paddlefleet.models.gpt.gpt_layer_specs import get_attention_spec
+        from paddlefleet.transformer.identity_op import IdentityOp
 
         config = self._make_mock_config(gated=True)
         spec = get_attention_spec(
             config=config,
             attention_layer_type="self_attention",
         )
-        self.assertFalse(hasattr(spec.sublayers_spec, "gate_proj"))
+        # When align_mode is None, gate_proj should be IdentityOp (no-op)
+        self.assertEqual(spec.sublayers_spec.gate_proj, IdentityOp)
 
 
 if __name__ == "__main__":

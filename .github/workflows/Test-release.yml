@@ -34,7 +34,7 @@ jobs:
     if: ${{ inputs.can-skip != 'true' }}
     uses: ./.github/workflows/check-bypass.yml
     with:
-      workflow-name: 'test-release'
+      workflow-name: "test-release"
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
       - name: git diff and check
         id: check_files
         if: |
@@ -207,7 +207,7 @@ jobs:
           export IS_NVIDIA=True
           export UV_HTTP_TIMEOUT=300
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install packaging "setuptools>=66.1.0" wheel "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3" "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
           echo "OPS_WHL=$(basename $OPS_WHL)" >> dist/whl_names.txt
@@ -262,8 +262,6 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
-
-
 
   single_card_test:
     name: Unit test (single card)
@@ -324,7 +322,7 @@ jobs:
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib einops
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
@@ -332,7 +330,7 @@ jobs:
           '
 
       - name: Single card test
-        timeout-minutes: 50
+        timeout-minutes: 60
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
@@ -420,7 +418,6 @@ jobs:
             -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image}
 
-
       - name: Clone PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -485,7 +482,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
-
   integration-test-H20-single-card:
     needs: [check-bypass, build_whl, check_documents_type]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
@@ -537,7 +533,6 @@ jobs:
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
-
 
       - name: Install PaddleFleet
         run: |
@@ -734,7 +729,6 @@ jobs:
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
-
 
       - name: Install PaddleFleet
         run: |
@@ -1051,7 +1045,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
-
   integration-test-a100:
     needs: [check-bypass, build_whl, check_documents_type]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
@@ -1095,7 +1088,6 @@ jobs:
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
-
 
       - name: Install PaddleFleet
         run: |
@@ -1294,7 +1286,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
           '
 
-
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         timeout-minutes: 10
@@ -1355,7 +1346,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          python-version: "3.10"
       - name: coverage file download
         shell: bash
         run: |

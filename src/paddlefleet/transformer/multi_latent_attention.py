@@ -277,14 +277,14 @@ class MultiLatentAttention(Attention):
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=1.0,
-                rotary_base=self.config.rope_theta,
+                rotary_base=self.rope_theta,
                 cp_group=self.pg_collection.cp,
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
-                rotary_base=self.config.rope_theta,
+                rotary_base=self.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
                 original_max_position_embeddings=self.config.original_max_position_embeddings,
                 beta_fast=self.config.beta_fast,
@@ -720,6 +720,17 @@ class MLASelfAttention(MultiLatentAttention):
             eps=self.config.rms_norm_eps,
         )
 
+    def _is_cudagraph_active(self) -> bool:
+        """Check if CUDA Graph capture or replay is currently active.
+
+        Uses forward_meta.step_use_cudagraph flag set on core_attention.config
+        by FastDeploy's model runner before CUDA graph capture/replay.
+        """
+        forward_meta = getattr(self.core_attention.config, "forward_meta", None)
+        if forward_meta is None:
+            return False
+        return getattr(forward_meta, "step_use_cudagraph", False)
+
     def get_query_key_value_tensors(
         self,
         hidden_states,
@@ -780,6 +791,7 @@ class MLASelfAttention(MultiLatentAttention):
                 rotary_pos_emb, mscale = self.rotary_pos_emb(
                     rotary_seq_len,
                     packed_seq=packed_seq,
+                    position_ids=None if self.training else position_ids,
                 )
                 # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
                 # mscale = 1.0
@@ -990,6 +1002,14 @@ class MLASelfAttention(MultiLatentAttention):
                     cp_rank,
                     cp_size,
                 )
+
+                # dynamic_inference not supported for now
+                if not self.training:
+                    raise NotImplementedError(
+                        "apply_rope_fusion does not support dynamic inference yet."
+                    )
+
+                k_pe = None
             else:
                 # Determine seq length:
                 #   packed 3D [t, n, d]      -> dim 0
@@ -1001,10 +1021,15 @@ class MLASelfAttention(MultiLatentAttention):
                     q_len = q.size(1)
 
                 # Determine RoPE start position from position_ids (for decode offset)
-                if position_ids is not None and position_ids.numel() == q_len:
-                    start_pos = int(position_ids.flatten()[0].item())
-                else:
-                    start_pos = 0
+                # .item() triggers D2H sync which is forbidden inside CUDA graph capture:
+                # it causes cudaErrorStreamCaptureUnsupported (900), invalidating the stream
+                # BEFORE the try/except can save it.  Guard with _is_cudagraph_active() so
+                # we never attempt the sync during capture at all.
+                start_pos = 0
+                if position_ids is not None and not self._is_cudagraph_active():
+                    # Normal path: works when not inside CUDA Graph capture
+                    if position_ids.numel() == q_len:
+                        start_pos = int(position_ids.flatten()[0].item())
 
                 if get_context_parallel_world_size() > 1:
                     # In EB dataflow and CP size > 1, rotary_pos_emb is [1, s, 1, d];
@@ -1027,14 +1052,24 @@ class MLASelfAttention(MultiLatentAttention):
                         # Recompute with the correct offset.
                         if self.config.rope_type == "rope":
                             rotary_pos_emb = self.rotary_pos_emb(
-                                q_len, offset=start_pos, packed_seq=packed_seq
+                                q_len,
+                                offset=start_pos,
+                                packed_seq=packed_seq,
+                                position_ids=None
+                                if self.training
+                                else position_ids,
                             )
                         else:
                             # mscale is constant for Yarn (depends only on
                             # model hyper-params), so we can safely drop the
                             # recomputed value and keep the outer-scope one.
                             rotary_pos_emb, _ = self.rotary_pos_emb(
-                                q_len, offset=start_pos, packed_seq=packed_seq
+                                q_len,
+                                offset=start_pos,
+                                packed_seq=packed_seq,
+                                position_ids=None
+                                if self.training
+                                else position_ids,
                             )
 
                 # Replace paddle.split with zero-copy slice views.
@@ -1069,7 +1104,7 @@ class MLASelfAttention(MultiLatentAttention):
                         q_pos_emb,
                         k_pos_emb,
                         q_len,
-                        rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
+                        rope_base=self.rope_theta,  # Must match EC's config.rope_theta
                         position_offset=start_pos,
                         position_ids=position_ids,
                     )

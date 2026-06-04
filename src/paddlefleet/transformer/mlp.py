@@ -184,6 +184,19 @@ class MLP(FleetLayer):
         _use_paddle_swiglu = getattr(
             self.config, "gpt_model_use_experimental_version", False
         )
+        if (
+            self.config.use_bias
+            and self.config.gpt_model_use_experimental_version
+            and self.config.tensor_model_parallel_size == 1
+        ):
+            hidden_states = paddle.incubate.nn.functional.fused_linear(
+                hidden_states, self.up_gate_proj.weight, self.up_gate_proj.bias
+            )
+            hidden_states = F.swiglu(hidden_states)
+            output = paddle.incubate.nn.functional.fused_linear(
+                hidden_states, self.down_proj.weight, self.down_proj.bias
+            )
+            return output, None
 
         if (
             _use_paddle_swiglu

@@ -3,17 +3,15 @@ name: PR update ops
 on:
   push:
     branches:
-      - 'release/**'
-      - 'develop'
+      - "release/**"
+      - "develop"
     tags:
-      - 'v*'
-
+      - "v*"
 
 permissions: read-all
 
-
 env:
-  PR_ID: '0'
+  PR_ID: "0"
   COMMIT_ID: ${{ github.sha }}
   BRANCH: ${{ github.ref_name }}
 
@@ -65,7 +63,7 @@ jobs:
       - name: Setup Python 3.10
         uses: actions/setup-python@v3
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
       - name: Upload PR ops whl to paddle
         run: |
@@ -113,6 +111,7 @@ jobs:
           - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126, CUDA_ARCH_LIST: "8.0;9.0"}
           - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
           - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
+          - {CUDA_VERSION: CUDA13.2, IMAGE_TAG: cuda13.2-cudnn9.20-trt10.16-gcc11, bos_CUDA: cu132, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
     env:
       TASK: PR-PaddleFleet-ops-${{ matrix.cuda.CUDA_VERSION }}-${{ matrix.python_version }}
       PIP_CACHE_DIR: /home/.cache/pip
@@ -195,7 +194,7 @@ jobs:
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           rm dist/paddlefleet-*.whl
-          pip install packaging "setuptools>=66.1.0" wheel --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
+          pip install packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
           if [[ ${{ matrix.cuda.bos_CUDA }} == "cu129" ]]; then
             pip install "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           elif [[ ${{ matrix.cuda.bos_CUDA }} == "cu130" ]]; then
@@ -258,6 +257,7 @@ jobs:
           - {CUDA_VERSION: CUDA12.6, IMAGE_TAG: cuda12.6-cudnn9.5-trt10.5-gcc11, bos_CUDA: cu126, CUDA_ARCH_LIST: "8.0;9.0"}
           - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
           - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
+          - {CUDA_VERSION: CUDA13.2, IMAGE_TAG: cuda13.2-cudnn9.20-trt10.16-gcc11, bos_CUDA: cu132, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
     env:
       TASK: PR-PaddleFleet-ops-${{ matrix.cuda.CUDA_VERSION }}-${{ matrix.python_version }}
       PIP_CACHE_DIR: /home/.cache/pip
@@ -338,11 +338,11 @@ jobs:
           fi
           export IS_NVIDIA=True
           python -m pip install --pre paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
-          pip install packaging "setuptools>=66.1.0" wheel --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
+          pip install packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
           if [[ ${{ matrix.cuda.bos_CUDA }} == "cu129" ]]; then
             pip install "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          elif [[ ${{ matrix.cuda.bos_CUDA }} == "cu130" ]]; then
-            pip install "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+          elif [[ ${{ matrix.cuda.bos_CUDA }} == "cu130" || ${{ matrix.cuda.bos_CUDA }} == "cu132" ]]; then
+            pip install "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
           else
             pip install "nvidia-nvshmem-cu12>=3.3.9,<3.5"
           fi

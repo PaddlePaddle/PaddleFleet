@@ -36,7 +36,14 @@ classifiers = [
 Homepage = "https://github.com/PaddlePaddle/PaddleFleet"
 
 [build-system]
-requires = ["setuptools>=66.1.0", "pip", "wheel", "packaging"]
+requires = [
+    "setuptools>=66.1.0",
+    "pip",
+    "wheel",
+    "packaging",
+    "ninja==1.11.1.1",  # For nvidia-cudnn-frontend
+    "pybind11[global]>=2.13,<3", # For nvidia-cudnn-frontend
+]
 build-backend = "build_backend"
 backend-path = ["."]
 

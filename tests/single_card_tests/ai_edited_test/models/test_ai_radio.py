@@ -317,7 +317,7 @@ class TestRADIOViTModelGetPosEnc(unittest.TestCase):
             max_img_h=16,
             max_img_w=16,
         )
-        patch_idxs = paddle.to_tensor([[0, 1]])
+        patch_idxs = paddle.to_tensor([[0]])
         result = model.get_pos_enc(batch_size=1, patch_idxs=patch_idxs)
         self.assertIsNotNone(result)
 

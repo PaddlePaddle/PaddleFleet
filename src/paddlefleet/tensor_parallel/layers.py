@@ -1261,6 +1261,21 @@ class ColumnParallelLinear(paddle.nn.Layer):
         bias = self.bias if not self.skip_bias_add else None
 
         if (
+            getattr(self.config, "gpt_model_use_experimental_version", False)
+            and self.world_size == 1
+            and self.bias is not None
+        ):
+            output = paddle.incubate.nn.functional.fused_linear(
+                input_, weight, self.bias
+            )
+            output_bias = (
+                self.bias.clone()
+                if (self.skip_bias_add and self.bias is not None)
+                else None
+            )
+            return output, output_bias
+
+        if (
             self.allreduce_dgrad
             or self.sequence_parallel
             or self.explicit_expert_comm

@@ -541,6 +541,35 @@ class GPTEmbedding(FleetLayer):
         if paddle.core._has_grad():
             decoder_input.stop_gradient = False  # Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
 
+        if (
+            get_context_parallel_world_size() > 1
+            and self.config.experimental_dataflow
+        ):
+            if rotary_pos_emb is not None:
+                rotary_pos_emb = ContextParallelScatterOp.apply(
+                    rotary_pos_emb, axis=1
+                )
+            if swa_rotary_pos_emb is not None:
+                swa_rotary_pos_emb = ContextParallelScatterOp.apply(
+                    swa_rotary_pos_emb, axis=1
+                )
+            if rotary_pos_cos is not None:
+                rotary_pos_cos = ContextParallelScatterOp.apply(
+                    rotary_pos_cos, axis=1
+                )
+            if rotary_pos_sin is not None:
+                rotary_pos_sin = ContextParallelScatterOp.apply(
+                    rotary_pos_sin, axis=1
+                )
+            if swa_rotary_pos_cos is not None:
+                swa_rotary_pos_cos = ContextParallelScatterOp.apply(
+                    swa_rotary_pos_cos, axis=1
+                )
+            if swa_rotary_pos_sin is not None:
+                swa_rotary_pos_sin = ContextParallelScatterOp.apply(
+                    swa_rotary_pos_sin, axis=1
+                )
+
         preproc_output = {
             "hidden_states": decoder_input,
             "attention_mask": attention_mask,
