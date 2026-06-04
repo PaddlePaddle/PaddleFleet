@@ -31,6 +31,11 @@ from typing import TYPE_CHECKING
 import paddle
 import paddle.nn.functional as F
 from paddle import Tensor
+
+try:
+    from fast_hadamard_transform import hadamard_transform as _fast_hadamard_transform
+except Exception:
+    _fast_hadamard_transform = None
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet import parallel_state
@@ -58,27 +63,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
-    """Fast Walsh-Hadamard Transform using the butterfly algorithm.
-
-    Pure Paddle implementation, equivalent to:
-        F.linear(x, hadamard_matrix(dim)) * scale
-
-    Uses O(N log N) butterfly operations instead of O(N^2) matrix multiply.
-    The Hadamard matrix is symmetric and orthogonal, so backward is the same
-    transform applied to grad_output (handled automatically by Paddle autograd).
-
-    Reference:
-        - fast-hadamard-transform (Tri Dao): csrc/fast_hadamard_transform_cuda.cu
-        - PaddleFormers/paddleformers/quantization/hadamard_utils.py (matmul_hadU)
-
-    Args:
-        x: Input tensor of shape (..., dim). dim must be a power of 2.
-        scale: Scaling factor applied to the output.
-
-    Returns:
-        Hadamard-transformed tensor of the same shape.
-    """
+def _paddle_hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     original_shape = x.shape
     output_dtype = x.dtype
     dim = original_shape[-1]
@@ -103,6 +88,34 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
         h *= 2
 
     return (x.reshape(original_shape) * scale).cast(output_dtype)
+
+
+_fast_hadamard_available = _fast_hadamard_transform is not None
+
+
+def _can_use_fast_hadamard(x: Tensor) -> bool:
+    return _fast_hadamard_available and x.place.is_gpu_place()
+
+
+def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
+    """Walsh-Hadamard Transform with an optional Paddle CUDA fast path.
+
+    Prefer the migrated Paddle ``fast_hadamard_transform`` operator when it is
+    available. Falls back to the pure Paddle butterfly implementation otherwise.
+    """
+    dim = x.shape[-1]
+    assert dim > 0 and (dim & (dim - 1)) == 0, (
+        f"hadamard_transform requires dim to be a power of 2, got {dim}"
+    )
+
+    global _fast_hadamard_available
+    if _can_use_fast_hadamard(x):
+        try:
+            return _fast_hadamard_transform(x, scale=scale)
+        except (ImportError, RuntimeError, ValueError, TypeError):
+            _fast_hadamard_available = False
+
+    return _paddle_hadamard_transform(x, scale)
 
 
 def rotate_activation(x: Tensor) -> Tensor:
