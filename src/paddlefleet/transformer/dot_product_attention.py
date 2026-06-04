@@ -430,6 +430,10 @@ class DotProductAttention(FleetLayer):
             if self.sliding_window is not None:
                 # SDPA has no SWA option; route through flashmask with no
                 # document boundaries so window_size is honored.
+                # Update KV cache before the early return so backbone SWA
+                # inference does not silently lose cache updates.
+                if use_cache and past_key_values is not None:
+                    key, value = past_key_values.update(key, value, layer_idx)
                 attn_output = flashmask_attention(
                     query,
                     key,
