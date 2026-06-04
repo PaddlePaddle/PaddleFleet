@@ -734,6 +734,7 @@ class Compressor(nn.Layer):
                 else 0.02
             ),
         )
+        self._cast_to_low_precision = False
 
         self.norm = build_spec_layer(
             sublayers_spec.norm,
@@ -1028,6 +1029,7 @@ class CompressedSparseAttention(FleetLayer):
             dtype="float32",
             default_initializer=nn.initializer.Constant(0.0),
         )
+        self._cast_to_low_precision = False
 
         # Conditionally build Compressor (ratio > 1)
         if self.compress_ratio > 1:
