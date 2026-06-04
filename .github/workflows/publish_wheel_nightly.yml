@@ -140,6 +140,7 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu126/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu129/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu130/paddlefleet
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu132/paddlefleet
             export AK=paddle
             export SK=paddle
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
@@ -149,6 +150,7 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu126/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu129/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu130/paddlefleet
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu132/paddlefleet
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
