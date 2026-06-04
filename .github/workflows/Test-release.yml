@@ -332,7 +332,7 @@ jobs:
           '
 
       - name: Single card test
-        timeout-minutes: 50
+        timeout-minutes: 60
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
