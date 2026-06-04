@@ -197,6 +197,7 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
             "result_attention": result_attn,
             "softmax_lse": softmax_lse,
             "startend_row_indices": startend,
+            "fa_version": 2,
             "group": group,
             "causal": causal,
         }
@@ -233,6 +234,7 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             "result_attention": result_attn,
             "softmax_lse": softmax_lse,
             "startend_row_indices": startend,
+            "fa_version": 2,
             "group": group,
             "causal": causal,
         }

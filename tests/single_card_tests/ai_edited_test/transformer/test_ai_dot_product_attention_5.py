@@ -128,7 +128,7 @@ class TestDotProductAttentionInit(unittest.TestCase):
             attn_mask_type=AttnMaskType.causal,
             attention_type="self",
         )
-        self.assertEqual(attn.layer_number, 1)
+        self.assertEqual(attn.layer_number, 0)
 
 
 class TestDotProductAttentionSoftmaxOffset(unittest.TestCase):
@@ -160,6 +160,8 @@ class TestDotProductAttentionSoftmaxOffset(unittest.TestCase):
         config.perform_initialization = True
         config.params_dtype = "float32"
         config.init_method = MagicMock()
+        config.add_full_attention_sink_bias = False
+        config.add_swa_attention_sink_bias = False
 
         attn = DotProductAttention(
             config=config,

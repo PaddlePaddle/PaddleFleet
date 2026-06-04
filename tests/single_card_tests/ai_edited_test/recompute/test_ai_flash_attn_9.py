@@ -75,6 +75,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionForward(unittest.TestCase):
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             paddle.randn([2, 4], dtype=paddle.float32),
             paddle.to_tensor([0, 4, 8], dtype=paddle.int32),
+            2,
         )
 
         attn = RefinedRcomputeFlashMaskCpAttention()
@@ -103,6 +104,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionForward(unittest.TestCase):
             ),
             "group": MagicMock(),
             "causal": False,
+            "fa_version": 2,
         }
         attn._hold_tensors_queue.put(hold_tensors)
 
@@ -284,6 +286,7 @@ class TestFlashMaskAttnCpFunctorForwardAndBackward(unittest.TestCase):
             ),
             "group": MagicMock(),
             "causal": False,
+            "fa_version": 2,
         }
 
         result = FlashMaskAttnCpFunctor.apply(config, q, k, v, hold_tensors)

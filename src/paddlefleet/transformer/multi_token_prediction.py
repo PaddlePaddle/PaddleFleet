@@ -42,6 +42,7 @@ from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -359,8 +360,15 @@ class MultiTokenPredictionLayer(FleetLayer):
             self.hc_head_fn = self.create_parameter(
                 shape=[hc_dim, n],
                 dtype=self.config.params_dtype,
-                default_initializer=nn.initializer.XavierUniform(),
+                default_initializer=nn.initializer.Constant(0.0),
             )
+            # Use model-parallel RNG tracker for Xavier init so that the
+            # initialization is independent of pipeline layer_index.
+            if paddle.distributed.get_world_size() <= 1:
+                nn.initializer.XavierUniform()(self.hc_head_fn)
+            else:
+                with get_cuda_rng_tracker().fork():
+                    nn.initializer.XavierUniform()(self.hc_head_fn)
             self.hc_head_base = self.create_parameter(
                 shape=[n],
                 dtype=self.config.params_dtype,
@@ -382,6 +390,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             # so the input's shape is [s, b, 2*h].
             # The output will be sent to the following transformer layer,
             # so the output's shape should be [s, b, h].
+            use_bias = False
+            if self.config.gpt_model_use_experimental_version:
+                use_bias = self.config.use_bias
             self.eh_proj = build_spec_layer(
                 self.sublayers_spec.eh_proj,
                 self.config.hidden_size * 2,
@@ -389,7 +400,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
-                bias=False,
+                bias=use_bias,
                 skip_bias_add=False,
                 is_expert=False,
             )
@@ -437,6 +448,7 @@ class MultiTokenPredictionLayer(FleetLayer):
 
             # Apply mask if needed
             if mtp_hidden_inputs_mask is not None:
+                # [B, 1, S] -> [B, S, 1]
                 mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
                     [0, 2, 1]
                 ).astype(hs_streams.dtype)
@@ -446,6 +458,18 @@ class MultiTokenPredictionLayer(FleetLayer):
                 ):
                     mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
                         mtp_hidden_inputs_mask, axis=1
+                    )
+                # when sp enable
+                if self.sequence_parallel:
+                    # [B, S/CP, 1] -> [S/CP, B, 1]
+                    mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
+                        [1, 0, 2]
+                    )
+                    # [S/CP, B, 1] -> [S/CP/TP, B, 1]
+                    mtp_hidden_inputs_mask = (
+                        scatter_to_sequence_parallel_region(
+                            mtp_hidden_inputs_mask
+                        )
                     )
                 hs_streams = hs_streams * mtp_hidden_inputs_mask.unsqueeze(-1)
 
@@ -497,6 +521,17 @@ class MultiTokenPredictionLayer(FleetLayer):
                         mtp_hidden_inputs_mask, axis=1
                     )
 
+                # when sp enable
+                if self.sequence_parallel:
+                    # [B, S/CP, 1] -> [S/CP, B, 1]
+                    mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
+                        [1, 0, 2]
+                    )
+                    mtp_hidden_inputs_mask = (
+                        scatter_to_sequence_parallel_region(
+                            mtp_hidden_inputs_mask
+                        )
+                    )
                 hidden_states = hidden_states * mtp_hidden_inputs_mask
             # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
             # and the (i + K)-th token's embedding, and combine them with linear projection.
@@ -533,6 +568,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         attn_mask_startend_row_indices: paddle.Tensor | None = None,
         mtp_hidden_inputs_mask: paddle.Tensor | None = None,
         input_ids: paddle.Tensor | None = None,
+        position_ids: paddle.Tensor | None = None,
         **kwargs,
     ) -> paddle.Tensor:
         """
@@ -561,6 +597,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
                 "is_mtp": True,
                 "input_ids": input_ids,
+                "position_ids": position_ids,
             }
             rst_dict = self.transformer_layer(input_dict)
 
@@ -620,6 +657,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             packed_seq_params = kwargs.get("packed_seq_params", None)
             mtp_hidden_inputs_mask = kwargs.get("mtp_hidden_inputs_mask", None)
             input_ids = kwargs.get("input_ids", None)
+            position_ids = kwargs.get("position_ids", None)
             return recompute(
                 forward_func,
                 hidden_states=hidden_states
@@ -655,6 +693,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 if mtp_hidden_inputs_mask is not None
                 else None,
                 input_ids=input_ids if input_ids is not None else None,
+                position_ids=position_ids if position_ids is not None else None,
             )
 
         if self.config.recompute_method == "uniform":
@@ -690,6 +729,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         # hidden_states is pure backbone output (not concatenated); mtp_input_embeds provided by MTPEmbeddingLayer
         if self.config.enable_mtp_magic_send:
             hidden_states = dict_args["hidden_states"]
+            mhc_multistream = dict_args.pop("mhc_multistream", None)
             # Save backbone output for downstream GPTMainLMHead (main logits computation)
             dict_args["_backbone_hidden_states"] = hidden_states
             mtp_input_embeds = dict_args.get("mtp_input_embeds", None)
@@ -806,7 +846,11 @@ class MultiTokenPredictionLayer(FleetLayer):
                 dict_args.pop("input_ids", None)
 
             # Set hidden_states and decoder_input, call _proj_and_transformer_layer
-            dict_args["hidden_states"] = hidden_states
+            # mHC: use multi-stream hidden states for MTP computation
+            if self.mhc_enabled and mhc_multistream is not None:
+                dict_args["hidden_states"] = mhc_multistream
+            else:
+                dict_args["hidden_states"] = hidden_states
             dict_args["decoder_input"] = decoder_input
 
             if self.config.recompute_granularity == "full" and self.training:
@@ -818,6 +862,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                 hidden_states = self._proj_and_transformer_layer(
                     **dict_args,
                 )
+
+            # mHC: contract multi-stream output to single-stream for loss computation
+            if self.mhc_enabled and mhc_multistream is not None:
+                hidden_states = self._postprocess(hidden_states)
 
             # Write back result
             dict_args.pop("decoder_input", None)

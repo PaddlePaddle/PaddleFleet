@@ -46,7 +46,7 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.utils import (
     attention_mask_func,
-    is_layer_window_attention,
+    startend_row_indices_add_sliding_window,
 )
 from paddlefleet.utils import divide
 
@@ -73,12 +73,16 @@ class DotProductAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
+        is_mtp_layer: bool = False,
+        is_swa: bool = False,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         k_channels: int | None = None,
         v_channels: int | None = None,
+        num_attention_heads: int | None = None,
+        num_key_value_heads: int | None = None,
         **kwargs,
     ):
         super().__init__(config=config)
@@ -89,11 +93,13 @@ class DotProductAttention(FleetLayer):
             "Context parallelism is only supported by TEDotProductAttention!"
         )
 
-        self.layer_number = max(1, layer_number)
+        self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
+        self.is_mtp_layer = is_mtp_layer
+        self.is_swa = is_swa
 
-        # For MLA, k_channels and v_channels may differ from config.head_dim
+        # k_channels and v_channels may differ from config.head_dim
         # Default to config.head_dim if not provided (standard attention)
         self.k_channels = (
             k_channels if k_channels is not None else self.config.head_dim
@@ -101,8 +107,18 @@ class DotProductAttention(FleetLayer):
         self.v_channels = (
             v_channels if v_channels is not None else self.config.head_dim
         )
+        self.num_attention_heads = (
+            num_attention_heads
+            if num_attention_heads is not None
+            else self.config.num_attention_heads
+        )
+        self.num_key_value_heads = (
+            num_key_value_heads
+            if num_key_value_heads is not None
+            else self.config.num_key_value_heads
+        )
 
-        projection_size = self.k_channels * self.config.num_attention_heads
+        projection_size = self.k_channels * self.num_attention_heads
 
         # Per attention head and per partition values.
         if pg_collection is None:
@@ -121,13 +137,13 @@ class DotProductAttention(FleetLayer):
         )
         self.hidden_size_per_partition = divide(projection_size, world_size)
         self.hidden_size_per_attention_head = divide(
-            projection_size, config.num_attention_heads
+            projection_size, self.num_attention_heads
         )
         self.num_attention_heads_per_partition = divide(
-            self.config.num_attention_heads, world_size
+            self.num_attention_heads, world_size
         )
         self.num_query_groups_per_partition = divide(
-            self.config.num_key_value_heads, world_size
+            self.num_key_value_heads, world_size
         )
 
         coeff = None
@@ -139,17 +155,16 @@ class DotProductAttention(FleetLayer):
             self.softmax_scale = softmax_scale
 
         if self.config.apply_query_key_layer_scaling:
-            coeff = self.layer_number
+            coeff = max(1, self.layer_number)
             self.softmax_scale /= coeff
 
-        if is_layer_window_attention(
-            self.config.sliding_window,
-            self.config.window_attn_skip_freq,
-            layer_number,
-        ):
+        if self.is_swa:
             sliding_window = self.config.sliding_window
         else:
             sliding_window = None
+
+        self.head_wise_swa_ratio = self.config.head_wise_swa_ratio
+        self.sliding_window = sliding_window
 
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             input_in_fp16=self.config.fp16,
@@ -171,24 +186,25 @@ class DotProductAttention(FleetLayer):
             else attention_dropout
         )
 
-        if self.config.softmax_type == "vanilla":
+        softmax_type = self.config.softmax_type
+        if (self.config.add_full_attention_sink_bias and not self.is_swa) or (
+            self.config.add_swa_attention_sink_bias and self.is_swa
+        ):
+            softmax_type = "learnable"
+
+        if softmax_type == "vanilla":
             self.softmax_offset = None
-        elif self.config.softmax_type == "off-by-one":
+        elif softmax_type == "off-by-one":
             self.softmax_offset = paddle.zeros(
                 self.num_attention_heads_per_partition
             )
-        elif self.config.softmax_type == "learnable":
-            self.register_parameter(
-                "softmax_offset",
-                paddle.nn.Parameter(
-                    paddle.empty(
-                        self.num_attention_heads_per_partition,
-                        dtype=self.config.params_dtype,
-                    )
-                ),
+        elif softmax_type == "learnable":
+            self.softmax_offset = self.create_parameter(
+                shape=[self.num_attention_heads_per_partition],
+                dtype=self.config.params_dtype,
             )
             if config.perform_initialization:
-                self.softmax_offset = config.init_method(self.softmax_offset)
+                config.init_method(self.softmax_offset)
         else:
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()
@@ -408,6 +424,16 @@ class DotProductAttention(FleetLayer):
             else:
                 value_padded = value
 
+            if self.sliding_window is not None:
+                attn_mask_startend_row_indices = (
+                    startend_row_indices_add_sliding_window(
+                        attn_mask_startend_row_indices,
+                        self.sliding_window,
+                        self.head_wise_swa_ratio,
+                        value.shape[2],
+                    )
+                )
+
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -437,7 +463,8 @@ class DotProductAttention(FleetLayer):
 
         # attn_mask_type is not used.
         if (
-            self.num_attention_heads_per_partition
+            query.shape[2] != key.shape[2]
+            and self.num_attention_heads_per_partition
             // self.num_query_groups_per_partition
             > 1
         ):
@@ -539,7 +566,7 @@ class DotProductAttention(FleetLayer):
         context = context.transpose([0, 2, 1, 3]).contiguous()
 
         # [b, sq, np, hn] --> [b, sq, hp]
-        # For MLA, use v_channels for output dimension (may differ from k_channels)
+        # use v_channels for output dimension (may differ from k_channels)
         new_context_shape = (
             *context.shape[:-2],
             self.hidden_size_per_partition // self.k_channels * self.v_channels,
@@ -560,6 +587,7 @@ class CPDotProductAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
+        is_mtp_layer: bool = False,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
         cp_comm_type: str | None = None,
@@ -568,6 +596,8 @@ class CPDotProductAttention(FleetLayer):
     ):
         super().__init__(config=config)
 
+        # TODO(GuoxiaWang): remove CPDotProductAttention, move to DotProductAttention
+
         self.config: TransformerConfig = config
 
         # self.context_parallel_size = self.config.context_parallel_size
@@ -575,6 +605,7 @@ class CPDotProductAttention(FleetLayer):
 
         self.layer_number = max(1, layer_number)
         self.attn_mask_type = attn_mask_type
+        self.is_mtp_layer = is_mtp_layer
         self.attention_type = attention_type  # unused for now
         self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
 

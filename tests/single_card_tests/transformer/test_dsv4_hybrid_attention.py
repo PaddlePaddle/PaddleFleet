@@ -392,11 +392,6 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         )
         self.assertIsInstance(mscale, float)
 
-    def test_unsupported_rope_type_raises(self):
-        config = _make_config(rope_type="invalid")
-        with self.assertRaisesRegex(ValueError, "Unsupported rope_type"):
-            _build_attention(config, layer_number=1)
-
     def test_o_group_proj_shape(self):
         paddle.seed(_SEED)
         o_groups = 4

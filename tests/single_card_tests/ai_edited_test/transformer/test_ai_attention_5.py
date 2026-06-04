@@ -82,6 +82,8 @@ class TestAttentionForwardRotaryPosEmbDuplication(unittest.TestCase):
         config.sequence_parallel = False
         config.gpt_model_use_experimental_version = False
         config.multi_latent_attention = False
+        config.sliding_window = None
+        config.use_vha_attention = False
 
         spec = SelfAttentionSublayersSpec()
         attn = SelfAttention(
@@ -121,6 +123,8 @@ class TestSelfAttentionGetQKVPerHeadNorm(unittest.TestCase):
         config.gated_attention = False
         config.qk_norm_type = "per_head"
         config.rms_norm_eps = 1e-5
+        config.sliding_window = None
+        config.use_vha_attention = False
 
         spec = SelfAttentionSublayersSpec()
         attn = SelfAttention(
@@ -179,8 +183,11 @@ class TestSelfAttentionGetQKVWithGate(unittest.TestCase):
         config.recompute_modules = None
         config.tensor_model_parallel_size = 1
         config.gated_attention = True
+        config.gpt_model_use_experimental_version = False
         config.qk_norm_type = "per_head"
         config.rms_norm_eps = 1e-5
+        config.sliding_window = None
+        config.use_vha_attention = False
 
         spec = SelfAttentionSublayersSpec()
         attn = SelfAttention(

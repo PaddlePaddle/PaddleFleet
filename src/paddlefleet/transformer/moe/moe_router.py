@@ -265,10 +265,16 @@ class StandardMoERouter(nn.Layer):
             )
 
         if self.topk_method == "noaux_tc":
-            self.register_buffer(
-                "e_score_correction_bias",
-                paddle.zeros((self.num_experts,), dtype=paddle.float32),
-            )
+            if not self.config.gpt_model_use_experimental_version:
+                self.register_buffer(
+                    "e_score_correction_bias",
+                    paddle.zeros((self.num_experts,), dtype=paddle.float32),
+                )
+            else:
+                self.register_buffer(
+                    "e_score_correction_bias",
+                    paddle.zeros((1, self.num_experts), dtype=paddle.float32),
+                )
             self._cast_to_low_precision = False
             self.expert_usage = paddle.zeros(
                 shape=[self.num_experts],
@@ -708,9 +714,15 @@ class StandardMoERouter(nn.Layer):
         assert self.e_score_correction_bias is not None, (
             "e_score_correction_bias is None"
         )
-        scores_for_choice = scores.reshape(
-            [bsz_seq_len, -1]
-        ) + self.e_score_correction_bias.detach().unsqueeze(0)
+        if not self.config.gpt_model_use_experimental_version:
+            scores_for_choice = scores.reshape(
+                [bsz_seq_len, -1]
+            ) + self.e_score_correction_bias.detach().unsqueeze(0)
+        else:
+            scores_for_choice = (
+                scores.reshape([bsz_seq_len, -1])
+                + self.e_score_correction_bias.detach()
+            )
         if n_group == 1:
             topk_weight, topk_idx = paddle.topk(
                 scores_for_choice, k=k, axis=-1, sorted=True
@@ -1037,9 +1049,12 @@ class TopKRouter(StandardMoERouter):
             # Triton's scalar loop and Paddle's tensor ops.
             MoETopkFusion = _get_moe_topk_fusion()
             use_node_limit = self.n_group > 1
-            probs_for_choice = (
-                gates + self.e_score_correction_bias.detach().unsqueeze(0)
-            )
+            if not self.config.gpt_model_use_experimental_version:
+                probs_for_choice = (
+                    gates + self.e_score_correction_bias.detach().unsqueeze(0)
+                )
+            else:
+                probs_for_choice = gates + self.e_score_correction_bias.detach()
             if _LOG_LAYER_MD5 and self._layer_number == 0:
                 _log_moe_md5(
                     self.e_score_correction_bias,

@@ -49,7 +49,7 @@ from .fusion_layer_utils import (
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
-from .moe_utils import AddAuxiliaryLoss
+from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
 from .token_dispatcher import (
     AllToAllTokenDispatcher,
     MoEFlexTokenDispatcher,
@@ -57,6 +57,7 @@ from .token_dispatcher import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 # MD5 logging for MoE precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
@@ -549,13 +550,32 @@ class MoELayer(nn.Layer):
         chunks = paddle.split(
             dispatched_input, num_or_sections=tokens_per_expert, axis=0
         )
+        scale_chunks = None
+        if use_accuracy_compatible_kernel():
+            per_token_scale = getattr(
+                self.token_dispatcher, "global_input_probs", None
+            )
+            if per_token_scale is None:
+                raise RuntimeError(
+                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                    "router probabilities from the token dispatcher."
+                )
+            scale_chunks = paddle.split(
+                per_token_scale, num_or_sections=tokens_per_expert, axis=0
+            )
         for i, chunk in enumerate(chunks):
             if tokens_per_expert[i] == 0:
                 continue
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            outputs += [expert(chunk)[0]]
+            if scale_chunks is None:
+                expert_output = expert(chunk)[0]
+            else:
+                expert_output = expert(chunk, per_token_scale=scale_chunks[i])[
+                    0
+                ]
+            outputs += [expert_output]
 
         if not outputs:
             return dispatched_input

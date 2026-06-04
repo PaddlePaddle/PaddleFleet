@@ -59,6 +59,8 @@ class TestSelfAttentionGatedAttentionAttribute(unittest.TestCase):
         config.init_method = MagicMock()
         config.output_layer_init_method = MagicMock()
         config.tensor_model_parallel_size = 1
+        config.sliding_window = None
+        config.use_vha_attention = False
 
         spec = SelfAttentionSublayersSpec(
             qkv_proj=MagicMock(),
@@ -101,6 +103,8 @@ class TestSelfAttentionRRFlashAttention(unittest.TestCase):
         config.init_method = MagicMock()
         config.output_layer_init_method = MagicMock()
         config.tensor_model_parallel_size = 1
+        config.sliding_window = None
+        config.use_vha_attention = False
 
         spec = SelfAttentionSublayersSpec(
             qkv_proj=MagicMock(),

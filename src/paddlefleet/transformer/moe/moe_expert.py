@@ -322,17 +322,37 @@ class GroupedMLPExpert(FleetLayer):
         return sharded_dict
 
 
-class SonicMoEExpert(FleetLayer):
+class SonicMoEExpert(GroupedMLPExpert):
+    _GROUPED_LAYOUT = "grouped"
+    _SONIC_LAYOUT = "sonic"
+
     @staticmethod
-    def _split_to_sonic_interleaved(weight):
-        # make the weight tensor of sonicmoe consistent
-        # with the original GroupedGEMM weight.
+    def _grouped_w1_to_sonic(weight):
         gate, up = paddle.chunk(weight, 2, axis=-1)
         gate = gate.transpose([0, 2, 1])
         up = up.transpose([0, 2, 1])
         return paddle.stack([gate, up], axis=2).reshape(
             [weight.shape[0], -1, weight.shape[1]]
         )
+
+    @staticmethod
+    def _sonic_w1_to_grouped(weight):
+        weight = weight.reshape([weight.shape[0], -1, 2, weight.shape[2]])
+        gate = weight[:, :, 0, :].transpose([0, 2, 1])
+        up = weight[:, :, 1, :].transpose([0, 2, 1])
+        return paddle.concat([gate, up], axis=-1)
+
+    @staticmethod
+    def _transpose_w2_layout(weight):
+        return weight.transpose([0, 2, 1])
+
+    @staticmethod
+    def _assign_tensor(tensor, value):
+        if not value.is_contiguous():
+            value = value.contiguous()
+        if list(tensor.shape) != list(value.shape):
+            tensor.reshape_(list(value.shape))
+        tensor[...] = value
 
     def __init__(
         self,
@@ -341,90 +361,64 @@ class SonicMoEExpert(FleetLayer):
         config: TransformerConfig,
         pg_collection: ProcessGroupCollection | None = None,
     ):
-        super().__init__(config=config)
-        self.config: TransformerConfig = config
-        self.config.hidden_act = F.silu
-        self.num_local_experts = num_local_experts
-        self.hidden_size = self.config.hidden_size
-        self.K = topk
         assert config.gated_linear_unit is True, (
             "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
         )
-        assert not config.use_bias, (
-            "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
+        super().__init__(
+            num_local_experts=num_local_experts,
+            config=config,
+            moe_deep_gemm=False,
+            pg_collection=pg_collection,
+        )
+        self.hidden_size = self.config.hidden_size
+        self.K = topk
+        self._weights_layout = self._GROUPED_LAYOUT
+
+    def _convert_grad_layout(self, param, converter):
+        main_grad = getattr(param, "main_grad", None)
+        if main_grad is not None:
+            self._assign_tensor(main_grad, converter(main_grad))
+        if param.grad is not None and (
+            main_grad is None or param.grad.data_ptr() != main_grad.data_ptr()
+        ):
+            self._assign_tensor(param.grad, converter(param.grad))
+
+    def _convert_layout(
+        self, target_layout, weight1_converter, weight2_converter
+    ):
+        if self._weights_layout == target_layout:
+            return
+        with paddle.no_grad():
+            for param, converter in (
+                (self.weight1, weight1_converter),
+                (self.weight2, weight2_converter),
+            ):
+                self._assign_tensor(param, converter(param))
+                self._convert_grad_layout(param, converter)
+        self._weights_layout = target_layout
+
+    def convert_weights_to_sonic_layout(self):
+        self._convert_layout(
+            self._SONIC_LAYOUT,
+            self._grouped_w1_to_sonic,
+            self._transpose_w2_layout,
         )
 
-        self.ep_group = pg_collection.ep if pg_collection else None
-        self.expert_parallel = (
-            utils.get_pg_size(self.ep_group) > 1 if self.ep_group else False
+    def convert_weights_to_grouped_layout(self):
+        self._convert_layout(
+            self._GROUPED_LAYOUT,
+            self._sonic_w1_to_grouped,
+            self._transpose_w2_layout,
         )
 
-        if self.config.gated_linear_unit:
-            if self.config.hidden_act not in [F.silu, F.gelu]:
-                raise ValueError(
-                    "Activation function must be silu or gelu when using SonicMoE."
-                )
+    def flush_to_grouped_layout(self):
+        self.convert_weights_to_grouped_layout()
 
-        # No tensor parallel - full sizes
-        fc1_output_size = self.config.moe_intermediate_size * 2
-        fc2_input_size = self.config.moe_intermediate_size
-
-        dtype = "bfloat16"
-
-        rng_ctx = (
-            get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name())
-            if paddle.distributed.get_world_size() > 1 and self.expert_parallel
-            else nullcontext()
-        )
-
-        with rng_ctx:
-            # NOTE: make the initial weight of sonicmoe consistent with
-            # the original GroupedGEMM implementation for fair comparison.
-            baseline_weight1 = paddle.zeros(
-                shape=[
-                    self.num_local_experts,
-                    self.hidden_size,
-                    fc1_output_size,
-                ],
-                dtype=dtype,
-            )
-            self.config.init_method(baseline_weight1)
-            baseline_weight2 = paddle.zeros(
-                shape=[
-                    self.num_local_experts,
-                    fc2_input_size,
-                    self.hidden_size,
-                ],
-                dtype=dtype,
-            )
-            self.config.output_layer_init_method(baseline_weight2)
-            self.weight1 = paddle.create_parameter(
-                shape=[
-                    self.num_local_experts,
-                    fc1_output_size,
-                    self.hidden_size,
-                ],
-                dtype=dtype,
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
-            self.weight2 = paddle.create_parameter(
-                shape=[
-                    self.num_local_experts,
-                    self.hidden_size,
-                    fc2_input_size,
-                ],
-                dtype=dtype,
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
-            self.weight1.set_value(
-                self._split_to_sonic_interleaved(baseline_weight1)
-            )
-            self.weight2.set_value(baseline_weight2.transpose([0, 2, 1]))
-
-        self.weight1.is_distributed = self.expert_parallel
-        self.weight2.is_distributed = self.expert_parallel
+    def step(self):
+        self.flush_to_grouped_layout()
 
     def forward(self, hidden_states, topk_indices, topk_scores, use_fp8=False):
+        self.convert_weights_to_sonic_layout()
         hidden_states = run_sonic_moe(
             hidden_states,
             topk_indices,
@@ -441,39 +435,8 @@ class SonicMoEExpert(FleetLayer):
         self,
         structured_name_prefix: str = "",
     ):
-        state_dict = self.state_dict(structured_name_prefix="")
-        model_type = getattr(self.config, "model_type", "none")
-        if "qwen3_vl" not in model_type and "qwen3_5" not in model_type:
-            w1 = state_dict["weight1"].reshape(-1, self.weight1.shape[-1])
-            w2 = state_dict["weight2"].reshape(-1, self.weight2.shape[-1])
-            w1.name = self.weight1.name
-            w2.name = self.weight2.name
-            state_dict["weight1"] = w1
-            state_dict["weight2"] = w2
-
-        sharded_dict = {}
-        full_key1 = f"{structured_name_prefix}weight1"
-        full_key2 = f"{structured_name_prefix}weight2"
-        if self.ep_group is None:
-            sharded_dict = build_sharded_state_dict(
-                state_dict, None, structured_name_prefix
-            )
-        else:
-            sharded_dict[full_key1] = shard_weight(
-                key=full_key1,
-                weight=state_dict["weight1"],
-                axis=0,
-                group=self.ep_group,
-            )
-            sharded_dict[full_key1].grouped_gemm_param = True
-            sharded_dict[full_key2] = shard_weight(
-                key=full_key2,
-                weight=state_dict["weight2"],
-                axis=0,
-                group=self.ep_group,
-            )
-            sharded_dict[full_key2].grouped_gemm_param = True
-        return sharded_dict
+        self.convert_weights_to_grouped_layout()
+        return super().sharded_state_dict(structured_name_prefix)
 
 
 class StandardMLPExpert(MLP):
