@@ -273,13 +273,13 @@ std::vector<paddle::Tensor> SwigluProbsGradCUDABackward(
       paddle::empty({o1_outer_dim}, paddle::DataType::FLOAT32, o1.place());
   auto o2_s = inplace ? do2_s : paddle::empty_like(do2_s);
 
-  if (o1.numel() == 0 || do2_s.numel() == 0 || unzipped_probs.numel() == 0) {
-    return {do1, probs_grad, o2_s};
-  }
-
   PD_CHECK(moe_intermediate_size > 0,
            "moe_intermediate_size must be > 0, but got ",
            moe_intermediate_size);
+
+  if (o1.numel() == 0 || do2_s.numel() == 0 || unzipped_probs.numel() == 0) {
+    return {do1, probs_grad, o2_s};
+  }
 
   const BFloat16* o1_ptr =
       reinterpret_cast<const BFloat16*>(o1.data<phi::bfloat16>());

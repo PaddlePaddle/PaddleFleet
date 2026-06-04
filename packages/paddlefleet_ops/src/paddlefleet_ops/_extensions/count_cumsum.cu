@@ -238,18 +238,21 @@ std::vector<paddle::Tensor> CountCumsumCuda(const paddle::Tensor& x,
   auto place = x.place();
   cudaStream_t stream = x.stream();
 
-  auto count_output = paddle::full({E}, 0, paddle::DataType::INT32, place);
+  if (N == 0) {
+    auto count_output = paddle::full({E}, 0, paddle::DataType::INT32, place);
+    paddle::Tensor cumsum_output =
+        do_cumsum ? paddle::full({E}, 0, paddle::DataType::INT32, place)
+                  : paddle::empty({0}, paddle::DataType::INT32, place);
+    return {count_output, cumsum_output};
+  }
+
+  auto count_output = paddle::empty({E}, paddle::DataType::INT32, place);
 
   paddle::Tensor cumsum_output;
   if (do_cumsum) {
-    cumsum_output = paddle::full({E}, 0, paddle::DataType::INT32, place);
+    cumsum_output = paddle::empty({E}, paddle::DataType::INT32, place);
   } else {
     cumsum_output = paddle::empty({0}, paddle::DataType::INT32, place);
-  }
-
-  // 0-size input: outputs are all zeros, skip the cooperative kernel launch.
-  if (N == 0) {
-    return {count_output, cumsum_output};
   }
 
   if (x.dtype() == paddle::DataType::INT32) {
