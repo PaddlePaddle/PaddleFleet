@@ -20,7 +20,7 @@ from __future__ import annotations
 import functools
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
 
@@ -294,7 +294,7 @@ class TransformerConfig(ModelParallelConfig):
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
 
-    multimax: Optional[Literal["lm_head", "attn", "all"]] = None
+    multimax: Literal["lm_head", "attn", "all"] | None = None
     """Apply learnable SeLU-style modulation before softmax.
     - ``None`` / ``null`` (default): disabled. An unset key, an empty value
       (``multimax:``), or an explicit ``null`` in YAML/JSON all map to Python
@@ -1251,7 +1251,11 @@ class TransformerConfig(ModelParallelConfig):
         if _multimax == "":
             _multimax = None
             self.multimax = None
-        if _multimax is not None and _multimax not in ("lm_head", "attn", "all"):
+        if _multimax is not None and _multimax not in (
+            "lm_head",
+            "attn",
+            "all",
+        ):
             raise ValueError(
                 f"multimax must be one of None, 'lm_head', 'attn', 'all', "
                 f"got {_multimax!r}."

@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import math
-import warnings
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -252,9 +251,7 @@ class DotProductAttention(FleetLayer):
 
             _swa_active = self.sliding_window is not None
             _suppress = _swa_active and self._is_mtp_layer
-            _startend = (
-                None if _suppress else attn_mask_startend_row_indices
-            )
+            _startend = None if _suppress else attn_mask_startend_row_indices
             if (
                 _suppress
                 and attn_mask_startend_row_indices is not None
@@ -395,9 +392,7 @@ class DotProductAttention(FleetLayer):
 
             _swa_active = self.sliding_window is not None
             _suppress = _swa_active and self._is_mtp_layer
-            _startend = (
-                None if _suppress else attn_mask_startend_row_indices
-            )
+            _startend = None if _suppress else attn_mask_startend_row_indices
             if (
                 _suppress
                 and attn_mask_startend_row_indices is not None
@@ -518,9 +513,8 @@ class DotProductAttention(FleetLayer):
             _swa_active = self.sliding_window is not None
             _suppress = _swa_active and self._is_mtp_layer
             if _suppress:
-                if (
-                    attn_mask_startend_row_indices is not None
-                    and not getattr(self, "_swa_boundary_warned", False)
+                if attn_mask_startend_row_indices is not None and not getattr(
+                    self, "_swa_boundary_warned", False
                 ):
                     print(
                         f"[SWA-BOUNDARY-SUPPRESS] layer_number={self.layer_number} "

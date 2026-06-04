@@ -94,6 +94,9 @@ class EcosystemLibrary:
     def build(self) -> None:
         """Builds the library unconditionally."""
         logger.info(f"Building ecosystem library: {self.name}")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "pybind11"]
+        )
         # Clean any stale artifacts from a previous (possibly partial) build
         # so that pip install does not warn about existing directories and
         # leave inconsistent state.

@@ -51,9 +51,11 @@ if paddlefleet_ops.is_sonic_moe_available():
             _UpProjection,
         )
         from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+
         _SONIC_MOE_USABLE = True
     except ImportError as _e:
         import warnings as _warnings
+
         _warnings.warn(
             f"paddlefleet_ops.is_sonic_moe_available()=True but sonicmoe "
             f"imports failed ({_e!r}); run_sonic_moe will be unavailable. "

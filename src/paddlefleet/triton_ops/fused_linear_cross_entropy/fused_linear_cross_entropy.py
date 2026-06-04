@@ -114,12 +114,8 @@ def fused_linear_cross_entropy_forward(
         # Extract scalar values once (one host<->device sync for an [4]
         # tensor; negligible vs the chunk's GEMM/CE cost). Using fp32 for
         # numerical stability inside the kernel.
-        _r_vals = [
-            float(v) for v in multimax_ranges.cast("float32").tolist()
-        ]
-        _t_vals = [
-            float(v) for v in multimax_ts.cast("float32").tolist()
-        ]
+        _r_vals = [float(v) for v in multimax_ranges.cast("float32").tolist()]
+        _t_vals = [float(v) for v in multimax_ts.cast("float32").tolist()]
     else:
         grad_multimax_ranges = None
         grad_multimax_ts = None

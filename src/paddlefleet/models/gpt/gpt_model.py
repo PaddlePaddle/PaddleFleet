@@ -246,7 +246,10 @@ class GPTModel(PipelineLayer):
         # is True, the alias would be partial (silent memory waste + half-shared
         # gradients). Fail loudly instead of warning.
         backbone_is_moe = any(
-            (".experts." in n) or ("experts." in n) or (".router." in n) or ("router." in n)
+            (".experts." in n)
+            or ("experts." in n)
+            or (".router." in n)
+            or ("router." in n)
             for n in src_params
         )
         if backbone_is_moe and getattr(self.config, "use_dense_mtp", False):
