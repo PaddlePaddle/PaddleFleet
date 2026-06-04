@@ -84,6 +84,35 @@ def _log_moe_md5(tensor, name, layer_idx=None):
         )
 
 
+class _DSV4MTPMoEInputBranches(PyLayer):
+    @staticmethod
+    def forward(ctx, x, is_mtp_layer, layer_number):
+        return x.clone(), x.clone(), x.clone()
+
+    @staticmethod
+    def backward(ctx, routed_grad, router_grad, shared_grad):
+        return (routed_grad + router_grad) + shared_grad
+
+
+def _dsv4_mtp_moe_split_input_branches(tensor, is_mtp_layer, layer_number):
+    if is_mtp_layer:
+        enabled = os.environ.get("DSV4_FLEET_MTP_MOE_INPUT_ORDER", "0") == "1"
+    else:
+        enabled = os.environ.get("DSV4_FLEET_MOE_INPUT_ORDER", "0") == "1"
+    if not enabled:
+        return tensor, tensor, tensor
+    if tensor is None or not isinstance(tensor, paddle.Tensor) or tensor.stop_gradient:
+        return tensor, tensor, tensor
+    return _DSV4MTPMoEInputBranches.apply(tensor, is_mtp_layer, layer_number)
+
+
+if paddlefleet_ops.is_sonic_moe_available():
+    from paddlefleet_ops.sonicmoe.enums import ActivationType
+    from paddlefleet_ops.sonicmoe.functional import (
+        _DownProjection,
+        _UpProjection,
+    )
+
 from .moe_utils import (
     global_moe_balance_training_logs_enabled,
     log_moe_balance,
@@ -392,6 +421,7 @@ class MoELayer(nn.Layer):
                     self.num_experts_per_device,
                     local_expert_indices,
                 )
+                self.token_dispatcher.layer_number = layer_number
             else:
                 raise NotImplementedError(
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
@@ -939,6 +969,9 @@ class MoELayer(nn.Layer):
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
+        routed_input, gate_input, shared_residuals = _dsv4_mtp_moe_split_input_branches(
+            hidden_states, self.is_mtp_layer, self.layer_number
+        )
         (
             capacity,
             topk_weights,
@@ -949,7 +982,7 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(
-            hidden_states,
+            gate_input,
             input_ids=input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
@@ -970,14 +1003,14 @@ class MoELayer(nn.Layer):
         ):
             combine_overlap_handle = {
                 "fn": self.shared_experts,
-                "fn_args": (residuals,),
+                "fn_args": (shared_residuals,),
             }
         else:
             combine_overlap_handle = None
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states,
+                    routed_input,
                     probs,
                     mask,
                     combine_overlap_handle,
@@ -986,7 +1019,7 @@ class MoELayer(nn.Layer):
                 )
             else:
                 output = self.custom_forward(
-                    hidden_states,
+                    routed_input,
                     probs,
                     mask,
                     topk_weights=topk_weights,
@@ -1027,7 +1060,7 @@ class MoELayer(nn.Layer):
             if combine_overlap_handle is not None:
                 shared_output = combine_overlap_handle["fn_out"][0]
             else:
-                shared_output = self.shared_experts(residuals)[0]
+                shared_output = self.shared_experts(shared_residuals)[0]
             output = output + shared_output
 
         _log_moe_md5(output, "moe_final_output", layer_idx)

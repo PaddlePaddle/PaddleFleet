@@ -51,6 +51,194 @@ def _use_accuracy_compatible_kernel() -> bool:
     return _ACCURACY_COMPATIBLE_KERNEL
 
 
+def _dsv4_hc_sinkhorn_torch_backward(
+    logits: Tensor, grad_output: Tensor, num_iterations: int, eps: float
+) -> Tensor:
+    if os.environ.get("DSV4_FLEET_HC_SINKHORN_TORCH_BWD", "0") != "1":
+        return None
+    torch_site_packages = os.environ.get(
+        "DSV4_FLEET_HC_SINKHORN_TORCH_SITE_PACKAGES",
+        os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES", ""),
+    )
+    if torch_site_packages:
+        import sys
+
+        if torch_site_packages not in sys.path:
+            sys.path.insert(0, torch_site_packages)
+    import torch
+    import torch.utils.dlpack
+    from paddle.utils import dlpack as paddle_dlpack
+
+    logits_t = torch.utils.dlpack.from_dlpack(
+        paddle_dlpack.to_dlpack(logits.contiguous())
+    ).to(torch.bfloat16)
+    grad_t = torch.utils.dlpack.from_dlpack(
+        paddle_dlpack.to_dlpack(grad_output.contiguous())
+    ).to(torch.bfloat16)
+    # Match Megatron's training graph: Sinkhorn receives a transposed-view grad
+    # from H_res.T @ residual, so the last two dimensions have stride (1, n).
+    grad_t = grad_t.transpose(-1, -2).contiguous().transpose(-1, -2)
+
+    with torch.enable_grad():
+        logits_t = logits_t.detach().requires_grad_(True)
+        row_max = logits_t.max(dim=-1, keepdim=True).values
+        m = torch.exp(logits_t - row_max)
+        for _ in range(num_iterations):
+            m = m / m.sum(dim=-1, keepdim=True).clamp(min=eps)
+            m = m / m.sum(dim=-2, keepdim=True).clamp(min=eps)
+        m.backward(grad_t)
+    grad_input_t = logits_t.grad.contiguous()
+    return paddle_dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(grad_input_t))
+
+
+class _DSV4HCTorchOrderRmsScale(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x: Tensor, eps: float):
+        nC = x.shape[-1]
+        norm = x.norm(axis=-1, keepdim=True)
+        r = 1.0 / (norm / math.sqrt(nC) + eps)
+        r = r.astype(x.dtype)
+        ctx.nC = nC
+        ctx.save_for_backward(x, norm, r)
+        return r
+
+    @staticmethod
+    def backward(ctx, grad: Tensor):
+        x, norm, r = ctx.saved_tensor()
+        grad = grad.astype(x.dtype)
+        # Match Torch norm + reciprocal backward source-order in BF16.
+        scaled = grad * (r * r)
+        scaled = scaled / math.sqrt(ctx.nC)
+        unit = x / norm
+        grad_x = (-scaled) * unit
+        # PyTorch preserves signed zeros in this path. Paddle's multiply tends
+        # to canonicalize the grad==0 row to +0, which is numerically equal but
+        # breaks bitwise grad checks.
+        zero = paddle.zeros_like(unit)
+        torch_zero = paddle.where(
+            x == 0, -paddle.ones_like(unit) * zero, (-unit) * zero
+        )
+        grad_x = paddle.where(scaled == 0, torch_zero, grad_x)
+        return grad_x.astype(x.dtype)
+
+
+class _DSV4LearnedOutputContract(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(
+        ctx,
+        hidden_states: Tensor,
+        head_fn: Tensor,
+        base: Tensor,
+        scale: Tensor,
+        n: int,
+        eps: float,
+    ):
+        dtype = hidden_states.dtype
+        hidden_fp32 = hidden_states.astype("float32")
+        head_fn_fp32 = head_fn.astype("float32")
+        base_fp32 = base.astype("float32")
+        scale_fp32 = scale.astype("float32")
+
+        rsqrt = paddle.rsqrt(hidden_fp32.square().mean(-1, keepdim=True) + eps)
+        head_fn_out_in = head_fn_fp32.transpose([1, 0]).contiguous()
+        with paddle.amp.auto_cast(False):
+            proj = paddle.matmul(hidden_fp32, head_fn_out_in, transpose_y=True)
+        if os.environ.get("DSV4_FLEET_CONTRACT_MIXES_RSQRT_FIRST", "0") == "1":
+            mixes = rsqrt * proj
+        else:
+            mixes = proj * rsqrt
+        pre_arg = mixes * scale_fp32 + base_fp32
+        sig = F.sigmoid(pre_arg)
+        pre = sig + eps
+        hidden_streams = hidden_fp32.reshape([*hidden_fp32.shape[:-1], n, -1])
+        y = paddle.sum(pre.unsqueeze(-1) * hidden_streams, axis=-2)
+
+        ctx.save_for_backward(
+            hidden_fp32,
+            head_fn_fp32,
+            base_fp32,
+            scale_fp32,
+            rsqrt,
+            proj,
+            mixes,
+            sig,
+            pre,
+        )
+        ctx.n = n
+        ctx.eps = eps
+        ctx.hidden_dtype = dtype
+        ctx.head_fn_dtype = head_fn.dtype
+        ctx.base_dtype = base.dtype
+        ctx.scale_dtype = scale.dtype
+        return y.astype(dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        (
+            hidden_fp32,
+            head_fn_fp32,
+            base_fp32,
+            scale_fp32,
+            rsqrt,
+            proj,
+            mixes,
+            sig,
+            pre,
+        ) = ctx.saved_tensor()
+        n = ctx.n
+        hdim = hidden_fp32.shape[-1]
+        hidden_streams = hidden_fp32.reshape([*hidden_fp32.shape[:-1], n, -1])
+        grad_y = grad_output.astype("float32")
+
+        grad_prod = paddle.expand(
+            grad_y.unsqueeze(-2),
+            [*hidden_streams.shape],
+        )
+        grad_hidden_streams = grad_prod * pre.unsqueeze(-1)
+        grad_hidden_direct = grad_hidden_streams.reshape(hidden_fp32.shape)
+
+        grad_pre = paddle.sum(grad_prod * hidden_streams, axis=-1)
+        grad_pre_arg = grad_pre * sig * (1.0 - sig)
+        grad_mixes = grad_pre_arg * scale_fp32
+        grad_scale = paddle.sum(grad_pre_arg * mixes).reshape(scale_fp32.shape)
+        grad_base = paddle.sum(
+            grad_pre_arg.reshape([-1, grad_pre_arg.shape[-1]]),
+            axis=0,
+        ).reshape(base_fp32.shape)
+
+        grad_proj = grad_mixes * rsqrt
+        grad_rsqrt = paddle.sum(grad_mixes * proj, axis=-1, keepdim=True)
+
+        hidden_2d = hidden_fp32.reshape([-1, hdim])
+        grad_proj_2d = grad_proj.reshape([-1, grad_proj.shape[-1]])
+        grad_head_fn = paddle.matmul(hidden_2d, grad_proj_2d, transpose_x=True)
+        grad_hidden_proj = paddle.matmul(grad_proj, head_fn_fp32, transpose_y=True)
+
+        grad_mean = grad_rsqrt * (-0.5) * rsqrt * rsqrt * rsqrt
+        grad_hidden_rsqrt = hidden_fp32 * grad_mean * (2.0 / float(hdim))
+
+        # Match PyTorch autograd's observed accumulation order for this graph:
+        # direct view branch, projection branch, then rsqrt/mean branch.
+        grad_hidden = (grad_hidden_direct + grad_hidden_proj) + grad_hidden_rsqrt
+
+        return (
+            grad_hidden.astype(ctx.hidden_dtype),
+            grad_head_fn.astype(ctx.head_fn_dtype),
+            grad_base.astype(ctx.base_dtype),
+            grad_scale.astype(ctx.scale_dtype),
+        )
+
+
+class _DSV4ContractBranchSplit(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, hidden_states: Tensor):
+        return hidden_states.clone(), hidden_states.clone(), hidden_states.clone()
+
+    @staticmethod
+    def backward(ctx, grad_rsqrt: Tensor, grad_proj: Tensor, grad_direct: Tensor):
+        return (grad_direct + grad_proj) + grad_rsqrt
+
+
 class SinkhornKnopp(paddle.autograd.PyLayer):
     """
     Differentiable Sinkhorn-Knopp algorithm for doubly stochastic projection.
@@ -60,6 +248,27 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
 
     Reference: Eq. (9) in mHC paper - M^{(t)} = T_c(T_r(M^{(t-1)}))
     """
+
+    eps = 1e-6
+
+    class _ExpRowMax(paddle.autograd.PyLayer):
+        @staticmethod
+        def forward(ctx, logits: Tensor) -> Tensor:
+            row_max = logits.max(axis=-1, keepdim=True)
+            out = paddle.exp(logits - row_max)
+            row_argmax = logits.argmax(axis=-1, keepdim=True)
+            ctx.save_for_backward(out, row_argmax)
+            return out
+
+        @staticmethod
+        def backward(ctx, grad_output: Tensor) -> tuple[Tensor]:
+            out, row_argmax = ctx.saved_tensor()
+            grad_z = grad_output * out
+            grad_row_max = grad_z.sum(axis=-1, keepdim=True)
+            row_argmax_mask = F.one_hot(
+                row_argmax.squeeze(-1), num_classes=out.shape[-1]
+            ).astype(out.dtype)
+            return grad_z - row_argmax_mask * grad_row_max
 
     @staticmethod
     def _sinkhorn_normalize(
@@ -98,26 +307,18 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         Returns:
             H_res: [..., n, n] - doubly stochastic matrix
         """
-        # Stabilized exp: subtract row-wise max to prevent overflow.
-        # Under FLAGS_use_accuracy_compatible_kernel, force this outside AMP
-        # so the Paddle native path preserves the BF16 contract used by
-        # Megatron's torch implementation.
-        if _use_accuracy_compatible_kernel():
-            with paddle.amp.auto_cast(enable=False):
-                M_init = paddle.exp(
-                    H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
-                )
-                M = SinkhornKnopp._sinkhorn_normalize(
-                    M_init, num_iterations, eps
-                )
-        else:
-            M_init = paddle.exp(
-                H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+        with paddle.amp.auto_cast(enable=False):
+            # Stabilized exp: subtract row-wise max to prevent overflow.
+            # Keep this outside AMP so the Paddle native path preserves the
+            # BF16 contract used by Megatron's torch implementation.
+            M_init = SinkhornKnopp._ExpRowMax.apply(H_res_logits)
+            M = SinkhornKnopp._sinkhorn_normalize(
+                M_init, num_iterations, eps
             )
-            M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
 
-        # Save initial M for backward recomputation
-        ctx.save_for_backward(M_init)
+        # Save logits instead of M_init so backward recomputes the same graph
+        # as Megatron: exp(logits - row_max) followed by Sinkhorn iterations.
+        ctx.save_for_backward(H_res_logits)
         ctx.num_iterations = num_iterations
         ctx.eps = eps
         return M
@@ -127,30 +328,30 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         """
         Backward through Sinkhorn-Knopp iterations using recomputation.
         """
-        (M_init,) = ctx.saved_tensor()
+        (H_res_logits,) = ctx.saved_tensor()
         num_iterations = ctx.num_iterations
         eps = ctx.eps
+        torch_grad_input = _dsv4_hc_sinkhorn_torch_backward(
+            H_res_logits, grad_output, num_iterations, eps
+        )
+        if torch_grad_input is not None:
+            return torch_grad_input
 
         with paddle.enable_grad():
-            # Recompute forward with autograd enabled
-            M_input = M_init.detach()
-            M_input.stop_gradient = False
+            logits = H_res_logits.detach()
+            logits.stop_gradient = False
+            with paddle.amp.auto_cast(enable=False):
+                M_current = SinkhornKnopp._ExpRowMax.apply(logits)
+                M_current = SinkhornKnopp._sinkhorn_normalize(
+                    M_current, num_iterations, eps
+                )
 
-            M_current = SinkhornKnopp._sinkhorn_normalize(
-                M_input, num_iterations, eps
-            )
-
-            # Compute dL/dM_input via autograd
-            grad_M_init = paddle.grad(
+            grad_input = paddle.grad(
                 outputs=[M_current],
-                inputs=[M_input],
+                inputs=[logits],
                 grad_outputs=[grad_output],
                 create_graph=False,
             )[0]
-
-        # Apply chain rule: dL/dH = dL/dM_init * dM_init/dH = dL/dM_init * M_init
-        # Since M_init = exp(H_res_logits), d(exp(x))/dx = exp(x) = M_init
-        grad_input = grad_M_init * M_init
 
         return grad_input
 
@@ -332,15 +533,15 @@ class HyperConnectionModule(nn.Layer):
         if _use_accuracy_compatible_kernel():
             nC = x.shape[-1]
             weight = self.mapping_proj.weight
-            r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
-            r = (1.0 / (r + self.norm_eps)).astype(x.dtype)  # [..., 1]
+            x_2d = x.reshape([-1, nC])
+            r = _DSV4HCTorchOrderRmsScale.apply(x_2d, self.norm_eps)
             # Match Megatron clean path: torch.matmul(x, weight.t()). Paddle
             # nn.Linear uses a different BF16 cuBLAS path for this shape and
             # drifts before the first HC BDA.
-            x_2d = x.reshape([-1, nC])
             weight_out_in = weight.t().contiguous()
             proj_2d = paddle.matmul(x_2d, weight_out_in, transpose_y=True)
             proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
+            r = r.reshape([*x.shape[:-1], 1])
         else:
             proj, r = self._proj_rms_op(
                 x, self.mapping_proj.weight, self.norm_eps
@@ -398,8 +599,10 @@ class HyperConnectionModule(nn.Layer):
         leading_shape = x.shape[:-1]
         proj, r = self._projection_and_get_norm(x)
         h_pre, h_post, h_res = self._compute_h(proj, r)
+        h_res_logits = h_res
+        h_res_logits_view = h_res_logits.reshape([*leading_shape, self.n, self.n])
         h_res = self._sinkhorn_op(
-            h_res.reshape([*leading_shape, self.n, self.n]),
+            h_res_logits_view,
             self.sinkhorn_iterations,
             self.norm_eps,
         )  # [..., n, n]
@@ -538,13 +741,16 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (for fused kernel)
             h_post: [..., n] - expansion weights
         """
+        mapping_input = hidden_states
+        aggregate_input = hidden_states
+
         # Compute mappings
         if not _use_accuracy_compatible_kernel():
-            hidden_states = hidden_states.astype("float32")
-        h_pre, h_post, h_res = self.compute_mappings(hidden_states)
+            mapping_input = mapping_input.astype("float32")
+        h_pre, h_post, h_res = self.compute_mappings(mapping_input)
 
         # Aggregate for layer input
-        aggregated = self.aggregate(hidden_states, h_pre)
+        aggregated = self.aggregate(aggregate_input, h_pre)
 
         return aggregated, h_res, h_post
 
@@ -618,34 +824,56 @@ class HyperConnectionModule(nn.Layer):
         Returns:
             contracted: [..., h] single-stream output
         """
+        if os.environ.get("DSV4_FLEET_CONTRACT_CUSTOM_BWD", "0") == "1":
+            return _DSV4LearnedOutputContract.apply(
+                hidden_states,
+                head_fn,
+                base,
+                scale,
+                n,
+                eps,
+            )
+
         dtype = hidden_states.dtype
         hidden_states = hidden_states.astype("float32")
         head_fn = head_fn.astype("float32")
         base = base.astype("float32")
         scale = scale.astype("float32")
+        hidden_for_rsqrt = hidden_states
+        hidden_for_proj = hidden_states
+        hidden_for_direct = hidden_states
+        if os.environ.get("DSV4_FLEET_CONTRACT_BRANCH_SPLIT", "0") == "1":
+            hidden_for_rsqrt, hidden_for_proj, hidden_for_direct = _DSV4ContractBranchSplit.apply(
+                hidden_states
+            )
 
         rsqrt = paddle.rsqrt(
-            hidden_states.square().mean(-1, keepdim=True) + eps
+            hidden_for_rsqrt.square().mean(-1, keepdim=True) + eps
         )
-        if _use_accuracy_compatible_kernel():
+        if (
+            _use_accuracy_compatible_kernel()
+            or os.environ.get("DSV4_FLEET_CONTRACT_BRANCH_SPLIT", "0") == "1"
+        ):
             # Match Torch F.linear(x, weight[out,in]) kernel selection. Paddle
             # F.linear(x, weight[in,out]) uses a different cuBLAS path and
             # causes BF16 ulp drift in DSv4 final output contraction.
             head_fn_out_in = head_fn.transpose([1, 0]).contiguous()
             with paddle.amp.auto_cast(False):
                 proj = paddle.matmul(
-                    hidden_states, head_fn_out_in, transpose_y=True
+                    hidden_for_proj, head_fn_out_in, transpose_y=True
                 )
             mixes = proj * rsqrt
         else:
             mixes = F.linear(hidden_states, head_fn) * rsqrt
-        pre = F.sigmoid(mixes * scale + base) + eps
-        y = paddle.sum(
-            pre.unsqueeze(-1)
-            * hidden_states.reshape([*hidden_states.shape[:-1], n, -1]),
-            axis=-2,
+        pre_arg = mixes * scale + base
+        pre = F.sigmoid(pre_arg) + eps
+        hidden_streams = hidden_for_direct.reshape(
+            [*hidden_for_direct.shape[:-1], n, -1]
         )
-        return y.astype(dtype)
+        contract_prod = pre.unsqueeze(-1) * hidden_streams
+        y = paddle.sum(contract_prod, axis=-2)
+        out = y.astype(dtype)
+        return out
 
     # ==================== Fused kernel placeholder ====================
 
@@ -715,7 +943,7 @@ class HyperConnectionModule(nn.Layer):
         out = paddle.nn.functional.dropout(
             x_expanded, p=dropout_prob, training=training
         )
-        output = out + mixed
+        output = mixed + out
 
         return output
 
