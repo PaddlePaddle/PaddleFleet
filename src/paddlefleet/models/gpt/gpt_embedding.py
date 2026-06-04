@@ -13,7 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-import warnings
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -65,7 +65,6 @@ class GPTEmbedding(FleetLayer):
         ] = "learned_absolute",
         rotary_percent: float = 1.0,
         rotary_base: int = 10000,
-        swa_rotary_base: int = 10000,
         rope_scaling: bool = False,
         mrope_section: list[int] | None = None,
     ):
@@ -101,7 +100,6 @@ class GPTEmbedding(FleetLayer):
             )
 
         self.rotary_pos_emb = None
-        self.swa_rotary_pos_emb = None
         self.mrope_section = mrope_section
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
@@ -113,22 +111,6 @@ class GPTEmbedding(FleetLayer):
                 rotary_base=rotary_base,
                 rope_scaling=rope_scaling,
             )
-
-            if config.sliding_window is not None:
-                if config.window_attn_skip_freq is None:
-                    warnings.warn(
-                        "sliding_window is set but window_attn_skip_freq is None. "
-                        "is_layer_window_attention() will return True for all layers, "
-                        "meaning all layers will use sliding window attention (SWA)."
-                    )
-                self.swa_rotary_pos_emb = build_spec_layer(
-                    sublayers_spec.rope_embedding,
-                    head_dim=config.swa_head_dim,
-                    rotary_percent=rotary_percent,
-                    rotary_interleaved=config.rotary_interleaved,
-                    rotary_base=swa_rotary_base,
-                    rope_scaling=rope_scaling,
-                )
 
     @property
     def embedding_weight(self):
@@ -205,122 +187,128 @@ class GPTEmbedding(FleetLayer):
                 assert not self.multimodal_embedding, (
                     "MTP not support mm for now."
                 )
+                num_nextn_predict_layers = self.config.num_nextn_predict_layers
                 # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
                 if input_ids_for_moe_mask is not None:
                     # Main backbone input_ids: [B, max_seq]
                     # Use .contiguous() because slices are non-contiguous and PP P2P send requires contiguous tensors.
                     input_ids_for_moe_mask = input_ids[
-                        :, : -self.config.num_nextn_predict_layers
+                        :, :-num_nextn_predict_layers
                     ].contiguous()
                     # Construct per-depth MTP input_ids: for depth k, use
                     # input_ids[:, (k+1):(k+1+max_seq)] matching embedding shift
-                    seq_length = (
-                        input_ids.shape[1]
-                        - self.config.num_nextn_predict_layers
-                    )
+                    seq_length = input_ids.shape[1] - num_nextn_predict_layers
                     mtp_ids_list = []
-                    for depth in range(self.config.num_nextn_predict_layers):
+                    for depth in range(num_nextn_predict_layers):
+                        pad_ids = paddle.zeros(
+                            [input_ids.shape[0], depth + 1],
+                            dtype=input_ids.dtype,
+                        )
                         mtp_ids_list.append(
-                            input_ids[:, (depth + 1) : (depth + 1 + seq_length)]
+                            paddle.concat(
+                                [input_ids[:, depth + 1 : seq_length], pad_ids],
+                                axis=1,
+                            )
                         )
                     # [B, num_mtp, max_seq] - paddle.stack creates a new contiguous tensor
                     mtp_input_ids_for_moe_mask = paddle.stack(
                         mtp_ids_list, axis=1
                     )
+                inputs_embeds_extra = decoder_input[
+                    :, -self.config.num_nextn_predict_layers :, :
+                ]  # [B, S, H]
+                inputs_embeds = decoder_input[
+                    :, : -self.config.num_nextn_predict_layers, :
+                ]
+                batch_size, seq_length, hidden_size = inputs_embeds.shape
 
-                if self.config.enable_mtp_magic_send:
-                    # Magic send: only truncate, skip shifted embedding pre-computation.
-                    # input_ids will be broadcast to the last stage for re-embedding.
-                    decoder_input = decoder_input[
-                        :, : -self.config.num_nextn_predict_layers, :
-                    ]
+                if (
+                    get_context_parallel_world_size() > 1
+                    and self.config.experimental_dataflow
+                ):
+                    # In EB data flow, main input embed apply CP scatter here
+                    inputs_embeds = ContextParallelScatterOp.apply(
+                        inputs_embeds, axis=1
+                    )
 
-                    # Apply the same SP scatter as the non-magic-send path to ensure
-                    # bit-for-bit identical main embedding output.
+                if self.sequence_parallel:
+                    inputs_embeds = inputs_embeds.reshape(
+                        [-1, inputs_embeds.shape[-1]]
+                    )
+                    inputs_embeds = ScatterOp.apply(inputs_embeds)
+                    inputs_embeds = (
+                        inputs_embeds.reshape([batch_size, -1, hidden_size])
+                        .permute(1, 0, 2)
+                        .contiguous()
+                    )  # change to [S, B, H]
+                mtp_emb_res = [inputs_embeds]
+                for depth in range(self.config.num_nextn_predict_layers):
+                    pad_input_ids = paddle.zeros(
+                        [batch_size, depth + 1], dtype=input_ids.dtype
+                    )
+                    pad_position_ids = None
+                    if not self.multimodal_embedding and position_ids is not None:
+                        pad_position_ids = paddle.zeros(
+                            [batch_size, depth + 1], dtype=position_ids.dtype
+                        )
+                    pad_embeds = self.embedding(
+                        input_ids=pad_input_ids,
+                        position_ids=pad_position_ids,
+                    )
                     if (
-                        get_context_parallel_world_size() > 1
-                        and self.config.experimental_dataflow
+                        paddle.core._has_grad()
+                        and os.getenv("DSV4_FLEET_MTP_SEPARATE_EMBEDDING", "0")
+                        == "1"
                     ):
-                        decoder_input = ContextParallelScatterOp.apply(
-                            decoder_input, axis=1
+                        shifted_input_ids = input_ids[
+                            :, (depth + 1) : seq_length
+                        ]
+                        shifted_position_ids = None
+                        if (
+                            not self.multimodal_embedding
+                            and position_ids is not None
+                        ):
+                            shifted_position_ids = position_ids[
+                                :, (depth + 1) : seq_length
+                            ]
+                        shifted_embeds = self.embedding(
+                            input_ids=shifted_input_ids,
+                            position_ids=shifted_position_ids,
                         )
-
-                    if self.sequence_parallel:
-                        batch_size, seq_length, hidden_size = (
-                            decoder_input.shape
+                        inputs_embeds_mtp = paddle.concat(
+                            [shifted_embeds, pad_embeds], axis=1
                         )
-                        decoder_input = decoder_input.reshape(
-                            [-1, decoder_input.shape[-1]]
-                        )
-                        decoder_input = ScatterOp.apply(decoder_input)
-                        decoder_input = (
-                            decoder_input.reshape([batch_size, -1, hidden_size])
-                            .permute(1, 0, 2)
-                            .contiguous()
-                        )  # change to [S/tp, B, H]
-                else:
-                    inputs_embeds_extra = decoder_input[
-                        :, -self.config.num_nextn_predict_layers :, :
-                    ]  # [B, S, H]
-                    inputs_embeds = decoder_input[
-                        :, : -self.config.num_nextn_predict_layers, :
-                    ]
-                    inputs_embeds_ori = inputs_embeds
-                    batch_size, seq_length, hidden_size = inputs_embeds.shape
-
-                    if (
-                        get_context_parallel_world_size() > 1
-                        and self.config.experimental_dataflow
-                    ):
-                        # In EB data flow, main input embed apply CP scatter here
-                        inputs_embeds = ContextParallelScatterOp.apply(
-                            inputs_embeds, axis=1
-                        )
-
-                    if self.sequence_parallel:
-                        inputs_embeds = inputs_embeds.reshape(
-                            [-1, inputs_embeds.shape[-1]]
-                        )
-                        inputs_embeds = ScatterOp.apply(inputs_embeds)
-                        inputs_embeds = (
-                            inputs_embeds.reshape([batch_size, -1, hidden_size])
-                            .permute(1, 0, 2)
-                            .contiguous()
-                        )  # change to [S, B, H]
-                    mtp_emb_res = [inputs_embeds]
-                    for depth in range(self.config.num_nextn_predict_layers):
+                    else:
                         inputs_embeds_mtp = paddle.concat(
                             [
-                                inputs_embeds_ori[:, (depth + 1) :, :],
-                                inputs_embeds_extra[:, : (depth + 1), :],
+                                inputs_embeds[:, (depth + 1) :, :],
+                                pad_embeds,
                             ],
                             axis=1,
                         )
 
-                        if (
-                            get_context_parallel_world_size() > 1
-                            and self.config.experimental_dataflow
-                        ):
-                            # In EB data flow, mtp input embed apply CP scatter here
-                            inputs_embeds_mtp = ContextParallelScatterOp.apply(
-                                inputs_embeds_mtp, axis=1
-                            )
+                    if (
+                        get_context_parallel_world_size() > 1
+                        and self.config.experimental_dataflow
+                    ):
+                        # In EB data flow, mtp input embed apply CP scatter here
+                        inputs_embeds_mtp = ContextParallelScatterOp.apply(
+                            inputs_embeds_mtp, axis=1
+                        )
 
-                        if self.sequence_parallel:
-                            inputs_embeds_mtp = inputs_embeds_mtp.reshape(
-                                [-1, inputs_embeds_mtp.shape[-1]]
+                    if self.sequence_parallel:
+                        inputs_embeds_mtp = inputs_embeds_mtp.reshape(
+                            [-1, inputs_embeds_mtp.shape[-1]]
+                        )
+                        inputs_embeds_mtp = ScatterOp.apply(inputs_embeds_mtp)
+                        inputs_embeds_mtp = (
+                            inputs_embeds_mtp.reshape(
+                                [batch_size, -1, hidden_size]
                             )
-                            inputs_embeds_mtp = ScatterOp.apply(
-                                inputs_embeds_mtp
-                            )
-                            inputs_embeds_mtp = (
-                                inputs_embeds_mtp.reshape(
-                                    [batch_size, -1, hidden_size]
-                                )
-                                .permute(1, 0, 2)
-                                .contiguous()
-                            )  # change to [S, B, H]
-                        mtp_emb_res.append(inputs_embeds_mtp)
+                            .permute(1, 0, 2)
+                            .contiguous()
+                        )  # change to [S, B, H]
+                    mtp_emb_res.append(inputs_embeds_mtp)
 
             if self.multimodal_embedding:
                 image_embeds = dict_args.get("image_embeds", None)
@@ -443,23 +431,6 @@ class GPTEmbedding(FleetLayer):
         rotary_pos_emb = None
         rotary_pos_cos = None
         rotary_pos_sin = None
-        swa_rotary_pos_emb = None
-        swa_rotary_pos_cos = None
-        swa_rotary_pos_sin = None
-
-        # For MTP mode: truncate position_ids to match the actual sequence length
-        # MTP reduces sequence length by num_nextn_predict_layers
-        mtp_position_ids = position_ids
-        if (
-            mtp_emb_res is not None
-            and position_ids is not None
-            and self.config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
-        ):
-            # mtp_emb_res[0] has shape [B, seq_len - num_nextn_predict_layers, H]
-            actual_seq_len = mtp_emb_res[0].shape[1]
-            if position_ids.shape[1] > actual_seq_len:
-                mtp_position_ids = position_ids[:, :actual_seq_len]
 
         if (
             self.position_embedding_type == "rope"
@@ -473,7 +444,7 @@ class GPTEmbedding(FleetLayer):
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
-                position_ids=None if self.training else mtp_position_ids,
+                position_ids=position_ids,
             )
         elif (
             self.position_embedding_type == "mrope"
@@ -499,76 +470,8 @@ class GPTEmbedding(FleetLayer):
                         [1, 0, 2, 3]
                     ).contiguous()
 
-        if (
-            self.position_embedding_type == "rope"
-            and self.swa_rotary_pos_emb is not None
-        ):
-            rope_base = decoder_input if mtp_emb_res is None else mtp_emb_res[0]
-            rotary_seq_len = self.swa_rotary_pos_emb.get_rotary_seq_len(
-                rope_base, self.config, packed_seq_params
-            )
-            swa_rotary_pos_emb = self.swa_rotary_pos_emb(
-                rotary_seq_len,
-                packed_seq=packed_seq_params is not None
-                and packed_seq_params.qkv_format == "thd",
-                position_ids=position_ids,
-            )
-
-        elif (
-            self.position_embedding_type == "mrope"
-            and self.swa_rotary_pos_emb is not None
-        ):
-            swa_rotary_pos_emb = self.swa_rotary_pos_emb(
-                position_ids, self.mrope_section
-            )
-
-        if swa_rotary_pos_emb is not None:
-            if self.config.apply_rope_fusion:
-                swa_rotary_pos_cos = paddle.cos(swa_rotary_pos_emb)
-                swa_rotary_pos_sin = paddle.sin(swa_rotary_pos_emb)
-            if self.config.sequence_parallel:
-                if self.position_embedding_type == "mrope":
-                    # MRoPE: [B, S, head_dim] -> [S, B, head_dim]
-                    swa_rotary_pos_emb = swa_rotary_pos_emb.transpose(
-                        [1, 0, 2]
-                    ).contiguous()
-                else:
-                    # RoPE: [1, S, 1, head_dim] -> [S, 1, 1, head_dim]
-                    swa_rotary_pos_emb = swa_rotary_pos_emb.transpose(
-                        [1, 0, 2, 3]
-                    ).contiguous()
-
         if paddle.core._has_grad():
             decoder_input.stop_gradient = False  # Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
-
-        if (
-            get_context_parallel_world_size() > 1
-            and self.config.experimental_dataflow
-        ):
-            if rotary_pos_emb is not None:
-                rotary_pos_emb = ContextParallelScatterOp.apply(
-                    rotary_pos_emb, axis=1
-                )
-            if swa_rotary_pos_emb is not None:
-                swa_rotary_pos_emb = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_emb, axis=1
-                )
-            if rotary_pos_cos is not None:
-                rotary_pos_cos = ContextParallelScatterOp.apply(
-                    rotary_pos_cos, axis=1
-                )
-            if rotary_pos_sin is not None:
-                rotary_pos_sin = ContextParallelScatterOp.apply(
-                    rotary_pos_sin, axis=1
-                )
-            if swa_rotary_pos_cos is not None:
-                swa_rotary_pos_cos = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_cos, axis=1
-                )
-            if swa_rotary_pos_sin is not None:
-                swa_rotary_pos_sin = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_sin, axis=1
-                )
 
         preproc_output = {
             "hidden_states": decoder_input,
@@ -577,9 +480,6 @@ class GPTEmbedding(FleetLayer):
             "rotary_pos_emb": rotary_pos_emb,
             "rotary_pos_cos": rotary_pos_cos,
             "rotary_pos_sin": rotary_pos_sin,
-            "swa_rotary_pos_emb": swa_rotary_pos_emb,
-            "swa_rotary_pos_cos": swa_rotary_pos_cos,
-            "swa_rotary_pos_sin": swa_rotary_pos_sin,
             "position_ids": position_ids,
             "deepstack_visual_emb": deepstack_visual_embeds,
             "visual_pos_masks": visual_pos_masks,
@@ -626,11 +526,6 @@ class GPTEmbedding(FleetLayer):
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
             hidden_states_concat = paddle.concat(mtp_emb_res)
             preproc_output["hidden_states"] = hidden_states_concat
-
-        # Pass through KV cache kwargs for inference
-        for key in ("past_key_values", "use_cache"):
-            if key in dict_args and key not in preproc_output:
-                preproc_output[key] = dict_args[key]
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:

@@ -25,6 +25,7 @@ Components:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -49,9 +50,45 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
+class _DSV4AttentionInputBranches(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x: Tensor):
+        return x.clone(), x.clone(), x.clone()
+
+    @staticmethod
+    def backward(ctx, q_grad: Tensor, kv_grad: Tensor, core_x_grad: Tensor):
+        return (q_grad + kv_grad) + core_x_grad
+
+
+def _dsv4_attention_split_input_branches(tensor: Tensor):
+    if os.environ.get("DSV4_FLEET_ATTN_INPUT_ORDER", "0") != "1":
+        return tensor, tensor, tensor
+    if tensor is None or not isinstance(tensor, paddle.Tensor) or tensor.stop_gradient:
+        return tensor, tensor, tensor
+    return _DSV4AttentionInputBranches.apply(tensor)
+
+
+class _DSV4QRMSNorm(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, q: Tensor, eps: float) -> Tensor:
+        r = paddle.rsqrt(q.square().mean(axis=-1, keepdim=True) + eps)
+        ctx.save_for_backward(q, r)
+        return q * r
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        q, r = ctx.saved_tensor()
+        hidden_size = q.shape[-1]
+        grad_r = (grad_output * q).sum(axis=-1, keepdim=True)
+        grad_q = grad_output * r
+        grad_add = grad_r * (-0.5) * (r * r * r)
+        grad_q = grad_q + (paddle.full_like(q, 2.0) * q) * (grad_add / hidden_size)
+        return grad_q
+
+
 def _q_rms_norm(q: Tensor, eps: float) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
-    return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
+    return _DSV4QRMSNorm.apply(q, eps)
 
 
 # ---------------------------------------------------------------------------
@@ -212,9 +249,10 @@ class DSv4HybridAttention(Attention):
         Returns:
             (output [b, sq, hidden_size], bias=None)
         """
+        q_input, kv_input, core_x = _dsv4_attention_split_input_branches(hidden_states)
         # Get Q, K, V tensors
         query, key, value, q_compressed, kv_compressed = (
-            self.get_query_key_value_tensors(hidden_states)
+            self.get_query_key_value_tensors(q_input, kv_input=kv_input)
         )
 
         # Core attention (CompressedSparseAttention)
@@ -223,7 +261,7 @@ class DSv4HybridAttention(Attention):
             key,
             value,
             attention_mask,
-            x=hidden_states,
+            x=core_x,
             qr=q_compressed,
         )
         # core_attn_out: [b, sq, np * v_head_dim]
@@ -376,7 +414,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )
 
     def get_query_key_value_tensors(
-        self, hidden_states: Tensor
+        self, hidden_states: Tensor, kv_input: Tensor | None = None
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Derive query, key, value from hidden_states.
 
@@ -391,6 +429,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             kv_compressed: [b, sq, hidden_size] (== hidden_states)
         """
         b, sq, _ = hidden_states.shape
+        kv_hidden_states = hidden_states if kv_input is None else kv_input
 
         # Q path
         q_compressed, _ = self.linear_q_down_proj(
@@ -403,7 +442,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         q = _q_rms_norm(q, getattr(self.config, "rms_norm_eps", 1e-5))
 
         # KV path
-        kv, _ = self.linear_kv_proj(hidden_states)  # [b, sq, v_head_dim]
+        kv, _ = self.linear_kv_proj(kv_hidden_states)  # [b, sq, v_head_dim]
         kv = self.kv_layernorm(kv)
 
         # Apply RoPE to both Q and KV
