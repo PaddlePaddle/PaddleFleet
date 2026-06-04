@@ -152,6 +152,8 @@ def csa_indexer_topk_fwd(
     weights,
     ratio: int,
     topk_effective: int,
+    seq_offset: int = 0,
+    valid_range: paddle.Tensor | None = None,
     block_K: int = DEFAULT_INDEXER_BLOCK,
     num_stages: int = 0,
     num_threads: int = 128,
@@ -162,12 +164,19 @@ def csa_indexer_topk_fwd(
         index_q: [B, S, H_i, D_i] indexer queries.
         index_k_comp: [B, S_comp, D_i] compressed indexer keys.
         weights: [B, S, H_i] per-head weights for score aggregation.
-        ratio: compression ratio (e.g. 4). Causal range: [0, (t+1)//ratio).
+        ratio: compression ratio (e.g. 4). Used only when valid_range is None
+            to build causal-only ValidRange.
         topk_effective: number of top-k entries to select per query position.
             - Phase 2 (dsa_indexer_use_sparse_loss=False): set to n_compressed
               = floor(S / ratio) for full-candidate selection.
             - Phase 3 (dsa_indexer_use_sparse_loss=True): set to
               min(index_topk, n_compressed), typically 512.
+        seq_offset: global position offset for the first local query token.
+            In CP mode, this is cp_rank * sq_local. Default 0.
+            Used only when valid_range is None.
+        valid_range: [B, S, 2] int32 tensor specifying per-query [BOS, EOS)
+            valid compressed K range (left-closed, right-open). If None,
+            automatically built from ratio + seq_offset (causal-only mode).
         block_K: tile size for streaming over compressed keys (default 32).
 
     Returns:
@@ -187,6 +196,8 @@ def csa_indexer_topk_fwd(
         weights,
         ratio=int(ratio),
         topk_effective=topk_effective,
+        seq_offset=int(seq_offset),
+        valid_range=valid_range,
         block_K=int(block_K),
         num_stages=int(num_stages),
         num_threads=int(num_threads),
