@@ -953,6 +953,50 @@ class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
             str(ctx.exception),
         )
 
+    def test_apply_rope_fusion_train_mode(self):
+        """apply_rope_fusion=True in train mode should succeed and set k_pe=None (L1000)."""
+        model, config = _build_gpt_model(
+            gpt_model_use_experimental_version=False
+        )
+        for sublayer in model.sublayers():
+            if hasattr(sublayer, "config") and hasattr(
+                sublayer.config, "apply_rope_fusion"
+            ):
+                sublayer.config.apply_rope_fusion = True
+
+        model.train()
+
+        sequence_length = 16
+        micro_batch_size = 2
+        input_ids = paddle.randint(
+            0, config.vocab_size, [micro_batch_size, sequence_length]
+        )
+        position_ids = (
+            paddle.arange(sequence_length, dtype=paddle.int64)
+            .unsqueeze(0)
+            .expand([micro_batch_size, sequence_length])
+        )
+        attention_mask = paddle.ones(
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        )
+
+        dict_args = {
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+        }
+        result = model(dict_args)
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+
+        self.assertEqual(
+            hidden_states.shape,
+            [micro_batch_size, sequence_length, config.vocab_size],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
