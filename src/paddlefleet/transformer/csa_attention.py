@@ -56,6 +56,139 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def get_doc_lens(attn_mask_startend_row_indices: Tensor) -> Tensor:
+    """Derive document lengths from attn_mask_startend_row_indices.
+
+    Args:
+        attn_mask_startend_row_indices: [batch_size, h, seqlen, 1] tensor where
+            each value is the end boundary (exclusive) of the document that
+            position belongs to.
+
+    Returns:
+        doc_lens: [n_docs] int32 tensor of document lengths.
+    """
+    mask = attn_mask_startend_row_indices.flatten().cast("int64")
+    seqlen = mask.shape[0]
+    positions = paddle.arange(seqlen, dtype="int64")
+
+    is_boundary = paddle.zeros([seqlen], dtype="bool")
+    is_boundary[0] = True
+    is_boundary[1:] = (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+
+    boundary_indices = paddle.nonzero(is_boundary).flatten()
+    doc_ends = mask[boundary_indices]
+    doc_lens = (doc_ends - boundary_indices).cast("int32")
+    return doc_lens
+
+
+def get_doc_starts(doc_lens: Tensor) -> Tensor:
+    """Compute document start positions from document lengths.
+
+    Args:
+        doc_lens: [n_docs] tensor of document lengths.
+
+    Returns:
+        doc_starts: [n_docs] int32 tensor of cumulative start positions.
+    """
+    lens = doc_lens.flatten().cast("int32")
+    cum = paddle.cumsum(lens, axis=0)
+    starts = paddle.zeros_like(cum)
+    if cum.shape[0] > 1:
+        starts[1:] = cum[:-1]
+    return starts
+
+
+def get_cutoff_doc_lens(doc_lens: Tensor, ratio: int) -> Tensor:
+    """Round each document length down to the nearest multiple of ratio.
+
+    Args:
+        doc_lens: [n_docs] tensor of document lengths.
+        ratio: compression ratio.
+
+    Returns:
+        cutoff_doc_lens: [n_docs] int32 tensor.
+    """
+    return ((doc_lens // ratio) * ratio).cast("int32")
+
+
+def get_cutoff_doc_starts(cutoff_doc_lens: Tensor) -> Tensor:
+    """Compute cumulative start positions from cutoff document lengths.
+
+    Args:
+        cutoff_doc_lens: [n_docs] tensor of cutoff document lengths.
+
+    Returns:
+        cutoff_doc_starts: [n_docs] int32 tensor.
+    """
+    lens = cutoff_doc_lens.flatten().cast("int32")
+    cum = paddle.cumsum(lens, axis=0)
+    starts = paddle.zeros_like(cum)
+    if cum.shape[0] > 1:
+        starts[1:] = cum[:-1]
+    return starts
+
+
+def get_compress_topk_idxs(
+    ratio: int,
+    batch_size: int,
+    seqlen: int,
+    offset: int,
+    attn_mask_startend_row_indices: Tensor,
+) -> Tensor:
+    """Get compressed indices for variable-length documents: [seqlen, seqlen // ratio].
+
+    Documents' compressed KVs are packed contiguously. Each doc contributes
+    cutoff_doc_len // ratio compressed positions. Padding positions (beyond
+    doc end) output all -1.
+
+    Args:
+        ratio: compression ratio.
+        batch_size: batch size (must be 1).
+        seqlen: sequence length.
+        offset: offset added to column indices to produce KV indices.
+        attn_mask_startend_row_indices: [batch_size, h, seqlen, 1] tensor.
+
+    Returns:
+        result: [seqlen, seqlen // ratio] int32 tensor.
+    """
+    n_compressed = seqlen // ratio
+    mask = attn_mask_startend_row_indices.flatten().cast("int64")
+    positions = paddle.arange(seqlen, dtype="int64")
+
+    is_boundary = paddle.zeros([seqlen], dtype="int64")
+    is_boundary[0] = 1
+    is_boundary[1:] = ((positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])).cast("int64")
+
+    start_marker = is_boundary * positions
+    doc_start = paddle.cummax(start_marker, axis=0).values
+
+    pos_in_doc = positions - doc_start
+    doc_len = mask - doc_start
+    num_compressed_per_pos = doc_len // ratio
+
+    boundary_compressed = is_boundary * num_compressed_per_pos
+    cum_compressed = paddle.cumsum(boundary_compressed, axis=0)
+    doc_col_start = cum_compressed - num_compressed_per_pos
+
+    is_valid = pos_in_doc < doc_len
+    causal_avail = ((pos_in_doc + 1) // ratio) * is_valid.cast("int64")
+    num_available = paddle.minimum(causal_avail, num_compressed_per_pos)
+    upper_bound = doc_col_start + num_available
+
+    c_grid = paddle.arange(n_compressed, dtype="int64").unsqueeze(0)
+    lower = doc_col_start.unsqueeze(1)
+    upper = upper_bound.unsqueeze(1)
+
+    active = (c_grid >= lower) & (c_grid < upper)
+
+    result = paddle.where(
+        active,
+        (c_grid + offset).cast("int32"),
+        paddle.full([seqlen, n_compressed], -1, dtype="int32"),
+    )
+    return result
+
+
 @functools.lru_cache(maxsize=8)
 def _get_window_topk_idxs_cached(
     window_size: int, seqlen: int, device_str: str
@@ -65,22 +198,6 @@ def _get_window_topk_idxs_cached(
     offsets = paddle.arange(window_size)  # [window_size]
     matrix = paddle.clip(base - window_size + 1, min=0) + offsets
     matrix = paddle.where(matrix > base, paddle.full_like(matrix, -1), matrix)
-    return matrix
-
-
-@functools.lru_cache(maxsize=8)
-def _get_compress_topk_idxs_cached(
-    ratio: int, seqlen: int, offset: int, device_str: str
-) -> Tensor:
-    """Compute compressed indices for a single sequence (cached)."""
-    n_compressed = seqlen // ratio
-    k_indices = paddle.arange(n_compressed)
-    matrix = k_indices.unsqueeze(0).expand([seqlen, -1])
-    causal_bound = paddle.arange(1, seqlen + 1).unsqueeze(1) // ratio
-    causal_invalid = matrix >= causal_bound
-    matrix = paddle.where(
-        causal_invalid, paddle.full_like(matrix, -1), matrix + offset
-    )
     return matrix
 
 
@@ -111,17 +228,6 @@ def _build_compressed_causal_mask(
         paddle.zeros([1], dtype="float32"),
     )
 
-
-def get_compress_topk_idxs(
-    ratio: int,
-    batch_size: int,
-    seqlen: int,
-    offset: int,
-    device=None,
-) -> Tensor:
-    """Get compressed indices: [b, seqlen, seqlen // ratio]."""
-    matrix = _get_compress_topk_idxs_cached(ratio, seqlen, offset, "gpu")
-    return matrix.unsqueeze(0).expand([batch_size, -1, -1])
 
 
 # ---------------------------------------------------------------------------
@@ -1337,6 +1443,7 @@ class CompressedSparseAttention(FleetLayer):
                     b,
                     sq,
                     offset,
+                    attention_mask,
                 )
 
             if compress_topk_idxs.dtype != window_idxs.dtype:
