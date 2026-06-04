@@ -39,6 +39,7 @@ packages/paddlefleet_ops/src/paddlefleet_ops/hybrid_ep_cpp.so
 packages/paddlefleet_ops/src/paddlefleet_ops/flash_mask
 packages/paddlefleet_ops/src/paddlefleet_ops/sonicmoe
 packages/paddlefleet_ops/src/paddlefleet_ops/quack
+packages/paddlefleet_ops/src/paddlefleet_ops/cudnn
 
 # Generated version files
 # Both version.py files are auto-generated at build time by build_backend.py.

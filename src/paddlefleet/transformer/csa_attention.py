@@ -1199,7 +1199,7 @@ class CompressedSparseAttention(FleetLayer):
                 topk_probs,
                 target,
                 float(indexer_loss_coeff),
-                str(getattr(self.config, "csa_indexer_backend", "tilelang")),
+                str(self.config.csa_indexer_backend),
             )
             if indexer_loss_coeff > 0:
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(

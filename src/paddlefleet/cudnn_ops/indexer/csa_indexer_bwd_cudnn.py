@@ -14,15 +14,11 @@
 
 """Paddle wrapper around the cuDNN-frontend DSA indexer backward.
 
-This bridges the Python API
-``cudnn.deepseek_sparse_attention.indexer_backward.indexer_backward_wrapper``
-(distributed inside ``nvidia-cudnn-frontend``) into PaddleFleet via dlpack
-zero-copy.
-
-It is a drop-in replacement for ``paddlefleet.tilelang_ops.csa_indexer_bwd``,
-but exposes the *raw* (target, predict) pair instead of pre-computed
-``grad_scores``: cuDNN performs the score-gradient precompute kernel itself,
-matching Megatron's ``FusedIndexerSparseAttnFunc`` data flow.
+Calls ``paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_backward.api
+.indexer_backward_wrapper`` directly on Paddle tensors. The wrapper performs
+the score-gradient precompute kernel internally, matching Megatron's
+``FusedIndexerSparseAttnFunc`` data flow, so this entry point exposes the
+*raw* (target, predict) pair instead of pre-computed ``grad_scores``.
 
 Returns d_index_q / d_weights / d_index_k_comp matching input dtypes/shapes.
 """
@@ -30,69 +26,9 @@ Returns d_index_q / d_weights / d_index_k_comp matching input dtypes/shapes.
 from __future__ import annotations
 
 import paddle
-
-_CUDNN_API_IMPORT_ERROR: str | None = None
-
-
-def _lazy_import_cudnn():
-    """Import the cuDNN-frontend DSA indexer-backward API on first use."""
-    global _CUDNN_API_IMPORT_ERROR
-    try:
-        from cudnn.deepseek_sparse_attention.indexer_backward.api import (
-            indexer_backward_wrapper,
-        )
-
-        return indexer_backward_wrapper
-    except Exception as exc:  # pragma: no cover - environment-specific
-        _CUDNN_API_IMPORT_ERROR = str(exc)
-        raise RuntimeError(
-            "csa_indexer_bwd requires the `nvidia-cudnn-frontend` "
-            "Python package (provides `cudnn.deepseek_sparse_attention`). "
-            f"Import failed: {exc}"
-        ) from exc
-
-
-def _lazy_import_torch():
-    try:
-        import torch
-
-        return torch
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(
-            "csa_indexer_bwd requires `torch` to be importable so that "
-            "tensors can be exchanged with cuDNN frontend via dlpack."
-        ) from exc
-
-
-def _paddle_to_torch(t: paddle.Tensor):
-    """Bridge paddle.Tensor -> torch.Tensor via dlpack.
-
-    Zero-copy in the common case (input already contiguous): the returned
-    tensor aliases the same GPU memory and mutating it mutates the original.
-
-    Falls back to ``t.contiguous()`` when the input has non-trivial stride.
-    In that case a fresh contiguous copy is allocated and the returned
-    tensor does **not** alias ``t`` -- callers that rely on aliasing must
-    ensure the input is contiguous before invoking.
-    """
-    torch = _lazy_import_torch()
-    if not t.is_contiguous():
-        t = t.contiguous()
-    # paddle.Tensor implements __dlpack__ (PEP 3118); torch.from_dlpack
-    # accepts either a capsule or an object with __dlpack__.
-    return torch.from_dlpack(t)
-
-
-def _torch_to_paddle(t) -> paddle.Tensor:
-    """Bridge torch.Tensor -> paddle.Tensor via dlpack.
-
-    Zero-copy when the input is contiguous (cuDNN-allocated outputs always
-    are). Otherwise falls back to ``t.contiguous()``, which allocates a
-    fresh buffer and breaks aliasing with ``t``.
-    """
-    if not t.is_contiguous():
-        t = t.contiguous()
-    return paddle.utils.dlpack.from_dlpack(t)
+from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_backward.api import (
+    indexer_backward_wrapper,
+)
 
 
 def _to_bf16(t: paddle.Tensor) -> paddle.Tensor:
@@ -134,9 +70,6 @@ def csa_indexer_bwd(
         as the corresponding inputs and dtypes restored to the original
         ``weights`` dtype.
     """
-    indexer_backward_wrapper = _lazy_import_cudnn()
-    torch = _lazy_import_torch()
-
     orig_weights_dtype = weights.dtype
     orig_q_dtype = index_q.dtype
     orig_k_dtype = index_k_comp.dtype
@@ -147,13 +80,17 @@ def csa_indexer_bwd(
 
     # cuDNN overwrites attn_score (target) and index_score (topk_probs)
     # in-place during the score-grad precompute. Clone so the saved
-    # forward tensors are untouched.
-    target_buf = target.clone()
-    predict_buf = topk_probs.clone()
-    if target_buf.dtype != paddle.float32:
-        target_buf = target_buf.cast(paddle.float32)
-    if predict_buf.dtype != paddle.float32:
-        predict_buf = predict_buf.cast(paddle.float32)
+    # forward tensors are untouched, casting to fp32 in one step.
+    target_buf = (
+        target.cast(paddle.float32)
+        if target.dtype != paddle.float32
+        else target.clone()
+    )
+    predict_buf = (
+        topk_probs.cast(paddle.float32)
+        if topk_probs.dtype != paddle.float32
+        else topk_probs.clone()
+    )
     if topk_indices.dtype != paddle.int32:
         topk_indices = topk_indices.cast(paddle.int32)
 
@@ -165,37 +102,22 @@ def csa_indexer_bwd(
         if grad_loss_paddle.dtype != paddle.float32:
             grad_loss_paddle = grad_loss_paddle.cast(paddle.float32)
 
-    # Move every tensor over to torch via dlpack (same GPU memory).
-    t_index_q = _paddle_to_torch(index_q_bf)
-    t_weights = _paddle_to_torch(weights_bf)
-    t_index_k = _paddle_to_torch(index_k_bf)
-    t_attn = _paddle_to_torch(target_buf)
-    t_index_score = _paddle_to_torch(predict_buf)
-    t_topk = _paddle_to_torch(topk_indices)
-    t_grad_loss = _paddle_to_torch(grad_loss_paddle)
+    out = indexer_backward_wrapper(
+        index_q_bf,
+        weights_bf,
+        index_k_bf,
+        target_buf,
+        predict_buf,
+        topk_indices,
+        sm_scale=float(index_q_bf.shape[-1]) ** -0.5,
+        loss_coeff=float(loss_coeff),
+        grad_loss=grad_loss_paddle,
+        block_I=int(block_I),
+    )
 
-    # Make sure cuDNN executes on Paddle's current CUDA stream so that the
-    # output tensors are visible to subsequent paddle ops without an
-    # explicit synchronize.
-    cur_stream_handle = paddle.device.current_stream().stream_base.cuda_stream
-    torch_stream = torch.cuda.ExternalStream(cur_stream_handle)
-    with torch.cuda.stream(torch_stream):
-        out = indexer_backward_wrapper(
-            t_index_q,
-            t_weights,
-            t_index_k,
-            t_attn,
-            t_index_score,
-            t_topk,
-            sm_scale=float(index_q_bf.shape[-1]) ** -0.5,
-            loss_coeff=float(loss_coeff),
-            grad_loss=t_grad_loss,
-            block_I=int(block_I),
-        )
-
-    grad_q = _torch_to_paddle(out["d_index_q"])
-    grad_weights = _torch_to_paddle(out["d_weights"])
-    grad_k = _torch_to_paddle(out["d_index_k"])
+    grad_q = out["d_index_q"]
+    grad_weights = out["d_weights"]
+    grad_k = out["d_index_k"]
 
     if grad_q.dtype != orig_q_dtype:
         grad_q = grad_q.cast(orig_q_dtype)

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""cuDNN frontend ops bridged into PaddleFleet via dlpack."""
+"""cuDNN frontend ops bridged into PaddleFleet."""
 
 __all__ = ["csa_indexer_bwd"]
 

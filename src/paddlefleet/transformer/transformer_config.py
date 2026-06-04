@@ -829,11 +829,8 @@ class TransformerConfig(ModelParallelConfig):
     csa_indexer_backend: str = "tilelang"
     """CSA indexer backward backend.
 
-    One of {"tilelang", "cudnn"}; "triton" is reserved for future work.
-    Default "tilelang" preserves the legacy path. "cudnn" requires the
-    TileLang indexer forward (csa_tilelang_enable_indexer=True or
-    csa_tilelang_backend='attention_paddle_compat') because the cuDNN
-    backward consumes the TileLang forward's saved tensors.
+    One of {"tilelang", "cudnn"}. Default "tilelang" preserves the legacy
+    path.
     """
 
     o_groups: int = 8
@@ -1128,7 +1125,7 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "csa_tilelang_enable_sparse_attn=True requires csa_tilelang_backend='attention_paddle_compat'."
                 )
-            if self.csa_indexer_backend not in {"tilelang", "cudnn", "triton"}:
+            if self.csa_indexer_backend not in {"tilelang", "cudnn"}:
                 raise ValueError(
                     f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
                     "Must be one of {'tilelang', 'cudnn'}."
