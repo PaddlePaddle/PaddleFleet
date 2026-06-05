@@ -604,7 +604,7 @@ class MainLanguageLoss(LanguageLoss):
                 loss_val.detach()
             )
 
-        # Also write to global_training_logs for ernie5 trainer to read
+        # Also write to global_training_logs to read
         logs = get_global_training_logs()
         if logs is not None and hasattr(logs, "update"):
             for i, loss_val in enumerate(mtp_loss):
