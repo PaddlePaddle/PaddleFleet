@@ -19,3 +19,6 @@
 [submodule "packages/paddlefleet_ops/third_party/cudnn-frontend"]
 	path = packages/paddlefleet_ops/third_party/cudnn-frontend
 	url = https://github.com/PFCCLab/cudnn-frontend.git
+[submodule "packages/paddlefleet_ops/third_party/FlashMLA"]
+	path = packages/paddlefleet_ops/third_party/FlashMLA
+	url = https://github.com/PFCCLab/FlashMLA.git
