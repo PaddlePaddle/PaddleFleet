@@ -25,7 +25,6 @@ Components:
 
 from __future__ import annotations
 
-import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -45,11 +44,10 @@ from paddlefleet.transformer.dsa_attention import (
     fused_qk_topk_naive,
     rotate_activation,
 )
-
 from paddlefleet.transformer.utils import (
     get_doc_lens,
     get_doc_starts,
-    )
+)
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -120,7 +118,9 @@ def get_compress_topk_idxs(
 
     is_boundary = paddle.zeros([seqlen], dtype="int64")
     is_boundary[0] = 1
-    is_boundary[1:] = ((positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])).cast("int64")
+    is_boundary[1:] = (
+        (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+    ).cast("int64")
 
     start_marker = is_boundary * positions
     doc_start = paddle.cummax(start_marker, axis=0).values
@@ -156,7 +156,7 @@ def get_window_topk_idxs(
     window_size: int,
     batch_size: int,
     seqlen: int,
-    startend_row_indices: Tensor,
+    startend_row_indices: Tensor | None = None,
 ) -> Tensor:
     """Get varlen-aware sliding window indices: [seqlen, window_size].
 
@@ -168,7 +168,9 @@ def get_window_topk_idxs(
 
     is_boundary = paddle.zeros([seqlen], dtype="int64")
     is_boundary[0] = 1
-    is_boundary[1:] = ((positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])).cast("int64")
+    is_boundary[1:] = (
+        (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+    ).cast("int64")
 
     start_marker = is_boundary * positions
     doc_start = paddle.cummax(start_marker, axis=0).values
@@ -188,7 +190,7 @@ def get_window_topk_idxs(
 
     invalid = beyond_pos | below_doc_start | padding_mask
     result = paddle.where(invalid, paddle.full_like(indices, -1), indices)
-    return result
+    return result.unsqueeze(0).expand([batch_size, -1, -1])
 
 
 def get_valid_range(
@@ -201,13 +203,17 @@ def get_valid_range(
 
     Returns shape [batch_size, seqlen, 2] with dtype int32.
     """
-    assert batch_size == 1, f"only support batch_size == 1, got batch_size: {batch_size}"
+    assert batch_size == 1, (
+        f"only support batch_size == 1, got batch_size: {batch_size}"
+    )
     mask = startend_row_indices.flatten().cast("int64")
     positions = paddle.arange(seqlen, dtype="int64")
 
     is_boundary = paddle.zeros([seqlen], dtype="int64")
     is_boundary[0] = 1
-    is_boundary[1:] = ((positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])).cast("int64")
+    is_boundary[1:] = (
+        (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+    ).cast("int64")
 
     start_marker = is_boundary * positions
     doc_start = paddle.cummax(start_marker, axis=0).values
@@ -230,7 +236,9 @@ def get_valid_range(
     range_end = doc_col_start + num_available
 
     zero_mask = (num_available == 0) | (~is_valid)
-    range_start = paddle.where(zero_mask, paddle.zeros_like(range_start), range_start)
+    range_start = paddle.where(
+        zero_mask, paddle.zeros_like(range_start), range_start
+    )
     range_end = paddle.where(zero_mask, paddle.zeros_like(range_end), range_end)
 
     result = paddle.stack([range_start, range_end], axis=-1).cast("int32")
@@ -254,7 +262,6 @@ def _build_compressed_causal_mask(
     )
 
 
-
 # ---------------------------------------------------------------------------
 # RoPE helper for CSA
 # ---------------------------------------------------------------------------
@@ -268,6 +275,7 @@ def _apply_rope(
     config: TransformerConfig,
     rotary_seq_len: int,
     ratio: int = 1,
+    doc_lens_cutoff: Tensor | None = None,
 ) -> Tensor:
     """Apply RoPE to the last pos_dim dims, leaving first nope_dim unchanged.
 
@@ -283,8 +291,17 @@ def _apply_rope(
         rotary_seq_len: sequence length for this tensor
         ratio: compression ratio for position subsampling
     """
-    total_seq_len = rotary_seq_len * ratio if ratio > 1 else rotary_seq_len
-    result = rotary_pos_emb_module(total_seq_len, packed_seq=False)
+    if doc_lens_cutoff is not None:
+        assert ratio > 1, (
+            "Document cutoff RoPE is only used for compressed positions."
+        )
+        compressed_doc_lens = (doc_lens_cutoff // ratio).cast("int32")
+        max_compressed_doc_len = int(compressed_doc_lens.max().item())
+        max_cutoff_doc_len = max_compressed_doc_len * ratio
+        result = rotary_pos_emb_module(max_cutoff_doc_len, packed_seq=False)
+    else:
+        total_seq_len = rotary_seq_len * ratio if ratio > 1 else rotary_seq_len
+        result = rotary_pos_emb_module(total_seq_len, packed_seq=False)
     if isinstance(result, tuple):
         freqs, mscale = result
     else:
@@ -293,7 +310,30 @@ def _apply_rope(
     # applied in the Megatron DSv4 CSA path, so keep Paddle CSA identical here.
     mscale = 1.0
     # freqs: [1, total_seq_len, pos_dim]
-    if ratio > 1:
+    if doc_lens_cutoff is not None:
+        freqs = freqs[:, :max_cutoff_doc_len:ratio, :, :]
+        doc_freqs = [
+            freqs[:, : int(doc_len.item()), :, :]
+            for doc_len in compressed_doc_lens
+            if int(doc_len.item()) > 0
+        ]
+        if doc_freqs:
+            freqs = paddle.concat(doc_freqs, axis=1)
+        else:
+            freqs = freqs[:, :0, :, :]
+        if freqs.shape[1] < rotary_seq_len:
+            pad_len = rotary_seq_len - freqs.shape[1]
+            freqs = paddle.concat(
+                [
+                    freqs,
+                    paddle.zeros(
+                        [1, pad_len, 1, freqs.shape[-1]], dtype=freqs.dtype
+                    ),
+                ],
+                axis=1,
+            )
+        freqs = freqs[:, :rotary_seq_len, :, :]
+    elif ratio > 1:
         freqs = freqs[:, :total_seq_len:ratio, :][:, :rotary_seq_len, :]
 
     squeeze_head = x.ndim == 3
@@ -934,20 +974,24 @@ class Compressor(nn.Layer):
         kv_cutoff = paddle.full(
             shape=[b, n_compressed * ratio, coff_head_dim],
             fill_value=0,
-            dtype=kv.dtype
+            dtype=kv.dtype,
         )
         score_cutoff = paddle.full(
             shape=[b, n_compressed * ratio, coff_head_dim],
             fill_value=float("-inf"),
-            dtype=score.dtype
+            dtype=score.dtype,
         )
         for i in range(len(doc_lens)):
-          doc_len = doc_lens[i]
-          doc_start = doc_starts[i]
-          doc_len_cutoff = doc_lens_cutoff[i]
-          doc_start_cutoff = doc_starts_cutoff[i]
-          kv_cutoff[:, doc_start_cutoff:(doc_start_cutoff + doc_len_cutoff), :] = kv[:, doc_start:(doc_start + doc_len_cutoff), :]
-          score_cutoff[:, doc_start_cutoff:(doc_start_cutoff + doc_len_cutoff), :] = score[:, doc_start:(doc_start + doc_len_cutoff), :]
+            doc_len = doc_lens[i]
+            doc_start = doc_starts[i]
+            doc_len_cutoff = doc_lens_cutoff[i]
+            doc_start_cutoff = doc_starts_cutoff[i]
+            kv_cutoff[
+                :, doc_start_cutoff : (doc_start_cutoff + doc_len_cutoff), :
+            ] = kv[:, doc_start : (doc_start + doc_len_cutoff), :]
+            score_cutoff[
+                :, doc_start_cutoff : (doc_start_cutoff + doc_len_cutoff), :
+            ] = score[:, doc_start : (doc_start + doc_len_cutoff), :]
 
         kv = kv_cutoff
         score = score_cutoff
@@ -979,6 +1023,7 @@ class Compressor(nn.Layer):
                 self.config,
                 n_compressed,
                 ratio=ratio,
+                doc_lens_cutoff=doc_lens_cutoff,
             )
 
         if self.rotate:
@@ -1073,7 +1118,7 @@ class CSAIndexer(nn.Layer):
         self,
         x: Tensor,  # [b, sq, hidden_size]
         qr: Tensor,  # [b, sq, q_lora_rank]
-        startend_row_indices,
+        startend_row_indices: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Compute Q, compressed K, and weights before top-k selection."""
         b, sq, _ = x.shape
@@ -1094,7 +1139,9 @@ class CSAIndexer(nn.Layer):
         q = rotate_activation(q)
 
         # K path: own compressor (already applies RoPE and rotation internally)
-        k = self.compressor(x, startend_row_indices)  # [b, n_compressed, index_head_dim]
+        k = self.compressor(
+            x, startend_row_indices
+        )  # [b, n_compressed, index_head_dim]
 
         # Weights
         weights, _ = self.linear_weights_proj(x)  # [b, sq, n_heads]
@@ -1287,7 +1334,9 @@ class CompressedSparseAttention(FleetLayer):
                 self.config, "dsa_indexer_loss_coeff", 0.0
             )
             q_indexer_bf, k_indexer_bf, weights_indexer_bf = (
-                self.indexer.forward_before_topk(x_det, qr_det, startend_row_indices)
+                self.indexer.forward_before_topk(
+                    x_det, qr_det, startend_row_indices
+                )
             )
             # compressed_kv is shared across query heads; pass it directly to
             # the target/reducesum path instead of materializing [B,S,H,D].
@@ -1327,7 +1376,9 @@ class CompressedSparseAttention(FleetLayer):
                 )
         elif self.training and not use_tilelang_indexer:
             q_indexer, k_indexer, weights_indexer = (
-                self.indexer.forward_before_topk(x_det, qr_det, startend_row_indices)
+                self.indexer.forward_before_topk(
+                    x_det, qr_det, startend_row_indices
+                )
             )
             indexer_loss_coeff = getattr(
                 self.config, "dsa_indexer_loss_coeff", 0.0
@@ -1388,7 +1439,9 @@ class CompressedSparseAttention(FleetLayer):
 
             with paddle.no_grad():
                 q_indexer_tl, k_indexer_tl, weights_indexer_tl = (
-                    self.indexer.forward_before_topk(x_det, qr_det, startend_row_indices)
+                    self.indexer.forward_before_topk(
+                        x_det, qr_det, startend_row_indices
+                    )
                 )
                 tl_topk_indices, _tl_topk_scores = csa_indexer_topk_fwd(
                     q_indexer_tl,
@@ -1445,7 +1498,9 @@ class CompressedSparseAttention(FleetLayer):
 
         # Step 2: Compression
         if self.compressor is not None and self.compress_ratio > 1:
-            compressed_kv = self.compressor(x, startend_row_indices)  # [b, n_compressed, v_head_dim]
+            compressed_kv = self.compressor(
+                x, startend_row_indices
+            )  # [b, n_compressed, v_head_dim]
             if compressed_kv is not None:
                 kv_full = paddle.concat([kv, compressed_kv], axis=1)
                 n_compressed = compressed_kv.shape[1]
@@ -1459,7 +1514,9 @@ class CompressedSparseAttention(FleetLayer):
         offset = sq  # compressed indices start after original positions
 
         # Step 3: Window indices
-        window_idxs = get_window_topk_idxs(self.window_size, b, sq, startend_row_indices)
+        window_idxs = get_window_topk_idxs(
+            self.window_size, b, sq, startend_row_indices
+        )
 
         # Step 4: Compressed indices
         indexer_loss = None

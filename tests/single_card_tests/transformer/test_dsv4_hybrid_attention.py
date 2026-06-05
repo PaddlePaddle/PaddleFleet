@@ -17,15 +17,20 @@ import unittest
 import paddle
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
+from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
+    YarnRotaryEmbedding,
+)
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_attention_spec,
     get_gpt_decoder_layers_spec,
     get_gpt_layer_local_spec,
     get_gpt_mtp_layers_spec,
 )
+from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.tilelang_ops import csa_sparse_attn
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
+    _apply_rope,
     _resolve_csa_indexer_attn_topk_effective,
     _resolve_csa_indexer_loss_topk_effective,
     _resolve_csa_tilelang_switch,
@@ -282,6 +287,142 @@ class TestCSAIndexHelpers(unittest.TestCase):
         self.assertEqual(list(index_scores.shape), [1, 2, 2])
         self.assertEqual(list(topk_indices.shape), [1, 2, 2])
         self.assertEqual(topk_indices.numpy().tolist()[0][0][0], 0)
+
+
+class TestDSv4HybridDocumentRoPE(unittest.TestCase):
+    def test_compressed_document_rope_matches_separate_documents(self):
+        paddle.seed(_SEED)
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        nope_dim = config.qk_nope_head_dim
+        pos_dim = config.qk_rope_head_dim
+        ratio = 4
+
+        doc1 = paddle.randn(
+            [1, 23 // ratio, 1, config.v_head_dim], dtype="bfloat16"
+        )
+        doc2 = paddle.randn(
+            [1, 9 // ratio, 1, config.v_head_dim], dtype="bfloat16"
+        )
+        padding = paddle.randn([1, 1, 1, config.v_head_dim], dtype="bfloat16")
+        packed = paddle.concat([doc1, doc2, padding], axis=1)
+
+        packed_out = _apply_rope(
+            packed,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=32 // ratio,
+            ratio=ratio,
+            doc_lens_cutoff=paddle.to_tensor([20, 8], dtype="int32"),
+        )
+        doc1_out = _apply_rope(
+            doc1,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=20 // ratio,
+            ratio=ratio,
+        )
+        doc2_out = _apply_rope(
+            doc2,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=8 // ratio,
+            ratio=ratio,
+        )
+
+        self.assertTrue(
+            paddle.equal_all(
+                packed_out[:, : doc1.shape[1], :, :].cast("float32"),
+                doc1_out.cast("float32"),
+            ).item()
+        )
+        self.assertTrue(
+            paddle.equal_all(
+                packed_out[
+                    :, doc1.shape[1] : doc1.shape[1] + doc2.shape[1], :, :
+                ].cast("float32"),
+                doc2_out.cast("float32"),
+            ).item()
+        )
+
+    def test_attention_module_document_mask_matches_separate_documents(self):
+        paddle.seed(_SEED)
+        for ratio in [0, 4, 128]:
+            config = _make_config(
+                hidden_size=64,
+                num_attention_heads=2,
+                v_head_dim=32,
+                q_lora_rank=32,
+                o_groups=2,
+                o_lora_rank=16,
+                csa_window_size=32,
+                dsa_indexer_loss_coeff=0.0,
+                csa_compress_ratios=[ratio],
+                num_layers=1,
+            )
+            model_parallel_cuda_manual_seed(_SEED)
+            attn = _build_attention(config, layer_number=0)
+            attn.eval()
+
+            doc1 = paddle.randn([1, 23, config.hidden_size], dtype="bfloat16")
+            doc2 = paddle.randn([1, 9, config.hidden_size], dtype="bfloat16")
+            packed = paddle.concat([doc1, doc2], axis=1)
+            startend_row_indices = paddle.to_tensor(
+                [23] * 23 + [32] * 9, dtype="int32"
+            ).reshape([1, 1, 32, 1])
+            doc1_startend_row_indices = paddle.to_tensor(
+                [23] * 23, dtype="int32"
+            ).reshape([1, 1, 23, 1])
+            doc2_startend_row_indices = paddle.to_tensor(
+                [9] * 9, dtype="int32"
+            ).reshape([1, 1, 9, 1])
+
+            with paddle.no_grad():
+                packed_out, _ = attn(
+                    hidden_states=packed,
+                    attention_mask=None,
+                    attn_mask_startend_row_indices=startend_row_indices,
+                )
+                doc1_out, _ = attn(
+                    hidden_states=doc1,
+                    attention_mask=None,
+                    attn_mask_startend_row_indices=doc1_startend_row_indices,
+                )
+                doc2_out, _ = attn(
+                    hidden_states=doc2,
+                    attention_mask=None,
+                    attn_mask_startend_row_indices=doc2_startend_row_indices,
+                )
+
+            self.assertTrue(
+                paddle.equal_all(
+                    packed_out[:, :23, :].cast("float32"),
+                    doc1_out.cast("float32"),
+                ).item()
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    packed_out[:, 23:, :].cast("float32"),
+                    doc2_out.cast("float32"),
+                ).item()
+            )
 
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):
