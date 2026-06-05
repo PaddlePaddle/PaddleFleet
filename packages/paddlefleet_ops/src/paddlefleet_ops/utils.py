@@ -92,12 +92,13 @@ class ModuleContext:
 
 def patch_module_namespace(source_name: str, target_prefix: str):
     """
-    Moves loaded modules from source_name to target_prefix + source_name.
-    Effectively 'installs' the module into the new namespace.
+    Copies loaded modules from source_name to target_prefix + source_name.
+    Effectively 'installs' the module into the new namespace while keeping
+    the original name so that internal absolute imports still resolve.
     """
     for name in list(sys.modules.keys()):
         if name == source_name or name.startswith(source_name + "."):
-            module = sys.modules.pop(name)
+            module = sys.modules[name]
             new_name = target_prefix + name
             sys.modules[new_name] = module
 

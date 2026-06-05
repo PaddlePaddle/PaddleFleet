@@ -45,22 +45,41 @@ if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
 
-_USE_ACCURACY_COMPATIBLE_KERNEL = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
+def _dsv4_fleet_moe_fp32_accum_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_MOE_FP32_ACCUM", "0") == "1"
 
 
-def use_accuracy_compatible_kernel() -> bool:
-    """Unified switch for accuracy-compatible (Megatron-aligned) numeric paths.
-
-    Controlled via the ``FLAGS_use_accuracy_compatible_kernel`` environment
-    variable. When enabled, modules switch to fp32-accumulating / Torch-aligned
-    kernels at the cost of throughput.
-    """
-    return _USE_ACCURACY_COMPATIBLE_KERNEL
+def _dsv4_probs_mul_custom_bwd_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_PROBS_MUL_CUSTOM_BWD", "0") == "1"
 
 
-def _unpermute_scatter(
+def _dsv4_fleet_moe_torch_index_add_enabled() -> bool:
+    explicit = os.environ.get("DSV4_FLEET_MOE_TORCH_INDEX_ADD")
+    if explicit is not None:
+        return explicit.lower() in ("1", "true", "yes", "on")
+    return os.environ.get("FLAGS_use_deterministic_algorithm", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _dsv4_import_torch_for_moe_index_add():
+    import sys
+
+    torch_site_packages = os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES")
+    if torch_site_packages and torch_site_packages not in sys.path:
+        sys.path.insert(0, torch_site_packages)
+    import torch
+    import torch.utils.dlpack
+
+    if _dsv4_fleet_moe_torch_index_add_enabled():
+        torch.use_deterministic_algorithms(True)
+    return torch
+
+
+def _dsv4_unpermute_scatter(
     permuted_tokens: paddle.Tensor, sorted_indices: paddle.Tensor, restore_shape
 ) -> paddle.Tensor:
     output_tokens = paddle.zeros(restore_shape, dtype=permuted_tokens.dtype)
@@ -70,7 +89,7 @@ def _unpermute_scatter(
     return output_tokens
 
 
-def _unpermute_fp32_accum(
+def _dsv4_unpermute_fp32_accum(
     permuted_tokens: paddle.Tensor, sorted_indices: paddle.Tensor, restore_shape
 ) -> paddle.Tensor:
     output_tokens = paddle.zeros(restore_shape, dtype="float32")
@@ -82,9 +101,35 @@ def _unpermute_fp32_accum(
     return output_tokens.cast(permuted_tokens.dtype)
 
 
-class ApplyPermutedProbs(PyLayer):
-    """tokens * probs with fp32-accumulated probs gradient."""
+class _DSV4TorchIndexAddUnpermute(PyLayer):
+    @staticmethod
+    def forward(ctx, permuted_tokens, sorted_indices, restore_shape):
+        ctx.save_for_backward(sorted_indices)
+        torch = _dsv4_import_torch_for_moe_index_add()
+        permuted_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(permuted_tokens.detach().contiguous())
+        )
+        indices_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(sorted_indices.detach().contiguous())
+        ).long()
+        output_t = torch.zeros(
+            (int(restore_shape[0]), int(restore_shape[1])),
+            dtype=permuted_t.dtype,
+            device=permuted_t.device,
+        )
+        output_t.index_add_(0, indices_t, permuted_t)
+        return paddle.utils.dlpack.from_dlpack(
+            torch.utils.dlpack.to_dlpack(output_t.contiguous())
+        )
 
+    @staticmethod
+    def backward(ctx, grad_output):
+        (sorted_indices,) = ctx.saved_tensor()
+        grad_tokens = grad_output.index_select(axis=0, index=sorted_indices)
+        return grad_tokens, None
+
+
+class _DSV4ApplyPermutedProbs(PyLayer):
     @staticmethod
     def forward(ctx, permuted_tokens, permuted_probs):
         ctx.input_dtype = permuted_tokens.dtype
@@ -98,9 +143,7 @@ class ApplyPermutedProbs(PyLayer):
         grad_probs = (
             permuted_tokens.cast("float32") * grad_output.cast("float32")
         ).sum(axis=-1)
-        return grad_tokens.cast(ctx.input_dtype), grad_probs.cast(
-            permuted_probs.dtype
-        )
+        return grad_tokens.cast(ctx.input_dtype), grad_probs.cast(permuted_probs.dtype)
 
 
 def barrier_ep(ep_group):
@@ -185,19 +228,23 @@ def unpermute(
         permuted_probs = probs.T.contiguous().masked_select(
             routing_map.T.contiguous().cast(paddle.bool)
         )
-        if use_accuracy_compatible_kernel():
-            permuted_tokens = ApplyPermutedProbs.apply(
+        if _dsv4_probs_mul_custom_bwd_enabled():
+            permuted_tokens = _DSV4ApplyPermutedProbs.apply(
                 permuted_tokens, permuted_probs
             )
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
 
-    if use_accuracy_compatible_kernel():
-        output_tokens = _unpermute_fp32_accum(
+    if _dsv4_fleet_moe_fp32_accum_enabled():
+        output_tokens = _dsv4_unpermute_fp32_accum(
+            permuted_tokens, sorted_indices, restore_shape
+        )
+    elif _dsv4_fleet_moe_torch_index_add_enabled():
+        output_tokens = _DSV4TorchIndexAddUnpermute.apply(
             permuted_tokens, sorted_indices, restore_shape
         )
     else:
-        output_tokens = _unpermute_scatter(
+        output_tokens = _dsv4_unpermute_scatter(
             permuted_tokens, sorted_indices, restore_shape
         )
 

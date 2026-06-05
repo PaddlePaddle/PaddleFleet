@@ -14,7 +14,6 @@
 
 
 import functools
-import hashlib
 import os
 
 import numpy as np
@@ -37,41 +36,119 @@ from paddlefleet.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-def _loss_md5_enabled() -> bool:
+def _dsv4_loss_md5_enabled() -> bool:
     return os.environ.get("LOG_LOSS_MD5", "0") == "1"
 
 
-def _use_accuracy_compatible_kernel() -> bool:
-    """Switch for Megatron-aligned (accuracy-compatible) numeric paths.
+def _dsv4_tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
+    import hashlib
 
-    Controlled by the ``FLAGS_use_accuracy_compatible_kernel`` env variable.
-    """
-    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-
-
-def _tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
-    """Calculate MD5 hash of a tensor, **for debugging only**.
-
-    Note: internally calls .numpy() which triggers GPU→CPU synchronization
-    and blocks the async training pipeline. Do NOT use in the forward pass.
-    """
     tensor_for_md5 = tensor.detach().cast(dtype)
     return hashlib.md5(tensor_for_md5.numpy().tobytes()).hexdigest()
 
 
-def _print_scalar_loss_md5(prefix: str, name: str, loss: Tensor) -> None:
-    if not _loss_md5_enabled():
+_DSV4_LOSS_GRAD_COUNTS = {}
+
+
+def _dsv4_loss_grad_rank_enabled(rank: int) -> bool:
+    ranks = os.environ.get("DSV4_LOSS_GRAD_RANKS", "0")
+    if ranks.strip().lower() == "all":
+        return True
+    return str(rank) in {item.strip() for item in ranks.split(",") if item.strip()}
+
+
+def _dsv4_register_loss_grad_hook(name: str, tensor: Tensor):
+    if os.environ.get("DSV4_LOG_LOSS_GRADS", "0") != "1":
+        return tensor
+    if not isinstance(tensor, paddle.Tensor) or tensor.stop_gradient:
+        return tensor
+    rank = paddle.distributed.get_rank()
+    if not _dsv4_loss_grad_rank_enabled(rank):
+        return tensor
+    occurrence = _DSV4_LOSS_GRAD_COUNTS.get(name, 0)
+    _DSV4_LOSS_GRAD_COUNTS[name] = occurrence + 1
+    max_numel = int(os.environ.get("DSV4_LOSS_GRAD_MD5_MAX_NUMEL", "600000000"))
+
+    def _hook(grad):
+        grad_fp32 = grad.detach().cast("float32")
+        norm = paddle.linalg.norm(grad_fp32).item()
+        md5 = _dsv4_tensor_md5(grad_fp32) if grad_fp32.numel() <= max_numel else "SKIP"
+        print(
+            f"[DSV4_LOSS_GRAD] framework=fleet rank={rank} name={name} "
+            f"occurrence={occurrence} shape={list(grad.shape)} dtype={grad.dtype} "
+            f"numel={grad.numel()} norm={norm:.20f} md5_float32={md5}",
+            flush=True,
+        )
+        return grad
+
+    tensor.register_hook(_hook)
+    return tensor
+
+
+def _dsv4_register_loss_logits_grad_hook(name: str, logits: Tensor, labels: Tensor):
+    if os.environ.get("DSV4_LOG_LOSS_GRADS", "0") != "1":
+        return logits
+    if os.environ.get("DSV4_LOG_LOSS_LOGITS_GRADS", "1") == "0":
+        return logits
+    if not isinstance(logits, paddle.Tensor) or logits.stop_gradient:
+        return logits
+    rank = paddle.distributed.get_rank()
+    if not _dsv4_loss_grad_rank_enabled(rank):
+        return logits
+    occurrence = _DSV4_LOSS_GRAD_COUNTS.get(name, 0)
+    _DSV4_LOSS_GRAD_COUNTS[name] = occurrence + 1
+    max_numel = int(os.environ.get("DSV4_LOSS_GRAD_MD5_MAX_NUMEL", "600000000"))
+    valid_mask = labels != -100
+
+    def _hook(grad):
+        grad_fp32 = grad.detach().cast("float32").cpu()
+        norm = paddle.linalg.norm(grad_fp32).item()
+        md5 = _dsv4_tensor_md5(grad_fp32) if grad_fp32.numel() <= max_numel else "SKIP"
+        valid_mask_cpu = valid_mask.cpu()
+        invalid_mask_cpu = paddle.logical_not(valid_mask_cpu)
+        flat_grad = grad_fp32.reshape([-1, grad_fp32.shape[-1]])
+        valid = flat_grad[valid_mask_cpu.reshape([-1])]
+        invalid = flat_grad[invalid_mask_cpu.reshape([-1])]
+        valid_norm = paddle.linalg.norm(valid).item() if valid.numel() else 0.0
+        invalid_norm = paddle.linalg.norm(invalid).item() if invalid.numel() else 0.0
+        valid_md5 = _dsv4_tensor_md5(valid) if valid.numel() <= max_numel else "SKIP"
+        invalid_md5 = _dsv4_tensor_md5(invalid) if invalid.numel() <= max_numel else "EMPTY"
+        prefix = grad_fp32[:, :-1, :].reshape([-1, grad_fp32.shape[-1]])
+        last = grad_fp32[:, -1:, :].reshape([-1, grad_fp32.shape[-1]])
+        prefix_norm = paddle.linalg.norm(prefix).item() if prefix.numel() else 0.0
+        last_norm = paddle.linalg.norm(last).item() if last.numel() else 0.0
+        prefix_md5 = _dsv4_tensor_md5(prefix) if prefix.numel() <= max_numel else "SKIP"
+        last_md5 = _dsv4_tensor_md5(last) if last.numel() <= max_numel else "EMPTY"
+        print(
+            f"[DSV4_LOSS_GRAD] framework=fleet rank={rank} name={name} "
+            f"occurrence={occurrence} shape={list(grad.shape)} dtype={grad.dtype} "
+            f"numel={grad.numel()} norm={norm:.20f} md5_float32={md5} "
+            f"valid_numel={valid.numel()} valid_norm={valid_norm:.20f} "
+            f"valid_md5_float32={valid_md5} invalid_numel={invalid.numel()} "
+            f"invalid_norm={invalid_norm:.20f} invalid_md5_float32={invalid_md5} "
+            f"prefix_no_last_numel={prefix.numel()} prefix_no_last_norm={prefix_norm:.20f} "
+            f"prefix_no_last_md5_float32={prefix_md5} last_token_numel={last.numel()} "
+            f"last_token_norm={last_norm:.20f} last_token_md5_float32={last_md5}",
+            flush=True,
+        )
+        return grad
+
+    logits.register_hook(_hook)
+    return logits
+
+
+def _dsv4_print_scalar_loss_md5(prefix: str, name: str, loss: Tensor) -> None:
+    if not _dsv4_loss_md5_enabled():
         return
     rank = paddle.distributed.get_rank()
     loss_tensor = loss.detach().cast("float32").reshape([1])
     print(
         f"[{prefix}] rank={rank} {name}={loss_tensor.item():.20f} "
-        f"{name}_md5={_tensor_md5(loss_tensor)}",
+        f"{name}_md5={_dsv4_tensor_md5(loss_tensor)}",
         flush=True,
     )
 
@@ -284,6 +361,9 @@ class LanguageLoss(FleetLayer):
             return loss
 
         seq_len = logits.shape[1]
+        logits = _dsv4_register_loss_logits_grad_hook(
+            "loss_input_logits", logits, labels
+        )
 
         # Loss-path MD5 probe: logits and labels before cross-entropy
         import os
@@ -329,6 +409,7 @@ class LanguageLoss(FleetLayer):
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(loss, axis=1)
             labels = ContextParallelGatherOp.apply(labels, axis=1)
+        loss = _dsv4_register_loss_grad_hook("per_token_loss", loss)
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
@@ -383,6 +464,29 @@ class LanguageLoss(FleetLayer):
                         f"[LOSS_PATH_MD5] rank={rank} line_wise_loss={_probe_lw.item():.20f}",
                         flush=True,
                     )
+
+            if _dsv4_loss_md5_enabled():
+                rank = paddle.distributed.get_rank()
+                loss_float = loss.cast("float32").reshape([-1])
+                valid_count = lossmask.sum().item()
+                loss_sum_tensor = paddle.sum(
+                    loss_float * lossmask
+                ).detach().cast("float32").reshape([1])
+                valid_count_tensor = lossmask.sum().detach().cast("float32").reshape([1])
+                final_loss_tensor = (
+                    loss_sum_tensor / valid_count_tensor
+                    if valid_count
+                    else paddle.full([1], float("nan"), dtype="float32")
+                )
+                loss_sum_val = loss_sum_tensor.item()
+                final_loss_val = final_loss_tensor.item()
+                print(
+                    f"[LOSS_PATH_MD5] rank={rank} loss_sum={loss_sum_val:.20f} "
+                    f"loss_sum_md5={_dsv4_tensor_md5(loss_sum_tensor)} "
+                    f"final_loss={final_loss_val:.20f} "
+                    f"final_loss_md5={_dsv4_tensor_md5(final_loss_tensor)}",
+                    flush=True,
+                )
 
             # EC-compat: line-wise loss (per-sample mean then average across samples)
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
@@ -463,16 +567,9 @@ class LanguageLoss(FleetLayer):
                                 labels_cur_depth, axis=1
                             )
 
-                        if self.config.fused_linear_ce_loss_chunk > 0:
-                            loss_matrix_cur_depth = self._forward(
-                                logits_cur_depth,
-                                labels_cur_depth,
-                            )
-                        else:
-                            loss_matrix_cur_depth = self.loss_func(
-                                logits_cur_depth.cast("float32"),
-                                labels_cur_depth,
-                            )
+                        loss_matrix_cur_depth = self.loss_func(
+                            logits_cur_depth.cast("float32"), labels_cur_depth
+                        )
 
                         if get_context_parallel_world_size() > 1:
                             # In EB data flow and CP size > 1, loss and labels need to be gathered back.
@@ -583,66 +680,37 @@ class LanguageLoss(FleetLayer):
                         ploss = ploss / xishu
                         mtp_loss.append(ploss)
 
-            # Store detached MTP loss tensors into class-level tracker and global_training_logs.
+            # Store detached MTP loss tensors into class-level tracker.
             # Use .detach() instead of .item() to avoid GPU synchronization on every
             # micro-batch. The trainer will call .item() only at logging steps.
             for i, loss_val in enumerate(mtp_loss):
                 LanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
                     loss_val.detach()
                 )
-                _print_scalar_loss_md5(
+                _dsv4_print_scalar_loss_md5(
                     "MTP_LOSS_PATH_MD5",
                     f"mtp{i + 1}.final_loss",
                     loss_val,
                 )
 
-            logs = get_global_training_logs()
-            if logs is not None and hasattr(logs, "update"):
-                for i, loss_val in enumerate(mtp_loss):
-                    logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
-
             def add_loss(main_loss, loss):
-                if _use_accuracy_compatible_kernel():
-                    # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
-                    # This matches Megatron's behavior where MTP contributes to training
-                    # gradients without affecting the reported loss value.
-                    if self.config.add_mtp_loss:
-                        return main_loss + loss - loss.detach()
-                    else:
-                        return main_loss
+                if self.config.add_mtp_loss:
+                    return main_loss + loss - loss.detach()
                 else:
-                    # Original behavior
-                    if self.config.add_mtp_loss:
-                        return main_loss + loss
-                    else:
-                        return main_loss + loss - loss.detach()
+                    return main_loss
 
             if self.config.gpt_model_use_experimental_version:
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
                 loss = lm_loss
-                if _use_accuracy_compatible_kernel():
-                    # Megatron-aligned: only add MTP loss when add_mtp_loss=True.
-                    # Use add_loss() to keep single maintenance point for compat
-                    # behavior (loss + val - val.detach() for gradient-only flow).
-                    if self.config.add_mtp_loss:
-                        num_mtp = len(mtp_loss)
-                        for mtp_l in mtp_loss:
-                            mtp_val = (
-                                self.config.mtp_loss_scaling_factor
-                                * mtp_l
-                                / num_mtp
-                            )
-                            loss = add_loss(loss, mtp_val)
-                else:
-                    # Original behavior: always use add_loss
+                if self.config.add_mtp_loss:
                     num_mtp = len(mtp_loss)
                     for mtp_l in mtp_loss:
-                        loss = add_loss(
-                            loss,
-                            self.config.mtp_loss_scaling_factor
+                        loss = (
+                            loss
+                            + self.config.mtp_loss_scaling_factor
                             * mtp_l
-                            / num_mtp,
+                            / num_mtp
                         )
             else:
                 loss = add_loss(
@@ -693,39 +761,24 @@ class MainLanguageLoss(LanguageLoss):
         else:
             lm_loss = self._forward(logits, lm_labels)
 
-        # Store detached MTP loss tensors into class-level tracker and global_training_logs.
+        # Store detached MTP loss tensors into class-level tracker.
         # Use .detach() instead of .item() to avoid GPU synchronization on every
         # micro-batch. The trainer will call .item() only at logging steps.
         for i, loss_val in enumerate(mtp_loss):
             MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
                 loss_val.detach()
             )
-            _print_scalar_loss_md5(
+            _dsv4_print_scalar_loss_md5(
                 "MTP_LOSS_PATH_MD5",
                 f"mtp{i + 1}.final_loss",
                 loss_val,
             )
 
-        # Also write to global_training_logs to read
-        logs = get_global_training_logs()
-        if logs is not None and hasattr(logs, "update"):
-            for i, loss_val in enumerate(mtp_loss):
-                logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
-
         def add_loss(main_loss, loss):
-            if _use_accuracy_compatible_kernel():
-                # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
-                # This matches Megatron's behavior
-                if self.config.add_mtp_loss:
-                    return main_loss + loss - loss.detach()
-                else:
-                    return main_loss
+            if self.config.add_mtp_loss:
+                return main_loss + loss - loss.detach()
             else:
-                # Original behavior
-                if self.config.add_mtp_loss:
-                    return main_loss + loss
-                else:
-                    return main_loss + loss - loss.detach()
+                return main_loss
 
         loss = add_loss(
             lm_loss,

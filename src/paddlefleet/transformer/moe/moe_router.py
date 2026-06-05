@@ -62,6 +62,41 @@ def _get_moe_topk_fusion():
 _moe_router_logger = logging.getLogger(__name__)
 
 
+def _dsv4_router_torch_probe_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_ROUTER_TORCH_PROBE", "0") == "1"
+
+
+def _dsv4_router_torch_mm_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_ROUTER_TORCH_MM", "0") == "1"
+
+
+def _dsv4_import_torch_for_router_probe():
+    import sys
+
+    torch_site_packages = os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES")
+    if torch_site_packages and torch_site_packages not in sys.path:
+        sys.path.insert(0, torch_site_packages)
+    import torch
+    import torch.utils.dlpack
+
+    return torch
+
+
+def _dsv4_torch_gate_mm(x, weight):
+    torch = _dsv4_import_torch_for_router_probe()
+    x_t = torch.utils.dlpack.from_dlpack(
+        paddle.utils.dlpack.to_dlpack(x.detach().contiguous())
+    )
+    w_t = torch.utils.dlpack.from_dlpack(
+        paddle.utils.dlpack.to_dlpack(weight.detach().contiguous())
+    )
+    with torch.no_grad():
+        logits_t = torch.mm(x_t.float(), w_t.float().t())
+    return paddle.utils.dlpack.from_dlpack(
+        torch.utils.dlpack.to_dlpack(logits_t.contiguous())
+    )
+
+
 def _dsv4_router_fp32_wgrad_enabled() -> bool:
     return os.environ.get("DSV4_FLEET_ROUTER_FP32_WGRAD", "0") == "1"
 
@@ -81,7 +116,7 @@ def _log_moe_md5(tensor, name, layer_idx=None):
     """Log MD5 of a tensor for MoE precision alignment debugging."""
     from paddlefleet.transformer.transformer_layer import TransformerLayer
 
-    if _LOG_LAYER_MD5 and TransformerLayer._gpt_model_use_experimental_version:
+    if _LOG_LAYER_MD5:
         if TransformerLayer._skip_mtp_probes:
             return  # Skip MTP passes — EC has no MTP
         data = tensor.detach().cast("float32").numpy().tobytes()
@@ -98,6 +133,24 @@ def _log_moe_md5(tensor, name, layer_idx=None):
         )
 
 
+def _log_torch_gate_mm_probe(x, weight, layer_idx=None):
+    if not (_LOG_LAYER_MD5 and _dsv4_router_torch_probe_enabled()):
+        return
+    logits = _dsv4_torch_gate_mm(x, weight)
+    data = logits.detach().cast("float32").numpy().tobytes()
+    md5 = hashlib.md5(data).hexdigest()
+    rank = (
+        paddle.distributed.get_rank()
+        if paddle.distributed.is_initialized()
+        else 0
+    )
+    layer_str = f" Layer={layer_idx}" if layer_idx is not None else ""
+    print(
+        f"[MD5 MoE] Rank={rank}{layer_str} gate_logits_torch_probe MD5={md5} shape={list(logits.shape)}",
+        flush=True,
+    )
+
+
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
     FusedGateDetachMatmul
@@ -112,6 +165,8 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         ctx.dtype = paddle.float32
         ctx.weight_ref = w
         ctx.save_for_backward(x, w)
+        if _dsv4_router_torch_mm_enabled():
+            return _dsv4_torch_gate_mm(x, w)
         w = w.T
         return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
@@ -992,6 +1047,7 @@ class TopKRouter(StandardMoERouter):
             )
 
         with paddle.amp.auto_cast(False):
+            _log_moe_md5(self.weight, "gate_weight", self._layer_number)
             logits = gate_detach_matmul(
                 input,
                 self.weight,
@@ -999,6 +1055,7 @@ class TopKRouter(StandardMoERouter):
                 self.config.moe_router_force_load_balancing,
                 getattr(self.config, "dw_p2p_overlap", False),
             )
+            _log_torch_gate_mm_probe(input, self.weight, self._layer_number)
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
 

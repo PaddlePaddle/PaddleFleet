@@ -93,6 +93,47 @@ def tensors_clone(outputs):
         )
 
 
+def _dsv4_register_mtp_layer_grad(
+    name: str, tensor: Tensor, is_mtp_layer: bool
+) -> None:
+    if not is_mtp_layer or os.environ.get("DSV4_LOG_MTP_GRADS", "0") != "1":
+        return
+    if tensor is None or tensor.stop_gradient:
+        return
+
+    def _hook(grad: Tensor) -> None:
+        rank = (
+            paddle.distributed.get_rank()
+            if paddle.distributed.is_initialized()
+            else 0
+        )
+        if rank != int(os.environ.get("DSV4_LOSS_PATH_RANK", "0")):
+            return
+        md5 = hashlib.md5(grad.cast("float32").numpy().tobytes()).hexdigest()
+        print(
+            f"[MTP_LAYER_GRAD_MD5] rank={rank} {name}.grad shape={list(grad.shape)} md5={md5}",
+            flush=True,
+        )
+
+    tensor.register_hook(_hook)
+
+
+class _DSV4MTPMlpInputBranchSplit(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x: Tensor):
+        return paddle.assign(x), paddle.assign(x)
+
+    @staticmethod
+    def backward(ctx, residual_grad: Tensor, hc_grad: Tensor):
+        order = os.environ.get(
+            "DSV4_FLEET_MTP_MLP_INPUT_BRANCH_SPLIT_ORDER",
+            "residual_hc",
+        )
+        if order == "hc_residual":
+            return hc_grad + residual_grad
+        return residual_grad + hc_grad
+
+
 @dataclass
 class TransformerLayerSublayersSpec:
     """
@@ -157,10 +198,7 @@ class TransformerLayer(nn.Layer):
     @staticmethod
     def _log_md5(tensor, name, layer_idx):
         """Log MD5 of a tensor for precision alignment debugging."""
-        if (
-            TransformerLayer._LOG_LAYER_MD5
-            and TransformerLayer._gpt_model_use_experimental_version
-        ):
+        if TransformerLayer._LOG_LAYER_MD5:
             if TransformerLayer._skip_mtp_probes:
                 return  # Skip MTP passes — EC has no MTP
             data = tensor.cast("float32").numpy().tobytes()
@@ -1062,10 +1100,7 @@ class TransformerLayer(nn.Layer):
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
         # Log MLP raw output before BDA
-        if (
-            TransformerLayer._LOG_LAYER_MD5
-            and TransformerLayer._gpt_model_use_experimental_version
-        ):
+        if TransformerLayer._LOG_LAYER_MD5:
             _mlp_tensor = (
                 mlp_output_with_bias[0]
                 if isinstance(mlp_output_with_bias, tuple)
@@ -1184,10 +1219,26 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         ori_dtype = hidden_states.dtype
 
         # mHC: aggregate n-stream → 1-stream
+        attn_hc_input = hidden_states
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_attn_hc_input", attn_hc_input, self.is_mtp_layer
+        )
+        self.self_attention_hyper_connection._dsv4_debug_name = (
+            "mtp_attn_hc" if self.is_mtp_layer else ""
+        )
         aggregated, h_res, h_post = self.self_attention_hyper_connection(
-            hidden_states
+            attn_hc_input
         )
         aggregated = aggregated.to(ori_dtype)
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_attn_agg", aggregated, self.is_mtp_layer
+        )
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_attn_h_res", h_res, self.is_mtp_layer
+        )
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_attn_h_post", h_post, self.is_mtp_layer
+        )
 
         # LayerNorm on aggregated single stream
         if self.recompute_input_layernorm:
@@ -1197,6 +1248,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         self._log_md5(
             input_layernorm_output, "input_layernorm_out", self.layer_number
+        )
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_attn_norm_out",
+            input_layernorm_output,
+            self.is_mtp_layer,
         )
 
         # Self-attention
@@ -1224,6 +1280,14 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
             )
+        _attention_tensor = (
+            attention_output_with_bias[0]
+            if isinstance(attention_output_with_bias, (tuple, list))
+            else attention_output_with_bias
+        )
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_attn_out", _attention_tensor, self.is_mtp_layer
+        )
 
         # mHC: fused H_res + H_post + bias-dropout-add
         with paddle.enable_grad():
@@ -1239,6 +1303,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 )
             )
             hidden_states = hidden_states.to(ori_dtype)
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_post_attn", hidden_states, self.is_mtp_layer
+        )
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -1276,12 +1343,37 @@ class HyperConnectionTransformerLayer(TransformerLayer):
     ):
         """mHC MLP forward: aggregate → layernorm → MLP → fused_h_res_h_post_bda."""
         # Save n-stream residual for H_res mixing
-        original_residual = hidden_states
+        if (
+            self.is_mtp_layer
+            and os.environ.get("DSV4_FLEET_MTP_MLP_INPUT_BRANCH_SPLIT", "0")
+            == "1"
+        ):
+            original_residual, mlp_hc_input = _DSV4MTPMlpInputBranchSplit.apply(
+                hidden_states
+            )
+        else:
+            original_residual = hidden_states
+            mlp_hc_input = hidden_states
         ori_dtype = hidden_states.dtype
 
         # mHC: aggregate n-stream → 1-stream
-        aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_mlp_hc_input", mlp_hc_input, self.is_mtp_layer
+        )
+        self.mlp_hyper_connection._dsv4_debug_name = (
+            "mtp_mlp_hc" if self.is_mtp_layer else ""
+        )
+        aggregated, h_res, h_post = self.mlp_hyper_connection(mlp_hc_input)
         aggregated = aggregated.to(ori_dtype)
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_mlp_agg", aggregated, self.is_mtp_layer
+        )
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_mlp_h_res", h_res, self.is_mtp_layer
+        )
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_mlp_h_post", h_post, self.is_mtp_layer
+        )
 
         # LayerNorm on aggregated single stream
         if self.recompute_post_attention_layernorm:
@@ -1297,6 +1389,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             post_attention_layernorm_output,
             "post_attn_layernorm_out",
             self.layer_number,
+        )
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_mlp_norm_out",
+            post_attention_layernorm_output,
+            self.is_mtp_layer,
         )
 
         # MLP
@@ -1333,6 +1430,14 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+        _mlp_tensor = (
+            mlp_output_with_bias[0]
+            if isinstance(mlp_output_with_bias, (tuple, list))
+            else mlp_output_with_bias
+        )
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_mlp_out", _mlp_tensor, self.is_mtp_layer
+        )
 
         # mHC: fused H_res + H_post + bias-dropout-add
         with paddle.enable_grad():
@@ -1346,6 +1451,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 fused=self.config.bias_dropout_fusion,
             )
             hidden_states = hidden_states.to(ori_dtype)
+        _dsv4_register_mtp_layer_grad(
+            "mtp_layer_output", hidden_states, self.is_mtp_layer
+        )
 
         if is_first_fwd:
             hidden_states.stop_gradient = False

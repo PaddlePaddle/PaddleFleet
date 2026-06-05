@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -57,6 +58,31 @@ SUPPORTED_ATTN_MASK = [
     AttnMaskType.no_mask,
     AttnMaskType.padding_causal,
 ]
+
+
+def _dsv4_mtp_tensor_md5(tensor: Tensor) -> str:
+    import hashlib
+
+    return hashlib.md5(tensor.cast("float32").numpy().tobytes()).hexdigest()
+
+
+def _dsv4_register_mtp_grad(name: str, tensor: Tensor) -> None:
+    if os.environ.get("DSV4_LOG_MTP_GRADS", "0") != "1":
+        return
+    if tensor is None or tensor.stop_gradient:
+        return
+
+    def _hook(grad: Tensor) -> None:
+        rank = paddle.distributed.get_rank()
+        if rank != int(os.environ.get("DSV4_LOSS_PATH_RANK", "0")):
+            return
+        print(
+            f"[MTP_GRAD_MD5] rank={rank} {name}.grad shape={list(grad.shape)} "
+            f"md5={_dsv4_mtp_tensor_md5(grad)}",
+            flush=True,
+        )
+
+    tensor.register_hook(_hook)
 
 
 class MTPLossLoggingHelper:
@@ -583,6 +609,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             hidden_states = self._concat_embeddings(
                 hidden_states, decoder_input, mtp_hidden_inputs_mask
             )
+            _dsv4_register_mtp_grad("mtp_transformer_input", hidden_states)
 
             input_dict = {
                 "hidden_states": hidden_states,
@@ -602,6 +629,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             rst_dict = self.transformer_layer(input_dict)
 
         hidden_states = rst_dict["hidden_states"]
+        _dsv4_register_mtp_grad("mtp_transformer_output", hidden_states)
 
         # In mHC mode, skip postprocess here - it's deferred to forward()
         # so we can keep multi-stream state for subsequent MTP layers.
@@ -620,6 +648,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         contracted to single-stream [s, b, h] before being used for loss computation.
         """
         if self.mhc_enabled:
+            _dsv4_register_mtp_grad("mtp_postprocess_input", hidden_states)
             from paddlefleet.transformer.hyper_connection import (
                 HyperConnectionModule,
             )
@@ -632,10 +661,12 @@ class MultiTokenPredictionLayer(FleetLayer):
                 self.config.num_residual_streams,
                 self.config.rms_norm_eps,
             )
+            _dsv4_register_mtp_grad("mtp_postprocess_contract_output", hidden_states)
 
         # Final layer norm
         if not self.config.gpt_model_use_experimental_version:
             hidden_states = self.norm(hidden_states)
+        _dsv4_register_mtp_grad("mtp_postprocess_output", hidden_states)
 
         return hidden_states
 
@@ -1046,6 +1077,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             if mhc_chunks is not None:
                 # mHC mode: use multi-stream as MTP input
                 dict_args["hidden_states"] = mhc_chunks[self.layer_number]
+                _dsv4_register_mtp_grad(
+                    "mtp_mhc_input", dict_args["hidden_states"]
+                )
             else:
                 dict_args["hidden_states"] = tensor_list[self.layer_number]
             dict_args["decoder_input"] = tensor_list[self.layer_number + 1]

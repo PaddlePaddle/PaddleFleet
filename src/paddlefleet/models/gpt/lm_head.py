@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import paddle
 from paddle.distributed.fleet.meta_parallel import (
     ScheduleNode,
@@ -27,6 +29,50 @@ from paddlefleet.tensor_parallel.layers import (
     _initialize_affine_weight_gpu,
 )
 from paddlefleet.transformer.identity_op import IdentityOp
+
+_DSV4_LOSS_GRAD_COUNTS = {}
+
+
+def _dsv4_loss_grad_rank_enabled(rank: int) -> bool:
+    ranks = os.environ.get("DSV4_LOSS_GRAD_RANKS", "0")
+    if ranks.strip().lower() == "all":
+        return True
+    return str(rank) in {item.strip() for item in ranks.split(",") if item.strip()}
+
+
+def _dsv4_tensor_md5_float32(tensor: paddle.Tensor) -> str:
+    import hashlib
+
+    tensor = tensor.detach().cast("float32")
+    return hashlib.md5(tensor.numpy().tobytes()).hexdigest()
+
+
+def _dsv4_register_loss_grad_hook(name: str, tensor: paddle.Tensor):
+    if os.environ.get("DSV4_LOG_LOSS_GRADS", "0") != "1":
+        return tensor
+    if not isinstance(tensor, paddle.Tensor) or tensor.stop_gradient:
+        return tensor
+    rank = paddle.distributed.get_rank()
+    if not _dsv4_loss_grad_rank_enabled(rank):
+        return tensor
+    occurrence = _DSV4_LOSS_GRAD_COUNTS.get(name, 0)
+    _DSV4_LOSS_GRAD_COUNTS[name] = occurrence + 1
+    max_numel = int(os.environ.get("DSV4_LOSS_GRAD_MD5_MAX_NUMEL", "600000000"))
+
+    def _hook(grad):
+        grad_fp32 = grad.detach().cast("float32")
+        norm = paddle.linalg.norm(grad_fp32).item()
+        md5 = _dsv4_tensor_md5_float32(grad_fp32) if grad_fp32.numel() <= max_numel else "SKIP"
+        print(
+            f"[DSV4_LOSS_GRAD] framework=fleet rank={rank} name={name} "
+            f"occurrence={occurrence} shape={list(grad.shape)} dtype={grad.dtype} "
+            f"numel={grad.numel()} norm={norm:.20f} md5_float32={md5}",
+            flush=True,
+        )
+        return grad
+
+    tensor.register_hook(_hook)
+    return tensor
 
 
 class GPTLMHead(ColumnParallelLinear):
@@ -101,6 +147,7 @@ class GPTLMHead(ColumnParallelLinear):
         return ScheduleNode(self.forward, name="GPTLMHead")
 
     def _forward(self, hidden_states: paddle.Tensor):
+        hidden_states = _dsv4_register_loss_grad_hook("lm_head_input", hidden_states)
         # Fused linear + cross-entropy path: skip materializing [B, S, V] logits
         # and delegate the linear projection into LanguageLoss, which will call
         # LigerFusedLinearCrossEntropyFunction.
@@ -126,10 +173,9 @@ class GPTLMHead(ColumnParallelLinear):
             logits, _ = super().forward(hidden_states, self.weight.T)
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
+        logits = _dsv4_register_loss_grad_hook("lm_head_logits", logits)
 
         # Loss-path MD5 probe: lm_head weight and logits
-        import os
-
         if (
             os.environ.get("LOG_LAYER_MD5", "0") == "1"
             or os.environ.get("LOG_LOSS_MD5", "0") == "1"
@@ -261,7 +307,10 @@ class GPTMTPLMHead(GPTLMHead):
 
         mtp_logits = []
         for i in range(num_mtp):
-            mtp_logits.append(self._forward(tensor_list[i + 1]))
+            mtp_input = _dsv4_register_loss_grad_hook(
+                "mtp_lm_head_input", tensor_list[i + 1]
+            )
+            mtp_logits.append(self._forward(mtp_input))
 
         dict_args["mtp_logits"] = mtp_logits
         return dict_args
