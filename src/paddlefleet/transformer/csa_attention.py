@@ -229,6 +229,51 @@ def get_window_topk_idxs(
     return result
 
 
+def get_valid_range(
+    ratio: int,
+    batch_size: int,
+    seqlen: int,
+    startend_row_indices: Tensor,
+) -> Tensor:
+    """Get valid compressed KV range [start, end) for each position.
+
+    Returns shape [batch_size, seqlen, 2] with dtype int32.
+    """
+    mask = startend_row_indices.flatten().cast("int64")
+    positions = paddle.arange(seqlen, dtype="int64")
+
+    is_boundary = paddle.zeros([seqlen], dtype="int64")
+    is_boundary[0] = 1
+    is_boundary[1:] = ((positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])).cast("int64")
+
+    start_marker = is_boundary * positions
+    doc_start = paddle.cummax(start_marker, axis=0).values
+
+    pos_in_doc = positions - doc_start
+    doc_len = mask - doc_start
+    is_valid = pos_in_doc < doc_len
+
+    cutoff_doc_len = (doc_len // ratio) * ratio
+    num_compressed_per_doc = cutoff_doc_len // ratio
+
+    boundary_compressed = is_boundary * num_compressed_per_doc
+    cum_compressed = paddle.cumsum(boundary_compressed, axis=0)
+    doc_col_start = cum_compressed - num_compressed_per_doc
+
+    causal_avail = (pos_in_doc + 1) // ratio
+    num_available = paddle.minimum(causal_avail, num_compressed_per_doc)
+
+    range_start = doc_col_start
+    range_end = doc_col_start + num_available
+
+    zero_mask = (num_available == 0) | (~is_valid)
+    range_start = paddle.where(zero_mask, paddle.zeros_like(range_start), range_start)
+    range_end = paddle.where(zero_mask, paddle.zeros_like(range_end), range_end)
+
+    result = paddle.stack([range_start, range_end], axis=-1).cast("int32")
+    return result.unsqueeze(0)
+
+
 def _build_compressed_causal_mask(
     ratio: int,
     batch_size: int,
@@ -530,6 +575,7 @@ def _compute_tilelang_csa_indexer_loss_forward(
     index_k_comp: Tensor,
     query_mla: Tensor,
     key_comp_mla: Tensor,
+    valid_range: Tensor,
     ratio: int,
     topk_effective: int,
     softmax_scale: float,
@@ -1063,6 +1109,7 @@ class CSAIndexer(nn.Layer):
         self,
         x: Tensor,  # [b, sq, hidden_size]
         qr: Tensor,  # [b, sq, q_lora_rank]
+        startend_row_indices,
     ) -> tuple[Tensor, Tensor, Tensor]:
         """Compute Q, compressed K, and weights before top-k selection."""
         b, sq, _ = x.shape
@@ -1083,7 +1130,7 @@ class CSAIndexer(nn.Layer):
         q = rotate_activation(q)
 
         # K path: own compressor (already applies RoPE and rotation internally)
-        k = self.compressor(x)  # [b, n_compressed, index_head_dim]
+        k = self.compressor(x, startend_row_indices)  # [b, n_compressed, index_head_dim]
 
         # Weights
         weights, _ = self.linear_weights_proj(x)  # [b, sq, n_heads]
@@ -1266,11 +1313,17 @@ class CompressedSparseAttention(FleetLayer):
                 self.config, "dsa_indexer_loss_coeff", 0.0
             )
             q_indexer_bf, k_indexer_bf, weights_indexer_bf = (
-                self.indexer.forward_before_topk(x_det, qr_det)
+                self.indexer.forward_before_topk(x_det, qr_det, startend_row_indices)
             )
             # compressed_kv is shared across query heads; pass it directly to
             # the target/reducesum path instead of materializing [B,S,H,D].
             key_comp_mla = compressed_kv.detach()
+            valid_range = get_valid_range(
+                int(self.compress_ratio),
+                b,
+                sq,
+                startend_row_indices,
+            )
             (
                 indexer_loss,
                 topk_indices_compressed,
