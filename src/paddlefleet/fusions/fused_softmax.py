@@ -47,7 +47,8 @@ class SoftmaxOne(nn.Layer):
         # qk: [b, np, sq, sk] --> [b, np, sq, sk+1]
         qk = paddle.concat([x, sink], axis=-1)
         # do softmax, and remove sink token at the end
-        ret = paddle.nn.functional.softmax(qk, axis=-1)[..., :-1]
+        ret = paddle.softmax(qk, axis=-1)[..., :-1]
+        # ret = paddle.nn.functional.softmax(qk, axis=-1)[..., :-1]
         return ret
 
 

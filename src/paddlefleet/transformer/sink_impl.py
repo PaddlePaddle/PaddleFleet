@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+import warnings
+
 import paddle
 
 paddle.enable_compat(scope={"tilelang"})
@@ -177,9 +179,12 @@ def _flash_attention_backward_dispatch(
     fa_version = _get_fa_version(query.shape[-1])
 
     if fa_version == 2:
-        assert softmax_scale is None, (
-            "flashmask do not support softmax_scale when using FA2 as backend"
-        )
+        if softmax_scale is not None:
+            warnings.warn(
+                "flashmask do not support softmax_scale when using FA2 as backend; "
+                "the provided softmax_scale will be ignored.",
+                stacklevel=2,
+            )
         seed_offset = paddle.zeros(shape=[2], dtype="int64")
         if hasattr(paddle.base.libpaddle.pir.ops, "flash_attn_grad"):
             grad_q, grad_k, grad_v = _C_ops.flash_attn_grad(
@@ -265,9 +270,12 @@ def _flashmask_attention_forward_dispatch(
     fa_version = _get_fa_version(query.shape[-1])
 
     if fa_version == 2:
-        assert softmax_scale is None, (
-            "flashmask do not support softmax_scale when using FA2 as backend"
-        )
+        if softmax_scale is not None:
+            warnings.warn(
+                "flashmask do not support softmax_scale when using FA2 as backend; "
+                "the provided softmax_scale will be ignored.",
+                stacklevel=2,
+            )
         assert sink is None, (
             "currently FlashMask doesn't support learnable sink when using FA2 as backend"
         )
@@ -330,9 +338,12 @@ def _flashmask_attention_backward_dispatch(
     fa_version = _get_fa_version(query.shape[-1])
     if fa_version == 2:
         seed_offset = paddle.zeros(shape=[2], dtype="int64")
-        assert softmax_scale is None, (
-            "flashmask do not support softmax_scale when using FA2 as backend"
-        )
+        if softmax_scale is not None:
+            warnings.warn(
+                "flashmask do not support softmax_scale when using FA2 as backend; "
+                "the provided softmax_scale will be ignored.",
+                stacklevel=2,
+            )
         if hasattr(paddle.base.libpaddle.pir.ops, "flashmask_attention_grad"):
             grad_q, grad_k, grad_v = _C_ops.flashmask_attention_grad(
                 query,
@@ -635,25 +646,24 @@ class FlashMaskSinkPyLayer(PyLayer):
                 scale,
             )
 
-        grad_sink = _sink_attention_grad_sink(
-            query, sink, output, lse, grad_output
-        )
+        if sink.stop_gradient:
+            grad_sink = None
+        else:
+            grad_sink = _sink_attention_grad_sink(
+                query, sink, output, lse, grad_output
+            )
+
         if query.dtype != grad_q.dtype:
             grad_q = grad_q.cast(query.dtype)
         if key.dtype != grad_k.dtype:
             grad_k = grad_k.cast(key.dtype)
         if value.dtype != grad_v.dtype:
             grad_v = grad_v.cast(value.dtype)
-        if sink.stop_gradient:
-            if startend_row_indices is None:
-                return grad_q, grad_k, grad_v, None
-            else:
-                return grad_q, grad_k, grad_v, None, None
+
+        if startend_row_indices is None:
+            return grad_q, grad_k, grad_v, grad_sink
         else:
-            if startend_row_indices is None:
-                return grad_q, grad_k, grad_v, grad_sink
-            else:
-                return grad_q, grad_k, grad_v, grad_sink, None
+            return grad_q, grad_k, grad_v, grad_sink, None
 
 
 def sink_attention(

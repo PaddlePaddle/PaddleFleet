@@ -145,7 +145,10 @@ class DotProductAttention(FleetLayer):
         )
 
         coeff = None
-        self.softmax_scale = softmax_scale
+        if softmax_scale is None:
+            self.softmax_scale = self.hidden_size_per_attention_head ** (-0.5)
+        else:
+            self.softmax_scale = softmax_scale
 
         if self.config.apply_query_key_layer_scaling:
             coeff = max(1, self.layer_number)
@@ -187,11 +190,12 @@ class DotProductAttention(FleetLayer):
 
         if softmax_type == "vanilla":
             self.softmax_offset = None
-        elif self.config.softmax_type == "off-by-one":
-            raise NotImplementedError(
-                "DotProductAttention currently supports sink attention only "
-                "for softmax_type='learnable'; softmax_type='off-by-one' is not supported."
+        elif softmax_type == "off-by-one":
+            self.softmax_offset = paddle.zeros(
+                [self.num_attention_heads_per_partition],
+                dtype=self.config.params_dtype,
             )
+            self.softmax_offset.stop_gradient = True
         elif softmax_type == "learnable":
             self.softmax_offset = self.create_parameter(
                 shape=[self.num_attention_heads_per_partition],
@@ -618,14 +622,8 @@ class DotProductAttention(FleetLayer):
 
         # Raw attention scores. [b * np, sq, sk]
         matmul_result = paddle.baddbmm(
-            matmul_input_buffer,
-            query,
-            key,
-            beta=0.0,
-            alpha=self.softmax_scale
-            if self.softmax_scale is not None
-            else query.shape[-1] ** (-0.5),
-        )  # if softmax_scale is not set, we should fallback to default softmax_scale
+            matmul_input_buffer, query, key, beta=0.0, alpha=self.softmax_scale
+        )
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.reshape(*output_size)
@@ -724,10 +722,11 @@ class CPDotProductAttention(FleetLayer):
         if self.config.softmax_type == "vanilla":
             self.softmax_offset = None
         elif self.config.softmax_type == "off-by-one":
-            raise NotImplementedError(
-                "CPDotProductAttention currently supports sink attention only "
-                "for softmax_type='learnable'; softmax_type='off-by-one' is not supported."
+            self.softmax_offset = paddle.zeros(
+                [self.config.num_attention_heads],
+                dtype=self.config.params_dtype,
             )
+            self.softmax_offset.stop_gradient = True
         elif self.config.softmax_type == "learnable":
             self.register_parameter(
                 "softmax_offset",
