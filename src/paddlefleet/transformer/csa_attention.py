@@ -556,6 +556,7 @@ def _compute_tilelang_csa_indexer_loss_forward(
         weights,
         ratio=int(ratio),
         topk_effective=int(topk_effective),
+        valid_range=valid_range,
     )
 
     if tp_group is not None and getattr(tp_group, "nranks", 1) > 1:
@@ -920,7 +921,7 @@ class Compressor(nn.Layer):
         doc_lens = get_doc_lens(startend_row_indices)
         doc_starts = get_doc_starts(doc_lens)
 
-        doc_lens_cutoff = get_cutoff_doc_lens(doc_lens)
+        doc_lens_cutoff = get_cutoff_doc_lens(doc_lens, ratio)
         doc_starts_cutoff = get_cutoff_doc_starts(doc_lens_cutoff)
 
         assert len(doc_lens) == len(doc_starts)
@@ -1105,6 +1106,7 @@ class CSAIndexer(nn.Layer):
         self,
         x: Tensor,
         qr: Tensor,
+        startend_row_indices: Tensor,
         mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Return (index_scores, topk_indices).
@@ -1112,13 +1114,14 @@ class CSAIndexer(nn.Layer):
         Args:
             x: [b, sq, hidden_size]
             qr: [b, sq, q_lora_rank]
+            startend_row_indices: document boundary tensor
             mask: [b, sq, n_compressed] optional causal mask
 
         Returns:
             index_scores: [b, sq, n_compressed]
             topk_indices: [b, sq, topk]
         """
-        q, k, weights = self.forward_before_topk(x, qr)
+        q, k, weights = self.forward_before_topk(x, qr, startend_row_indices)
         effective_topk = min(self.index_topk, k.shape[1])
         index_scores, topk_indices = fused_qk_topk_naive(
             q, k, weights, effective_topk, mask
@@ -1225,6 +1228,7 @@ class CompressedSparseAttention(FleetLayer):
         compressed_kv: Tensor,
         n_compressed: int,
         offset: int,
+        startend_row_indices: Tensor,
     ) -> tuple[Tensor, Tensor | None, tuple | None]:
         """Build indexer-selected compressed KV indices and loss state."""
         b, sq, np_heads, _ = query.shape
@@ -1268,6 +1272,13 @@ class CompressedSparseAttention(FleetLayer):
             n_compressed,
         )
 
+        valid_range = get_valid_range(
+            int(self.compress_ratio),
+            b,
+            sq,
+            startend_row_indices,
+        )
+
         if use_tilelang_loss_path:
             # Fused TileLang fwd + selected-set KL + TileLang bwd. The returned
             # indices may be wider than main attention top-k during phase 2 and
@@ -1281,12 +1292,6 @@ class CompressedSparseAttention(FleetLayer):
             # compressed_kv is shared across query heads; pass it directly to
             # the target/reducesum path instead of materializing [B,S,H,D].
             key_comp_mla = compressed_kv.detach()
-            valid_range = get_valid_range(
-                int(self.compress_ratio),
-                b,
-                sq,
-                startend_row_indices,
-            )
             (
                 indexer_loss,
                 topk_indices_compressed,
@@ -1298,6 +1303,7 @@ class CompressedSparseAttention(FleetLayer):
                 k_indexer_bf,
                 query.detach(),
                 key_comp_mla,
+                valid_range,
                 int(self.compress_ratio),
                 int(loss_topk_effective),
                 float(self.softmax_scale),
@@ -1321,7 +1327,7 @@ class CompressedSparseAttention(FleetLayer):
                 )
         elif self.training and not use_tilelang_indexer:
             q_indexer, k_indexer, weights_indexer = (
-                self.indexer.forward_before_topk(x_det, qr_det)
+                self.indexer.forward_before_topk(x_det, qr_det, startend_row_indices)
             )
             indexer_loss_coeff = getattr(
                 self.config, "dsa_indexer_loss_coeff", 0.0
@@ -1369,6 +1375,7 @@ class CompressedSparseAttention(FleetLayer):
             _, topk_indices_compressed = self.indexer(
                 x_det,
                 qr_det,
+                startend_row_indices,
                 mask=causal_mask,
             )
 
@@ -1381,7 +1388,7 @@ class CompressedSparseAttention(FleetLayer):
 
             with paddle.no_grad():
                 q_indexer_tl, k_indexer_tl, weights_indexer_tl = (
-                    self.indexer.forward_before_topk(x_det, qr_det)
+                    self.indexer.forward_before_topk(x_det, qr_det, startend_row_indices)
                 )
                 tl_topk_indices, _tl_topk_scores = csa_indexer_topk_fwd(
                     q_indexer_tl,
@@ -1389,6 +1396,7 @@ class CompressedSparseAttention(FleetLayer):
                     weights_indexer_tl,
                     ratio=self.compress_ratio,
                     topk_effective=attn_topk_effective,
+                    valid_range=valid_range,
                 )
 
             topk_indices_compressed = tl_topk_indices
@@ -1437,7 +1445,7 @@ class CompressedSparseAttention(FleetLayer):
 
         # Step 2: Compression
         if self.compressor is not None and self.compress_ratio > 1:
-            compressed_kv = self.compressor(x)  # [b, n_compressed, v_head_dim]
+            compressed_kv = self.compressor(x, startend_row_indices)  # [b, n_compressed, v_head_dim]
             if compressed_kv is not None:
                 kv_full = paddle.concat([kv, compressed_kv], axis=1)
                 n_compressed = compressed_kv.shape[1]
@@ -1470,6 +1478,7 @@ class CompressedSparseAttention(FleetLayer):
                     compressed_kv,
                     n_compressed,
                     offset,
+                    startend_row_indices,
                 )
             else:
                 # ratio=128: attend to all compressed positions
@@ -1478,7 +1487,7 @@ class CompressedSparseAttention(FleetLayer):
                     b,
                     sq,
                     offset,
-                    attention_mask,
+                    startend_row_indices,
                 )
 
             if compress_topk_idxs.dtype != window_idxs.dtype:

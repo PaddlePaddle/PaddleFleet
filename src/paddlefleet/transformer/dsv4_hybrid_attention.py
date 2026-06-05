@@ -217,11 +217,14 @@ class DSv4HybridAttention(Attention):
             self.get_query_key_value_tensors(hidden_states)
         )
 
+        startend_row_indices = kwargs.get("startend_row_indices", None)
+
         # Core attention (CompressedSparseAttention)
         core_attn_out = self.core_attention(
             query,
             key,
             value,
+            startend_row_indices,
             attention_mask,
             x=hidden_states,
             qr=q_compressed,
