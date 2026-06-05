@@ -80,14 +80,20 @@ class GPTEmbedding(FleetLayer):
         self.sequence_parallel = self.config.sequence_parallel
 
         self.multimodal_embedding = config.multimodal_embedding
-        if self.sequence_parallel and (
-            self.multimodal_embedding
-            or (
-                config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not config.mtp_load_weight_only
-            )
-        ):
+        # Previously, SP was handled in LanguageModelEmbedding for non-multimodal & non-MTP cases.
+        # Before:
+        #     if self.sequence_parallel and (
+        #         self.multimodal_embedding
+        #         or (
+        #             config.num_nextn_predict_layers is not None
+        #             and self.config.num_nextn_predict_layers > 0
+        #             and not config.mtp_load_weight_only
+        #         )
+        #     )
+        # To reduce confusion from multiple SP implementations, all SP logic is now unified here in GPTEmbedding.
+        # Now:
+        #     if self.sequence_parallel
+        if self.sequence_parallel:
             self.embedding.embed_tokens.reduce_scatter_embeddings = False
             self.embedding.scatter_to_sequence_parallel = False
             self.embedding.reduce_scatter_embeddings = False
@@ -197,11 +203,49 @@ class GPTEmbedding(FleetLayer):
                     decoder_input, text_padding_indices, 0
                 )
                 input_ids_for_moe_mask = input_ids
-            if (
+
+            is_mtp = (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
                 and not self.config.mtp_load_weight_only
-            ):
+            )
+
+            def _cp_sp_scatter(embed, is_mtp=True):
+                # Apply the same SP scatter as the non-magic-send path to ensure
+                # bit-for-bit identical main embedding output.
+                if (
+                    get_context_parallel_world_size() > 1
+                    and self.config.experimental_dataflow
+                ):
+                    embed = ContextParallelScatterOp.apply(
+                        embed, axis=1, mode=self.config.cp_balance_mode
+                    )
+
+                if self.sequence_parallel:
+                    # In non-MTP mode, SP performs permute before scatter on embeddings,
+                    # whereas MTP performs scatter before permute. This ordering difference
+                    # causes precision diff. Provide a dedicated non-MTP SP scatter path here
+                    # to ensure consistent numerical results.
+                    if not is_mtp:
+                        batch_size, seq_length, hidden_size = embed.shape
+                        embed = embed.permute(1, 0, 2)
+                        embed = embed.reshape([-1, embed.shape[-1]])
+                        embed = ScatterOp.apply(embed)
+                        embed = embed.reshape(
+                            [-1, batch_size, hidden_size]
+                        ).contiguous()  # change to [S/tp, B, H]
+                    else:
+                        batch_size, seq_length, hidden_size = embed.shape
+                        embed = embed.reshape([-1, embed.shape[-1]])
+                        embed = ScatterOp.apply(embed)
+                        embed = (
+                            embed.reshape([batch_size, -1, hidden_size])
+                            .permute(1, 0, 2)
+                            .contiguous()
+                        )  # change to [S/tp, B, H]
+                return embed
+
+            if is_mtp:
                 assert not self.multimodal_embedding, (
                     "MTP not support mm for now."
                 )
@@ -228,37 +272,18 @@ class GPTEmbedding(FleetLayer):
                         mtp_ids_list, axis=1
                     )
 
-                if self.config.enable_mtp_magic_send:
-                    # Magic send: only truncate, skip shifted embedding pre-computation.
-                    # input_ids will be broadcast to the last stage for re-embedding.
+            # cp and sp scatter for decoder_input
+            if self.config.enable_mtp_magic_send:
+                # Magic send: only truncate, skip shifted embedding pre-computation.
+                # input_ids will be broadcast to the last stage for re-embedding.
+                if is_mtp:
                     decoder_input = decoder_input[
                         :, : -self.config.num_nextn_predict_layers, :
                     ]
 
-                    # Apply the same SP scatter as the non-magic-send path to ensure
-                    # bit-for-bit identical main embedding output.
-                    if (
-                        get_context_parallel_world_size() > 1
-                        and self.config.experimental_dataflow
-                    ):
-                        decoder_input = ContextParallelScatterOp.apply(
-                            decoder_input, axis=1
-                        )
-
-                    if self.sequence_parallel:
-                        batch_size, seq_length, hidden_size = (
-                            decoder_input.shape
-                        )
-                        decoder_input = decoder_input.reshape(
-                            [-1, decoder_input.shape[-1]]
-                        )
-                        decoder_input = ScatterOp.apply(decoder_input)
-                        decoder_input = (
-                            decoder_input.reshape([batch_size, -1, hidden_size])
-                            .permute(1, 0, 2)
-                            .contiguous()
-                        )  # change to [S/tp, B, H]
-                else:
+                decoder_input = _cp_sp_scatter(decoder_input)
+            else:
+                if is_mtp:
                     inputs_embeds_extra = decoder_input[
                         :, -self.config.num_nextn_predict_layers :, :
                     ]  # [B, S, H]
@@ -268,25 +293,8 @@ class GPTEmbedding(FleetLayer):
                     inputs_embeds_ori = inputs_embeds
                     batch_size, seq_length, hidden_size = inputs_embeds.shape
 
-                    if (
-                        get_context_parallel_world_size() > 1
-                        and self.config.experimental_dataflow
-                    ):
-                        # In EB data flow, main input embed apply CP scatter here
-                        inputs_embeds = ContextParallelScatterOp.apply(
-                            inputs_embeds, axis=1
-                        )
+                    inputs_embeds = _cp_sp_scatter(inputs_embeds)
 
-                    if self.sequence_parallel:
-                        inputs_embeds = inputs_embeds.reshape(
-                            [-1, inputs_embeds.shape[-1]]
-                        )
-                        inputs_embeds = ScatterOp.apply(inputs_embeds)
-                        inputs_embeds = (
-                            inputs_embeds.reshape([batch_size, -1, hidden_size])
-                            .permute(1, 0, 2)
-                            .contiguous()
-                        )  # change to [S, B, H]
                     mtp_emb_res = [inputs_embeds]
                     for depth in range(self.config.num_nextn_predict_layers):
                         inputs_embeds_mtp = paddle.concat(
@@ -297,30 +305,11 @@ class GPTEmbedding(FleetLayer):
                             axis=1,
                         )
 
-                        if (
-                            get_context_parallel_world_size() > 1
-                            and self.config.experimental_dataflow
-                        ):
-                            # In EB data flow, mtp input embed apply CP scatter here
-                            inputs_embeds_mtp = ContextParallelScatterOp.apply(
-                                inputs_embeds_mtp, axis=1
-                            )
+                        inputs_embeds_mtp = _cp_sp_scatter(inputs_embeds_mtp)
 
-                        if self.sequence_parallel:
-                            inputs_embeds_mtp = inputs_embeds_mtp.reshape(
-                                [-1, inputs_embeds_mtp.shape[-1]]
-                            )
-                            inputs_embeds_mtp = ScatterOp.apply(
-                                inputs_embeds_mtp
-                            )
-                            inputs_embeds_mtp = (
-                                inputs_embeds_mtp.reshape(
-                                    [batch_size, -1, hidden_size]
-                                )
-                                .permute(1, 0, 2)
-                                .contiguous()
-                            )  # change to [S, B, H]
                         mtp_emb_res.append(inputs_embeds_mtp)
+                else:
+                    decoder_input = _cp_sp_scatter(decoder_input, is_mtp=False)
 
             if self.multimodal_embedding:
                 image_embeds = dict_args.get("image_embeds", None)
@@ -547,27 +536,27 @@ class GPTEmbedding(FleetLayer):
         ):
             if rotary_pos_emb is not None:
                 rotary_pos_emb = ContextParallelScatterOp.apply(
-                    rotary_pos_emb, axis=1
+                    rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
                 )
             if swa_rotary_pos_emb is not None:
                 swa_rotary_pos_emb = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_emb, axis=1
+                    swa_rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
                 )
             if rotary_pos_cos is not None:
                 rotary_pos_cos = ContextParallelScatterOp.apply(
-                    rotary_pos_cos, axis=1
+                    rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
                 )
             if rotary_pos_sin is not None:
                 rotary_pos_sin = ContextParallelScatterOp.apply(
-                    rotary_pos_sin, axis=1
+                    rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
                 )
             if swa_rotary_pos_cos is not None:
                 swa_rotary_pos_cos = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_cos, axis=1
+                    swa_rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
                 )
             if swa_rotary_pos_sin is not None:
                 swa_rotary_pos_sin = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_sin, axis=1
+                    swa_rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
                 )
 
         preproc_output = {
