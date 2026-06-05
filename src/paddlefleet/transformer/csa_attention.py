@@ -94,25 +94,41 @@ def get_compress_topk_idxs(
     batch_size: int,
     seqlen: int,
     offset: int,
-    startend_row_indices: Tensor,
+    startend_row_indices: Tensor | None = None,
 ) -> Tensor:
-    """Get compressed indices for variable-length documents: [seqlen, seqlen // ratio].
+    """Get compressed indices: [b, seqlen, seqlen // ratio].
 
-    Documents' compressed KVs are packed contiguously. Each doc contributes
+    When startend_row_indices is provided, uses varlen-aware logic where
+    documents' compressed KVs are packed contiguously. Each doc contributes
     cutoff_doc_len // ratio compressed positions. Padding positions (beyond
     doc end) output all -1.
 
+    When startend_row_indices is None, uses simple causal logic where
+    valid compressed range for query t is [0, (t+1) // ratio).
+
     Args:
         ratio: compression ratio.
-        batch_size: batch size (must be 1).
+        batch_size: batch size.
         seqlen: sequence length.
         offset: offset added to column indices to produce KV indices.
-        startend_row_indices: [batch_size, h, seqlen, 1] tensor.
+        startend_row_indices: [batch_size, h, seqlen, 1] tensor, or None.
 
     Returns:
-        result: [seqlen, seqlen // ratio] int32 tensor.
+        result: [b, seqlen, seqlen // ratio] int32 tensor.
     """
     n_compressed = seqlen // ratio
+
+    if startend_row_indices is None:
+        # Original simple causal logic
+        k_indices = paddle.arange(n_compressed)
+        matrix = k_indices.unsqueeze(0).expand([seqlen, -1])
+        causal_bound = paddle.arange(1, seqlen + 1).unsqueeze(1) // ratio
+        causal_invalid = matrix >= causal_bound
+        matrix = paddle.where(
+            causal_invalid, paddle.full_like(matrix, -1), matrix + offset
+        )
+        return matrix.unsqueeze(0).expand([batch_size, -1, -1])
+
     mask = startend_row_indices.flatten().cast("int64")
     positions = paddle.arange(seqlen, dtype="int64")
 
@@ -158,11 +174,21 @@ def get_window_topk_idxs(
     seqlen: int,
     startend_row_indices: Tensor | None = None,
 ) -> Tensor:
-    """Get varlen-aware sliding window indices: [seqlen, window_size].
+    """Get sliding window indices: [b, seqlen, window_size].
 
-    The sliding window resets at document boundaries and padding positions
-    (positions beyond the last document's end) output all -1.
+    When startend_row_indices is provided, the sliding window resets at
+    document boundaries and padding positions output all -1.
+
+    When startend_row_indices is None, uses simple causal sliding window.
     """
+    if startend_row_indices is None:
+        # Original simple sliding-window logic
+        base = paddle.arange(seqlen).unsqueeze(1)  # [seqlen, 1]
+        offsets = paddle.arange(window_size)  # [window_size]
+        matrix = paddle.clip(base - window_size + 1, min=0) + offsets
+        matrix = paddle.where(matrix > base, paddle.full_like(matrix, -1), matrix)
+        return matrix.unsqueeze(0).expand([batch_size, -1, -1])
+
     mask = startend_row_indices.flatten().cast("int64")
     positions = paddle.arange(seqlen, dtype="int64")
 
@@ -197,12 +223,17 @@ def get_valid_range(
     ratio: int,
     batch_size: int,
     seqlen: int,
-    startend_row_indices: Tensor,
-) -> Tensor:
+    startend_row_indices: Tensor | None = None,
+) -> Tensor | None:
     """Get valid compressed KV range [start, end) for each position.
 
-    Returns shape [batch_size, seqlen, 2] with dtype int32.
+    Returns shape [batch_size, seqlen, 2] with dtype int32, or None when
+    startend_row_indices is not provided (causal-only mode, let the
+    downstream kernel build its own valid range).
     """
+    if startend_row_indices is None:
+        return None
+
     assert batch_size == 1, (
         f"only support batch_size == 1, got batch_size: {batch_size}"
     )
@@ -938,12 +969,14 @@ class Compressor(nn.Layer):
     def forward(
         self,
         x: Tensor,
-        startend_row_indices: Tensor,
+        startend_row_indices: Tensor | None = None,
     ) -> Tensor | None:
         """Compress hidden states into shorter KV sequence.
 
         Args:
             x: [b, sq, hidden_size]
+            startend_row_indices: [batch_size, h, seqlen, 1] tensor for
+                varlen document boundaries, or None for simple causal mode.
 
         Returns:
             compressed_kv: [b, sq // ratio, head_dim] or None if too short.
@@ -957,44 +990,53 @@ class Compressor(nn.Layer):
         kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
         score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
 
-        # per-document cutoff, with padding at tail for CP
-        doc_lens = get_doc_lens(startend_row_indices)
-        doc_starts = get_doc_starts(doc_lens)
+        if startend_row_indices is not None:
+            # per-document cutoff, with padding at tail for CP
+            doc_lens = get_doc_lens(startend_row_indices)
+            doc_starts = get_doc_starts(doc_lens)
 
-        doc_lens_cutoff = get_cutoff_doc_lens(doc_lens, ratio)
-        doc_starts_cutoff = get_cutoff_doc_starts(doc_lens_cutoff)
+            doc_lens_cutoff = get_cutoff_doc_lens(doc_lens, ratio)
+            doc_starts_cutoff = get_cutoff_doc_starts(doc_lens_cutoff)
 
-        assert len(doc_lens) == len(doc_starts)
-        assert len(doc_lens) == len(doc_lens_cutoff)
-        assert len(doc_lens) == len(doc_starts_cutoff)
+            assert len(doc_lens) == len(doc_starts)
+            assert len(doc_lens) == len(doc_lens_cutoff)
+            assert len(doc_lens) == len(doc_starts_cutoff)
 
-        # a // ratio + b // ratio <= (a + b) // ratio
-        n_compressed = sq // ratio
-        coff_head_dim = kv.shape[-1]
-        kv_cutoff = paddle.full(
-            shape=[b, n_compressed * ratio, coff_head_dim],
-            fill_value=0,
-            dtype=kv.dtype,
-        )
-        score_cutoff = paddle.full(
-            shape=[b, n_compressed * ratio, coff_head_dim],
-            fill_value=float("-inf"),
-            dtype=score.dtype,
-        )
-        for i in range(len(doc_lens)):
-            doc_len = doc_lens[i]
-            doc_start = doc_starts[i]
-            doc_len_cutoff = doc_lens_cutoff[i]
-            doc_start_cutoff = doc_starts_cutoff[i]
-            kv_cutoff[
-                :, doc_start_cutoff : (doc_start_cutoff + doc_len_cutoff), :
-            ] = kv[:, doc_start : (doc_start + doc_len_cutoff), :]
-            score_cutoff[
-                :, doc_start_cutoff : (doc_start_cutoff + doc_len_cutoff), :
-            ] = score[:, doc_start : (doc_start + doc_len_cutoff), :]
+            # a // ratio + b // ratio <= (a + b) // ratio
+            n_compressed = sq // ratio
+            coff_head_dim = kv.shape[-1]
+            kv_cutoff = paddle.full(
+                shape=[b, n_compressed * ratio, coff_head_dim],
+                fill_value=0,
+                dtype=kv.dtype,
+            )
+            score_cutoff = paddle.full(
+                shape=[b, n_compressed * ratio, coff_head_dim],
+                fill_value=float("-inf"),
+                dtype=score.dtype,
+            )
+            for i in range(len(doc_lens)):
+                doc_len = doc_lens[i]
+                doc_start = doc_starts[i]
+                doc_len_cutoff = doc_lens_cutoff[i]
+                doc_start_cutoff = doc_starts_cutoff[i]
+                kv_cutoff[
+                    :, doc_start_cutoff : (doc_start_cutoff + doc_len_cutoff), :
+                ] = kv[:, doc_start : (doc_start + doc_len_cutoff), :]
+                score_cutoff[
+                    :, doc_start_cutoff : (doc_start_cutoff + doc_len_cutoff), :
+                ] = score[:, doc_start : (doc_start + doc_len_cutoff), :]
 
-        kv = kv_cutoff
-        score = score_cutoff
+            kv = kv_cutoff
+            score = score_cutoff
+        else:
+            # Original simple cutoff logic
+            n_compressed = sq // ratio
+            cutoff = n_compressed * ratio
+            if cutoff < sq:
+                kv = kv[:, :cutoff, :]
+                score = score[:, :cutoff, :]
+            doc_lens_cutoff = None
 
         # Reshape: [b, n_compressed, ratio, coff * head_dim]
         kv = kv.reshape([b, n_compressed, ratio, -1])
@@ -1153,7 +1195,7 @@ class CSAIndexer(nn.Layer):
         self,
         x: Tensor,
         qr: Tensor,
-        startend_row_indices: Tensor,
+        startend_row_indices: Tensor | None = None,
         mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Return (index_scores, topk_indices).
@@ -1161,7 +1203,7 @@ class CSAIndexer(nn.Layer):
         Args:
             x: [b, sq, hidden_size]
             qr: [b, sq, q_lora_rank]
-            startend_row_indices: document boundary tensor
+            startend_row_indices: document boundary tensor, or None
             mask: [b, sq, n_compressed] optional causal mask
 
         Returns:
@@ -1275,7 +1317,7 @@ class CompressedSparseAttention(FleetLayer):
         compressed_kv: Tensor,
         n_compressed: int,
         offset: int,
-        startend_row_indices: Tensor,
+        startend_row_indices: Tensor | None = None,
     ) -> tuple[Tensor, Tensor | None, tuple | None]:
         """Build indexer-selected compressed KV indices and loss state."""
         b, sq, np_heads, _ = query.shape
@@ -1473,8 +1515,8 @@ class CompressedSparseAttention(FleetLayer):
         query: Tensor,
         key: Tensor,
         value: Tensor,
-        startend_row_indices: Tensor,
-        attention_mask: Tensor | None,
+        startend_row_indices: Tensor | None = None,
+        attention_mask: Tensor | None = None,
         x: Tensor = None,
         qr: Tensor = None,
     ) -> Tensor:
