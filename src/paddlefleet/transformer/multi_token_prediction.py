@@ -657,7 +657,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             packed_seq_params = kwargs.get("packed_seq_params", None)
             mtp_hidden_inputs_mask = kwargs.get("mtp_hidden_inputs_mask", None)
             input_ids = kwargs.get("input_ids", None)
-            position_ids = kwargs.get("position_ids", None)
+            position_ids = None
+            if self.config.gpt_model_use_experimental_version:
+                position_ids = kwargs.get("position_ids", None)
             return recompute(
                 forward_func,
                 hidden_states=hidden_states
