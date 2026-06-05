@@ -165,7 +165,7 @@ def get_compress_topk_idxs(
         (c_grid + offset).cast("int32"),
         paddle.full([seqlen, n_compressed], -1, dtype="int32"),
     )
-    return result
+    return result.unsqueeze(0).expand([batch_size, -1, -1])
 
 
 def get_window_topk_idxs(
