@@ -152,7 +152,6 @@ def get_compress_topk_idxs(
     return result
 
 
-@functools.lru_cache(maxsize=8)
 def get_window_topk_idxs(
     window_size: int,
     batch_size: int,
@@ -202,6 +201,7 @@ def get_valid_range(
 
     Returns shape [batch_size, seqlen, 2] with dtype int32.
     """
+    assert batch_size == 1, f"only support batch_size == 1, got batch_size: {batch_size}"
     mask = startend_row_indices.flatten().cast("int64")
     positions = paddle.arange(seqlen, dtype="int64")
 
@@ -941,13 +941,13 @@ class Compressor(nn.Layer):
             fill_value=float("-inf"),
             dtype=score.dtype
         )
-        for i in len(doc_lens):
+        for i in range(len(doc_lens)):
           doc_len = doc_lens[i]
           doc_start = doc_starts[i]
           doc_len_cutoff = doc_lens_cutoff[i]
           doc_start_cutoff = doc_starts_cutoff[i]
-          kv_cutoff[:, doc_start_cutoff:doc_len_cutoff, :] = kv[:, doc_start:doc_len_cutoff, :]
-          score_cutoff[:, doc_start_cutoff:doc_len_cutoff, :] = score[:, doc_start:doc_len_cutoff, :]
+          kv_cutoff[:, doc_start_cutoff:(doc_start_cutoff + doc_len_cutoff), :] = kv[:, doc_start:(doc_start + doc_len_cutoff), :]
+          score_cutoff[:, doc_start_cutoff:(doc_start_cutoff + doc_len_cutoff), :] = score[:, doc_start:(doc_start + doc_len_cutoff), :]
 
         kv = kv_cutoff
         score = score_cutoff
