@@ -1271,8 +1271,22 @@ class Compressor(nn.Layer):
         score = score + self.ape.reshape([1, 1, ratio, -1])
 
         if self.overlap:
-            kv = self._overlap_transform(kv, fill_value=0)
-            score = self._overlap_transform(score, fill_value=float("-inf"))
+            # Build is_first mask for document boundaries
+            is_first = None
+            if startend_row_indices is not None:
+                is_first = paddle.zeros([n_compressed], dtype="bool")
+                for i in range(len(doc_starts_cutoff)):
+                    idx = int(doc_starts_cutoff[i].item()) // ratio
+                    if idx < n_compressed:
+                        is_first[idx] = True
+            kv = self._overlap_transform(kv, fill_value=0, is_first=is_first)
+            score = self._overlap_transform(
+                score, fill_value=float("-inf"), is_first=is_first
+            )
+
+        # TODO: old megatron-aligned logic. This will cause possible acc declining
+        # weights = F.softmax(score, axis=2).cast(kv.dtype)
+        # kv = (kv * weights).sum(axis=2)  # [b, n_compressed, head_dim]
         # Gated pooling: softmax over the pool_dim, weighted sum.
         kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
 
@@ -1782,7 +1796,7 @@ class CompressedSparseAttention(FleetLayer):
             output: [b, sq, np * v_head_dim]
         """
         if self.cp_enabled:
-            return self._forward_cp(query, key, x, qr)
+            return self._forward_cp(query, key, x, qr, startend_row_indices)
 
         b, sq, np_heads, hn = query.shape
 
@@ -1876,6 +1890,7 @@ class CompressedSparseAttention(FleetLayer):
         key: Tensor,
         x: Tensor,
         qr: Tensor,
+        startend_row_indices: Tensor | None = None,
     ) -> Tensor:
         """CP-aware forward: local compress + all-gather, sparse attention.
 
@@ -1898,10 +1913,18 @@ class CompressedSparseAttention(FleetLayer):
             position_offset, position_offset + sq, dtype="int64"
         )
 
-        # Step 1: Window topk (CP-aware: uses global q_positions)
-        window_idxs = get_window_topk_idxs_cp(
-            q_positions, self.window_size, b, sq_global
-        )
+        # Step 1: Get window topk
+        if startend_row_indices is None:
+            window_idxs = get_window_topk_idxs_cp(
+                q_positions, self.window_size, b, sq_global
+            )
+        else:
+            full_window_idxs = get_window_topk_idxs(
+                self.window_size, b, sq_global, startend_row_indices
+            )
+            window_idxs = full_window_idxs[
+                :, position_offset : position_offset + sq, ...
+            ]
 
         # Step 2: All-gather KV + compress
         kv_local = key.squeeze(2)  # [b, sq, hn]
@@ -1928,7 +1951,10 @@ class CompressedSparseAttention(FleetLayer):
         ):
             # inside the compressor, we will all-gather all the compressed KV
             compressed_kv_global = self.compressor(
-                x, position_offset=position_offset, cp_group=self.cp_group
+                x,
+                startend_row_indices=startend_row_indices,
+                position_offset=position_offset,
+                cp_group=self.cp_group,
             )
             kv_full = paddle.concat([kv_global, compressed_kv_global], axis=1)
         else:
@@ -1961,10 +1987,28 @@ class CompressedSparseAttention(FleetLayer):
                     self.indexer.index_topk, n_compressed_global
                 )
 
+                # valid_range for varlen: [b, sq_local, 2] or None
+                if startend_row_indices is not None:
+                    print(
+                        f"[CSA-CP Temp] startend_row_indices valid_range, position offset: {position_offset}"
+                    )
+                    valid_range_full = get_valid_range(
+                        int(self.compress_ratio),
+                        b,
+                        sq_global,
+                        startend_row_indices,
+                    )
+                    valid_range = valid_range_full[
+                        :, position_offset : position_offset + sq, :
+                    ]
+                else:
+                    valid_range = None
+
                 q_indexer_bf, k_indexer_global, weights_indexer_bf = (
                     self.indexer.forward_before_topk(
                         x_det,
                         qr_det,
+                        startend_row_indices=startend_row_indices,
                         position_offset=position_offset,
                         cp_group=self.cp_group,
                     )
@@ -1989,7 +2033,7 @@ class CompressedSparseAttention(FleetLayer):
                         k_indexer_global,
                         query.detach(),
                         key_comp_mla,
-                        None,
+                        valid_range,
                         int(self.compress_ratio),
                         int(loss_topk_effective),
                         float(self.softmax_scale),
@@ -2024,9 +2068,25 @@ class CompressedSparseAttention(FleetLayer):
                         .unsqueeze(2)
                         .expand([-1, -1, np_heads, -1])
                     )
-                    causal_mask = build_causal_mask_cp(
-                        q_positions, n_compressed_global, self.compress_ratio, b
-                    )
+                    if startend_row_indices is None:
+                        causal_mask = build_causal_mask_cp(
+                            q_positions,
+                            n_compressed_global,
+                            self.compress_ratio,
+                            b,
+                        )
+                    else:
+                        causal_mask_full = _build_compressed_causal_mask(
+                            self.compress_ratio,
+                            b,
+                            sq_global,
+                            n_compressed_global,
+                            startend_row_indices,
+                        )
+                        causal_mask = causal_mask_full[
+                            :, position_offset : position_offset + sq, ...
+                        ]
+
                     q_sf = q_indexer_bf.transpose([1, 0, 2, 3])
                     k_sf = (
                         k_indexer_global.transpose([1, 0, 2])
@@ -2067,9 +2127,25 @@ class CompressedSparseAttention(FleetLayer):
 
                 elif not use_tilelang_indexer:
                     # Inference-only Paddle topk (use already-gathered global K)
-                    causal_mask = build_causal_mask_cp(
-                        q_positions, n_compressed_global, self.compress_ratio, b
-                    )
+                    if startend_row_indices is None:
+                        causal_mask = build_causal_mask_cp(
+                            q_positions,
+                            n_compressed_global,
+                            self.compress_ratio,
+                            b,
+                        )
+                    else:
+                        causal_mask_full = _build_compressed_causal_mask(
+                            self.compress_ratio,
+                            b,
+                            sq_global,
+                            n_compressed_global,
+                            startend_row_indices,
+                        )
+                        causal_mask = causal_mask_full[
+                            :, position_offset : position_offset + sq, ...
+                        ]
+
                     _, topk_indices_compressed = fused_qk_topk_naive(
                         q_indexer_bf,
                         k_indexer_global,
@@ -2090,6 +2166,7 @@ class CompressedSparseAttention(FleetLayer):
                             ratio=self.compress_ratio,
                             topk_effective=attn_topk_effective,
                             seq_offset=position_offset,
+                            valid_range=valid_range,
                         )
                     topk_indices_compressed = tl_topk_indices
 
@@ -2106,13 +2183,25 @@ class CompressedSparseAttention(FleetLayer):
                 )
             else:
                 # HCA path: attend to all compressed positions
-                compress_topk_idxs = get_compress_topk_idxs_cp(
-                    q_positions,
-                    self.compress_ratio,
-                    b,
-                    offset,
-                    n_compressed_global,
-                )
+                if startend_row_indices is None:
+                    compress_topk_idxs = get_compress_topk_idxs_cp(
+                        q_positions,
+                        self.compress_ratio,
+                        b,
+                        offset,
+                        n_compressed_global,
+                    )
+                else:
+                    compress_topk_idxs = get_compress_topk_idxs(
+                        self.compress_ratio,
+                        b,
+                        sq_global,
+                        offset,
+                        startend_row_indices,
+                    )
+                    compress_topk_idxs = compress_topk_idxs[
+                        :, position_offset : position_offset + sq, ...
+                    ]
 
             if compress_topk_idxs.dtype != window_idxs.dtype:
                 compress_topk_idxs = compress_topk_idxs.cast(window_idxs.dtype)
