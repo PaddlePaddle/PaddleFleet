@@ -904,11 +904,6 @@ class Compressor(nn.Layer):
                 )
             if self.rotate:
                 kv = rotate_activation(kv)
-            # Slice back to local rank's compressed range
-            cp_size = cp_group.nranks
-            n_comp_local = n_compressed // cp_size
-            cp_rank = cp_group.rank
-            kv = kv[:, cp_rank * n_comp_local : (cp_rank + 1) * n_comp_local, :]
             return kv
 
         # Non-CP path (original logic)
@@ -1551,12 +1546,9 @@ class CompressedSparseAttention(FleetLayer):
             and self.compress_ratio > 1
             and n_compressed_local > 0
         ):
-            # Miles pattern: project locally, gather projected, pool globally, slice back
-            compressed_kv_local = self.compressor(
+            # inside the compressor, we will all-gather all the compressed KV
+            compressed_kv_global = self.compressor(
                 x, position_offset=position_offset, cp_group=self.cp_group
-            )
-            compressed_kv_global = all_gather_cp(
-                compressed_kv_local, dim=1, group=self.cp_group
             )
             kv_full = paddle.concat([kv_global, compressed_kv_global], axis=1)
         else:
@@ -1589,18 +1581,13 @@ class CompressedSparseAttention(FleetLayer):
                     self.indexer.index_topk, n_compressed_global
                 )
 
-                q_indexer_bf, k_indexer_local, weights_indexer_bf = (
+                q_indexer_bf, k_indexer_global, weights_indexer_bf = (
                     self.indexer.forward_before_topk(
                         x_det,
                         qr_det,
                         position_offset=position_offset,
                         cp_group=self.cp_group,
                     )
-                )
-                # Gather indexer K globally (local K is already the local slice
-                # from the compressor's CP path)
-                k_indexer_global = all_gather_cp(
-                    k_indexer_local, dim=1, group=self.cp_group
                 )
 
                 indexer_loss_coeff = getattr(

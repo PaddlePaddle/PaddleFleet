@@ -299,6 +299,9 @@ def tl_csa_indexer_bwd_impl(
                             d_index_k_frag[i, j],
                         )
 
+                # Prevent the race condition: threads in the warp might overwrite topk in the next loop
+                T.sync_threads()
+
             for i, j in T.Parallel(heads, dim):
                 d_index_q_frag[i, j] = d_index_q_frag[i, j] * sm_scale
 
