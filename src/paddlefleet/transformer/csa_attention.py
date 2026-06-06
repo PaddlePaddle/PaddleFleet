@@ -281,10 +281,73 @@ def _build_compressed_causal_mask(
     batch_size: int,
     seqlen: int,
     n_compressed: int,
+    startend_row_indices: "Tensor | None" = None,
 ) -> Tensor:
-    compressed_ids = paddle.arange(n_compressed).unsqueeze(0)
-    positions = paddle.arange(1, seqlen + 1).unsqueeze(1)
-    invalid = compressed_ids >= (positions // ratio)
+    """Build causal mask for compressed attention: [b, seqlen, n_compressed].
+
+    When startend_row_indices is provided, the mask respects document
+    boundaries so that queries only attend to compressed positions belonging
+    to the same document.
+
+    Returns:
+        mask: [b, seqlen, n_compressed] float32, 0 for valid, -inf for invalid.
+    """
+    if startend_row_indices is None:
+        # Simple causal-only mask
+        compressed_ids = paddle.arange(n_compressed).unsqueeze(0)
+        positions = paddle.arange(1, seqlen + 1).unsqueeze(1)
+        invalid = compressed_ids >= (positions // ratio)
+        invalid = invalid.unsqueeze(0).expand([batch_size, seqlen, n_compressed])
+        return paddle.where(
+            invalid,
+            paddle.full([1], float("-inf"), dtype="float32"),
+            paddle.zeros([1], dtype="float32"),
+        )
+
+    # Document-aware mask: use valid_range logic
+    mask = startend_row_indices.flatten().cast("int64")
+    positions = paddle.arange(seqlen, dtype="int64")
+
+    is_boundary = paddle.zeros([seqlen], dtype="int64")
+    is_boundary[0] = 1
+    is_boundary[1:] = (
+        (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+    ).cast("int64")
+
+    start_marker = is_boundary * positions
+    doc_start = paddle.cummax(start_marker, axis=0).values
+
+    pos_in_doc = positions - doc_start
+    doc_len = mask - doc_start
+    is_valid = pos_in_doc < doc_len
+
+    cutoff_doc_len = (doc_len // ratio) * ratio
+    num_compressed_per_doc = cutoff_doc_len // ratio
+
+    boundary_compressed = is_boundary * num_compressed_per_doc
+    cum_compressed = paddle.cumsum(boundary_compressed, axis=0)
+    doc_col_start = cum_compressed - num_compressed_per_doc
+
+    causal_avail = (pos_in_doc + 1) // ratio
+    num_available = paddle.minimum(causal_avail, num_compressed_per_doc)
+
+    range_start = doc_col_start  # [seqlen]
+    range_end = doc_col_start + num_available  # [seqlen]
+
+    # Zero out for padding/invalid positions
+    zero_mask = (num_available == 0) | (~is_valid)
+    range_start = paddle.where(
+        zero_mask, paddle.zeros_like(range_start), range_start
+    )
+    range_end = paddle.where(zero_mask, paddle.zeros_like(range_end), range_end)
+
+    # Build 2D mask: [seqlen, n_compressed]
+    c_grid = paddle.arange(n_compressed, dtype="int64").unsqueeze(0)  # [1, n_compressed]
+    lower = range_start.unsqueeze(1)  # [seqlen, 1]
+    upper = range_end.unsqueeze(1)  # [seqlen, 1]
+
+    valid_mask = (c_grid >= lower) & (c_grid < upper)  # [seqlen, n_compressed]
+    invalid = ~valid_mask
     invalid = invalid.unsqueeze(0).expand([batch_size, seqlen, n_compressed])
     return paddle.where(
         invalid,
@@ -321,6 +384,7 @@ def _apply_rope(
         config: transformer config
         rotary_seq_len: sequence length for this tensor
         ratio: compression ratio for position subsampling
+        doc_lens_cutoff: per-doc cutoff lengths for compressed RoPE (ratio > 1)
     """
     if doc_lens_cutoff is not None:
         assert ratio > 1, (
@@ -948,12 +1012,20 @@ class Compressor(nn.Layer):
         )
 
     def _overlap_transform(
-        self, tensor: Tensor, fill_value: float = 0
+        self, tensor: Tensor, fill_value: float = 0, is_first: Tensor | None = None
     ) -> Tensor:
         """Apply overlapping window transform for 4x compression.
 
         Input shape:  [b, n_groups, ratio, coff * head_dim]
         Output shape: [b, n_groups, 2 * ratio, head_dim]
+
+        Args:
+            tensor: input tensor.
+            fill_value: fill value for positions without valid previous data.
+            is_first: optional [n_groups] bool mask that is True for each
+                compressed group that starts a new document (no valid
+                predecessor). When provided, prevents pulling data across
+                document boundaries.
         """
         b, n_groups, ratio, _ = tensor.shape
         d = self.head_dim
@@ -964,6 +1036,22 @@ class Compressor(nn.Layer):
         new_tensor[:, :, ratio:, :] = tensor[:, :, :, d:]
         # First half of previous group goes to positions [:ratio] (skip group 0)
         new_tensor[:, 1:, :ratio, :] = tensor[:, :-1, :, :d]
+        # Zero out at document boundaries: the first compressed group of each
+        # document has no valid previous group to pull from.
+        if is_first is not None:
+            # is_first: [n_groups] bool mask; positions where is_first=True
+            # should not use previous group data
+            # is_first[0] is always True (handled by skipping group 0 above),
+            # so we only need to handle is_first[1:] for groups 1..n_groups-1
+            boundary_mask = is_first[1:]  # [n_groups - 1]
+            if boundary_mask.any():
+                # Expand to [b, n_groups-1, ratio, d] broadcast shape
+                bm = boundary_mask.reshape([1, -1, 1, 1])
+                new_tensor[:, 1:, :ratio, :] = paddle.where(
+                    bm,
+                    paddle.full([1], fill_value, dtype=tensor.dtype),
+                    new_tensor[:, 1:, :ratio, :],
+                )
         return new_tensor
 
     def forward(
@@ -1046,8 +1134,16 @@ class Compressor(nn.Layer):
         score = score + self.ape.reshape([1, 1, ratio, -1])
 
         if self.overlap:
-            kv = self._overlap_transform(kv, fill_value=0)
-            score = self._overlap_transform(score, fill_value=float("-inf"))
+            # Build is_first mask for document boundaries
+            is_first = None
+            if startend_row_indices is not None:
+                is_first = paddle.zeros([n_compressed], dtype="bool")
+                for i in range(len(doc_starts_cutoff)):
+                    idx = int(doc_starts_cutoff[i].item()) // ratio
+                    if idx < n_compressed:
+                        is_first[idx] = True
+            kv = self._overlap_transform(kv, fill_value=0, is_first=is_first)
+            score = self._overlap_transform(score, fill_value=float("-inf"), is_first=is_first)
 
         # Gated pooling: softmax over the pool_dim, weighted sum.
         weights = F.softmax(score, axis=2).cast(kv.dtype)
@@ -1359,6 +1455,7 @@ class CompressedSparseAttention(FleetLayer):
             b,
             sq,
             n_compressed,
+            startend_row_indices,
         )
 
         valid_range = get_valid_range(

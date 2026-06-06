@@ -540,9 +540,19 @@ def fused_qk_topk_naive(
         index_scores = index_scores + mask
 
     topk_k = min(index_topk, index_scores.shape[-1])
-    topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)[1]
+    topk_values, topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)
     topk_indices = paddle.clip(
         topk_indices, min=0, max=index_scores.shape[-1] - 1
+    )
+    # Mark indices whose scores are -inf as invalid (-1). This happens when
+    # a document-aware mask blocks cross-document compressed positions.
+    # The tilelang kernel handles this internally, but the naive path needs
+    # explicit invalidation so downstream sparse attention ignores them.
+    invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
+    topk_indices = paddle.where(
+        invalid_topk,
+        paddle.full_like(topk_indices, -1),
+        topk_indices,
     )
 
     return index_scores, topk_indices
@@ -967,11 +977,22 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
             else:
                 masked_scores = index_scores
             topk_k = min(topk, masked_scores.shape[-1])
-            topk_indices = paddle.topk(masked_scores, k=topk_k, axis=-1)[1]
+            topk_values, topk_indices = paddle.topk(
+                masked_scores, k=topk_k, axis=-1
+            )
             # Clamp indices to valid range: paddle.topk may return garbage indices
             # for -inf input values
             topk_indices = paddle.clip(
                 topk_indices, min=0, max=masked_scores.shape[-1] - 1
+            )
+            # Mark indices whose scores are -inf as invalid (-1). This happens
+            # when a document-aware mask blocks cross-document compressed
+            # positions.
+            invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
+            topk_indices = paddle.where(
+                invalid_topk,
+                paddle.full_like(topk_indices, -1),
+                topk_indices,
             )
 
             FusedDSAIndexerLoss._last_topk_indices = topk_indices.detach()
