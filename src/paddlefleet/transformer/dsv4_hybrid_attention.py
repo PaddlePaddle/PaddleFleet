@@ -78,6 +78,16 @@ def build_document_rope_freqs(
     freqs = freqs.squeeze(0).squeeze(1)
     doc_freqs = [freqs[: int(doc_len.item())] for doc_len in doc_lens]
     freqs = paddle.concat(doc_freqs, axis=0)
+    if freqs.shape[0] < sq:
+        freqs = paddle.concat(
+            [
+                freqs,
+                paddle.zeros(
+                    [sq - freqs.shape[0], freqs.shape[-1]], dtype=freqs.dtype
+                ),
+            ],
+            axis=0,
+        )
 
     return freqs.reshape([1, sq, 1, freqs.shape[-1]]), mscale
 
@@ -259,7 +269,9 @@ class DSv4HybridAttention(Attention):
 
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(
-                hidden_states, startend_row_indices, position_offset=position_offset
+                hidden_states,
+                startend_row_indices,
+                position_offset=position_offset,
             )
         )
 
@@ -433,7 +445,10 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )
 
     def get_query_key_value_tensors(
-        self, hidden_states: Tensor, startend_row_indices: Tensor | None = None, position_offset: int = 0
+        self,
+        hidden_states: Tensor,
+        startend_row_indices: Tensor | None = None,
+        position_offset: int = 0,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Derive query, key, value from hidden_states.
 
