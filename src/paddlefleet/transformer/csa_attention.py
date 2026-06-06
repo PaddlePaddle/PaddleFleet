@@ -779,6 +779,7 @@ class TileLangCSAIndexerLoss(paddle.autograd.PyLayer):
                 index_k_comp,
                 query_mla,
                 key_comp_mla,
+                None,  # valid_range: None triggers causal-only mode in kernel
                 ratio,
                 topk_effective,
                 softmax_scale,
