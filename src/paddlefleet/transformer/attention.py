@@ -74,6 +74,7 @@ def _apply_ec_complex_3d_mrope(
     rope_theta=1000000.0,
     mrope_section=None,
     layer_number=0,
+    cp_balance_mode="dualchunk_allgather",
 ):
     """Apply EC-style complex multiplication 3D MRoPE to query and key tensors."""
     import logging
@@ -130,7 +131,9 @@ def _apply_ec_complex_3d_mrope(
     freqs_cis = paddle.polar(paddle.ones_like(freqs), freqs)
     freqs_cis = freqs_cis.unsqueeze(2)
     if get_context_parallel_world_size() > 1:
-        freqs_cis = ContextParallelScatterOp.apply(freqs_cis, axis=1)
+        freqs_cis = ContextParallelScatterOp.apply(
+            freqs_cis, axis=1, mode=cp_balance_mode
+        )
     if _LOG_LAYER_MD5:
         logger = logging.getLogger(__name__)
         rank = paddle.distributed.get_rank()
@@ -601,6 +604,7 @@ class Attention(FleetLayer, ABC):
                 rope_theta=self.config.rope_theta,
                 mrope_section=getattr(self.config, "mrope_section", [16, 1, 1]),
                 layer_number=self.layer_number,
+                cp_balance_mode=self.config.cp_balance_mode,
             )
         elif rope_freqs_cis is not None:
             rope_freqs_cis = rope_freqs_cis.unsqueeze(-2)  # ..., 1, head_dim/2

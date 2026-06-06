@@ -67,6 +67,7 @@ def _ec_compatible_rope_apply(
     rope_base=1000000.0,
     position_offset=0,
     position_ids=None,
+    cp_balance_mode="dualchunk_allgather",
 ):
     """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
 
@@ -117,7 +118,9 @@ def _ec_compatible_rope_apply(
     if get_context_parallel_world_size() > 1:
         # In EB dataflow and CP size > 1, freqs_cis is [b, s/cp, 1, d] in local
         # so, we need to scatter freqs_cis here
-        freqs_cis = ContextParallelScatterOp.apply(freqs_cis, axis=1)
+        freqs_cis = ContextParallelScatterOp.apply(
+            freqs_cis, axis=1, mode=cp_balance_mode
+        )
 
     # MD5 debug
     import hashlib as _hl
@@ -1035,7 +1038,7 @@ class MLASelfAttention(MultiLatentAttention):
                     # In EB dataflow and CP size > 1, rotary_pos_emb is [1, s, 1, d];
                     # we need to scatter it to [1, s/cp, 1, d] here.
                     rotary_pos_emb = ContextParallelScatterOp.apply(
-                        rotary_pos_emb, axis=1
+                        rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
                     )
                 elif (
                     packed_seq_params is None
@@ -1107,6 +1110,7 @@ class MLASelfAttention(MultiLatentAttention):
                         rope_base=self.rope_theta,  # Must match EC's config.rope_theta
                         position_offset=start_pos,
                         position_ids=position_ids,
+                        cp_balance_mode=self.config.cp_balance_mode,
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)

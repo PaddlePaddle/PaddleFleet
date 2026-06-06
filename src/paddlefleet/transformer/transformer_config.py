@@ -539,6 +539,12 @@ class TransformerConfig(ModelParallelConfig):
     List[str]: each layer has its separate communication type.
     """
 
+    cp_balance_mode: str = "dualchunk_allgather"
+    """Context parallel scatter/gather layout mode.
+    "dualchunk_allgather": balanced front+rear chunk splitting (default).
+    "contiguous_allgather": simple rank-order contiguous slicing.
+    """
+
     ####################
     # fp8
     ####################
