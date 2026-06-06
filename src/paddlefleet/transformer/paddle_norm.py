@@ -43,24 +43,6 @@ if TYPE_CHECKING:
     from paddlefleet.transformer import TransformerConfig
 
 
-def _dsv4_log_loss_path_tensor(name: str, tensor: paddle.Tensor) -> None:
-    if (
-        os.environ.get("LOG_LAYER_MD5", "0") != "1"
-        and os.environ.get("LOG_LOSS_MD5", "0") != "1"
-    ):
-        return
-    if tensor is None:
-        return
-    import hashlib
-
-    rank = paddle.distributed.get_rank()
-    md5 = hashlib.md5(tensor.cast("float32").numpy().tobytes()).hexdigest()
-    print(
-        f"[LOSS_PATH_MD5] rank={rank} {name} shape={list(tensor.shape)} md5={md5}",
-        flush=True,
-    )
-
-
 class RMSNorm(paddle.nn.Layer):
     def __init__(
         self,
@@ -282,13 +264,7 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             )
             dict_args["hidden_states"] = tensor_list[0]
 
-        _dsv4_log_loss_path_tensor(
-            "final_layernorm_input", dict_args["hidden_states"]
-        )
         normed_hidden_states = self.norm(dict_args["hidden_states"])
-        _dsv4_log_loss_path_tensor(
-            "final_layernorm_output", normed_hidden_states
-        )
         rst = {
             **dict_args,
             "hidden_states": normed_hidden_states,
@@ -303,17 +279,10 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             if self.config.gpt_model_use_experimental_version:
                 for i in range(1, len(tensor_list)):
                     tensor_list[i] = self.norm(tensor_list[i])
-            for i, mtp_hidden in enumerate(tensor_list[1:]):
-                _dsv4_log_loss_path_tensor(
-                    f"final_layernorm_mtp{i}_output", mtp_hidden
-                )
             hidden_states_concat = paddle.concat(
                 [rst["hidden_states"], *tensor_list[1:]]
             )
             rst["hidden_states"] = hidden_states_concat
-            _dsv4_log_loss_path_tensor(
-                "final_layernorm_output_concat", hidden_states_concat
-            )
         rst = {**dict_args, **rst}
 
         return rst

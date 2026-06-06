@@ -37,185 +37,6 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-_DSV4_HC_COMPONENT_STORE: dict[str, dict[str, Tensor]] = {}
-
-
-def _dsv4_log_loss_path_tensor(name: str, tensor: Tensor) -> None:
-    if (
-        os.environ.get("LOG_LAYER_MD5", "0") != "1"
-        and os.environ.get("LOG_LOSS_MD5", "0") != "1"
-    ):
-        return
-    if tensor is None:
-        return
-    import hashlib
-
-    rank = paddle.distributed.get_rank()
-    md5 = hashlib.md5(tensor.cast("float32").numpy().tobytes()).hexdigest()
-    print(
-        f"[LOSS_PATH_MD5] rank={rank} {name} shape={list(tensor.shape)} md5={md5}",
-        flush=True,
-    )
-
-
-def _dsv4_log_contract_grad(name: str, tensor: Tensor) -> None:
-    if os.environ.get("DSV4_LOG_CONTRACT_GRADS", "0") != "1":
-        return
-    _dsv4_log_loss_path_tensor(f"{name}.grad", tensor)
-
-
-def _dsv4_register_contract_grad(name: str, tensor: Tensor) -> None:
-    if os.environ.get("DSV4_LOG_CONTRACT_GRADS", "0") != "1":
-        return
-    if tensor is None or tensor.stop_gradient:
-        return
-
-    def _hook(grad: Tensor):
-        _dsv4_log_contract_grad(name, grad)
-
-    tensor.register_hook(_hook)
-
-
-def _dsv4_register_contract_split_grad(name: str, tensor: Tensor, parts: int) -> None:
-    if os.environ.get("DSV4_LOG_CONTRACT_GRADS", "0") != "1":
-        return
-    if tensor is None or tensor.stop_gradient:
-        return
-
-    def _hook(grad: Tensor):
-        _dsv4_log_contract_grad(name, grad)
-        for idx, grad_chunk in enumerate(paddle.split(grad, parts)):
-            _dsv4_log_contract_grad(f"{name}_chunk{idx}", grad_chunk)
-
-    tensor.register_hook(_hook)
-
-
-def _dsv4_register_hc_grad(name: str, tensor: Tensor) -> None:
-    if os.environ.get("DSV4_LOG_HC_GRADS", "0") != "1":
-        return
-    if tensor is None or tensor.stop_gradient:
-        return
-
-    def _hook(grad: Tensor):
-        import hashlib
-
-        rank = paddle.distributed.get_rank()
-        if rank != int(os.environ.get("DSV4_LOSS_PATH_RANK", "0")):
-            return
-        md5 = hashlib.md5(grad.cast("float32").numpy().tobytes()).hexdigest()
-        print(
-            f"[HC_GRAD_MD5] rank={rank} {name}.grad shape={list(grad.shape)} md5={md5}",
-            flush=True,
-        )
-
-    tensor.register_hook(_hook)
-
-
-def _dsv4_log_hc_component_grad(name: str, tensor: Tensor) -> None:
-    if os.environ.get("DSV4_LOG_HC_COMPONENT_GRADS", "0") != "1":
-        return
-    import hashlib
-
-    rank = paddle.distributed.get_rank()
-    if rank != int(os.environ.get("DSV4_LOSS_PATH_RANK", "0")):
-        return
-    md5 = hashlib.md5(tensor.cast("float32").numpy().tobytes()).hexdigest()
-    print(
-        f"[HC_COMPONENT_GRAD_MD5] rank={rank} {name}.grad shape={list(tensor.shape)} md5={md5}",
-        flush=True,
-    )
-
-
-def _dsv4_store_hc_component_grad(name: str, kind: str, tensor: Tensor) -> None:
-    if os.environ.get("DSV4_LOG_HC_COMPONENT_GRADS", "0") != "1" or not name:
-        return
-    entry = _DSV4_HC_COMPONENT_STORE.setdefault(name, {})
-    entry[kind] = tensor
-    if "proj" not in entry or "r" not in entry:
-        return
-    proj_grad = entry.pop("proj")
-    r_grad = entry.pop("r")
-    if not entry:
-        _DSV4_HC_COMPONENT_STORE.pop(name, None)
-    _dsv4_log_hc_component_grad(
-        f"{name}_mapping_input_manual_proj_r",
-        proj_grad + r_grad,
-    )
-    _dsv4_log_hc_component_grad(
-        f"{name}_mapping_input_manual_r_proj",
-        r_grad + proj_grad,
-    )
-
-
-def _dsv4_log_torch_contract_probe(
-    hidden_states: Tensor,
-    head_fn_out_in: Tensor,
-    base: Tensor,
-    scale: Tensor,
-    n: int,
-    eps: float,
-    out_dtype,
-) -> None:
-    if os.environ.get("DSV4_FLEET_CONTRACT_TORCH_PROBE", "0") != "1":
-        return
-    if (
-        os.environ.get("LOG_LAYER_MD5", "0") != "1"
-        and os.environ.get("LOG_LOSS_MD5", "0") != "1"
-    ):
-        return
-
-    torch_site_packages = os.environ.get(
-        "DSV4_FLEET_CONTRACT_TORCH_SITE_PACKAGES",
-        os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES", ""),
-    )
-    if torch_site_packages:
-        import sys
-
-        if torch_site_packages not in sys.path:
-            sys.path.insert(0, torch_site_packages)
-    import hashlib
-    import torch
-    import torch.nn.functional as torch_F
-    import torch.utils.dlpack
-    from paddle.utils import dlpack as paddle_dlpack
-
-    def to_torch(tensor: Tensor):
-        return torch.utils.dlpack.from_dlpack(
-            paddle_dlpack.to_dlpack(tensor.contiguous())
-        )
-
-    def log_torch(name: str, tensor):
-        data = tensor.detach().to(torch.float32).contiguous().cpu().numpy().tobytes()
-        md5 = hashlib.md5(data).hexdigest()
-        rank = paddle.distributed.get_rank()
-        print(
-            f"[LOSS_PATH_MD5] rank={rank} {name} shape={list(tensor.shape)} md5={md5}",
-            flush=True,
-        )
-
-    hidden_t = to_torch(hidden_states)
-    head_t = to_torch(head_fn_out_in)
-    base_t = to_torch(base)
-    scale_t = to_torch(scale)
-    torch_dtype = torch.bfloat16 if str(out_dtype) == "paddle.bfloat16" else hidden_t.dtype
-    with torch.no_grad():
-        rsqrt_t = torch.rsqrt(hidden_t.square().mean(-1, keepdim=True) + eps)
-        proj_t = torch_F.linear(hidden_t, head_t)
-        mixes_t = proj_t * rsqrt_t
-        pre_t = torch.sigmoid(mixes_t * scale_t + base_t) + eps
-        y_t = torch.sum(
-            pre_t.unsqueeze(-1) * hidden_t.reshape(*hidden_t.shape[:-1], n, -1),
-            dim=-2,
-        )
-        out_t = y_t.to(torch_dtype)
-    log_torch("final_contract_torch_probe_head_fn_out_in", head_t)
-    log_torch("final_contract_torch_probe_proj", proj_t)
-    log_torch("final_contract_torch_probe_mixes", mixes_t)
-    log_torch("final_contract_torch_probe_pre", pre_t)
-    log_torch("final_contract_torch_probe_y_float32", y_t)
-    log_torch("final_contract_torch_probe_main_output", out_t)
-
-
 def _dsv4_torch_contract_forward(
     hidden_states: Tensor,
     head_fn_out_in: Tensor,
@@ -335,33 +156,6 @@ def _dsv4_torch_contract_backward(
         out_t = y_t.to(hidden_input_t.dtype)
         out_t.backward(grad_t)
 
-    if os.environ.get("DSV4_FLEET_CONTRACT_TORCH_BWD_CAST_PROBE", "0") == "1":
-        import hashlib
-
-        rank = paddle.distributed.get_rank()
-
-        def log_torch(name: str, tensor):
-            data = tensor.detach().to(torch.float32).contiguous().cpu().numpy().tobytes()
-            md5 = hashlib.md5(data).hexdigest()
-            print(
-                f"[LOSS_PATH_MD5] rank={rank} {name} shape={list(tensor.shape)} md5={md5}",
-                flush=True,
-            )
-
-        manual_cast = hidden_t.grad.to(hidden_input_t.dtype)
-        log_torch("final_contract_hidden_fp32_manual_bf16_cast.grad", manual_cast)
-        if hidden_t.grad.ndim >= 3 and hidden_t.grad.shape[0] == 1:
-            megatron_shape_cast = (
-                hidden_t.grad.transpose(0, 1)
-                .contiguous()
-                .to(hidden_input_t.dtype)
-            )
-            log_torch(
-                "final_contract_hidden_fp32_megatron_shape_bf16_cast.grad",
-                megatron_shape_cast,
-            )
-        log_torch("final_contract_hidden_input_leaf.grad", hidden_input_t.grad)
-
     return (
         to_paddle(hidden_t.grad),
         to_paddle(hidden_input_t.grad),
@@ -413,14 +207,13 @@ def _dsv4_hc_sinkhorn_torch_backward(
 
 class _DSV4HCTorchOrderRmsScale(paddle.autograd.PyLayer):
     @staticmethod
-    def forward(ctx, x: Tensor, eps: float, debug_name: str = ""):
+    def forward(ctx, x: Tensor, eps: float):
         nC = x.shape[-1]
         norm = x.norm(axis=-1, keepdim=True)
         r = 1.0 / (norm / math.sqrt(nC) + eps)
         r = r.astype(x.dtype)
         ctx.nC = nC
         ctx.eps = eps
-        ctx.debug_name = debug_name
         ctx.save_for_backward(x, norm, r)
         return r
 
@@ -459,11 +252,6 @@ class _DSV4HCTorchOrderRmsScale(paddle.autograd.PyLayer):
                 r_t = 1.0 / (norm_t / math.sqrt(ctx.nC) + ctx.eps)
                 r_t.backward(grad_t)
             grad_x = to_paddle(x_t.grad).astype(x.dtype)
-            if ctx.debug_name:
-                _dsv4_log_hc_component_grad(
-                    f"{ctx.debug_name}_r_input_manual", grad_x
-                )
-                _dsv4_store_hc_component_grad(ctx.debug_name, "r", grad_x)
             return grad_x
         # Match Torch norm + reciprocal backward source-order in BF16.
         scaled = grad * (r * r)
@@ -477,11 +265,6 @@ class _DSV4HCTorchOrderRmsScale(paddle.autograd.PyLayer):
         torch_zero = paddle.where(x == 0, -paddle.ones_like(unit) * zero, (-unit) * zero)
         grad_x = paddle.where(scaled == 0, torch_zero, grad_x)
         grad_x = grad_x.astype(x.dtype)
-        if ctx.debug_name:
-            _dsv4_log_hc_component_grad(
-                f"{ctx.debug_name}_r_input_manual", grad_x
-            )
-            _dsv4_store_hc_component_grad(ctx.debug_name, "r", grad_x)
         return grad_x
 
 
@@ -803,7 +586,6 @@ class _DSV4LearnedOutputContract(paddle.autograd.PyLayer):
         hdim = hidden_fp32.shape[-1]
         hidden_streams = hidden_fp32.reshape([*hidden_fp32.shape[:-1], n, -1])
         grad_y = grad_output.astype("float32")
-        _dsv4_log_contract_grad("final_contract_main_output", grad_output)
         torch_grads = _dsv4_torch_contract_backward(
             hidden_input,
             head_fn_input,
@@ -815,12 +597,6 @@ class _DSV4LearnedOutputContract(paddle.autograd.PyLayer):
         )
         if torch_grads is not None:
             grad_hidden, grad_hidden_out, grad_head_fn_out, grad_base_out, grad_scale_out = torch_grads
-
-            _dsv4_log_contract_grad("final_contract_hidden_fp32", grad_hidden)
-            _dsv4_log_contract_grad("final_contract_input", grad_hidden_out)
-            _dsv4_log_contract_grad("final_contract_head_fn", grad_head_fn_out)
-            _dsv4_log_contract_grad("final_contract_base", grad_base_out)
-            _dsv4_log_contract_grad("final_contract_scale", grad_scale_out)
 
             return (
                 grad_hidden_out,
@@ -863,12 +639,6 @@ class _DSV4LearnedOutputContract(paddle.autograd.PyLayer):
         grad_head_fn_out = grad_head_fn.astype(ctx.head_fn_dtype)
         grad_base_out = grad_base.astype(ctx.base_dtype)
         grad_scale_out = grad_scale.astype(ctx.scale_dtype)
-
-        _dsv4_log_contract_grad("final_contract_hidden_fp32", grad_hidden)
-        _dsv4_log_contract_grad("final_contract_input", grad_hidden_out)
-        _dsv4_log_contract_grad("final_contract_head_fn", grad_head_fn_out)
-        _dsv4_log_contract_grad("final_contract_base", grad_base_out)
-        _dsv4_log_contract_grad("final_contract_scale", grad_scale_out)
 
         return (
             grad_hidden_out,
@@ -1081,34 +851,13 @@ class HyperConnectionModule(nn.Layer):
             x: [..., n*C] - n-stream hidden states
         """
         nC = x.shape[-1]
-        debug_name = getattr(self, "_dsv4_debug_name", "")
         weight = self.mapping_proj.weight
         x_2d = x.reshape([-1, nC])
-        r = _DSV4HCTorchOrderRmsScale.apply(
-            x_2d, self.norm_eps, debug_name
-        )
+        r = _DSV4HCTorchOrderRmsScale.apply(x_2d, self.norm_eps)
         # Match Megatron clean path: torch.matmul(x, weight.t()).  Paddle
         # nn.Linear uses a different BF16 cuBLAS path for this shape and drifts
         # before the first HC BDA.
         proj_2d = paddle.matmul(x_2d, weight.t(), transpose_y=True)
-        if (
-            os.environ.get("DSV4_LOG_HC_COMPONENT_GRADS", "0") == "1"
-            and debug_name
-            and not proj_2d.stop_gradient
-        ):
-
-            def _proj_hook(grad: Tensor) -> None:
-                grad_x = paddle.matmul(
-                    grad.astype(x_2d.dtype),
-                    weight.astype(x_2d.dtype),
-                    transpose_y=True,
-                )
-                _dsv4_log_hc_component_grad(
-                    f"{debug_name}_proj_input_manual", grad_x
-                )
-                _dsv4_store_hc_component_grad(debug_name, "proj", grad_x)
-
-            proj_2d.register_hook(_proj_hook)
         proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
         return proj, r.reshape([*x.shape[:-1], 1])
 
@@ -1161,21 +910,14 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (doubly stochastic)
         """
         leading_shape = x.shape[:-1]
-        debug_name = getattr(self, "_dsv4_debug_name", "")
         proj, r = self._projection_and_get_norm(x)
-        _dsv4_register_hc_grad(f"{debug_name}_proj", proj)
-        _dsv4_register_hc_grad(f"{debug_name}_r", r)
         h_pre, h_post, h_res = self._compute_h(proj, r)
-        _dsv4_register_hc_grad(f"{debug_name}_h_pre", h_pre)
-        _dsv4_register_hc_grad(f"{debug_name}_h_post_pre_sinkhorn", h_post)
-        _dsv4_register_hc_grad(f"{debug_name}_h_res_logits", h_res)
         h_res_logits = h_res
         h_res_logits_view = h_res_logits.reshape([*leading_shape, self.n, self.n])
         h_res = SinkhornKnopp.apply(
             h_res_logits_view,
             self.sinkhorn_iterations,
         )  # [..., n, n]
-        _dsv4_register_hc_grad(f"{debug_name}_h_res", h_res)
 
         return h_pre, h_post, h_res
 
@@ -1200,23 +942,6 @@ class HyperConnectionModule(nn.Layer):
 
         # Weighted sum: [..., n, C] * [..., n, 1] -> sum over n -> [..., C]
         aggregated = (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
-        debug_name = getattr(self, "_dsv4_debug_name", "")
-        if (
-            os.environ.get("DSV4_LOG_HC_COMPONENT_GRADS", "0") == "1"
-            and debug_name
-            and not aggregated.stop_gradient
-        ):
-
-            def _aggregate_hook(grad: Tensor) -> None:
-                grad_x = (
-                    grad.astype(x.dtype).unsqueeze(-2)
-                    * h_pre.astype(x.dtype).unsqueeze(-1)
-                ).reshape(x.shape)
-                _dsv4_log_hc_component_grad(
-                    f"{debug_name}_aggregate_input_manual", grad_x
-                )
-
-            aggregated.register_hook(_aggregate_hook)
         if aggregated.dtype != x.dtype:
             aggregated = aggregated.astype(x.dtype)
 
@@ -1322,23 +1047,10 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (for fused kernel)
             h_post: [..., n] - expansion weights
         """
-        debug_name = getattr(self, "_dsv4_debug_name", "")
         if os.environ.get("DSV4_FLEET_HC_INPUT_BRANCH_SPLIT", "0") == "1":
             mapping_input, aggregate_input = _DSV4HCInputBranchSplit.apply(
                 hidden_states
             )
-            if os.environ.get("DSV4_LOG_HC_BRANCH_GRADS", "0") == "1":
-                _dsv4_register_hc_grad(
-                    f"{debug_name}_mapping_input", mapping_input
-                )
-                _dsv4_register_hc_grad(
-                    f"{debug_name}_aggregate_input", aggregate_input
-                )
-        elif os.environ.get("DSV4_LOG_HC_BRANCH_GRADS", "0") == "1":
-            mapping_input = hidden_states.reshape(hidden_states.shape)
-            aggregate_input = hidden_states.reshape(hidden_states.shape)
-            _dsv4_register_hc_grad(f"{debug_name}_mapping_input", mapping_input)
-            _dsv4_register_hc_grad(f"{debug_name}_aggregate_input", aggregate_input)
         else:
             mapping_input = hidden_states
             aggregate_input = hidden_states
@@ -1348,7 +1060,6 @@ class HyperConnectionModule(nn.Layer):
 
         # Aggregate for layer input
         aggregated = self.aggregate(aggregate_input, h_pre)
-        _dsv4_register_hc_grad(f"{debug_name}_aggregated", aggregated)
 
         return aggregated, h_res, h_post
 
@@ -1422,10 +1133,6 @@ class HyperConnectionModule(nn.Layer):
         Returns:
             contracted: [..., h] single-stream output
         """
-        _dsv4_register_contract_grad("final_contract_input_total", hidden_states)
-        _dsv4_register_contract_grad("final_contract_head_fn_total", head_fn)
-        _dsv4_register_contract_grad("final_contract_base_total", base)
-        _dsv4_register_contract_grad("final_contract_scale_total", scale)
         if (
             os.environ.get("DSV4_FLEET_CONTRACT_CUSTOM_BWD", "0") == "1"
             or os.environ.get("DSV4_FLEET_CONTRACT_TORCH_FORWARD", "0") == "1"
@@ -1444,10 +1151,6 @@ class HyperConnectionModule(nn.Layer):
         head_fn = head_fn.astype("float32")
         base = base.astype("float32")
         scale = scale.astype("float32")
-        _dsv4_log_loss_path_tensor("final_contract_hidden_fp32", hidden_states)
-        _dsv4_log_loss_path_tensor("final_contract_head_fn", head_fn)
-        _dsv4_log_loss_path_tensor("final_contract_base", base)
-        _dsv4_log_loss_path_tensor("final_contract_scale", scale)
         hidden_for_rsqrt = hidden_states
         hidden_for_proj = hidden_states
         hidden_for_direct = hidden_states
@@ -1459,34 +1162,19 @@ class HyperConnectionModule(nn.Layer):
         rsqrt = paddle.rsqrt(
             hidden_for_rsqrt.square().mean(-1, keepdim=True) + eps
         )
-        _dsv4_log_loss_path_tensor("final_contract_rsqrt", rsqrt)
         # Match Torch F.linear(x, weight[out,in]) kernel selection. Paddle
         # F.linear(x, weight[in,out]) uses a different cuBLAS path and causes
         # BF16 ulp drift in DSv4 final output contraction.
         head_fn_out_in = head_fn.transpose([1, 0]).contiguous()
-        _dsv4_log_loss_path_tensor("final_contract_head_fn_out_in", head_fn_out_in)
-        _dsv4_log_torch_contract_probe(
-            hidden_for_proj,
-            head_fn_out_in,
-            base,
-            scale,
-            n,
-            eps,
-            dtype,
-        )
         with paddle.amp.auto_cast(False):
             proj = paddle.matmul(hidden_for_proj, head_fn_out_in, transpose_y=True)
         mixes = proj * rsqrt
-        _dsv4_log_loss_path_tensor("final_contract_mixes", mixes)
         pre_arg = mixes * scale + base
         pre = F.sigmoid(pre_arg) + eps
-        _dsv4_log_loss_path_tensor("final_contract_pre", pre)
         hidden_streams = hidden_for_direct.reshape([*hidden_for_direct.shape[:-1], n, -1])
         contract_prod = pre.unsqueeze(-1) * hidden_streams
         y = paddle.sum(contract_prod, axis=-2)
-        _dsv4_log_loss_path_tensor("final_contract_y_float32", y)
         out = y.astype(dtype)
-        _dsv4_log_loss_path_tensor("final_contract_main_output", out)
         return out
 
     # ==================== Fused kernel placeholder ====================
@@ -1539,36 +1227,6 @@ class HyperConnectionModule(nn.Layer):
                 self.n,
                 self.hidden_size,
             )
-
-        if (
-            os.environ.get("DSV4_LOG_HC_BDA_GRADS", "0") == "1"
-            and bias is None
-            and (dropout_prob == 0.0 or not training)
-        ):
-            debug_name = getattr(self, "_dsv4_debug_name", "")
-            leading_shape = original_residual.shape[:-1]
-            num_tokens = math.prod(leading_shape)
-            h_res_cast = h_res.astype(original_residual.dtype)
-            h_post_cast = h_post.astype(original_residual.dtype)
-            h_res_batched = (
-                h_res_cast.transpose([0, 1, 3, 2]).reshape(
-                    [num_tokens, self.n, self.n]
-                )
-            )
-            residual_batched = original_residual.reshape(
-                [num_tokens, self.n, self.hidden_size]
-            )
-            mixed = paddle.bmm(h_res_batched, residual_batched).reshape(
-                [*leading_shape, self.n, self.hidden_size]
-            )
-            x_expanded = h_post_cast.unsqueeze(-1) * x.unsqueeze(-2)
-            output_4d = x_expanded + mixed
-            output = output_4d.reshape([*leading_shape, self.n * self.hidden_size])
-            _dsv4_register_hc_grad(f"{debug_name}_bda_mixed", mixed)
-            _dsv4_register_hc_grad(f"{debug_name}_bda_x_expanded", x_expanded)
-            _dsv4_register_hc_grad(f"{debug_name}_bda_output_4d", output_4d)
-            _dsv4_register_hc_grad(f"{debug_name}_bda_output", output)
-            return output
 
         # Step 1: Apply H_res to original residual
         mixed = self.apply_h_res(h_res, original_residual)
@@ -1662,14 +1320,9 @@ class HyperConnectionContractLayer(FleetLayer):
         # When MTP is enabled, preserve multi-stream for MTP input
         if self.mtp_enabled and self.num_mtp > 0:
             dict_args["mhc_multistream"] = hidden_states
-            _dsv4_register_contract_split_grad(
-                "final_contract_mhc_multistream", hidden_states, self.num_mtp + 1
-            )
-            _dsv4_log_loss_path_tensor("final_contract_mhc_multistream", hidden_states)
 
             # Split into main backbone + MTP chunks
             chunks = paddle.split(hidden_states, self.num_mtp + 1)
-            _dsv4_log_loss_path_tensor("final_contract_input", chunks[0])
 
             # Main backbone: learned contraction [s, b, n*h] -> [s, b, h]
             main_contracted = HyperConnectionModule.learned_output_contract(
@@ -1680,27 +1333,17 @@ class HyperConnectionContractLayer(FleetLayer):
                 self.n,
                 self.config.rms_norm_eps,
             )
-            _dsv4_log_loss_path_tensor("final_contract_main_output", main_contracted)
-            _dsv4_log_loss_path_tensor("final_layernorm_input", main_contracted)
 
             # 为了后面MTP slice、取shape的时候兼容,原本也是expand过来的[[s,b,h]...]
             mtp_contracted = [
                 c[..., : c.shape[-1] // self.n] for c in chunks[1:]
             ]
-            for i, mtp_hidden in enumerate(mtp_contracted):
-                _dsv4_log_loss_path_tensor(
-                    f"final_contract_mtp{i}_passthrough", mtp_hidden
-                )
 
             dict_args["hidden_states"] = paddle.concat(
                 [main_contracted, *mtp_contracted]
             )
-            _dsv4_log_loss_path_tensor(
-                "final_contract_output_concat", dict_args["hidden_states"]
-            )
 
         else:
-            _dsv4_log_loss_path_tensor("final_contract_input", hidden_states)
             # Learned output contraction: [s, b, n*h] -> [s, b, h]
             dict_args["hidden_states"] = (
                 HyperConnectionModule.learned_output_contract(
@@ -1711,11 +1354,5 @@ class HyperConnectionContractLayer(FleetLayer):
                     self.n,
                     self.config.rms_norm_eps,
                 )
-            )
-            _dsv4_log_loss_path_tensor(
-                "final_contract_main_output", dict_args["hidden_states"]
-            )
-            _dsv4_log_loss_path_tensor(
-                "final_layernorm_input", dict_args["hidden_states"]
             )
         return dict_args

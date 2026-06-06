@@ -102,7 +102,6 @@ def _dsv4_te_dgrad_enabled(
 def _dsv4_te_dgrad(
     grad_output: paddle.Tensor, weight: paddle.Tensor
 ) -> paddle.Tensor:
-    import hashlib
     import sys
 
     te_site_packages = os.getenv("DSV4_FLEET_TE_SITE_PACKAGES", "")
@@ -127,29 +126,6 @@ def _dsv4_te_dgrad(
         layout="NN",
         grad=True,
     )
-
-    if os.getenv("DSV4_FLEET_TE_DGRAD_LOG", "0") == "1":
-        rank = paddle.distributed.get_rank() if dist.is_initialized() else 0
-        rank_filter = os.getenv("DSV4_FLEET_TE_DGRAD_LOG_RANKS", "0")
-        allowed_ranks = {x.strip() for x in rank_filter.split(",")}
-        if rank_filter == "all" or str(rank) in allowed_ranks:
-            grad32 = grad_input_torch.detach().float()
-            flat = grad32.reshape(-1)
-            max_numel = int(
-                os.getenv("DSV4_FLEET_TE_DGRAD_LOG_MAX_NUMEL", "600000000")
-            )
-            count = min(flat.numel(), max_numel)
-            md5 = hashlib.md5(
-                flat[:count].cpu().numpy().tobytes()
-            ).hexdigest()
-            print(
-                "[DSV4_FLEET_TE_DGRAD] "
-                f"rank={rank} grad_output_shape={tuple(grad_output.shape)} "
-                f"weight_shape={tuple(weight.shape)} "
-                f"grad_input_shape={tuple(grad_input_torch.shape)} "
-                f"norm={grad32.norm().item():.12f} md5_first_{count}={md5}",
-                flush=True,
-            )
 
     return paddle_dlpack.from_dlpack(
         torch.utils.dlpack.to_dlpack(grad_input_torch.contiguous())

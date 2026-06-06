@@ -51,96 +51,6 @@ def _dsv4_tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
     return hashlib.md5(tensor_for_md5.numpy().tobytes()).hexdigest()
 
 
-_DSV4_LOSS_GRAD_COUNTS = {}
-
-
-def _dsv4_loss_grad_rank_enabled(rank: int) -> bool:
-    ranks = os.environ.get("DSV4_LOSS_GRAD_RANKS", "0")
-    if ranks.strip().lower() == "all":
-        return True
-    return str(rank) in {item.strip() for item in ranks.split(",") if item.strip()}
-
-
-def _dsv4_register_loss_grad_hook(name: str, tensor: Tensor):
-    if os.environ.get("DSV4_LOG_LOSS_GRADS", "0") != "1":
-        return tensor
-    if not isinstance(tensor, paddle.Tensor) or tensor.stop_gradient:
-        return tensor
-    rank = paddle.distributed.get_rank()
-    if not _dsv4_loss_grad_rank_enabled(rank):
-        return tensor
-    occurrence = _DSV4_LOSS_GRAD_COUNTS.get(name, 0)
-    _DSV4_LOSS_GRAD_COUNTS[name] = occurrence + 1
-    max_numel = int(os.environ.get("DSV4_LOSS_GRAD_MD5_MAX_NUMEL", "600000000"))
-
-    def _hook(grad):
-        grad_fp32 = grad.detach().cast("float32")
-        norm = paddle.linalg.norm(grad_fp32).item()
-        md5 = _dsv4_tensor_md5(grad_fp32) if grad_fp32.numel() <= max_numel else "SKIP"
-        print(
-            f"[DSV4_LOSS_GRAD] framework=fleet rank={rank} name={name} "
-            f"occurrence={occurrence} shape={list(grad.shape)} dtype={grad.dtype} "
-            f"numel={grad.numel()} norm={norm:.20f} md5_float32={md5}",
-            flush=True,
-        )
-        return grad
-
-    tensor.register_hook(_hook)
-    return tensor
-
-
-def _dsv4_register_loss_logits_grad_hook(name: str, logits: Tensor, labels: Tensor):
-    if os.environ.get("DSV4_LOG_LOSS_GRADS", "0") != "1":
-        return logits
-    if os.environ.get("DSV4_LOG_LOSS_LOGITS_GRADS", "1") == "0":
-        return logits
-    if not isinstance(logits, paddle.Tensor) or logits.stop_gradient:
-        return logits
-    rank = paddle.distributed.get_rank()
-    if not _dsv4_loss_grad_rank_enabled(rank):
-        return logits
-    occurrence = _DSV4_LOSS_GRAD_COUNTS.get(name, 0)
-    _DSV4_LOSS_GRAD_COUNTS[name] = occurrence + 1
-    max_numel = int(os.environ.get("DSV4_LOSS_GRAD_MD5_MAX_NUMEL", "600000000"))
-    valid_mask = labels != -100
-
-    def _hook(grad):
-        grad_fp32 = grad.detach().cast("float32").cpu()
-        norm = paddle.linalg.norm(grad_fp32).item()
-        md5 = _dsv4_tensor_md5(grad_fp32) if grad_fp32.numel() <= max_numel else "SKIP"
-        valid_mask_cpu = valid_mask.cpu()
-        invalid_mask_cpu = paddle.logical_not(valid_mask_cpu)
-        flat_grad = grad_fp32.reshape([-1, grad_fp32.shape[-1]])
-        valid = flat_grad[valid_mask_cpu.reshape([-1])]
-        invalid = flat_grad[invalid_mask_cpu.reshape([-1])]
-        valid_norm = paddle.linalg.norm(valid).item() if valid.numel() else 0.0
-        invalid_norm = paddle.linalg.norm(invalid).item() if invalid.numel() else 0.0
-        valid_md5 = _dsv4_tensor_md5(valid) if valid.numel() <= max_numel else "SKIP"
-        invalid_md5 = _dsv4_tensor_md5(invalid) if invalid.numel() <= max_numel else "EMPTY"
-        prefix = grad_fp32[:, :-1, :].reshape([-1, grad_fp32.shape[-1]])
-        last = grad_fp32[:, -1:, :].reshape([-1, grad_fp32.shape[-1]])
-        prefix_norm = paddle.linalg.norm(prefix).item() if prefix.numel() else 0.0
-        last_norm = paddle.linalg.norm(last).item() if last.numel() else 0.0
-        prefix_md5 = _dsv4_tensor_md5(prefix) if prefix.numel() <= max_numel else "SKIP"
-        last_md5 = _dsv4_tensor_md5(last) if last.numel() <= max_numel else "EMPTY"
-        print(
-            f"[DSV4_LOSS_GRAD] framework=fleet rank={rank} name={name} "
-            f"occurrence={occurrence} shape={list(grad.shape)} dtype={grad.dtype} "
-            f"numel={grad.numel()} norm={norm:.20f} md5_float32={md5} "
-            f"valid_numel={valid.numel()} valid_norm={valid_norm:.20f} "
-            f"valid_md5_float32={valid_md5} invalid_numel={invalid.numel()} "
-            f"invalid_norm={invalid_norm:.20f} invalid_md5_float32={invalid_md5} "
-            f"prefix_no_last_numel={prefix.numel()} prefix_no_last_norm={prefix_norm:.20f} "
-            f"prefix_no_last_md5_float32={prefix_md5} last_token_numel={last.numel()} "
-            f"last_token_norm={last_norm:.20f} last_token_md5_float32={last_md5}",
-            flush=True,
-        )
-        return grad
-
-    logits.register_hook(_hook)
-    return logits
-
-
 def _dsv4_print_scalar_loss_md5(prefix: str, name: str, loss: Tensor) -> None:
     if not _dsv4_loss_md5_enabled():
         return
@@ -361,35 +271,6 @@ class LanguageLoss(FleetLayer):
             return loss
 
         seq_len = logits.shape[1]
-        logits = _dsv4_register_loss_logits_grad_hook(
-            "loss_input_logits", logits, labels
-        )
-
-        # Loss-path MD5 probe: logits and labels before cross-entropy
-        import os
-
-        if (
-            os.environ.get("LOG_LAYER_MD5", "0") == "1"
-            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
-        ):
-            import hashlib
-
-            rank = paddle.distributed.get_rank()
-            lg_md5 = hashlib.md5(
-                logits.cast("float32").numpy().tobytes()
-            ).hexdigest()
-            lb_md5 = hashlib.md5(
-                labels.cast("int64").numpy().tobytes()
-            ).hexdigest()
-            print(
-                f"[LOSS_PATH_MD5] rank={rank} loss_input_logits shape={list(logits.shape)} md5={lg_md5}",
-                flush=True,
-            )
-            print(
-                f"[LOSS_PATH_MD5] rank={rank} loss_input_labels shape={list(labels.shape)} md5={lb_md5}",
-                flush=True,
-            )
-
         if self.use_subbatch and seq_len > self.loss_subbatch_sequence_length:
 
             def _cast_loss_func(logits, labels):
@@ -409,61 +290,11 @@ class LanguageLoss(FleetLayer):
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(loss, axis=1)
             labels = ContextParallelGatherOp.apply(labels, axis=1)
-        loss = _dsv4_register_loss_grad_hook("per_token_loss", loss)
-
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
             loss = paddle.mean(loss) * 0.0
         else:
             lossmask = lossmask.reshape([-1]).cast(paddle.float32)
-
-            # Loss-path MD5 probe: per-token loss and lossmask
-            if (
-                os.environ.get("LOG_LAYER_MD5", "0") == "1"
-                or os.environ.get("LOG_LOSS_MD5", "0") == "1"
-            ):
-                import hashlib
-
-                rank = paddle.distributed.get_rank()
-                pt_md5 = hashlib.md5(
-                    loss.cast("float32").reshape([-1]).numpy().tobytes()
-                ).hexdigest()
-                lm_md5 = hashlib.md5(lossmask.numpy().tobytes()).hexdigest()
-                valid_count = lossmask.sum().item()
-                loss_sum_val = paddle.sum(
-                    loss.cast("float32").reshape([-1]) * lossmask
-                ).item()
-                print(
-                    f"[LOSS_PATH_MD5] rank={rank} per_token_loss md5={pt_md5}",
-                    flush=True,
-                )
-                print(
-                    f"[LOSS_PATH_MD5] rank={rank} lossmask md5={lm_md5} valid_tokens={valid_count}",
-                    flush=True,
-                )
-                print(
-                    f"[LOSS_PATH_MD5] rank={rank} loss_sum={loss_sum_val} final_loss={loss_sum_val / valid_count}",
-                    flush=True,
-                )
-                # Also compute line-wise loss (matches EC's _line_wise_loss) for exact comparison
-                if self.config.gpt_model_use_experimental_version:
-                    _probe_loss_2d = loss.cast(
-                        paddle.float32
-                    ) * lossmask.reshape(labels.shape)
-                    _probe_lm_2d = lossmask.reshape(labels.shape)
-                    _probe_tc = _probe_lm_2d.sum(-1)
-                    _probe_inv = (_probe_tc == 0).astype(paddle.float32)
-                    _probe_lpl = _probe_loss_2d.sum(-1) / (
-                        _probe_tc + 1e-6 * _probe_inv
-                    )
-                    _probe_lpl = _probe_lpl * (1 - _probe_inv)
-                    _probe_lw = _probe_lpl.sum() / (
-                        (1 - _probe_inv).sum() + 1e-6
-                    )
-                    print(
-                        f"[LOSS_PATH_MD5] rank={rank} line_wise_loss={_probe_lw.item():.20f}",
-                        flush=True,
-                    )
 
             if _dsv4_loss_md5_enabled():
                 rank = paddle.distributed.get_rank()

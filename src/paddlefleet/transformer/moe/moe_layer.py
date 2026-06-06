@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 from copy import deepcopy
@@ -57,30 +56,6 @@ logger = logging.getLogger(__name__)
 
 def _dsv4_expert_scale_before_down_enabled() -> bool:
     return os.environ.get("DSV4_FLEET_EXPERT_SCALE_BEFORE_DOWN", "0") == "1"
-
-# MD5 logging for MoE precision debugging
-_LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
-
-
-def _log_moe_md5(tensor, name, layer_idx=None):
-    """Log MD5 of a tensor for MoE precision alignment debugging."""
-    from paddlefleet.transformer.transformer_layer import TransformerLayer
-
-    if _LOG_LAYER_MD5:
-        if TransformerLayer._skip_mtp_probes:
-            return  # Skip MTP passes — EC has no MTP
-        data = tensor.detach().cast("float32").numpy().tobytes()
-        md5 = hashlib.md5(data).hexdigest()
-        rank = (
-            paddle.distributed.get_rank()
-            if paddle.distributed.is_initialized()
-            else 0
-        )
-        layer_str = f" Layer={layer_idx}" if layer_idx is not None else ""
-        print(
-            f"[MD5 MoE] Rank={rank}{layer_str} {name} MD5={md5} shape={list(tensor.shape)}",
-            flush=True,
-        )
 
 
 class _DSV4MTPMoEInputBranches(PyLayer):
@@ -605,15 +580,6 @@ class MoELayer(nn.Layer):
         hidden_states = self.token_dispatcher.dispatch_preprocess(
             hidden_states, probs, routing_map, topk_weights, topk_indices
         )
-        layer_idx = getattr(self, "layer_number", None)
-        _log_moe_md5(
-            hidden_states, "dispatch_preprocess_hidden", layer_idx
-        )
-        _log_moe_md5(
-            getattr(self.token_dispatcher, "global_input_probs", probs),
-            "dispatch_preprocess_probs",
-            layer_idx,
-        )
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
                 hidden_states,
@@ -622,61 +588,23 @@ class MoELayer(nn.Layer):
                 use_ue8m0=self.use_ue8m0,
             )
         )
-        _log_moe_md5(hidden_states, "token_dispatch_hidden", layer_idx)
         return hidden_states, fp8_dispatched_handle
 
     def permute(self, hidden_states: paddle.Tensor):
         global_input_tokens, tokens_per_expert = (
             self.token_dispatcher.dispatch_postprocess(hidden_states)
         )
-        layer_idx = getattr(self, "layer_number", None)
-        _log_moe_md5(
-            global_input_tokens, "dispatch_postprocess_hidden", layer_idx
-        )
-        _log_moe_md5(
-            paddle.to_tensor(tokens_per_expert, dtype="float32")
-            if not isinstance(tokens_per_expert, paddle.Tensor)
-            else tokens_per_expert.cast("float32"),
-            "tokens_per_expert",
-            layer_idx,
-        )
-        dispatch_probs = getattr(
-            self.token_dispatcher, "global_input_probs", None
-        )
-        if dispatch_probs is not None:
-            _log_moe_md5(
-                dispatch_probs, "dispatch_postprocess_probs", layer_idx
-            )
         return global_input_tokens, tokens_per_expert
 
     def unpermute(self, hidden_states: paddle.Tensor):
         hidden_states = self.token_dispatcher.combine_preprocess(hidden_states)
-        _log_moe_md5(
-            hidden_states,
-            "combine_preprocess_output",
-            getattr(self, "layer_number", None),
-        )
         return hidden_states
 
     def combine(self, hidden_states: paddle.Tensor, async_finish: bool = False):
         hidden_states = self.token_dispatcher.token_combine(
             hidden_states, async_finish=async_finish
         )
-        layer_idx = getattr(self, "layer_number", None)
-        reverse_mapping = getattr(
-            self.token_dispatcher,
-            "reversed_local_input_permutation_mapping",
-            None,
-        )
-        if reverse_mapping is not None:
-            _log_moe_md5(
-                reverse_mapping.cast("float32"),
-                "reverse_mapping_for_combine",
-                layer_idx,
-            )
-        _log_moe_md5(hidden_states, "token_combine_output", layer_idx)
         hidden_states = self.token_dispatcher.combine_postprocess(hidden_states)
-        _log_moe_md5(hidden_states, "combine_postprocess_output", layer_idx)
         return hidden_states
 
     def routed_experts_compute(
@@ -687,9 +615,6 @@ class MoELayer(nn.Layer):
         expert_outs = self.expert_forward(
             global_input_tokens,
             tokens_per_expert,
-        )
-        _log_moe_md5(
-            expert_outs, "expert_output", getattr(self, "layer_number", None)
         )
         return self.unpermute(expert_outs)
 
@@ -1056,8 +981,6 @@ class MoELayer(nn.Layer):
         orig_shape = hidden_states.shape
         residuals = hidden_states
 
-        layer_idx = getattr(self, "layer_number", None)
-        _log_moe_md5(hidden_states, "moe_input", layer_idx)
         routed_input, gate_input, shared_residuals = _dsv4_mtp_moe_split_input_branches(
             hidden_states, self.is_mtp_layer, self.layer_number
         )
@@ -1079,10 +1002,8 @@ class MoELayer(nn.Layer):
         # mask (routing_map): binary selection matrix [seq_len, num_experts]
         # capacity, priorities are used for dropping tokens, currently they are not used
 
-        _log_moe_md5(probs, "probs", layer_idx)
-        _log_moe_md5(mask, "routing_mask", layer_idx)
         if framework._dygraph_tracer()._has_grad:
-            log_moe_losses(layer_idx, aux_loss=aux_loss, z_loss=z_loss)
+            log_moe_losses(self.layer_number, aux_loss=aux_loss, z_loss=z_loss)
 
         if (
             self.shared_experts is not None
@@ -1135,7 +1056,6 @@ class MoELayer(nn.Layer):
             if self.use_latent_moe:
                 output = self.fc2_latent_proj(output)
 
-        _log_moe_md5(output, "moe_routed_output", layer_idx)
         if self.training and self.router_aux_loss_coef and aux_loss is not None:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(output, aux_loss)
@@ -1149,10 +1069,7 @@ class MoELayer(nn.Layer):
                 shared_output = combine_overlap_handle["fn_out"][0]
             else:
                 shared_output = self.shared_experts(shared_residuals)[0]
-            _log_moe_md5(shared_output, "shared_expert_output", layer_idx)
             output = output + shared_output
-
-        _log_moe_md5(output, "moe_final_output", layer_idx)
 
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)

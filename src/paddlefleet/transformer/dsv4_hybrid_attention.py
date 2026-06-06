@@ -25,7 +25,6 @@ Components:
 
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -67,29 +66,6 @@ def _dsv4_attention_split_input_branches(tensor: Tensor):
     if tensor is None or not isinstance(tensor, paddle.Tensor) or tensor.stop_gradient:
         return tensor, tensor, tensor
     return _DSV4AttentionInputBranches.apply(tensor)
-
-
-def _dsv4_register_mtp_attn_grad(name: str, tensor: Tensor, is_mtp_layer: bool) -> None:
-    if not is_mtp_layer or os.environ.get("DSV4_LOG_MTP_GRADS", "0") != "1":
-        return
-    if tensor is None or not isinstance(tensor, paddle.Tensor) or tensor.stop_gradient:
-        return
-
-    def _hook(grad: Tensor) -> None:
-        rank = (
-            paddle.distributed.get_rank()
-            if paddle.distributed.is_initialized()
-            else 0
-        )
-        if rank != int(os.environ.get("DSV4_LOSS_PATH_RANK", "0")):
-            return
-        md5 = hashlib.md5(grad.cast("float32").numpy().tobytes()).hexdigest()
-        print(
-            f"[MTP_ATTN_GRAD_MD5] rank={rank} {name}.grad shape={list(grad.shape)} md5={md5}",
-            flush=True,
-        )
-
-    tensor.register_hook(_hook)
 
 
 class _DSV4QRMSNorm(paddle.autograd.PyLayer):
@@ -273,18 +249,11 @@ class DSv4HybridAttention(Attention):
         Returns:
             (output [b, sq, hidden_size], bias=None)
         """
-        _dsv4_register_mtp_attn_grad("mtp_attn_input", hidden_states, self.is_mtp_layer)
         q_input, kv_input, core_x = _dsv4_attention_split_input_branches(hidden_states)
         # Get Q, K, V tensors
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(q_input, kv_input=kv_input)
         )
-        _dsv4_register_mtp_attn_grad("mtp_attn_query", query, self.is_mtp_layer)
-        _dsv4_register_mtp_attn_grad("mtp_attn_key", key, self.is_mtp_layer)
-        _dsv4_register_mtp_attn_grad("mtp_attn_value", value, self.is_mtp_layer)
-        _dsv4_register_mtp_attn_grad("mtp_attn_q_compressed", q_compressed, self.is_mtp_layer)
-        _dsv4_register_mtp_attn_grad("mtp_attn_kv_compressed", kv_compressed, self.is_mtp_layer)
-
         # Core attention (CompressedSparseAttention)
         core_attn_out = self.core_attention(
             query,
@@ -294,7 +263,6 @@ class DSv4HybridAttention(Attention):
             x=core_x,
             qr=q_compressed,
         )
-        _dsv4_register_mtp_attn_grad("mtp_attn_core_out", core_attn_out, self.is_mtp_layer)
         # core_attn_out: [b, sq, np * v_head_dim]
 
         # Inverse RoPE on last qk_pos_emb_head_dim of each head
@@ -329,8 +297,6 @@ class DSv4HybridAttention(Attention):
             )
             core_attn_out = paddle.concat([content_part, rot_part], axis=-1)
             core_attn_out = core_attn_out.reshape([b, sq, -1])
-        _dsv4_register_mtp_attn_grad("mtp_attn_inv_rope_out", core_attn_out, self.is_mtp_layer)
-
         # Grouped output projection
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
         wo_a_weight = self.linear_o_group_proj.reshape(
@@ -340,12 +306,8 @@ class DSv4HybridAttention(Attention):
             "...gd,grd->...gr", core_attn_out, wo_a_weight
         )
         core_attn_out = core_attn_out.reshape([b, sq, -1])
-        _dsv4_register_mtp_attn_grad("mtp_attn_o_group_out", core_attn_out, self.is_mtp_layer)
-
         # Output projection
-        _dsv4_register_mtp_attn_grad("mtp_attn_o_proj_input", core_attn_out, self.is_mtp_layer)
         output, bias = self.o_proj(core_attn_out)
-        _dsv4_register_mtp_attn_grad("mtp_attn_o_proj_out", output, self.is_mtp_layer)
 
         return output, bias
 
@@ -470,23 +432,15 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         q_compressed, _ = self.linear_q_down_proj(
             hidden_states
         )  # [b, sq, q_lora_rank]
-        _dsv4_register_mtp_attn_grad("mtp_attn_q_down_out", q_compressed, self.is_mtp_layer)
         q_compressed = self.q_layernorm(q_compressed)
-        _dsv4_register_mtp_attn_grad(
-            "mtp_attn_q_layernorm_out", q_compressed, self.is_mtp_layer
-        )
 
         q, _ = self.linear_q_up_proj(q_compressed)  # [b, sq, n * v_head_dim]
-        _dsv4_register_mtp_attn_grad("mtp_attn_q_up_out", q, self.is_mtp_layer)
         q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
         q = _q_rms_norm(q, getattr(self.config, "rms_norm_eps", 1e-5))
-        _dsv4_register_mtp_attn_grad("mtp_attn_q_rms_out", q, self.is_mtp_layer)
 
         # KV path
         kv, _ = self.linear_kv_proj(kv_hidden_states)  # [b, sq, v_head_dim]
-        _dsv4_register_mtp_attn_grad("mtp_attn_kv_proj_out", kv, self.is_mtp_layer)
         kv = self.kv_layernorm(kv)
-        _dsv4_register_mtp_attn_grad("mtp_attn_kv_norm_out", kv, self.is_mtp_layer)
 
         # Apply RoPE to both Q and KV
         pos_dim = self.qk_pos_emb_head_dim
