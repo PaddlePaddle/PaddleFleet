@@ -325,7 +325,10 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         self.num_embeddings_per_partition = (
             self.vocab_end_index - self.vocab_start_index
         )
-        self.deterministic_mode = config.deterministic_mode
+        self.deterministic_mode = (
+            config.deterministic_mode
+            or os.environ.get("DSV4_EMBEDDING_INDEX_BACKWARD", "0") == "1"
+        )
         self.world_size = get_pg_size(self.tp_group)
 
         # Allocate weights and initialize.

@@ -45,6 +45,16 @@ if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
 
+_USE_ACCURACY_COMPATIBLE_KERNEL = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
+
+
+def use_accuracy_compatible_kernel() -> bool:
+    """Unified switch for accuracy-compatible numeric paths."""
+    return _USE_ACCURACY_COMPATIBLE_KERNEL
+
+
 def _dsv4_fleet_moe_fp32_accum_enabled() -> bool:
     return os.environ.get("DSV4_FLEET_MOE_FP32_ACCUM", "0") == "1"
 

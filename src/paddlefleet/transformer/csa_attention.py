@@ -776,6 +776,9 @@ class CompressedSparseAttention(FleetLayer):
         pg_collection: ProcessGroupCollection = None,
         rotary_pos_emb: nn.Layer = None,
         compress_ratio: int = 0,
+        is_mtp_layer: bool = False,
+        is_swa: bool = False,
+        **kwargs,
     ):
         super().__init__(config)
         self.config = config
