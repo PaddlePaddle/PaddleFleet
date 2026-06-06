@@ -971,6 +971,23 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
         # Should not raise
 
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    def test_reduce_empty_tracker_with_num_layers_joins_pp_reduce(
+        self, mock_ps
+    ):
+        """Empty tracker should initialize zeros and join PP all_reduce."""
+        pp_group = MagicMock()
+        pp_group.nranks = 2
+        mock_ps.get_pipeline_model_parallel_group.return_value = pp_group
+        mock_ps.get_data_parallel_group.return_value = None
+
+        with patch("paddle.distributed.all_reduce") as mock_all_reduce:
+            DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(num_layers=3)
+            mock_all_reduce.assert_called_once()
+
+        values = DSAIndexerLossLoggingHelper.tracker["values"]
+        self.assertTrue(paddle.allclose(values, paddle.zeros([3])))
+
+    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_no_distributed_groups(self, mock_ps):
         """Reduce with no distributed groups should keep values unchanged."""
         mock_ps.get_pipeline_model_parallel_group.return_value = None
@@ -1107,9 +1124,9 @@ class TestDSAIndexerLossLoggingHelperTrackMetrics(unittest.TestCase):
     def test_track_metrics_empty_tracker_noop(self, mock_reduce):
         """With no values, track_indexer_metrics should be a no-op after reduce."""
         DSAIndexerLossLoggingHelper.track_indexer_metrics(
-            loss_scale=1.0, iteration=10
+            loss_scale=1.0, iteration=10, num_layers=2
         )
-        mock_reduce.assert_called_once()
+        mock_reduce.assert_called_once_with(num_layers=2)
 
     @patch.object(DSAIndexerLossLoggingHelper, "reduce_loss_in_tracker")
     def test_track_metrics_logs_loss(self, mock_reduce):

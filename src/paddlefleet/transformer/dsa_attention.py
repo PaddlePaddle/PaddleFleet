@@ -1093,11 +1093,20 @@ class DSAIndexerLossLoggingHelper:
         tracker["avg_group"] = None
 
     @staticmethod
-    def reduce_loss_in_tracker():
-        """Collect and reduce the indexer losses across ranks."""
+    def reduce_loss_in_tracker(num_layers: int | None = None):
+        """Collect and reduce the indexer losses across ranks.
+
+        PP all-reduce must be called on every rank in the pipeline group.
+        Ranks without local indexer layers lazily create a zero tracker so they
+        still participate in the collective and do not hang other ranks.
+        """
         tracker = DSAIndexerLossLoggingHelper.tracker
         if "values" not in tracker:
-            return
+            if num_layers is None:
+                return
+            tracker["values"] = paddle.zeros([num_layers])
+            tracker["reduce_group"] = None
+            tracker["avg_group"] = None
         values = tracker["values"]
 
         # PP all-reduce
@@ -1130,6 +1139,7 @@ class DSAIndexerLossLoggingHelper:
         iteration: int,
         writer=None,
         total_loss_dict: dict | None = None,
+        num_layers: int | None = None,
     ):
         """Track the sparse attention indexer metrics for logging.
 
@@ -1138,8 +1148,9 @@ class DSAIndexerLossLoggingHelper:
             iteration: Current training iteration.
             writer: TensorBoard writer (optional).
             total_loss_dict: Dictionary to accumulate total losses (optional).
+            num_layers: Total number of layers with indexer metrics.
         """
-        DSAIndexerLossLoggingHelper.reduce_loss_in_tracker()
+        DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(num_layers=num_layers)
         tracker = DSAIndexerLossLoggingHelper.tracker
         if "values" not in tracker:
             return
@@ -1406,7 +1417,11 @@ class DSAttention(FleetLayer):
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,
-                    num_layers=self.config.num_hidden_layers,
+                    num_layers=self.config.num_hidden_layers
+                    + (
+                        getattr(self.config, "mtp_num_layers", 0)
+                        or getattr(self.config, "num_nextn_predict_layers", 0)
+                    ),
                 )
             core_attn_out = DSAIndexerLossAutoScaler.apply(
                 core_attn_out, indexer_loss
