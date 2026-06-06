@@ -148,8 +148,9 @@ def tl_csa_indexer_topk_fwd_impl(
             T.copy(Weights[i_b, i_t, :], weights_shared)
             T.sync_threads()
 
-            for i, j in T.Parallel(heads, dim):
-                index_q_shared[i, j] = index_q_shared[i, j] * sm_scale
+            # Fold sm_scale into weights (fp32) to avoid bf16 truncation on Q
+            for i in T.Parallel(heads):
+                weights_shared[i] = weights_shared[i] * sm_scale
             T.sync_threads()
 
             for bk_i in T.Pipelined(num_valid_blocks, num_stages=num_stages):

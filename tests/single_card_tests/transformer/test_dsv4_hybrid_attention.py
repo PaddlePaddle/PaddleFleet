@@ -436,6 +436,197 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             ).item()
         )
 
+    def test_attention_module_fused_sparse_matches_dynamic_forward_backward(
+        self,
+    ):
+        old_flag = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]
+        paddle.set_flags({"FLAGS_cudnn_deterministic": 0})
+        try:
+            paddle.seed(_SEED)
+            seq_len = 128
+            for ratio in [4]:
+                dynamic_config = _make_config(
+                    hidden_size=256,
+                    num_attention_heads=2,
+                    v_head_dim=128,
+                    q_lora_rank=64,
+                    o_groups=2,
+                    o_lora_rank=32,
+                    csa_window_size=32,
+                    dsa_indexer_loss_coeff=1.0,
+                    dsa_index_n_heads=16,
+                    csa_compress_ratios=[ratio],
+                    num_layers=1,
+                    csa_tilelang_backend=None,
+                    csa_tilelang_enable_indexer=False,
+                    csa_tilelang_enable_sparse_attn=False,
+                )
+                fused_config = _make_config(
+                    hidden_size=256,
+                    num_attention_heads=2,
+                    v_head_dim=128,
+                    q_lora_rank=64,
+                    o_groups=2,
+                    o_lora_rank=32,
+                    csa_window_size=32,
+                    dsa_indexer_loss_coeff=1.0,
+                    dsa_index_n_heads=16,
+                    csa_compress_ratios=[ratio],
+                    num_layers=1,
+                    csa_tilelang_backend="attention_paddle_compat",
+                    csa_tilelang_enable_indexer=True,
+                    csa_tilelang_enable_sparse_attn=True,
+                )
+                doc_len_cases = [
+                    ##################### 1. pad + //
+                    (96, 24),  # x
+                    (24, 96),
+                    (92, 28),  # x
+                    (28, 92),  # x
+                    (88, 32),
+                    ##################### 2. pad + ! //
+                    (89, 37),  # x
+                    (87, 39),
+                    #################### 3. no pad + //
+                    (92, 36),  # x
+                    (88, 40),
+                    (84, 44),
+                    (80, 48),
+                    ##################### 4. no pad + ! //
+                    (91, 37),  # x
+                    (37, 91),
+                    (90, 38),  # x
+                    (89, 39),  # x
+                    (87, 41),
+                    (86, 42),
+                    (85, 43),
+                    (83, 45),
+                    (82, 46),
+                ]
+
+                def assert_close_with_diff(name, actual, expected):
+                    actual = actual.cast("float32")
+                    expected = expected.cast("float32")
+                    diff = (actual - expected).abs()
+                    close_mask = paddle.isclose(
+                        actual, expected, rtol=2e-2, atol=2e-2
+                    )
+                    fail_mask = ~close_mask
+                    fail_count = int(fail_mask.cast("int64").sum().item())
+                    total_count = fail_mask.numel()
+                    max_idx = int(diff.flatten().argmax().item())
+                    actual_flat = actual.flatten()
+                    expected_flat = expected.flatten()
+                    diff_flat = diff.flatten()
+                    print(
+                        f"[diff] {name}: "
+                        f"shape={actual.shape}, "
+                        f"max={float(diff.max().item())}, "
+                        f"mean={float(diff.mean().item())}, "
+                        f"fail={fail_count}/{total_count}, "
+                        f"max_idx={max_idx}, "
+                        f"actual={float(actual_flat[max_idx].item())}, "
+                        f"expected={float(expected_flat[max_idx].item())}, "
+                        f"abs_diff={float(diff_flat[max_idx].item())}"
+                    )
+                    if fail_count > 0:
+                        fail_indices = paddle.nonzero(
+                            fail_mask.flatten()
+                        ).flatten()[:8]
+                        for i, fail_idx in enumerate(fail_indices):
+                            idx = int(fail_idx.item())
+                            print(
+                                f"[diff] {name} fail[{i}]: "
+                                f"idx={idx}, "
+                                f"actual={float(actual_flat[idx].item())}, "
+                                f"expected={float(expected_flat[idx].item())}, "
+                                f"abs_diff={float(diff_flat[idx].item())}"
+                            )
+                    self.assertTrue(close_mask.all().item(), name)
+
+                for doc1_len, doc2_len in doc_len_cases:
+                    with self.subTest(
+                        ratio=ratio,
+                        doc1_len=doc1_len,
+                        doc2_len=doc2_len,
+                    ):
+                        model_parallel_cuda_manual_seed(_SEED)
+                        dynamic_attn = _build_attention(
+                            dynamic_config, layer_number=0
+                        )
+                        model_parallel_cuda_manual_seed(_SEED)
+                        fused_attn = _build_attention(
+                            fused_config, layer_number=0
+                        )
+                        fused_attn.set_state_dict(dynamic_attn.state_dict())
+                        dynamic_attn.train()
+                        fused_attn.train()
+
+                        padding_len = seq_len - doc1_len - doc2_len
+                        print(f"[ghz] {doc1_len=} {doc2_len=} {padding_len=}")
+                        hidden = paddle.randn(
+                            [1, seq_len, dynamic_config.hidden_size],
+                            dtype="bfloat16",
+                        )
+                        startend_row_indices = paddle.to_tensor(
+                            [doc1_len] * doc1_len
+                            + [doc1_len + doc2_len] * (doc2_len + padding_len),
+                            dtype="int32",
+                        ).reshape([1, 1, seq_len, 1])
+
+                        dynamic_hidden = hidden.clone()
+                        fused_hidden = hidden.clone()
+                        dynamic_hidden.stop_gradient = False
+                        fused_hidden.stop_gradient = False
+
+                        valid_len = doc1_len + doc2_len
+                        dynamic_out, _ = dynamic_attn(
+                            hidden_states=dynamic_hidden,
+                            attention_mask=None,
+                            attn_mask_startend_row_indices=startend_row_indices,
+                        )
+                        grad = paddle.randn(
+                            dynamic_out.shape, dynamic_out.dtype
+                        )
+                        if padding_len > 0:
+                            grad[:, valid_len:, :] = 0
+                        dynamic_out.backward(grad)
+                        dynamic_hidden_grad = dynamic_hidden.grad.clone()
+                        dynamic_param_grads = {
+                            name: param.grad.clone()
+                            for name, param in dynamic_attn.named_parameters()
+                            if param.grad is not None
+                        }
+
+                        fused_out, _ = fused_attn(
+                            hidden_states=fused_hidden,
+                            attention_mask=None,
+                            attn_mask_startend_row_indices=startend_row_indices,
+                        )
+                        fused_out.backward(grad)
+
+                        assert_close_with_diff(
+                            "output",
+                            fused_out,
+                            dynamic_out,
+                        )
+                        fused_params = dict(fused_attn.named_parameters())
+                        for name, dynamic_grad in dynamic_param_grads.items():
+                            fused_grad = fused_params[name].grad
+                            self.assertIsNotNone(fused_grad, name)
+                            assert_close_with_diff(
+                                name, fused_grad, dynamic_grad
+                            )
+                        assert_close_with_diff(
+                            "hidden_grad",
+                            fused_hidden.grad,
+                            dynamic_hidden_grad,
+                        )
+        finally:
+            paddle.set_flags({"FLAGS_cudnn_deterministic": old_flag})
+
     def test_attention_module_document_mask_matches_separate_documents(self):
         paddle.seed(_SEED)
         for ratio in [0, 4, 128]:

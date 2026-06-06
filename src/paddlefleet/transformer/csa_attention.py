@@ -196,7 +196,9 @@ def get_window_topk_idxs(
         base = paddle.arange(seqlen).unsqueeze(1)  # [seqlen, 1]
         offsets = paddle.arange(window_size)  # [window_size]
         matrix = paddle.clip(base - window_size + 1, min=0) + offsets
-        matrix = paddle.where(matrix > base, paddle.full_like(matrix, -1), matrix)
+        matrix = paddle.where(
+            matrix > base, paddle.full_like(matrix, -1), matrix
+        )
         return matrix.unsqueeze(0).expand([batch_size, -1, -1])
 
     mask = startend_row_indices.flatten().cast("int64")
@@ -291,7 +293,7 @@ def _build_compressed_causal_mask(
     batch_size: int,
     seqlen: int,
     n_compressed: int,
-    startend_row_indices: "Tensor | None" = None,
+    startend_row_indices: Tensor | None = None,
 ) -> Tensor:
     """Build causal mask for compressed attention: [b, seqlen, n_compressed].
 
@@ -307,7 +309,9 @@ def _build_compressed_causal_mask(
         compressed_ids = paddle.arange(n_compressed).unsqueeze(0)
         positions = paddle.arange(1, seqlen + 1).unsqueeze(1)
         invalid = compressed_ids >= (positions // ratio)
-        invalid = invalid.unsqueeze(0).expand([batch_size, seqlen, n_compressed])
+        invalid = invalid.unsqueeze(0).expand(
+            [batch_size, seqlen, n_compressed]
+        )
         return paddle.where(
             invalid,
             paddle.full([1], float("-inf"), dtype="float32"),
@@ -352,7 +356,9 @@ def _build_compressed_causal_mask(
     range_end = paddle.where(zero_mask, paddle.zeros_like(range_end), range_end)
 
     # Build 2D mask: [seqlen, n_compressed]
-    c_grid = paddle.arange(n_compressed, dtype="int64").unsqueeze(0)  # [1, n_compressed]
+    c_grid = paddle.arange(n_compressed, dtype="int64").unsqueeze(
+        0
+    )  # [1, n_compressed]
     lower = range_start.unsqueeze(1)  # [seqlen, 1]
     upper = range_end.unsqueeze(1)  # [seqlen, 1]
 
@@ -445,7 +451,7 @@ def _apply_rope(
             )
         freqs = freqs[:, :rotary_seq_len, :, :]
     elif ratio > 1:
-        freqs = freqs[:, position_offset * ratio :total_seq_len: ratio, :][
+        freqs = freqs[:, position_offset * ratio : total_seq_len : ratio, :][
             :, :rotary_seq_len, :
         ]
     else:
@@ -1036,7 +1042,10 @@ class Compressor(nn.Layer):
         )
 
     def _overlap_transform(
-        self, tensor: Tensor, fill_value: float = 0, is_first: Tensor | None = None
+        self,
+        tensor: Tensor,
+        fill_value: float = 0,
+        is_first: Tensor | None = None,
     ) -> Tensor:
         """Apply overlapping window transform for 4x compression.
 
@@ -1206,8 +1215,12 @@ class Compressor(nn.Layer):
                     idx = int(doc_starts_cutoff[i].item()) // ratio
                     if idx < actual_n_compressed:
                         is_first[idx] = True
-                kv = self._overlap_transform(kv, fill_value=0, is_first=is_first)
-                score = self._overlap_transform(score, fill_value=float("-inf"), is_first=is_first)
+                kv = self._overlap_transform(
+                    kv, fill_value=0, is_first=is_first
+                )
+                score = self._overlap_transform(
+                    score, fill_value=float("-inf"), is_first=is_first
+                )
 
             # Gated pooling: softmax over the pool_dim, weighted sum.
             kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
@@ -1265,7 +1278,6 @@ class Compressor(nn.Layer):
         if self.overlap:
             kv = self._overlap_transform(kv, fill_value=0)
             score = self._overlap_transform(score, fill_value=float("-inf"))
-
         # Gated pooling: softmax over the pool_dim, weighted sum.
         kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
 
@@ -1406,7 +1418,10 @@ class CSAIndexer(nn.Layer):
 
         # K path: own compressor (already applies RoPE and rotation internally)
         k = self.compressor(
-            x, startend_row_indices=startend_row_indices, position_offset=position_offset, cp_group=cp_group,
+            x,
+            startend_row_indices=startend_row_indices,
+            position_offset=position_offset,
+            cp_group=cp_group,
         )  # [b, n_compressed, index_head_dim]
 
         # Weights
