@@ -1623,7 +1623,7 @@ class CompressedSparseAttention(FleetLayer):
                         topk_indices_compressed,
                         topk_probs,
                         target,
-                        float(indexer_loss_coeff),
+                        float(indexer_loss_coeff) / self.cp_size,
                     )
                     if indexer_loss_coeff > 0:
                         DSAIndexerLossLoggingHelper.save_loss_to_tracker(
