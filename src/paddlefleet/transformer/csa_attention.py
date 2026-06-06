@@ -1152,7 +1152,7 @@ class Compressor(nn.Layer):
 
         # Non-CP path (original logic)
         if startend_row_indices is not None:
-            # per-document cutoff, with padding at tail for CP
+            # per-document cutoff, pack contiguously without padding
             doc_lens = get_doc_lens(startend_row_indices)
             doc_starts = get_doc_starts(doc_lens)
 
@@ -1163,21 +1163,22 @@ class Compressor(nn.Layer):
             assert len(doc_lens) == len(doc_lens_cutoff)
             assert len(doc_lens) == len(doc_starts_cutoff)
 
-            # a // ratio + b // ratio <= (a + b) // ratio
             n_compressed = sq // ratio
+            total_cutoff = int(doc_lens_cutoff.sum().item())
+            actual_n_compressed = total_cutoff // ratio
             coff_head_dim = kv.shape[-1]
-            kv_cutoff = paddle.full(
-                shape=[b, n_compressed * ratio, coff_head_dim],
-                fill_value=0,
+
+            # Pack only valid cutoff data contiguously (no padding)
+            kv_cutoff = paddle.zeros(
+                shape=[b, total_cutoff, coff_head_dim],
                 dtype=kv.dtype,
             )
             score_cutoff = paddle.full(
-                shape=[b, n_compressed * ratio, coff_head_dim],
+                shape=[b, total_cutoff, coff_head_dim],
                 fill_value=float("-inf"),
                 dtype=score.dtype,
             )
             for i in range(len(doc_lens)):
-                doc_len = doc_lens[i]
                 doc_start = doc_starts[i]
                 doc_len_cutoff = doc_lens_cutoff[i]
                 doc_start_cutoff = doc_starts_cutoff[i]
@@ -1190,6 +1191,61 @@ class Compressor(nn.Layer):
 
             kv = kv_cutoff
             score = score_cutoff
+
+            # Reshape: [b, actual_n_compressed, ratio, coff * head_dim]
+            kv = kv.reshape([b, actual_n_compressed, ratio, -1])
+            score = score.reshape([b, actual_n_compressed, ratio, -1])
+
+            # APE: [ratio, coff * head_dim] -> [1, 1, ratio, coff * head_dim]
+            score = score + self.ape.reshape([1, 1, ratio, -1])
+
+            if self.overlap:
+                # Build is_first mask for document boundaries
+                is_first = paddle.zeros([actual_n_compressed], dtype="bool")
+                for i in range(len(doc_starts_cutoff)):
+                    idx = int(doc_starts_cutoff[i].item()) // ratio
+                    if idx < actual_n_compressed:
+                        is_first[idx] = True
+                kv = self._overlap_transform(kv, fill_value=0, is_first=is_first)
+                score = self._overlap_transform(score, fill_value=float("-inf"), is_first=is_first)
+
+            # Gated pooling: softmax over the pool_dim, weighted sum.
+            kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
+            # kv: [b, actual_n_compressed, head_dim]
+
+            kv = self.norm(kv.cast(x.dtype))
+
+            # Pad to n_compressed before RoPE
+            if actual_n_compressed < n_compressed:
+                pad_len = n_compressed - actual_n_compressed
+                kv = paddle.concat(
+                    [
+                        kv,
+                        paddle.zeros(
+                            [b, pad_len, kv.shape[-1]], dtype=kv.dtype
+                        ),
+                    ],
+                    axis=1,
+                )
+
+            # Apply RoPE with subsampled positions
+            if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
+                kv = _apply_rope(
+                    kv,
+                    self.head_dim - self.qk_pos_emb_head_dim,
+                    self.qk_pos_emb_head_dim,
+                    self.rotary_pos_emb,
+                    self.config,
+                    n_compressed,
+                    ratio=ratio,
+                    doc_lens_cutoff=doc_lens_cutoff,
+                    position_offset=position_offset,
+                )
+
+            if self.rotate:
+                kv = rotate_activation(kv)
+
+            return kv  # [b, n_compressed, head_dim]
         else:
             # Original simple cutoff logic
             n_compressed = sq // ratio
@@ -1207,20 +1263,9 @@ class Compressor(nn.Layer):
         score = score + self.ape.reshape([1, 1, ratio, -1])
 
         if self.overlap:
-            # Build is_first mask for document boundaries
-            is_first = None
-            if startend_row_indices is not None:
-                is_first = paddle.zeros([n_compressed], dtype="bool")
-                for i in range(len(doc_starts_cutoff)):
-                    idx = int(doc_starts_cutoff[i].item()) // ratio
-                    if idx < n_compressed:
-                        is_first[idx] = True
-            kv = self._overlap_transform(kv, fill_value=0, is_first=is_first)
-            score = self._overlap_transform(score, fill_value=float("-inf"), is_first=is_first)
+            kv = self._overlap_transform(kv, fill_value=0)
+            score = self._overlap_transform(score, fill_value=float("-inf"))
 
-        # TODO: old megatron-aligned logic. This will cause possible acc declining
-        # weights = F.softmax(score, axis=2).cast(kv.dtype)
-        # kv = (kv * weights).sum(axis=2)  # [b, n_compressed, head_dim]
         # Gated pooling: softmax over the pool_dim, weighted sum.
         kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
 
