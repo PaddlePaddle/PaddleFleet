@@ -1998,9 +1998,6 @@ class CompressedSparseAttention(FleetLayer):
 
                 # valid_range for varlen: [b, sq_local, 2] or None
                 if startend_row_indices is not None:
-                    print(
-                        f"[CSA-CP Temp] startend_row_indices valid_range, position offset: {position_offset}"
-                    )
                     valid_range_full = get_valid_range(
                         int(self.compress_ratio),
                         b,
@@ -2057,7 +2054,7 @@ class CompressedSparseAttention(FleetLayer):
                         topk_indices_compressed,
                         topk_probs,
                         target,
-                        float(indexer_loss_coeff),
+                        float(indexer_loss_coeff) / self.cp_size,
                     )
                     if indexer_loss_coeff > 0:
                         DSAIndexerLossLoggingHelper.save_loss_to_tracker(
