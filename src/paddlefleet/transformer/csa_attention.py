@@ -1798,13 +1798,22 @@ class CompressedSparseAttention(FleetLayer):
         if self.cp_enabled:
             return self._forward_cp(query, key, x, qr, startend_row_indices)
 
+        assert startend_row_indices is not None
+        if self.compress_ratio > 1:
+            doc_lens = get_doc_lens(startend_row_indices)
+            doc_lens_cutoff = get_cutoff_doc_lens(doc_lens, self.compress_ratio)
+            total_cutoff = int(doc_lens_cutoff.sum().item())
+            actual_n_compressed = total_cutoff // self.compress_ratio
+        else:
+            actual_n_compressed = 0
+
         b, sq, np_heads, hn = query.shape
 
         # Step 1: Prepare single-head KV
         kv = key.squeeze(2)  # [b, sq, v_head_dim]
 
         # Step 2: Compression
-        if self.compressor is not None and self.compress_ratio > 1:
+        if self.compressor is not None and self.compress_ratio > 1 and actual_n_compressed > 0:
             compressed_kv = self.compressor(
                 x, startend_row_indices
             )  # [b, n_compressed, v_head_dim]
@@ -1829,7 +1838,7 @@ class CompressedSparseAttention(FleetLayer):
         indexer_loss = None
         tilelang_indexer_loss_state = None
 
-        if self.compress_ratio > 1 and n_compressed > 0:
+        if self.compress_ratio > 1 and n_compressed > 0 and actual_n_compressed > 0:
             if self.indexer is not None:
                 (
                     compress_topk_idxs,
