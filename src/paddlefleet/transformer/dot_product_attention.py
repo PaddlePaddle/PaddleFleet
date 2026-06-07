@@ -265,6 +265,9 @@ class DotProductAttention(FleetLayer):
                     flush=True,
                 )
                 self._swa_boundary_warned = True
+            # Pass window_size only when SWA is not already encoded in
+            # _startend; flashmask kernel rejects both signals at once.
+            _window = self.sliding_window if _startend is None else None
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -272,7 +275,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=_startend,
                 dropout=0.0,
                 causal=False,  # EC uses causal=False with 2-col startend_row_indices
-                window_size=self.sliding_window,
+                window_size=_window,
             )
         else:
             # simple causal path — no document boundaries
@@ -406,6 +409,9 @@ class DotProductAttention(FleetLayer):
                     flush=True,
                 )
                 self._swa_boundary_warned = True
+            # Pass window_size only when SWA is not already encoded in
+            # _startend; flashmask kernel rejects both signals at once.
+            _window = self.sliding_window if _startend is None else None
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -413,7 +419,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=_startend,
                 dropout=self.config.attention_dropout,
                 causal=False,
-                window_size=self.sliding_window,
+                window_size=_window,
             )
             attn_output = attn_output.reshape([bsz, q_len, -1])
             return attn_output
@@ -538,6 +544,16 @@ class DotProductAttention(FleetLayer):
                 )
             else:
                 _startend = attn_mask_startend_row_indices
+            # Pass window_size to the kernel only when SWA is not already
+            # encoded in _startend. The flashmask kernel rejects both signals
+            # at once. Three cases:
+            #   - MTP suppress path (_suppress=True): _startend is None, SWA
+            #     must come through window_size.
+            #   - Backbone SWA + doc boundaries: _startend already has SWA
+            #     baked in via startend_row_indices_add_sliding_window;
+            #     window_size must be None to avoid double-clipping.
+            #   - No SWA: self.sliding_window is None, harmless either way.
+            _window = self.sliding_window if _startend is None else None
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -545,7 +561,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=_startend,
                 dropout=self.config.attention_dropout,
                 causal=(attn_mask_type == AttnMaskType.causal),
-                window_size=self.sliding_window,
+                window_size=_window,
             )
 
             if need_value_padding:
