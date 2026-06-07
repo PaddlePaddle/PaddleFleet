@@ -1919,12 +1919,25 @@ class CompressedSparseAttention(FleetLayer):
             )
             n_compressed_local = sq // self.compress_ratio
         n_compressed_global = n_compressed_local * self.cp_size
+
+        # Compute actual_n_compressed accounting for document boundaries
+        if startend_row_indices is not None and self.compress_ratio > 1:
+            doc_lens = get_doc_lens(startend_row_indices)
+            doc_lens_cutoff = get_cutoff_doc_lens(doc_lens, self.compress_ratio)
+            total_cutoff = int(doc_lens_cutoff.sum().item())
+            actual_n_compressed = total_cutoff // self.compress_ratio
+        elif self.compress_ratio > 1:
+            actual_n_compressed = n_compressed_global
+        else:
+            actual_n_compressed = 0
+
         offset = sq_global  # compressed indices follow vanilla KV in kv_full
 
         if (
             self.compressor is not None
             and self.compress_ratio > 1
             and n_compressed_local > 0
+            and actual_n_compressed > 0
         ):
             # inside the compressor, we will all-gather all the compressed KV
             compressed_kv_global = self.compressor(
@@ -1941,7 +1954,7 @@ class CompressedSparseAttention(FleetLayer):
         indexer_loss = None
         tilelang_indexer_loss_state = None
 
-        if self.compress_ratio > 1 and n_compressed_global > 0:
+        if self.compress_ratio > 1 and n_compressed_global > 0 and actual_n_compressed > 0:
             if self.indexer is not None:
                 x_det = x.detach()
                 qr_det = qr.detach()
