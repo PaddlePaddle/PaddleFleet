@@ -1121,40 +1121,14 @@ class Compressor(nn.Layer):
         # CP: gather projected KV globally before pooling (Miles pattern).
         # This lets the compressor pool across the full sequence while keeping
         # communication cheap (projected dim << hidden_size).
+        # After all-gather, kv/score are global and sq is updated to sq_global.
+        # The rest of the compression logic is shared with the non-CP path.
         if cp_group is not None and getattr(cp_group, "nranks", 1) > 1:
             kv = all_gather_cp(kv, dim=1, group=cp_group)
             score = all_gather_cp(score, dim=1, group=cp_group)
-            b, sq_global, _ = kv.shape
-            # Pool globally, then slice back to local rank's range
-            cutoff = (sq_global // ratio) * ratio
-            if cutoff < sq_global:
-                kv = kv[:, :cutoff, :]
-                score = score[:, :cutoff, :]
-            n_compressed = cutoff // ratio
-            kv = kv.reshape([b, n_compressed, ratio, -1])
-            score = score.reshape([b, n_compressed, ratio, -1])
-            score = score + self.ape.reshape([1, 1, ratio, -1])
-            if self.overlap:
-                kv = self._overlap_transform(kv, fill_value=0)
-                score = self._overlap_transform(score, fill_value=float("-inf"))
-            kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
-            kv = self.norm(kv.cast(x.dtype))
-            if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
-                kv = _apply_rope(
-                    kv,
-                    self.head_dim - self.qk_pos_emb_head_dim,
-                    self.qk_pos_emb_head_dim,
-                    self.rotary_pos_emb,
-                    self.config,
-                    n_compressed,
-                    ratio=ratio,
-                    position_offset=0,  # global compressed KV starts at 0
-                )
-            if self.rotate:
-                kv = rotate_activation(kv)
-            return kv
+            b, sq, _ = kv.shape
 
-        # Non-CP path (original logic)
+        # Shared compression logic for both CP and non-CP paths.
         if startend_row_indices is not None:
             # per-document cutoff, pack contiguously without padding
             doc_lens = get_doc_lens(startend_row_indices)
@@ -1217,6 +1191,7 @@ class Compressor(nn.Layer):
                     score, fill_value=float("-inf"), is_first=is_first
                 )
 
+            # TODO: should we cast?
             # Gated pooling: softmax over the pool_dim, weighted sum.
             kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
             # kv: [b, actual_n_compressed, head_dim]
@@ -1271,17 +1246,9 @@ class Compressor(nn.Layer):
         score = score + self.ape.reshape([1, 1, ratio, -1])
 
         if self.overlap:
-            # Build is_first mask for document boundaries
-            is_first = None
-            if startend_row_indices is not None:
-                is_first = paddle.zeros([n_compressed], dtype="bool")
-                for i in range(len(doc_starts_cutoff)):
-                    idx = int(doc_starts_cutoff[i].item()) // ratio
-                    if idx < n_compressed:
-                        is_first[idx] = True
-            kv = self._overlap_transform(kv, fill_value=0, is_first=is_first)
+            kv = self._overlap_transform(kv, fill_value=0)
             score = self._overlap_transform(
-                score, fill_value=float("-inf"), is_first=is_first
+                score, fill_value=float("-inf")
             )
 
         # TODO: old megatron-aligned logic. This will cause possible acc declining
