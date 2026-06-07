@@ -52,13 +52,6 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
-try:
-    from paddlefleet.transformer.dot_product_attention import (
-        CPDotProductAttention,
-    )
-except Exception:
-    CPDotProductAttention = None
-
 
 def _ec_compatible_rope_apply(
     q_pe,

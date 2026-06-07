@@ -206,6 +206,15 @@ class TransformerConfig(ModelParallelConfig):
     vha_postmix_rank: int | None = None
     """Rank of the VHA postmix low-rank head mixing matrices."""
 
+    vha_q_lora_rank: int | None = None
+    """Rank of the VHA Q low-rank projection. When set, Q projects to this rank per head before premix expansion."""
+
+    swa_vha_q_lora_rank: int | None = None
+    """VHA Q low-rank projection rank for SWA layers. Defaults to swa_head_dim in __post_init__."""
+
+    swa_vha_postmix_rank: int | None = None
+    """VHA postmix rank for SWA layers. Defaults to swa_num_attention_heads // 4."""
+
     attention_value_scale: float | None = None
     """Scale factor applied to the value tensor before attention computation. If None, no scaling
     is applied. Used in architectures like MiMo that scale V for training stability."""
@@ -218,20 +227,20 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to add a learnable attention sink bias for sliding window attention (SWA) layers.
     When True, softmax_type is promoted to 'learnable' for SWA layers."""
 
-    swa_head_dim: int = 192
-    """Dimension of query/key heads for sliding window attention layers."""
+    swa_head_dim: int | None = None
+    """Dimension of query/key heads for sliding window attention layers. Defaults to head_dim."""
 
-    swa_v_head_dim: int = 128
-    """Dimension of value heads for sliding window attention layers."""
+    swa_v_head_dim: int | None = None
+    """Dimension of value heads for sliding window attention layers. Defaults to v_head_dim."""
 
-    swa_num_attention_heads: int = 64
-    """Number of attention heads for sliding window attention layers."""
+    swa_num_attention_heads: int | None = None
+    """Number of attention heads for sliding window attention layers. Defaults to num_attention_heads."""
 
-    swa_num_key_value_heads: int = 8
-    """Number of key/value heads (GQA groups) for sliding window attention layers."""
+    swa_num_key_value_heads: int | None = None
+    """Number of key/value heads (GQA groups) for sliding window attention layers. Defaults to num_key_value_heads."""
 
-    swa_rope_theta: float = 10000
-    """The base period of the RoPE embeddings for sliding window attention layers."""
+    swa_rope_theta: float | None = None
+    """The base period of the RoPE embeddings for sliding window attention layers. Defaults to rope_theta."""
 
     head_wise_swa_ratio: float = 0.0
     """Ratio of KV heads that use sliding window attention within an SWA layer.
@@ -972,6 +981,23 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
+
+        if self.swa_head_dim is None:
+            self.swa_head_dim = self.head_dim
+        if self.swa_v_head_dim is None:
+            self.swa_v_head_dim = self.v_head_dim
+        if self.swa_num_attention_heads is None:
+            self.swa_num_attention_heads = self.num_attention_heads
+        if self.swa_num_key_value_heads is None:
+            self.swa_num_key_value_heads = self.num_key_value_heads
+        if self.swa_rope_theta is None:
+            self.swa_rope_theta = self.rope_theta
+
+        if self.vha_q_lora_rank is None:
+            self.vha_q_lora_rank = self.head_dim
+
+        if self.swa_vha_q_lora_rank is None:
+            self.swa_vha_q_lora_rank = self.swa_head_dim
 
         if self.num_key_value_heads % self.tensor_model_parallel_size != 0:
             raise ValueError(

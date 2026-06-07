@@ -52,6 +52,8 @@ from paddlefleet.models.gpt.mtp_embedding_layer import MTPEmbeddingLayer
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
+    SelfAttentionVHA,
+    SelfAttentionVHASublayersSpec,
 )
 from paddlefleet.transformer.block_attn_res import (
     BlockAttnRes,
@@ -152,6 +154,35 @@ def get_attention_spec(
     align_mode = getattr(config, "gpt_model_use_experimental_version", None)
 
     if attention_layer_type == "self_attention":
+        if getattr(config, "use_vha_attention", False):
+            return LayerSpec(
+                layer=SelfAttentionVHA,
+                extra_kwargs={
+                    "attn_mask_type": attn_mask_type,
+                    "is_mtp_layer": is_mtp_layer,
+                },
+                sublayers_spec=SelfAttentionVHASublayersSpec(
+                    q_proj=backend.column_parallel_linear(),
+                    k_proj=backend.column_parallel_linear(),
+                    v_proj=backend.column_parallel_linear(),
+                    gate_proj=backend.column_parallel_linear()
+                    if getattr(config, "gated_attention", False)
+                    else None,
+                    qkv_proj=backend.column_parallel_linear(),
+                    core_attention=backend.core_attention(),
+                    o_proj=backend.row_parallel_linear(),
+                    q_norm=(
+                        L2Norm
+                        if qk_l2_norm
+                        else (qk_norm if use_qk_norm else IdentityOp)
+                    ),
+                    k_norm=(
+                        L2Norm
+                        if qk_l2_norm
+                        else (qk_norm if use_qk_norm else IdentityOp)
+                    ),
+                ),
+            )
         return LayerSpec(
             layer=SelfAttention,
             extra_kwargs={
