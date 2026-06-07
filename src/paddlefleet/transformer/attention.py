@@ -538,9 +538,18 @@ class Attention(FleetLayer, ABC):
         if self.is_swa:
             if rope_freqs_cis is not None:
                 raise ValueError("Sliding Window Not Support rope_freqs_cis")
-            rotary_pos_emb = swa_rotary_pos_emb
-            rotary_pos_cos = swa_rotary_pos_cos
-            rotary_pos_sin = swa_rotary_pos_sin
+            # Only override with SWA-specific RoPE tables when they exist.
+            # When backbone has no sliding_window configured, GPTEmbedding does
+            # not build swa_rotary_pos_emb, so it is None. Unconditionally
+            # overwriting would silently disable RoPE on MTP-SWA layers
+            # (apply_rotary_pos_emb no-ops on None). Fall back to the regular
+            # RoPE tables in that case so MTP layers still get positional info.
+            if swa_rotary_pos_emb is not None:
+                rotary_pos_emb = swa_rotary_pos_emb
+            if swa_rotary_pos_cos is not None:
+                rotary_pos_cos = swa_rotary_pos_cos
+            if swa_rotary_pos_sin is not None:
+                rotary_pos_sin = swa_rotary_pos_sin
 
         if no_rope:
             rotary_pos_emb = None
