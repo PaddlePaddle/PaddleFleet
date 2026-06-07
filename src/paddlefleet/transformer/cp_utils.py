@@ -25,98 +25,23 @@ so it can be safely imported by both csa_attention.py without circular imports.
 from __future__ import annotations
 
 import paddle
-import paddle.distributed as dist
 from paddle import Tensor
-from paddle.autograd import PyLayer
 
 # ===========================================================================
-# Communication primitives
+# Differentiable all-gather — delegates to ContextParallelAllGatherOp
 # ===========================================================================
-
-
-def _cp_all_gather(local_tensor: Tensor, dim: int, group) -> Tensor:
-    """All-gather for contiguous CP along `dim`. Natural rank order.
-
-    Paddle's dist.stream.all_gather concatenates along axis=0, so we
-    transpose dim<->0 when dim != 0.
-    """
-    nranks = group.nranks
-    if nranks == 1:
-        return local_tensor
-
-    if dim != 0:
-        perm = list(range(local_tensor.ndim))
-        perm[0], perm[dim] = perm[dim], perm[0]
-        local_tensor = local_tensor.transpose(perm).contiguous()
-
-    shape = list(local_tensor.shape)
-    shape[0] = shape[0] * nranks
-    gathered = paddle.empty(shape=shape, dtype=local_tensor.dtype)
-    dist.stream.all_gather(
-        gathered, local_tensor, group=group, use_calc_stream=True
-    )
-
-    if dim != 0:
-        gathered = gathered.transpose(perm).contiguous()
-
-    return gathered
-
-
-def _cp_reduce_scatter(grad_full: Tensor, dim: int, group) -> Tensor:
-    """Reduce-scatter for contiguous CP along `dim`.
-
-    Each rank receives the sum of all ranks' gradients for its local slice.
-    Uses alltoall + local fp32 sum for bf16 precision.
-    """
-    nranks = group.nranks
-    if nranks == 1:
-        return grad_full
-
-    if dim != 0:
-        perm = list(range(grad_full.ndim))
-        perm[0], perm[dim] = perm[dim], perm[0]
-        grad_full = grad_full.transpose(perm).contiguous()
-
-    chunks = paddle.split(grad_full, nranks, axis=0)
-
-    bufs = [
-        paddle.empty(chunks[0].shape, dtype=grad_full.dtype)
-        for _ in range(nranks)
-    ]
-    dist.stream.alltoall(bufs, list(chunks), group=group, use_calc_stream=True)
-
-    result = paddle.stack(bufs).sum(0).cast(grad_full.dtype)
-
-    if dim != 0:
-        result = result.transpose(perm)
-
-    return result
-
-
-# ===========================================================================
-# Differentiable all-gather PyLayer
-# ===========================================================================
-
-
-class _AllGatherCPFunction(PyLayer):
-    """Forward: all-gather. Backward: reduce-scatter. Stores nothing."""
-
-    @staticmethod
-    def forward(ctx, x: Tensor, dim: int, group) -> Tensor:
-        ctx.dim = dim
-        ctx.group = group
-        return _cp_all_gather(x, dim, group)
-
-    @staticmethod
-    def backward(ctx, grad_output: Tensor):
-        return _cp_reduce_scatter(grad_output, ctx.dim, ctx.group)
+from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 
 
 def all_gather_cp(x: Tensor, dim: int, group) -> Tensor:
-    """Differentiable all-gather for contiguous CP."""
+    """Differentiable all-gather for contiguous CP.
+
+    Delegates to ContextParallelAllGatherOp (mode='contiguous_allgather'),
+    which uses NCCL reduce_scatter in backward for axis=0 (more efficient).
+    """
     if group is None or group.nranks <= 1:
         return x
-    return _AllGatherCPFunction.apply(x, dim, group)
+    return ContextParallelAllGatherOp.apply(x, dim, "contiguous_allgather")
 
 
 # ===========================================================================

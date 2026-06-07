@@ -845,16 +845,12 @@ class Compressor(nn.Layer):
     def forward(
         self,
         x: Tensor,
-        position_offset: int = 0,
         cp_group=None,
     ) -> Tensor | None:
         """Compress hidden states into shorter KV sequence.
 
         Args:
             x: [b, sq, hidden_size]
-            position_offset: global position offset for CP (cp_rank * sq_local).
-                When non-zero, all-gathers projected KV before pooling so that
-                the compressor sees the full global context.
             cp_group: CP process group. Required when position_offset > 0.
 
         Returns:
@@ -876,35 +872,7 @@ class Compressor(nn.Layer):
         if cp_group is not None and getattr(cp_group, "nranks", 1) > 1:
             kv = all_gather_cp(kv, dim=1, group=cp_group)
             score = all_gather_cp(score, dim=1, group=cp_group)
-            b, sq_global, _ = kv.shape
-            # Pool globally, then slice back to local rank's range
-            cutoff = (sq_global // ratio) * ratio
-            if cutoff < sq_global:
-                kv = kv[:, :cutoff, :]
-                score = score[:, :cutoff, :]
-            n_compressed = cutoff // ratio
-            kv = kv.reshape([b, n_compressed, ratio, -1])
-            score = score.reshape([b, n_compressed, ratio, -1])
-            score = score + self.ape.reshape([1, 1, ratio, -1])
-            if self.overlap:
-                kv = self._overlap_transform(kv, fill_value=0)
-                score = self._overlap_transform(score, fill_value=float("-inf"))
-            kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
-            kv = self.norm(kv.cast(x.dtype))
-            if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
-                kv = _apply_rope(
-                    kv,
-                    self.head_dim - self.qk_pos_emb_head_dim,
-                    self.qk_pos_emb_head_dim,
-                    self.rotary_pos_emb,
-                    self.config,
-                    n_compressed,
-                    ratio=ratio,
-                    position_offset=0,  # global compressed KV starts at 0
-                )
-            if self.rotate:
-                kv = rotate_activation(kv)
-            return kv
+            b, sq, _ = kv.shape
 
         # Non-CP path (original logic)
         cutoff = (sq // ratio) * ratio
@@ -926,8 +894,9 @@ class Compressor(nn.Layer):
             score = self._overlap_transform(score, fill_value=float("-inf"))
 
         # Gated pooling: softmax over the pool_dim, weighted sum.
-        weights = F.softmax(score, axis=2).cast(kv.dtype)
-        kv = (kv * weights).sum(axis=2)  # [b, n_compressed, head_dim]
+        kv = (kv * F.softmax(score, axis=2)).sum(
+            axis=2
+        )  # [b, n_compressed, head_dim]
 
         kv = self.norm(kv.cast(x.dtype))
 
@@ -941,7 +910,7 @@ class Compressor(nn.Layer):
                 self.config,
                 n_compressed,
                 ratio=ratio,
-                position_offset=position_offset,
+                position_offset=0,
             )
 
         if self.rotate:
@@ -1063,9 +1032,7 @@ class CSAIndexer(nn.Layer):
         q = rotate_activation(q)
 
         # K path: own compressor (applies RoPE and rotation internally)
-        k = self.compressor(
-            x, position_offset=position_offset, cp_group=cp_group
-        )
+        k = self.compressor(x, cp_group=cp_group)
 
         # Weights
         weights, _ = self.linear_weights_proj(x)  # [b, sq, n_heads]
@@ -1547,9 +1514,7 @@ class CompressedSparseAttention(FleetLayer):
             and n_compressed_local > 0
         ):
             # inside the compressor, we will all-gather all the compressed KV
-            compressed_kv_global = self.compressor(
-                x, position_offset=position_offset, cp_group=self.cp_group
-            )
+            compressed_kv_global = self.compressor(x, cp_group=self.cp_group)
             kv_full = paddle.concat([kv_global, compressed_kv_global], axis=1)
         else:
             kv_full = kv_global
