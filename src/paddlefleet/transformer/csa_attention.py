@@ -802,7 +802,7 @@ class Compressor(nn.Layer):
             score = self._overlap_transform(score, fill_value=float("-inf"))
 
         # Gated pooling: softmax over the pool_dim, weighted sum.
-        weights = F.softmax(score, axis=2).cast(kv.dtype)
+        weights = F.softmax(score, axis=2, dtype="float32").cast(kv.dtype)
         kv = (kv * weights).sum(axis=2)  # [b, n_compressed, head_dim]
 
         kv = self.norm(kv.cast(x.dtype))
