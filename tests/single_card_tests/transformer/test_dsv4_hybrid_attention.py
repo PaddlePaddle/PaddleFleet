@@ -356,6 +356,9 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         self.assertEqual(
             attn.core_attention.compress_ratio, ratios[config.num_hidden_layers]
         )
+        self.assertEqual(
+            attn.core_attention.layer_number, config.num_hidden_layers + 1
+        )
 
     def test_non_dense_mtp_spec_uses_mtp_attention_ratio(self):
         ratios = [0, 4, 128, 4, 128]

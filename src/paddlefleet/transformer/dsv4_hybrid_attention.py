@@ -163,6 +163,7 @@ class DSv4HybridAttention(Attention):
             num_key_value_heads=1,
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
+            is_mtp_layer=is_mtp_layer,
             compress_ratio=compress_ratio,
             rotary_pos_emb=self.rotary_pos_emb,
         )

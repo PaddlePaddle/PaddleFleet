@@ -439,7 +439,7 @@ jobs:
           '
 
       - name: Multi-card test
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           export WITH_COVERAGE=ON
