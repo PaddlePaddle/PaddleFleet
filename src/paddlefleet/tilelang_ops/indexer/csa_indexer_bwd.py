@@ -311,6 +311,268 @@ def tl_csa_indexer_bwd_impl(
     return tl_csa_indexer_bwd_kernel
 
 
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_WGMMA: True,
+    }
+)
+def tl_csa_indexer_bwd_det_impl(
+    heads: int,
+    dim: int,
+    topk: int,
+    block_I: int = 32,
+    dtype: str = "bfloat16",
+    num_stages: int = 0,
+    num_threads: int = 128,
+):
+    """Deterministic indexer backward: writes dIndexKComp to per-token buffer (no atomics)."""
+    assert num_stages == 0
+    assert topk == tilelang.math.next_power_of_2(topk)
+    assert topk % block_I == 0
+    assert heads <= 64 and heads % 8 == 0
+
+    batch = T.dynamic("batch")
+    seq_len = T.dynamic("seq_len")
+    seq_len_comp = T.dynamic("seq_len_comp")
+
+    FP32 = "float"
+    INT32 = "int32"
+    sm_scale = dim**-0.5
+
+    index_q_shape = [batch, seq_len, heads, dim]
+    weights_shape = [batch, seq_len, heads]
+    index_k_shape = [batch, seq_len_comp, dim]
+    topk_indices_shape = [batch, seq_len, topk]
+    grad_scores_shape = [batch, seq_len, topk]
+
+    @T.prim_func
+    def tl_csa_indexer_bwd_det_kernel(
+        IndexQ: T.Tensor(index_q_shape, dtype),
+        IndexKComp: T.Tensor(index_k_shape, dtype),
+        Weights: T.Tensor(weights_shape, FP32),
+        TopkIndices: T.Tensor(topk_indices_shape, INT32),
+        OGrad: T.Tensor(grad_scores_shape, FP32),
+        dIndexQ: T.Tensor(index_q_shape, dtype),
+        dWeights: T.Tensor(weights_shape, FP32),
+        dIndexKComp_buf: T.Tensor([batch, seq_len, topk, dim], FP32),
+    ):
+        with T.Kernel(seq_len, batch, threads=num_threads) as (bx, by):
+            i_t = bx
+            i_b = by
+            index_q_shared = T.alloc_shared([heads, dim], dtype=dtype)
+            index_q_scaled_shared = T.alloc_shared([heads, dim], dtype=dtype)
+            weights_shared = T.alloc_shared([heads], dtype=FP32)
+            indices_shared = T.alloc_shared([block_I], dtype=INT32)
+            grad_shared = T.alloc_shared([block_I], dtype=FP32)
+            index_k_shared = T.alloc_shared([block_I, dim], dtype=dtype)
+
+            d_index_q_frag = T.alloc_fragment([heads, dim], dtype=FP32)
+            d_weights_frag = T.alloc_fragment([heads], dtype=FP32)
+            d_index_k_frag = T.alloc_fragment([block_I, dim], dtype=FP32)
+            logits = T.alloc_fragment((block_I, heads), dtype=FP32)
+            d_logits_qk = T.alloc_shared((block_I, heads), dtype=FP32)
+            d_logits_qk_cast1 = T.alloc_fragment((block_I, heads), dtype=dtype)
+            d_logits_qk_cast2 = T.alloc_fragment((block_I, heads), dtype=dtype)
+
+            T.copy(IndexQ[i_b, i_t, :, :], index_q_shared)
+            T.copy(Weights[i_b, i_t, :], weights_shared)
+            T.sync_threads()
+
+            for i, j in T.Parallel(heads, dim):
+                index_q_scaled_shared[i, j] = index_q_shared[i, j] * sm_scale
+            T.sync_threads()
+
+            T.fill(d_index_q_frag, 0)
+            T.fill(d_weights_frag, 0)
+            num_blocks = T.ceildiv(topk, block_I)
+
+            for bi_i in T.serial(num_blocks):
+                for i in T.Parallel(block_I):
+                    indices_shared[i] = TopkIndices[
+                        i_b, i_t, bi_i * block_I + i
+                    ]
+                    grad_shared[i] = OGrad[i_b, i_t, bi_i * block_I + i]
+                T.sync_threads()
+
+                for i, j in T.Parallel(block_I, dim):
+                    index_k_shared[i, j] = T.if_then_else(
+                        (indices_shared[i] >= 0)
+                        & (indices_shared[i] < seq_len_comp),
+                        IndexKComp[i_b, indices_shared[i], j],
+                        0,
+                    )
+                T.sync_threads()
+
+                T.gemm(
+                    index_k_shared,
+                    index_q_scaled_shared,
+                    logits,
+                    transpose_A=False,
+                    transpose_B=True,
+                    clear_accum=True,
+                )
+                T.sync_threads()
+
+                for i, j in T.Parallel(block_I, heads):
+                    logits[i, j] = T.max(logits[i, j], 0)
+                T.sync_threads()
+
+                d_weights_i = T.alloc_fragment((block_I, heads), dtype=FP32)
+                for i, j in T.Parallel(block_I, heads):
+                    d_weights_i[i, j] = T.if_then_else(
+                        (indices_shared[i] >= 0)
+                        & (indices_shared[i] < seq_len_comp),
+                        grad_shared[i] * logits[i, j],
+                        0,
+                    )
+                T.reduce_sum(d_weights_i, d_weights_frag, dim=0, clear=False)
+
+                for i, j in T.Parallel(block_I, heads):
+                    d_logits_qk[i, j] = T.if_then_else(
+                        (
+                            (indices_shared[i] >= 0)
+                            & (indices_shared[i] < seq_len_comp)
+                        )
+                        & (logits[i, j] > 0),
+                        grad_shared[i] * weights_shared[j],
+                        0,
+                    )
+                T.sync_threads()
+
+                T.copy(d_logits_qk, d_logits_qk_cast1)
+                T.gemm(
+                    d_logits_qk_cast1,
+                    index_k_shared,
+                    d_index_q_frag,
+                    transpose_A=True,
+                    transpose_B=False,
+                    clear_accum=False,
+                )
+
+                T.copy(d_logits_qk, d_logits_qk_cast2)
+                T.gemm(
+                    d_logits_qk_cast2,
+                    index_q_scaled_shared,
+                    d_index_k_frag,
+                    transpose_A=False,
+                    transpose_B=False,
+                    clear_accum=True,
+                )
+
+                # Deterministic: write to per-token buffer (no atomics)
+                for i, j in T.Parallel(block_I, dim):
+                    dIndexKComp_buf[i_b, i_t, bi_i * block_I + i, j] = (
+                        T.if_then_else(
+                            (indices_shared[i] >= 0)
+                            & (indices_shared[i] < seq_len_comp),
+                            d_index_k_frag[i, j],
+                            0,
+                        )
+                    )
+                # Prevent the race condition: threads in the warp might overwrite topk in the next loop
+                T.sync_threads()
+
+            for i, j in T.Parallel(heads, dim):
+                d_index_q_frag[i, j] = d_index_q_frag[i, j] * sm_scale
+
+            T.copy(d_index_q_frag, dIndexQ[i_b, i_t, :, :])
+            T.copy(d_weights_frag, dWeights[i_b, i_t, :])
+
+    return tl_csa_indexer_bwd_det_kernel
+
+
+@tilelang.jit(
+    out_idx=[-1],
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    },
+)
+def dindexk_reduce(
+    B,
+    S,
+    S_comp,
+    topk,
+    D,
+    BK=4,
+    threads=128,
+    indices_dtype=T.int32,
+    accum_dtype=T.float32,
+):
+    """Deterministic reduction for dIndexKComp using CSR structure."""
+    buf_shape = [B, S, topk, D]
+    sort_perm_shape = [B, S * topk]
+    seg_offsets_shape = [B, S_comp + 1]
+    out_shape = [B, S_comp, D]
+
+    @T.prim_func
+    def dindexk_reduce_kernel(
+        dIndexKComp_buf: T.Tensor(buf_shape, accum_dtype),
+        sort_perm: T.Tensor(sort_perm_shape, indices_dtype),
+        seg_offsets: T.Tensor(seg_offsets_shape, indices_dtype),
+        dIndexKComp: T.Tensor(out_shape, accum_dtype),
+    ):
+        with T.Kernel(T.ceildiv(S_comp, BK), B, threads=threads) as (bk, by):
+            acc = T.alloc_fragment([D], accum_dtype)
+
+            for ki in range(BK):
+                k = bk * BK + ki
+                if k < S_comp:
+                    T.clear(acc)
+                    start = seg_offsets[by, k]
+                    end = seg_offsets[by, k + 1]
+
+                    for fi in T.serial(end - start):
+                        flat_pos = sort_perm[by, start + fi]
+                        s_idx = flat_pos // topk
+                        t_idx = flat_pos % topk
+                        for d_i in T.Parallel(D):
+                            acc[d_i] += dIndexKComp_buf[by, s_idx, t_idx, d_i]
+
+                    for d_i in T.Parallel(D):
+                        dIndexKComp[by, k, d_i] = acc[d_i]
+
+    return dindexk_reduce_kernel
+
+
+def _build_indexer_csr_index(topk_indices, S_comp):
+    """Build CSR inverse index for deterministic dIndexKComp reduction.
+
+    Args:
+        topk_indices: [B, S, topk] int32.
+        S_comp: int — number of compressed KV positions.
+
+    Returns:
+        sort_perm:   [B, S*topk] int32.
+        seg_offsets: [B, S_comp+1] int32.
+    """
+    B, S, topk = topk_indices.shape
+    flat_idx = topk_indices.reshape([B, S * topk])
+
+    flat_idx_shifted = paddle.where(
+        flat_idx < 0,
+        paddle.full_like(flat_idx, S_comp),
+        flat_idx,
+    )
+
+    sort_perm = paddle.argsort(flat_idx_shifted, axis=1, stable=True).cast(
+        "int32"
+    )
+    sorted_idx = paddle.take_along_axis(
+        flat_idx_shifted, sort_perm.cast("int64"), axis=1
+    )
+
+    boundaries = (
+        paddle.arange(S_comp + 1, dtype="int64").unsqueeze(0).expand([B, -1])
+    )
+    seg_offsets = paddle.searchsorted(sorted_idx, boundaries).cast("int32")
+
+    return sort_perm, seg_offsets
+
+
 def csa_indexer_bwd_interface(
     index_q,
     weights,
@@ -345,6 +607,10 @@ def csa_indexer_bwd_interface(
         num_stages,
     )
 
+    deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+        "FLAGS_cudnn_deterministic"
+    ]
+
     batch, seq_len, heads, dim = index_q.shape
     _, seq_len_comp, _ = index_k_comp.shape
     topk_effective = topk_indices.shape[-1]
@@ -371,34 +637,68 @@ def csa_indexer_bwd_interface(
             [grad_scores, grad_pad], axis=-1
         ).contiguous()
 
-    kernel = tl_csa_indexer_bwd_impl(
-        heads=heads,
-        dim=dim,
-        topk=padded_topk,
-        block_I=block_I,
-        dtype=_tilelang_dtype(index_q),
-        num_stages=num_stages,
-        num_threads=num_threads,
-    )
-
-    grad_q = paddle.empty_like(index_q)
-    grad_weights = paddle.empty_like(weights, dtype="float32")
-    grad_k_comp = paddle.zeros_like(index_k_comp, dtype="float32")
-
     if weights.dtype != paddle.float32:
         weights = weights.cast("float32").contiguous()
     if grad_scores.dtype != paddle.float32:
         grad_scores = grad_scores.cast("float32").contiguous()
 
-    kernel(
-        index_q,
-        index_k_comp,
-        weights,
-        topk_indices,
-        grad_scores,
-        grad_q,
-        grad_weights,
-        grad_k_comp,
-    )
+    grad_q = paddle.empty_like(index_q)
+    grad_weights = paddle.empty_like(weights, dtype="float32")
+
+    if not deterministic:
+        # === Non-deterministic path (atomic_add) ===
+        kernel = tl_csa_indexer_bwd_impl(
+            heads=heads,
+            dim=dim,
+            topk=padded_topk,
+            block_I=block_I,
+            dtype=_tilelang_dtype(index_q),
+            num_stages=num_stages,
+            num_threads=num_threads,
+        )
+        grad_k_comp = paddle.zeros([batch, seq_len_comp, dim], dtype="float32")
+        kernel(
+            index_q,
+            index_k_comp,
+            weights,
+            topk_indices,
+            grad_scores,
+            grad_q,
+            grad_weights,
+            grad_k_comp,
+        )
+    else:
+        # === Deterministic path (per-token buffer + CSR reduction) ===
+        kernel_det = tl_csa_indexer_bwd_det_impl(
+            heads=heads,
+            dim=dim,
+            topk=padded_topk,
+            block_I=block_I,
+            dtype=_tilelang_dtype(index_q),
+            num_stages=num_stages,
+            num_threads=num_threads,
+        )
+        dindexk_buf = paddle.empty(
+            [batch, seq_len, padded_topk, dim], dtype="float32"
+        )
+        kernel_det(
+            index_q,
+            index_k_comp,
+            weights,
+            topk_indices,
+            grad_scores,
+            grad_q,
+            grad_weights,
+            dindexk_buf,
+        )
+
+        # CSR-ordered deterministic reduction
+        sort_perm, seg_offsets = _build_indexer_csr_index(
+            topk_indices, seq_len_comp
+        )
+        reduce_kernel = dindexk_reduce(
+            batch, seq_len, seq_len_comp, padded_topk, dim
+        )
+        grad_k_comp = reduce_kernel(dindexk_buf, sort_perm, seg_offsets)
 
     return grad_q, grad_weights, grad_k_comp
