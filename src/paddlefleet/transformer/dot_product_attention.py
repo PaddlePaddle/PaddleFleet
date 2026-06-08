@@ -326,12 +326,26 @@ class DotProductAttention(FleetLayer):
             use_rr_flash_attention and self.config.flashmask_use_varlen
         ), "flashmask_use_varlen does not support refined recompute now."
 
+        use_eager = self.config._attn_implementation == "eager"
+
+        assert self.is_swa and not use_eager, (
+            "SWA doesn't support _attn_implementation is eager"
+        )
+
         if self.context_parallel_size > 1:
             assert packed_seq_params is None, (
                 "Packed sequence is not supported by context_parallel_size > 1 now."
             )
             assert not self.config.flashmask_use_varlen, (
                 "flashmask_use_varlen does not support context parallel now."
+            )
+            assert (
+                (
+                    query.dtype == paddle.bfloat16
+                    or query.dtype == paddle.float16
+                )
+                and attn_mask_startend_row_indices is not None
+                and not use_eager
             )
             attn_mask_startend_row_indices = (
                 self.expand_attn_mask_startend_row_indices_for_cp(
@@ -346,8 +360,6 @@ class DotProductAttention(FleetLayer):
 
         bsz, q_len, num_heads, q_head_dim = query.shape
         v_head_dim = value.shape[-1]
-
-        use_eager = self.config._attn_implementation == "eager"
 
         if use_eager and packed_seq_params is not None:
             raise ValueError(
