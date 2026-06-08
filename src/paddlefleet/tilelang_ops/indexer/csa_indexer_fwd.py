@@ -29,6 +29,12 @@
 #       Standard selected-topk semantics for sparse training.
 #   - Phase 1 (csa_dense_mode=True): this kernel is never called.
 #
+# Varlen support: the kernel accepts a ValidRange [B, S, 2] tensor specifying
+# per-query [BOS, EOS) valid compressed K range. This enables document-mask
+# (packed multi-document) training where queries must not attend to compressed
+# keys from other documents. When ValidRange is not provided, the interface
+# constructs it from ratio + seq_offset (causal-only mode).
+#
 # Padding: topk_effective is internally padded to the next power-of-2 that is
 # also divisible by block_K (for bitonic sort alignment). Padded slots in the
 # output are filled with -1 (indices) and 0.0 (scores). The caller receives
@@ -74,6 +80,7 @@ def tl_csa_indexer_topk_fwd_impl(
     index_q_shape = [batch, seq_len, heads, dim]
     weights_shape = [batch, seq_len, heads]
     index_k_shape = [batch, seq_len_comp, dim]
+    valid_range_shape = [batch, seq_len, 2]
     topk_indices_shape = [batch, seq_len, topk]
     topk_scores_shape = [batch, seq_len, topk]
 
@@ -115,13 +122,18 @@ def tl_csa_indexer_topk_fwd_impl(
         IndexQ: T.Tensor(index_q_shape, dtype),
         IndexKComp: T.Tensor(index_k_shape, dtype),
         Weights: T.Tensor(weights_shape, FP32),
+        ValidRange: T.Tensor(valid_range_shape, INT32),
         TopkIndices: T.Tensor(topk_indices_shape, INT32),
         TopkScores: T.Tensor(topk_scores_shape, FP32),
     ):
         with T.Kernel(seq_len, batch, threads=num_threads) as (bx, by):
             i_t = bx
             i_b = by
-            valid_end = T.min((i_t + seq_offset + 1) // ratio, seq_len_comp)
+
+            valid_start = ValidRange[i_b, i_t, 0]
+            valid_end = ValidRange[i_b, i_t, 1]
+            start_block = valid_start // block_K
+            num_valid_blocks = T.ceildiv(valid_end, block_K) - start_block
 
             topk_index_shared = T.alloc_shared([N], dtype=INT32)
             topk_value_shared = T.alloc_shared([N], dtype=FP32)
@@ -137,19 +149,19 @@ def tl_csa_indexer_topk_fwd_impl(
             T.copy(Weights[i_b, i_t, :], weights_shared)
             T.sync_threads()
 
-            for i, j in T.Parallel(heads, dim):
-                index_q_shared[i, j] = index_q_shared[i, j] * sm_scale
+            # Fold sm_scale into weights (fp32) to avoid bf16 truncation on Q
+            for i in T.Parallel(heads):
+                weights_shared[i] = weights_shared[i] * sm_scale
             T.sync_threads()
 
-            num_blocks = T.ceildiv(valid_end, block_K)
-            for bk_i in T.Pipelined(num_blocks, num_stages=num_stages):
-                k_st = bk_i * block_K
-                k_ed = T.min((bk_i + 1) * block_K, valid_end)
+            for bk_i in T.Pipelined(num_valid_blocks, num_stages=num_stages):
+                k_st = (start_block + bk_i) * block_K
+                k_ed = T.min(k_st + block_K, valid_end)
 
                 index_k_shared = T.alloc_shared([block_K, dim], dtype=dtype)
                 for i, j in T.Parallel(block_K, dim):
                     index_k_shared[i, j] = T.if_then_else(
-                        k_st + i < k_ed,
+                        (k_st + i >= valid_start) & (k_st + i < k_ed),
                         IndexKComp[i_b, k_st + i, j],
                         0,
                     )
@@ -174,26 +186,30 @@ def tl_csa_indexer_topk_fwd_impl(
                 T.reduce_sum(logits, logits_sum, dim=1)
                 T.sync_threads()
 
+                # Buffer management uses relative offset (iteration count)
+                k_rel = bk_i * block_K
                 offset = T.alloc_var(INT32)
-                if k_st >= topk:
-                    offset = topk + (k_st % topk)
+                if k_rel >= topk:
+                    offset = topk + (k_rel % topk)
                 else:
-                    offset = k_st
+                    offset = k_rel
                 T.sync_threads()
 
                 for i in T.Parallel(block_K):
-                    if k_st + i >= valid_end:
+                    valid_flag = (k_st + i >= valid_start) & (
+                        k_st + i < valid_end
+                    )
+                    if not valid_flag:
                         logits_sum[i] = float("-inf")
                     j = offset + i
                     topk_index_shared[j] = T.if_then_else(
-                        k_st + i < valid_end,
-                        k_st + i,
-                        -1,
+                        valid_flag, k_st + i, -1
                     )
                     topk_value_shared[j] = logits_sum[i]
                 T.sync_threads()
 
-                if k_ed > topk and k_ed % topk == 0:
+                k_rel_ed = (bk_i + 1) * block_K
+                if k_rel_ed > topk and k_rel_ed % topk == 0:
                     bitonic_sort(topk_index_shared, topk_value_shared)
 
             bitonic_sort(topk_index_shared, topk_value_shared)
@@ -320,6 +336,32 @@ def _validate_interface_inputs(
         raise ValueError(f"num_stages must be 0, got {num_stages}")
 
 
+def _build_causal_valid_range(
+    batch: int,
+    seq_len: int,
+    seq_len_comp: int,
+    ratio: int,
+    seq_offset: int,
+) -> "paddle.Tensor":
+    """Build ValidRange [B, S, 2] for causal-only mode (no varlen).
+
+    Equivalent to the original kernel behavior:
+        valid_start = 0
+        valid_end = min((t + seq_offset + 1) // ratio, seq_len_comp)
+    """
+    q_pos = paddle.arange(seq_len, dtype="int32") + seq_offset
+    valid_end = paddle.minimum(
+        (q_pos + 1) // ratio,
+        paddle.full([seq_len], seq_len_comp, dtype="int32"),
+    )
+    # [S, 2] -> [1, S, 2] -> [B, S, 2]
+    valid_start = paddle.zeros([seq_len], dtype="int32")
+    vr = paddle.stack([valid_start, valid_end], axis=-1).unsqueeze(0)
+    if batch > 1:
+        vr = vr.expand([batch, -1, -1])
+    return vr.contiguous()
+
+
 def csa_indexer_topk_fwd_interface(
     index_q,
     index_k_comp,
@@ -327,6 +369,7 @@ def csa_indexer_topk_fwd_interface(
     ratio: int,
     topk_effective: int,
     seq_offset: int = 0,
+    valid_range: paddle.Tensor | None = None,
     block_K: int = 32,
     num_stages: int = 0,
     num_threads: int = 128,
@@ -338,11 +381,15 @@ def csa_indexer_topk_fwd_interface(
         index_k_comp: [B, S_comp, D_i] bf16/fp16, BSD layout.
         weights: [B, S, H_i] fp32 or castable to fp32.
         ratio: compression ratio. Valid compressed range for query t is
-            [0, (t + seq_offset + 1) // ratio).
-        topk_effective: requested output top-k. Phase 2 may set this to
+            [0, (t + seq_offset + 1) // ratio). Used only when
+            valid_range is None to build causal-only ValidRange.
+        topk_effective: requested output top-k width. Phase 2 may set this to
             S_comp; Phase 3 usually sets this to dsa_indexer_topk.
         seq_offset: global position offset for the first local query token.
-            In CP mode, this is cp_rank * sq_local.
+            Used only when valid_range is None. In CP mode, cp_rank * sq_local.
+        valid_range: [B, S, 2] int32 tensor specifying per-query [BOS, EOS)
+            valid compressed K range (left-closed, right-open). If None,
+            automatically built from ratio + seq_offset (causal-only mode).
 
     Returns:
         topk_indices: [B, S, topk_effective] int32, invalid slots are -1.
@@ -358,6 +405,28 @@ def csa_indexer_topk_fwd_interface(
     )
 
     batch, seq_len, heads, dim = index_q.shape
+    seq_len_comp = index_k_comp.shape[1]
+
+    # Build or validate ValidRange
+    if valid_range is None:
+        valid_range = _build_causal_valid_range(
+            batch, seq_len, seq_len_comp, ratio, int(seq_offset)
+        )
+    else:
+        _require_tensor("valid_range", valid_range)
+        if valid_range.ndim != 3 or valid_range.shape[2] != 2:
+            raise ValueError(
+                f"valid_range must have shape [B, S, 2], got {_shape(valid_range)}"
+            )
+        if valid_range.shape[0] != batch or valid_range.shape[1] != seq_len:
+            raise ValueError(
+                f"valid_range shape {_shape(valid_range)} incompatible with "
+                f"index_q shape {_shape(index_q)}"
+            )
+        if valid_range.dtype != paddle.int32:
+            valid_range = valid_range.cast("int32")
+        valid_range = valid_range.contiguous()
+
     padded_topk = _next_power_of_2(topk_effective)
     if padded_topk % block_K != 0:
         padded_topk = ((padded_topk + block_K - 1) // block_K) * block_K
@@ -385,6 +454,7 @@ def csa_indexer_topk_fwd_interface(
         index_q,
         index_k_comp,
         weights,
+        valid_range,
         topk_indices,
         topk_scores,
     )
