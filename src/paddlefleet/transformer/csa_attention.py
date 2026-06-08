@@ -887,7 +887,7 @@ class Compressor(nn.Layer):
         score = score.reshape([b, n_compressed, ratio, -1])
 
         # APE: [ratio, coff * head_dim] -> [1, 1, ratio, coff * head_dim]
-        score = score + self.ape.reshape([1, 1, ratio, -1])
+        score = score + self.ape.reshape([1, 1, ratio, -1]).cast(score.dtype)
 
         if self.overlap:
             kv = self._overlap_transform(kv, fill_value=0)
@@ -1740,7 +1740,7 @@ class CompressedSparseAttention(FleetLayer):
             output = csa_sparse_attn(
                 query,
                 kv_full,
-                attn_sink.cast("float32"),
+                attn_sink.cast("bfloat16").cast("float32"),
                 topk_idxs,
                 softmax_scale,
             )
@@ -1748,7 +1748,7 @@ class CompressedSparseAttention(FleetLayer):
             output = unfused_compressed_sparse_attn(
                 query,
                 kv_full,
-                attn_sink.cast("float32"),
+                attn_sink.cast("bfloat16").cast("float32"),
                 topk_idxs,
                 softmax_scale,
             )
