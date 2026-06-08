@@ -330,10 +330,6 @@ def _dsv4_hc_sinkhorn_torch_backward(
     grad_t = torch.utils.dlpack.from_dlpack(
         paddle_dlpack.to_dlpack(grad_output.contiguous())
     ).to(torch.bfloat16)
-    # Match Megatron's training graph: Sinkhorn receives a transposed-view grad
-    # from H_res.T @ residual, so the last two dimensions have stride (1, n).
-    grad_t = grad_t.transpose(-1, -2).contiguous().transpose(-1, -2)
-
     with torch.enable_grad():
         logits_t = logits_t.detach().requires_grad_(True)
         row_max = logits_t.max(dim=-1, keepdim=True).values
@@ -895,8 +891,7 @@ class HyperConnectionModule(nn.Layer):
         C = self.hidden_size
         num_tokens = math.prod(leading_shape)
 
-        # Megatron clean path applies H_res.T to residual.
-        h_res_batched = h_res.astype(residual.dtype).transpose([0, 1, 3, 2]).reshape([num_tokens, n, n])
+        h_res_batched = h_res.reshape([num_tokens, n, n])
         # [..., n*C] -> [..., n, C] -> [batch, n, C]
         residual_batched = residual.reshape([num_tokens, n, C])
 

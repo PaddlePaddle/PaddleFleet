@@ -178,7 +178,7 @@ class DSv4HybridAttention(Attention):
     """DSv4 Hybrid Attention with CSA core attention, inverse RoPE, and grouped output.
 
     This class:
-    1. Builds per-layer RotaryEmbedding (with configurable base for compressed layers)
+    1. Builds RotaryEmbedding or YarnRotaryEmbedding from config.rope_type
     2. Builds CompressedSparseAttention as core attention
     3. Applies inverse RoPE on attention output
     4. Performs grouped low-rank output projection
@@ -220,19 +220,17 @@ class DSv4HybridAttention(Attention):
             compress_ratio = self.config.csa_compress_ratios[layer_idx]
         else:
             compress_ratio = self.config.csa_compress_ratios[layer_number]
-        # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
         if compress_ratio > 1:
             rope_base = config.csa_compress_rotary_base
 
-        use_compressed_yarn = compress_ratio > 1
-        if not use_compressed_yarn:
+        if config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
                 self.qk_pos_emb_head_dim,
                 rotary_percent=getattr(config, "rotary_percent", 1.0),
                 rotary_base=rope_base,
             )
-        else:
+        elif config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.qk_pos_emb_head_dim,
                 rotary_base=rope_base,
@@ -244,6 +242,11 @@ class DSv4HybridAttention(Attention):
                 beta_slow=getattr(config, "beta_slow", 1),
                 mscale=getattr(config, "mscale", 1.0),
                 mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported RoPE type: {config.rope_type}, supported types are "
+                "'rope' and 'yarn'"
             )
 
         self.core_attention = build_spec_layer(
