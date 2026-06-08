@@ -28,6 +28,7 @@ from paddle.autograd import PyLayer
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
+    mark_as_sequence_parallel_parameter,
 )
 
 if TYPE_CHECKING:
@@ -371,6 +372,29 @@ class MoELayer(nn.Layer):
             self.shared_experts = self.shared_expert_class(**shared_expert_args)
         else:
             self.shared_experts = None
+
+        # when sp is enabled, mark shared_experts as sequence parallel, because:
+        # 1. shared_experts only process local tokens which shape is [s/tp,b,h]
+        # 2. shared_experts'weight and bias will not be splited across tp ranks
+        if (
+            self.sequence_parallel
+            and self.expert_model_parallel_size > 1
+            and self.shared_experts is not None
+        ):
+            mark_as_sequence_parallel_parameter(
+                self.shared_experts.up_gate_proj.weight
+            )
+            if shared_expert_config.use_bias:
+                mark_as_sequence_parallel_parameter(
+                    self.shared_experts.up_gate_proj.bias
+                )
+            mark_as_sequence_parallel_parameter(
+                self.shared_experts.down_proj.weight
+            )
+            if shared_expert_config.use_bias:
+                mark_as_sequence_parallel_parameter(
+                    self.shared_experts.down_proj.bias
+                )
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
