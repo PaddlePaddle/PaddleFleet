@@ -1055,12 +1055,18 @@ class DSAIndexerLossLoggingHelper:
     """Helper class for logging sparse attention indexer losses across layers and ranks."""
 
     tracker = {}
+    num_layers = None
 
     @staticmethod
     def get_total_num_layers(config):
-        return config.num_hidden_layers + (
-            getattr(config, "mtp_num_layers", 0)
-            or getattr(config, "num_nextn_predict_layers", 0)
+        mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
+        nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
+        return config.num_hidden_layers + (mtp_num_layers or nextn_num_layers)
+
+    @staticmethod
+    def register_total_num_layers(config):
+        DSAIndexerLossLoggingHelper.num_layers = (
+            DSAIndexerLossLoggingHelper.get_total_num_layers(config)
         )
 
     @staticmethod
@@ -1100,6 +1106,15 @@ class DSAIndexerLossLoggingHelper:
         tracker["avg_group"] = None
 
     @staticmethod
+    def _infer_num_layers(num_layers: int | None = None):
+        if num_layers is not None:
+            return num_layers
+        tracker = DSAIndexerLossLoggingHelper.tracker
+        if "values" in tracker:
+            return tracker["values"].shape[0]
+        return DSAIndexerLossLoggingHelper.num_layers
+
+    @staticmethod
     def reduce_loss_in_tracker(num_layers: int | None = None):
         """Collect and reduce the indexer losses across ranks.
 
@@ -1108,6 +1123,7 @@ class DSAIndexerLossLoggingHelper:
         still participate in the collective and do not hang other ranks.
         """
         tracker = DSAIndexerLossLoggingHelper.tracker
+        num_layers = DSAIndexerLossLoggingHelper._infer_num_layers(num_layers)
         if "values" not in tracker:
             if num_layers is None:
                 return
@@ -1159,6 +1175,7 @@ class DSAIndexerLossLoggingHelper:
             num_layers: Total number of layers with indexer metrics.
             csa_compress_ratios: Per-layer CSA compress ratios.
         """
+        num_layers = DSAIndexerLossLoggingHelper._infer_num_layers(num_layers)
         DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(
             num_layers=num_layers
         )
@@ -1235,6 +1252,7 @@ class DSAttention(FleetLayer):
     ):
         super().__init__(config=config)
 
+        DSAIndexerLossLoggingHelper.register_total_num_layers(config)
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
 
