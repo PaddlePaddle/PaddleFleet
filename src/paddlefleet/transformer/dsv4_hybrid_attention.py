@@ -217,6 +217,11 @@ class DSv4HybridAttention(Attention):
         cp_pg = getattr(self, "pg_collection", None)
         cp_pg = cp_pg.cp if cp_pg is not None else None
         cp_size = getattr(cp_pg, "nranks", 1) if cp_pg is not None else 1
+        if cp_size > 1:
+            assert self.config.cp_balance_mode == "contiguous_allgather", (
+                f"DSv4HybridAttention requires cp_balance_mode='contiguous_allgather', "
+                f"got '{self.config.cp_balance_mode}'"
+            )
         cp_rank = (
             getattr(cp_pg, "rank", 0)
             if cp_pg is not None and cp_size > 1

@@ -492,6 +492,8 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.o_lora_rank = 64
         config.sequence_parallel = False
         config.tensor_model_parallel_size = 1
+        config.cp_balance_mode = "contiguous_allgather"
+        config.csa_indexer_backend = "tilelang"
 
         sublayers = DSv4HybridSelfAttentionSublayersSpec(
             linear_q_down_proj=_TestLinear,
@@ -807,6 +809,7 @@ class TestTileLangCSALayerCP(unittest.TestCase):
             csa_tilelang_enable_indexer=True,
             csa_tilelang_enable_sparse_attn=False,
             csa_tilelang_backend="attention_paddle_compat",
+            csa_indexer_backend="tilelang",
             init_method=None,
             init_method_std=0.02,
             layernorm_epsilon=1e-5,

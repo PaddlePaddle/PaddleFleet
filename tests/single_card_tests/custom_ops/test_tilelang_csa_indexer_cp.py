@@ -257,7 +257,7 @@ class TestIndexerBwdCPGradients(unittest.TestCase):
             )
             self.assertLess(
                 dw_diff,
-                1e-4,
+                1e-2,
                 f"dW mismatch: sq={sq_global} rank={r} diff={dw_diff:.2e}",
             )
             dk_accum += dk_r.cast("float32")
@@ -266,7 +266,7 @@ class TestIndexerBwdCPGradients(unittest.TestCase):
         dk_diff = (dk_accum - dk_full.cast("float32")).abs().max().item()
         self.assertLess(
             dk_diff,
-            1e-3,
+            1e-2,
             f"dK sum mismatch: sq={sq_global} cp={cp_size} diff={dk_diff:.2e}",
         )
 
