@@ -342,9 +342,13 @@ class HyperConnectionModule(nn.Layer):
             proj_2d = paddle.matmul(x_2d, weight_out_in, transpose_y=True)
             proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
         else:
+            ori_dtype = x.dtype
             proj, r = self._proj_rms_op(
-                x, self.mapping_proj.weight, self.norm_eps
+                x, self.mapping_proj.weight.astype(ori_dtype), self.norm_eps
             )
+            if not self.config.high_precision_mhc:
+                r = r.astype(ori_dtype)
+
         return proj, r
 
     def _compute_h(
@@ -431,7 +435,11 @@ class HyperConnectionModule(nn.Layer):
             if aggregated.dtype != x.dtype:
                 aggregated = aggregated.astype(x.dtype)
             return aggregated
-        return self._h_aggregate_op(x_streams, h_pre)
+        else:
+            aggregated = self._h_aggregate_op(x_streams, h_pre)
+            if aggregated.dtype != x.dtype:
+                aggregated = aggregated.astype(x.dtype)
+            return aggregated
 
     def apply_h_res(self, h_res: Tensor, residual: Tensor) -> Tensor:
         """
@@ -538,12 +546,17 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (for fused kernel)
             h_post: [..., n] - expansion weights
         """
-        # Compute mappings
-        hidden_states = hidden_states.astype("float32")
-        h_pre, h_post, h_res = self.compute_mappings(hidden_states)
+        with paddle.amp.auto_cast(enable=False):
+            # Compute mappings
+            if (
+                not _use_accuracy_compatible_kernel()
+                and self.config.high_precision_mhc
+            ):
+                hidden_states = hidden_states.astype("float32")
+            h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
-        # Aggregate for layer input
-        aggregated = self.aggregate(hidden_states, h_pre)
+            # Aggregate for layer input
+            aggregated = self.aggregate(hidden_states, h_pre)
 
         return aggregated, h_res, h_post
 
@@ -682,35 +695,43 @@ class HyperConnectionModule(nn.Layer):
         Returns:
             output: [..., n*C] - final output after all operations
         """
-        x, bias = layer_output_with_bias
+        with paddle.amp.auto_cast(enable=False):
+            x, bias = layer_output_with_bias
 
-        # Fast path: no dropout — use fused/native h_post_bda kernel
-        if dropout_prob == 0.0 or not training:
-            leading_shape = original_residual.shape[:-1]
-            n = self.n
-            C = self.hidden_size
-            orig_reshaped = original_residual.reshape(
-                [*leading_shape, n, C]
-            ).astype("float32")
-            x = x.astype("float32")
-            if bias is not None:
-                bias = bias.astype("float32")
-            output = self._h_post_bda_op(h_res, orig_reshaped, h_post, x, bias)
-            return output.reshape([*leading_shape, n * C])
+            # Fast path: no dropout — use fused/native h_post_bda kernel
+            if not _use_accuracy_compatible_kernel() and (
+                dropout_prob == 0.0 or not training
+            ):
+                leading_shape = original_residual.shape[:-1]
+                n = self.n
+                C = self.hidden_size
+                orig_reshaped = original_residual.reshape(
+                    [*leading_shape, n, C]
+                )
+                if self.config.high_precision_mhc:
+                    orig_reshaped = orig_reshaped.astype("float32")
+                    x = x.astype("float32")
+                    if bias is not None:
+                        bias = bias.astype("float32")
+                output = self._h_post_bda_op(
+                    h_res, orig_reshaped, h_post, x, bias
+                )
+                return output.reshape([*leading_shape, n * C])
 
-        # Slow path: dropout required — sequential ops
-        mixed = self.apply_h_res(h_res, original_residual)
-        x_expanded = self._apply_h_post(x, h_post)
-        bias_expanded = (
-            self._apply_h_post(bias, h_post) if bias is not None else None
-        )
+            # Sequential path: used when dropout required OR accuracy-compatible kernel is NOT enabled
+            mixed = self.apply_h_res(h_res, original_residual)
 
-        if bias_expanded is not None:
-            x_expanded = x_expanded + bias_expanded
-        out = paddle.nn.functional.dropout(
-            x_expanded, p=dropout_prob, training=training
-        )
-        output = out + mixed
+            x_expanded = self._apply_h_post(x, h_post)
+            bias_expanded = (
+                self._apply_h_post(bias, h_post) if bias is not None else None
+            )
+
+            if bias_expanded is not None:
+                x_expanded = x_expanded + bias_expanded
+            out = paddle.nn.functional.dropout(
+                x_expanded, p=dropout_prob, training=training
+            )
+            output = out + mixed
 
         return output
 

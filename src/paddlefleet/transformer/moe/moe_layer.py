@@ -319,11 +319,23 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.moe_sublayers.mlp_spec
 
-        if self.moe_expert_fusion:
-            if self.fp8:
-                assert self.using_sonic_moe or self.moe_deep_gemm, (
-                    "For fp8 grouped_gemm, either set using_sonic_moe=True or moe_deep_gemm=True."
-                )
+        use_fused_weight = self.moe_expert_fusion
+        if (
+            self.fp8
+            and (self.moe_expert_fusion is False)
+            and self.moe_deep_gemm
+        ):
+            raise ValueError(
+                "For fp8 deep_gemm (i.e. use k-grouped gemm in backward), moe_expert_fusion must be True."
+            )
+        if self.fp8 and self.moe_expert_fusion and self.moe_deep_gemm is False:
+            use_fused_weight = False
+        if self.using_sonic_moe:
+            assert use_fused_weight is True, (
+                "for sonic moe, expert weight must be fused."
+            )
+
+        if use_fused_weight:
             if self.using_sonic_moe:
                 # TODO: replace grouped_gemm_experts with fusion_experts
                 self.grouped_gemm_experts = SonicMoEExpert(

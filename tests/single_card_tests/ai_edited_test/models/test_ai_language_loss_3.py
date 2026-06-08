@@ -199,6 +199,7 @@ class TestLanguageLossForwardWithListLogits(unittest.TestCase):
         mock_config.add_mtp_loss = True
         mock_config.mtp_loss_scaling_factor = 0.5
         mock_config.gpt_model_use_experimental_version = True
+        mock_config.fused_linear_ce_loss_chunk = 0
 
         loss_fn = LanguageLoss(config=mock_config)
         vocab_size = 128

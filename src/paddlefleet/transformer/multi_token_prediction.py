@@ -390,6 +390,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             # so the input's shape is [s, b, 2*h].
             # The output will be sent to the following transformer layer,
             # so the output's shape should be [s, b, h].
+            use_bias = False
+            if self.config.gpt_model_use_experimental_version:
+                use_bias = self.config.use_bias
             self.eh_proj = build_spec_layer(
                 self.sublayers_spec.eh_proj,
                 self.config.hidden_size * 2,
@@ -397,7 +400,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
-                bias=False,
+                bias=use_bias,
                 skip_bias_add=False,
                 is_expert=False,
             )
@@ -454,7 +457,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                     and self.config.experimental_dataflow
                 ):
                     mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                        mtp_hidden_inputs_mask, axis=1
+                        mtp_hidden_inputs_mask,
+                        axis=1,
+                        mode=self.config.cp_balance_mode,
                     )
                 # when sp enable
                 if self.sequence_parallel:
@@ -515,7 +520,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                     # In EB dataflow and CP size > 1, mtp_hidden_inputs_mask is [b, s, 1];
                     # we need to scatter it to [b, s/cp, 1] here.
                     mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                        mtp_hidden_inputs_mask, axis=1
+                        mtp_hidden_inputs_mask,
+                        axis=1,
+                        mode=self.config.cp_balance_mode,
                     )
 
                 # when sp enable
@@ -565,6 +572,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         attn_mask_startend_row_indices: paddle.Tensor | None = None,
         mtp_hidden_inputs_mask: paddle.Tensor | None = None,
         input_ids: paddle.Tensor | None = None,
+        position_ids: paddle.Tensor | None = None,
         **kwargs,
     ) -> paddle.Tensor:
         """
@@ -593,6 +601,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
                 "is_mtp": True,
                 "input_ids": input_ids,
+                "position_ids": position_ids,
             }
             rst_dict = self.transformer_layer(input_dict)
 
@@ -652,6 +661,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             packed_seq_params = kwargs.get("packed_seq_params", None)
             mtp_hidden_inputs_mask = kwargs.get("mtp_hidden_inputs_mask", None)
             input_ids = kwargs.get("input_ids", None)
+            position_ids = None
+            if self.config.gpt_model_use_experimental_version:
+                position_ids = kwargs.get("position_ids", None)
             return recompute(
                 forward_func,
                 hidden_states=hidden_states
@@ -687,6 +699,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 if mtp_hidden_inputs_mask is not None
                 else None,
                 input_ids=input_ids if input_ids is not None else None,
+                position_ids=position_ids if position_ids is not None else None,
             )
 
         if self.config.recompute_method == "uniform":
@@ -767,7 +780,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 and self.config.experimental_dataflow
             ):
                 decoder_input = ContextParallelScatterOp.apply(
-                    decoder_input, axis=1
+                    decoder_input, axis=1, mode=self.config.cp_balance_mode
                 )
 
             if self.config.sequence_parallel:

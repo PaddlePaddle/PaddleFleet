@@ -66,6 +66,9 @@ print_info "Detected CUDA version: $DETECTED_CUDA_VERSION"
 
 # Check if the detected CUDA version is supported
 case "$DETECTED_CUDA_VERSION" in
+    "13.2")
+        CUDA_SUFFIX="cu132"
+        ;;
     "13.0")
         CUDA_SUFFIX="cu130"
         ;;
@@ -74,7 +77,7 @@ case "$DETECTED_CUDA_VERSION" in
         ;;
     *)
         print_error "Unsupported CUDA version: $DETECTED_CUDA_VERSION"
-        print_error "Only CUDA 13.0 and CUDA 12.9 are supported."
+        print_error "Only CUDA 13.2, CUDA 13.0 and CUDA 12.9 are supported."
         exit 1
         ;;
 esac

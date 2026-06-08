@@ -41,6 +41,8 @@ class GPTLMHead(ColumnParallelLinear):
         block_attn_res_spec = kwargs.pop("block_attn_res", IdentityOp)
 
         kwargs["skip_weight_param_allocation"] = True
+        if self.config.gpt_model_use_experimental_version:
+            kwargs["bias"] = self.config.use_bias
         super().__init__(**kwargs)
 
         stride = kwargs["stride"] if "stride" in kwargs.keys() else 1

@@ -523,5 +523,163 @@ class TestYarnRotaryEmbeddingIsSubclass(unittest.TestCase):
         self.assertTrue(hasattr(yarn, "get_freqs_non_repeated"))
 
 
+class TestYarnRotaryEmbeddingForwardPositionIds(unittest.TestCase):
+    """Tests for position_ids branch coverage in YarnRotaryEmbedding.forward (lines 140-156).
+
+    Covers:
+      - position_ids is None            → seq from arange(max_seq_len) + offset
+      - position_ids.ndim == 1          → seq = position_ids directly
+      - position_ids.ndim == 2          → seq = position_ids[0] (first batch row)
+      - position_ids.ndim == 3 (or > 2) → fallback to arange(max_seq_len) + offset
+
+    NOTE: Paddle's Layer.__call__ does not forward kwargs to forward(), so we
+    call yarn.forward(...) directly to pass position_ids.
+    """
+
+    def _make_yarn(self, **kwargs):
+        """Helper: create YarnRotaryEmbedding with parallel_state mocked out."""
+        from unittest.mock import patch as _patch
+
+        from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
+            YarnRotaryEmbedding,
+        )
+
+        with _patch(
+            "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
+        ) as mock_ps:
+            mock_ps.get_context_parallel_group.return_value = None
+            yarn = YarnRotaryEmbedding(head_dim=64, **kwargs)
+        return yarn
+
+    # ------------------------------------------------------------------
+    # Branch: position_ids is None
+    # ------------------------------------------------------------------
+    def test_no_position_ids_uses_arange(self):
+        """When position_ids=None, seq is built from arange(max_seq_len) + offset."""
+        yarn = self._make_yarn()
+        emb, mscale = yarn.forward(max_seq_len=16, offset=0, position_ids=None)
+        self.assertEqual(emb.shape, [1, 16, 1, 64])
+        self.assertIsInstance(mscale, float)
+
+    def test_no_position_ids_with_offset(self):
+        """offset is applied to the arange sequence when position_ids=None."""
+        yarn = self._make_yarn()
+        emb_no_offset, _ = yarn.forward(
+            max_seq_len=8, offset=0, position_ids=None
+        )
+        emb_with_offset, _ = yarn.forward(
+            max_seq_len=8, offset=5, position_ids=None
+        )
+        # Different offsets should produce different embeddings
+        self.assertFalse(
+            paddle.allclose(emb_no_offset, emb_with_offset, atol=1e-6)
+        )
+
+    # ------------------------------------------------------------------
+    # Branch: position_ids.ndim == 1  (1-D tensor [S])
+    # ------------------------------------------------------------------
+    def test_1d_position_ids(self):
+        """1-D position_ids [S] is used directly as the sequence."""
+        yarn = self._make_yarn()
+        S = 10
+        pos_ids = paddle.arange(S, dtype=paddle.int64)
+        emb, mscale = yarn.forward(max_seq_len=S, position_ids=pos_ids)
+        self.assertEqual(emb.shape, [1, S, 1, 64])
+        self.assertIsInstance(mscale, float)
+
+    def test_1d_position_ids_non_contiguous(self):
+        """1-D position_ids with a single token (fastdeploy decode mode)."""
+        yarn = self._make_yarn()
+        pos_ids = paddle.to_tensor([42], dtype=paddle.int64)
+        emb, mscale = yarn.forward(max_seq_len=1, position_ids=pos_ids)
+        self.assertEqual(emb.shape, [1, 1, 1, 64])
+
+    def test_1d_position_ids_matches_arange(self):
+        """1-D position_ids equal to arange should produce the same emb as no position_ids."""
+        yarn = self._make_yarn()
+        S = 8
+        pos_ids = paddle.arange(S, dtype=paddle.int64)
+        emb_with_ids, _ = yarn.forward(
+            max_seq_len=S, offset=0, position_ids=pos_ids
+        )
+        emb_without_ids, _ = yarn.forward(
+            max_seq_len=S, offset=0, position_ids=None
+        )
+        self.assertTrue(
+            paddle.allclose(emb_with_ids, emb_without_ids, atol=1e-5)
+        )
+
+    # ------------------------------------------------------------------
+    # Branch: position_ids.ndim == 2  (2-D tensor [B, S])
+    # ------------------------------------------------------------------
+    def test_2d_position_ids(self):
+        """2-D position_ids [B, S] — first batch row is used."""
+        yarn = self._make_yarn()
+        B, S = 4, 12
+        pos_ids = (
+            paddle.arange(S, dtype=paddle.int64).unsqueeze(0).expand([B, S])
+        )
+        emb, mscale = yarn.forward(max_seq_len=S, position_ids=pos_ids)
+        self.assertEqual(emb.shape, [1, S, 1, 64])
+
+    def test_2d_position_ids_uses_first_batch_row(self):
+        """Verifies that only the first batch row of 2-D position_ids is used."""
+        yarn = self._make_yarn()
+        S = 8
+        row0 = paddle.arange(S, dtype=paddle.int64)
+        row1 = row0 + 100  # different values in second row — should be ignored
+        pos_ids_2d = paddle.stack([row0, row1], axis=0)  # [2, S]
+        emb_2d, _ = yarn.forward(
+            max_seq_len=S, offset=0, position_ids=pos_ids_2d
+        )
+        emb_1d, _ = yarn.forward(max_seq_len=S, offset=0, position_ids=row0)
+        self.assertTrue(paddle.allclose(emb_2d, emb_1d, atol=1e-5))
+
+    def test_2d_position_ids_batch_size_one(self):
+        """2-D position_ids with B=1 should behave like 1-D."""
+        yarn = self._make_yarn()
+        S = 6
+        pos_ids_1d = paddle.arange(S, dtype=paddle.int64)
+        pos_ids_2d = pos_ids_1d.unsqueeze(0)  # [1, S]
+        emb_1d, _ = yarn.forward(max_seq_len=S, position_ids=pos_ids_1d)
+        emb_2d, _ = yarn.forward(max_seq_len=S, position_ids=pos_ids_2d)
+        self.assertTrue(paddle.allclose(emb_1d, emb_2d, atol=1e-5))
+
+    # ------------------------------------------------------------------
+    # Branch: position_ids.ndim >= 3  (fallback to arange + offset)
+    # ------------------------------------------------------------------
+    def test_3d_position_ids_fallback(self):
+        """3-D position_ids (M-RoPE) falls back to arange(max_seq_len) + offset."""
+        yarn = self._make_yarn()
+        max_seq_len = 8
+        pos_ids_3d = (
+            paddle.arange(max_seq_len, dtype=paddle.int64)
+            .reshape([1, 1, max_seq_len])
+            .expand([3, 2, max_seq_len])
+        )
+        emb_3d, _ = yarn.forward(
+            max_seq_len=max_seq_len, offset=0, position_ids=pos_ids_3d
+        )
+        emb_none, _ = yarn.forward(
+            max_seq_len=max_seq_len, offset=0, position_ids=None
+        )
+        self.assertTrue(paddle.allclose(emb_3d, emb_none, atol=1e-5))
+        self.assertEqual(emb_3d.shape, [1, max_seq_len, 1, 64])
+
+    def test_3d_position_ids_fallback_with_offset(self):
+        """3-D fallback applies offset correctly."""
+        yarn = self._make_yarn()
+        max_seq_len = 6
+        pos_ids_3d = paddle.zeros([3, 1, max_seq_len], dtype=paddle.int64)
+        emb_off0, _ = yarn.forward(
+            max_seq_len=max_seq_len, offset=0, position_ids=pos_ids_3d
+        )
+        emb_off3, _ = yarn.forward(
+            max_seq_len=max_seq_len, offset=3, position_ids=pos_ids_3d
+        )
+        # Different offsets → different embeddings
+        self.assertFalse(paddle.allclose(emb_off0, emb_off3, atol=1e-6))
+
+
 if __name__ == "__main__":
     unittest.main()

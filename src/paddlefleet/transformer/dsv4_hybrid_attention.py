@@ -213,8 +213,27 @@ class DSv4HybridAttention(Attention):
             (output [b, sq, hidden_size], bias=None)
         """
         # Get Q, K, V tensors
+        # In CP mode, pass position_offset so RoPE uses correct global positions.
+        cp_pg = getattr(self, "pg_collection", None)
+        cp_pg = cp_pg.cp if cp_pg is not None else None
+        cp_size = getattr(cp_pg, "nranks", 1) if cp_pg is not None else 1
+        if cp_size > 1:
+            assert self.config.cp_balance_mode == "contiguous_allgather", (
+                f"DSv4HybridAttention requires cp_balance_mode='contiguous_allgather', "
+                f"got '{self.config.cp_balance_mode}'"
+            )
+        cp_rank = (
+            getattr(cp_pg, "rank", 0)
+            if cp_pg is not None and cp_size > 1
+            else 0
+        )
+        _, sq, _ = hidden_states.shape
+        position_offset = cp_rank * sq if cp_size > 1 else 0
+
         query, key, value, q_compressed, kv_compressed = (
-            self.get_query_key_value_tensors(hidden_states)
+            self.get_query_key_value_tensors(
+                hidden_states, position_offset=position_offset
+            )
         )
 
         # Core attention (CompressedSparseAttention)
@@ -237,14 +256,16 @@ class DSv4HybridAttention(Attention):
             core_attn_out = core_attn_out.reshape(
                 [b, sq, self.num_attention_heads, self.v_head_dim]
             )
-            # Get RoPE frequencies for inverse
-            _rope_result = self.rotary_pos_emb(sq, packed_seq=False)
+            # Get RoPE frequencies for inverse; use global positions in CP mode
+            rope_len = sq + position_offset
+            _rope_result = self.rotary_pos_emb(rope_len, packed_seq=False)
             if isinstance(_rope_result, tuple):
                 freqs, mscale = _rope_result
             else:
                 freqs, mscale = _rope_result, 1.0
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
+            freqs = freqs[:, position_offset : position_offset + sq, :]
 
             content_part = core_attn_out[..., :nope_dim]
             rot_part = core_attn_out[..., nope_dim:]
@@ -376,12 +397,15 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )
 
     def get_query_key_value_tensors(
-        self, hidden_states: Tensor
+        self, hidden_states: Tensor, position_offset: int = 0
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Derive query, key, value from hidden_states.
 
         Args:
             hidden_states: [b, sq, hidden_size]
+            position_offset: global position offset for CP (cp_rank * sq_local).
+                When non-zero, RoPE frequencies are sliced from the correct
+                global starting position.
 
         Returns:
             query: [b, sq, num_heads, v_head_dim]
@@ -411,14 +435,17 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         nope_dim = self.v_head_dim - pos_dim
 
         if pos_dim > 0:
-            # Get RoPE frequencies
-            _rope_result = self.rotary_pos_emb(sq, packed_seq=False)
+            # Get RoPE frequencies for global positions
+            rope_len = sq + position_offset
+            _rope_result = self.rotary_pos_emb(rope_len, packed_seq=False)
             if isinstance(_rope_result, tuple):
                 freqs, mscale = _rope_result
             else:
                 freqs, mscale = _rope_result, 1.0
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
+            # Slice to local positions [position_offset : position_offset + sq]
+            freqs = freqs[:, position_offset : position_offset + sq, :]
 
             # Q RoPE: split nope/pe, apply RoPE to pe part
             q_nope = q[..., :nope_dim]
