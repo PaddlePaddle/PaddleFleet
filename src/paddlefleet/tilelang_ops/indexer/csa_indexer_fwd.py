@@ -53,6 +53,7 @@ def tl_csa_indexer_topk_fwd_impl(
     dim: int,
     topk: int,
     ratio: int,
+    seq_offset: int = 0,
     block_K: int = 32,
     dtype: str = "bfloat16",
     num_stages: int = 0,
@@ -120,7 +121,7 @@ def tl_csa_indexer_topk_fwd_impl(
         with T.Kernel(seq_len, batch, threads=num_threads) as (bx, by):
             i_t = bx
             i_b = by
-            valid_end = T.min((i_t + 1) // ratio, seq_len_comp)
+            valid_end = T.min((i_t + seq_offset + 1) // ratio, seq_len_comp)
 
             topk_index_shared = T.alloc_shared([N], dtype=INT32)
             topk_value_shared = T.alloc_shared([N], dtype=FP32)
@@ -325,6 +326,7 @@ def csa_indexer_topk_fwd_interface(
     weights,
     ratio: int,
     topk_effective: int,
+    seq_offset: int = 0,
     block_K: int = 32,
     num_stages: int = 0,
     num_threads: int = 128,
@@ -336,9 +338,11 @@ def csa_indexer_topk_fwd_interface(
         index_k_comp: [B, S_comp, D_i] bf16/fp16, BSD layout.
         weights: [B, S, H_i] fp32 or castable to fp32.
         ratio: compression ratio. Valid compressed range for query t is
-            [0, (t + 1) // ratio).
+            [0, (t + seq_offset + 1) // ratio).
         topk_effective: requested output top-k. Phase 2 may set this to
             S_comp; Phase 3 usually sets this to dsa_indexer_topk.
+        seq_offset: global position offset for the first local query token.
+            In CP mode, this is cp_rank * sq_local.
 
     Returns:
         topk_indices: [B, S, topk_effective] int32, invalid slots are -1.
@@ -364,6 +368,7 @@ def csa_indexer_topk_fwd_interface(
         dim=dim,
         topk=padded_topk,
         ratio=ratio,
+        seq_offset=int(seq_offset),
         block_K=block_K,
         dtype=_tilelang_dtype(index_q),
         num_stages=num_stages,
