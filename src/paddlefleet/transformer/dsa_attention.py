@@ -25,6 +25,7 @@ This module provides:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -57,6 +58,57 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+def _dsv4_torch_dsa_grad_k(grad_scores: Tensor, q: Tensor) -> Tensor | None:
+    if os.environ.get("DSV4_FLEET_DSA_INDEXER_GRAD_K_TORCH_BWD", "0") != "1":
+        return None
+    site_packages = os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES", "")
+    if site_packages and site_packages not in os.sys.path:
+        os.sys.path.insert(0, site_packages)
+    import torch
+    import torch.utils.dlpack
+
+    grad_scores_t = torch.utils.dlpack.from_dlpack(
+        paddle.utils.dlpack.to_dlpack(grad_scores)
+    )
+    q_t = torch.utils.dlpack.from_dlpack(paddle.utils.dlpack.to_dlpack(q))
+    grad_k_t = torch.einsum(
+        "sbht,sbhd->tbd", grad_scores_t, q_t.to(dtype=torch.float32)
+    ).to(dtype=q_t.dtype)
+    return paddle.utils.dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(grad_k_t))
+
+
+def _dsv4_import_torch_for_hadamard():
+    site_packages = os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES", "")
+    if site_packages and site_packages not in os.sys.path:
+        os.sys.path.insert(0, site_packages)
+    import torch
+    import torch.utils.dlpack
+    from fast_hadamard_transform import hadamard_transform as torch_hadamard_transform
+
+    return torch, torch_hadamard_transform
+
+
+class _DSV4TorchHadamard(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x: Tensor, scale_tensor: Tensor):
+        scale = float(scale_tensor.item())
+        ctx.scale = scale
+        torch, torch_hadamard_transform = _dsv4_import_torch_for_hadamard()
+        x_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(x.contiguous())
+        )
+        y_t = torch_hadamard_transform(x_t, scale=scale)
+        return paddle.utils.dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(y_t.contiguous()))
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        torch, torch_hadamard_transform = _dsv4_import_torch_for_hadamard()
+        grad_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(grad_output.contiguous())
+        )
+        grad_x_t = torch_hadamard_transform(grad_t, scale=ctx.scale)
+        return paddle.utils.dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(grad_x_t.contiguous())), None
+
 
 def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     """Fast Walsh-Hadamard Transform using the butterfly algorithm.
@@ -85,6 +137,10 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     assert dim > 0 and (dim & (dim - 1)) == 0, (
         f"hadamard_transform requires dim to be a power of 2, got {dim}"
     )
+
+    if os.environ.get("DSV4_FLEET_HADAMARD_TORCH", "0") == "1":
+        scale_tensor = paddle.to_tensor([scale], dtype="float32")
+        return _DSV4TorchHadamard.apply(x, scale_tensor)
 
     # Megatron uses fast_hadamard_transform, whose bf16 path accumulates in fp32
     # and casts back to bf16. Keep the same numeric contract here.
@@ -903,9 +959,11 @@ def _bwd_fused_indexer_loss(
         "sbht,tbd->sbhd", grad_scores, k.cast("float32")
     )  # [sq, b, h, d]
     # ∂L/∂k = einsum('sbht,sbhd->tbd', grad_scores, q)
-    grad_k = paddle.einsum(
-        "sbht,sbhd->tbd", grad_scores, q.cast("float32")
-    )  # [sk, b, d]
+    grad_k = _dsv4_torch_dsa_grad_k(grad_scores, q)
+    if grad_k is None:
+        grad_k = paddle.einsum(
+            "sbht,sbhd->tbd", grad_scores, q.cast("float32")
+        )  # [sk, b, d]
     del grad_scores
 
     return (
@@ -1196,10 +1254,6 @@ class DSAttention(FleetLayer):
         softmax_scale: float,
         k_channels: int | None = None,
         v_channels: int | None = None,
-        is_mtp_layer: bool = False,
-        is_swa: bool = False,
-        num_attention_heads: int | None = None,
-        num_key_value_heads: int | None = None,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
     ):
@@ -1242,18 +1296,9 @@ class DSAttention(FleetLayer):
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         use_rr_flash_attention: bool = False,
-        # KV cache parameters (ignored by DSAttention, for interface compatibility)
-        past_key_values=None,
-        layer_idx=None,
-        use_cache: bool = False,
         # DSA-specific parameters
         x: Tensor | None = None,
         qr: Tensor | None = None,
-        # ignore fastdeploy specific parameters
-        kv_compressed: paddle.Tensor = None,
-        k_pos_emb: paddle.Tensor = None,
-        q_absorbed: paddle.Tensor = None,
-        v_b_proj_weight: paddle.Tensor = None,
     ) -> Tensor:
         """Forward pass for Sparse Attention.
 

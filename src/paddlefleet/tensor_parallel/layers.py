@@ -40,6 +40,7 @@ from ..parallel_state import (
 # from ..transformer.utils import make_sharded_tensors_for_checkpoint
 from ..utils import (
     divide,
+    dsv4_sequence_first_feature_enabled,
     get_pg_rank,
     get_pg_size,
     get_tensor_model_parallel_group_if_none,
@@ -75,6 +76,148 @@ _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "partition_dim": -1,
     "partition_stride": 1,
 }
+def _dsv4_te_dgrad_enabled(
+    grad_output: paddle.Tensor, weight: paddle.Tensor
+) -> bool:
+    if os.getenv("DSV4_FLEET_TE_DGRAD", "0") != "1":
+        return False
+    shape_filter = os.getenv("DSV4_FLEET_TE_DGRAD_WEIGHT_SHAPES", "")
+    if shape_filter:
+        allowed = {
+            item.strip() for item in shape_filter.split(",") if item.strip()
+        }
+        if "x".join(str(dim) for dim in weight.shape) not in allowed:
+            return False
+    return weight.dtype == paddle.bfloat16 and grad_output.dtype == paddle.bfloat16
+
+
+def _dsv4_te_dgrad(
+    grad_output: paddle.Tensor, weight: paddle.Tensor
+) -> paddle.Tensor:
+    import sys
+
+    te_site_packages = os.getenv("DSV4_FLEET_TE_SITE_PACKAGES", "")
+    if te_site_packages and te_site_packages not in sys.path:
+        sys.path.insert(0, te_site_packages)
+
+    import torch
+    import torch.utils.dlpack
+    from paddle.utils import dlpack as paddle_dlpack
+    from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
+
+    grad_output_torch = torch.utils.dlpack.from_dlpack(
+        paddle_dlpack.to_dlpack(grad_output.contiguous())
+    )
+    weight_oi_torch = torch.utils.dlpack.from_dlpack(
+        paddle_dlpack.to_dlpack(weight.t().contiguous())
+    )
+    grad_input_torch, *_ = general_gemm(
+        weight_oi_torch,
+        grad_output_torch,
+        out_dtype=torch.bfloat16,
+        layout="NN",
+        grad=True,
+    )
+
+    return paddle_dlpack.from_dlpack(
+        torch.utils.dlpack.to_dlpack(grad_input_torch.contiguous())
+    )
+
+
+def _dsv4_linear_seqfirst_wgrad_enabled(
+    input: paddle.Tensor, grad_output: paddle.Tensor, weight: paddle.Tensor
+) -> bool:
+    if not dsv4_sequence_first_feature_enabled(
+        "DSV4_FLEET_LINEAR_SEQFIRST_WGRAD"
+    ):
+        return False
+    if input.dim() not in (3, 4) or grad_output.dim() != input.dim():
+        return False
+    # This branch is for DSv4 Paddle modules that run linears as [B, S, H]
+    # / [B, S, N, H] while the Megatron reference computes wgrad over
+    # [S, B, H] / [S, B, N, H].
+    if input.shape[0] <= 1:
+        return False
+    if os.getenv("DSV4_FLEET_LINEAR_SEQFIRST_WGRAD_REQUIRE_BATCH_FIRST", "1") == "1":
+        if input.shape[0] >= input.shape[1]:
+            return False
+    shape_filter = os.getenv("DSV4_FLEET_LINEAR_SEQFIRST_WGRAD_WEIGHT_SHAPES", "")
+    if shape_filter:
+        allowed = {
+            item.strip() for item in shape_filter.split(",") if item.strip()
+        }
+        if "x".join(str(dim) for dim in weight.shape) not in allowed:
+            return False
+    return weight.dtype == paddle.bfloat16
+
+
+def _dsv4_torch_linear_seqfirst_wgrad(
+    input: paddle.Tensor, grad_output: paddle.Tensor, weight: paddle.Tensor
+) -> paddle.Tensor:
+    import sys
+
+    site_packages = os.getenv("DSV4_FLEET_TE_SITE_PACKAGES", "")
+    if site_packages and site_packages not in sys.path:
+        sys.path.insert(0, site_packages)
+
+    import torch
+    import torch.utils.dlpack
+    from paddle.utils import dlpack as paddle_dlpack
+
+    out_features = grad_output.shape[-1]
+    if input.dim() == 3:
+        batch, seq, hidden = input.shape
+        flat_rows = batch * seq
+        input_seqfirst = (
+            input.detach()
+            .reshape([batch, seq, hidden])
+            .transpose([1, 0, 2])
+            .reshape([flat_rows, hidden])
+            .contiguous()
+        )
+        grad_seqfirst = (
+            grad_output.detach()
+            .reshape([batch, seq, out_features])
+            .transpose([1, 0, 2])
+            .reshape([flat_rows, out_features])
+            .contiguous()
+        )
+    else:
+        batch, seq, streams, hidden = input.shape
+        flat_rows = batch * seq * streams
+        input_seqfirst = (
+            input.detach()
+            .reshape([batch, seq, streams, hidden])
+            .transpose([1, 0, 2, 3])
+            .reshape([flat_rows, hidden])
+            .contiguous()
+        )
+        grad_seqfirst = (
+            grad_output.detach()
+            .reshape([batch, seq, streams, out_features])
+            .transpose([1, 0, 2, 3])
+            .reshape([flat_rows, out_features])
+            .contiguous()
+        )
+
+    input_t = torch.utils.dlpack.from_dlpack(
+        paddle_dlpack.to_dlpack(input_seqfirst)
+    ).detach()
+    grad_t = torch.utils.dlpack.from_dlpack(
+        paddle_dlpack.to_dlpack(grad_seqfirst)
+    ).detach()
+    weight_oi_t = torch.utils.dlpack.from_dlpack(
+        paddle_dlpack.to_dlpack(weight.t().contiguous())
+    ).detach()
+
+    with torch.enable_grad():
+        input_t = input_t.requires_grad_(True)
+        weight_oi_t = weight_oi_t.requires_grad_(True)
+        output_t = torch.matmul(input_t, weight_oi_t.t())
+        output_t.backward(grad_t)
+        grad_weight_t = weight_oi_t.grad.t().contiguous()
+
+    return paddle_dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(grad_weight_t))
 
 
 def param_is_not_tensor_parallel_duplicate(param):
@@ -299,7 +442,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         else:
             masked_input = input_
         # Get the embeddings.
-        if self.deterministic_mode:
+        if self.deterministic_mode or os.getenv("DSV4_EMBEDDING_INDEX_BACKWARD", "0") == "1":
             output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
@@ -342,12 +485,19 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
     but in experiments they are not identical mathematically."""
 
     @staticmethod
-    def forward(ctx, input, weight, bias, allreduce_dgrad, tp_group):
+    def forward(
+        ctx,
+        input,
+        weight,
+        bias,
+        allreduce_dgrad,
+        tp_group,
+    ):
         """Forward with frozen weight."""
         ctx.save_for_backward(weight, bias)
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.tp_group = tp_group
-        output = paddle.matmul(input, weight)
+        output = paddle.matmul(input, weight.t().contiguous(), transpose_y=True)
 
         if bias is not None:
             output = output + bias
@@ -357,7 +507,10 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
     def backward(ctx, grad_output):
         """Backward with frozen weight."""
         (weight, bias) = ctx.saved_tensor()
-        grad_input = grad_output.matmul(weight.t())
+        if _dsv4_te_dgrad_enabled(grad_output, weight):
+            grad_input = _dsv4_te_dgrad(grad_output, weight)
+        else:
+            grad_input = grad_output.matmul(weight.t())
 
         if ctx.allreduce_dgrad:
             # All-reduce. Note: here async and sync are effectively the same.
@@ -447,7 +600,13 @@ def linear_with_frozen_weight(
     else:
         input = input
 
-    args = [input, weight, bias, allreduce_dgrad, tp_group]
+    args = [
+        input,
+        weight,
+        bias,
+        allreduce_dgrad,
+        tp_group,
+    ]
 
     return LinearWithFrozenWeight.apply(*args)
 
@@ -485,11 +644,6 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
-        # Cache input.stop_gradient: ``_new_shared_tensor()`` does not
-        # necessarily preserve this flag, and Paddle's PyLayer contract
-        # requires backward to return None at position 0 iff the original
-        # forward input had stop_gradient=True.
-        ctx.input_stop_gradient = bool(input.stop_gradient)
 
         if sequence_parallel:
             dim_size = list(input.shape)
@@ -506,7 +660,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         if bias is not None:
             output = paddle.nn.functional.linear(total_input, weight, bias)
         else:
-            output = paddle.matmul(total_input, weight)
+            output = paddle.matmul(
+                total_input, weight.t().contiguous(), transpose_y=True
+            )
         return output
 
     @staticmethod
@@ -519,16 +675,6 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
         handle = None
         tp_group = ctx.tp_group
-
-        # Paddle PyLayer contract: when a forward Tensor input has
-        # stop_gradient=True, the corresponding backward return slot MUST be
-        # None. The "input" position (0) is the only one that can carry
-        # stop_gradient=True in normal usage (weight/bias are trainable);
-        # callers that intentionally feed a detached tensor (e.g. for
-        # gradient isolation) rely on this. We must skip grad_input compute
-        # and any input-side collective (all_reduce / reduce_scatter) in
-        # that case, while still computing grad_weight / grad_bias.
-        input_needs_grad = not ctx.input_stop_gradient
 
         if ctx.gradient_accumulation_fusion:
             weight.main_grad = main_grad
@@ -559,21 +705,29 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 total_input = all_gather_buffer
             else:
                 total_input = input
-        if input_needs_grad:
-            grad_input = grad_output.matmul(weight.t())
+        if _dsv4_te_dgrad_enabled(grad_output, weight):
+            grad_input = _dsv4_te_dgrad(grad_output, weight)
         else:
-            grad_input = None
+            grad_input = grad_output.matmul(weight.t())
 
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
             handle.wait()
+
+        dsv4_seqfirst_grad_weight = None
+        if wgrad_compute and _dsv4_linear_seqfirst_wgrad_enabled(
+            input, grad_output, weight
+        ):
+            dsv4_seqfirst_grad_weight = _dsv4_torch_linear_seqfirst_wgrad(
+                input, grad_output, weight
+            )
 
         if wgrad_compute:
             grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
                 grad_output, total_input
             )
 
-        if ctx.allreduce_dgrad and input_needs_grad:
+        if ctx.allreduce_dgrad:
             # Asynchronous all-reduce
             handle = dist.all_reduce(grad_input, group=tp_group, sync_op=False)
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
@@ -581,19 +735,16 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         if ctx.sequence_parallel:
             assert not ctx.allreduce_dgrad
-            if input_needs_grad:
-                dim_size = list(input.shape)
-                sub_grad_input = paddle.empty(
-                    dim_size, dtype=input.dtype, requires_grad=False
-                )
-                # reduce_scatter
-                handle = _reduce_scatter_base(
-                    sub_grad_input, grad_input, group=tp_group, sync_op=False
-                )
-                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
-                # reduce scatter is scheduled before the weight gradient computation
-            else:
-                sub_grad_input = None
+            dim_size = list(input.shape)
+            sub_grad_input = paddle.empty(
+                dim_size, dtype=input.dtype, requires_grad=False
+            )
+            # reduce_scatter
+            handle = _reduce_scatter_base(
+                sub_grad_input, grad_input, group=tp_group, sync_op=False
+            )
+            # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+            # reduce scatter is scheduled before the weight gradient computation
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
@@ -634,12 +785,14 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            grad_weight = total_input.t().matmul(grad_output)
+            if dsv4_seqfirst_grad_weight is not None:
+                grad_weight = dsv4_seqfirst_grad_weight
+            else:
+                grad_weight = total_input.t().matmul(grad_output)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
-            if input_needs_grad:
-                handle.wait()
+            handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
             if use_bias:
@@ -647,7 +800,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 return sub_grad_input, grad_weight
 
-        if ctx.allreduce_dgrad and input_needs_grad:
+        if ctx.allreduce_dgrad:
             handle.wait()
 
         # PyLayer requires the number of output in backward
@@ -1259,21 +1412,6 @@ class ColumnParallelLinear(paddle.nn.Layer):
                 )
 
         bias = self.bias if not self.skip_bias_add else None
-
-        if (
-            getattr(self.config, "gpt_model_use_experimental_version", False)
-            and self.world_size == 1
-            and self.bias is not None
-        ):
-            output = paddle.incubate.nn.functional.fused_linear(
-                input_, weight, self.bias
-            )
-            output_bias = (
-                self.bias.clone()
-                if (self.skip_bias_add and self.bias is not None)
-                else None
-            )
-            return output, output_bias
 
         if (
             self.allreduce_dgrad

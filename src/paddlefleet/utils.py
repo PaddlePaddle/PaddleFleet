@@ -21,6 +21,7 @@ import functools
 import inspect
 import math
 import operator
+import os
 import warnings
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -55,6 +56,24 @@ except Exception:
 if TYPE_CHECKING:
     import logging
     from collections.abc import Callable
+
+
+def dsv4_env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def dsv4_mbs2_sequence_first_enabled() -> bool:
+    return dsv4_env_flag("DSV4_FLEET_MBS2_SEQUENCE_FIRST", False)
+
+
+def dsv4_sequence_first_feature_enabled(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is not None:
+        return dsv4_env_flag(name)
+    return dsv4_mbs2_sequence_first_enabled()
 
 
 class WrappedTensor:

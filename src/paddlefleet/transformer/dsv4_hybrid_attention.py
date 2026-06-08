@@ -25,6 +25,7 @@ Components:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -42,6 +43,7 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
 from paddlefleet.transformer.attention import Attention
+from paddlefleet.utils import dsv4_sequence_first_feature_enabled
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -49,9 +51,104 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
+class _DSV4TorchOGroupProjection(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x: Tensor, weight: Tensor, o_local_groups: int, o_lora_rank: int):
+        import sys
+
+        site_packages = os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES", "")
+        if site_packages and site_packages not in sys.path:
+            sys.path.insert(0, site_packages)
+
+        import torch
+        import torch.utils.dlpack
+        from paddle.utils import dlpack as paddle_dlpack
+
+        ctx.o_local_groups = o_local_groups
+        ctx.o_lora_rank = o_lora_rank
+        ctx.save_for_backward(x, weight)
+
+        x_seqfirst = x.detach().transpose([1, 0, 2, 3]).contiguous()
+        weight_grouped = weight.detach().reshape([o_local_groups, o_lora_rank, -1]).contiguous()
+        x_t = torch.utils.dlpack.from_dlpack(paddle_dlpack.to_dlpack(x_seqfirst)).detach()
+        weight_t = torch.utils.dlpack.from_dlpack(
+            paddle_dlpack.to_dlpack(weight_grouped)
+        ).detach()
+        out_t = torch.einsum("...gd,grd->...gr", x_t, weight_t)
+        out = paddle_dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(out_t.contiguous()))
+        return out.transpose([1, 0, 2, 3]).contiguous()
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        import sys
+
+        site_packages = os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES", "")
+        if site_packages and site_packages not in sys.path:
+            sys.path.insert(0, site_packages)
+
+        import torch
+        import torch.utils.dlpack
+        from paddle.utils import dlpack as paddle_dlpack
+
+        x, weight = ctx.saved_tensor()
+        x_seqfirst = x.detach().transpose([1, 0, 2, 3]).contiguous()
+        grad_seqfirst = grad_output.detach().transpose([1, 0, 2, 3]).contiguous()
+        weight_grouped = weight.detach().reshape(
+            [ctx.o_local_groups, ctx.o_lora_rank, -1]
+        ).contiguous()
+
+        x_t = torch.utils.dlpack.from_dlpack(paddle_dlpack.to_dlpack(x_seqfirst)).detach()
+        grad_t = torch.utils.dlpack.from_dlpack(
+            paddle_dlpack.to_dlpack(grad_seqfirst)
+        ).detach()
+        weight_t = torch.utils.dlpack.from_dlpack(
+            paddle_dlpack.to_dlpack(weight_grouped)
+        ).detach()
+
+        with torch.enable_grad():
+            x_t = x_t.requires_grad_(True)
+            weight_t = weight_t.requires_grad_(True)
+            out_t = torch.einsum("...gd,grd->...gr", x_t, weight_t)
+            out_t.backward(grad_t)
+            x_grad_t = x_t.grad.contiguous()
+            w_grad_t = weight_t.grad.reshape(tuple(weight.shape)).contiguous()
+
+        x_grad = paddle_dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(x_grad_t))
+        x_grad = x_grad.transpose([1, 0, 2, 3]).contiguous()
+        w_grad = paddle_dlpack.from_dlpack(torch.utils.dlpack.to_dlpack(w_grad_t))
+        return x_grad, w_grad
+
+
+def _dsv4_torch_attn_o_group_projection(
+    x: Tensor,
+    weight: Tensor,
+    o_local_groups: int,
+    o_lora_rank: int,
+) -> Tensor:
+    return _DSV4TorchOGroupProjection.apply(x, weight, o_local_groups, o_lora_rank)
+
+
+class _DSV4QRMSNorm(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, q: Tensor, eps: float) -> Tensor:
+        r = paddle.rsqrt(q.square().mean(axis=-1, keepdim=True) + eps)
+        ctx.save_for_backward(q, r)
+        return q * r
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        q, r = ctx.saved_tensor()
+        hidden_size = q.shape[-1]
+        grad_r = (grad_output * q).sum(axis=-1, keepdim=True)
+        grad_q = grad_output * r
+        grad_add = grad_r * (-0.5) * (r * r * r)
+        grad_q = grad_q + (paddle.full_like(q, 2.0) * q) * (grad_add / hidden_size)
+        return grad_q
+
+
 def _q_rms_norm(q: Tensor, eps: float) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
-    return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
+    return _DSV4QRMSNorm.apply(q, eps)
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +256,6 @@ class DSv4HybridAttention(Attention):
             softmax_scale=getattr(config, "softmax_scale", None),
             k_channels=self.q_head_dim,
             v_channels=self.v_head_dim,
-            num_attention_heads=self.num_attention_heads,
-            num_key_value_heads=1,
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
             compress_ratio=compress_ratio,
@@ -244,6 +339,9 @@ class DSv4HybridAttention(Attention):
             attention_mask,
             x=hidden_states,
             qr=q_compressed,
+            attn_mask_startend_row_indices=kwargs.get(
+                "attn_mask_startend_row_indices", None
+            ),
         )
         # core_attn_out: [b, sq, np * v_head_dim]
 
@@ -287,9 +385,23 @@ class DSv4HybridAttention(Attention):
         wo_a_weight = self.linear_o_group_proj.reshape(
             [self.o_local_groups, self.config.o_lora_rank, -1]
         )
-        core_attn_out = paddle.einsum(
-            "...gd,grd->...gr", core_attn_out, wo_a_weight
+        use_torch_o_group_projection = (
+            dsv4_sequence_first_feature_enabled(
+                "DSV4_FLEET_ATTN_O_GROUP_TORCH_BWD"
+            )
+            and b > 1
         )
+        if use_torch_o_group_projection:
+            core_attn_out = _dsv4_torch_attn_o_group_projection(
+                core_attn_out,
+                self.linear_o_group_proj,
+                self.o_local_groups,
+                self.config.o_lora_rank,
+            )
+        else:
+            core_attn_out = paddle.einsum(
+                "...gd,grd->...gr", core_attn_out, wo_a_weight
+            )
         core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Output projection

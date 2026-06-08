@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 from collections import OrderedDict
@@ -149,40 +148,15 @@ class TransformerLayer(nn.Layer):
     """
 
     _gpt_model_use_experimental_version = False
-    _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
-    _skip_mtp_probes = (
-        False  # Set True during MTP forward to suppress MD5 probes
-    )
-
-    @staticmethod
-    def _log_md5(tensor, name, layer_idx):
-        """Log MD5 of a tensor for precision alignment debugging."""
-        if (
-            TransformerLayer._LOG_LAYER_MD5
-            and TransformerLayer._gpt_model_use_experimental_version
-        ):
-            if TransformerLayer._skip_mtp_probes:
-                return  # Skip MTP passes — EC has no MTP
-            data = tensor.cast("float32").numpy().tobytes()
-            md5 = hashlib.md5(data).hexdigest()
-            rank = (
-                paddle.distributed.get_rank()
-                if paddle.distributed.is_initialized()
-                else 0
-            )
-            print(
-                f"[MD5 Probe] Rank={rank} Layer={layer_idx} {name} MD5={md5} shape={list(tensor.shape)}",
-                flush=True,
-            )
 
     def __init__(
         self,
         config: TransformerConfig,
         sublayers_spec: TransformerLayerSublayersSpec,
         layer_number: int = 1,
+        is_mtp_layer: bool = False,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
-        is_mtp_layer: bool = False,
     ):
         super().__init__()
 
@@ -293,9 +267,7 @@ class TransformerLayer(nn.Layer):
             sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )
         if hasattr(self.mlp, "set_layer_number"):
-            self.mlp.set_layer_number(
-                self.layer_number, is_mtp_layer=self.is_mtp_layer
-            )
+            self.mlp.set_layer_number(self.layer_number, self.is_mtp_layer)
 
         # [Layer 9: BiasDropoutFusion]
         self.mlp_bda = build_spec_layer(sublayers_spec.mlp_bda)
@@ -445,9 +417,6 @@ class TransformerLayer(nn.Layer):
         values = tuple(dict_args.values())
 
         is_mtp = dict_args.pop("is_mtp", False)
-        TransformerLayer._skip_mtp_probes = (
-            is_mtp  # Suppress MD5 probes for MTP passes
-        )
         mtp_input = None
         mtp_ids = None
         if (
@@ -455,7 +424,6 @@ class TransformerLayer(nn.Layer):
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
             and not self.config.mtp_load_weight_only
-            and not self.config.enable_mtp_magic_send
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -467,16 +435,15 @@ class TransformerLayer(nn.Layer):
             dict_args["hidden_states"] = hidden_states
 
             # process position_ids
-            if not self.config.gpt_model_use_experimental_version:
-                if "position_ids" in dict_args.keys():
-                    position_ids = dict_args["position_ids"]
-                    decoder_ids = position_ids[
-                        :, : -self.config.num_nextn_predict_layers
-                    ]
-                    mtp_ids = position_ids[
-                        :, -self.config.num_nextn_predict_layers :
-                    ]
-                    dict_args["position_ids"] = decoder_ids
+            if "position_ids" in dict_args.keys():
+                position_ids = dict_args["position_ids"]
+                decoder_ids = position_ids[
+                    :, : -self.config.num_nextn_predict_layers
+                ]
+                mtp_ids = position_ids[
+                    :, -self.config.num_nextn_predict_layers :
+                ]
+                dict_args["position_ids"] = decoder_ids
 
             # process rotary_pos_emb: trim to main decoder sequence length
             # With SP: rotary_pos_emb is [S, B, head_dim], seq is dim 0
@@ -587,9 +554,6 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
             rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
             rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
-            swa_rotary_pos_emb = dict_args.get("swa_rotary_pos_emb", None)
-            swa_rotary_pos_cos = dict_args.get("swa_rotary_pos_cos", None)
-            swa_rotary_pos_sin = dict_args.get("swa_rotary_pos_sin", None)
             position_ids = dict_args.get("position_ids", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
@@ -611,15 +575,6 @@ class TransformerLayer(nn.Layer):
                 else None,
                 rotary_pos_sin=rotary_pos_sin.clone()  # Clone is necessary!
                 if rotary_pos_sin is not None
-                else None,
-                swa_rotary_pos_emb=swa_rotary_pos_emb.clone()  # Clone is necessary!
-                if swa_rotary_pos_emb is not None
-                else None,
-                swa_rotary_pos_cos=swa_rotary_pos_cos.clone()  # Clone is necessary!
-                if swa_rotary_pos_cos is not None
-                else None,
-                swa_rotary_pos_sin=swa_rotary_pos_sin.clone()  # Clone is necessary!
-                if swa_rotary_pos_sin is not None
                 else None,
                 position_ids=position_ids.clone()  # Clone is necessary!
                 if position_ids is not None
@@ -643,16 +598,15 @@ class TransformerLayer(nn.Layer):
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
             and not self.config.mtp_load_weight_only
-            and not self.config.enable_mtp_magic_send
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
-            if not self.config.gpt_model_use_experimental_version:
-                if "position_ids" in dict_args.keys():
-                    position_ids = paddle.concat(
-                        [dict_args["position_ids"], mtp_ids], axis=1
-                    )
-                    dict_args["position_ids"] = position_ids
+
+            if "position_ids" in dict_args.keys():
+                position_ids = paddle.concat(
+                    [dict_args["position_ids"], mtp_ids], axis=1
+                )
+                dict_args["position_ids"] = position_ids
 
             # Restore rotary_pos_emb/cos/sin to full length for next layer
             if rotary_pos_emb_full is not None:
@@ -706,41 +660,12 @@ class TransformerLayer(nn.Layer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
-        swa_rotary_pos_emb: Tensor | None = None,
-        swa_rotary_pos_cos: Tensor | None = None,
-        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
         **kwargs,
     ):
-        def need_do_attention():
-            # need_do_prefill = forward_meta.max_len_tensor_cpu[1] > 0
-            # need_do_decode = forward_meta.max_len_tensor_cpu[2] > 0
-            # in fastdeploy mode , not need_do_prefill and not need_do_decode,
-            # core_attention will return none, so pass self attention
-            if (
-                getattr(self, "training", True)
-                or not self.config.multi_latent_attention
-            ):
-                return True
-            if hasattr(self, "self_attn") and hasattr(
-                self.self_attn, "core_attention"
-            ):
-                core_attn = self.self_attn.core_attention
-                if hasattr(core_attn, "config") and hasattr(
-                    core_attn.config, "forward_meta"
-                ):
-                    fm = core_attn.config.forward_meta
-                    return not (
-                        fm.max_len_tensor_cpu[1] <= 0
-                        and fm.max_len_tensor_cpu[2] <= 0
-                    )
-                return True
-            else:
-                return True
-
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
         if self.config.block_attention_residuals:
             blocks = kwargs.get("blocks", [])
@@ -758,26 +683,20 @@ class TransformerLayer(nn.Layer):
 
             # Self-attention (skip internal bda residual)
             with profile("attn"):
-                if need_do_attention():
-                    hidden_states, context = self._forward_attention(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        rotary_pos_cos=rotary_pos_cos,
-                        rotary_pos_sin=rotary_pos_sin,
-                        swa_rotary_pos_emb=swa_rotary_pos_emb,
-                        swa_rotary_pos_cos=swa_rotary_pos_cos,
-                        swa_rotary_pos_sin=swa_rotary_pos_sin,
-                        position_ids=position_ids,
-                        attention_bias=attention_bias,
-                        packed_seq_params=packed_seq_params,
-                        block_attention_residuals=True,
-                        in_recompute=self.full_recompute,
-                        **kwargs,
-                    )
+                hidden_states, context = self._forward_attention(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                    context=context,
+                    context_mask=context_mask,
+                    rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
+                    position_ids=position_ids,
+                    attention_bias=attention_bias,
+                    packed_seq_params=packed_seq_params,
+                    block_attention_residuals=True,
+                )
 
             # Accumulate attn output into partial_block
             if (
@@ -807,33 +726,23 @@ class TransformerLayer(nn.Layer):
             # Accumulate mlp output into partial_block
             output = partial_block + mlp_out
         else:
-            self._log_md5(hidden_states, "input", self.layer_number)
             with profile("attn"):
-                if need_do_attention():
-                    hidden_states, context = self._forward_attention(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        rotary_pos_cos=rotary_pos_cos,
-                        rotary_pos_sin=rotary_pos_sin,
-                        swa_rotary_pos_emb=swa_rotary_pos_emb,
-                        swa_rotary_pos_cos=swa_rotary_pos_cos,
-                        swa_rotary_pos_sin=swa_rotary_pos_sin,
-                        position_ids=position_ids,
-                        attention_bias=attention_bias,
-                        packed_seq_params=packed_seq_params,
-                        in_recompute=self.full_recompute,
-                        **kwargs,
-                    )
-            self._log_md5(
-                hidden_states, "post_attn_residual", self.layer_number
-            )
+                hidden_states, context = self._forward_attention(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                    context=context,
+                    context_mask=context_mask,
+                    rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
+                    position_ids=position_ids,
+                    attention_bias=attention_bias,
+                    packed_seq_params=packed_seq_params,
+                    in_recompute=self.full_recompute,
+                )
             with profile(timer_name):
                 output = self._forward_mlp(hidden_states, input_ids=input_ids)
-            self._log_md5(output, "layer_output", self.layer_number)
         if context is not None:
             return output, context
         return output
@@ -849,9 +758,6 @@ class TransformerLayer(nn.Layer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         rope_freqs_cis: Tensor | None = None,
-        swa_rotary_pos_emb: Tensor | None = None,
-        swa_rotary_pos_cos: Tensor | None = None,
-        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -874,9 +780,6 @@ class TransformerLayer(nn.Layer):
             rotary_pos_cos (Tensor | None): Rotary embedding cosine.
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
             rope_freqs_cis (Tensor | None): Rotary embedding frequency.
-            swa_rotary_pos_emb (Tensor | None): Sliding Window Rotary positional embeddings.
-            swa_rotary_pos_cos (Tensor | None): Sliding Window Rotary embedding cosine.
-            swa_rotary_pos_sin (Tensor | None): Sliding Window Rotary embedding sine.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
 
@@ -898,10 +801,6 @@ class TransformerLayer(nn.Layer):
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
 
-        self._log_md5(
-            input_layernorm_output, "input_layernorm_out", self.layer_number
-        )
-
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
                 input_layernorm_output,
@@ -912,9 +811,6 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
-                past_key_values=kwargs.get("past_key_values"),
-                layer_idx=self.layer_number,
-                use_cache=kwargs.get("use_cache", False),
             )
         else:
             attention_output_with_bias = self.self_attn(
@@ -924,16 +820,10 @@ class TransformerLayer(nn.Layer):
                 rotary_pos_emb=rotary_pos_emb,
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
-                swa_rotary_pos_emb=swa_rotary_pos_emb,
-                swa_rotary_pos_cos=swa_rotary_pos_cos,
-                swa_rotary_pos_sin=swa_rotary_pos_sin,
                 position_ids=position_ids,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
-                past_key_values=kwargs.get("past_key_values"),
-                layer_idx=self.layer_number,
-                use_cache=kwargs.get("use_cache", False),
             )
 
         with paddle.enable_grad():
@@ -1018,12 +908,6 @@ class TransformerLayer(nn.Layer):
                 hidden_states
             )
 
-        self._log_md5(
-            post_attention_layernorm_output,
-            "post_attn_layernorm_out",
-            self.layer_number,
-        )
-
         if self.recompute_mlp:
             _mlp_input_ids = (
                 input_ids if isinstance(self.mlp, MoELayer) else None
@@ -1060,18 +944,6 @@ class TransformerLayer(nn.Layer):
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
-
-        # Log MLP raw output before BDA
-        if (
-            TransformerLayer._LOG_LAYER_MD5
-            and TransformerLayer._gpt_model_use_experimental_version
-        ):
-            _mlp_tensor = (
-                mlp_output_with_bias[0]
-                if isinstance(mlp_output_with_bias, tuple)
-                else mlp_output_with_bias
-            )
-            self._log_md5(_mlp_tensor, "mlp_out", self.layer_number)
 
         with paddle.enable_grad():
             if block_attention_residuals:
@@ -1122,17 +994,17 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         config: TransformerConfig,
         sublayers_spec: TransformerLayerSublayersSpec,
         layer_number: int = 1,
+        is_mtp_layer: bool = False,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
-        is_mtp_layer: bool = False,
     ):
         super().__init__(
             config=config,
             sublayers_spec=sublayers_spec,
             layer_number=layer_number,
+            is_mtp_layer=is_mtp_layer,
             hidden_dropout_prob=hidden_dropout_prob,
             pg_collection=pg_collection,
-            is_mtp_layer=is_mtp_layer,
         )
 
         assert (
@@ -1184,8 +1056,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         ori_dtype = hidden_states.dtype
 
         # mHC: aggregate n-stream → 1-stream
+        attn_hc_input = hidden_states
         aggregated, h_res, h_post = self.self_attention_hyper_connection(
-            hidden_states
+            attn_hc_input
         )
         aggregated = aggregated.to(ori_dtype)
 
@@ -1194,10 +1067,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             input_layernorm_output = recompute(self.input_layernorm, aggregated)
         else:
             input_layernorm_output = self.input_layernorm(aggregated)
-
-        self._log_md5(
-            input_layernorm_output, "input_layernorm_out", self.layer_number
-        )
 
         # Self-attention
         if rope_freqs_cis is not None:
@@ -1224,7 +1093,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
             )
-
         # mHC: fused H_res + H_post + bias-dropout-add
         with paddle.enable_grad():
             hidden_states = (
@@ -1277,10 +1145,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         """mHC MLP forward: aggregate → layernorm → MLP → fused_h_res_h_post_bda."""
         # Save n-stream residual for H_res mixing
         original_residual = hidden_states
+        mlp_hc_input = hidden_states
         ori_dtype = hidden_states.dtype
 
         # mHC: aggregate n-stream → 1-stream
-        aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
+        aggregated, h_res, h_post = self.mlp_hyper_connection(mlp_hc_input)
         aggregated = aggregated.to(ori_dtype)
 
         # LayerNorm on aggregated single stream
@@ -1292,12 +1161,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             post_attention_layernorm_output = self.post_attention_layernorm(
                 aggregated
             )
-
-        self._log_md5(
-            post_attention_layernorm_output,
-            "post_attn_layernorm_out",
-            self.layer_number,
-        )
 
         # MLP
         if self.recompute_mlp:
@@ -1333,7 +1196,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
-
         # mHC: fused H_res + H_post + bias-dropout-add
         with paddle.enable_grad():
             hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(

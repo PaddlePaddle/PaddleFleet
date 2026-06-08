@@ -36,11 +36,46 @@ except ImportError:
 from paddle.distributed.fleet.meta_parallel import ScheduleNode
 
 from paddlefleet.jit import jit_fuser
+from paddlefleet.utils import dsv4_sequence_first_feature_enabled
 
 if TYPE_CHECKING:
     from paddle import Tensor
 
     from paddlefleet.transformer import TransformerConfig
+
+
+def _dsv4_sequence_first_rmsnorm_enabled() -> bool:
+    return dsv4_sequence_first_feature_enabled(
+        "DSV4_FLEET_SEQUENCE_FIRST_RMSNORM"
+    )
+
+
+def _dsv4_should_use_sequence_first_rmsnorm(hidden_states: paddle.Tensor) -> bool:
+    return (
+        _dsv4_sequence_first_rmsnorm_enabled()
+        and hidden_states.ndim in (3, 4)
+        and hidden_states.shape[0] > 1
+        and (hidden_states.ndim == 3 or hidden_states.shape[0] < hidden_states.shape[1])
+    )
+
+
+def _dsv4_sequence_first_rmsnorm_axes(hidden_states: paddle.Tensor) -> list[int]:
+    if hidden_states.ndim == 4:
+        return [1, 0, 2, 3]
+    return [1, 0, 2]
+
+
+def _dsv4_restore_batch_first_rmsnorm_output(
+    rms_norm_out: paddle.Tensor | tuple | list, use_sequence_first: bool, weight_dtype
+) -> paddle.Tensor:
+    if isinstance(rms_norm_out, (tuple, list)):
+        output = rms_norm_out[0]
+    else:
+        output = rms_norm_out
+    output = output.astype(weight_dtype)
+    if use_sequence_first:
+        output = output.transpose(_dsv4_sequence_first_rmsnorm_axes(output)).contiguous()
+    return output
 
 
 class RMSNorm(paddle.nn.Layer):
@@ -73,19 +108,23 @@ class RMSNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        # Ensure hidden_states dtype matches weight dtype for rms_norm
-        if hidden_states.dtype != self.weight.dtype:
-            hidden_states = hidden_states.astype(self.weight.dtype)
+        use_sequence_first = _dsv4_should_use_sequence_first_rmsnorm(
+            hidden_states
+        )
+        norm_input = (
+            hidden_states.transpose(_dsv4_sequence_first_rmsnorm_axes(hidden_states)).contiguous()
+            if use_sequence_first
+            else hidden_states
+        )
         rms_norm_out = rms_norm(
-            hidden_states,
-            hidden_states.shape[-1:],
+            norm_input,
+            norm_input.shape[-1:],
             self.weight,
             self.variance_epsilon,
         )
-        if isinstance(rms_norm_out, (tuple, list)):
-            return rms_norm_out[0].astype(self.weight.dtype)
-        else:
-            return rms_norm_out.astype(self.weight.dtype)
+        return _dsv4_restore_batch_first_rmsnorm_output(
+            rms_norm_out, use_sequence_first, self.weight.dtype
+        )
 
     def enable_sequence_parallel(self):
         mark_as_sequence_parallel_parameter(self.weight)
@@ -143,16 +182,23 @@ class LayerNorm(paddle.nn.Layer):
 
 class FusedRMSNorm(RMSNorm):
     def forward(self, hidden_states: Tensor):
+        use_sequence_first = _dsv4_should_use_sequence_first_rmsnorm(
+            hidden_states
+        )
+        norm_input = (
+            hidden_states.transpose(_dsv4_sequence_first_rmsnorm_axes(hidden_states)).contiguous()
+            if use_sequence_first
+            else hidden_states
+        )
         rms_norm_out = rms_norm(
-            hidden_states,
-            hidden_states.shape[-1:],
+            norm_input,
+            norm_input.shape[-1:],
             self.weight,
             self.variance_epsilon,
         )
-        if isinstance(rms_norm_out, (tuple, list)):
-            return rms_norm_out[0].astype(self.weight.dtype)
-        else:
-            return rms_norm_out.astype(self.weight.dtype)
+        return _dsv4_restore_batch_first_rmsnorm_output(
+            rms_norm_out, use_sequence_first, self.weight.dtype
+        )
 
 
 class RMSNormTriton(RMSNorm):
@@ -251,26 +297,27 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
         )
 
     def forward(self, dict_args: dict):
+        tensor_list = None
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not self.config.mtp_load_weight_only
-            and not self.config.enable_mtp_magic_send
         ):
             hidden_states_concat = dict_args["hidden_states"]
             tensor_list = paddle.split(
                 hidden_states_concat, self.config.num_nextn_predict_layers + 1
             )
             dict_args["hidden_states"] = tensor_list[0]
+
+        normed_hidden_states = self.norm(dict_args["hidden_states"])
         rst = {
             **dict_args,
-            "hidden_states": self.norm(dict_args["hidden_states"]),
+            "hidden_states": normed_hidden_states,
         }
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not self.config.mtp_load_weight_only
-            and not self.config.enable_mtp_magic_send
         ):
             # normalize MTP hidden_states
             if self.config.gpt_model_use_experimental_version:
@@ -281,21 +328,6 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             )
             rst["hidden_states"] = hidden_states_concat
         rst = {**dict_args, **rst}
-
-        # Loss-path MD5 probe: final_layernorm output
-        if (
-            os.environ.get("LOG_LAYER_MD5", "0") == "1"
-            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
-        ):
-            import hashlib
-
-            rank = paddle.distributed.get_rank()
-            h = rst["hidden_states"]
-            md5 = hashlib.md5(h.cast("float32").numpy().tobytes()).hexdigest()
-            print(
-                f"[LOSS_PATH_MD5] rank={rank} final_layernorm_output shape={list(h.shape)} md5={md5}",
-                flush=True,
-            )
 
         return rst
 
