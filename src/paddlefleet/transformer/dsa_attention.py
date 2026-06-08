@@ -1054,7 +1054,14 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
 class DSAIndexerLossLoggingHelper:
     """Helper class for logging sparse attention indexer losses across layers and ranks."""
 
-    tracker: dict = {}
+    tracker = {}
+
+    @staticmethod
+    def get_total_num_layers(config):
+        return config.num_hidden_layers + (
+            getattr(config, "mtp_num_layers", 0)
+            or getattr(config, "num_nextn_predict_layers", 0)
+        )
 
     @staticmethod
     def save_loss_to_tracker(
@@ -1140,6 +1147,7 @@ class DSAIndexerLossLoggingHelper:
         writer=None,
         total_loss_dict: dict | None = None,
         num_layers: int | None = None,
+        csa_compress_ratios: list[int] | None = None,
     ):
         """Track the sparse attention indexer metrics for logging.
 
@@ -1149,15 +1157,26 @@ class DSAIndexerLossLoggingHelper:
             writer: TensorBoard writer (optional).
             total_loss_dict: Dictionary to accumulate total losses (optional).
             num_layers: Total number of layers with indexer metrics.
+            csa_compress_ratios: Per-layer CSA compress ratios.
         """
-        DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(num_layers=num_layers)
+        DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(
+            num_layers=num_layers
+        )
         tracker = DSAIndexerLossLoggingHelper.tracker
         if "values" not in tracker:
             return
 
         indexer_loss_values = tracker["values"] * loss_scale
-        num_layers = indexer_loss_values.shape[0]
-        avg_indexer_loss = indexer_loss_values.sum() / num_layers
+        if csa_compress_ratios is not None:
+            num_indexer_layers = sum(
+                1 for ratio in csa_compress_ratios if ratio == 4
+            )
+        else:
+            num_indexer_layers = indexer_loss_values.shape[0]
+        if num_indexer_layers == 0:
+            DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
+            return
+        avg_indexer_loss = indexer_loss_values.sum() / num_indexer_layers
 
         if total_loss_dict is not None:
             if "indexer loss" in total_loss_dict:
@@ -1417,10 +1436,8 @@ class DSAttention(FleetLayer):
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,
-                    num_layers=self.config.num_hidden_layers
-                    + (
-                        getattr(self.config, "mtp_num_layers", 0)
-                        or getattr(self.config, "num_nextn_predict_layers", 0)
+                    num_layers=DSAIndexerLossLoggingHelper.get_total_num_layers(
+                        self.config
                     ),
                 )
             core_attn_out = DSAIndexerLossAutoScaler.apply(

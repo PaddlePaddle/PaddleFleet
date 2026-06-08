@@ -1010,7 +1010,7 @@ class CompressedSparseAttention(FleetLayer):
         self.config = config
         self.layer_number = layer_number
         if is_mtp_layer:
-            self.layer_number += self.config.num_hidden_layers
+            self.layer_number += self.config.num_hidden_layers + 1
         self.pg_collection = pg_collection
         self.tp_group = (
             pg_collection.tp
@@ -1151,10 +1151,8 @@ class CompressedSparseAttention(FleetLayer):
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,
-                    num_layers=self.config.num_hidden_layers
-                    + (
-                        getattr(self.config, "mtp_num_layers", 0)
-                        or getattr(self.config, "num_nextn_predict_layers", 0)
+                    num_layers=DSAIndexerLossLoggingHelper.get_total_num_layers(
+                        self.config
                     ),
                 )
         elif self.training and not use_tilelang_indexer:
@@ -1201,10 +1199,8 @@ class CompressedSparseAttention(FleetLayer):
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,
-                    num_layers=self.config.num_hidden_layers
-                    + (
-                        getattr(self.config, "mtp_num_layers", 0)
-                        or getattr(self.config, "num_nextn_predict_layers", 0)
+                    num_layers=DSAIndexerLossLoggingHelper.get_total_num_layers(
+                        self.config
                     ),
                 )
         elif not use_tilelang_indexer:
