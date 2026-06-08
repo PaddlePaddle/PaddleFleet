@@ -138,6 +138,7 @@ def startend_row_indices_add_sliding_window(
         )
     return startend_row_indices
 
+
 # ---------------------------------------------------------------------------
 # Helper functions for document mask
 # ---------------------------------------------------------------------------
