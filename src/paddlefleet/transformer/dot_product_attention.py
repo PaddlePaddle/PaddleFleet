@@ -318,6 +318,13 @@ class DotProductAttention(FleetLayer):
         v_b_proj_weight: paddle.Tensor = None,
     ):
         """Forward."""
+
+        # EC-compatible flash attention path for alignment mode
+        if self.config.gpt_model_use_experimental_version:
+            return self._ec_compatible_flash_attention(
+                query, key, value, attn_mask_startend_row_indices
+            )
+
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
@@ -340,12 +347,6 @@ class DotProductAttention(FleetLayer):
 
         bsz, q_len, num_heads, q_head_dim = query.shape
         v_head_dim = value.shape[-1]
-
-        # EC-compatible flash attention path for alignment mode
-        if self.config.gpt_model_use_experimental_version:
-            return self._ec_compatible_flash_attention(
-                query, key, value, attn_mask_startend_row_indices
-            )
 
         use_eager = self.config._attn_implementation == "eager"
 
