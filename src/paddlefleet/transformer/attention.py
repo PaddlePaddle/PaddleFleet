@@ -959,7 +959,7 @@ class SelfAttention(Attention):
                 gate_dim = (
                     heads_per_group * self.value_hidden_size_per_attention_head
                 )
-    
+
             if self.gated_attention:
                 # Per group: Q + Gate + K + V
                 group_dim = (
@@ -975,7 +975,7 @@ class SelfAttention(Attention):
                     + self.hidden_size_per_attention_head
                     + self.value_hidden_size_per_attention_head
                 )
-    
+
             # [b, sq, hp] --> [b, sq, ng, group_dim]
             new_tensor_shape = (
                 *mixed_qkv.shape[:-1],
@@ -983,7 +983,7 @@ class SelfAttention(Attention):
                 group_dim,
             )
             mixed_qkv = mixed_qkv.reshape(*new_tensor_shape)
-    
+
             if self.gated_attention:
                 split_arg_list = [
                     q_dim,
