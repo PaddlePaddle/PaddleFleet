@@ -19,6 +19,7 @@ import logging
 import paddle
 import paddlefleet_ops
 
+from paddlefleet.pipeline_parallel.pp_utils.utils import sonic_moe_memory_probe
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
 from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
@@ -41,8 +42,14 @@ if paddlefleet_ops.is_sonic_moe_available():
         _DownProjection,
         _refresh_fp8_config,
         _UpProjection,
+        precompute_weight_fp8,
+        precompute_weight_fp8_for_direct_fused_dgated,
+        precompute_weight_fp8_for_fused_gated,
     )
-    from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+    from paddlefleet_ops.sonicmoe.functional.utils import (
+        enable_fp8,
+        enable_quack_gemm,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -2175,18 +2182,83 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         return hidden_states_grad, dispatched_probs_grad
 
 
+def make_sonic_fp8_weight_payload(w1, w2):
+    w1_sonic = w1.permute([1, 2, 0])
+    w2_sonic = w2.permute([1, 2, 0])
+    w1_fused_fp8, w1_fused_scales = precompute_weight_fp8_for_fused_gated(
+        w1_sonic
+    )
+    w1T_varlen_fp8, w1T_varlen_scales = precompute_weight_fp8(
+        w1_sonic.permute(1, 0, 2)
+    )
+    w2_varlen_fp8, w2_varlen_scales = precompute_weight_fp8(w2_sonic)
+    w2_dgated_fp8, w2_dgated_scales = precompute_weight_fp8_for_direct_fused_dgated(
+        w2_sonic
+    )
+    return {
+        "format": "1x32",
+        "w1_fused": (w1_fused_fp8, w1_fused_scales),
+        "w1T_varlen": (w1T_varlen_fp8, w1T_varlen_scales),
+        "w2_varlen": (w2_varlen_fp8, w2_varlen_scales),
+        "w2_dgated": (w2_dgated_fp8, w2_dgated_scales),
+    }
+
+
+def attach_sonic_fp8_weight_payload(w1, w2, payload):
+    if payload.get("format") != "1x32":
+        raise ValueError("Sonic Fleet FP8 weight payload requires 1x32 format")
+    w1.sonic_fp8_weight_format = payload["format"]
+    w1.sonic_fp8_w1_fused = payload["w1_fused"]
+    w1.sonic_fp8_w1T_varlen = payload["w1T_varlen"]
+    w2.sonic_fp8_weight_format = payload["format"]
+    w2.sonic_fp8_w2_varlen = payload["w2_varlen"]
+    w2.sonic_fp8_w2_dgated = payload["w2_dgated"]
+
+
+def get_sonic_fp8_weight_payload(w1, w2):
+    required = (
+        hasattr(w1, "sonic_fp8_w1_fused")
+        and hasattr(w1, "sonic_fp8_w1T_varlen")
+        and hasattr(w2, "sonic_fp8_w2_varlen")
+        and hasattr(w2, "sonic_fp8_w2_dgated")
+    )
+    if not required:
+        raise RuntimeError(
+            "Sonic FP8 weight payload is missing; call fp8_quant_weight() before FP8 forward"
+        )
+    return {
+        "format": getattr(w1, "sonic_fp8_weight_format", "1x32"),
+        "w1_fused": w1.sonic_fp8_w1_fused,
+        "w1T_varlen": w1.sonic_fp8_w1T_varlen,
+        "w2_varlen": w2.sonic_fp8_w2_varlen,
+        "w2_dgated": w2.sonic_fp8_w2_dgated,
+    }
+
+
 def run_sonic_moe(
     hidden_states, topk_indices, topk_scores, K, E, w1, w2, fp8=False
 ):
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
 
+    sonic_moe_memory_probe(
+        "Before_sonic_metadata",
+        tensors={"hidden_states": hidden_states, "topk_indices": topk_indices, "topk_scores": topk_scores},
+        extra={"K": K, "E": E, "fp8": fp8},
+    )
     valid = topk_indices >= 0
     valid_experts = topk_indices[valid].cast(paddle.int32)
     tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
         paddle.int32
     )
 
+    metadata = deepep_topk_to_sonic_metadata(
+        topk_indices.cast(paddle.int32),
+        topk_scores,
+        tokens_per_expert,
+        E,
+        block=128 if fp8 else 1,
+    )
     (
         expert_frequency_offset,
         x_gather_idx,
@@ -2198,18 +2270,25 @@ def run_sonic_moe(
         total_pad_rows,
         _N_recv,
         _score_src_idx,
-    ) = deepep_topk_to_sonic_metadata(
-        topk_indices.cast(paddle.int32),
-        topk_scores,
-        tokens_per_expert,
-        E,
-        block=128 if fp8 else 1,
+    ) = metadata[:10]
+    sonic_moe_memory_probe(
+        "After_sonic_metadata",
+        tensors={
+            "tokens_per_expert": tokens_per_expert,
+            "metadata": metadata,
+        },
+        extra={"TK_padded": TK_padded, "total_pad_rows": total_pad_rows},
     )
 
     s_scatter_idx.stop_gradient = True
     activation_type = ActivationType("swiglu")
 
     total_expert_freq = TK_padded
+    sonic_moe_memory_probe(
+        "Before_sonic_router_scores",
+        tensors={"topk_scores": topk_scores, "topk_indices": topk_indices},
+        extra={"TK_padded": TK_padded, "total_pad_rows": total_pad_rows},
+    )
     scores_for_down = _differentiable_router_scores(
         topk_scores,
         topk_indices.cast(paddle.int32),
@@ -2219,9 +2298,26 @@ def run_sonic_moe(
         E,
         score_src_idx=_score_src_idx,
     )
+    sonic_moe_memory_probe(
+        "After_sonic_router_scores",
+        tensors={"scores_for_down": scores_for_down},
+        extra={"TK_padded": TK_padded, "total_pad_rows": total_pad_rows},
+    )
 
-    with enable_fp8(fp8):
+    with enable_quack_gemm(True), enable_fp8(fp8):
         _refresh_fp8_config()
+        fp8_weight_payload = (
+            get_sonic_fp8_weight_payload(w1, w2) if fp8 else None
+        )
+        sonic_moe_memory_probe(
+            "Before_sonic_up_projection",
+            tensors={
+                "hidden_states": hidden_states,
+                "w1": w1,
+                "fp8_weight_payload": fp8_weight_payload,
+            },
+            extra={"fp8": fp8, "TK_padded": TK_padded},
+        )
         y1, z = _UpProjection.apply(
             hidden_states,
             w1.permute([1, 2, 0]),
@@ -2238,6 +2334,17 @@ def run_sonic_moe(
             activation_type,
             is_inference_mode_enabled=False,
             use_low_precision_postact_buffer=False,
+            fp8_weight_payload=fp8_weight_payload,
+        )
+        sonic_moe_memory_probe(
+            "After_sonic_up_projection",
+            tensors={"y1": y1, "z": z},
+            extra={"fp8": fp8, "TK_padded": TK_padded},
+        )
+        sonic_moe_memory_probe(
+            "Before_sonic_down_projection",
+            tensors={"y1": y1, "z": z, "w2": w2, "scores_for_down": scores_for_down},
+            extra={"fp8": fp8, "TK_padded": TK_padded, "T": T},
         )
         hidden_states = _DownProjection.apply(
             y1,
@@ -2257,6 +2364,12 @@ def run_sonic_moe(
             True,  # is_varlen_k
             activation_type,
             None,
+            fp8_weight_payload=fp8_weight_payload,
+        )
+        sonic_moe_memory_probe(
+            "After_sonic_down_projection",
+            tensors={"hidden_states": hidden_states},
+            extra={"fp8": fp8, "TK_padded": TK_padded, "T": T},
         )
 
     return hidden_states

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import paddle
 from paddle.distributed.fleet.utils.log_util import get_sync_logger
 
@@ -56,6 +58,174 @@ def profile_pipeline_details(msg):
     get_sync_logger().info(
         f"{msg}: memory_allocated_size={memory_allocated_size:.2f}, memory_reserved_size={memory_reserved_size:.2f}"
     )
+
+
+def _parse_int_set(env_name):
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return None
+    values = set()
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            values.add(int(item))
+        except ValueError:
+            return None
+    return values
+
+
+def _current_rank():
+    try:
+        if paddle.distributed.is_initialized():
+            return paddle.distributed.get_rank()
+    except Exception:
+        pass
+    try:
+        return int(os.environ.get("PADDLE_TRAINER_ID", os.environ.get("RANK", "0")))
+    except ValueError:
+        return 0
+
+
+def _current_local_rank():
+    for name in ("PADDLE_RANK_IN_NODE", "FLAGS_selected_gpus", "CUDA_VISIBLE_DEVICES"):
+        raw = os.environ.get(name, "").split(",")[0].strip()
+        if not raw:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            continue
+    return None
+
+
+def _current_step():
+    raw = os.environ.get("TRAINER_GLOBAL_STEP", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _mem_probe_enabled(step=None, layer=None):
+    if os.environ.get("SONIC_MOE_MEM_PROBE", "0").lower() not in {"1", "true", "yes", "on"}:
+        return False
+    ranks = _parse_int_set("SONIC_MOE_MEM_PROBE_RANKS")
+    if ranks is not None and _current_rank() not in ranks:
+        return False
+    local_ranks = _parse_int_set("SONIC_MOE_MEM_PROBE_LOCAL_RANKS")
+    if local_ranks is not None and _current_local_rank() not in local_ranks:
+        return False
+    steps = _parse_int_set("SONIC_MOE_MEM_PROBE_STEPS")
+    if steps is not None and (step is None or int(step) not in steps):
+        return False
+    layers = _parse_int_set("SONIC_MOE_MEM_PROBE_LAYERS")
+    if layers is not None and layer is not None and int(layer) not in layers:
+        return False
+    return True
+
+
+def _try_record_memory(mem_dict, key, getter, unit):
+    try:
+        mem_dict[key] = getter() / unit
+    except Exception:
+        pass
+
+
+def _tensor_nbytes(tensor):
+    if tensor is None:
+        return 0
+    try:
+        size = getattr(tensor, "size", None)
+        if callable(size):
+            size = size()
+        if size is None:
+            shape = getattr(tensor, "shape", None)
+            if shape is None:
+                return 0
+            size = 1
+            for dim in shape:
+                size *= int(dim)
+        itemsize = getattr(tensor, "itemsize", None)
+        if itemsize is None:
+            dtype = str(getattr(tensor, "dtype", ""))
+            itemsize = 1 if any(x in dtype for x in ("float8", "int8", "uint8")) else 2 if any(x in dtype for x in ("float16", "bfloat16")) else 4
+        return int(size) * int(itemsize)
+    except Exception:
+        return 0
+
+
+def _collect_tensor_summaries(name, value, unit, summaries, max_items):
+    if value is None or len(summaries) >= max_items:
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _collect_tensor_summaries(f"{name}.{key}", item, unit, summaries, max_items)
+        return
+    if isinstance(value, (list, tuple)):
+        for idx, item in enumerate(value):
+            _collect_tensor_summaries(f"{name}.{idx}", item, unit, summaries, max_items)
+        return
+    nbytes = _tensor_nbytes(value)
+    if nbytes <= 0:
+        return
+    shape = getattr(value, "shape", None)
+    dtype = getattr(value, "dtype", None)
+    summaries.append(f"{name}={nbytes / unit:.1f}MB(shape={list(shape) if shape is not None else '?'},dtype={dtype})")
+
+
+def sonic_moe_memory_probe(msg, step=None, layer=None, logger=None, extra=None, tensors=None):
+    if step is None:
+        step = _current_step()
+    if not _mem_probe_enabled(step=step, layer=layer):
+        return
+    unit = 1024.0 * 1024.0
+    unit_name = "MB"
+    mem_dict = {}
+    if paddle.base.core.is_compiled_with_cuda():
+        _try_record_memory(mem_dict, "memory_allocated", paddle.device.cuda.memory_allocated, unit)
+        _try_record_memory(mem_dict, "memory_reserved", paddle.device.cuda.memory_reserved, unit)
+        _try_record_memory(mem_dict, "max_memory_allocated", paddle.device.cuda.max_memory_allocated, unit)
+        _try_record_memory(mem_dict, "max_memory_reserved", paddle.device.cuda.max_memory_reserved, unit)
+        if hasattr(paddle.device.cuda, "max_pinned_memory_allocated"):
+            _try_record_memory(mem_dict, "pinned_memory_allocated", paddle.device.cuda.pinned_memory_allocated, unit)
+            _try_record_memory(mem_dict, "pinned_memory_reserved", paddle.device.cuda.pinned_memory_reserved, unit)
+            _try_record_memory(mem_dict, "pinned_max_memory_allocated", paddle.device.cuda.max_pinned_memory_allocated, unit)
+            _try_record_memory(mem_dict, "pinned_max_memory_reserved", paddle.device.cuda.max_pinned_memory_reserved, unit)
+    if hasattr(paddle.device, "cpu"):
+        if hasattr(paddle.device.cpu, "memory_allocated"):
+            _try_record_memory(mem_dict, "cpu_memory_allocated", paddle.device.cpu.memory_allocated, unit)
+        if hasattr(paddle.device.cpu, "memory_reserved"):
+            _try_record_memory(mem_dict, "cpu_memory_reserved", paddle.device.cpu.memory_reserved, unit)
+        if hasattr(paddle.device.cpu, "max_memory_allocated"):
+            _try_record_memory(mem_dict, "cpu_max_memory_allocated", paddle.device.cpu.max_memory_allocated, unit)
+        if hasattr(paddle.device.cpu, "max_memory_reserved"):
+            _try_record_memory(mem_dict, "cpu_max_memory_reserved", paddle.device.cpu.max_memory_reserved, unit)
+    fields = [f"rank={_current_rank()}"]
+    local_rank = _current_local_rank()
+    if local_rank is not None:
+        fields.append(f"local_rank={local_rank}")
+    if step is not None:
+        fields.append(f"step={int(step)}")
+    if layer is not None:
+        fields.append(f"layer={int(layer)}")
+    fields.extend(f"{key}: {value:.1f}{unit_name}" for key, value in mem_dict.items())
+    if extra:
+        fields.extend(f"{key}={value}" for key, value in extra.items())
+    if tensors:
+        tensor_summaries = []
+        for key, value in tensors.items():
+            _collect_tensor_summaries(key, value, unit, tensor_summaries, max_items=16)
+        fields.extend(tensor_summaries)
+    log_msg = f"[SonicMoE memory] {msg}: " + ", ".join(fields)
+    (logger or get_sync_logger()).info(log_msg)
+
+
+def sonic_moe_tensor_memory_probe(msg, tensors=None, step=None, layer=None, logger=None, extra=None):
+    sonic_moe_memory_probe(msg, step=step, layer=layer, logger=logger, extra=extra, tensors=tensors or {})
 
 
 def tuple_to_dict_helper(input_tensor):

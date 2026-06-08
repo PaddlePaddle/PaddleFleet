@@ -24,6 +24,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 )
 
 from paddlefleet import utils
+from paddlefleet.pipeline_parallel.pp_utils.utils import sonic_moe_memory_probe
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
@@ -33,7 +34,11 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from .fusion_layer_utils import run_sonic_moe
+from .fusion_layer_utils import (
+    attach_sonic_fp8_weight_payload,
+    make_sonic_fp8_weight_payload,
+    run_sonic_moe,
+)
 from .moe_utils import (
     k_grouped_bf16_gemm_tn_contiguous_aligned,
 )
@@ -482,6 +487,39 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.hidden_size = self.config.hidden_size
         self.K = topk
         self._weights_layout = self._GROUPED_LAYOUT
+        self.fp8_weight_payload = None
+
+    def fp8_quant_weight(self):
+        sonic_moe_memory_probe(
+            "Before_sonic_fp8_payload",
+            tensors={"weight1": self.weight1, "weight2": self.weight2},
+            extra={"weights_layout": self._weights_layout},
+        )
+        self.convert_weights_to_sonic_layout()
+        sonic_moe_memory_probe(
+            "After_sonic_layout_for_payload",
+            tensors={"weight1": self.weight1, "weight2": self.weight2},
+            extra={"weights_layout": self._weights_layout},
+        )
+        self.fp8_weight_payload = make_sonic_fp8_weight_payload(
+            self.weight1,
+            self.weight2,
+        )
+        sonic_moe_memory_probe(
+            "After_sonic_make_fp8_payload",
+            tensors={"fp8_weight_payload": self.fp8_weight_payload},
+            extra={"payload_keys": list(self.fp8_weight_payload.keys()) if isinstance(self.fp8_weight_payload, dict) else None},
+        )
+        attach_sonic_fp8_weight_payload(
+            self.weight1,
+            self.weight2,
+            self.fp8_weight_payload,
+        )
+        sonic_moe_memory_probe(
+            "After_sonic_attach_fp8_payload",
+            tensors={"weight1": self.weight1, "weight2": self.weight2, "fp8_weight_payload": self.fp8_weight_payload},
+            extra={"weights_layout": self._weights_layout},
+        )
 
     def _convert_grad_layout(self, param, converter):
         main_grad = getattr(param, "main_grad", None)
@@ -527,7 +565,22 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.flush_to_grouped_layout()
 
     def forward(self, hidden_states, topk_indices, topk_scores, use_fp8=False):
+        sonic_moe_memory_probe(
+            "Before_sonic_convert_layout",
+            tensors={"hidden_states": hidden_states, "weight1": self.weight1, "weight2": self.weight2},
+            extra={"weights_layout": self._weights_layout, "use_fp8": use_fp8},
+        )
         self.convert_weights_to_sonic_layout()
+        sonic_moe_memory_probe(
+            "After_sonic_convert_layout",
+            tensors={"weight1": self.weight1, "weight2": self.weight2},
+            extra={"weights_layout": self._weights_layout},
+        )
+        sonic_moe_memory_probe(
+            "Before_run_sonic_moe",
+            tensors={"hidden_states": hidden_states, "topk_indices": topk_indices, "topk_scores": topk_scores},
+            extra={"use_fp8": use_fp8},
+        )
         hidden_states = run_sonic_moe(
             hidden_states,
             topk_indices,
@@ -537,6 +590,11 @@ class SonicMoEExpert(GroupedMLPExpert):
             self.weight1,
             self.weight2,
             use_fp8,
+        )
+        sonic_moe_memory_probe(
+            "After_run_sonic_moe",
+            tensors={"hidden_states": hidden_states},
+            extra={"use_fp8": use_fp8},
         )
         return hidden_states
 

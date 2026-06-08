@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
+from paddlefleet.pipeline_parallel.pp_utils.utils import sonic_moe_memory_probe
 from paddlefleet.recompute_utils import need_recompute_in_first_n
 from paddlefleet.transformer.utils import profile
 
@@ -495,6 +496,8 @@ class MoELayer(nn.Layer):
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts,
+                    fp8_dispatch=self.fp8_dispatch,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
                 raise NotImplementedError(
@@ -830,10 +833,21 @@ class MoELayer(nn.Layer):
             hidden_states = self.fc1_latent_proj(hidden_states)
 
         should_log_balance = framework._dygraph_tracer()._has_grad
+        sonic_moe_memory_probe(
+            "Before_moe_dispatch",
+            layer=self.layer_number,
+            tensors={"hidden_states": hidden_states, "probs": probs, "routing_map": routing_map},
+        )
         with profile("dispatch"):
             dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
                 hidden_states, probs, routing_map, topk_weights, topk_indices
             )
+        sonic_moe_memory_probe(
+            "After_moe_dispatch",
+            layer=self.layer_number,
+            tensors={"dispatched_hidden_states": dispatched_hidden_states},
+            extra={"fp8_dispatched_handle": fp8_dispatched_handle is not None},
+        )
 
         tokens_per_expert = None
         if self.moe_token_dispatcher_type == "allgather":
@@ -885,13 +899,37 @@ class MoELayer(nn.Layer):
                 )
             elif self.using_sonic_moe:
                 use_fp8 = self.fp8 is not None
+                sonic_moe_memory_probe(
+                    "Before_sonic_moe_expert",
+                    layer=self.layer_number,
+                    tensors={
+                        "dispatched_hidden_states": dispatched_hidden_states,
+                        "dispatched_indices": dispatched_indices,
+                        "dispatched_probs": dispatched_probs,
+                    },
+                    extra={"use_fp8": use_fp8},
+                )
                 hidden_states = self.grouped_gemm_experts(
                     dispatched_hidden_states,
                     dispatched_indices,
                     dispatched_probs,
                     use_fp8,
                 )
+                sonic_moe_memory_probe(
+                    "After_sonic_moe_expert",
+                    layer=self.layer_number,
+                    tensors={"expert_output": hidden_states},
+                )
             else:
+                sonic_moe_memory_probe(
+                    "Before_standard_fusion_moe",
+                    layer=self.layer_number,
+                    tensors={
+                        "dispatched_hidden_states": dispatched_hidden_states,
+                        "dispatched_indices": dispatched_indices,
+                        "dispatched_probs": dispatched_probs,
+                    },
+                )
                 hidden_states = FusionMoePyLayer.apply(
                     dispatched_hidden_states,
                     dispatched_probs,
@@ -913,7 +951,17 @@ class MoELayer(nn.Layer):
                     clamp_value=self.config.activation_func_clamp_value,
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
                 )
+                sonic_moe_memory_probe(
+                    "After_standard_fusion_moe",
+                    layer=self.layer_number,
+                    tensors={"expert_output": hidden_states},
+                )
 
+        sonic_moe_memory_probe(
+            "Before_moe_combine",
+            layer=self.layer_number,
+            tensors={"expert_output": hidden_states},
+        )
         with profile("combine"):
             if self.moe_token_dispatcher_type == "allgather":
                 hidden_states = self.token_dispatcher.token_combine(
@@ -929,6 +977,11 @@ class MoELayer(nn.Layer):
                     combine_overlap_handle,
                     use_rr_deepep_combine=self.use_rr_deepep_combine,
                 )
+        sonic_moe_memory_probe(
+            "After_moe_combine",
+            layer=self.layer_number,
+            tensors={"combined_output": hidden_states},
+        )
 
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
@@ -1336,11 +1389,22 @@ class MoELayer(nn.Layer):
 
         if self.using_sonic_moe:
             use_fp8 = self.fp8 is not None
+            sonic_moe_memory_probe(
+                "Before_single_sonic_moe_expert",
+                layer=self.layer_number,
+                tensors={"hidden_states": hidden_states, "topk_indices": topk_indices, "topk_weights": topk_weights},
+                extra={"use_fp8": use_fp8},
+            )
             final_hidden_states = self.grouped_gemm_experts(
                 hidden_states,
                 topk_indices,
                 topk_weights,
                 use_fp8,
+            )
+            sonic_moe_memory_probe(
+                "After_single_sonic_moe_expert",
+                layer=self.layer_number,
+                tensors={"final_hidden_states": final_hidden_states},
             )
             return final_hidden_states.cast(hidden_states.dtype)
         else:
@@ -1401,6 +1465,29 @@ class MoELayer(nn.Layer):
                     weight_obj.fp8_scale_stacked_transpose = converted_scale
 
         if hasattr(self, "grouped_gemm_experts"):
+            if self.using_sonic_moe:
+                sonic_moe_memory_probe(
+                    "Before_moe_fp8_quant_weight",
+                    layer=self.layer_number,
+                    tensors={
+                        "weight1": getattr(self.grouped_gemm_experts, "weight1", None),
+                        "weight2": getattr(self.grouped_gemm_experts, "weight2", None),
+                    },
+                )
+                self.grouped_gemm_experts.fp8_quant_weight()
+                payload = getattr(self.grouped_gemm_experts, "fp8_weight_payload", None)
+                sonic_moe_memory_probe(
+                    "After_moe_fp8_quant_weight",
+                    layer=self.layer_number,
+                    tensors={
+                        "weight1": getattr(self.grouped_gemm_experts, "weight1", None),
+                        "weight2": getattr(self.grouped_gemm_experts, "weight2", None),
+                        "fp8_weight_payload": payload,
+                    },
+                    extra={"payload_keys": list(payload.keys()) if isinstance(payload, dict) else None},
+                )
+                return
+
             if batch_mode:
                 expert_w1 = self.grouped_gemm_experts.weight1
                 expert_w2 = self.grouped_gemm_experts.weight2
