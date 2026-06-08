@@ -40,6 +40,7 @@ from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.refined_recompute import (
     RefinedRcomputeFlashMaskAttention as rr_flashmask_attention,
+    RefinedRcomputeFlashMaskCpAttention as rr_flashmask_attention_cp,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
@@ -205,6 +206,7 @@ class DotProductAttention(FleetLayer):
         else:
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()
+        self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
 
     def _ec_compatible_flash_attention(
         self, query, key, value, attn_mask_startend_row_indices=None
