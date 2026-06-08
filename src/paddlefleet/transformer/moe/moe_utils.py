@@ -45,22 +45,15 @@ if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
 
-_USE_ACCURACY_COMPATIBLE_KERNEL = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
+def _dsv4_fleet_moe_fp32_accum_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_MOE_FP32_ACCUM", "0") == "1"
 
 
-def use_accuracy_compatible_kernel() -> bool:
-    """Unified switch for accuracy-compatible (Megatron-aligned) numeric paths.
-
-    Controlled via the ``FLAGS_use_accuracy_compatible_kernel`` environment
-    variable. When enabled, modules switch to fp32-accumulating / Torch-aligned
-    kernels at the cost of throughput.
-    """
-    return _USE_ACCURACY_COMPATIBLE_KERNEL
+def _dsv4_probs_mul_custom_bwd_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_PROBS_MUL_CUSTOM_BWD", "0") == "1"
 
 
-def _unpermute_scatter(
+def _dsv4_unpermute_scatter(
     permuted_tokens: paddle.Tensor, sorted_indices: paddle.Tensor, restore_shape
 ) -> paddle.Tensor:
     output_tokens = paddle.zeros(restore_shape, dtype=permuted_tokens.dtype)
@@ -70,7 +63,7 @@ def _unpermute_scatter(
     return output_tokens
 
 
-def _unpermute_fp32_accum(
+def _dsv4_unpermute_fp32_accum(
     permuted_tokens: paddle.Tensor, sorted_indices: paddle.Tensor, restore_shape
 ) -> paddle.Tensor:
     output_tokens = paddle.zeros(restore_shape, dtype="float32")
@@ -82,9 +75,7 @@ def _unpermute_fp32_accum(
     return output_tokens.cast(permuted_tokens.dtype)
 
 
-class ApplyPermutedProbs(PyLayer):
-    """tokens * probs with fp32-accumulated probs gradient."""
-
+class _DSV4ApplyPermutedProbs(PyLayer):
     @staticmethod
     def forward(ctx, permuted_tokens, permuted_probs):
         ctx.input_dtype = permuted_tokens.dtype
@@ -98,9 +89,7 @@ class ApplyPermutedProbs(PyLayer):
         grad_probs = (
             permuted_tokens.cast("float32") * grad_output.cast("float32")
         ).sum(axis=-1)
-        return grad_tokens.cast(ctx.input_dtype), grad_probs.cast(
-            permuted_probs.dtype
-        )
+        return grad_tokens.cast(ctx.input_dtype), grad_probs.cast(permuted_probs.dtype)
 
 
 def barrier_ep(ep_group):
@@ -141,7 +130,12 @@ def permute(
     sorted_indices = token_indices.masked_select(routing_map)
 
     # use the mapping to permute the tokens
-    permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+    if _dsv4_fleet_moe_fp32_accum_enabled():
+        permuted_input = tokens.cast("float32").index_select(
+            axis=0, index=sorted_indices
+        ).cast(tokens.dtype)
+    else:
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
 
     return permuted_input, sorted_indices
 
@@ -180,19 +174,19 @@ def unpermute(
         permuted_probs = probs.T.contiguous().masked_select(
             routing_map.T.contiguous().cast(paddle.bool)
         )
-        if use_accuracy_compatible_kernel():
-            permuted_tokens = ApplyPermutedProbs.apply(
+        if _dsv4_probs_mul_custom_bwd_enabled():
+            permuted_tokens = _DSV4ApplyPermutedProbs.apply(
                 permuted_tokens, permuted_probs
             )
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
 
-    if use_accuracy_compatible_kernel():
-        output_tokens = _unpermute_fp32_accum(
+    if _dsv4_fleet_moe_fp32_accum_enabled():
+        output_tokens = _dsv4_unpermute_fp32_accum(
             permuted_tokens, sorted_indices, restore_shape
         )
     else:
-        output_tokens = _unpermute_scatter(
+        output_tokens = _dsv4_unpermute_scatter(
             permuted_tokens, sorted_indices, restore_shape
         )
 

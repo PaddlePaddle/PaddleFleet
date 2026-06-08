@@ -27,6 +27,12 @@ from paddlefleet.tensor_parallel.layers import (
     _initialize_affine_weight_gpu,
 )
 from paddlefleet.transformer.identity_op import IdentityOp
+from paddlefleet.utils import dsv4_sequence_first_feature_enabled
+
+def _dsv4_lm_head_sequence_first_linear_enabled() -> bool:
+    return dsv4_sequence_first_feature_enabled(
+        "DSV4_FLEET_LM_HEAD_SEQUENCE_FIRST_LINEAR"
+    )
 
 
 class GPTLMHead(ColumnParallelLinear):
@@ -41,8 +47,6 @@ class GPTLMHead(ColumnParallelLinear):
         block_attn_res_spec = kwargs.pop("block_attn_res", IdentityOp)
 
         kwargs["skip_weight_param_allocation"] = True
-        if self.config.gpt_model_use_experimental_version:
-            kwargs["bias"] = self.config.use_bias
         super().__init__(**kwargs)
 
         stride = kwargs["stride"] if "stride" in kwargs.keys() else 1
@@ -100,7 +104,16 @@ class GPTLMHead(ColumnParallelLinear):
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTLMHead")
 
-    def _forward(self, hidden_states: paddle.Tensor):
+    def _forward(self, hidden_states: paddle.Tensor, *, is_main: bool = False):
+        use_sequence_first_linear = (
+            _dsv4_lm_head_sequence_first_linear_enabled()
+            and not self.config.sequence_parallel
+            and hidden_states.ndim == 3
+            and hidden_states.shape[0] > 1
+        )
+        linear_input = hidden_states
+        if use_sequence_first_linear:
+            linear_input = hidden_states.transpose([1, 0, 2]).contiguous()
         # Fused linear + cross-entropy path: skip materializing [B, S, V] logits
         # and delegate the linear projection into LanguageLoss, which will call
         # LigerFusedLinearCrossEntropyFunction.
@@ -121,44 +134,13 @@ class GPTLMHead(ColumnParallelLinear):
                 logits, _ = recompute_func(hidden_states, weight)
                 return logits
 
-            logits = recompute_handler(hidden_states, self.weight.T)
+            logits = recompute_handler(linear_input, self.weight.T)
         else:
-            logits, _ = super().forward(hidden_states, self.weight.T)
+            logits, _ = super().forward(linear_input, self.weight.T)
+        if use_sequence_first_linear:
+            logits = logits.transpose([1, 0, 2]).contiguous()
         if self.config.sequence_parallel:
             logits = logits.transpose([1, 0, 2]).contiguous()
-
-        # Loss-path MD5 probe: lm_head weight and logits
-        import os
-
-        if (
-            os.environ.get("LOG_LAYER_MD5", "0") == "1"
-            or os.environ.get("LOG_LOSS_MD5", "0") == "1"
-        ):
-            import hashlib
-
-            rank = paddle.distributed.get_rank()
-            w_md5 = hashlib.md5(
-                self.weight.cast("float32").numpy().tobytes()
-            ).hexdigest()
-            h_md5 = hashlib.md5(
-                hidden_states.cast("float32").numpy().tobytes()
-            ).hexdigest()
-            l_md5 = hashlib.md5(
-                logits.cast("float32").numpy().tobytes()
-            ).hexdigest()
-            print(
-                f"[LOSS_PATH_MD5] rank={rank} lm_head_weight shape={list(self.weight.shape)} md5={w_md5}",
-                flush=True,
-            )
-            print(
-                f"[LOSS_PATH_MD5] rank={rank} lm_head_input shape={list(hidden_states.shape)} md5={h_md5}",
-                flush=True,
-            )
-            print(
-                f"[LOSS_PATH_MD5] rank={rank} lm_head_logits shape={list(logits.shape)} md5={l_md5}",
-                flush=True,
-            )
-
         return logits
 
     def forward(self, dict_args: dict):
@@ -178,12 +160,12 @@ class GPTLMHead(ColumnParallelLinear):
                 hidden_states,
                 self.config.num_nextn_predict_layers + 1,
             )
-            logits = [self._forward(tensor_list[0])]
+            logits = [self._forward(tensor_list[0], is_main=True)]
             for i in range(self.config.num_nextn_predict_layers):
                 logits.append(self._forward(tensor_list[i + 1]))
             return logits
         else:
-            return self._forward(hidden_states)
+            return self._forward(hidden_states, is_main=True)
 
     @property
     def embedding_weight(self):
@@ -225,7 +207,7 @@ class GPTMainLMHead(GPTLMHead):
             hidden_states,
             self.config.num_nextn_predict_layers + 1,
         )
-        logits = self._forward(tensor_list[0])
+        logits = self._forward(tensor_list[0], is_main=True)
         ret = {
             "logits": logits,
             "mtp_loss": mtp_loss,

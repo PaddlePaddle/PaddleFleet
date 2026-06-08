@@ -15,6 +15,8 @@
 # limitations under the License.
 """FP8 Utils"""
 
+import os
+
 import numpy
 import paddle
 import paddle.nn.functional as F
@@ -31,28 +33,21 @@ try:
         fuse_stack_transpose_fp8_quant,
         fuse_weighted_swiglu_fp8_quant,
         fuse_weighted_swiglu_fp8_quant_clamp,
-        fused_swiglu_weighted_clamp_bwd,
     )
 except (ImportError, RuntimeError):
     pass
 
-# 优先从 paddlefleet_ops 导入（算子已重命名为 paddlefleet_fused_swiglu_probs_bwd 避免冲突），
-# 仅在 paddlefleet_ops 中不存在时回退到旧的 FusedQuantOps。
+# 优先使用 FusedQuantOps.fused_swiglu_probs_bwd（inplace，行为对齐）。
+# 若环境中没有 FusedQuantOps，则回退到 paddle.incubate 的 out-of-place 实现。
+# TODO: 迁移fused_swiglu_probs_bwd至paddlefleet_ops
 try:
-    from paddlefleet_ops import (
-        fused_swiglu_probs_bwd as _fused_swiglu_probs_bwd,
-    )
+    import FusedQuantOps as _FQO
 
+    _fused_swiglu_probs_bwd = _FQO.fused_swiglu_probs_bwd
     USE_INPLACE_SWIGLU_BWD = True
-except (ImportError, AttributeError, RuntimeError):
-    try:
-        import FusedQuantOps as _FQO
-
-        _fused_swiglu_probs_bwd = _FQO.fused_swiglu_probs_bwd
-        USE_INPLACE_SWIGLU_BWD = True
-    except (ImportError, AttributeError):
-        _fused_swiglu_probs_bwd = None
-        USE_INPLACE_SWIGLU_BWD = False
+except (ImportError, AttributeError):
+    _fused_swiglu_probs_bwd = None
+    USE_INPLACE_SWIGLU_BWD = False
 
 try:
     from paddle.nn.functional import swiglu
@@ -326,112 +321,6 @@ def kitchen_gemm(
     return y
 
 
-class _PerExpertWeightView:
-    """A lightweight view into a single expert's slice of the stacked fp8 weight.
-
-    After offline fp8 quant, the original bf16 weight storage is cleared.
-    This view provides the same interface that ``_get_fp8_weight_and_scale``
-    expects (``fp8_weight_stacked``, ``fp8_scale_stacked``, etc.) by slicing
-    the parent's stacked fp8 tensors for a single expert.
-
-    The ``shape`` property reports ``[1, K, N]`` so that downstream code
-    (e.g., ``_get_fp8_weight_and_scale``) correctly infers ``num_expert = 1``.
-    """
-
-    def __init__(self, parent_weight, local_id, num_experts):
-        self._parent = parent_weight
-        self._local_id = local_id
-        self._num_experts = num_experts
-        self._shape = [1, *list(parent_weight.shape[1:])]
-
-    def _slice_stacked(self, attr_name):
-        """Slice a 2D stacked tensor [E*rows, cols] to this expert's rows."""
-        t = getattr(self._parent, attr_name, None)
-        if t is None:
-            return None
-        rows_per_expert = t.shape[0] // self._num_experts
-        start = self._local_id * rows_per_expert
-        return t._slice(start, start + rows_per_expert)
-
-    @property
-    def shape(self):
-        return self._shape
-
-    def __len__(self):
-        return self._shape[0]
-
-    @property
-    def dtype(self):
-        return self._parent.dtype
-
-    @property
-    def fp8_weight_stacked(self):
-        return self._slice_stacked("fp8_weight_stacked")
-
-    @property
-    def fp8_scale_stacked(self):
-        return self._slice_stacked("fp8_scale_stacked")
-
-    @property
-    def fp8_weight_stacked_transpose(self):
-        return self._slice_stacked("fp8_weight_stacked_transpose")
-
-    @property
-    def fp8_scale_stacked_transpose(self):
-        return self._slice_stacked("fp8_scale_stacked_transpose")
-
-    @property
-    def main_grad(self):
-        mg = getattr(self._parent, "main_grad", None)
-        if mg is None:
-            return None
-        return mg._slice(self._local_id, self._local_id + 1)
-
-    @main_grad.setter
-    def main_grad(self, value):
-        # When backward tries to allocate main_grad, ensure parent has it
-        if getattr(self._parent, "main_grad", None) is None:
-            self._parent.main_grad = paddle.zeros(
-                self._parent.shape, dtype=paddle.float32
-            )
-
-    @property
-    def grad(self):
-        g = self._parent.grad
-        if g is None:
-            return None
-        return g._slice(self._local_id, self._local_id + 1)
-
-    @grad.setter
-    def grad(self, value):
-        pass
-
-    def _apply_backward_hook(self):
-        if hasattr(self._parent, "_apply_backward_hook"):
-            self._parent._apply_backward_hook()
-
-    @property
-    def stop_gradient(self):
-        return self._parent.stop_gradient
-
-
-class _PerExpertWeightProxy:
-    """Proxy for grouped_gemm_experts that provides per-expert weight views.
-
-    Holds ``weight1`` and ``weight2`` as ``_PerExpertWeightView`` instances
-    that lazily slice from the parent's fp8 stacked weights.
-    """
-
-    def __init__(self, parent, local_id):
-        num_experts = parent.weight1.shape[0]
-        self.weight1 = _PerExpertWeightView(
-            parent.weight1, local_id, num_experts
-        )
-        self.weight2 = _PerExpertWeightView(
-            parent.weight2, local_id, num_experts
-        )
-
-
 class ExpertsGroupGemmContiguousNode:
     """ExpertsGroupGemmContiguousNode"""
 
@@ -461,30 +350,12 @@ class ExpertsGroupGemmContiguousNode:
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
         """
-        if moe_deep_gemm and expert_id is not None:
-            # Per-expert node for deep_gemm: slice stacked weight to [1, K, N]
-            parent = custom_map.grouped_gemm_experts
-            moe_rank = getattr(custom_map, "moe_rank", 0)
-            num_experts_per_device = getattr(
-                custom_map, "num_experts_per_device", parent.weight1.shape[0]
-            )
-            local_id = expert_id - moe_rank * num_experts_per_device
-            if hasattr(parent.weight1, "fp8_weight_stacked"):
-                # Offline quant: bf16 weight may have been cleared, use proxy
-                self.grouped_gemm_experts = _PerExpertWeightProxy(
-                    parent, local_id
-                )
-            else:
-                # Normal: bf16 weight is valid, slice directly
-                sliced = type("_SlicedGroupedExpert", (), {})()
-                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
-                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
-                sliced._parent = parent
-                sliced._local_id = local_id
-                self.grouped_gemm_experts = sliced
-            self.experts = None
-            moe_expert_fusion = True
-        elif not moe_expert_fusion or (use_fp8_mlp and not moe_deep_gemm):
+        # 两条路径：
+        #   split path (self.experts): 权重为 list，支持 auto_subbatch 逐专家 fallback
+        #     条件: moe_expert_fusion=False, 或 use_fp8_mlp=True & moe_deep_gemm=False
+        #   grouped path (self.grouped_gemm_experts): 权重为 stacked tensor，走批量 gemm
+        #     条件: moe_expert_fusion=True & (use_fp8_mlp=False 或 moe_deep_gemm=True)
+        if not moe_expert_fusion or (use_fp8_mlp and not moe_deep_gemm):
             if expert_id is None:
                 self.experts = custom_map.experts
             else:
@@ -601,7 +472,7 @@ class ExpertsGroupGemmContiguousNode:
                         x,
                         expert_w1,
                         o1,
-                        self.m_indices,
+                        self.tokens_per_expert_indices,
                     )
                 else:
                     o1 = paddle.incubate.nn.functional.batched_gemm(
@@ -640,10 +511,10 @@ class ExpertsGroupGemmContiguousNode:
         self, x, expert_w1, num_expert, tokens_per_expert, scale=None
     ):
         self.tokens_per_expert = tokens_per_expert
-        if self.moe_deep_gemm or self.moe_expert_fusion:
-            self.m_indices = self.gen_m_indices(self.tokens_per_expert)
-        else:
-            self.m_indices = None
+        if self.moe_deep_gemm:
+            self.tokens_per_expert_indices = self.gen_m_indices(
+                self.tokens_per_expert
+            )
         if not self.use_fp8_mlp:
             return self.fwd_gate_up_bf16(x, expert_w1)
         else:
@@ -658,6 +529,9 @@ class ExpertsGroupGemmContiguousNode:
         o1 = x * w1
         [m_sum, n] = [m_sum, k] * [num_groups, k, n] (m_sum = sum(tokens_per_expert))
         """
+
+        if self.moe_expert_fusion:
+            self.m_indices = self.gen_m_indices(tokens_per_expert)
         # concat w1, shape is [num_groups, n, k]
 
         if hasattr(self, "grouped_gemm_experts"):
@@ -754,9 +628,9 @@ class ExpertsGroupGemmContiguousNode:
         fwd_down_bf16
         """
 
-        if self.clamp_value is not None and self.clamp_value > 0:
+        if self.clamp_value is not None:
             o2 = fused_swiglu_scale_forward(
-                o1, unzipped_probs, self.clamp_value
+                o1, unzipped_probs, clamp_value=self.clamp_value
             )
         else:
             o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
@@ -775,7 +649,7 @@ class ExpertsGroupGemmContiguousNode:
                         o2,
                         expert_w2,
                         o3,
-                        self.m_indices,
+                        self.tokens_per_expert_indices,
                     )
                 else:
                     o3 = paddle.incubate.nn.functional.batched_gemm(
@@ -824,10 +698,7 @@ class ExpertsGroupGemmContiguousNode:
         """
         # concat and transpose w2
 
-        if (
-            hasattr(self, "grouped_gemm_experts")
-            and self.grouped_gemm_experts is not None
-        ):
+        if hasattr(self, "grouped_gemm_experts"):
             offline_quant = hasattr(
                 self.grouped_gemm_experts.weight2,
                 "fp8_weight_stacked_transpose",
@@ -851,7 +722,7 @@ class ExpertsGroupGemmContiguousNode:
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
-        if self.clamp_value is not None and self.clamp_value > 0:
+        if self.clamp_value is not None:
             o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant_clamp(
                 o1,
                 unzipped_probs,
@@ -920,7 +791,7 @@ class ExpertsGroupGemmContiguousNode:
                         unzipped_grad,
                         expert_w2,
                         do2_s,
-                        self.m_indices,
+                        self.tokens_per_expert_indices,
                     )
                 else:
                     do2_s = paddle.incubate.nn.functional.batched_gemm(
@@ -952,9 +823,12 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        if self.clamp_value is not None and self.clamp_value > 0:
-            do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
-                o1, unzipped_probs, do2_s, float(self.clamp_value)
+        if self.clamp_value is not None:
+            o2_s = fused_swiglu_scale_forward(
+                o1, unzipped_probs, clamp_value=self.clamp_value
+            )
+            do1, probs_grad = fused_swiglu_scale_backward(
+                o1, unzipped_probs, do2_s, clamp_value=self.clamp_value
             )
         else:
             o2_s = fused_swiglu_scale_forward(o1, unzipped_probs)
@@ -1071,12 +945,16 @@ class ExpertsGroupGemmContiguousNode:
                 )
 
         with paddle.amp.auto_cast(False):
-            if self.clamp_value is not None and self.clamp_value > 0:
-                do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
-                    o1,
-                    unzipped_probs,
-                    do2_s,
-                    float(self.clamp_value),
+            if self.clamp_value is not None:
+                # Neither the inplace fused kernel nor Paddle core's
+                # fused_swiglu_weighted_bwd support clamp. Fall back to the
+                # python implementation in paddlefleet.fusions.fused_swiglu_scale
+                # which handles clamp via gradient masking.
+                o2_s = fused_swiglu_scale_forward(
+                    o1, unzipped_probs, clamp_value=self.clamp_value
+                )
+                do1, probs_grad = fused_swiglu_scale_backward(
+                    o1, unzipped_probs, do2_s, clamp_value=self.clamp_value
                 )
             elif USE_INPLACE_SWIGLU_BWD:
                 # inplace，do1 复用 o1 的 GPU buffer（data_ptr 相同）。
@@ -1119,7 +997,7 @@ class ExpertsGroupGemmContiguousNode:
                         do1,
                         expert_w1,
                         dx,
-                        self.m_indices,
+                        self.tokens_per_expert_indices,
                     )
                 else:
                     dx = paddle.incubate.nn.functional.batched_gemm(
@@ -1567,7 +1445,7 @@ class ExpertsGroupGemmContiguousNode:
         subbatch_rows = self.moe_subbatch_token_num_after_dispatch
         if subbatch_rows is None:
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int32"
+                self.tokens_per_expert, dtype="int64"
             )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
@@ -1582,7 +1460,7 @@ class ExpertsGroupGemmContiguousNode:
         nparts = (rows + subbatch_rows - 1) // subbatch_rows
         if nparts <= 1:
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int32"
+                self.tokens_per_expert, dtype="int64"
             )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
@@ -1609,10 +1487,13 @@ class ExpertsGroupGemmContiguousNode:
                 self.o1 = o1._slice(s_idx, e_idx)
             self.tokens_per_expert = [e_idx - s_idx]
             self.tokens_per_expert_tensor = paddle.to_tensor(
-                self.tokens_per_expert, dtype="int32"
+                self.tokens_per_expert, dtype="int64"
             )
             if self.moe_deep_gemm:
-                self.m_indices = self.gen_m_indices(self.tokens_per_expert)
+                self.tokens_per_expert_indices = paddle.repeat_interleave(
+                    paddle.arange(len(self.tokens_per_expert)),
+                    paddle.to_tensor(self.tokens_per_expert),
+                ).cast("int32")
 
             tmp_out_grad = out_grad._slice(s_idx, e_idx)
             tmp_unzipped_probs = unzipped_probs._slice(s_idx, e_idx)
@@ -1635,7 +1516,10 @@ class ExpertsGroupGemmContiguousNode:
 
         self.tokens_per_expert = tokens_per_expert
         if self.moe_deep_gemm:
-            self.m_indices = self.gen_m_indices(self.tokens_per_expert)
+            self.tokens_per_expert_indices = paddle.repeat_interleave(
+                paddle.arange(len(self.tokens_per_expert)),
+                paddle.to_tensor(self.tokens_per_expert),
+            ).cast("int32")
         probs_grad = paddle.concat(probs_grad, axis=0)
         return out_grad, probs_grad
 

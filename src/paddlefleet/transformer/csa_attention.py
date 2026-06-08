@@ -26,6 +26,7 @@ Components:
 from __future__ import annotations
 
 import functools
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -66,11 +67,34 @@ from paddlefleet.transformer.cp_utils import (
 # ---------------------------------------------------------------------------
 
 
+def _get_doc_start(
+    attn_mask_startend_row_indices: Tensor, seqlen: int
+) -> Tensor:
+    """Derive per-position document start from packed document boundaries."""
+    mask = attn_mask_startend_row_indices
+    squeeze_batch: bool = mask.ndim == 1
+    if squeeze_batch:
+        mask = mask.unsqueeze(0)
+
+    changed = paddle.zeros_like(mask, dtype="int64")
+    changed[:, 0] = 1
+    changed[:, 1:] = (mask[:, 1:] != mask[:, :-1]).cast("int64")
+
+    positions = (
+        paddle.arange(seqlen, dtype="int64").unsqueeze(0).expand_as(mask)
+    )
+    doc_start = paddle.cummax(changed * positions, axis=1).values
+
+    if squeeze_batch:
+        doc_start = doc_start.squeeze(0)
+    return doc_start
+
+
 @functools.lru_cache(maxsize=8)
-def _get_window_topk_idxs_cached(
+def _get_window_topk_idxs_no_doc(
     window_size: int, seqlen: int, device_str: str
 ) -> Tensor:
-    """Compute sliding window indices for a single sequence (cached)."""
+    """Compute sliding window indices without document mask (cached)."""
     base = paddle.arange(seqlen).unsqueeze(1)  # [seqlen, 1]
     offsets = paddle.arange(window_size)  # [window_size]
     matrix = paddle.clip(base - window_size + 1, min=0) + offsets
@@ -79,10 +103,10 @@ def _get_window_topk_idxs_cached(
 
 
 @functools.lru_cache(maxsize=8)
-def _get_compress_topk_idxs_cached(
+def _get_compress_topk_idxs_no_doc(
     ratio: int, seqlen: int, offset: int, device_str: str
 ) -> Tensor:
-    """Compute compressed indices for a single sequence (cached)."""
+    """Compute compressed indices without document mask (cached)."""
     n_compressed = seqlen // ratio
     k_indices = paddle.arange(n_compressed)
     matrix = k_indices.unsqueeze(0).expand([seqlen, -1])
@@ -98,11 +122,34 @@ def get_window_topk_idxs(
     window_size: int,
     batch_size: int,
     seqlen: int,
+    attn_mask_startend_row_indices: Tensor | None = None,
     device=None,
 ) -> Tensor:
     """Get sliding window indices: [b, seqlen, window_size]."""
-    indices = _get_window_topk_idxs_cached(window_size, seqlen, "gpu")
-    return indices.unsqueeze(0).expand([batch_size, -1, -1])
+    if attn_mask_startend_row_indices is None:
+        indices = _get_window_topk_idxs_no_doc(window_size, seqlen, "gpu")
+        return indices.unsqueeze(0).expand([batch_size, -1, -1])
+
+    assert (
+        attn_mask_startend_row_indices.shape[1] == 1
+        and attn_mask_startend_row_indices.shape[3] == 1
+    ), (
+        f"attn_mask_startend_row_indices shape must be [b, 1, seqlen, 1] now, but got {attn_mask_startend_row_indices.shape}"
+    )
+    mask = attn_mask_startend_row_indices.reshape([batch_size, seqlen])
+    doc_start = _get_doc_start(mask, seqlen)
+
+    base = paddle.arange(seqlen).unsqueeze(1)
+    offsets = paddle.arange(window_size)
+    base_3d = base.unsqueeze(0)
+    win_start = paddle.maximum(
+        base_3d - window_size + 1, doc_start.unsqueeze(2)
+    )
+    matrix = win_start + offsets.unsqueeze(0).unsqueeze(0)
+    matrix = paddle.where(
+        matrix > base_3d, paddle.full_like(matrix, -1), matrix
+    )
+    return matrix
 
 
 def _build_compressed_causal_mask(
@@ -127,11 +174,38 @@ def get_compress_topk_idxs(
     batch_size: int,
     seqlen: int,
     offset: int,
+    attn_mask_startend_row_indices: Tensor | None = None,
     device=None,
 ) -> Tensor:
     """Get compressed indices: [b, seqlen, seqlen // ratio]."""
-    matrix = _get_compress_topk_idxs_cached(ratio, seqlen, offset, "gpu")
-    return matrix.unsqueeze(0).expand([batch_size, -1, -1])
+    if attn_mask_startend_row_indices is None:
+        matrix = _get_compress_topk_idxs_no_doc(ratio, seqlen, offset, "gpu")
+        return matrix.unsqueeze(0).expand([batch_size, -1, -1])
+
+    mask = attn_mask_startend_row_indices.reshape([batch_size, seqlen])
+    doc_start = _get_doc_start(mask, seqlen)
+
+    n_compressed = seqlen // ratio
+    matrix = (
+        paddle.arange(n_compressed)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .expand([batch_size, seqlen, -1])
+    )
+
+    causal_bound = (
+        paddle.arange(1, seqlen + 1).unsqueeze(1) // ratio
+    ).unsqueeze(0)
+    causal_invalid = matrix >= causal_bound
+
+    doc_start_compressed = ((doc_start + ratio - 1) // ratio).unsqueeze(2)
+    doc_invalid = matrix < doc_start_compressed
+
+    invalid = causal_invalid | doc_invalid
+    matrix = paddle.where(
+        invalid, paddle.full_like(matrix, -1), matrix + offset
+    )
+    return matrix
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +286,72 @@ def _apply_rope(
 # ---------------------------------------------------------------------------
 
 
+def _dsv4_import_torch_for_csa_sink_softmax():
+    site_packages = os.environ.get("DSV4_FLEET_TE_SITE_PACKAGES", "")
+    if site_packages and site_packages not in os.sys.path:
+        os.sys.path.insert(0, site_packages)
+    import torch
+    import torch.utils.dlpack
+
+    return torch
+
+
+def _dsv4_csa_sink_softmax_torch_bwd_enabled() -> bool:
+    return os.environ.get("DSV4_FLEET_CSA_SINK_SOFTMAX_TORCH_BWD", "0") == "1"
+
+
+def _dsv4_csa_sink_softmax_paddle(scores: Tensor, sink: Tensor) -> Tensor:
+    scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
+    scores_max = paddle.maximum(scores_max, sink)
+    exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
+    exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
+    sum_exp = exp_scores.sum(axis=-1, keepdim=True) + exp_sink  # [b, np, sq, 1]
+    return exp_scores / sum_exp  # [b, np, sq, topk]
+
+
+class _DSV4CSASinkSoftmaxTorchBackward(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, scores: Tensor, sink: Tensor):
+        ctx.save_for_backward(scores, sink)
+        return _dsv4_csa_sink_softmax_paddle(scores, sink)
+
+    @staticmethod
+    def backward(ctx, grad_attn_weights: Tensor):
+        torch = _dsv4_import_torch_for_csa_sink_softmax()
+        scores, sink = ctx.saved_tensor()
+        scores_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(scores.detach().contiguous())
+        )
+        sink_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(sink.detach().contiguous())
+        )
+        grad_t = torch.utils.dlpack.from_dlpack(
+            paddle.utils.dlpack.to_dlpack(
+                grad_attn_weights.detach().contiguous()
+            )
+        )
+
+        with torch.enable_grad():
+            scores_t = scores_t.detach().requires_grad_(True)
+            sink_t = sink_t.detach().requires_grad_(True)
+            scores_max_t = torch.maximum(
+                scores_t.max(dim=-1, keepdim=True).values, sink_t
+            )
+            exp_scores_t = torch.exp(scores_t - scores_max_t)
+            exp_sink_t = torch.exp(sink_t - scores_max_t)
+            sum_exp_t = exp_scores_t.sum(dim=-1, keepdim=True) + exp_sink_t
+            attn_weights_t = exp_scores_t / sum_exp_t
+            attn_weights_t.backward(grad_t)
+
+        grad_scores = paddle.utils.dlpack.from_dlpack(
+            torch.utils.dlpack.to_dlpack(scores_t.grad.contiguous())
+        )
+        grad_sink = paddle.utils.dlpack.from_dlpack(
+            torch.utils.dlpack.to_dlpack(sink_t.grad.contiguous())
+        )
+        return grad_scores, grad_sink
+
+
 def unfused_compressed_sparse_attn(
     query: Tensor,
     kv_full: Tensor,
@@ -261,18 +401,11 @@ def unfused_compressed_sparse_attn(
 
         # Softmax with attention sink
         # sink: [np] -> [1, np, 1, 1]
-        sink = attn_sink.reshape([1, np_heads, 1, 1])
-        # Compute stable softmax: max over scores and sink
-        scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
-        scores_max = paddle.maximum(scores_max, sink)
-
-        exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
-        exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
-
-        sum_exp = (
-            exp_scores.sum(axis=-1, keepdim=True) + exp_sink
-        )  # [b, np, sq, 1]
-        attn_weights = exp_scores / sum_exp  # [b, np, sq, topk]
+        sink = attn_sink.reshape([1, np_heads, 1, 1]).cast("float32")
+        if _dsv4_csa_sink_softmax_torch_bwd_enabled():
+            attn_weights = _DSV4CSASinkSoftmaxTorchBackward.apply(scores, sink)
+        else:
+            attn_weights = _dsv4_csa_sink_softmax_paddle(scores, sink)
 
         # Weighted sum: [b, np, sq, topk] x [b, sq, topk, hn] -> [b, np, sq, hn]
         output = paddle.einsum("bnsk,bskh->bnsh", attn_weights, kv_g)
@@ -814,8 +947,6 @@ class Compressor(nn.Layer):
                 else 0.02
             ),
         )
-        self._cast_to_low_precision = False
-
         self.norm = build_spec_layer(
             sublayers_spec.norm,
             config=config,
@@ -894,9 +1025,8 @@ class Compressor(nn.Layer):
             score = self._overlap_transform(score, fill_value=float("-inf"))
 
         # Gated pooling: softmax over the pool_dim, weighted sum.
-        kv = (kv * F.softmax(score, axis=2)).sum(
-            axis=2
-        )  # [b, n_compressed, head_dim]
+        weights = F.softmax(score, axis=2).cast(kv.dtype)
+        kv = (kv * weights).sum(axis=2)  # [b, n_compressed, head_dim]
 
         kv = self.norm(kv.cast(x.dtype))
 
@@ -1094,12 +1224,12 @@ class CompressedSparseAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
+        is_mtp_layer: bool = False,
+        is_swa: bool = False,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
         k_channels: int | None = None,
         v_channels: int | None = None,
-        is_mtp_layer: bool = False,
-        is_swa: bool = False,
         num_attention_heads: int | None = None,
         num_key_value_heads: int | None = None,
         cp_comm_type: str = "p2p",
@@ -1143,7 +1273,6 @@ class CompressedSparseAttention(FleetLayer):
             dtype="float32",
             default_initializer=nn.initializer.Constant(0.0),
         )
-        self._cast_to_low_precision = False
 
         # Conditionally build Compressor (ratio > 1)
         if self.compress_ratio > 1:
@@ -1360,6 +1489,7 @@ class CompressedSparseAttention(FleetLayer):
         attention_mask: Tensor | None,
         x: Tensor = None,
         qr: Tensor = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
     ) -> Tensor:
         """Forward pass for CompressedSparseAttention.
 
@@ -1398,7 +1528,9 @@ class CompressedSparseAttention(FleetLayer):
         offset = sq  # compressed indices start after original positions
 
         # Step 3: Window indices
-        window_idxs = get_window_topk_idxs(self.window_size, b, sq)
+        window_idxs = get_window_topk_idxs(
+            self.window_size, b, sq, attn_mask_startend_row_indices
+        )
 
         # Step 4: Compressed indices
         indexer_loss = None
@@ -1425,6 +1557,7 @@ class CompressedSparseAttention(FleetLayer):
                     b,
                     sq,
                     offset,
+                    attn_mask_startend_row_indices,
                 )
 
             if compress_topk_idxs.dtype != window_idxs.dtype:
