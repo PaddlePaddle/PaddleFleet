@@ -43,7 +43,7 @@ class TransformerConfig(ModelParallelConfig):
     # model architecture
     ####################
 
-    pad_token_id: int = 1
+    pad_token_id: int = 0
     """Token ID used for padding."""
 
     num_hidden_layers: int = 1
