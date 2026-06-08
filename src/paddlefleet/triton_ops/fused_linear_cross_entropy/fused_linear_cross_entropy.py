@@ -245,14 +245,19 @@ def fused_linear_cross_entropy_forward(
     else:
         loss = paddle.sum(loss_1d)
 
-    return (
-        loss,
-        grad_input,
-        grad_weight,
-        grad_bias,
-        grad_multimax_ranges,
-        grad_multimax_ts,
-    )
+    # Backward compatibility: return 4-tuple when multimax is disabled,
+    # 6-tuple when enabled. Direct callers expecting 4 values won't break.
+    if multimax_ranges is None:
+        return loss, grad_input, grad_weight, grad_bias
+    else:
+        return (
+            loss,
+            grad_input,
+            grad_weight,
+            grad_bias,
+            grad_multimax_ranges,
+            grad_multimax_ts,
+        )
 
 
 def fused_linear_cross_entropy_backward(
@@ -338,14 +343,7 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
         multimax_ranges = args[8] if len(args) > 8 else None
         multimax_ts = args[9] if len(args) > 9 else None
 
-        (
-            loss,
-            grad_input,
-            grad_weight,
-            grad_bias,
-            grad_mm_ranges,
-            grad_mm_ts,
-        ) = fused_linear_cross_entropy_forward(
+        ret = fused_linear_cross_entropy_forward(
             _input=_input,
             weight=weight,
             target=target,
@@ -357,6 +355,12 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
             multimax_ranges=multimax_ranges,
             multimax_ts=multimax_ts,
         )
+        # Handle both 4-tuple (multimax disabled) and 6-tuple (enabled)
+        if len(ret) == 4:
+            loss, grad_input, grad_weight, grad_bias = ret
+            grad_mm_ranges = grad_mm_ts = None
+        else:
+            loss, grad_input, grad_weight, grad_bias, grad_mm_ranges, grad_mm_ts = ret
 
         ctx.save_for_backward(
             grad_input.detach() if grad_input is not None else None,
