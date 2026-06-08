@@ -362,6 +362,41 @@ class TestMTPEmbeddingLayer(unittest.TestCase):
             ).item()
         )
 
+    def test_fill_feature_with_custom_pad_token_id(self):
+        """pad_token_id != 0: padding positions zeroed; token-id 0 left intact."""
+        pad_id = 7
+        layer = MTPEmbeddingLayer(
+            config=_cfg(
+                vocab_size=1024,
+                hidden_size=64,
+                expert_model_parallel_size=4,
+                pad_token_id=pad_id,
+            )
+        )
+        # Weights are zero-init (perform_initialization=False); fill non-zero
+        # so we can distinguish "explicitly zeroed by fill_feature" from the
+        # natural embedding output.
+        with paddle.no_grad():
+            layer.embed_tokens.weight.set_value(
+                paddle.ones_like(layer.embed_tokens.weight)
+            )
+        ids = paddle.randint(1, 1024, [1, 5])
+        ids[0, 1] = pad_id  # pad position -> must be zeroed
+        ids[0, 3] = 0  # non-pad token -> must NOT be zeroed
+        input_ids_for_mtp.clear()
+        input_ids_for_mtp.append(ids)
+        result = layer.forward({"hidden_states": paddle.randn([1, 4, 64])})
+        self.assertTrue(
+            paddle.allclose(
+                result["mtp_input_embeds"][0, 1, :], paddle.zeros([64])
+            ).item()
+        )
+        self.assertFalse(
+            paddle.allclose(
+                result["mtp_input_embeds"][0, 3, :], paddle.zeros([64])
+            ).item()
+        )
+
 
 class TestWrappedPaddleNormPipe(unittest.TestCase):
     def test_magic_send_vs_non_magic_send(self):
