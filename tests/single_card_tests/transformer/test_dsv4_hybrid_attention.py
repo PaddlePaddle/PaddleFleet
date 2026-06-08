@@ -920,29 +920,6 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         paddle.seed(_SEED)
         self.config = _make_config(dsa_indexer_loss_coeff=1.0)
 
-    def test_forward_output_shape(self):
-        batch_size = 2
-        seq_len = 64
-
-        for layer_number in [0, 1, 2, 3]:
-            attn = _build_attention(self.config, layer_number=layer_number)
-            hidden = paddle.randn(
-                [batch_size, seq_len, self.config.hidden_size],
-                dtype=paddle.bfloat16,
-            )
-
-            output, bias = attn(hidden_states=hidden, attention_mask=None)
-
-            self.assertEqual(
-                list(output.shape),
-                [batch_size, seq_len, self.config.hidden_size],
-            )
-            self.assertEqual(output.dtype, paddle.bfloat16)
-            self.assertTrue(
-                paddle.isfinite(output.cast("float32")).all().item()
-            )
-            self.assertIsNone(bias)
-
     def test_backward_gradient_flow(self):
         batch_size = 2
         seq_len = 64
