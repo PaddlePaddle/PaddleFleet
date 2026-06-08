@@ -92,7 +92,21 @@ def context_parallel_parameter_disable_scale_grad(param):
 
 
 def scatter_balance(input_tensor, group=None, axis=0):
-    """Contiguous scatter: rank r gets input[..., r*chunk:(r+1)*chunk, ...] along axis."""
+    """
+    Evenly split input tensor along the specified axis across model parallel ranks.
+    This function implements balanced scattering by taking chunks from both ends
+    of the tensor to ensure load balancing across ranks.
+    Args:
+        input_tensor (paddle.Tensor): Input tensor to be scattered
+        group (paddle.distributed.Group, optional): Communication group.
+            If None, uses model parallel group from fleet
+        axis (int, optional): Axis along which to scatter. Defaults to 0
+    Returns:
+        paddle.Tensor: Scattered tensor chunk for current rank
+    Note:
+        This API is different from distributed.scatter - it performs balanced
+        splitting by taking chunks from both ends of the sequence.
+    """
     if group is None:
         hcg = fleet.get_hybrid_communicate_group()
         group = hcg.get_model_parallel_group()
@@ -103,23 +117,52 @@ def scatter_balance(input_tensor, group=None, axis=0):
 
     rank = group.rank
     seq_len = input_tensor.shape[axis]
-    assert seq_len % parallelism == 0, (
-        f"Input sequence length {seq_len} can't be divided exactly by parallelism {parallelism}"
+
+    # Ensure sequence length is divisible by parallelism * 2 for balanced splitting
+    assert seq_len % (parallelism * 2) == 0, (
+        f"Input sequence length {seq_len} can't be divided exactly by sequence parallelism * 2 {parallelism * 2}"
     )
 
-    chunk_size = seq_len // parallelism
-    result = paddle.slice(
+    interval = seq_len // parallelism // 2
+    total_len = input_tensor.shape[axis]
+
+    # Take chunk from the beginning
+    chunk_start = paddle.slice(
         input_tensor,
         axes=[axis],
-        starts=[chunk_size * rank],
-        ends=[chunk_size * (rank + 1)],
+        starts=[interval * rank],
+        ends=[interval * (rank + 1)],
     )
+
+    # Take chunk from the end (in reverse order)
+    chunk_end = paddle.slice(
+        input_tensor,
+        axes=[axis],
+        starts=[total_len - interval * (rank + 1)],
+        ends=[total_len - interval * rank],
+    )
+
+    # Concatenate chunks
+    result = paddle.concat([chunk_start, chunk_end], axis=axis)
+
+    # Use assign to free the memory of the whole input tensor to avoid OOM
+    # since slice uses stride and maintains reference to original tensor
     result = paddle.assign(result)
     return result
 
 
 def all_gather_balance(input_tensor, group=None, axis=0):
-    """Contiguous all-gather: collect chunks from all ranks and concat in rank order."""
+    """
+    All-gather operation with balanced reconstruction.
+    This function performs all-gather to reconstruct the original tensor
+    from balanced scattered chunks.
+    Args:
+        input_tensor (paddle.Tensor): Input tensor chunk
+        group (paddle.distributed.Group, optional): Communication group
+        axis (int, optional): Axis along which to gather. Defaults to 0
+    Returns:
+        paddle.Tensor: Reconstructed full tensor
+    """
     if group is None:
         hcg = fleet.get_hybrid_communicate_group()
         group = hcg.get_model_parallel_group()
@@ -128,25 +171,60 @@ def all_gather_balance(input_tensor, group=None, axis=0):
     if parallelism == 1:
         return input_tensor.clone()
 
-    input_tensor = input_tensor.contiguous()
+    # Split input into two halves (start and end chunks)
+    chunk_start, chunk_end = paddle.split(input_tensor, 2, axis=axis)
 
     if axis == 0:
-        output_shape = list(input_tensor.shape)
-        output_shape[0] = output_shape[0] * parallelism
-        gathered = paddle.empty(shape=output_shape, dtype=input_tensor.dtype)
-        dist.stream.all_gather(
-            gathered, input_tensor, group=group, use_calc_stream=True
+        # Handle axis=0 case with optimized memory layout
+        output_shape_start = list(chunk_start.shape)
+        output_shape_start[axis] = output_shape_start[axis] * parallelism
+
+        gathered_start = paddle.empty(
+            shape=output_shape_start, dtype=input_tensor.dtype
         )
-        return gathered
-    else:
-        gathered_list = [
-            paddle.empty(input_tensor.shape, dtype=input_tensor.dtype)
+        dist.stream.all_gather(
+            gathered_start, chunk_start, group=group, use_calc_stream=True
+        )
+
+        # Gather end chunks
+        gathered_end_list = [
+            paddle.empty(chunk_end.shape, dtype=input_tensor.dtype)
             for _ in range(parallelism)
         ]
         dist.stream.all_gather(
-            gathered_list, input_tensor, group=group, use_calc_stream=True
+            gathered_end_list, chunk_end, group=group, use_calc_stream=True
         )
-        return paddle.concat(gathered_list, axis=axis)
+
+        # Reverse the end chunks to reconstruct original order
+        gathered_end_list.reverse()
+
+        result = paddle.concat([gathered_start, *gathered_end_list], axis=axis)
+        return result
+    else:
+        # Handle other axes
+        gathered_start_list = [
+            paddle.empty(chunk_start.shape, dtype=input_tensor.dtype)
+            for _ in range(parallelism)
+        ]
+        dist.stream.all_gather(
+            gathered_start_list, chunk_start, group=group, use_calc_stream=True
+        )
+
+        gathered_end_list = [
+            paddle.empty(chunk_end.shape, dtype=input_tensor.dtype)
+            for _ in range(parallelism)
+        ]
+        dist.stream.all_gather(
+            gathered_end_list, chunk_end, group=group, use_calc_stream=True
+        )
+
+        # Reverse the end chunks
+        gathered_end_list = gathered_end_list[::-1]
+
+        result = paddle.concat(
+            gathered_start_list + gathered_end_list, axis=axis
+        )
+        return result
 
 
 def reduce_scatter_any_axis(input_tensor, axis, group=None):
@@ -182,7 +260,7 @@ def reduce_scatter_any_axis(input_tensor, axis, group=None):
         output = paddle.empty(shape=output_shape, dtype=input_tensor.dtype)
         dist.stream.reduce_scatter(
             output,
-            input_tensor.contiguous(),
+            input_tensor,
             op=dist.ReduceOp.SUM,
             group=group,
             use_calc_stream=True,
@@ -190,11 +268,7 @@ def reduce_scatter_any_axis(input_tensor, axis, group=None):
         return output
     else:
         # General case for other axes using alltoall
-        # paddle.split returns views; alltoall needs contiguous inputs
-        input_chunks = [
-            c.contiguous()
-            for c in paddle.split(input_tensor, parallelism, axis=axis)
-        ]
+        input_chunks = paddle.split(input_tensor, parallelism, axis=axis)
 
         output_buffers = [
             paddle.empty(input_chunks[0].shape, dtype=input_tensor.dtype)
@@ -211,11 +285,6 @@ def reduce_scatter_any_axis(input_tensor, axis, group=None):
 
 
 def reduce_scatter_any_axis_balance(input_tensor, axis, group=None):
-    """Contiguous reduce-scatter: delegates to reduce_scatter_any_axis."""
-    return reduce_scatter_any_axis(input_tensor, axis, group=group)
-
-
-def reduce_scatter_any_axis_balance_dualchunk(input_tensor, axis, group=None):
     """
     Balanced reduce-scatter operation along any axis.
     Similar to reduce_scatter_any_axis but uses balanced splitting strategy
