@@ -37,7 +37,7 @@ env:
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/develop/latest/"
   use_release: ${{ inputs.use_release || 'true' }}
   fleet_branch: "release/0.3"
-  formers_branch: "develop"
+  formers_branch: "release/1.2"
 defaults:
   run:
     shell: bash
