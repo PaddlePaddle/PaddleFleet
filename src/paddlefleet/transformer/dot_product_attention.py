@@ -319,12 +319,6 @@ class DotProductAttention(FleetLayer):
     ):
         """Forward."""
 
-        # EC-compatible flash attention path for alignment mode
-        if self.config.gpt_model_use_experimental_version:
-            return self._ec_compatible_flash_attention(
-                query, key, value, attn_mask_startend_row_indices
-            )
-
         assert attention_bias is None, (
             "Attention bias is not supported for DotProductAttention."
         )
@@ -343,6 +337,11 @@ class DotProductAttention(FleetLayer):
                 self.expand_attn_mask_startend_row_indices_for_cp(
                     attn_mask_startend_row_indices, key
                 )
+            )
+        elif self.config.gpt_model_use_experimental_version:
+            # EC-compatible flash attention path for alignment mode, only support non-cp
+            return self._ec_compatible_flash_attention(
+                query, key, value, attn_mask_startend_row_indices
             )
 
         bsz, q_len, num_heads, q_head_dim = query.shape

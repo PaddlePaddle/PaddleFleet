@@ -420,6 +420,12 @@ class Attention(FleetLayer, ABC):
             tp_group=self.pg_collection.tp,
         )
 
+        self.recompute_gated_attn = (
+            self.config.recompute_granularity == "selective"
+            and self.config.recompute_modules is not None
+            and "gated_attn" in self.config.recompute_modules
+        )
+
     def _post_core_attention_hook(self, core_attn_out: Tensor) -> Tensor:
         """Hook called after core attention. Override in subclasses (e.g. VHA postmix)."""
         return core_attn_out
