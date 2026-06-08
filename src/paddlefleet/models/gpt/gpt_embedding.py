@@ -192,11 +192,12 @@ class GPTEmbedding(FleetLayer):
                 self.config.expert_model_parallel_size > 1
                 and self.config.tensor_model_parallel_size < 2
             ):
-                text_padding_indices = input_ids == 0
+                text_padding_indices = input_ids == self.config.pad_token_id
                 decoder_input = fill_feature(
                     decoder_input, text_padding_indices, 0
                 )
-                input_ids_for_moe_mask = input_ids
+                input_ids_for_moe_mask = paddle.ones_like(input_ids)
+                input_ids_for_moe_mask[text_padding_indices] = 0
             if (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0

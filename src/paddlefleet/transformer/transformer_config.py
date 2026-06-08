@@ -43,6 +43,9 @@ class TransformerConfig(ModelParallelConfig):
     # model architecture
     ####################
 
+    pad_token_id: int = 1
+    """Token ID used for padding."""
+
     num_hidden_layers: int = 1
     """Number of transformer layers in a transformer block."""
 
