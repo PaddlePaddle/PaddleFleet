@@ -1810,10 +1810,16 @@ class CompressedSparseAttention(FleetLayer):
         Returns:
             output: [b, sq, np * v_head_dim]
         """
+        b, sq, np_heads, hn = query.shape
+
+        if startend_row_indices is not None:
+            assert b == 1, (
+                "when startend_row_indices is not None, ",
+                f"only support batch_size == 1, current batch_size: {b}",
+            )
+
         if self.cp_enabled:
             return self._forward_cp(query, key, x, qr, startend_row_indices)
-
-        b, sq, np_heads, hn = query.shape
 
         if startend_row_indices is not None and self.compress_ratio > 1:
             doc_lens = get_doc_lens(startend_row_indices)
