@@ -551,6 +551,19 @@ class GPTEmbedding(FleetLayer):
             get_context_parallel_world_size() > 1
             and self.config.experimental_dataflow
         ):
+            # MTP and multimodal paths scatter decoder_input internally;
+            # only scatter here for the plain (no-MTP, no-multimodal) path.
+            if (
+                not (
+                    self.config.num_nextn_predict_layers
+                    and self.config.num_nextn_predict_layers > 0
+                    and not self.config.mtp_load_weight_only
+                )
+                and not self.multimodal_embedding
+            ):
+                decoder_input = ContextParallelScatterOp.apply(
+                    decoder_input, axis=1
+                )
             if rotary_pos_emb is not None:
                 rotary_pos_emb = ContextParallelScatterOp.apply(
                     rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
