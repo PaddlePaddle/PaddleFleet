@@ -39,7 +39,7 @@ def re_rule(body, CHECK_TEMPLATE):
 
 
 def extract_pr_links(description_text):
-    pattern = r"(?:https://github\.com/PaddlePaddle/Paddle/pull/|#)(\d+)"
+    pattern = r"(?:https://github\.com/PaddlePaddle/PaddleFleet/pull/|#)(\d+)"
     return re.findall(pattern, description_text)
 
 
