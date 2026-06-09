@@ -1232,7 +1232,9 @@ class Compressor(nn.Layer):
             score = score.reshape([b, actual_n_compressed, ratio, -1])
 
             # APE: [ratio, coff * head_dim] -> [1, 1, ratio, coff * head_dim]
-            score = score + self.ape.reshape([1, 1, ratio, -1])
+            ape = self.ape.reshape([1, 1, ratio, -1])
+            ape = ape.cast(score.dtype) if _ACCURACY_COMPATIBLE_KERNEL else ape
+            score = score + ape
 
             if self.overlap:
                 # Build is_first mask for document boundaries
