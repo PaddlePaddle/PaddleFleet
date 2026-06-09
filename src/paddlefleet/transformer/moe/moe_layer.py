@@ -986,9 +986,17 @@ class MoELayer(nn.Layer):
                     reshaped_input, mask, probs, topk_indices, topk_weights
                 )
             else:
-                output = self._forward_single_card_moe(
-                    reshaped_input, topk_indices, topk_weights
-                )
+                if os.environ.get("MOE_DETERMINISTIC_UNPERMUTE", "1") == "1":
+                    output = self._forward_single_card_moe(
+                        reshaped_input,
+                        topk_indices,
+                        topk_weights,
+                        routing_map=mask,
+                    )
+                else:
+                    output = self._forward_single_card_moe(
+                        reshaped_input, topk_indices, topk_weights
+                    )
             # Latent MoE: project back from latent space
             if self.use_latent_moe:
                 output = self.fc2_latent_proj(output)
@@ -1021,6 +1029,7 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         selected_experts: paddle.Tensor,
         topk_weights: paddle.Tensor,
+        routing_map: paddle.Tensor = None,
     ) -> paddle.Tensor:
         """
         Forward without expert parallelism
@@ -1033,6 +1042,10 @@ class MoELayer(nn.Layer):
         Returns:
             output: Output hidden states, shape: [seq_len, hidden_size]
         """
+        if os.environ.get("MOE_DETERMINISTIC_UNPERMUTE", "1") == "1":
+            return self._forward_single_card_moe_deterministic(
+                hidden_states, selected_experts, topk_weights, routing_map
+            )
 
         _, d_model = hidden_states.shape
         final_hidden_states = paddle.zeros_like(
@@ -1071,6 +1084,98 @@ class MoELayer(nn.Layer):
             )
             final_hidden_states = final_hidden_states + final_hidden_states_tmp
         return final_hidden_states.cast(hidden_states.dtype)
+
+    def _forward_single_card_moe_deterministic(
+        self,
+        hidden_states: paddle.Tensor,
+        selected_experts: paddle.Tensor,
+        topk_weights: paddle.Tensor,
+        routing_map: paddle.Tensor,
+    ) -> paddle.Tensor:
+        num_tokens, d_model = hidden_states.shape
+
+        # ========== Step 1: Permute ==========
+        routing_map_bool = routing_map.cast("bool")
+        routing_map_T = routing_map_bool.T  # [num_experts, num_tokens]
+
+        token_indices = (
+            paddle.arange(num_tokens, dtype="int64")
+            .unsqueeze(0)
+            .expand([self.num_experts, num_tokens])
+        )
+        sorted_indices = token_indices[
+            routing_map_T
+        ]  # masked_select equivalent
+
+        permuted_input = hidden_states.index_select(sorted_indices, axis=0)
+        tokens_per_expert = routing_map_T.cast("int64").sum(axis=-1)
+
+        full_probs = paddle.zeros(
+            [num_tokens, self.num_experts], dtype=topk_weights.dtype
+        )
+        token_idx_2d = (
+            paddle.arange(num_tokens, dtype="int64")
+            .unsqueeze(1)
+            .expand_as(selected_experts)
+        )
+        full_probs[
+            token_idx_2d.reshape([-1]), selected_experts.reshape([-1])
+        ] = topk_weights.reshape([-1])
+        permuted_probs = full_probs.T[routing_map_T]
+
+        # ========== Step 2: Expert  ==========
+        tokens_per_expert_list = tokens_per_expert.tolist()
+        tokens_list = paddle.split(
+            permuted_input, tokens_per_expert_list, axis=0
+        )
+        probs_list = paddle.split(
+            permuted_probs, tokens_per_expert_list, axis=0
+        )
+
+        output_local_list = []
+        from paddlefleet.fusions.fused_bias_swiglu import (
+            weighted_bias_swiglu_impl,
+        )
+
+        for expert_idx, (expert_layer, tokens, probs) in enumerate(
+            zip(self.experts, tokens_list, probs_list)
+        ):
+            if tokens.shape[0] == 0:
+                output_local_list.append(tokens)
+                continue
+
+            fc1_out, _ = expert_layer.up_gate_proj(tokens)
+            act_out = weighted_bias_swiglu_impl(
+                fc1_out, None, probs.unsqueeze(-1)
+            )
+            act_out = act_out.cast(tokens.dtype)
+            expert_out, _ = expert_layer.down_proj(act_out)
+            output_local_list.append(expert_out.cast(hidden_states.dtype))
+
+        expert_raw_output = paddle.concat(output_local_list, axis=0)
+
+        # ========== Step 3: Unpermute ==========
+        expert_offsets = paddle.zeros([self.num_experts + 1], dtype="int64")
+        expert_offsets[1:] = paddle.cumsum(tokens_per_expert)
+        position_in_expert_T = routing_map_T.cast("int64").cumsum(axis=-1) - 1
+        global_position = position_in_expert_T + expert_offsets[:-1].unsqueeze(
+            1
+        )
+        global_position_per_token = global_position.T
+        topk = int(routing_map_bool.cast("int64").sum(axis=-1)[0].item())
+        valid_positions = global_position_per_token * routing_map_bool.cast(
+            "int64"
+        )
+        reverse_indices = valid_positions[routing_map_bool].reshape(
+            [num_tokens, topk]
+        )
+        gathered = expert_raw_output.index_select(
+            reverse_indices.reshape([-1]), axis=0
+        )
+        gathered = gathered.reshape([num_tokens, topk, d_model])
+        output_tokens = gathered.sum(axis=1)
+
+        return output_tokens.cast(hidden_states.dtype)
 
     def _forward_single_card_grouped_gemm_moe(
         self,

@@ -40,6 +40,11 @@ def swiglu(y):
     return F.swiglu(y)
 
 
+def swiglu_eager(y):
+    y_1, y_2 = paddle.chunk(y, 2, axis=-1)
+    return F.silu(y_1) * y_2
+
+
 @jit_fuser
 def bias_swiglu(y, bias):
     """Performs SwiGLU activation with bias addition.
@@ -53,6 +58,11 @@ def bias_swiglu(y, bias):
     """
     y = y + bias
     return swiglu(y)
+
+
+def bias_swiglu_eager(y, bias):
+    y = y + bias
+    return swiglu_eager(y)
 
 
 @jit_fuser
@@ -81,6 +91,20 @@ def swiglu_back(g, y):
     return dx
 
 
+def swiglu_back_eager(g, y):
+    y_1, y_2 = paddle.chunk(y, 2, axis=-1)
+    return paddle.concat(
+        (
+            g
+            * paddle.nn.functional.sigmoid(y_1)
+            * (1 + y_1 * (1 - paddle.nn.functional.sigmoid(y_1)))
+            * y_2,
+            g * F.silu(y_1),
+        ),
+        axis=-1,
+    )
+
+
 @jit_fuser
 def bias_swiglu_back(g, y, bias):
     """Computes the gradient for the biased SwiGLU activation function.
@@ -107,6 +131,15 @@ def weighted_swiglu_back(g, y, weights):
     weights_grad = swiglu(y) * g.to(w_dtype)
     weights_grad = paddle.sum(weights_grad, dim=-1, keepdim=True)
     return input_grad.to(input_dtype), weights_grad.to(w_dtype)
+
+
+def weighted_swiglu_back_eager(g, y, weights):
+    input_dtype = y.dtype
+    w_dtype = weights.dtype
+    input_grad = swiglu_back_eager(g * weights, y)
+    weights_grad = swiglu_eager(y) * g.cast(w_dtype)
+    weights_grad = paddle.sum(weights_grad, axis=-1, keepdim=True)
+    return input_grad.cast(input_dtype), weights_grad.cast(w_dtype)
 
 
 @jit_fuser
@@ -258,7 +291,7 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
         ctx.save_for_backward(input_for_backward, bias)
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
-        return bias_swiglu(input, bias)
+        return bias_swiglu_eager(input, bias)
 
     @staticmethod
     @nvtx_decorator()
@@ -276,7 +309,8 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
         """
         input, bias = ctx.saved_tensor()
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
-        tmp = bias_swiglu_back(grad_output, input, bias)
+        y = input + bias
+        tmp = swiglu_back_eager(grad_output, y)
         return tmp, tmp
 
 
@@ -304,7 +338,7 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
         ctx.save_for_backward(input_for_backward)
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
-        return swiglu(input)
+        return swiglu_eager(input)
 
     @staticmethod
     @nvtx_decorator()
@@ -320,7 +354,7 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
         """
         input = ctx.saved_tensor()[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
-        tmp = swiglu_back(grad_output, input)
+        tmp = swiglu_back_eager(grad_output, input)
         return tmp
 
 
@@ -334,13 +368,15 @@ class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
         ctx.save_for_backward(input_for_backward, weights)
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
-        return weighted_swiglu(input, weights)
+        dtype = input.dtype
+        res = swiglu_eager(input) * weights
+        return res.cast(dtype)
 
     @staticmethod
     def backward(ctx, grad_output):
         input, weights = ctx.saved_tensor()
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
-        tmp, wgrad = weighted_swiglu_back(grad_output, input, weights)
+        tmp, wgrad = weighted_swiglu_back_eager(grad_output, input, weights)
         return tmp, wgrad
 
 

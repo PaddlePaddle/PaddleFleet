@@ -97,7 +97,10 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
-        return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
+        x_bf16 = x.cast(paddle.bfloat16)
+        w_bf16 = w.cast(paddle.bfloat16)
+        output = paddle.matmul(x_bf16, w_bf16).cast(paddle.float32)
+        return output
 
     @staticmethod
     def backward(ctx, y_grad):
@@ -708,9 +711,14 @@ class StandardMoERouter(nn.Layer):
         assert self.e_score_correction_bias is not None, (
             "e_score_correction_bias is None"
         )
-        scores_for_choice = scores.reshape(
-            [bsz_seq_len, -1]
-        ) + self.e_score_correction_bias.detach().unsqueeze(0)
+        _bias = (
+            self.e_score_correction_bias.detach()
+            .cast(paddle.bfloat16)
+            .cast(paddle.float32)
+        )
+        scores_for_choice = scores.reshape([bsz_seq_len, -1]) + _bias.unsqueeze(
+            0
+        )
         if n_group == 1:
             topk_weight, topk_idx = paddle.topk(
                 scores_for_choice, k=k, axis=-1, sorted=True
@@ -1118,7 +1126,10 @@ class TopKRouter(StandardMoERouter):
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
-                denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+                _sum_f64 = top_gate.cast(paddle.float64).sum(
+                    axis=-1, keepdim=True
+                )
+                denominator = _sum_f64.cast(paddle.float32) + 1e-20
                 top_gate = top_gate / denominator
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
 
