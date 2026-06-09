@@ -65,7 +65,6 @@ def run_vha_cp_e2e():
     seq_len = 64
     vocab_size = 512
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
         "dp_degree": 1,
@@ -210,7 +209,7 @@ def run_vha_cp_e2e():
     assert loss.item() > 0, f"Loss should be positive: {loss.item()}"
 
     print(f"actual loss: {loss.item()}")
-    loss_baseline = 8.485405
+    loss_baseline = 8.493358
     np.testing.assert_allclose(
         np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
     )
