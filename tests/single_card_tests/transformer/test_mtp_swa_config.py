@@ -42,9 +42,7 @@ sys.path.insert(
 # Ensure the in-repo `src/paddlefleet` is loaded ahead of any installed
 # (potentially stale) site-packages copy, so we test the actual branch code.
 _REPO_ROOT = os.path.dirname(
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
@@ -53,7 +51,10 @@ def _make_mock_self(mtp_window_size, *, with_extra_kwargs=True):
     """Build a minimal `self` object exposing only what the method touches."""
     config = SimpleNamespace(
         mtp_window_size=mtp_window_size,
-        sliding_window=(128, 0),  # backbone uses SWA; MTP override should be independent
+        sliding_window=(
+            128,
+            0,
+        ),  # backbone uses SWA; MTP override should be independent
         window_attn_skip_freq=4,  # backbone has skip pattern; MTP must clear it
         is_mtp_layer=False,  # backbone marker; MTP must override to True
         # extra fields that copy.copy may carry; harmless

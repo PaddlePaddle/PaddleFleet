@@ -27,14 +27,12 @@ import unittest
 
 # Load the in-repo source ahead of any installed copy.
 _REPO_ROOT = os.path.dirname(
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    )
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 sys.path.insert(0, _REPO_ROOT)
 
-import paddle  # noqa: E402
+import paddle
 
 
 class TestSeLU(unittest.TestCase):
@@ -94,9 +92,7 @@ class TestSeLU(unittest.TestCase):
         -> all four ReLU args are negative -> SeLU is identity for any x.
         """
         x = paddle.to_tensor([-2.0, 0.0, 2.0], dtype="float32")
-        ranges = paddle.to_tensor(
-            [1e30, -1e30, 1e30, -1e30], dtype="float32"
-        )
+        ranges = paddle.to_tensor([1e30, -1e30, 1e30, -1e30], dtype="float32")
         ts = paddle.to_tensor([1.0, 1.0, 1.0, 1.0], dtype="float32")
         # NOTE: ranges[0]=+inf -> relu(inf - x) = inf, so this WOULD blow up.
         # Construct the opposite: choose ranges such that all relu(...) are 0.
@@ -104,9 +100,7 @@ class TestSeLU(unittest.TestCase):
         # relu(x - ranges[1]) = 0 iff x <= ranges[1]  -> use ranges[1] = +1e30
         # relu(ranges[2] - x) = 0 iff ranges[2] <= x  -> use ranges[2] = -1e30
         # relu(x - ranges[3]) = 0 iff x <= ranges[3]  -> use ranges[3] = +1e30
-        ranges = paddle.to_tensor(
-            [-1e30, 1e30, -1e30, 1e30], dtype="float32"
-        )
+        ranges = paddle.to_tensor([-1e30, 1e30, -1e30, 1e30], dtype="float32")
         y = self.SeLU(x, ranges, ts)
         self.assertTrue(paddle.allclose(y, x, atol=0.0).item())
 

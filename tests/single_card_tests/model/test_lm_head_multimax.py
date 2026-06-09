@@ -112,7 +112,9 @@ class TestMultimaxLMHead(unittest.TestCase):
             tie_word_embeddings=True,
             multimax=None,
         )
-        cls.model_no_multimax = gpt_builder(cls.config_no_multimax, num_stages=1)
+        cls.model_no_multimax = gpt_builder(
+            cls.config_no_multimax, num_stages=1
+        )
 
         # Config with multimax + fused path
         cls.config_fused = GPTConfig(
@@ -143,6 +145,7 @@ class TestMultimaxLMHead(unittest.TestCase):
 
     def _find_lm_head(self, model):
         from paddlefleet.models.gpt.lm_head import GPTLMHead
+
         for layer in model.run_function:
             if isinstance(layer, GPTLMHead):
                 return layer

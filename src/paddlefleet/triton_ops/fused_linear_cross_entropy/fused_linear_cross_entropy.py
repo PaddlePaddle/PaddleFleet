@@ -356,7 +356,14 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
             loss, grad_input, grad_weight, grad_bias = ret
             grad_mm_ranges = grad_mm_ts = None
         else:
-            loss, grad_input, grad_weight, grad_bias, grad_mm_ranges, grad_mm_ts = ret
+            (
+                loss,
+                grad_input,
+                grad_weight,
+                grad_bias,
+                grad_mm_ranges,
+                grad_mm_ts,
+            ) = ret
 
         ctx.save_for_backward(
             grad_input.detach() if grad_input is not None else None,

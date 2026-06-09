@@ -125,7 +125,7 @@ class TestMTPSWA(unittest.TestCase):
         from paddlefleet.transformer.multi_token_prediction import (
             MultiTokenPredictionLayer,
         )
-        
+
         config = GPTConfig(
             num_hidden_layers=2,
             hidden_size=256,
@@ -154,7 +154,11 @@ class TestMTPSWA(unittest.TestCase):
         model = gpt_builder(config, num_stages=1)
 
         mtp_layer = next(
-            (l for l in model.run_function if isinstance(l, MultiTokenPredictionLayer)),
+            (
+                l
+                for l in model.run_function
+                if isinstance(l, MultiTokenPredictionLayer)
+            ),
             None,
         )
         self.assertIsNotNone(mtp_layer, "MTP layer should exist")

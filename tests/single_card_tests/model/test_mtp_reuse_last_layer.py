@@ -21,7 +21,6 @@ import unittest
 import numpy as np
 import paddle
 from paddle.distributed import fleet
-from paddle.distributed.fleet.meta_parallel import NoPipelineParallel
 
 import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
@@ -93,6 +92,7 @@ class TestMTPReuseLastLayer(unittest.TestCase):
 
     def _find_transformer_layers(self, model):
         from paddlefleet.transformer.transformer_layer import TransformerLayer
+
         layers = []
         for layer in model.run_function:
             if isinstance(layer, TransformerLayer):
@@ -103,6 +103,7 @@ class TestMTPReuseLastLayer(unittest.TestCase):
         from paddlefleet.transformer.multi_token_prediction import (
             MultiTokenPredictionLayer,
         )
+
         for layer in model.run_function:
             if isinstance(layer, MultiTokenPredictionLayer):
                 return layer
@@ -110,10 +111,6 @@ class TestMTPReuseLastLayer(unittest.TestCase):
 
     def test_mtp_reuse_aliases_parameters(self):
         """When mtp_reuse_last_layer=True, MTP transformer params should alias backbone last layer."""
-        from paddlefleet.transformer.transformer_layer import TransformerLayer
-        from paddlefleet.transformer.multi_token_prediction import (
-            MultiTokenPredictionLayer,
-        )
 
         backbone_layers = self._find_transformer_layers(self.model_reuse)
         self.assertGreater(len(backbone_layers), 0)
@@ -206,17 +203,20 @@ class TestMTPReuseLastLayer(unittest.TestCase):
         )
         model = gpt_builder(config, num_stages=1)
 
-        from paddlefleet.transformer.transformer_layer import TransformerLayer
         from paddlefleet.transformer.multi_token_prediction import (
             MultiTokenPredictionLayer,
         )
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
 
         backbone_layers = [
-            l for l in model.run_function
-            if isinstance(l, TransformerLayer)
+            l for l in model.run_function if isinstance(l, TransformerLayer)
         ]
         mtp_layer = next(
-            (l for l in model.run_function if isinstance(l, MultiTokenPredictionLayer)),
+            (
+                l
+                for l in model.run_function
+                if isinstance(l, MultiTokenPredictionLayer)
+            ),
             None,
         )
 
