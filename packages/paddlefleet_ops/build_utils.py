@@ -194,14 +194,18 @@ class EcosystemLibrary:
 
 def check_submodule_updated():
     if backends.IS_NVIDIA:
-        if not (
-            (PKG_ROOT / "third_party" / "DeepGEMM" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "DeepEP" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "HybridEP" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "quack" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "sonic-moe" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "flash-attention" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "FlashMLA" / ".git").exists()
+        third_parties = [
+            "DeepGEMM",
+            "DeepEP",
+            "HybridEP",
+            "quack",
+            "sonic-moe",
+            "flash-attention",
+            "FlashMLA",
+        ]
+        if not all(
+            (PKG_ROOT / "third_party" / third_party / ".git").exists()
+            for third_party in third_parties
         ):
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
