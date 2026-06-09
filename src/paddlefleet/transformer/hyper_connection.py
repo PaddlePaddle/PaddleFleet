@@ -330,8 +330,9 @@ class HyperConnectionModule(nn.Layer):
             x: [..., n*C] - n-stream hidden states
         """
         if _use_accuracy_compatible_kernel():
+            ori_dtype = x.dtype
             nC = x.shape[-1]
-            weight = self.mapping_proj.weight
+            weight = self.mapping_proj.weight.astype(ori_dtype)
             r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
             r = (1.0 / (r + self.norm_eps)).astype(x.dtype)  # [..., 1]
             # Match Megatron clean path: torch.matmul(x, weight.t()). Paddle
@@ -341,6 +342,8 @@ class HyperConnectionModule(nn.Layer):
             weight_out_in = weight.t().contiguous()
             proj_2d = paddle.matmul(x_2d, weight_out_in, transpose_y=True)
             proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
+            if not self.config.high_precision_mhc:
+                r = r.astype(ori_dtype)
         else:
             ori_dtype = x.dtype
             proj, r = self._proj_rms_op(
@@ -548,10 +551,7 @@ class HyperConnectionModule(nn.Layer):
         """
         with paddle.amp.auto_cast(enable=False):
             # Compute mappings
-            if (
-                not _use_accuracy_compatible_kernel()
-                and self.config.high_precision_mhc
-            ):
+            if self.config.high_precision_mhc:
                 hidden_states = hidden_states.astype("float32")
             h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
@@ -719,6 +719,12 @@ class HyperConnectionModule(nn.Layer):
                 return output.reshape([*leading_shape, n * C])
 
             # Sequential path: used when dropout required OR accuracy-compatible kernel is NOT enabled
+            if self.config.high_precision_mhc:
+                original_residual = original_residual.astype("float32")
+                x = x.astype("float32")
+                if bias is not None:
+                    bias = bias.astype("float32")
+
             mixed = self.apply_h_res(h_res, original_residual)
 
             x_expanded = self._apply_h_post(x, h_post)
