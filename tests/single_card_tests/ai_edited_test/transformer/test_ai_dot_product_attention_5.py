@@ -202,6 +202,7 @@ class TestDotProductAttentionForwardAssertions(unittest.TestCase):
         config.params_dtype = "float32"
         config.init_method = MagicMock()
         config._attn_implementation = "flash"
+        config.gpt_model_use_experimental_version = False
 
         attn = DotProductAttention(
             config=config,

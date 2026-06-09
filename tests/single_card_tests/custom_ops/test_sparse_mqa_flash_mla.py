@@ -28,7 +28,7 @@ try:
         paddlefleet_ops.is_flash_mla_available()
         and sparse_mqa._flash_mla_sparse_fwd is not None
     )
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, AttributeError):
     _HAS_FLASH_MLA = False
 
 

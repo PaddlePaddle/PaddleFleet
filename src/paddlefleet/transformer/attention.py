@@ -58,7 +58,6 @@ from paddlefleet.transformer.utils import (
 )
 from paddlefleet.utils import divide, get_pg_rank, get_pg_size
 
-from .dot_product_attention import CPDotProductAttention
 from .enums import AttnMaskType
 
 
@@ -190,6 +189,23 @@ class SelfAttentionSublayersSpec:
 
 
 @dataclass
+class SelfAttentionVHASublayersSpec:
+    """
+    Configuration class for specifying the sublayers_spec of a VHA self-attention.
+    """
+
+    q_proj: LayerSpec | type = None
+    k_proj: LayerSpec | type = None
+    v_proj: LayerSpec | type = None
+    gate_proj: LayerSpec | type = None
+    qkv_proj: LayerSpec | type = None  # used for SWA fallback (fused QKV)
+    core_attention: LayerSpec | type = None
+    o_proj: LayerSpec | type = None
+    q_norm: LayerSpec | type = None
+    k_norm: LayerSpec | type = None
+
+
+@dataclass
 class CrossAttentionSublayersSpec:
     """
     Configuration class for specifying the sublayers_spec of a cross-attention.
@@ -227,9 +243,6 @@ class Attention(FleetLayer, ABC):
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type
         self.is_mtp_layer = is_mtp_layer
-        self.use_vha_attention = (
-            attention_type == "self" and self.config.use_vha_attention
-        )
 
         self.is_swa = False
 
@@ -275,12 +288,7 @@ class Attention(FleetLayer, ABC):
             self.num_key_value_heads = self.config.num_key_value_heads
             self.rope_theta = self.config.rope_theta
 
-        self.query_projection_size = (
-            self.head_dim
-            * (self.num_attention_heads // self.num_key_value_heads)
-            if self.use_vha_attention
-            else self.head_dim * self.num_attention_heads
-        )
+        self.query_projection_size = self.head_dim * self.num_attention_heads
         self.key_projection_size = self.head_dim * self.num_key_value_heads
         self.value_projection_size = self.v_head_dim * self.num_key_value_heads
         self.out_projection_size = self.v_head_dim * self.num_attention_heads
@@ -312,28 +320,19 @@ class Attention(FleetLayer, ABC):
         world_size = get_pg_size(self.pg_collection.tp)
         self.hidden_size_per_attention_head = divide(
             self.query_projection_size,
-            (self.num_attention_heads // self.num_key_value_heads)
-            if self.use_vha_attention
-            else self.num_attention_heads,
+            self.num_attention_heads,
         )
 
         self.value_hidden_size_per_attention_head = divide(
             self.value_projection_size, self.num_key_value_heads
         )
         self.num_attention_heads_per_partition = divide(
-            (self.num_attention_heads // self.num_key_value_heads)
-            if self.use_vha_attention
-            else self.num_attention_heads,
+            self.num_attention_heads,
             world_size,
         )
         self.num_query_groups_per_partition = divide(
             self.num_key_value_heads, world_size
         )
-
-        if self.use_vha_attention:
-            assert world_size == 1, (
-                "VHA attention currently requires tensor_model_parallel_size == 1"
-            )
 
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
@@ -421,74 +420,15 @@ class Attention(FleetLayer, ABC):
             tp_group=self.pg_collection.tp,
         )
 
-        if self.use_vha_attention:
-            eye = paddle.eye(self.head_dim)
-            init_mats = paddle.stack(
-                [
-                    eye
-                    + paddle.randn([self.head_dim, self.head_dim])
-                    * (0.1 / math.sqrt(self.head_dim))
-                    for _ in range(self.num_key_value_heads)
-                ]
-            )
-            self.vha_premix_weight = self.create_parameter(
-                shape=[
-                    self.num_key_value_heads,
-                    self.head_dim,
-                    self.head_dim,
-                ],
-                default_initializer=nn.initializer.Assign(init_mats),
-            )
-            vha_postmix_rank = self.config.vha_postmix_rank
-            if vha_postmix_rank is None:
-                vha_postmix_rank = self.num_attention_heads // 4
-            self.vha_postmix_U = self.create_parameter(
-                shape=[self.num_attention_heads, vha_postmix_rank],
-                default_initializer=nn.initializer.Normal(mean=0.0, std=0.01),
-            )
-            self.vha_postmix_V = self.create_parameter(
-                shape=[self.num_attention_heads, vha_postmix_rank],
-                default_initializer=nn.initializer.Constant(0.0),
-            )
-
         self.recompute_gated_attn = (
             self.config.recompute_granularity == "selective"
             and self.config.recompute_modules is not None
             and "gated_attn" in self.config.recompute_modules
         )
 
-    def _apply_vha_premix(self, query: Tensor) -> Tensor:
-        q_expanded = paddle.einsum(
-            "bthd,kde->btkhe", query, self.vha_premix_weight
-        )
-        return q_expanded.reshape(
-            [
-                query.shape[0],
-                query.shape[1],
-                self.num_attention_heads,
-                self.head_dim,
-            ]
-        )
-
-    def _apply_vha_postmix(self, attn_out: Tensor) -> Tensor:
-        mixed = attn_out.reshape(
-            [
-                attn_out.shape[0],
-                attn_out.shape[1],
-                self.num_attention_heads,
-                self.v_head_dim,
-            ]
-        )
-        z = paddle.einsum("bthd,hr->btrd", mixed, self.vha_postmix_U)
-        delta = paddle.einsum("btrd,hr->bthd", z, self.vha_postmix_V)
-        mixed = mixed + delta
-        return mixed.reshape(
-            [
-                attn_out.shape[0],
-                attn_out.shape[1],
-                self.num_attention_heads * self.v_head_dim,
-            ]
-        )
+    def _post_core_attention_hook(self, core_attn_out: Tensor) -> Tensor:
+        """Hook called after core attention. Override in subclasses (e.g. VHA postmix)."""
+        return core_attn_out
 
     @abstractmethod
     def get_query_key_value_tensors(
@@ -731,10 +671,11 @@ class Attention(FleetLayer, ABC):
             # range. The full mask has shape [B, 1, S, 1] with absolute row indices.
             # Each SP rank processes key/query positions [tp_rank*L : (tp_rank+1)*L],
             # so we need the local slice with row indices adjusted to local space.
-            if attn_mask_startend_row_indices is not None and not isinstance(
-                self.core_attention, CPDotProductAttention
+            if (
+                attn_mask_startend_row_indices is not None
+                and self.core_attention.context_parallel_size == 1
             ):
-                # Skip this adjustment when CP is active, as CPDotProductAttention
+                # Skip this adjustment when CP is active, as DotProductAttention
                 # expects the full global mask and handles CP splitting internally.
                 local_seq = key.shape[1]  # S / tp_size after transpose
                 if attn_mask_startend_row_indices.shape[2] != local_seq:
@@ -787,8 +728,7 @@ class Attention(FleetLayer, ABC):
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
 
-        if self.use_vha_attention:
-            core_attn_out = self._apply_vha_postmix(core_attn_out)
+        core_attn_out = self._post_core_attention_hook(core_attn_out)
 
         # Apply gated attention: gate the attention output before output projection
         gate_recompute = None
@@ -1023,13 +963,7 @@ class SelfAttention(Attention):
         else:
             if self.gated_attention:
                 gate_dim = (
-                    heads_per_group
-                    * (
-                        self.num_key_value_heads
-                        if self.use_vha_attention
-                        else 1
-                    )
-                    * self.value_hidden_size_per_attention_head
+                    heads_per_group * self.value_hidden_size_per_attention_head
                 )
 
             if self.gated_attention:
@@ -1090,48 +1024,33 @@ class SelfAttention(Attention):
         ):
             # per_layer qk_norm: normalize across all heads jointly
 
-            if self.use_vha_attention:
-                query = query.reshape(
-                    query.shape[0],
-                    query.shape[1],
-                    -1,
-                    self.hidden_size_per_attention_head,
+            # Flatten to [b, sq, np * hn] / [b, sq, ng * hn]
+            query = query.reshape(*query.shape[:2], -1)
+            key = key.reshape(*key.shape[:2], -1)
+
+            # TP gather: collect all TP shards so norm sees the full dimension
+            enable_tp = get_pg_size(self.pg_collection.tp) > 1
+            if enable_tp:
+                query = gather_from_tensor_model_parallel_region(
+                    query, group=self.pg_collection.tp
                 )
-                query = self._apply_vha_premix(query)
-                query = query.reshape(*query.shape[:2], -1)
-                key = key.reshape(*key.shape[:2], -1)
-                if self.q_norm is not None:
-                    query = self.q_norm(query)
-                if self.k_norm is not None:
-                    key = self.k_norm(key)
-            else:
-                # Flatten to [b, sq, np * hn] / [b, sq, ng * hn]
-                query = query.reshape(*query.shape[:2], -1)
-                key = key.reshape(*key.shape[:2], -1)
+                key = gather_from_tensor_model_parallel_region(
+                    key, group=self.pg_collection.tp
+                )
 
-                # TP gather: collect all TP shards so norm sees the full dimension
-                enable_tp = get_pg_size(self.pg_collection.tp) > 1
-                if enable_tp:
-                    query = gather_from_tensor_model_parallel_region(
-                        query, group=self.pg_collection.tp
-                    )
-                    key = gather_from_tensor_model_parallel_region(
-                        key, group=self.pg_collection.tp
-                    )
+            if self.q_norm is not None:
+                query = self.q_norm(query)
+            if self.k_norm is not None:
+                key = self.k_norm(key)
 
-                if self.q_norm is not None:
-                    query = self.q_norm(query)
-                if self.k_norm is not None:
-                    key = self.k_norm(key)
-
-                # TP scatter: split back to per-rank shards
-                if enable_tp:
-                    query = scatter_to_tensor_model_parallel_region(
-                        query, group=self.pg_collection.tp
-                    )
-                    key = scatter_to_tensor_model_parallel_region(
-                        key, group=self.pg_collection.tp
-                    )
+            # TP scatter: split back to per-rank shards
+            if enable_tp:
+                query = scatter_to_tensor_model_parallel_region(
+                    query, group=self.pg_collection.tp
+                )
+                key = scatter_to_tensor_model_parallel_region(
+                    key, group=self.pg_collection.tp
+                )
 
             # Reshape to per-head layout [b, sq, np, hn] / [b, sq, ng, hn]
             query = query.reshape(
@@ -1155,9 +1074,6 @@ class SelfAttention(Attention):
                 -1,
                 self.hidden_size_per_attention_head,
             )
-
-            if self.use_vha_attention:
-                query = self._apply_vha_premix(query)
 
             if self.q_norm is not None:
                 query = self.q_norm(query)
@@ -1183,6 +1099,299 @@ class SelfAttention(Attention):
 
     def _backward_output_proj(self):
         """Update weights for output projection layer"""
+        self.o_proj.backward_dw()
+
+
+class SelfAttentionVHA(Attention):
+    """VHA (Virtual Head Attention) self-attention with independent q/k/v/gate projections."""
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers_spec: SelfAttentionVHASublayersSpec,
+        layer_number: int,
+        attn_mask_type=AttnMaskType.padding,
+        cp_comm_type: str | None = None,
+        pg_collection: ProcessGroupCollection = None,
+        is_mtp_layer: bool = False,
+    ):
+        super().__init__(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=layer_number,
+            attn_mask_type=attn_mask_type,
+            attention_type="self",
+            cp_comm_type=cp_comm_type,
+            pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
+        )
+
+        self.gated_attention = getattr(self.config, "gated_attention", False)
+
+        # VHA-specific projection sizes
+        if self.is_swa:
+            self.q_head_dim = self.config.swa_vha_q_lora_rank
+        else:
+            self.q_head_dim = self.config.vha_q_lora_rank
+        self.query_projection_size = self.q_head_dim * (
+            self.num_attention_heads // self.num_key_value_heads
+        )
+        self.hidden_size_per_attention_head = self.head_dim
+        self.num_attention_heads_per_partition = (
+            self.num_attention_heads // self.num_key_value_heads
+        )
+        self.num_query_groups_per_partition = self.num_key_value_heads
+
+        # VHA requires TP == 1
+        world_size = get_pg_size(self.pg_collection.tp)
+        assert world_size == 1, (
+            "VHA attention currently requires tensor_model_parallel_size == 1"
+        )
+
+        # Independent projections
+        self.q_proj = build_spec_layer(
+            sublayers_spec.q_proj,
+            self.config.hidden_size,
+            self.query_projection_size,
+            config=self.config,
+            init_method=self.config.init_method,
+            gather_output=False,
+            bias=self.config.use_bias or self.config.attention_bias,
+            skip_bias_add=False,
+            is_expert=False,
+            tp_group=self.pg_collection.tp,
+        )
+        # PLACEHOLDER_VHA_CLASS_CONTINUE
+        self.k_proj = build_spec_layer(
+            sublayers_spec.k_proj,
+            self.config.hidden_size,
+            self.key_projection_size,
+            config=self.config,
+            init_method=self.config.init_method,
+            gather_output=False,
+            bias=self.config.use_bias or self.config.attention_bias,
+            skip_bias_add=False,
+            is_expert=False,
+            tp_group=self.pg_collection.tp,
+        )
+        self.v_proj = build_spec_layer(
+            sublayers_spec.v_proj,
+            self.config.hidden_size,
+            self.value_projection_size,
+            config=self.config,
+            init_method=self.config.init_method,
+            gather_output=False,
+            bias=self.config.use_bias or self.config.attention_bias,
+            skip_bias_add=False,
+            is_expert=False,
+            tp_group=self.pg_collection.tp,
+        )
+
+        if self.gated_attention and sublayers_spec.gate_proj is not None:
+            self.gate_proj = build_spec_layer(
+                sublayers_spec.gate_proj,
+                self.config.hidden_size,
+                self.out_projection_size,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=self.config.use_bias or self.config.attention_bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_group=self.pg_collection.tp,
+            )
+        else:
+            self.gate_proj = None
+
+        # QK norms
+        if sublayers_spec.q_norm is not None:
+            if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
+                q_norm_hidden_size = self.head_dim * self.num_attention_heads
+            else:
+                q_norm_hidden_size = self.head_dim
+            self.q_norm = build_spec_layer(
+                sublayers_spec.q_norm,
+                hidden_size=q_norm_hidden_size,
+                config=self.config,
+                eps=self.config.rms_norm_eps,
+                input_is_parallel=False,
+            )
+        else:
+            self.q_norm = None
+        # PLACEHOLDER_VHA_CLASS_PART2
+
+        if sublayers_spec.k_norm is not None:
+            if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
+                k_norm_hidden_size = self.head_dim * self.num_key_value_heads
+            else:
+                k_norm_hidden_size = self.head_dim
+            self.k_norm = build_spec_layer(
+                sublayers_spec.k_norm,
+                hidden_size=k_norm_hidden_size,
+                config=self.config,
+                eps=self.config.rms_norm_eps,
+                input_is_parallel=False,
+            )
+        else:
+            self.k_norm = None
+
+        # VHA parameters
+        if self.q_head_dim == self.head_dim:
+            eye = paddle.eye(self.head_dim)
+            init_mats = paddle.stack(
+                [
+                    eye
+                    + paddle.randn([self.head_dim, self.head_dim])
+                    * (0.1 / math.sqrt(self.head_dim))
+                    for _ in range(self.num_key_value_heads)
+                ]
+            )
+        else:
+            init_mats = []
+            for _ in range(self.num_key_value_heads):
+                mat = paddle.empty([self.q_head_dim, self.head_dim])
+                nn.initializer.Orthogonal()(mat)
+                mat = mat * math.sqrt(self.head_dim / self.q_head_dim)
+                init_mats.append(mat)
+            init_mats = paddle.stack(init_mats)
+        self.vha_premix_weight = self.create_parameter(
+            shape=[self.num_key_value_heads, self.q_head_dim, self.head_dim],
+            default_initializer=nn.initializer.Assign(init_mats),
+        )
+        vha_postmix_rank = (
+            self.config.swa_vha_postmix_rank
+            if self.is_swa
+            else self.config.vha_postmix_rank
+        )
+        if vha_postmix_rank is None:
+            vha_postmix_rank = self.num_attention_heads // 4
+        self.vha_postmix_U = self.create_parameter(
+            shape=[self.num_attention_heads, vha_postmix_rank],
+            default_initializer=nn.initializer.Normal(mean=0.0, std=0.01),
+        )
+        self.vha_postmix_V = self.create_parameter(
+            shape=[self.num_attention_heads, vha_postmix_rank],
+            default_initializer=nn.initializer.Constant(0.0),
+        )
+
+        vha_postmix_rank_val = vha_postmix_rank
+
+    def _apply_vha_premix(self, query: Tensor) -> Tensor:
+        # query: [b, sq, g, q_head_dim], premix: [nkv, q_head_dim, head_dim]
+        # output: [b, sq, nkv*g, head_dim] = [b, sq, nh, head_dim]
+        q_expanded = paddle.einsum(
+            "btgr,krd->btkgd", query, self.vha_premix_weight
+        )
+        return q_expanded.reshape(
+            [
+                query.shape[0],
+                query.shape[1],
+                self.num_attention_heads,
+                self.head_dim,
+            ]
+        )
+
+    def _apply_vha_postmix(self, attn_out: Tensor) -> Tensor:
+        mixed = attn_out.reshape(
+            [
+                attn_out.shape[0],
+                attn_out.shape[1],
+                self.num_attention_heads,
+                self.v_head_dim,
+            ]
+        )
+        z = paddle.einsum("bthd,hr->btrd", mixed, self.vha_postmix_U)
+        delta = paddle.einsum("btrd,hr->bthd", z, self.vha_postmix_V)
+        mixed = mixed + delta
+        return mixed.reshape(
+            [
+                attn_out.shape[0],
+                attn_out.shape[1],
+                self.num_attention_heads * self.v_head_dim,
+            ]
+        )
+
+    def _post_core_attention_hook(self, core_attn_out: Tensor) -> Tensor:
+        return self._apply_vha_postmix(core_attn_out)
+
+    def get_query_key_value_tensors(
+        self, hidden_states, key_value_states=None, split_qkv=True
+    ):
+        """Derives query, key, value (and optionally gate) from hidden_states."""
+        return self._get_qkv_vha(hidden_states)
+
+    def _get_qkv_vha(self, hidden_states):
+        query, _ = self.q_proj(hidden_states)  # [b, sq, g*q_head_dim]
+        key, _ = self.k_proj(hidden_states)  # [b, sq, nkv*hd]
+        value, _ = self.v_proj(hidden_states)  # [b, sq, nkv*v_hd]
+
+        gate = None
+        if self.gated_attention and self.gate_proj is not None:
+            gate, _ = self.gate_proj(hidden_states)  # [b, sq, nh*v_hd]
+
+        if os.environ.get("VHA_DEBUG"):
+            import logging
+
+            layer_type = "SWA" if self.is_swa else "Full"
+            logging.getLogger(__name__).info(
+                f"[VHA-Runtime] layer={self.layer_number} type={layer_type} | "
+                f"q={list(query.shape)} k={list(key.shape)} v={list(value.shape)} "
+                f"gate={list(gate.shape) if gate is not None else None} | "
+                f"premix_w={list(self.vha_premix_weight.shape)} "
+                f"postmix_U={list(self.vha_postmix_U.shape)} "
+                f"postmix_V={list(self.vha_postmix_V.shape)}"
+            )
+
+        # Reshape query for premix: [b, sq, g, q_head_dim] where g = nh // nkv
+        query = query.reshape(
+            query.shape[0],
+            query.shape[1],
+            self.num_attention_heads // self.num_key_value_heads,
+            self.q_head_dim,
+        )
+        query = self._apply_vha_premix(query)  # -> [b, sq, nh, hd]
+
+        if self.v_scale is not None:
+            value = value * self.v_scale
+
+        if getattr(self.config, "qk_norm_type", "per_head") == "per_layer" and (
+            self.q_norm is not None or self.k_norm is not None
+        ):
+            query = query.reshape(*query.shape[:2], -1)
+            key = key.reshape(*key.shape[:2], -1)
+            if self.q_norm is not None:
+                query = self.q_norm(query)
+            if self.k_norm is not None:
+                key = self.k_norm(key)
+            query = query.reshape(
+                query.shape[0], query.shape[1], -1, self.head_dim
+            )
+            key = key.reshape(key.shape[0], key.shape[1], -1, self.head_dim)
+        else:
+            # per_head norm
+            if self.q_norm is not None:
+                query = self.q_norm(query)
+            key = key.reshape(key.shape[0], key.shape[1], -1, self.head_dim)
+            if self.k_norm is not None:
+                key = self.k_norm(key)
+
+        value = value.reshape(
+            value.shape[0], value.shape[1], -1, self.v_head_dim
+        )
+
+        if gate is not None:
+            gate = gate.reshape(*gate.shape[:2], -1)
+            return query, key, value, gate
+
+        return query, key, value
+
+    def backward_dw(self) -> NoReturn:
+        """Execute weight update operations."""
+        self.q_proj.backward_dw()
+        self.k_proj.backward_dw()
+        self.v_proj.backward_dw()
+        if self.gate_proj is not None:
+            self.gate_proj.backward_dw()
         self.o_proj.backward_dw()
 
 

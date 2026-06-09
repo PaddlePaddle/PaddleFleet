@@ -716,7 +716,7 @@ def cp_flashmask_allgatherkv_balance_backward(
         causal (bool): Whether causal attention was used
         fa_version (int): FlashAttention version that was actually used by the
             forward kernel. Must be propagated from the forward call to keep
-            fwd/bwd consistent (do not re-derive from external config here).
+            fwd/bwd consistent.
     Returns:
         tuple: (query_grad, key_grad, value_grad)
     """
@@ -962,7 +962,6 @@ class FlashMaskContextParallel(PyLayer):
     @staticmethod
     def forward(
         ctx,
-        config,
         query,
         key,
         value,
@@ -1072,7 +1071,6 @@ class FlashMaskContextParallel(PyLayer):
 
 
 def flashmask_attention_cp(
-    config,
     query,
     key,
     value,
@@ -1117,7 +1115,6 @@ def flashmask_attention_cp(
         ```
     """
     output = FlashMaskContextParallel.apply(
-        config,
         query,
         key,
         value,

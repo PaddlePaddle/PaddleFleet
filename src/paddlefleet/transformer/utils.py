@@ -100,8 +100,8 @@ def startend_row_indices_add_sliding_window(
         return startend_row_indices
     # construct sliding window mask
     bsz, heads, seq, num_vec = startend_row_indices.shape
-    if num_vec != 1:
-        raise ValueError("only support LTS now")
+    if num_vec not in [1, 2]:
+        raise ValueError("only support LTS and LTS & UTE now")
 
     swa_head_num = int(head_wise_swa_ratio * kv_num_heads)
 
@@ -129,7 +129,14 @@ def startend_row_indices_add_sliding_window(
             startend_row_indices[:, :non_swa_head_num, :, 0]
         )
 
-    return startend_row_indices_new_LTS.unsqueeze(-1)
+    if num_vec == 1:
+        startend_row_indices = startend_row_indices_new_LTS.unsqueeze(-1)
+    else:
+        startend_row_indices = paddle.stack(
+            [startend_row_indices_new_LTS, startend_row_indices[..., 1]],
+            axis=-1,
+        )
+    return startend_row_indices
 
 
 # ---------------------------------------------------------------------------
