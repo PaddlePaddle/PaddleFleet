@@ -554,6 +554,7 @@ class GPTEmbedding(FleetLayer):
                     and not self.config.mtp_load_weight_only
                 )
                 and not self.multimodal_embedding
+                and self.config.experimental_dataflow
             ):
                 decoder_input = ContextParallelScatterOp.apply(
                     decoder_input, axis=1
