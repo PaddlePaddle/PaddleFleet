@@ -40,6 +40,7 @@ from .moe_utils import (
 
 try:
     from paddlefleet_ops import deep_gemm as paddlefleet_deep_gemm
+    from paddlefleet_ops.sonicmoe.quack_utils import quantize_native_fp8_weights
 except (ImportError, RuntimeError):
     pass
 
@@ -352,7 +353,8 @@ class SonicMoEExpert(GroupedMLPExpert):
             value = value.contiguous()
         if list(tensor.shape) != list(value.shape):
             tensor.reshape_(list(value.shape))
-        tensor[...] = value
+        # tensor[...] = value
+        paddle.assign(value, output=tensor)
 
     def __init__(
         self,
@@ -417,7 +419,34 @@ class SonicMoEExpert(GroupedMLPExpert):
     def step(self):
         self.flush_to_grouped_layout()
 
-    def forward(self, hidden_states, topk_indices, topk_scores, use_fp8=False):
+    @paddle.no_grad()
+    def quant_weight(self):
+        self.convert_weights_to_sonic_layout()
+
+        payload = quantize_native_fp8_weights(
+            self.weight1.permute([1, 2, 0]),
+            self.weight2.permute([1, 2, 0]),
+        )
+        assert payload["format"] == "1x32", (
+            f"quant strategy {payload.get('format')} is not supported."
+        )
+        w1_fp8, w1_scale, w1t_fp8, w1t_scale = payload["w1"]
+        w2_fp8, w2_scale, w2t_fp8, w2t_scale = payload["w2"]
+        self.weight1.fp8 = (w1_fp8.mT, w1_scale)
+        self.weight1.transposed_fp8 = (w1t_fp8, w1t_scale)
+        self.weight2.fp8 = (w2_fp8, w2_scale)
+        self.weight2.transposed_fp8 = (w2t_fp8, w2t_scale)
+
+    def forward(
+        self,
+        hidden_states,
+        topk_indices,
+        topk_scores,
+        use_fp8=False,
+        tokens_per_expert=None,
+        fp8_scale=None,
+        fp8_combine_grad_handle=None,
+    ):
         self.convert_weights_to_sonic_layout()
         hidden_states = run_sonic_moe(
             hidden_states,
@@ -428,6 +457,9 @@ class SonicMoEExpert(GroupedMLPExpert):
             self.weight1,
             self.weight2,
             use_fp8,
+            tokens_per_expert=tokens_per_expert,
+            fp8_scale=fp8_scale,
+            fp8_combine_grad_handle=fp8_combine_grad_handle,
         )
         return hidden_states
 

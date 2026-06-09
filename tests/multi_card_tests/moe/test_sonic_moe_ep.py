@@ -439,6 +439,13 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             using_sonic_moe=True,
             fp8="e4m3",
         )
+        paddle.seed(self.seed)
+        model_parallel_cuda_manual_seed(self.seed)
+        moe_layer_sonic_fp8_dispatch = self._build_moe_layer(
+            using_sonic_moe=True,
+            fp8="e4m3",
+        )
+        moe_layer_sonic_fp8_dispatch.fp8_dispatch = True
 
         input_data_list = []
         for step_idx in range(acc_steps):
@@ -456,8 +463,15 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
         output_bf16, grads_bf16 = self._run_accumulated_forward_backward(
             moe_layer_sonic_bf16, input_data_list
         )
+        moe_layer_sonic_fp8.grouped_gemm_experts.quant_weight()
         output_fp8, grads_fp8 = self._run_accumulated_forward_backward(
             moe_layer_sonic_fp8, input_data_list
+        )
+        moe_layer_sonic_fp8_dispatch.grouped_gemm_experts.quant_weight()
+        output_fp8_dispatch, grads_fp8_dispatch = (
+            self._run_accumulated_forward_backward(
+                moe_layer_sonic_fp8_dispatch, input_data_list
+            )
         )
         clear_all_fp8_weight_caches()
 
@@ -486,6 +500,31 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             grads_bf16,
             tol=fp8_tol,
             title="Sonic-MoE FP8 vs BF16 accumulated grad",
+        )
+
+        self._assert_tensor_diff_less(
+            output_fp8_dispatch,
+            output_bf16,
+            tol=fp8_tol,
+            title="Sonic-MoE FP8-dispatch vs BF16 final output",
+        )
+        self._assert_grad_diff_less(
+            grads_fp8_dispatch,
+            grads_bf16,
+            tol=fp8_tol,
+            title="Sonic-MoE FP8-dispatch vs BF16 accumulated grad",
+        )
+        self._assert_tensor_diff_less(
+            output_fp8_dispatch,
+            output_fp8,
+            tol=1e-8,
+            title="Sonic-MoE FP8-dispatch vs FP8 final output",
+        )
+        self._assert_grad_diff_less(
+            grads_fp8_dispatch,
+            grads_fp8,
+            tol=1e-8,
+            title="Sonic-MoE FP8-dispatch vs FP8 accumulated grad",
         )
 
         print("Final output and parameter gradient precision checks passed!")
@@ -524,9 +563,11 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             dtype=paddle.bfloat16,
         )
 
+        moe_layer_single.grouped_gemm_experts.quant_weight()
         output_single, loss_single, input_grad_single, grads_single = (
             self._run_forward_backward(moe_layer_single, input_data)
         )
+        moe_layer_ep.grouped_gemm_experts.quant_weight()
         output_ep, loss_ep, input_grad_ep, grads_ep = (
             self._run_forward_backward(moe_layer_ep, input_data)
         )

@@ -2176,16 +2176,27 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
 
 
 def run_sonic_moe(
-    hidden_states, topk_indices, topk_scores, K, E, w1, w2, fp8=False
+    hidden_states,
+    topk_indices,
+    topk_scores,
+    K,
+    E,
+    w1,
+    w2,
+    fp8=False,
+    tokens_per_expert=None,
+    fp8_scale=None,
+    fp8_combine_grad_handle=None,
 ):
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
 
-    valid = topk_indices >= 0
-    valid_experts = topk_indices[valid].cast(paddle.int32)
-    tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
-        paddle.int32
-    )
+    if tokens_per_expert is None:
+        valid = topk_indices >= 0
+        valid_experts = topk_indices[valid].cast(paddle.int32)
+        tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
+            paddle.int32
+        )
 
     (
         expert_frequency_offset,
@@ -2198,6 +2209,7 @@ def run_sonic_moe(
         total_pad_rows,
         _N_recv,
         _score_src_idx,
+        expert_order_scores,
     ) = deepep_topk_to_sonic_metadata(
         topk_indices.cast(paddle.int32),
         topk_scores,
@@ -2210,7 +2222,7 @@ def run_sonic_moe(
     activation_type = ActivationType("swiglu")
 
     total_expert_freq = TK_padded
-    scores_for_down = _differentiable_router_scores(
+    router_scores_token_order = _differentiable_router_scores(
         topk_scores,
         topk_indices.cast(paddle.int32),
         num_activated_expert_per_token_offset,
@@ -2220,11 +2232,24 @@ def run_sonic_moe(
         score_src_idx=_score_src_idx,
     )
 
+    fp8_hidden_states = None
+    if fp8_scale is not None:
+        fp8_hidden_states = (hidden_states, fp8_scale)
+
+    w1_sonic = w1.permute([1, 2, 0])
+    w2_sonic = w2.permute([1, 2, 0])
+    if fp8:
+        for attr_name in ("fp8", "transposed_fp8"):
+            if hasattr(w1, attr_name):
+                setattr(w1_sonic, attr_name, getattr(w1, attr_name))
+            if hasattr(w2, attr_name):
+                setattr(w2_sonic, attr_name, getattr(w2, attr_name))
+
     with enable_fp8(fp8):
         _refresh_fp8_config()
         y1, z = _UpProjection.apply(
             hidden_states,
-            w1.permute([1, 2, 0]),
+            w1_sonic,
             None,
             expert_frequency_offset,
             total_expert_freq,
@@ -2238,13 +2263,14 @@ def run_sonic_moe(
             activation_type,
             is_inference_mode_enabled=False,
             use_low_precision_postact_buffer=False,
+            prequant_activation_payload=fp8_hidden_states,
         )
         hidden_states = _DownProjection.apply(
             y1,
             z,
-            w2.permute([1, 2, 0]),
+            w2_sonic,
             None,
-            scores_for_down,
+            topk_scores,
             s_scatter_idx,
             expert_frequency_offset,
             T,
@@ -2257,6 +2283,10 @@ def run_sonic_moe(
             True,  # is_varlen_k
             activation_type,
             None,
+            fp8_combine_grad_handle,
+            expert_order_scores,
+            router_scores_token_order,
+            _score_src_idx,
         )
 
     return hidden_states
