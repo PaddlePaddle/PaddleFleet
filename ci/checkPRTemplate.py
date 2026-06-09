@@ -134,6 +134,12 @@ def checkPRTemplate(repo, body, CHECK_TEMPLATE):
     elif result is None:
         res = False
         message = parameter_accuracy(body)
+        if BRANCH.startswith("release") and len(message) == 0:
+            message = "The PR link does not exist. To merge into the release/3.3 branch, you need to merge into the develop branch first and then cherry-pick it to the release/3.3 branch. Please merge into develop first and fill in the PR link in the Description.Use this format devPR:https://github.com/PaddlePaddle/Paddle/pull/xxxx"
+    print(f"checkPRTemplate res: {res} message: {message}")
+    print(f"checkPRTemplate result: {result}")
+    print(f"checkPRTemplate body: {body}")
+    print(message)
     return res, message
 
 
