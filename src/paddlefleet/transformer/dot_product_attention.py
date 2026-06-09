@@ -340,6 +340,11 @@ class DotProductAttention(FleetLayer):
             assert not self.config.flashmask_use_varlen, (
                 "flashmask_use_varlen does not support context parallel now."
             )
+            attn_mask_startend_row_indices = (
+                self.expand_attn_mask_startend_row_indices_for_cp(
+                    attn_mask_startend_row_indices, key
+                )
+            )
             assert (
                 (
                     query.dtype == paddle.bfloat16
@@ -347,11 +352,6 @@ class DotProductAttention(FleetLayer):
                 )
                 and attn_mask_startend_row_indices is not None
                 and not use_eager
-            )
-            attn_mask_startend_row_indices = (
-                self.expand_attn_mask_startend_row_indices_for_cp(
-                    attn_mask_startend_row_indices, key
-                )
             )
         elif self.config.gpt_model_use_experimental_version:
             # EC-compatible flash attention path for alignment mode, only support non-cp
