@@ -328,7 +328,12 @@ class MoELayer(nn.Layer):
             raise ValueError(
                 "For fp8 deep_gemm (i.e. use k-grouped gemm in backward), moe_expert_fusion must be True."
             )
-        if self.fp8 and self.moe_expert_fusion and self.moe_deep_gemm is False:
+        if (
+            self.fp8
+            and self.moe_expert_fusion
+            and self.moe_deep_gemm is False
+            and self.using_sonic_moe is False
+        ):
             use_fused_weight = False
         if self.using_sonic_moe:
             assert use_fused_weight is True, (
