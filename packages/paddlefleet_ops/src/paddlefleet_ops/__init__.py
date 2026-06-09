@@ -93,6 +93,8 @@ if paddle.is_compiled_with_cuda():
         "For developers: guard imports with `is_flash_mla_available()` and only call `paddlefleet_ops.flash_mla` when flag branch enabled.\n"
         "For users: use a GPU with compute capability >= 9.0 (Hopper or Blackwell) to enable."
     )
+
+    FAST_HADAMARD_TRANSFORM_HINT = "For developers: guard imports with `is_fast_hadamard_transform_available()` and only call `paddlefleet_ops.fast_hadamard_transform` when CUDA is enabled."
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
     DEEP_EP_HINT = "deep_ep is not supported on XPU backend."
@@ -100,11 +102,13 @@ else:
     SONIC_MOE_HINT = "sonicmoe is not supported on XPU backend."
     CUDNN_FRONTEND_HINT = "cudnn frontend is not supported on XPU backend."
     FLASH_MLA_HINT = "flash_mla is not supported on XPU backend."
-
-FLASH_MASK_HINT = (
-    "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet_ops.flash_mask` when flag branch enabled.\n"
-    "For users: use a GPU with compute capability >= 10.0 (Blackwell) to enable."
-)
+    FAST_HADAMARD_TRANSFORM_HINT = (
+        "fast_hadamard_transform is not supported on XPU backend."
+    )
+    FLASH_MASK_HINT = (
+        "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet_ops.flash_mask` when flag branch enabled.\n"
+        "For users: use a GPU with compute capability >= 10.0 (Blackwell) to enable."
+    )
 
 
 def _build_notice(
@@ -169,8 +173,10 @@ _SONIC_MOE_AVAILABLE = False
 _FLASH_MLA_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
 _CUDNN_FRONTEND_AVAILABLE = False
+_FAST_HADAMARD_TRANSFORM_AVAILABLE = False
 
 if paddle.is_compiled_with_cuda():
+    _FAST_HADAMARD_TRANSFORM_AVAILABLE = True
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
@@ -218,6 +224,10 @@ def is_flash_mask_available():
 
 def is_cudnn_frontend_available():
     return _CUDNN_FRONTEND_AVAILABLE
+
+
+def is_fast_hadamard_transform_available():
+    return _FAST_HADAMARD_TRANSFORM_AVAILABLE
 
 
 def _try_load_nvshmem(ops_dir: Path):
@@ -342,6 +352,24 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.flash_mask"] = error
+
+    if is_fast_hadamard_transform_available():
+        _safe_load_ecosystem_lib(
+            "fast_hadamard_transform",
+            ops_dir,
+            globals(),
+            ["fast_hadamard_transform_cuda"],
+        )
+    else:
+        warning, error = _build_notice(
+            "paddlefleet_ops.fast_hadamard_transform",
+            "CUDA backend is unavailable.",
+            hint_for_error=FAST_HADAMARD_TRANSFORM_HINT,
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet_ops.fast_hadamard_transform"] = (
+            error
+        )
 
     if is_cudnn_frontend_available():
         paddle.enable_compat(scope={"cudnn"}, silent=True)

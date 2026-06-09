@@ -33,9 +33,16 @@ import paddle.nn.functional as F
 from paddle import Tensor
 
 try:
-    from fast_hadamard_transform import hadamard_transform as _fast_hadamard_transform
+    from paddlefleet_ops.fast_hadamard_transform import (
+        hadamard_transform as _fast_hadamard_transform,
+    )
 except Exception:
-    _fast_hadamard_transform = None
+    try:
+        from fast_hadamard_transform import (
+            hadamard_transform as _fast_hadamard_transform,
+        )
+    except Exception:
+        _fast_hadamard_transform = None
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet import parallel_state
