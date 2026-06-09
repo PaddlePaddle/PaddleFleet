@@ -2209,6 +2209,7 @@ def run_sonic_moe(
         total_pad_rows,
         _N_recv,
         _score_src_idx,
+        expert_order_scores,
     ) = deepep_topk_to_sonic_metadata(
         topk_indices.cast(paddle.int32),
         topk_scores,
@@ -2221,7 +2222,7 @@ def run_sonic_moe(
     activation_type = ActivationType("swiglu")
 
     total_expert_freq = TK_padded
-    scores_for_down = _differentiable_router_scores(
+    router_scores_token_order = _differentiable_router_scores(
         topk_scores,
         topk_indices.cast(paddle.int32),
         num_activated_expert_per_token_offset,
@@ -2269,7 +2270,7 @@ def run_sonic_moe(
             z,
             w2_sonic,
             None,
-            scores_for_down,
+            topk_scores,
             s_scatter_idx,
             expert_frequency_offset,
             T,
@@ -2283,6 +2284,9 @@ def run_sonic_moe(
             activation_type,
             None,
             fp8_combine_grad_handle,
+            expert_order_scores,
+            router_scores_token_order,
+            _score_src_idx,
         )
 
     return hidden_states

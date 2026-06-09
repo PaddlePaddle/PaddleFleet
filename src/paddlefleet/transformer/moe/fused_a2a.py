@@ -505,7 +505,6 @@ class DeepEPCombine(PyLayer):
             grad_for_comm = quantize_activation_blockscaled_fast(
                 grad_output, scale_dtype=paddle.int32
             )
-
         grad_x = fused_combine_backward_func(
             grad_for_comm,
             ctx.group,
@@ -515,6 +514,14 @@ class DeepEPCombine(PyLayer):
             ctx.allocate_on_comm_stream,
             moe_ep_barrier=ctx.moe_ep_barrier,
         )
+        if ctx.fp8_dispatch:
+            assert ctx.combine_grad_handle is not None, (
+                "For fp8_dispatch, combine_grad_handle must be provided in combine backward."
+            )
+            grad_x, grad_scale = grad_x
+            ctx.combine_grad_handle["data"] = grad_x
+            ctx.combine_grad_handle["scale"] = grad_scale
+        return grad_x
 
         if ctx.fp8_dispatch:
             assert ctx.combine_grad_handle is not None, (

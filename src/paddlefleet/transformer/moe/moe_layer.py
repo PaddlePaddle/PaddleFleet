@@ -338,7 +338,7 @@ class MoELayer(nn.Layer):
             use_fused_weight = False
         if self.using_sonic_moe:
             assert use_fused_weight is True, (
-                "for sonic moe, expert weight must be fused."
+                "For sonic moe, expert weight must be fused."
             )
 
         if use_fused_weight:
@@ -492,6 +492,7 @@ class MoELayer(nn.Layer):
                         p.is_distributed = True
 
         self.use_rr_deepep_combine = False
+        print(f"====== fp8_dispatch:{self.fp8_dispatch}")
 
     def rr_recompute_update(self, in_full_recompute, in_mlp_recompute):
         if (
@@ -741,7 +742,6 @@ class MoELayer(nn.Layer):
         fp8_combine_grad_handle = (
             {} if self.fp8_dispatch and self.using_sonic_moe else None
         )
-        # fp8_combine_grad_handle = None
 
         with profile("fusion_mlp"):
             if self._use_hybrid_ep_fusion():
@@ -1206,6 +1206,10 @@ class MoELayer(nn.Layer):
         if hasattr(self, "grouped_gemm_experts") and isinstance(
             self.grouped_gemm_experts, SonicMoEExpert
         ):
+            self.grouped_gemm_experts.quant_weight()
+            return
+
+        if self.using_sonic_moe and hasattr(self, "grouped_gemm_experts"):
             self.grouped_gemm_experts.quant_weight()
             return
 
