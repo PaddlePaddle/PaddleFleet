@@ -54,6 +54,44 @@ def _q_rms_norm(q: Tensor, eps: float) -> Tensor:
     return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
 
 
+from paddlefleet.transformer.utils import (
+    get_doc_lens,
+)
+
+
+def build_document_rope_freqs(
+    rotary_pos_emb: nn.Layer, sq: int, startend_row_indices: Tensor
+):
+    """Build RoPE frequencies that restart from zero for each document."""
+    assert (
+        startend_row_indices.shape[0] == 1
+        and startend_row_indices.shape[1] == 1
+    ), "Document RoPE currently expects batch_size == 1 and head == 1."
+
+    doc_lens = get_doc_lens(startend_row_indices)
+    max_doc_len = int(doc_lens.max().item())
+    _rope_result = rotary_pos_emb(max_doc_len, packed_seq=False)
+    if isinstance(_rope_result, tuple):
+        freqs, mscale = _rope_result
+    else:
+        freqs, mscale = _rope_result, 1.0
+    freqs = freqs.squeeze(0).squeeze(1)
+    doc_freqs = [freqs[: int(doc_len.item())] for doc_len in doc_lens]
+    freqs = paddle.concat(doc_freqs, axis=0)
+    if freqs.shape[0] < sq:
+        freqs = paddle.concat(
+            [
+                freqs,
+                paddle.zeros(
+                    [sq - freqs.shape[0], freqs.shape[-1]], dtype=freqs.dtype
+                ),
+            ],
+            axis=0,
+        )
+
+    return freqs.reshape([1, sq, 1, freqs.shape[-1]]), mscale
+
+
 # ---------------------------------------------------------------------------
 # Sublayers spec dataclass
 # ---------------------------------------------------------------------------
@@ -213,6 +251,10 @@ class DSv4HybridAttention(Attention):
         Returns:
             (output [b, sq, hidden_size], bias=None)
         """
+        startend_row_indices = kwargs.get(
+            "attn_mask_startend_row_indices", None
+        )
+
         # Get Q, K, V tensors
         # In CP mode, pass position_offset so RoPE uses correct global positions.
         cp_pg = getattr(self, "pg_collection", None)
@@ -233,7 +275,9 @@ class DSv4HybridAttention(Attention):
 
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(
-                hidden_states, position_offset=position_offset
+                hidden_states=hidden_states,
+                startend_row_indices=startend_row_indices,
+                position_offset=position_offset,
             )
         )
 
@@ -242,6 +286,7 @@ class DSv4HybridAttention(Attention):
             query,
             key,
             value,
+            startend_row_indices,
             attention_mask,
             x=hidden_states,
             qr=q_compressed,
@@ -257,13 +302,19 @@ class DSv4HybridAttention(Attention):
             core_attn_out = core_attn_out.reshape(
                 [b, sq, self.num_attention_heads, self.v_head_dim]
             )
-            # Get RoPE frequencies for inverse; use global positions in CP mode
-            rope_len = sq + position_offset
-            _rope_result = self.rotary_pos_emb(rope_len, packed_seq=False)
-            if isinstance(_rope_result, tuple):
-                freqs, mscale = _rope_result
+            # Get RoPE frequencies for inverse
+            if startend_row_indices is not None:
+                freqs, mscale = build_document_rope_freqs(
+                    self.rotary_pos_emb, sq, startend_row_indices
+                )
             else:
-                freqs, mscale = _rope_result, 1.0
+                # Get RoPE frequencies for inverse; use global positions in CP mode
+                rope_len = sq + position_offset
+                _rope_result = self.rotary_pos_emb(rope_len, packed_seq=False)
+                if isinstance(_rope_result, tuple):
+                    freqs, mscale = _rope_result
+                else:
+                    freqs, mscale = _rope_result, 1.0
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
             freqs = freqs[:, position_offset : position_offset + sq, :]
@@ -298,7 +349,9 @@ class DSv4HybridAttention(Attention):
 
         return output, bias
 
-    def get_query_key_value_tensors(self, hidden_states: Tensor):
+    def get_query_key_value_tensors(
+        self, hidden_states: Tensor, startend_row_indices: Tensor | None = None
+    ):
         """Override in subclass."""
         raise NotImplementedError
 
@@ -398,7 +451,10 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )
 
     def get_query_key_value_tensors(
-        self, hidden_states: Tensor, position_offset: int = 0
+        self,
+        hidden_states: Tensor,
+        startend_row_indices: Tensor | None = None,
+        position_offset: int = 0,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Derive query, key, value from hidden_states.
 
@@ -436,13 +492,19 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         nope_dim = self.v_head_dim - pos_dim
 
         if pos_dim > 0:
-            # Get RoPE frequencies for global positions
-            rope_len = sq + position_offset
-            _rope_result = self.rotary_pos_emb(rope_len, packed_seq=False)
-            if isinstance(_rope_result, tuple):
-                freqs, mscale = _rope_result
+            # Get RoPE frequencies
+            if startend_row_indices is not None:
+                freqs, mscale = build_document_rope_freqs(
+                    self.rotary_pos_emb, sq, startend_row_indices
+                )
             else:
-                freqs, mscale = _rope_result, 1.0
+                # Get RoPE frequencies for global positions
+                rope_len = sq + position_offset
+                _rope_result = self.rotary_pos_emb(rope_len, packed_seq=False)
+                if isinstance(_rope_result, tuple):
+                    freqs, mscale = _rope_result
+                else:
+                    freqs, mscale = _rope_result, 1.0
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
             # Slice to local positions [position_offset : position_offset + sq]

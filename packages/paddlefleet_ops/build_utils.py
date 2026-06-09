@@ -323,10 +323,7 @@ def get_special_build_deps():
             else:
                 deps.append("nvidia-nvshmem-cu12>=3.3.9,<3.5")
         elif cuda_major == 13:
-            if cuda_minor == 0:
-                deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
-            else:
-                deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")
+            deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
         else:
             raise ValueError(
                 f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."

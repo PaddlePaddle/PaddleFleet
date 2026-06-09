@@ -47,6 +47,7 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
+from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_tensor_model_parallel_region,
@@ -450,6 +451,12 @@ class Attention(FleetLayer, ABC):
                 default_initializer=nn.initializer.Constant(0.0),
             )
 
+        self.recompute_gated_attn = (
+            self.config.recompute_granularity == "selective"
+            and self.config.recompute_modules is not None
+            and "gated_attn" in self.config.recompute_modules
+        )
+
     def _apply_vha_premix(self, query: Tensor) -> Tensor:
         q_expanded = paddle.einsum(
             "bthd,kde->btkhe", query, self.vha_premix_weight
@@ -784,8 +791,19 @@ class Attention(FleetLayer, ABC):
             core_attn_out = self._apply_vha_postmix(core_attn_out)
 
         # Apply gated attention: gate the attention output before output projection
+        gate_recompute = None
         if gate is not None:
-            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+            if self.recompute_gated_attn and self.training:
+                gate_recompute = RecomputeWithoutOutput()
+                core_attn_out = gate_recompute.recompute(
+                    self._gate_apply,
+                    core_attn_out,
+                    gate,
+                    preserve_rng_state=False,
+                    share_grad_holder=True,
+                )
+            else:
+                core_attn_out = self._gate_apply(core_attn_out, gate)
 
         if self.config.gpt_model_use_experimental_version and _LOG_LAYER_MD5:
             import logging
@@ -813,6 +831,9 @@ class Attention(FleetLayer, ABC):
         else:
             output, bias = self.o_proj(core_attn_out)
 
+        if gate_recompute is not None:
+            gate_recompute.discard_output_and_register_recompute(output)
+
         if self.config.gpt_model_use_experimental_version and _LOG_LAYER_MD5:
             _out = output
             _o_md5 = _md5(_out)
@@ -821,6 +842,10 @@ class Attention(FleetLayer, ABC):
             )
 
         return output, bias
+
+    def _gate_apply(self, core_attn_out, gate):
+        """Apply gated attention: sigmoid(gate) * core_attn_out."""
+        return core_attn_out * paddle.nn.functional.sigmoid(gate)
 
     def set_for_recompute_input_layernorm(self):
         """Set the attention layer for recompute input_layernorm. Only needed for fp8."""
