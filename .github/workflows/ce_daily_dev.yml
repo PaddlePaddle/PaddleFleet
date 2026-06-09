@@ -28,12 +28,10 @@ env:
   ci_scripts: /paddle/ci
   BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
-  docker_image_cu126: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda126-dev"
   docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
   docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda130-py312-dev"
-  paddle_url_cu126: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
   paddle_url_cu129: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
-  paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
+  paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl"
   use_release: ${{ inputs.use_release || 'true' }}
   MAX_PARALLEL: ${{ github.event.inputs.parallel_jobs || '2' }}
 
@@ -54,7 +52,7 @@ jobs:
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
-            python: "3.10"
+            python: "3.12"
           - cuda: "12.9"
             python: "3.11"
           - cuda: "12.9"
@@ -237,7 +235,7 @@ jobs:
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
-            python: "3.10"
+            python: "3.12"
           - cuda: "12.9"
             python: "3.11"
           - cuda: "12.9"
@@ -406,7 +404,7 @@ jobs:
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
-            python: "3.10"
+            python: "3.12"
           - cuda: "12.9"
             python: "3.11"
           - cuda: "12.9"
@@ -674,7 +672,7 @@ jobs:
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
-            python: "3.10"
+            python: "3.12"
           - cuda: "12.9"
             python: "3.11"
           - cuda: "12.9"
@@ -1192,7 +1190,7 @@ jobs:
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
-            python: "3.10"
+            python: "3.12"
           - cuda: "12.9"
             python: "3.11"
           - cuda: "12.9"
