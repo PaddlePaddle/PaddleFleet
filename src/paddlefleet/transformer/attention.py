@@ -1275,7 +1275,6 @@ class SelfAttentionVHA(Attention):
         )
 
         vha_postmix_rank_val = vha_postmix_rank
-        self._vha_logged = False
 
     def _apply_vha_premix(self, query: Tensor) -> Tensor:
         # query: [b, sq, g, q_head_dim], premix: [nkv, q_head_dim, head_dim]
@@ -1330,10 +1329,11 @@ class SelfAttentionVHA(Attention):
         if self.gated_attention and self.gate_proj is not None:
             gate, _ = self.gate_proj(hidden_states)  # [b, sq, nh*v_hd]
 
-        if not self._vha_logged:
-            self._vha_logged = True
+        if os.environ.get("VHA_DEBUG"):
+            import logging
+
             layer_type = "SWA" if self.is_swa else "Full"
-            print(
+            logging.getLogger(__name__).info(
                 f"[VHA-Runtime] layer={self.layer_number} type={layer_type} | "
                 f"q={list(query.shape)} k={list(key.shape)} v={list(value.shape)} "
                 f"gate={list(gate.shape) if gate is not None else None} | "
