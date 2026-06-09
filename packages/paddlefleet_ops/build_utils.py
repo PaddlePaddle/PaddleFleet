@@ -202,6 +202,9 @@ def check_submodule_updated():
             and (PKG_ROOT / "third_party" / "sonic-moe" / ".git").exists()
             and (PKG_ROOT / "third_party" / "flash-attention" / ".git").exists()
             and (PKG_ROOT / "third_party" / "FlashMLA" / ".git").exists()
+            and (
+                PKG_ROOT / "third_party" / "fast-hadamard-transform" / ".git"
+            ).exists()
         ):
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
@@ -423,6 +426,16 @@ def get_libs():
                     (cuda_major, cuda_minor) <= (12, 8)
                 ),
             },
+            name="fast-hadamard-transform",
+            source_rel_path="third_party/fast-hadamard-transform",
+            artifacts=[
+                Artifact("fast_hadamard_transform", "fast_hadamard_transform"),
+                Artifact(
+                    "fast_hadamard_transform_cuda",
+                    "fast_hadamard_transform_cuda",
+                ),
+            ],
+            include_dirs=["csrc"],
         ),
     ]
     if (cuda_major, cuda_minor) >= (12, 9):

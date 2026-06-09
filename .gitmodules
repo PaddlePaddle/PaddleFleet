@@ -22,3 +22,6 @@
 [submodule "packages/paddlefleet_ops/third_party/FlashMLA"]
 	path = packages/paddlefleet_ops/third_party/FlashMLA
 	url = https://github.com/PFCCLab/FlashMLA.git
+[submodule "packages/paddlefleet_ops/third_party/fast-hadamard-transform"]
+	path = packages/paddlefleet_ops/third_party/fast-hadamard-transform
+	url = https://github.com/PFCCLab/fast-hadamard-transform.git
