@@ -328,9 +328,10 @@ class DotProductAttention(FleetLayer):
 
         use_eager = self.config._attn_implementation == "eager"
 
-        assert self.is_swa and not use_eager, (
-            "SWA doesn't support _attn_implementation is eager"
-        )
+        if self.is_swa:
+            assert not use_eager, (
+                "SWA doesn't support _attn_implementation is eager"
+            )
 
         if self.context_parallel_size > 1:
             assert packed_seq_params is None, (
