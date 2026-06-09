@@ -183,7 +183,6 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
 
     def test_forward_saves_tensors(self):
         """Test forward saves the correct tensors."""
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -202,7 +201,7 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
             "causal": causal,
         }
 
-        result = FlashMaskAttnCpFunctor.apply(config, q, k, v, hold_tensors)
+        result = FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
         self.assertEqual(result.shape, result_attn.shape)
 
 
@@ -220,7 +219,6 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
         )
 
-        config = MagicMock()
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -239,7 +237,7 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             "causal": causal,
         }
 
-        FlashMaskAttnCpFunctor.apply(config, q, k, v, hold_tensors)
+        FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
         mock_cp_backward.assert_not_called()  # Not called in forward
 
 

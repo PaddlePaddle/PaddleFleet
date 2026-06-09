@@ -28,6 +28,7 @@ from paddle.autograd import PyLayer
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
+    mark_as_sequence_parallel_parameter,
 )
 
 if TYPE_CHECKING:
@@ -319,11 +320,28 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.moe_sublayers.mlp_spec
 
-        if self.moe_expert_fusion:
-            if self.fp8:
-                assert self.using_sonic_moe or self.moe_deep_gemm, (
-                    "For fp8 grouped_gemm, either set using_sonic_moe=True or moe_deep_gemm=True."
-                )
+        use_fused_weight = self.moe_expert_fusion
+        if (
+            self.fp8
+            and (self.moe_expert_fusion is False)
+            and self.moe_deep_gemm
+        ):
+            raise ValueError(
+                "For fp8 deep_gemm (i.e. use k-grouped gemm in backward), moe_expert_fusion must be True."
+            )
+        if (
+            self.fp8
+            and self.moe_expert_fusion
+            and self.moe_deep_gemm is False
+            and self.using_sonic_moe is False
+        ):
+            use_fused_weight = False
+        if self.using_sonic_moe:
+            assert use_fused_weight is True, (
+                "for sonic moe, expert weight must be fused."
+            )
+
+        if use_fused_weight:
             if self.using_sonic_moe:
                 # TODO: replace grouped_gemm_experts with fusion_experts
                 self.grouped_gemm_experts = SonicMoEExpert(
@@ -359,6 +377,29 @@ class MoELayer(nn.Layer):
             self.shared_experts = self.shared_expert_class(**shared_expert_args)
         else:
             self.shared_experts = None
+
+        # when sp is enabled, mark shared_experts as sequence parallel, because:
+        # 1. shared_experts only process local tokens which shape is [s/tp,b,h]
+        # 2. shared_experts'weight and bias will not be splited across tp ranks
+        if (
+            self.sequence_parallel
+            and self.expert_model_parallel_size > 1
+            and self.shared_experts is not None
+        ):
+            mark_as_sequence_parallel_parameter(
+                self.shared_experts.up_gate_proj.weight
+            )
+            if shared_expert_config.use_bias:
+                mark_as_sequence_parallel_parameter(
+                    self.shared_experts.up_gate_proj.bias
+                )
+            mark_as_sequence_parallel_parameter(
+                self.shared_experts.down_proj.weight
+            )
+            if shared_expert_config.use_bias:
+                mark_as_sequence_parallel_parameter(
+                    self.shared_experts.down_proj.bias
+                )
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type in ("deepep", "hybridep"):

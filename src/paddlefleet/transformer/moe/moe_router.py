@@ -25,7 +25,10 @@ from typing import TYPE_CHECKING
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
-from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
+from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+    AllGatherOp,
+    mark_as_sequence_parallel_parameter,
+)
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -255,6 +258,12 @@ class StandardMoERouter(nn.Layer):
         )
         config.init_method(self.weight)
 
+        if (
+            self.sequence_parallel
+            and self.config.expert_model_parallel_size > 1
+        ):
+            mark_as_sequence_parallel_parameter(self.weight)
+
         if self.routed_scaling_factor_learnable:
             self.routed_scaling_factor_param = self.create_parameter(
                 shape=[self.num_experts],
@@ -263,6 +272,13 @@ class StandardMoERouter(nn.Layer):
                     self.routed_scaling_factor
                 ),
             )
+            if (
+                self.sequence_parallel
+                and self.config.expert_model_parallel_size > 1
+            ):
+                mark_as_sequence_parallel_parameter(
+                    self.routed_scaling_factor_param
+                )
 
         if self.topk_method == "noaux_tc":
             if not self.config.gpt_model_use_experimental_version:
@@ -394,7 +410,9 @@ class StandardMoERouter(nn.Layer):
                     ]
                 )
                 # [B, S, E]
-                all_probs = ContextParallelAllGatherOp.apply(all_probs, axis=1)
+                all_probs = ContextParallelAllGatherOp.apply(
+                    all_probs, axis=1, mode=self.config.cp_balance_mode
+                )
                 local_seq_len = local_seq_len * self.context_parallel_size
             else:
                 # [B, S, E]
@@ -424,7 +442,9 @@ class StandardMoERouter(nn.Layer):
                 and self.config.experimental_dataflow
             ):
                 # In EB data flow, we need to gather input_ids here to get right denom.
-                input_ids = ContextParallelGatherOp.apply(input_ids, axis=1)
+                input_ids = ContextParallelGatherOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
             _ids = input_ids
             if _ids.ndim == 1:
                 _ids = _ids.unsqueeze(axis=0)
@@ -494,7 +514,7 @@ class StandardMoERouter(nn.Layer):
             ):
                 # In EB data flow, we need to gather input_ids here to get right denom.
                 origin_input_ids = ContextParallelGatherOp.apply(
-                    input_ids, axis=1
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
             else:
                 origin_input_ids = input_ids
@@ -938,7 +958,9 @@ class TopKRouter(StandardMoERouter):
                 # In EB dataflow, shape of input_ids [b, s],
                 # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
                 # so we need to scatter input_ids here to avid the assertion below
-                input_ids = ContextParallelScatterOp.apply(input_ids, axis=1)
+                input_ids = ContextParallelScatterOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
             if input_ids is not None:
                 if self.sequence_parallel:
                     input_ids_none_zero_mask = (

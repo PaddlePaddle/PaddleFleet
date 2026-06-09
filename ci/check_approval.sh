@@ -127,6 +127,21 @@ for PATTERN in "${PACKAGING_PATTERNS[@]}"; do
     fi
 done
 
+PACKAGES_APPROVERS="sneaxiy"
+PACKAGES_PATTERNS=(
+    "^packages/"
+    "^build_backend\.py$"
+    "^pyproject\.toml$"
+)
+for PATTERN in "${PACKAGES_PATTERNS[@]}"; do
+    HAS_MODIFIED=$(git diff --name-only "${DIFF_BASE}" HEAD -- | grep "${PATTERN}" || true)
+    if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
+        echo_line="You must be approved by ${PACKAGES_APPROVERS} for changes in packaging-related files (${PATTERN}).\n"
+        APPROVER_LIST=(${PACKAGES_APPROVERS})
+        check_approval 1 "${APPROVER_LIST[@]}"
+    fi
+done
+
 
 if [ -n "${echo_list}" ];then
   echo "****************"

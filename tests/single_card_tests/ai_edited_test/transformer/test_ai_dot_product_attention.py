@@ -30,7 +30,6 @@ from unittest.mock import MagicMock, patch
 import paddle
 
 from paddlefleet.transformer.dot_product_attention import (
-    CPDotProductAttention,
     DotProductAttention,
 )
 from paddlefleet.transformer.enums import AttnMaskType
@@ -84,13 +83,13 @@ class TestDotProductAttentionConstructor(unittest.TestCase):
 
     def test_context_parallel_raises(self):
         config = _make_config(context_parallel_size=2)
-        with self.assertRaises(AssertionError):
-            DotProductAttention(
-                config=config,
-                layer_number=1,
-                attn_mask_type=AttnMaskType.causal,
-                attention_type="self",
-            )
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+        )
+        self.assertIsInstance(attn, DotProductAttention)
 
     def test_layer_number_clamped_to_one(self):
         config = _make_config()
@@ -354,31 +353,16 @@ class TestDotProductAttentionEager(unittest.TestCase):
         self.assertIn("packed_seq_params", str(ctx.exception))
 
 
-class TestCPDotProductAttention(unittest.TestCase):
-    """Tests for CPDotProductAttention."""
+class TestDotProductAttentionContextParallel(unittest.TestCase):
+    """Tests for DotProductAttention with context parallelism (formerly CPDotProductAttention)."""
 
     @patch(
         "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size"
     )
-    def test_constructor(self, mock_get_cp_world_size):
+    def test_cp_packed_seq_raises(self, mock_get_cp_world_size):
         mock_get_cp_world_size.return_value = 2
-        config = _make_config(context_parallel_size=2)
-        attn = CPDotProductAttention(
-            config=config,
-            layer_number=1,
-            attn_mask_type=AttnMaskType.causal,
-            attention_type="self",
-        )
-        self.assertIsInstance(attn, CPDotProductAttention)
-        self.assertEqual(attn.context_parallel_size, 2)
-
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size"
-    )
-    def test_packed_seq_raises(self, mock_get_cp_world_size):
-        mock_get_cp_world_size.return_value = 2
-        config = _make_config(context_parallel_size=2)
-        attn = CPDotProductAttention(
+        config = _make_config()
+        attn = DotProductAttention(
             config=config,
             layer_number=1,
             attn_mask_type=AttnMaskType.causal,

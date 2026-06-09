@@ -293,6 +293,7 @@ class TestGetAttentionSpecGate(unittest.TestCase):
         config.use_qk_norm = False
         config.qk_l2_norm = False
         config.gpt_model_use_experimental_version = align_mode
+        config.use_vha_attention = False
         return config
 
     def test_mla_gated_has_gate_proj(self):

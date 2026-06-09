@@ -37,6 +37,7 @@ from paddlefleet.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -278,8 +279,12 @@ class LanguageLoss(FleetLayer):
             loss = loss_1d.reshape([B, S])
 
             if get_context_parallel_world_size() > 1:
-                loss = ContextParallelGatherOp.apply(loss, axis=1)
-                labels = ContextParallelGatherOp.apply(labels, axis=1)
+                loss = ContextParallelGatherOp.apply(
+                    loss, axis=1, mode=self.config.cp_balance_mode
+                )
+                labels = ContextParallelGatherOp.apply(
+                    labels, axis=1, mode=self.config.cp_balance_mode
+                )
 
             lossmask = labels != self.ignored_index
             if (~lossmask).all():
@@ -336,8 +341,12 @@ class LanguageLoss(FleetLayer):
             loss = self.loss_func(logits.cast("float32"), labels)
 
         if get_context_parallel_world_size() > 1:
-            loss = ContextParallelGatherOp.apply(loss, axis=1)
-            labels = ContextParallelGatherOp.apply(labels, axis=1)
+            loss = ContextParallelGatherOp.apply(
+                loss, axis=1, mode=self.config.cp_balance_mode
+            )
+            labels = ContextParallelGatherOp.apply(
+                labels, axis=1, mode=self.config.cp_balance_mode
+            )
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
@@ -426,7 +435,9 @@ class LanguageLoss(FleetLayer):
             and self.config.experimental_dataflow
         ):
             # In EB data flow and CP size > 1, scatter labels to cp local
-            labels = ContextParallelScatterOp.apply(labels, axis=1)
+            labels = ContextParallelScatterOp.apply(
+                labels, axis=1, mode=self.config.cp_balance_mode
+            )
         if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
@@ -469,7 +480,9 @@ class LanguageLoss(FleetLayer):
                             # In EB data flow and CP size > 1, since we do not use _forward
                             # we need to scatter labels to cp local here.
                             labels_cur_depth = ContextParallelScatterOp.apply(
-                                labels_cur_depth, axis=1
+                                labels_cur_depth,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
 
                         if self.config.fused_linear_ce_loss_chunk > 0:
@@ -487,11 +500,15 @@ class LanguageLoss(FleetLayer):
                             # In EB data flow and CP size > 1, loss and labels need to be gathered back.
                             loss_matrix_cur_depth = (
                                 ContextParallelGatherOp.apply(
-                                    loss_matrix_cur_depth, axis=1
+                                    loss_matrix_cur_depth,
+                                    axis=1,
+                                    mode=self.config.cp_balance_mode,
                                 )
                             )
                             labels_cur_depth = ContextParallelGatherOp.apply(
-                                labels_cur_depth, axis=1
+                                labels_cur_depth,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
 
                         lossmask_cur_depth = (
@@ -523,7 +540,9 @@ class LanguageLoss(FleetLayer):
                     target_p_self_op_dist = nn.Softmax(axis=2)(logits[0])
                 if get_context_parallel_world_size() > 1:
                     target_p_self_op_dist = ContextParallelGatherOp.apply(
-                        target_p_self_op_dist, axis=1
+                        target_p_self_op_dist,
+                        axis=1,
+                        mode=self.config.cp_balance_mode,
                     )
 
                 def padding(tensor, left=False, pad_len=1):
@@ -565,7 +584,9 @@ class LanguageLoss(FleetLayer):
                         )
                         if get_context_parallel_world_size() > 1:
                             target_p = ContextParallelScatterOp.apply(
-                                target_p, axis=1
+                                target_p,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
                         plogp = target_p * out_logp
 
@@ -573,7 +594,9 @@ class LanguageLoss(FleetLayer):
                         xishu = lossmask.sum() + 1e-5
                         if get_context_parallel_world_size() > 1:
                             lossmask = ContextParallelScatterOp.apply(
-                                lossmask, axis=1
+                                lossmask,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
 
                         ploss = -paddle.sum(lossmask * plogp)
@@ -592,7 +615,7 @@ class LanguageLoss(FleetLayer):
                         ploss = ploss / xishu
                         mtp_loss.append(ploss)
 
-            # Store detached MTP loss tensors into class-level tracker.
+            # Store detached MTP loss tensors into class-level tracker and global_training_logs.
             # Use .detach() instead of .item() to avoid GPU synchronization on every
             # micro-batch. The trainer will call .item() only at logging steps.
             for i, loss_val in enumerate(mtp_loss):
@@ -604,6 +627,11 @@ class LanguageLoss(FleetLayer):
                     f"mtp{i + 1}.final_loss",
                     loss_val,
                 )
+
+            logs = get_global_training_logs()
+            if logs is not None and hasattr(logs, "update"):
+                for i, loss_val in enumerate(mtp_loss):
+                    logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
             def add_loss(main_loss, loss):
                 if _use_accuracy_compatible_kernel():
@@ -697,7 +725,7 @@ class MainLanguageLoss(LanguageLoss):
         else:
             lm_loss = self._forward(logits, lm_labels)
 
-        # Store detached MTP loss tensors into class-level tracker.
+        # Store detached MTP loss tensors into class-level tracker and global_training_logs.
         # Use .detach() instead of .item() to avoid GPU synchronization on every
         # micro-batch. The trainer will call .item() only at logging steps.
         for i, loss_val in enumerate(mtp_loss):
@@ -709,6 +737,12 @@ class MainLanguageLoss(LanguageLoss):
                 f"mtp{i + 1}.final_loss",
                 loss_val,
             )
+
+        # Also write to global_training_logs to read
+        logs = get_global_training_logs()
+        if logs is not None and hasattr(logs, "update"):
+            for i, loss_val in enumerate(mtp_loss):
+                logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
         def add_loss(main_loss, loss):
             if _use_accuracy_compatible_kernel():

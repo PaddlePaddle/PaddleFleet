@@ -23,6 +23,7 @@ Tests are organized in 4 layers:
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -961,14 +962,57 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
 
     def setUp(self):
         DSAIndexerLossLoggingHelper.tracker = {}
+        DSAIndexerLossLoggingHelper.num_layers = None
 
     def tearDown(self):
         DSAIndexerLossLoggingHelper.tracker = {}
+        DSAIndexerLossLoggingHelper.num_layers = None
 
     def test_reduce_empty_tracker_noop(self):
         """Reduce with no 'values' should be a no-op."""
         DSAIndexerLossLoggingHelper.reduce_loss_in_tracker()
         # Should not raise
+
+    def test_get_total_num_layers_treats_none_as_zero(self):
+        """None nextn layer count should be treated as zero."""
+        config = SimpleNamespace(num_hidden_layers=4, mtp_num_layers=0)
+        config.num_nextn_predict_layers = None
+        self.assertEqual(
+            DSAIndexerLossLoggingHelper.get_total_num_layers(config), 4
+        )
+
+    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    def test_reduce_empty_tracker_with_num_layers_joins_pp_reduce(
+        self, mock_ps
+    ):
+        """Empty tracker should initialize zeros and join PP all_reduce."""
+        pp_group = MagicMock()
+        pp_group.nranks = 2
+        mock_ps.get_pipeline_model_parallel_group.return_value = pp_group
+        mock_ps.get_data_parallel_group.return_value = None
+
+        with patch("paddle.distributed.all_reduce") as mock_all_reduce:
+            DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(num_layers=3)
+            mock_all_reduce.assert_called_once()
+
+        values = DSAIndexerLossLoggingHelper.tracker["values"]
+        self.assertTrue(paddle.allclose(values, paddle.zeros([3])))
+
+    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    def test_reduce_empty_tracker_uses_registered_num_layers(self, mock_ps):
+        """Empty tracker should infer registered layer count for PP reduce."""
+        pp_group = MagicMock()
+        pp_group.nranks = 2
+        mock_ps.get_pipeline_model_parallel_group.return_value = pp_group
+        mock_ps.get_data_parallel_group.return_value = None
+        DSAIndexerLossLoggingHelper.num_layers = 3
+
+        with patch("paddle.distributed.all_reduce") as mock_all_reduce:
+            DSAIndexerLossLoggingHelper.reduce_loss_in_tracker()
+            mock_all_reduce.assert_called_once()
+
+        values = DSAIndexerLossLoggingHelper.tracker["values"]
+        self.assertTrue(paddle.allclose(values, paddle.zeros([3])))
 
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_no_distributed_groups(self, mock_ps):
@@ -1099,17 +1143,19 @@ class TestDSAIndexerLossLoggingHelperTrackMetrics(unittest.TestCase):
 
     def setUp(self):
         DSAIndexerLossLoggingHelper.tracker = {}
+        DSAIndexerLossLoggingHelper.num_layers = None
 
     def tearDown(self):
         DSAIndexerLossLoggingHelper.tracker = {}
+        DSAIndexerLossLoggingHelper.num_layers = None
 
     @patch.object(DSAIndexerLossLoggingHelper, "reduce_loss_in_tracker")
     def test_track_metrics_empty_tracker_noop(self, mock_reduce):
         """With no values, track_indexer_metrics should be a no-op after reduce."""
         DSAIndexerLossLoggingHelper.track_indexer_metrics(
-            loss_scale=1.0, iteration=10
+            loss_scale=1.0, iteration=10, num_layers=2
         )
-        mock_reduce.assert_called_once()
+        mock_reduce.assert_called_once_with(num_layers=2)
 
     @patch.object(DSAIndexerLossLoggingHelper, "reduce_loss_in_tracker")
     def test_track_metrics_logs_loss(self, mock_reduce):
@@ -1218,6 +1264,42 @@ class TestDSAIndexerLossLoggingHelperTrackMetrics(unittest.TestCase):
         # 6.0 * 0.25 / 1 = 1.5
         self.assertAlmostEqual(
             total_loss_dict["indexer loss"].item(), 1.5, places=4
+        )
+
+    @patch.object(DSAIndexerLossLoggingHelper, "reduce_loss_in_tracker")
+    def test_track_metrics_averages_over_csa_indexer_layers(self, mock_reduce):
+        """CSA logging should average over layers with ratio == 4."""
+        DSAIndexerLossLoggingHelper.tracker["values"] = paddle.to_tensor(
+            [0.0, 2.0, 0.0, 4.0], dtype="float32"
+        )
+        total_loss_dict = {}
+        DSAIndexerLossLoggingHelper.track_indexer_metrics(
+            loss_scale=1.0,
+            iteration=1,
+            total_loss_dict=total_loss_dict,
+            csa_compress_ratios=[0, 4, 128, 4],
+        )
+        self.assertAlmostEqual(
+            total_loss_dict["indexer loss"].item(), 3.0, places=4
+        )
+
+    @patch.object(DSAIndexerLossLoggingHelper, "reduce_loss_in_tracker")
+    def test_track_metrics_no_csa_indexer_layers_noop(self, mock_reduce):
+        """CSA logging should skip metrics when no layer owns an indexer."""
+        DSAIndexerLossLoggingHelper.tracker["values"] = paddle.zeros([2])
+        total_loss_dict = {}
+        DSAIndexerLossLoggingHelper.track_indexer_metrics(
+            loss_scale=1.0,
+            iteration=1,
+            total_loss_dict=total_loss_dict,
+            csa_compress_ratios=[0, 128],
+        )
+        self.assertNotIn("indexer loss", total_loss_dict)
+        self.assertTrue(
+            paddle.allclose(
+                DSAIndexerLossLoggingHelper.tracker["values"],
+                paddle.zeros([2]),
+            )
         )
 
 

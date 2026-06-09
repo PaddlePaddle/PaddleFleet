@@ -121,6 +121,17 @@ std::vector<paddle::Tensor> RouterMetadataCuda(
   padded_expert_frequency_offset.slice(1, num_experts + 1)
       .copy_(expert_frequency_offset, place, false);
 
+  if (topk_router_indices.numel() == 0) {
+    auto empty_indices = paddle::empty({0}, paddle::DataType::INT32, place);
+    auto num_activated_per_token_offset =
+        paddle::full({num_tokens + 1}, 0, paddle::DataType::INT32, place);
+    return {padded_expert_frequency_offset,
+            empty_indices,
+            empty_indices,
+            empty_indices,
+            num_activated_per_token_offset};
+  }
+
   auto num_activated_per_token =
       paddle::empty({num_tokens}, paddle::DataType::INT32, place);
   auto num_activated_per_token_offset =

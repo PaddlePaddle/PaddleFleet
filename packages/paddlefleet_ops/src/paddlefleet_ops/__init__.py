@@ -88,12 +88,18 @@ if paddle.is_compiled_with_cuda():
     )
 
     CUDNN_FRONTEND_HINT = "For developers: guard imports with `is_cudnn_frontend_available()` and only call `paddlefleet_ops.cudnn` when flag branch enabled."
+
+    FLASH_MLA_HINT = (
+        "For developers: guard imports with `is_flash_mla_available()` and only call `paddlefleet_ops.flash_mla` when flag branch enabled.\n"
+        "For users: use a GPU with compute capability >= 9.0 (Hopper or Blackwell) to enable."
+    )
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
     DEEP_EP_HINT = "deep_ep is not supported on XPU backend."
     HYBRID_EP_HINT = "hybrid_ep is not supported on XPU backend."
     SONIC_MOE_HINT = "sonicmoe is not supported on XPU backend."
     CUDNN_FRONTEND_HINT = "cudnn frontend is not supported on XPU backend."
+    FLASH_MLA_HINT = "flash_mla is not supported on XPU backend."
 
 FLASH_MASK_HINT = (
     "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet_ops.flash_mask` when flag branch enabled.\n"
@@ -160,6 +166,7 @@ _DEEP_GEMM_AVAILABLE = False
 _DEEP_EP_AVAILABLE = False
 _HYBRID_EP_AVAILABLE = False
 _SONIC_MOE_AVAILABLE = False
+_FLASH_MLA_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
 _CUDNN_FRONTEND_AVAILABLE = False
 
@@ -167,6 +174,7 @@ if paddle.is_compiled_with_cuda():
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
+        _FLASH_MLA_AVAILABLE = True
         if _cuda_version >= (12, 9):
             _HYBRID_EP_AVAILABLE = True
     if paddle.cuda.get_device_capability()[0] >= 10:
@@ -198,6 +206,10 @@ def is_hybrid_ep_available():
 
 def is_sonic_moe_available():
     return _SONIC_MOE_AVAILABLE
+
+
+def is_flash_mla_available():
+    return _FLASH_MLA_AVAILABLE
 
 
 def is_flash_mask_available():
@@ -311,6 +323,16 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.sonicmoe"] = error
+
+    if is_flash_mla_available():
+        paddle.enable_compat(scope={"flash_mla"}, silent=True)
+        _safe_load_ecosystem_lib("flash_mla", ops_dir, globals())
+    else:
+        warning, error = _hopper_requirement(
+            "paddlefleet_ops.flash_mla", hint=FLASH_MLA_HINT
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet_ops.flash_mla"] = error
 
     if is_flash_mask_available():
         _safe_load_ecosystem_lib("flash_mask", ops_dir, globals())
