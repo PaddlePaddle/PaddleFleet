@@ -1,6 +1,8 @@
 name: CE Weekly Release
 
 on:
+  pull_request:
+    branches: develop
   schedule:
     - cron: '0 2 * * 6' # Weekly on Sunday at 20:00 for release
   workflow_dispatch:
@@ -11,7 +13,7 @@ on:
         options:
           - 'true'
           - 'false'
-        default: 'true'
+        default: 'false'
         required: false
 
 permissions: read-all
@@ -35,7 +37,7 @@ env:
   paddle_url_cu129_release: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddle_url_cu130_release: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.2/latest/"
-  use_release: ${{ inputs.use_release || 'true' }}
+  use_release: ${{ inputs.use_release || 'false' }}
   fleet_branch: "release/0.3"
   formers_branch: "develop"
   MAX_PARALLEL: ${{ github.event.inputs.parallel_jobs || '2' }}
@@ -55,11 +57,7 @@ jobs:
       matrix:
         include:
           - cuda: "13.0"
-            python: "3.11"
-          - cuda: "13.0"
             python: "3.12"
-          - cuda: "13.0"
-            python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -224,11 +222,7 @@ jobs:
       matrix:
         include:
           - cuda: "13.0"
-            python: "3.11"
-          - cuda: "13.0"
             python: "3.12"
-          - cuda: "13.0"
-            python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -369,11 +363,7 @@ jobs:
       matrix:
         include:
           - cuda: "13.0"
-            python: "3.11"
-          - cuda: "13.0"
             python: "3.12"
-          - cuda: "13.0"
-            python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -605,11 +595,7 @@ jobs:
       matrix:
         include:
           - cuda: "13.0"
-            python: "3.11"
-          - cuda: "13.0"
             python: "3.12"
-          - cuda: "13.0"
-            python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -1052,18 +1038,8 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.11"
-          - cuda: "12.6"
-            python: "3.12"
-          - cuda: "12.6"
-            python: "3.13"
-          - cuda: "13.0"
-            python: "3.11"
           - cuda: "13.0"
             python: "3.12"
-          - cuda: "13.0"
-            python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
