@@ -25,7 +25,10 @@ from typing import TYPE_CHECKING
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
-from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
+from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+    AllGatherOp,
+    mark_as_sequence_parallel_parameter,
+)
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -255,6 +258,12 @@ class StandardMoERouter(nn.Layer):
         )
         config.init_method(self.weight)
 
+        if (
+            self.sequence_parallel
+            and self.config.expert_model_parallel_size > 1
+        ):
+            mark_as_sequence_parallel_parameter(self.weight)
+
         if self.routed_scaling_factor_learnable:
             self.routed_scaling_factor_param = self.create_parameter(
                 shape=[self.num_experts],
@@ -263,6 +272,13 @@ class StandardMoERouter(nn.Layer):
                     self.routed_scaling_factor
                 ),
             )
+            if (
+                self.sequence_parallel
+                and self.config.expert_model_parallel_size > 1
+            ):
+                mark_as_sequence_parallel_parameter(
+                    self.routed_scaling_factor_param
+                )
 
         if self.topk_method == "noaux_tc":
             if not self.config.gpt_model_use_experimental_version:
