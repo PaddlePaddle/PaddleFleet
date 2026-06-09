@@ -130,3 +130,50 @@ def startend_row_indices_add_sliding_window(
         )
 
     return startend_row_indices_new_LTS.unsqueeze(-1)
+
+
+# ---------------------------------------------------------------------------
+# Helper functions for document mask
+# ---------------------------------------------------------------------------
+
+
+def get_doc_lens(startend_row_indices: paddle.Tensor) -> paddle.Tensor:
+    """Derive document lengths from startend_row_indices.
+
+    Args:
+        startend_row_indices: [batch_size, h, seqlen, 1] tensor where
+            each value is the end boundary (exclusive) of the document that
+            position belongs to.
+
+    Returns:
+        doc_lens: [n_docs] int32 tensor of document lengths.
+    """
+    mask = startend_row_indices.flatten().cast("int64")
+    seqlen = mask.shape[0]
+    positions = paddle.arange(seqlen, dtype="int64")
+
+    is_boundary = paddle.zeros([seqlen], dtype="bool")
+    is_boundary[0] = True
+    is_boundary[1:] = (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+
+    boundary_indices = paddle.nonzero(is_boundary).flatten()
+    doc_ends = mask[boundary_indices]
+    doc_lens = (doc_ends - boundary_indices).cast("int32")
+    return doc_lens
+
+
+def get_doc_starts(doc_lens: paddle.Tensor) -> paddle.Tensor:
+    """Compute document start positions from document lengths.
+
+    Args:
+        doc_lens: [n_docs] tensor of document lengths.
+
+    Returns:
+        doc_starts: [n_docs] int32 tensor of cumulative start positions.
+    """
+    lens = doc_lens.flatten().cast("int32")
+    cum = paddle.cumsum(lens, axis=0)
+    starts = paddle.zeros_like(cum)
+    if cum.shape[0] > 1:
+        starts[1:] = cum[:-1]
+    return starts

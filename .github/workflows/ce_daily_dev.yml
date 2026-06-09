@@ -51,8 +51,6 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
@@ -236,8 +234,6 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
@@ -407,8 +403,6 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
@@ -677,8 +671,6 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
@@ -1197,8 +1189,6 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"

@@ -36,7 +36,7 @@ env:
   paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl"
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/develop/latest/"
   use_release: ${{ inputs.use_release || 'true' }}
-  fleet_branch: "develop"
+  fleet_branch: "release/0.3"
   formers_branch: "develop"
 defaults:
   run:
@@ -52,8 +52,6 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
@@ -228,8 +226,6 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
@@ -384,8 +380,6 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
@@ -629,8 +623,6 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"
@@ -1087,8 +1079,6 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.6"
-            python: "3.10"
           - cuda: "12.9"
             python: "3.10"
           - cuda: "13.0"

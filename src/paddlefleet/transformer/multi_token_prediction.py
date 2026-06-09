@@ -457,7 +457,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                     and self.config.experimental_dataflow
                 ):
                     mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                        mtp_hidden_inputs_mask, axis=1
+                        mtp_hidden_inputs_mask,
+                        axis=1,
+                        mode=self.config.cp_balance_mode,
                     )
                 # when sp enable
                 if self.sequence_parallel:
@@ -518,7 +520,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                     # In EB dataflow and CP size > 1, mtp_hidden_inputs_mask is [b, s, 1];
                     # we need to scatter it to [b, s/cp, 1] here.
                     mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                        mtp_hidden_inputs_mask, axis=1
+                        mtp_hidden_inputs_mask,
+                        axis=1,
+                        mode=self.config.cp_balance_mode,
                     )
 
                 # when sp enable
@@ -776,7 +780,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 and self.config.experimental_dataflow
             ):
                 decoder_input = ContextParallelScatterOp.apply(
-                    decoder_input, axis=1
+                    decoder_input, axis=1, mode=self.config.cp_balance_mode
                 )
 
             if self.config.sequence_parallel:

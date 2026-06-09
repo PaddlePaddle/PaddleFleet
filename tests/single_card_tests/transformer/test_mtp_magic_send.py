@@ -526,7 +526,7 @@ class TestMTPLayerForward(unittest.TestCase):
 
         cp_count = [0]
 
-        def cp_fn(x, axis=0):
+        def cp_fn(x, axis=0, **kwargs):
             cp_count[0] += 1
             return (
                 x[:, : x.shape[1] // 2, :]
@@ -573,7 +573,7 @@ class TestMTPLayerForward(unittest.TestCase):
             captured["di"] = decoder_input
             return hidden_states
 
-        def cp_fn(x, axis=0):
+        def cp_fn(x, axis=0, **kwargs):
             return (
                 x[:, : x.shape[1] // 2, :]
                 if axis == 1
@@ -631,7 +631,7 @@ class TestGPTEmbeddingForward(unittest.TestCase):
                         "paddlefleet.models.gpt.gpt_embedding.ContextParallelScatterOp"
                     )
                 )
-                cp.apply = lambda x, axis=0: x
+                cp.apply = lambda x, axis=0, **kwargs: x
             return emb.forward({"input_ids": paddle.randint(0, 512, [B, S])})
 
     def test_magic_send_paths(self):
