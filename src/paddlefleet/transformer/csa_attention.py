@@ -25,6 +25,7 @@ Components:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -37,6 +38,10 @@ from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
 from paddlefleet.transformer import FleetLayer
+
+_ACCURACY_COMPATIBLE_KERNEL: bool = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -1294,7 +1299,9 @@ class Compressor(nn.Layer):
         score = score.reshape([b, n_compressed, ratio, -1])
 
         # APE: [ratio, coff * head_dim] -> [1, 1, ratio, coff * head_dim]
-        score = score + self.ape.reshape([1, 1, ratio, -1]).cast(score.dtype)
+        ape = self.ape.reshape([1, 1, ratio, -1])
+        ape = ape.cast(score.dtype) if _ACCURACY_COMPATIBLE_KERNEL else ape
+        score = score + ape
 
         if self.overlap:
             kv = self._overlap_transform(kv, fill_value=0)
@@ -2296,6 +2303,11 @@ class CompressedSparseAttention(FleetLayer):
         topk_idxs: Tensor,
         softmax_scale: float,
     ):
+        attn_sink_fp32 = (
+            attn_sink.cast("bfloat16").cast("float32")
+            if _ACCURACY_COMPATIBLE_KERNEL
+            else attn_sink.cast("float32")
+        )
         if _resolve_csa_tilelang_switch(
             self.config,
             "csa_tilelang_enable_sparse_attn",
@@ -2305,7 +2317,7 @@ class CompressedSparseAttention(FleetLayer):
             output = csa_sparse_attn(
                 query,
                 kv_full,
-                attn_sink.cast("bfloat16").cast("float32"),
+                attn_sink_fp32,
                 topk_idxs,
                 softmax_scale,
             )
@@ -2313,7 +2325,7 @@ class CompressedSparseAttention(FleetLayer):
             output = unfused_compressed_sparse_attn(
                 query,
                 kv_full,
-                attn_sink.cast("bfloat16").cast("float32"),
+                attn_sink_fp32,
                 topk_idxs,
                 softmax_scale,
             )
