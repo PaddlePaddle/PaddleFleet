@@ -2220,11 +2220,20 @@ def run_sonic_moe(
         score_src_idx=_score_src_idx,
     )
 
+    w1_sonic = w1.permute([1, 2, 0])
+    w2_sonic = w2.permute([1, 2, 0])
+    if fp8:
+        for attr_name in ("fp8", "transposed_fp8"):
+            if hasattr(w1, attr_name):
+                setattr(w1_sonic, attr_name, getattr(w1, attr_name))
+            if hasattr(w2, attr_name):
+                setattr(w2_sonic, attr_name, getattr(w2, attr_name))
+
     with enable_fp8(fp8):
         _refresh_fp8_config()
         y1, z = _UpProjection.apply(
             hidden_states,
-            w1.permute([1, 2, 0]),
+            w1_sonic,
             None,
             expert_frequency_offset,
             total_expert_freq,
@@ -2242,7 +2251,7 @@ def run_sonic_moe(
         hidden_states = _DownProjection.apply(
             y1,
             z,
-            w2.permute([1, 2, 0]),
+            w2_sonic,
             None,
             scores_for_down,
             s_scatter_idx,
