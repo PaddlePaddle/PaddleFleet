@@ -18,6 +18,7 @@ from copy import deepcopy
 
 import paddle
 import paddle.nn.functional as F
+import paddlefleet_ops
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
     shard_weight,
@@ -38,11 +39,15 @@ from .moe_utils import (
     k_grouped_bf16_gemm_tn_contiguous_aligned,
 )
 
-try:
+if paddlefleet_ops.is_deep_gemm_available():
     from paddlefleet_ops import deep_gemm as paddlefleet_deep_gemm
-    from paddlefleet_ops.sonicmoe.quack_utils import quantize_native_fp8_weights
-except (ImportError, RuntimeError):
-    pass
+
+if paddlefleet_ops.is_sonic_moe_available():
+    from paddlefleet_ops.sonicmoe.functional import clear_all_fp8_weight_caches
+    from paddlefleet_ops.sonicmoe.quack_utils import (
+        install_native_fp8_weight_cache,
+        quantize_native_fp8_weights,
+    )
 
 
 class BMMFunction(paddle.autograd.PyLayer):
@@ -328,6 +333,10 @@ class SonicMoEExpert(GroupedMLPExpert):
     _SONIC_LAYOUT = "sonic"
 
     @staticmethod
+    def clear_fp8_weight_cache():
+        clear_all_fp8_weight_caches()
+
+    @staticmethod
     def _grouped_w1_to_sonic(weight):
         gate, up = paddle.chunk(weight, 2, axis=-1)
         gate = gate.transpose([0, 2, 1])
@@ -423,10 +432,14 @@ class SonicMoEExpert(GroupedMLPExpert):
     def quant_weight(self):
         self.convert_weights_to_sonic_layout()
 
-        payload = quantize_native_fp8_weights(
-            self.weight1.permute([1, 2, 0]),
-            self.weight2.permute([1, 2, 0]),
+        w1_sonic = self.weight1.permute([1, 2, 0])
+        w2_sonic = self.weight2.permute([1, 2, 0])
+        payload = quantize_native_fp8_weights(w1_sonic, w2_sonic, iso32=False)
+        install_native_fp8_weight_cache(
+            w1_sonic, w2_sonic, payload, iso32=False
         )
+        self._native_fp8_weight_payload = payload
+
         assert payload["format"] == "1x32", (
             f"quant strategy {payload.get('format')} is not supported."
         )
