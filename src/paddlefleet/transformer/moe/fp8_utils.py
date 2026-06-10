@@ -15,6 +15,8 @@
 # limitations under the License.
 """FP8 Utils"""
 
+import logging
+
 import numpy
 import paddle
 import paddle.nn.functional as F
@@ -645,8 +647,20 @@ class ExpertsGroupGemmContiguousNode:
         else:
             self.m_indices = None
         if not self.use_fp8_mlp:
+            # === HACK: log dtype for bf16 path ===
+            if x is not None:
+                logging.info(
+                    f"[MoE Expert W1] Using BF16: x.dtype={x.dtype}, "
+                    f"weight1.dtype={expert_w1.dtype if hasattr(expert_w1, 'dtype') else expert_w1[0].dtype}"
+                )
             return self.fwd_gate_up_bf16(x, expert_w1)
         else:
+            # === HACK: log dtype for fp8 path ===
+            if x is not None:
+                logging.info(
+                    f"[MoE Expert W1] Using FP8: x.dtype={x.dtype}, "
+                    f"weight1.dtype={expert_w1.dtype if hasattr(expert_w1, 'dtype') else expert_w1[0].dtype}"
+                )
             return self.fwd_gate_up_fp8(
                 x, expert_w1, num_expert, tokens_per_expert, scale
             )
@@ -712,6 +726,11 @@ class ExpertsGroupGemmContiguousNode:
         # compute gemm
         o1 = paddle.empty(
             [x_fp8.shape[0], w1_t_quant.shape[1]], dtype=expert_w1[0].dtype
+        )
+        # === HACK: log FP8 tensor dtype for GEMM computation ===
+        logging.info(
+            f"[MoE Expert W1 FP8 GEMM] x_fp8.dtype={x_fp8.dtype}, x_scale.dtype={x_scale.dtype}, "
+            f"w1_t_quant.dtype={w1_t_quant.dtype}, w1_t_scale.dtype={w1_t_scale.dtype}"
         )
         if numpy.prod(x_fp8.shape) != 0:
             if not self.moe_expert_fusion:
@@ -809,8 +828,18 @@ class ExpertsGroupGemmContiguousNode:
         self, o1, unzipped_probs, expert_w2, num_expert, o3=None, clear_o1=False
     ):
         if not self.use_fp8_mlp:
+            # === HACK: log dtype for bf16 path ===
+            w2_dtype = expert_w2.dtype if not isinstance(expert_w2, list) else expert_w2[0].dtype
+            logging.info(
+                f"[MoE Expert W2] Using BF16: o1.dtype={o1.dtype}, weight2.dtype={w2_dtype}"
+            )
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
+            # === HACK: log dtype for fp8 path ===
+            w2_dtype = expert_w2.dtype if not isinstance(expert_w2, list) else expert_w2[0].dtype
+            logging.info(
+                f"[MoE Expert W2] Using FP8: o1.dtype={o1.dtype}, weight2.dtype={w2_dtype}"
+            )
             return self.fwd_down_fp8(
                 o1, unzipped_probs, expert_w2, num_expert, o3, clear_o1
             )
@@ -879,6 +908,11 @@ class ExpertsGroupGemmContiguousNode:
             o3.zero_()
         else:
             o3 = paddle.empty(o3_shape, dtype=o1.dtype)
+        # === HACK: log FP8 tensor dtype for GEMM computation ===
+        logging.info(
+            f"[MoE Expert W2 FP8 GEMM] o2_fp8.dtype={o2_fp8.dtype}, o2_scale.dtype={o2_scale.dtype}, "
+            f"w2_quant.dtype={w2_quant.dtype}, w2_scale.dtype={w2_scale.dtype}"
+        )
         if numpy.prod(o2_fp8.shape) != 0:
             if not self.moe_expert_fusion:
                 split_group_gemm(

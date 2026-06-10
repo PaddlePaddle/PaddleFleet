@@ -46,6 +46,7 @@ from .fusion_layer_utils import (
     FusionMoePyLayer,
     HybridEPMoePyLayer,
 )
+
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
@@ -299,6 +300,29 @@ class MoELayer(nn.Layer):
                     )
                 self.fp8_dispatch = False
 
+        # === HACK START: 强制 MoE Expert 走 FP8，不影响其他模块 ===
+        if self.fp8 is None:
+            self._expert_fp8_override = 'e4m3'  # 或 'hybrid'
+            self.fp8 = self._expert_fp8_override
+            # 以下两项已在训练配置中设置，无需 hack
+            # self.moe_expert_fusion = True  # 配置已设置
+            # self.moe_deep_gemm = True      # 配置已设置
+            self.moe_use_fusion_node = True  # FP8 需要 fusion node
+            self.fp8_dispatch = False  # 禁用 dispatch FP8，只保留 expert FP8
+            # FP8 weight grad 目前不支持 grouped path，使用 BF16 GEMM 计算 weight gradient
+            # bf16_weight_grad 会用 deep_gemm.k_grouped_bf16_gemm_tn_contiguous
+            self.fp8_wgrad = False
+            # Shared expert 也使用 FP8 forward
+            self._shared_expert_fp8 = True
+            logging.info(
+                f"[MoELayer HACK] Expert FP8 override enabled: fp8={self.fp8}, "
+                f"fp8_dispatch=False, fp8_wgrad=False (BF16 for weight grad), "
+                f"shared_expert_fp8=True"
+            )
+        else:
+            self._shared_expert_fp8 = False
+        # === HACK END ===
+
         if self.fp8:
             if paddle.version.cuda() == "12.6":
                 raise NotImplementedError(
@@ -371,6 +395,16 @@ class MoELayer(nn.Layer):
             self.shared_experts = self.shared_expert_class(**shared_expert_args)
         else:
             self.shared_experts = None
+
+        # === HACK: Shared Expert FP8 权重量化 ===
+        if getattr(self, '_shared_expert_fp8', False) and self.shared_experts is not None:
+            # 设置 shared_expert 的 FP8 标志
+            self.shared_experts._shared_expert_fp8 = True
+            self.shared_experts._shared_expert_fp8_compare = True
+            # 调用 shared_expert 的权重量化方法
+            self.shared_experts._quantize_weights()
+            logging.info("[MoELayer HACK] Shared expert FP8 weights quantized (compare mode ON)")
+        # === HACK END ===
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
@@ -924,6 +958,7 @@ class MoELayer(nn.Layer):
             output = AddAuxiliaryLoss.apply(output, z_loss)
         output = output.reshape(residuals.shape)
         if self.shared_experts is not None:
+            # FP8 logic is now internal to shared_expert.forward()
             shared_output = self.shared_experts(residuals)[0]
             output = output + shared_output
 
@@ -974,12 +1009,18 @@ class MoELayer(nn.Layer):
         if framework._dygraph_tracer()._has_grad:
             log_moe_losses(layer_idx, aux_loss=aux_loss, z_loss=z_loss)
 
-        if (
+        # === HACK: Shared Expert FP8 - disable overlap when enabled ===
+        # FP8 hack 需要直接调用 shared_expert FP8 forward，不支持 overlap 路径
+        use_overlap = (
             self.shared_experts is not None
             and self.moe_shared_expert_overlap
             and self.moe_use_fusion_node
             and self.expert_model_parallel_size > 1
-        ):
+            and not getattr(self, '_shared_expert_fp8', False)  # FP8 hack 禁用 overlap
+        )
+        # === HACK END ===
+
+        if use_overlap:
             combine_overlap_handle = {
                 "fn": self.shared_experts,
                 "fn_args": (residuals,),
@@ -1264,6 +1305,10 @@ class MoELayer(nn.Layer):
                         [expert.down_proj.weight],
                         quant_transpose=quant_transpose,
                     )
+
+        # === HACK: Re-quantize shared expert weights every step ===
+        if getattr(self, '_shared_expert_fp8', False) and self.shared_experts is not None:
+            self.shared_experts._quantize_weights()
 
     def use_fp8(self):
         if self.moe_use_fusion_node and self.fp8:
