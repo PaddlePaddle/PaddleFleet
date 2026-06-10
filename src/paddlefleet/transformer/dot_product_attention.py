@@ -422,7 +422,12 @@ class DotProductAttention(FleetLayer):
                 "please disable packed sequence inputs or use a fused attention implementation."
             )
         if packed_seq_params is not None:
-            assert self.is_swa is False, "SWA doesn't support packed sequence"
+            # Allow MTP-SWA: _suppress logic will drop startend and use window_size
+            # instead, so SWA can work with packed_seq in MTP layers.
+            if not (self.is_swa and self._is_mtp_layer):
+                assert self.is_swa is False, (
+                    "SWA doesn't support packed sequence"
+                )
             assert (
                 query.dtype == paddle.bfloat16 or query.dtype == paddle.float16
             ), "attention only support fp16/bf16 when use packed_seq_params"
