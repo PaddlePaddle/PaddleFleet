@@ -41,6 +41,7 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
 )
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
+    get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
@@ -134,6 +135,8 @@ def _apply_ec_complex_3d_mrope(
         freqs_cis = ContextParallelScatterOp.apply(
             freqs_cis, axis=1, mode=cp_balance_mode
         )
+    if get_tensor_model_parallel_world_size() > 1:
+        freqs_cis = freqs_cis.transpose(1, 0)
     if _LOG_LAYER_MD5:
         logger = logging.getLogger(__name__)
         rank = paddle.distributed.get_rank()

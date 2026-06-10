@@ -249,7 +249,8 @@ class MoELayer(nn.Layer):
             and self.tensor_model_parallel_size > 1
         ):
             routed_expert_config.sequence_parallel = False
-            shared_expert_config.sequence_parallel = False
+            if not self.config.gpt_model_use_experimental_version:
+                shared_expert_config.sequence_parallel = False
         elif (
             self.expert_model_parallel_size > 1
             and self.tensor_model_parallel_size >= 1
@@ -367,6 +368,9 @@ class MoELayer(nn.Layer):
                     self.experts.append(None)
 
         shared_expert_args = deepcopy(expert_args)
+        if self.config.gpt_model_use_experimental_version:
+            shared_expert_args["is_expert"] = False
+            shared_expert_args["config"] = shared_expert_config
         shared_expert_args["config"].use_bias = shared_expert_config.use_bias
         shared_expert_args["config"].hidden_size = self.config.hidden_size
         shared_expert_args["moe_intermediate_size"] = (

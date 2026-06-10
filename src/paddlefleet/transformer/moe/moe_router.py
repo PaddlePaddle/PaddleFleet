@@ -37,6 +37,7 @@ from paddle._C_ops import matmul_grad
 from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
 )
+from paddle.distributed.fleet.utils.sequence_parallel_utils import ScatterOp
 
 from paddlefleet.context_parallel_utils import (
     ContextParallelAllGatherOp,
@@ -438,6 +439,15 @@ class StandardMoERouter(nn.Layer):
         # [B, 1]
         if input_ids is not None:
             if (
+                self.config.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
+                b, s = input_ids.shape
+                input_ids = AllGatherOp.apply(input_ids.reshape([-1])).reshape(
+                    [b, -1]
+                )
+            if (
                 get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
             ):
@@ -508,16 +518,25 @@ class StandardMoERouter(nn.Layer):
             paddle.Tensor: The z loss value.
         """
         if input_ids is not None:
+            origin_input_ids = input_ids
+            if (
+                self.config.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
+                b, s = input_ids.shape
+                origin_input_ids = AllGatherOp.apply(
+                    origin_input_ids.reshape([-1])
+                ).reshape([b, -1])
             if (
                 get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
             ):
                 # In EB data flow, we need to gather input_ids here to get right denom.
                 origin_input_ids = ContextParallelGatherOp.apply(
-                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                    origin_input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
-            else:
-                origin_input_ids = input_ids
+
             origin_loss_mask = (origin_input_ids != 0).astype(paddle.float32)
             loss_mask = (input_ids != 0).astype(paddle.float32)
             loss_mask = loss_mask.reshape([-1])
@@ -954,12 +973,23 @@ class TopKRouter(StandardMoERouter):
             if (
                 get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
+                and input_ids is not None
             ):
                 # In EB dataflow, shape of input_ids [b, s],
                 # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
                 # so we need to scatter input_ids here to avid the assertion below
                 input_ids = ContextParallelScatterOp.apply(
                     input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
+            if (
+                input_ids is not None
+                and self.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # SP: input_ids [b, s/cp] -> [b, s/(cp*tp)]
+                b, s = input_ids.shape
+                input_ids = ScatterOp.apply(input_ids.reshape([-1])).reshape(
+                    [b, -1]
                 )
             if input_ids is not None:
                 if self.sequence_parallel:

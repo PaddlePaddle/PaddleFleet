@@ -188,10 +188,7 @@ class GPTEmbedding(FleetLayer):
                 else position_ids,
             )
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
-            if (
-                self.config.expert_model_parallel_size > 1
-                and self.config.tensor_model_parallel_size < 2
-            ):
+            if self.config.expert_model_parallel_size > 1:
                 text_padding_indices = input_ids == 0
                 decoder_input = fill_feature(
                     decoder_input, text_padding_indices, 0
@@ -553,6 +550,7 @@ class GPTEmbedding(FleetLayer):
         ):
             # MTP and multimodal paths scatter decoder_input internally;
             # only scatter here for the plain (no-MTP, no-multimodal) path.
+            cp_split_axis = 0 if self.config.sequence_parallel else 1
             if (
                 not (
                     self.config.num_nextn_predict_layers
@@ -563,31 +561,45 @@ class GPTEmbedding(FleetLayer):
                 and self.config.experimental_dataflow
             ):
                 decoder_input = ContextParallelScatterOp.apply(
-                    decoder_input, axis=1
+                    decoder_input,
+                    axis=cp_split_axis,
+                    mode=self.config.cp_balance_mode,
                 )
             if rotary_pos_emb is not None:
                 rotary_pos_emb = ContextParallelScatterOp.apply(
-                    rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
+                    rotary_pos_emb,
+                    axis=cp_split_axis,
+                    mode=self.config.cp_balance_mode,
                 )
             if swa_rotary_pos_emb is not None:
                 swa_rotary_pos_emb = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
+                    swa_rotary_pos_emb,
+                    axis=cp_split_axis,
+                    mode=self.config.cp_balance_mode,
                 )
             if rotary_pos_cos is not None:
                 rotary_pos_cos = ContextParallelScatterOp.apply(
-                    rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
+                    rotary_pos_cos,
+                    axis=cp_split_axis,
+                    mode=self.config.cp_balance_mode,
                 )
             if rotary_pos_sin is not None:
                 rotary_pos_sin = ContextParallelScatterOp.apply(
-                    rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
+                    rotary_pos_sin,
+                    axis=cp_split_axis,
+                    mode=self.config.cp_balance_mode,
                 )
             if swa_rotary_pos_cos is not None:
                 swa_rotary_pos_cos = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
+                    swa_rotary_pos_cos,
+                    axis=cp_split_axis,
+                    mode=self.config.cp_balance_mode,
                 )
             if swa_rotary_pos_sin is not None:
                 swa_rotary_pos_sin = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
+                    swa_rotary_pos_sin,
+                    axis=cp_split_axis,
+                    mode=self.config.cp_balance_mode,
                 )
 
         preproc_output = {
