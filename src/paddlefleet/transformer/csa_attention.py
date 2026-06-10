@@ -1699,7 +1699,7 @@ class CompressedSparseAttention(FleetLayer):
                 float(indexer_loss_coeff),
                 str(self.config.csa_indexer_backend),
             )
-            if indexer_loss_coeff > 0:
+            if indexer_loss_coeff > 0 and paddle.is_grad_enabled():
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,
@@ -1749,7 +1749,7 @@ class CompressedSparseAttention(FleetLayer):
             )
             topk_indices_compressed = FusedDSAIndexerLoss._last_topk_indices
 
-            if indexer_loss_coeff > 0:
+            if indexer_loss_coeff > 0 and paddle.is_grad_enabled():
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,
