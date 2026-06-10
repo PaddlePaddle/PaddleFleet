@@ -13,9 +13,18 @@
 # limitations under the License.
 
 
+import logging
+
 import paddle
 from paddle.nn.parameter import Parameter
-from paddlefleet_ops import deep_gemm
+
+logger = logging.getLogger(__name__)
+
+try:
+    from paddlefleet_ops import deep_gemm
+except (ImportError, RuntimeError) as e:
+    logger.warning(f"deep_gemm not available: {e}")
+    deep_gemm = None
 
 from paddlefleet.tensor_parallel import ColumnParallelLinear
 
@@ -194,6 +203,11 @@ class FP8Linear(ColumnParallelLinear):
             disable_grad_reduce=disable_grad_reduce,
             tp_group=tp_group,
         )
+
+        if deep_gemm is None:
+            raise RuntimeError(
+                "FP8Linear requires H-series GPU or above (paddlefleet_ops.deep_gemm not available)"
+            )
 
         # DeepGEMM requires k-major storage, here to make self.weight k-major
         # and keep its shape consistent with [k, m]

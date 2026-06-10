@@ -602,6 +602,9 @@ class TransformerConfig(ModelParallelConfig):
     use_ue8m0: bool = False
     """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
 
+    use_fp8_qat: bool = False
+    """Whether to enable FP8 Quantization-Aware Training (QAT)."""
+
     ####################
     # initialization
     ####################
