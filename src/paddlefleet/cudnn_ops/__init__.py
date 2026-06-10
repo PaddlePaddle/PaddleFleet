@@ -14,7 +14,13 @@
 
 """cuDNN frontend ops bridged into PaddleFleet."""
 
-__all__ = ["csa_indexer_bwd", "csa_sparse_attn_bwd_cudnn"]
+__all__ = [
+    "csa_indexer_bwd",
+    "csa_sparse_attn_bwd_cudnn",
+    "cudnn_indexer_forward",
+    "cudnn_indexer_topk",
+    "cudnn_indexer_topk_fwd",
+]
 
 
 def __getattr__(name):
@@ -28,4 +34,14 @@ def __getattr__(name):
 
         globals()[name] = csa_sparse_attn_bwd_cudnn
         return csa_sparse_attn_bwd_cudnn
+    if name in {
+        "cudnn_indexer_forward",
+        "cudnn_indexer_topk",
+        "cudnn_indexer_topk_fwd",
+    }:
+        from .indexer import cudnn_indexer
+
+        obj = getattr(cudnn_indexer, name)
+        globals()[name] = obj
+        return obj
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
