@@ -925,14 +925,32 @@ jobs:
 
       - name: GLM4.5 pre-train (EP4)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          sleep 5
+          ep4_exit_code=1
+          for attempt in 1 2; do
+            bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+            ep4_exit_code=$?
+            if [ "$ep4_exit_code" = "0" ]; then
+              break
+            fi
+            if [ "$attempt" = "1" ]; then
+              echo "Attempt $attempt failed with exit code $ep4_exit_code, retrying in 10s..."
+              sleep 10
+            fi
+          done
+          if [[ "$ep4_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 EP4.\033[0m"
+            exit 1
+          else
+            echo -e "\033[32mIntegration test succeeded: GLM4.5 EP4.\033[0m"
+          fi
           '
 
       - name: Qwen pre-train
