@@ -8,7 +8,3 @@ test_layers.py
 test_sigmoid_gate_fusion_triton.py
 test_ai_sigmoid_gate_fusion.py
 test_ai_moe_layer_5.py
-test_sparse_mqa_flash_mla.py
-test_tilelang_csa_indexer_cp.py
-test_tilelang_csa_indexer.py
-test_dsv4_hybrid_attention.py
