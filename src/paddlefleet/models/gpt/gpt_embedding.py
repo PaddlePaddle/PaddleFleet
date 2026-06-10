@@ -563,7 +563,7 @@ class GPTEmbedding(FleetLayer):
                 and self.config.experimental_dataflow
             ):
                 decoder_input = ContextParallelScatterOp.apply(
-                    decoder_input, axis=1
+                    decoder_input, axis=1, mode=self.config.cp_balance_mode
                 )
             if rotary_pos_emb is not None:
                 rotary_pos_emb = ContextParallelScatterOp.apply(
