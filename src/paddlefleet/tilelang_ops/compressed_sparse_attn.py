@@ -23,11 +23,20 @@ from .attn.sparse_mqa import (
 
 class CSASparseAttention(paddle.autograd.PyLayer):
     @staticmethod
-    def forward(ctx, query, kv_full, attn_sink, topk_idxs, softmax_scale):
+    def forward(
+        ctx,
+        query,
+        kv_full,
+        attn_sink,
+        topk_idxs,
+        softmax_scale,
+        sparse_attn_backend,
+    ):
         b, sq, np_heads, hn = query.shape
         ctx.query_shape = (b, sq, np_heads, hn)
         ctx.softmax_scale = float(softmax_scale)
         ctx.attn_sink_dtype = attn_sink.dtype
+        ctx.sparse_attn_backend = sparse_attn_backend
         query, kv_full, attn_sink, topk_idxs = _prepare_inputs(
             query,
             kv_full,
@@ -40,6 +49,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             attn_sink,
             topk_idxs,
             sm_scale=ctx.softmax_scale,
+            use_flashmla=(sparse_attn_backend == "cudnn"),
         )
         ctx.save_for_backward(query, kv_full, attn_sink, topk_idxs, output, lse)
         return output.reshape([b, sq, np_heads * hn])
@@ -78,6 +88,7 @@ def csa_sparse_attn(
     attn_sink,
     topk_idxs,
     softmax_scale,
+    sparse_attn_backend="tilelang",
 ):
     return CSASparseAttention.apply(
         query,
@@ -85,4 +96,5 @@ def csa_sparse_attn(
         attn_sink,
         topk_idxs,
         softmax_scale,
+        sparse_attn_backend,
     )

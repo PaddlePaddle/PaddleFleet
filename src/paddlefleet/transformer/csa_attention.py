@@ -1751,5 +1751,6 @@ class CompressedSparseAttention(FleetLayer):
                 attn_sink.cast("float32"),
                 topk_idxs,
                 softmax_scale,
+                getattr(self.config, "csa_sparse_attn_backend", "tilelang"),
             )
         return output
