@@ -160,7 +160,8 @@ class DSv4HybridAttention(Attention):
             layer_idx = self.config.num_hidden_layers + layer_number
             compress_ratio = self.config.csa_compress_ratios[layer_idx]
         else:
-            compress_ratio = self.config.csa_compress_ratios[layer_number]
+            layer_idx = layer_number - self.config.num_empty_layers_add_in_head
+            compress_ratio = self.config.csa_compress_ratios[layer_idx]
         # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
         if compress_ratio > 1:
