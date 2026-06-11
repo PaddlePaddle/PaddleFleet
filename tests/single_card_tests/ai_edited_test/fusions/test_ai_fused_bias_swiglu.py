@@ -14,14 +14,18 @@
 import os
 import sys
 
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
+# Walk up to find the repo root.
+_test_file = os.path.abspath(__file__)
+_repo_root = _test_file
+for _ in range(10):
+    _repo_root = os.path.dirname(_repo_root)
+    if os.path.isdir(os.path.join(_repo_root, "src", "paddlefleet")):
+        break
+sys.path.insert(0, _repo_root)
+sys.path.insert(0, os.path.join(_repo_root, "src"))
+for _mod in list(sys.modules.keys()):
+    if _mod == "paddlefleet" or _mod.startswith("paddlefleet."):
+        del sys.modules[_mod]
 
 import unittest
 from unittest.mock import MagicMock, patch
@@ -32,7 +36,6 @@ import paddle.nn.functional as F
 
 from paddlefleet.fusions.fused_bias_swiglu import (
     BiasSwiGLUFunction,
-    ClampedWeightedSwiGLUFunction,
     SwiGLUFunction,
     WeightedSwiGLUFunction,
     bias_swiglu,
@@ -208,14 +211,14 @@ class TestPyLayerBackwardReturnCount(unittest.TestCase):
         self.assertEqual(w.grad.shape, [4, 1])
 
     def test_clamped_weighted_swiglu_function_backward_returns_2(self):
-        """ClampedWeightedSwiGLUFunction.forward(input, weights,
+        """WeightedSwiGLUFunction.apply(input, weights,
         fp8_input_store, clamp_value) has 2 tensor inputs (input, weights)
         => backward must return 2 values."""
         x = paddle.randn([4, 16]).astype("float32")
         x.stop_gradient = False
         w = paddle.ones([4, 1]).astype("float32")
         w.stop_gradient = False
-        result = ClampedWeightedSwiGLUFunction.apply(x, w, False, 2.0)
+        result = WeightedSwiGLUFunction.apply(x, w, False, 2.0)
         result.sum().backward()
         self.assertIsNotNone(x.grad)
         self.assertIsNotNone(w.grad)
@@ -312,42 +315,29 @@ class TestClampedSwiGLU(unittest.TestCase):
         self.assertEqual(grad_w.shape, [4, 1])
 
     def test_weighted_bias_swiglu_impl_clamp_e2e(self):
-        """End-to-end fwd+bwd through clamped_weighted_bias_swiglu_impl."""
+        """End-to-end fwd+bwd through weighted_bias_swiglu_impl."""
         from paddlefleet.fusions.fused_bias_swiglu import (
-            clamped_weighted_bias_swiglu_impl,
+            weighted_bias_swiglu_impl,
         )
 
         inp = paddle.randn([4, 16])
         inp.stop_gradient = False
         w = paddle.randn([4, 1])
         w.stop_gradient = False
-        out = clamped_weighted_bias_swiglu_impl(inp, None, w, clamp_value=2.0)
+        out = weighted_bias_swiglu_impl(inp, None, w, clamp_value=2.0)
         self.assertEqual(out.shape, [4, 8])
         grads = paddle.grad([out.sum()], [inp, w])
         self.assertEqual(grads[0].shape, [4, 16])
         self.assertEqual(grads[1].shape, [4, 1])
         self.assertFalse(bool(paddle.isnan(out).any().numpy()))
 
-    def test_clamped_weighted_bias_swiglu_impl_bias_raises(self):
-        """Line 438: clamped_weighted_bias_swiglu_impl with non-None bias
-        raises NotImplementedError."""
-        from paddlefleet.fusions.fused_bias_swiglu import (
-            clamped_weighted_bias_swiglu_impl,
-        )
-
-        inp = paddle.randn([4, 16])
-        w = paddle.randn([4, 1])
-        bias = paddle.randn([4, 16])
-        with self.assertRaises(NotImplementedError):
-            clamped_weighted_bias_swiglu_impl(inp, bias, w, clamp_value=2.0)
-
     def test_clamped_weighted_pylayer_fwd_bwd(self):
-        """ClampedWeightedSwiGLUFunction PyLayer apply + backward."""
+        """WeightedSwiGLUFunction PyLayer with clamp_value + backward."""
         x = paddle.randn([4, 16]).astype("float32")
         x.stop_gradient = False
         w = paddle.ones([4, 1]).astype("float32")
         w.stop_gradient = False
-        result = ClampedWeightedSwiGLUFunction.apply(x, w, False, 1.0)
+        result = WeightedSwiGLUFunction.apply(x, w, False, 1.0)
         self.assertEqual(result.shape, [4, 8])
         result.sum().backward()
         self.assertIsNotNone(x.grad)
@@ -517,12 +507,12 @@ class TestClampedSwiGLU(unittest.TestCase):
         self.assertEqual(grad_w.shape, [0, 1])
 
     def test_clamped_weighted_pylayer_zero_size(self):
-        """ClampedWeightedSwiGLUFunction PyLayer apply+backward on 0 rows."""
+        """WeightedSwiGLUFunction PyLayer with clamp_value on 0 rows."""
         x = paddle.zeros([0, 16]).astype("float32")
         x.stop_gradient = False
         w = paddle.zeros([0, 1]).astype("float32")
         w.stop_gradient = False
-        out = ClampedWeightedSwiGLUFunction.apply(x, w, False, 1.0)
+        out = WeightedSwiGLUFunction.apply(x, w, False, 1.0)
         self.assertEqual(out.shape, [0, 8])
         out.sum().backward()
         self.assertEqual(x.grad.shape, [0, 16])

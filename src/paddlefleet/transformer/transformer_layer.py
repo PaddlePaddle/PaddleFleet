@@ -467,15 +467,16 @@ class TransformerLayer(nn.Layer):
             dict_args["hidden_states"] = hidden_states
 
             # process position_ids
-            if "position_ids" in dict_args.keys():
-                position_ids = dict_args["position_ids"]
-                decoder_ids = position_ids[
-                    :, : -self.config.num_nextn_predict_layers
-                ]
-                mtp_ids = position_ids[
-                    :, -self.config.num_nextn_predict_layers :
-                ]
-                dict_args["position_ids"] = decoder_ids
+            if not self.config.gpt_model_use_experimental_version:
+                if "position_ids" in dict_args.keys():
+                    position_ids = dict_args["position_ids"]
+                    decoder_ids = position_ids[
+                        :, : -self.config.num_nextn_predict_layers
+                    ]
+                    mtp_ids = position_ids[
+                        :, -self.config.num_nextn_predict_layers :
+                    ]
+                    dict_args["position_ids"] = decoder_ids
 
             # process rotary_pos_emb: trim to main decoder sequence length
             # With SP: rotary_pos_emb is [S, B, head_dim], seq is dim 0
@@ -646,12 +647,12 @@ class TransformerLayer(nn.Layer):
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
-
-            if "position_ids" in dict_args.keys():
-                position_ids = paddle.concat(
-                    [dict_args["position_ids"], mtp_ids], axis=1
-                )
-                dict_args["position_ids"] = position_ids
+            if not self.config.gpt_model_use_experimental_version:
+                if "position_ids" in dict_args.keys():
+                    position_ids = paddle.concat(
+                        [dict_args["position_ids"], mtp_ids], axis=1
+                    )
+                    dict_args["position_ids"] = position_ids
 
             # Restore rotary_pos_emb/cos/sin to full length for next layer
             if rotary_pos_emb_full is not None:
@@ -1225,19 +1226,18 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        with paddle.enable_grad():
-            hidden_states = (
-                self.self_attention_hyper_connection.fused_h_res_h_post_bda(
-                    h_res=h_res,
-                    original_residual=original_residual,
-                    h_post=h_post,
-                    layer_output_with_bias=attention_output_with_bias,
-                    dropout_prob=self.hidden_dropout_prob,
-                    training=self.training,
-                    fused=self.config.bias_dropout_fusion,
-                )
+        hidden_states = (
+            self.self_attention_hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=attention_output_with_bias,
+                dropout_prob=self.hidden_dropout_prob,
+                training=self.training,
+                fused=self.config.bias_dropout_fusion,
             )
-            hidden_states = hidden_states.to(ori_dtype)
+        )
+        hidden_states = hidden_states.to(ori_dtype)
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -1334,17 +1334,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        with paddle.enable_grad():
-            hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
-                h_res=h_res,
-                original_residual=original_residual,
-                h_post=h_post,
-                layer_output_with_bias=mlp_output_with_bias,
-                dropout_prob=self.hidden_dropout_prob,
-                training=self.training,
-                fused=self.config.bias_dropout_fusion,
-            )
-            hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
+            h_res=h_res,
+            original_residual=original_residual,
+            h_post=h_post,
+            layer_output_with_bias=mlp_output_with_bias,
+            dropout_prob=self.hidden_dropout_prob,
+            training=self.training,
+            fused=self.config.bias_dropout_fusion,
+        )
+        hidden_states = hidden_states.to(ori_dtype)
 
         if is_first_fwd:
             hidden_states.stop_gradient = False

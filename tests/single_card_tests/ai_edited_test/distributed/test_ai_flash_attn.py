@@ -74,7 +74,6 @@ class TestCpFlashmaskBackwardDispatch(unittest.TestCase):
         ):
             mock_sig.return_value.parameters = sig_params
             cp_flashmask_allgatherkv_balance_backward(
-                config,
                 q,
                 k,
                 v,
@@ -84,6 +83,7 @@ class TestCpFlashmaskBackwardDispatch(unittest.TestCase):
                 out_grad,
                 group,
                 False,
+                config.fa_version,
             )
 
         return mock_v2_grad

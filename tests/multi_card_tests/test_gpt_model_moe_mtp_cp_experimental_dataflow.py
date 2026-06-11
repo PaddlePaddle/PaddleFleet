@@ -52,6 +52,9 @@ from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.training.initialize import initialize_fleet
 
+REPO_FLAG = os.getenv("repo_flag")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
+
 
 def _set_random_seed(seed_):
     """Set random seed for reproducibility."""
@@ -260,5 +263,8 @@ def run_experimental_dataflow_cp_e2e():
 
 
 if __name__ == "__main__":
+    if SKIP_TESTS:
+        print(f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')")
+        sys.exit(0)
     paddle.set_default_dtype("bfloat16")
     run_experimental_dataflow_cp_e2e()

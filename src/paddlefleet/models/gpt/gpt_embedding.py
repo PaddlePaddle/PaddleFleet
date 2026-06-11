@@ -242,7 +242,9 @@ class GPTEmbedding(FleetLayer):
                         and self.config.experimental_dataflow
                     ):
                         decoder_input = ContextParallelScatterOp.apply(
-                            decoder_input, axis=1
+                            decoder_input,
+                            axis=1,
+                            mode=self.config.cp_balance_mode,
                         )
 
                     if self.sequence_parallel:
@@ -274,7 +276,9 @@ class GPTEmbedding(FleetLayer):
                     ):
                         # In EB data flow, main input embed apply CP scatter here
                         inputs_embeds = ContextParallelScatterOp.apply(
-                            inputs_embeds, axis=1
+                            inputs_embeds,
+                            axis=1,
+                            mode=self.config.cp_balance_mode,
                         )
 
                     if self.sequence_parallel:
@@ -303,7 +307,9 @@ class GPTEmbedding(FleetLayer):
                         ):
                             # In EB data flow, mtp input embed apply CP scatter here
                             inputs_embeds_mtp = ContextParallelScatterOp.apply(
-                                inputs_embeds_mtp, axis=1
+                                inputs_embeds_mtp,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
 
                         if self.sequence_parallel:
@@ -439,6 +445,27 @@ class GPTEmbedding(FleetLayer):
                     )
                     if self.config.clone_scatter_output_in_embedding:
                         decoder_input = decoder_input.clone()
+            # CP scatter for the plain (no-MTP, no-multimodal) path must happen
+            # before rope generation so that get_rotary_seq_len sees local seq len.
+            if (
+                not self.multimodal_embedding
+                and not (
+                    self.config.num_nextn_predict_layers
+                    and self.config.num_nextn_predict_layers > 0
+                    and not self.config.mtp_load_weight_only
+                )
+                and get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                assert not self.sequence_parallel, (
+                    "sequence_parallel is not supported when context_parallel scatter "
+                    "is applied in the plain (no-MTP, no-multimodal) path before RoPE "
+                    "generation."
+                )
+                decoder_input = ContextParallelScatterOp.apply(
+                    decoder_input, axis=1, mode=self.config.cp_balance_mode
+                )
+
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
         rotary_pos_cos = None
@@ -540,6 +567,35 @@ class GPTEmbedding(FleetLayer):
 
         if paddle.core._has_grad():
             decoder_input.stop_gradient = False  # Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
+
+        if (
+            get_context_parallel_world_size() > 1
+            and self.config.experimental_dataflow
+        ):
+            if rotary_pos_emb is not None:
+                rotary_pos_emb = ContextParallelScatterOp.apply(
+                    rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
+                )
+            if swa_rotary_pos_emb is not None:
+                swa_rotary_pos_emb = ContextParallelScatterOp.apply(
+                    swa_rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
+                )
+            if rotary_pos_cos is not None:
+                rotary_pos_cos = ContextParallelScatterOp.apply(
+                    rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
+                )
+            if rotary_pos_sin is not None:
+                rotary_pos_sin = ContextParallelScatterOp.apply(
+                    rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
+                )
+            if swa_rotary_pos_cos is not None:
+                swa_rotary_pos_cos = ContextParallelScatterOp.apply(
+                    swa_rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
+                )
+            if swa_rotary_pos_sin is not None:
+                swa_rotary_pos_sin = ContextParallelScatterOp.apply(
+                    swa_rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
+                )
 
         preproc_output = {
             "hidden_states": decoder_input,

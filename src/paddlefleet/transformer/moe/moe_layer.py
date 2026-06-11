@@ -28,6 +28,7 @@ from paddle.autograd import PyLayer
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
+    mark_as_sequence_parallel_parameter,
 )
 
 if TYPE_CHECKING:
@@ -49,7 +50,7 @@ from .fusion_layer_utils import (
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
-from .moe_utils import AddAuxiliaryLoss
+from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
 from .token_dispatcher import (
     AllToAllTokenDispatcher,
     MoEFlexTokenDispatcher,
@@ -57,6 +58,7 @@ from .token_dispatcher import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 # MD5 logging for MoE precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
@@ -318,11 +320,28 @@ class MoELayer(nn.Layer):
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.moe_sublayers.mlp_spec
 
-        if self.moe_expert_fusion:
-            if self.fp8:
-                assert self.using_sonic_moe or self.moe_deep_gemm, (
-                    "For fp8 grouped_gemm, either set using_sonic_moe=True or moe_deep_gemm=True."
-                )
+        use_fused_weight = self.moe_expert_fusion
+        if (
+            self.fp8
+            and (self.moe_expert_fusion is False)
+            and self.moe_deep_gemm
+        ):
+            raise ValueError(
+                "For fp8 deep_gemm (i.e. use k-grouped gemm in backward), moe_expert_fusion must be True."
+            )
+        if (
+            self.fp8
+            and self.moe_expert_fusion
+            and self.moe_deep_gemm is False
+            and self.using_sonic_moe is False
+        ):
+            use_fused_weight = False
+        if self.using_sonic_moe:
+            assert use_fused_weight is True, (
+                "for sonic moe, expert weight must be fused."
+            )
+
+        if use_fused_weight:
             if self.using_sonic_moe:
                 # TODO: replace grouped_gemm_experts with fusion_experts
                 self.grouped_gemm_experts = SonicMoEExpert(
@@ -358,6 +377,29 @@ class MoELayer(nn.Layer):
             self.shared_experts = self.shared_expert_class(**shared_expert_args)
         else:
             self.shared_experts = None
+
+        # when sp is enabled, mark shared_experts as sequence parallel, because:
+        # 1. shared_experts only process local tokens which shape is [s/tp,b,h]
+        # 2. shared_experts'weight and bias will not be splited across tp ranks
+        if (
+            self.sequence_parallel
+            and self.expert_model_parallel_size > 1
+            and self.shared_experts is not None
+        ):
+            mark_as_sequence_parallel_parameter(
+                self.shared_experts.up_gate_proj.weight
+            )
+            if shared_expert_config.use_bias:
+                mark_as_sequence_parallel_parameter(
+                    self.shared_experts.up_gate_proj.bias
+                )
+            mark_as_sequence_parallel_parameter(
+                self.shared_experts.down_proj.weight
+            )
+            if shared_expert_config.use_bias:
+                mark_as_sequence_parallel_parameter(
+                    self.shared_experts.down_proj.bias
+                )
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
@@ -549,13 +591,32 @@ class MoELayer(nn.Layer):
         chunks = paddle.split(
             dispatched_input, num_or_sections=tokens_per_expert, axis=0
         )
+        scale_chunks = None
+        if use_accuracy_compatible_kernel():
+            per_token_scale = getattr(
+                self.token_dispatcher, "global_input_probs", None
+            )
+            if per_token_scale is None:
+                raise RuntimeError(
+                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                    "router probabilities from the token dispatcher."
+                )
+            scale_chunks = paddle.split(
+                per_token_scale, num_or_sections=tokens_per_expert, axis=0
+            )
         for i, chunk in enumerate(chunks):
             if tokens_per_expert[i] == 0:
                 continue
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            outputs += [expert(chunk)[0]]
+            if scale_chunks is None:
+                expert_output = expert(chunk)[0]
+            else:
+                expert_output = expert(chunk, per_token_scale=scale_chunks[i])[
+                    0
+                ]
+            outputs += [expert_output]
 
         if not outputs:
             return dispatched_input
