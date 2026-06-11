@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import math
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -955,6 +956,18 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.mtp_reuse_last_layer and self.use_dense_mtp:
+            # When MTP reuses the last backbone TransformerLayer's parameters,
+            # the MTP transformer block must have an identical structure to the
+            # backbone-last layer (same MoE / dense shape). Force-disable
+            # use_dense_mtp so the MTP layer matches whatever the backbone is.
+            warnings.warn(
+                "[MTP-REUSE-LAST-LAYER] mtp_reuse_last_layer=True overrides "
+                "use_dense_mtp=True -> use_dense_mtp=False. MTP layer structure "
+                "always matches the backbone-last TransformerLayer when reuse "
+                "is enabled."
+            )
+            self.use_dense_mtp = False
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
