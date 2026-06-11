@@ -435,9 +435,9 @@ def _apply_rope(
     if doc_lens_cutoff is not None:
         freqs = freqs[:, :max_cutoff_doc_len:ratio, :, :]
         doc_freqs = [
-            freqs[:, : int(doc_len.item()), :, :]
-            for doc_len in compressed_doc_lens
-            if int(doc_len.item()) > 0
+            freqs[:, :doc_len, :, :]
+            for doc_len in compressed_doc_lens.tolist()
+            if doc_len > 0
         ]
         if doc_freqs:
             freqs = paddle.concat(doc_freqs, axis=1)

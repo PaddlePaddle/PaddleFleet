@@ -76,7 +76,7 @@ def build_document_rope_freqs(
     else:
         freqs, mscale = _rope_result, 1.0
     freqs = freqs.squeeze(0).squeeze(1)
-    doc_freqs = [freqs[: int(doc_len.item())] for doc_len in doc_lens]
+    doc_freqs = [freqs[:doc_len] for doc_len in doc_lens.tolist()]
     freqs = paddle.concat(doc_freqs, axis=0)
     if freqs.shape[0] < sq:
         freqs = paddle.concat(
