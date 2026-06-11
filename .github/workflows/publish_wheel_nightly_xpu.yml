@@ -176,7 +176,7 @@ jobs:
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           # upload to paddletest
           wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
-          python notify_paddle_link.py  ${{ matrix.xpu.bos_XPU }} paddlefleet-*.whl paddlefleet 
+          python notify_paddle_link.py  ${{ matrix.xpu.bos_XPU }} paddlefleet-*.whl paddlefleet
           '
 
       - name: Upload paddlefleet-ops wheel
@@ -210,7 +210,7 @@ jobs:
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           # upload to paddletest
           wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
-          python notify_paddle_link.py  ${{ matrix.xpu.bos_XPU }} paddlefleet_ops-*.whl paddlefleet-ops 
+          python notify_paddle_link.py  ${{ matrix.xpu.bos_XPU }} paddlefleet_ops-*.whl paddlefleet-ops
           '
 
       - name: Cleanup
