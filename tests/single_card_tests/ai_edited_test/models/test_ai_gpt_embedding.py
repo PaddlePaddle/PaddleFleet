@@ -24,6 +24,7 @@ sys.path.insert(
 )
 
 import unittest
+import unittest.mock
 from unittest.mock import MagicMock
 
 import paddle
@@ -396,6 +397,70 @@ class TestGPTEmbeddingSWARotaryPosEmb(unittest.TestCase):
         # After transpose: [S, B, head_dim]
         swa_emb = result["swa_rotary_pos_emb"]
         self.assertEqual(list(swa_emb.shape), [4, 2, 16])
+
+
+class TestGPTEmbeddingCPScatterSPAssert(unittest.TestCase):
+    """Test assertion: sequence_parallel not supported with CP scatter in plain path."""
+
+    def _make_embedding(self):
+        emb = GPTEmbedding.__new__(GPTEmbedding)
+        emb.__dict__.setdefault("_parameters", {})
+        emb.__dict__.setdefault("_buffers", {})
+        emb.__dict__.setdefault("_sub_layers", {})
+        emb.__dict__.setdefault("_loaddict_holder", {})
+        emb.__dict__.setdefault("_non_persistable_buffers", set())
+        emb.__dict__.setdefault("_non_persistable_buffer_names_set", set())
+        emb.config = MagicMock()
+        emb.config.sequence_parallel = False
+        emb.config.multimodal_embedding = False
+        emb.config.expert_model_parallel_size = 1
+        emb.config.tensor_model_parallel_size = 1
+        emb.config.num_nextn_predict_layers = 0
+        emb.config.mtp_load_weight_only = False
+        emb.config.apply_rope_fusion = False
+        emb.config.experimental_dataflow = True
+        emb.config.cp_balance_mode = "padding"
+        emb.config.clone_scatter_output_in_embedding = False
+        emb.position_embedding_type = "none"
+        emb.rotary_pos_emb = None
+        emb.mrope_section = None
+        emb.sequence_parallel = True
+        emb.multimodal_embedding = False
+        mock_embedding = MagicMock()
+        mock_embedding.return_value = paddle.randn([2, 8, 64])
+        emb.embedding = mock_embedding
+        return emb
+
+    @unittest.mock.patch(
+        "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
+        return_value=2,
+    )
+    def test_sp_with_cp_scatter_plain_path_raises(self, mock_cp_ws):
+        """sequence_parallel + CP scatter in plain path should raise AssertionError."""
+        emb = self._make_embedding()
+        input_ids = paddle.ones([2, 8], dtype="int64")
+        with self.assertRaises(AssertionError) as ctx:
+            emb.forward(dict_args={"input_ids": input_ids})
+        self.assertIn("sequence_parallel is not supported", str(ctx.exception))
+
+    @unittest.mock.patch(
+        "paddlefleet.models.gpt.gpt_embedding.ContextParallelScatterOp"
+    )
+    @unittest.mock.patch(
+        "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
+        return_value=2,
+    )
+    def test_no_sp_with_cp_scatter_plain_path_passes(
+        self, mock_cp_ws, mock_cp_op
+    ):
+        """Without sequence_parallel, CP scatter in plain path should not raise."""
+        emb = self._make_embedding()
+        emb.sequence_parallel = False
+        mock_cp_op.apply.return_value = paddle.randn([2, 8, 64])
+        input_ids = paddle.ones([2, 8], dtype="int64")
+        # Should not raise
+        result = emb.forward(dict_args={"input_ids": input_ids})
+        self.assertIn("hidden_states", result)
 
 
 if __name__ == "__main__":
