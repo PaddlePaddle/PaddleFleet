@@ -170,6 +170,13 @@ _FLASH_MLA_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
 _CUDNN_FRONTEND_AVAILABLE = False
 
+
+def _ecosystem_module_exists(lib_name: str) -> bool:
+    return (ops_dir / lib_name).exists() or (
+        ops_dir / f"{lib_name}.py"
+    ).exists()
+
+
 if paddle.is_compiled_with_cuda():
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
@@ -185,7 +192,7 @@ if paddle.is_compiled_with_cuda():
         and _cuda_version >= (12, 9)
     ):
         _SONIC_MOE_AVAILABLE = True
-    if sys.version_info >= (3, 12):
+    if sys.version_info >= (3, 12) and _ecosystem_module_exists("cudnn"):
         _CUDNN_FRONTEND_AVAILABLE = True
 
 if paddle.is_compiled_with_xpu():
@@ -347,9 +354,16 @@ if paddle.is_compiled_with_cuda():
         paddle.enable_compat(scope={"cudnn"}, silent=True)
         _safe_load_ecosystem_lib("cudnn", ops_dir, globals())
     else:
-        warning, error = _cutedsl_requirement(
-            "paddlefleet_ops.cudnn", hint=CUDNN_FRONTEND_HINT
-        )
+        if sys.version_info < (3, 12):
+            warning, error = _cutedsl_requirement(
+                "paddlefleet_ops.cudnn", hint=CUDNN_FRONTEND_HINT
+            )
+        else:
+            warning, error = _build_notice(
+                "paddlefleet_ops.cudnn",
+                "cudnn frontend Python module is not installed.",
+                hint_for_error=CUDNN_FRONTEND_HINT,
+            )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.cudnn"] = error
 

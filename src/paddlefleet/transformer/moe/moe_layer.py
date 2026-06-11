@@ -905,7 +905,7 @@ class MoELayer(nn.Layer):
                     dispatched_indices,
                     dispatched_probs,
                     use_fp8,
-                    tokens_per_expert=self.token_dispatcher._comm_manager.tokens_per_expert,
+                    tokens_per_expert=tokens_per_expert,
                     fp8_scale=fp8_scale,
                     fp8_combine_grad_handle=fp8_combine_grad_handle,
                 )

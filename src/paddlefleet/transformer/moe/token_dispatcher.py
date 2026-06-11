@@ -35,6 +35,7 @@ from .fused_a2a import (
     get_hybrid_ep_buffer,
     hybrid_ep_combine,
     hybrid_ep_dispatch,
+    quantize_activation_blockscaled_fast,
 )
 from .moe_utils import (
     AllGatherGroupOp,
@@ -1212,7 +1213,13 @@ class _AllGatherFP8(paddle.autograd.PyLayer):
            using 1x128 blockwise quantization (same format as DeepEP fp8_dispatch).
         2. AllGather fp8 via uint8 bitcast (NCCL-compatible) → [T_global, H].
         3. AllGather scale (float32) → [T_global, H//128].
-        4. Dequant: bf16[t, h] = fp8_val[t, h] * scale[t, h // 128].
+
+    Returns ``(fp8_global, scale_global)`` — the raw fp8 hidden states and the
+    global scale tensor.  **No dequantisation** is performed: the consumer
+    (``run_sonic_moe`` / ``_UpProjection``) receives ``(fp8, scale)`` as
+    ``prequant_activation_payload`` and consumes the fp8 data natively, avoiding
+    a redundant quant → dequant → requant round trip and matching DeepEP's
+    ``{"scale": scale}`` contract exactly.
 
     Backward:
         Straight-through estimator: ReduceScatter(grad_bf16_global) → grad_bf16_local.
@@ -1226,22 +1233,32 @@ class _AllGatherFP8(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, x, group, use_ue8m0=False):
+        """Forward: quantize → AllGather(fp8) → AllGather(scale).
+
+        Args:
+            x: bf16 input [T_local, H].
+            group: EP group.
+            use_ue8m0: deprecated — kept for signature compatibility with dispatch
+                       config; the DeepEP quant function is used instead of
+                       ``fp8_quant_blockwise`` and does not support ue8m0 scales.
+        """
         ctx.group = group
         ctx.input_shape = list(x.shape)
         if group is None or group.nranks == 1:
-            return x.clone()
+            return x.clone(), None
 
         # Quantize locally: bf16 [T_local, H] → fp8 [T_local, H] + scale
-        # output_scale_transpose=True → scale shape [H//128, T_local]; .T → [T_local, H//128]
-        x_fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
-            x,
-            quant_method="1x128",
-            input_transpose=False,
-            output_scale_transpose=True,
-            return_transpose_only=False,
-            using_ue8m0_scale=use_ue8m0,
+        # Reuses DeepEP's quantize_activation_blockscaled_fast (1x128 blockwise)
+        # so the allgather path's FP8 format is identical to the deepep+sonic_moe
+        # path, enabling the same prequant_activation_payload contract downstream.
+        assert quantize_activation_blockscaled_fast is not None, (
+            "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
         )
-        scale = scale.T.contiguous()  # [T_local, H//128]
+        if not x.is_contiguous():
+            x = x.contiguous()
+        x_fp8, scale = quantize_activation_blockscaled_fast(
+            x, scale_dtype=paddle.int32
+        )
 
         T_local, H = x_fp8.shape
         T_global = T_local * group.nranks
@@ -1264,16 +1281,13 @@ class _AllGatherFP8(paddle.autograd.PyLayer):
             scale_global, scale, group=group, use_calc_stream=True
         )
 
-        # Dequant: bf16[t, h] = fp8_val[t, h] * scale[t, h // 128]
-        bf16_global = (
-            x_fp8_global.cast("bfloat16").reshape([T_global, H128, 128])
-            * scale_global.unsqueeze(-1)
-        ).reshape([T_global, H])
-
-        return bf16_global
+        # Skip dequant — the consumer (run_sonic_moe / _UpProjection) handles
+        # fp8 input natively via prequant_activation_payload, matching DeepEP.
+        return x_fp8_global, scale_global
 
     @staticmethod
-    def backward(ctx, grad_output):
+    def backward(ctx, grad_output, grad_scale=None):
+        del grad_scale
         group = ctx.group
         if group is None or group.nranks == 1:
             return grad_output
@@ -1464,6 +1478,11 @@ class AllGatherTokenDispatcher(nn.Layer):
         # after AllGather across the EP group.
         self._global_topk_indices = None
         self._global_topk_weights = None
+        # Populated by ``dispatch_preprocess`` when fp8_dispatch is active —
+        # the AllGather'd blockwise scale tensor, reused by downstream fused
+        # kernels (``run_sonic_moe``) as ``prequant_activation_payload`` to
+        # skip redundant re-quantization, mirroring DeepEP's contract.
+        self._fp8_dispatch_scale = None
         # Cache for the overlap-combine path (set by ``token_combine``,
         # consumed by ``combine_postprocess``).
         self._overlap_combined = None
@@ -1560,6 +1579,9 @@ class AllGatherTokenDispatcher(nn.Layer):
             _, d_model = hidden_states.shape
         reshaped_input = hidden_states.reshape([-1, d_model]).contiguous()
 
+        # Reset fp8 dispatch scale — will be set below only when fp8 path is taken.
+        self._fp8_dispatch_scale = None
+
         # AllGather hidden_states along token dim across the EP group.
         # If pre_allgather() was called before gate, reuse the async result;
         # otherwise fall back to the synchronous path.
@@ -1569,7 +1591,7 @@ class AllGatherTokenDispatcher(nn.Layer):
             )
             self._pre_ag_handle = None
         elif self.fp8_dispatch:
-            global_hidden_states = _AllGatherFP8.apply(
+            global_hidden_states, self._fp8_dispatch_scale = _AllGatherFP8.apply(
                 reshaped_input, self.moe_group, self.use_ue8m0
             )
         else:
@@ -1648,11 +1670,18 @@ class AllGatherTokenDispatcher(nn.Layer):
         quantization is handled inside ``dispatch_preprocess``.
 
         Returns:
-            tuple: ``(global_tokens, None)``. The second slot is reserved
-            for ``tokens_per_expert`` in the dispatcher contract; the
-            fused-kernel consumer recomputes it.
+            tuple: ``(global_tokens, fp8_handle)``. When ``_fp8_dispatch_scale``
+            was captured during :meth:`dispatch_preprocess` (fp8 path), the handle
+            is ``{"scale": scale}`` matching DeepEP's contract so downstream
+            fused kernels can reuse the dispatch scale as
+            ``prequant_activation_payload``.
         """
-        return permuted_global_input_tokens, None
+        fp8_handle = (
+            {"scale": self._fp8_dispatch_scale}
+            if self._fp8_dispatch_scale is not None
+            else None
+        )
+        return permuted_global_input_tokens, fp8_handle
 
     def get_dispatched_routing(self):
         """Return (dispatched_indices, dispatched_probs, tokens_per_expert).
