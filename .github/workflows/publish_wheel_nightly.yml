@@ -115,7 +115,7 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
-          git submodule update --init --recursive
+          uv cache clean paddlepaddle-gpu
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
@@ -246,7 +246,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
-          git submodule update --init --recursive
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"

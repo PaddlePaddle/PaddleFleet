@@ -32,6 +32,7 @@ import paddle
 from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
+from paddlefleet.fp8.qat import fp8_simulate_qat
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
@@ -236,6 +237,7 @@ class DSv4HybridAttention(Attention):
             is_expert=False,
             tp_group=self.pg_collection.tp,
         )
+        self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
 
     def forward(
         self,
@@ -538,6 +540,12 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
                 mla_output_remove_interleaving=True,
             )
             kv_pe = kv_pe.squeeze(2)
+
+            # KV QAT:
+            #   kv_nope: bf16 -> fp32 -> fp8e4m3 ->fp32 -> bf16
+            if self.use_fp8_qat:
+                kv_nope = fp8_simulate_qat(kv_nope, 64)
+
             kv = paddle.concat([kv_nope, kv_pe], axis=-1)
         else:
             query = q

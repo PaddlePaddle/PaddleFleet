@@ -594,6 +594,155 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
             f"Full-layer dH cosine sim too low: {dh_cos:.6f}",
         )
 
+    def test_full_layer_fwd_bwd_fp8_qat(self):
+        """DSv4HybridSelfAttention with use_fp8_qat=True: CP vs non-CP."""
+        from paddlefleet.transformer.enums import AttnMaskType
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        head_dim = 128
+        hidden_size = 256
+        num_heads = 4
+        q_lora_rank = 64
+        pos_dim = 64
+        sq_global = 256
+        sq_local = sq_global // CP_SIZE
+        b = 2
+
+        config = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=hidden_size,
+            num_attention_heads=num_heads,
+            use_fp8_qat=True,
+        )
+        config.num_key_value_heads = 1
+        config.head_dim = head_dim
+        config.q_lora_rank = q_lora_rank
+        config.kv_lora_rank = q_lora_rank
+        config.qk_nope_head_dim = head_dim - pos_dim
+        config.qk_rope_head_dim = pos_dim
+        config.qk_pos_emb_head_dim = pos_dim
+        config.v_head_dim = head_dim
+        config.multi_latent_attention = True
+        config.rope_type = "rope"
+        config.rotary_base = 10000.0
+        config.rotary_interleaved = False
+        config.rotary_percent = 1.0
+        config.apply_rope_fusion = False
+        config.csa_compress_ratios = [4]
+        config.csa_compress_rotary_base = 160000.0
+        config.csa_window_size = 64
+        config.csa_dense_mode = False
+        config.dsa_index_n_heads = 8
+        config.dsa_index_head_dim = 128
+        config.dsa_index_topk = 16
+        config.dsa_indexer_loss_coeff = 0.0
+        config.dsa_indexer_use_sparse_loss = False
+        config.csa_tilelang_enable_indexer = False
+        config.csa_tilelang_enable_sparse_attn = False
+        config.init_method = None
+        config.init_method_std = 0.02
+        config.output_layer_init_method = None
+        config.layernorm_epsilon = 1e-5
+        config.rms_norm_eps = 1e-5
+        config.o_groups = 4
+        config.o_lora_rank = 64
+        config.sequence_parallel = False
+        config.tensor_model_parallel_size = 1
+        config.cp_balance_mode = "contiguous_allgather"
+        config.csa_indexer_backend = "tilelang"
+
+        sublayers = DSv4HybridSelfAttentionSublayersSpec(
+            linear_q_down_proj=_TestLinear,
+            linear_q_up_proj=_TestLinear,
+            linear_kv_proj=_TestLinear,
+            core_attention=LayerSpec(
+                layer=CompressedSparseAttention,
+                sublayers_spec=CompressedSparseAttentionSublayersSpec(
+                    compressor=LayerSpec(
+                        layer=Compressor,
+                        sublayers_spec=CompressorSublayersSpec(
+                            linear_wkv=_TestLinear,
+                            linear_wgate=_TestLinear,
+                            norm=_TestRMSNorm,
+                        ),
+                    ),
+                    indexer=LayerSpec(
+                        layer=CSAIndexer,
+                        sublayers_spec=CSAIndexerSublayersSpec(
+                            linear_wq_b=_TestLinear,
+                            linear_weights_proj=_TestLinear,
+                            compressor=LayerSpec(
+                                layer=Compressor,
+                                sublayers_spec=CompressorSublayersSpec(
+                                    linear_wkv=_TestLinear,
+                                    linear_wgate=_TestLinear,
+                                    norm=_TestRMSNorm,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            o_proj=_TestLinear,
+            q_layernorm=_TestRMSNorm,
+            kv_layernorm=_TestRMSNorm,
+        )
+
+        pg_ref = types.SimpleNamespace(tp=None, cp=None)
+        pg_cp = types.SimpleNamespace(tp=None, cp=CP_GROUP)
+
+        paddle.seed(2026)
+        layer_ref = DSv4HybridSelfAttention(
+            config=config,
+            sublayers_spec=sublayers,
+            layer_number=0,
+            attn_mask_type=AttnMaskType.causal,
+            pg_collection=pg_ref,
+        )
+
+        paddle.seed(2026)
+        layer_cp = DSv4HybridSelfAttention(
+            config=config,
+            sublayers_spec=sublayers,
+            layer_number=0,
+            attn_mask_type=AttnMaskType.causal,
+            pg_collection=pg_cp,
+        )
+
+        paddle.seed(1000)
+        hidden_full = paddle.randn([b, sq_global, hidden_size], dtype=DTYPE)
+
+        h_a = hidden_full.clone()
+        h_a.stop_gradient = False
+        out_a, _ = layer_ref.forward(h_a)
+        out_a.sum().backward()
+
+        s, e = CP_RANK * sq_local, (CP_RANK + 1) * sq_local
+        h_b = hidden_full[:, s:e].clone()
+        h_b.stop_gradient = False
+        out_b, _ = layer_cp.forward(h_b)
+        out_b.sum().backward()
+
+        for p in layer_cp.parameters():
+            if p.grad is not None:
+                g = p.grad.contiguous()
+                dist.all_reduce(g, group=CP_GROUP)
+                paddle.assign(g, p.grad)
+
+        fwd_cos = _cosine_sim(out_b, out_a[:, s:e])
+        self.assertGreater(
+            fwd_cos,
+            COS_SIM_THRESHOLD,
+            f"FP8 QAT full-layer forward cosine sim too low: {fwd_cos:.6f}",
+        )
+
+        dh_cos = _cosine_sim(h_b.grad, h_a.grad[:, s:e])
+        self.assertGreater(
+            dh_cos,
+            COS_SIM_THRESHOLD,
+            f"FP8 QAT full-layer dH cosine sim too low: {dh_cos:.6f}",
+        )
+
 
 # ---------------------------------------------------------------------------
 # TileLang CP: kernel-level isolation tests

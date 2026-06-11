@@ -18,11 +18,40 @@ import numpy as np
 import paddle
 from paddle import nn
 
+
+def _is_fa4_supported():
+    """sink_impl only supports FlashMask V4 (Blackwell SM100, FA4 cute kernel).
+
+    FA2 / FA3 dispatch paths have been removed from sink_impl, so the only
+    requirement is a Blackwell GPU with the FA4 cute interface importable.
+    """
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        cap = paddle.device.cuda.get_device_capability()
+    except Exception:
+        return False
+    if cap[0] != 10:
+        return False
+    try:
+        from paddlefleet_ops.flash_mask.cute.interface import (  # noqa: F401
+            _flash_attn_bwd,
+            _flash_attn_fwd,
+        )
+    except Exception:
+        return False
+    return True
+
+
+if not _is_fa4_supported():
+    raise unittest.SkipTest(
+        "sink_impl only supports FlashMask V4 (FA4); requires Blackwell GPU "
+        "(SM100) with paddlefleet_ops FA4 cute kernel available. "
+        "FA2 / FA3 are not supported."
+    )
+
+
 from paddlefleet.transformer.sink_impl import (
-    _flash_attention_backward_dispatch,
-    _flash_attention_forward_dispatch,
-    _flashmask_attention_backward_dispatch,
-    _flashmask_attention_forward_dispatch,
     sink_attention,
 )
 
@@ -1174,256 +1203,15 @@ class TestFA4Path(unittest.TestCase):
         self.assertIsNotNone(key.grad)
 
 
-class TestFA3PathMocked(unittest.TestCase):
-    """Test FA3 code paths using mocks (for non-Hopper machines)."""
-
-    def setUp(self):
-        if not _is_sm90():
-            self.skipTest("FA3 only available on Hopper (SM90)")
-        paddle.seed(42)
-        self.batch_size = 1
-        self.seq_len = 1024
-        self.num_heads = 4
-        self.head_dim = 64
-        self.dtype = "bfloat16"
-        self.scaling = self.head_dim**-0.5
-
-    def test_fa3_forward_dispatch(self):
-        """Test FA3 forward path by mocking _C_ops.flash_attn_v3."""
-        from unittest.mock import patch
-
-        query = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        key = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        value = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-
-        # Create mock output tensors
-        mock_out = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        mock_lse = paddle.rand(
-            [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
-        )
-
-        original_fa = paddle.base.framework.get_flags(
-            ["FLAGS_flash_attn_version"]
-        )["FLAGS_flash_attn_version"]
-        try:
-            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
-            with patch.object(
-                paddle._C_ops,
-                "flash_attn_v3",
-                return_value=(mock_out, mock_lse),
-            ):
-                out, lse = _flash_attention_forward_dispatch(
-                    query, key, value, causal=True, softmax_scale=self.scaling
-                )
-                self.assertEqual(out.shape, mock_out.shape)
-                self.assertEqual(lse.shape, mock_lse.shape)
-        finally:
-            paddle.base.framework.set_flags(
-                {"FLAGS_flash_attn_version": original_fa}
-            )
-
-    def test_fa3_backward_dispatch(self):
-        """Test FA3 backward path by mocking _C_ops.flash_attn_v3_grad."""
-        from unittest.mock import patch
-
-        query = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        key = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        value = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        output = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        lse = paddle.rand(
-            [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
-        )
-        grad_output = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-
-        mock_grad_q = paddle.rand_like(query)
-        mock_grad_k = paddle.rand_like(key)
-        mock_grad_v = paddle.rand_like(value)
-
-        original_fa = paddle.base.framework.get_flags(
-            ["FLAGS_flash_attn_version"]
-        )["FLAGS_flash_attn_version"]
-        try:
-            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
-            with patch.object(
-                paddle._C_ops,
-                "flash_attn_v3_grad",
-                return_value=(mock_grad_q, mock_grad_k, mock_grad_v),
-            ):
-                grad_q, grad_k, grad_v = _flash_attention_backward_dispatch(
-                    grad_output,
-                    query,
-                    key,
-                    value,
-                    output,
-                    lse,
-                    causal=True,
-                    softmax_scale=self.scaling,
-                )
-                self.assertEqual(grad_q.shape, query.shape)
-                self.assertEqual(grad_k.shape, key.shape)
-                self.assertEqual(grad_v.shape, value.shape)
-        finally:
-            paddle.base.framework.set_flags(
-                {"FLAGS_flash_attn_version": original_fa}
-            )
-
-    def test_fa3_flashmask_forward_dispatch(self):
-        """Test FlashMask with FA3 forward produces correct output shape."""
-        from unittest.mock import patch
-
-        query = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        key = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        value = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-
-        indices = np.zeros(
-            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
-        )
-        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
-        indices[:, :, :, 0] = diag
-        indices[:, :, :, 1] = 0
-        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
-
-        mock_out = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        mock_lse = paddle.rand(
-            [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
-        )
-
-        original_fa = paddle.base.framework.get_flags(
-            ["FLAGS_flash_attn_version"]
-        )["FLAGS_flash_attn_version"]
-        try:
-            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
-            with patch(
-                "paddle.nn.functional.flashmask_attention",
-                return_value=(mock_out, mock_lse),
-            ):
-                out, lse = _flashmask_attention_forward_dispatch(
-                    query,
-                    key,
-                    value,
-                    startend_row_indices,
-                    causal=False,
-                    softmax_scale=self.scaling,
-                )
-                self.assertEqual(out.shape, mock_out.shape)
-        finally:
-            paddle.base.framework.set_flags(
-                {"FLAGS_flash_attn_version": original_fa}
-            )
-
-    def test_fa3_flashmask_backward_dispatch(self):
-        """Test FlashMask FA3 backward dispatch via mock."""
-        from unittest.mock import patch
-
-        query = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        key = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        value = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        output = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-        lse = paddle.rand(
-            [self.batch_size, self.num_heads, self.seq_len], dtype="float32"
-        )
-        grad_output = paddle.rand(
-            [self.batch_size, self.seq_len, self.num_heads, self.head_dim],
-            dtype=self.dtype,
-        )
-
-        indices = np.zeros(
-            (self.batch_size, self.num_heads, self.seq_len, 2), dtype="int32"
-        )
-        diag = np.arange(self.seq_len).reshape((1, 1, self.seq_len))
-        indices[:, :, :, 0] = diag
-        indices[:, :, :, 1] = 0
-        startend_row_indices = paddle.to_tensor(indices, dtype="int32")
-
-        mock_grad_q = paddle.rand_like(query)
-        mock_grad_k = paddle.rand_like(key)
-        mock_grad_v = paddle.rand_like(value)
-
-        original_fa = paddle.base.framework.get_flags(
-            ["FLAGS_flash_attn_version"]
-        )["FLAGS_flash_attn_version"]
-        try:
-            paddle.base.framework.set_flags({"FLAGS_flash_attn_version": 3})
-            with patch.object(
-                paddle._C_ops,
-                "flashmask_attention_v2_grad",
-                return_value=(mock_grad_q, mock_grad_k, mock_grad_v),
-            ):
-                grad_q, grad_k, grad_v = _flashmask_attention_backward_dispatch(
-                    grad_output,
-                    query,
-                    key,
-                    value,
-                    output,
-                    lse,
-                    startend_row_indices,
-                    causal=False,
-                    softmax_scale=self.scaling,
-                )
-                self.assertEqual(grad_q.shape, query.shape)
-        finally:
-            paddle.base.framework.set_flags(
-                {"FLAGS_flash_attn_version": original_fa}
-            )
-
-
 class TestLSEShapeCompat(unittest.TestCase):
     """Test LSE shape compatibility when kernel returns rounded sequence length."""
 
     def test_lse_rounded_shape(self):
         """Test that rounded LSE shape is handled correctly in forward."""
         from unittest.mock import patch
+
+        if not _is_sm100():
+            self.skipTest("FA4 requires Blackwell GPU (SM100)")
 
         paddle.seed(42)
         batch, seq, heads, dim = 1, 100, 4, 64
@@ -1434,14 +1222,14 @@ class TestLSEShapeCompat(unittest.TestCase):
         value = paddle.rand([batch, seq, heads, dim], dtype=dtype)
         sink = paddle.rand([heads], dtype=dtype)
 
-        # Mock _flash_attention_forward_dispatch to return a rounded LSE
+        # Mock the FA4 forward op to return a rounded LSE
         mock_out = paddle.rand([batch, seq, heads, dim], dtype=dtype)
         # Simulate a rounded LSE (e.g., 128 instead of 100)
         rounded_seq = 128
         mock_lse = paddle.rand([batch, heads, rounded_seq], dtype="float32")
 
         with patch(
-            "paddlefleet.transformer.sink_impl._flash_attention_forward_dispatch",
+            "paddlefleet.transformer.sink_impl._flash_attn_fwd",
             return_value=(mock_out, mock_lse),
         ):
             out = sink_attention(
