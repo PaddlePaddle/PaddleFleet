@@ -89,7 +89,7 @@ def build_document_rope_freqs(
             axis=0,
         )
 
-    return freqs.reshape([1, sq, 1, freqs.shape[-1]]), mscale
+    return freqs.reshape([1, -1, 1, freqs.shape[-1]]), mscale
 
 
 # ---------------------------------------------------------------------------
