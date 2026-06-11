@@ -16,6 +16,7 @@
 import functools
 import random
 import unittest
+import warnings
 
 import numpy as np
 import paddle
@@ -266,6 +267,72 @@ class TestDenseMTP(unittest.TestCase):
                 not_shared.append(param_name)
 
         assert len(mtp_params) > 0, "MTP transformer should have parameters"
+        assert not not_shared, (
+            f"MTP params should reuse last backbone params, not_shared={not_shared[:5]}"
+        )
+
+    def test_mtp_reuse_last_layer_overrides_use_dense_mtp(self):
+        """mtp_reuse_last_layer=True should force use_dense_mtp=False so the MTP
+        layer always mirrors the backbone-last layer (MoE in this config),
+        regardless of the user-supplied use_dense_mtp value."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            config = GPTConfig(
+                num_hidden_layers=2,
+                hidden_size=512,
+                vocab_size=100,
+                max_sequence_length=64,
+                num_attention_heads=4,
+                moe_expert_fusion=False,
+                intermediate_size=1024,
+                normalization="RMSNorm",
+                hidden_dropout_prob=0.0,
+                attention_dropout=0.0,
+                n_routed_experts=8,
+                moe_intermediate_size=1024,
+                moe_token_dispatcher_type="alltoall",
+                n_shared_experts=1,
+                use_bias=False,
+                rotary_percent=1.0,
+                rotary_base=10000,
+                rope_scaling=1.0,
+                init_method=functools.partial(
+                    paddle.nn.init.xavier_uniform_, gain=1.0
+                ),
+                output_layer_init_method=functools.partial(
+                    paddle.nn.init.xavier_uniform_, gain=1.0
+                ),
+                tie_word_embeddings=True,
+                use_qk_norm=True,
+                num_nextn_predict_layers=1,
+                use_dense_mtp=True,
+                mtp_reuse_last_layer=True,
+            )
+
+        assert config.use_dense_mtp is False, (
+            "mtp_reuse_last_layer=True should force use_dense_mtp=False, "
+            f"got use_dense_mtp={config.use_dense_mtp}"
+        )
+        assert any("MTP-REUSE-LAST-LAYER" in str(w.message) for w in caught), (
+            "Override should emit a [MTP-REUSE-LAST-LAYER] warning"
+        )
+
+        model = gpt_builder(config, num_stages=1)
+        mtp_layer = self._find_mtp_layer(model)
+        assert mtp_layer is not None
+        # Backbone is MoE, MTP must therefore also be MoE (override took effect).
+        assert isinstance(mtp_layer.transformer_layer.mlp, MoELayer), (
+            "MTP layer's MLP should be MoELayer after override, got "
+            f"{type(mtp_layer.transformer_layer.mlp).__name__}"
+        )
+
+        # And the alias should still produce shared parameters.
+        decoder_layers = self._find_decoder_layers(model)
+        backbone_params = dict(decoder_layers[-1].named_parameters())
+        mtp_params = dict(mtp_layer.transformer_layer.named_parameters())
+        not_shared = [
+            n for n, p in mtp_params.items() if backbone_params.get(n) is not p
+        ]
         assert not not_shared, (
             f"MTP params should reuse last backbone params, not_shared={not_shared[:5]}"
         )

@@ -241,10 +241,10 @@ class GPTModel(PipelineLayer):
 
         src_params = dict(last_backbone.named_parameters())
 
-        # Pre-flight: parameter-level aliasing cannot bridge dense MTP MLP to a
-        # MoE experts/router tree. If backbone-last is MoE while use_dense_mtp
-        # is True, the alias would be partial (silent memory waste + half-shared
-        # gradients). Fail loudly instead of warning.
+        # Defensive check: with mtp_reuse_last_layer=True, TransformerConfig's
+        # __post_init__ force-sets use_dense_mtp=False so the MTP layer mirrors
+        # whatever the backbone-last layer is. This assert just guards against
+        # someone bypassing __post_init__ (e.g. mutating the config after init).
         backbone_is_moe = any(
             (".experts." in n)
             or ("experts." in n)
@@ -252,17 +252,13 @@ class GPTModel(PipelineLayer):
             or ("router." in n)
             for n in src_params
         )
-        if backbone_is_moe and getattr(self.config, "use_dense_mtp", False):
-            raise ValueError(
-                "[MTP-REUSE-LAST-LAYER] Incompatible configuration: backbone-last "
-                "TransformerLayer is MoE (params under experts.*/router.*) but "
-                "use_dense_mtp=True. Parameter aliasing cannot bridge a dense MTP "
-                "MLP to MoE experts/router — the dense MLP params would stay "
-                "independent, defeating the memory-saving purpose of "
-                "mtp_reuse_last_layer. Resolution: set use_dense_mtp=False to "
-                "make MTP MoE-shaped (full reuse), or set "
-                "mtp_reuse_last_layer=False to disable aliasing."
-            )
+        assert not (
+            backbone_is_moe and getattr(self.config, "use_dense_mtp", False)
+        ), (
+            "[MTP-REUSE-LAST-LAYER] use_dense_mtp must be False when "
+            "mtp_reuse_last_layer=True (TransformerConfig.__post_init__ enforces "
+            "this). Backbone-last is MoE, MTP cannot be dense."
+        )
 
         for mtp in mtp_layers:
             dst_module = mtp.transformer_layer
