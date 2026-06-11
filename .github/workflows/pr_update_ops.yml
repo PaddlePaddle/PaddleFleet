@@ -498,6 +498,9 @@ jobs:
             python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          # upload to paddletest
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet_ops*.whl paddlefleet-ops 
           '
 
       - name: Cleanup
