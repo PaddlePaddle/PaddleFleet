@@ -126,6 +126,7 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         layer.moe_group = pg.ep
         layer.expert_model_parallel_size = 4
         layer.num_experts = 8
+        layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         layer._init_expert_parallel()
 
         self.assertEqual(layer.moe_rank, 0)
@@ -148,6 +149,7 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         layer.moe_group = pg.ep
         layer.expert_model_parallel_size = 2
         layer.num_experts = 4
+        layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         layer._init_expert_parallel()
 
         self.assertEqual(layer.moe_rank, 0)
@@ -248,7 +250,7 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
         layer = MoELayer.__new__(MoELayer)
         layer.gate = MagicMock()
         del layer.gate.set_layer_number
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(AttributeError):
             layer.set_layer_number(5)
 
 
@@ -324,6 +326,7 @@ class TestMoELayerForwardLogging(unittest.TestCase):
         layer.router_aux_loss_coef = None
         layer.use_latent_moe = False
         layer.layer_number = 7
+        layer.moe_token_dispatcher_type = "alltoall"
         layer.gate = MagicMock(
             return_value=(
                 None,
