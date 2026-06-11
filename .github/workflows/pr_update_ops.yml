@@ -188,6 +188,8 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
+          git reset --hard ${{ github.sha }}
+          uv cache clean paddlepaddle-gpu
           git submodule update --init --recursive
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
@@ -341,6 +343,8 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
+          git reset --hard ${{ github.sha }}
+          uv cache clean paddlepaddle-gpu
           git submodule update --init --recursive
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
@@ -473,6 +477,8 @@ jobs:
           set -e
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
+          git reset --hard ${{ github.sha }}
+          uv cache clean paddlepaddle-gpu
           git submodule update --init --recursive
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
