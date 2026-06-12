@@ -448,9 +448,10 @@ class StandardMoERouter(nn.Layer):
             _ids = input_ids
             if _ids.ndim == 1:
                 _ids = _ids.unsqueeze(axis=0)
-            origin_valid_mask = (_ids != self.config.pad_token_id).astype(
-                paddle.float32
-            )
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            origin_valid_mask = (_ids != pad_token_id).astype(paddle.float32)
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
@@ -520,12 +521,13 @@ class StandardMoERouter(nn.Layer):
                 )
             else:
                 origin_input_ids = input_ids
-            origin_loss_mask = (
-                origin_input_ids != self.config.pad_token_id
-            ).astype(paddle.float32)
-            loss_mask = (input_ids != self.config.pad_token_id).astype(
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            origin_loss_mask = (origin_input_ids != pad_token_id).astype(
                 paddle.float32
             )
+            loss_mask = (input_ids != pad_token_id).astype(paddle.float32)
             loss_mask = loss_mask.reshape([-1])
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
@@ -968,15 +970,18 @@ class TopKRouter(StandardMoERouter):
                     input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
             if input_ids is not None:
+                pad_token_id = getattr(self.config, "pad_token_id", 0)
+                if pad_token_id is None:
+                    pad_token_id = 0
                 if self.sequence_parallel:
                     input_ids_none_zero_mask = (
-                        (input_ids != self.config.pad_token_id)
+                        (input_ids != pad_token_id)
                         .transpose([1, 0])
                         .reshape([-1, 1])
                     )
                 else:
                     input_ids_none_zero_mask = (
-                        input_ids != self.config.pad_token_id
+                        input_ids != pad_token_id
                     ).reshape([-1, 1])
                 batch_size_, seq_len_ = input_ids.shape
                 assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
