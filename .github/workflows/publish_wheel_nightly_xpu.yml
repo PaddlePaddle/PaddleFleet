@@ -9,6 +9,11 @@ on:
       - 'release/**'
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - "release/**"
+      - "develop"
+
 
 
 permissions: read-all
@@ -106,7 +111,6 @@ jobs:
           # pip cache dir
           python -m pip install --upgrade pip
           python -m pip install bce-python-sdk==0.8.74
-          python -m pip install requests
           python -m pip uninstall -y paddlepaddle-xpu fastdeploy-xpu paddlefleet
           python -m pip install --pre paddlepaddle-xpu -i https://www.paddlepaddle.org.cn/packages/nightly/xpu-p800
           '
@@ -151,33 +155,31 @@ jobs:
           tar -xf bos_new.tar.gz -C bos
           cd dist
           git rev-parse HEAD > commitid
+          ls paddlefleet-*.whl | head -n1 > paddlefleet-${{ matrix.xpu.bos_XPU }}-linux_x86_64.whl.name
           if [[ "${{ github.event_name }}" != "push" ]]; then
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet
+            # python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
-            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet
+            # python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet
           else
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet
+            # python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
-            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
-          # upload to paddletest
-          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
-          python notify_paddle_link.py  ${{ matrix.xpu.bos_XPU }} paddlefleet-*.whl paddlefleet
           '
 
       - name: Upload paddlefleet-ops wheel
@@ -185,34 +187,43 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           cd dist_ops
           git rev-parse HEAD > commitid
+          ls paddlefleet_ops-*.whl | head -n1 > paddlefleet_ops-${{ matrix.xpu.bos_XPU }}-linux_x86_64.whl.name
           if [[ "${{ github.event_name }}" != "push" ]]; then
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             cp paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
-            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
           else
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             cp paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
-            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
-          # upload to paddletest
-          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
-          python notify_paddle_link.py  ${{ matrix.xpu.bos_XPU }} paddlefleet_ops-*.whl paddlefleet-ops
           '
+
+      - name: Upload wheel name artifacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: whl-name-${{ matrix.xpu.bos_XPU }}-linux_x86_64
+          path: |
+            dist/paddlefleet-${{ matrix.xpu.bos_XPU }}-linux_x86_64.whl.name
+            dist_ops/paddlefleet_ops-${{ matrix.xpu.bos_XPU }}-linux_x86_64.whl.name
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Cleanup
         if: ${{ always() }}
@@ -220,3 +231,32 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+
+  upload-to-paddletest:
+    needs: publish-wheel-xpu
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    runs-on:
+      group: APPROVAL
+    env:
+      PR_ID: ${{ github.event.pull_request.number || '0' }}
+      COMMIT_ID: ${{ github.event.pull_request.head.sha || github.sha }}
+      BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        xpu:
+          - {bos_XPU: xpu-p800, platform: linux_x86_64, py_version: cp310}
+    steps:
+      - name: Download wheel name artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: whl-name-${{ matrix.xpu.bos_XPU }}-${{ matrix.xpu.platform }}
+
+      - name: Upload wheel to paddletest
+        run: |
+          python -m pip install requests
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          WHEEL_FILE=$(cat dist/paddlefleet-${{ matrix.xpu.bos_XPU }}-${{ matrix.xpu.platform }}.whl.name)
+          OPS_WHEEL_FILE=$(cat dist_ops/paddlefleet_ops-${{ matrix.xpu.bos_XPU }}-${{ matrix.xpu.platform }}.whl.name)
+          python notify_paddle_link.py ${{ matrix.xpu.bos_XPU }} ${WHEEL_FILE} paddlefleet
+          python notify_paddle_link.py ${{ matrix.xpu.bos_XPU }} ${OPS_WHEEL_FILE} paddlefleet-ops
