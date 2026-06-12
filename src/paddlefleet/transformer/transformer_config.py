@@ -851,6 +851,14 @@ class TransformerConfig(ModelParallelConfig):
     path.
     """
 
+    csa_sparse_attn_backend: str = "tilelang"
+    """CSA sparse attention backend.
+
+    One of {"tilelang", "cudnn"}. Default "tilelang" uses the TileLang
+    sparse MQA kernel. "cudnn" uses the FlashMLA sparse forward kernel and
+    cuDNN DSA backward kernel.
+    """
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.
@@ -896,6 +904,7 @@ class TransformerConfig(ModelParallelConfig):
         "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
         "csa_tilelang_enable_sparse_attn": "csa_tilelang_enable_sparse_attn",
         "csa_indexer_backend": "csa_indexer_backend",
+        "csa_sparse_attn_backend": "csa_sparse_attn_backend",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -1173,6 +1182,11 @@ class TransformerConfig(ModelParallelConfig):
             if self.csa_indexer_backend not in {"tilelang", "cudnn"}:
                 raise ValueError(
                     f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
+                    "Must be one of {'tilelang', 'cudnn'}."
+                )
+            if self.csa_sparse_attn_backend not in {"tilelang", "cudnn"}:
+                raise ValueError(
+                    f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'tilelang', 'cudnn'}."
                 )
 

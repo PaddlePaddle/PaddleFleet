@@ -19,6 +19,8 @@ from unittest import mock
 import numpy as np
 import paddle
 
+from paddlefleet.transformer.transformer_config import TransformerConfig
+
 try:
     import paddlefleet_ops
 
@@ -75,8 +77,13 @@ class TestSparseMQAFlashMLAForward(unittest.TestCase):
             q, kv, attn_sink, topk_idxs, sm_scale=self.softmax_scale
         )
 
-        flash_out, flash_lse, _ = sparse_mqa.flash_mla_sparse_attn(
-            q, kv, attn_sink, topk_idxs, sm_scale=self.softmax_scale
+        flash_out, flash_lse = sparse_mqa.sparse_attn(
+            q,
+            kv,
+            attn_sink,
+            topk_idxs,
+            sm_scale=self.softmax_scale,
+            backend="cudnn",
         )
 
         # flash_mla uses a different lse computation from tilelang
@@ -140,6 +147,15 @@ class TestSparseMQAFlashMLAForward(unittest.TestCase):
             return_value=(10, 0),
         ):
             self.assertEqual(sparse_mqa._get_topk_alignment(), 64)
+
+        with self.assertRaisesRegex(
+            ValueError, "csa_sparse_attn_backend='paddle' is invalid"
+        ):
+            config = TransformerConfig(
+                experimental_attention_variant="dsv4_hybrid",
+                csa_compress_ratios=[0],
+                csa_sparse_attn_backend="paddle",
+            )
 
 
 if __name__ == "__main__":

@@ -2312,14 +2312,18 @@ class CompressedSparseAttention(FleetLayer):
             self.config,
             "csa_tilelang_enable_sparse_attn",
         ):
-            from paddlefleet.tilelang_ops import csa_sparse_attn
+            from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
 
+            sparse_attn_backend = getattr(
+                self.config, "csa_sparse_attn_backend", "tilelang"
+            )
             output = csa_sparse_attn(
                 query,
                 kv_full,
                 attn_sink_fp32,
                 topk_idxs,
                 softmax_scale,
+                backend=sparse_attn_backend,
             )
         else:
             output = unfused_compressed_sparse_attn(
