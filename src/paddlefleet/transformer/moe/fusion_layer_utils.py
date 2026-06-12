@@ -47,6 +47,14 @@ if paddlefleet_ops.is_sonic_moe_available():
 logger = logging.getLogger(__name__)
 
 
+def _build_tokens_per_expert_from_topk(topk_indices, num_experts):
+    valid = topk_indices >= 0
+    valid_experts = topk_indices[valid].cast(paddle.int32)
+    return paddle.bincount(valid_experts, minlength=num_experts).cast(
+        paddle.int32
+    )
+
+
 class UnZipNode:
     """
     UnZipNode 类用于对输入的token 矩阵根据分发索引进行解压操作,得到专家需要处理的 token。
@@ -2192,11 +2200,7 @@ def run_sonic_moe(
     stream_id = paddle.device.current_stream()
 
     if tokens_per_expert is None:
-        valid = topk_indices >= 0
-        valid_experts = topk_indices[valid].cast(paddle.int32)
-        tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
-            paddle.int32
-        )
+        tokens_per_expert = _build_tokens_per_expert_from_topk(topk_indices, E)
 
     (
         expert_frequency_offset,
