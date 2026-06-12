@@ -1262,7 +1262,13 @@ class Compressor(nn.Layer):
             kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
             # kv: [b, actual_n_compressed, head_dim]
 
-            kv = self.norm(kv.cast(x.dtype))
+            if getattr(self.config, "high_precision_compressor", False):
+                with paddle.amp.auto_cast(enable=False):
+                    var = kv.square().mean(-1, keepdim=True)
+                    kv = kv * paddle.rsqrt(var + self.norm.variance_epsilon)
+                    kv = (self.norm.weight.cast("float32") * kv).cast(x.dtype)
+            else:
+                kv = self.norm(kv.cast(x.dtype))
 
             # Pad to n_compressed before RoPE
             if actual_n_compressed < n_compressed:
