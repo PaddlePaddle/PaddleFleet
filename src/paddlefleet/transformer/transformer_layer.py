@@ -1226,19 +1226,18 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        with paddle.enable_grad():
-            hidden_states = (
-                self.self_attention_hyper_connection.fused_h_res_h_post_bda(
-                    h_res=h_res,
-                    original_residual=original_residual,
-                    h_post=h_post,
-                    layer_output_with_bias=attention_output_with_bias,
-                    dropout_prob=self.hidden_dropout_prob,
-                    training=self.training,
-                    fused=self.config.bias_dropout_fusion,
-                )
+        hidden_states = (
+            self.self_attention_hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=attention_output_with_bias,
+                dropout_prob=self.hidden_dropout_prob,
+                training=self.training,
+                fused=self.config.bias_dropout_fusion,
             )
-            hidden_states = hidden_states.to(ori_dtype)
+        )
+        hidden_states = hidden_states.to(ori_dtype)
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -1335,17 +1334,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        with paddle.enable_grad():
-            hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
-                h_res=h_res,
-                original_residual=original_residual,
-                h_post=h_post,
-                layer_output_with_bias=mlp_output_with_bias,
-                dropout_prob=self.hidden_dropout_prob,
-                training=self.training,
-                fused=self.config.bias_dropout_fusion,
-            )
-            hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
+            h_res=h_res,
+            original_residual=original_residual,
+            h_post=h_post,
+            layer_output_with_bias=mlp_output_with_bias,
+            dropout_prob=self.hidden_dropout_prob,
+            training=self.training,
+            fused=self.config.bias_dropout_fusion,
+        )
+        hidden_states = hidden_states.to(ori_dtype)
 
         if is_first_fwd:
             hidden_states.stop_gradient = False

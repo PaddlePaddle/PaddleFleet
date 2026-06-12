@@ -33,6 +33,8 @@ from paddlefleet.transformer.attention import (
     CrossAttentionSublayersSpec,
     SelfAttention,
     SelfAttentionSublayersSpec,
+    SelfAttentionVHA,
+    SelfAttentionVHASublayersSpec,
     _apply_ec_complex_3d_mrope,
 )
 
@@ -295,15 +297,9 @@ class TestSelfAttentionGatedAttention(unittest.TestCase):
 
 
 class TestVHAAttentionInit(unittest.TestCase):
-    """Tests for VHA (Variable Head Attention) initialization and methods."""
+    """Tests for VHA (Virtual Head Attention) initialization and methods."""
 
-    @patch("paddlefleet.transformer.attention.build_spec_layer")
-    @patch("paddlefleet.transformer.attention.get_pg_size", return_value=1)
-    @patch(
-        "paddlefleet.transformer.attention.ProcessGroupCollection.use_mpu_process_groups"
-    )
-    def test_vha_creates_parameters(self, mock_pg, mock_size, mock_build):
-        """VHA init should create premix_weight, postmix_U, postmix_V."""
+    def _make_vha_attn(self, mock_pg, mock_build):
         mock_pg.return_value = MagicMock()
         mock_build.return_value = MagicMock()
 
@@ -312,8 +308,11 @@ class TestVHAAttentionInit(unittest.TestCase):
         config.num_attention_heads = 8
         config.num_key_value_heads = 4
         config.hidden_size = 64
-        config.use_vha_attention = True
+        config.v_head_dim = 16
         config.vha_postmix_rank = 2
+        config.vha_q_lora_rank = 16
+        config.swa_vha_q_lora_rank = 16
+        config.swa_vha_postmix_rank = None
         config.recompute_granularity = None
         config.recompute_modules = None
         config.use_bias = False
@@ -323,20 +322,31 @@ class TestVHAAttentionInit(unittest.TestCase):
         config.output_layer_init_method = MagicMock()
         config.tensor_model_parallel_size = 1
         config.sliding_window = None
+        config.attention_value_scale = None
+        config.gated_attention = False
 
-        spec = SelfAttentionSublayersSpec(
-            qkv_proj=MagicMock(),
+        spec = SelfAttentionVHASublayersSpec(
+            q_proj=MagicMock(),
+            k_proj=MagicMock(),
+            v_proj=MagicMock(),
             core_attention=MagicMock(),
             o_proj=MagicMock(),
         )
 
-        attn = SelfAttention(
+        return SelfAttentionVHA(
             config=config,
             sublayers_spec=spec,
             layer_number=1,
         )
-        self.assertTrue(attn.use_vha_attention)
-        # Check parameter shapes
+
+    @patch("paddlefleet.transformer.attention.build_spec_layer")
+    @patch("paddlefleet.transformer.attention.get_pg_size", return_value=1)
+    @patch(
+        "paddlefleet.transformer.attention.ProcessGroupCollection.use_mpu_process_groups"
+    )
+    def test_vha_creates_parameters(self, mock_pg, mock_size, mock_build):
+        """VHA init should create vha_premix_weight, vha_postmix_U, vha_postmix_V."""
+        attn = self._make_vha_attn(mock_pg, mock_build)
         self.assertEqual(list(attn.vha_premix_weight.shape), [4, 16, 16])
         self.assertEqual(list(attn.vha_postmix_U.shape), [8, 2])
         self.assertEqual(list(attn.vha_postmix_V.shape), [8, 2])
@@ -348,39 +358,8 @@ class TestVHAAttentionInit(unittest.TestCase):
     )
     def test_vha_premix_output_shape(self, mock_pg, mock_size, mock_build):
         """_apply_vha_premix should expand query from kv_heads to num_heads."""
-        mock_pg.return_value = MagicMock()
-        mock_build.return_value = MagicMock()
-
-        config = MagicMock()
-        config.head_dim = 16
-        config.num_attention_heads = 8
-        config.num_key_value_heads = 4
-        config.hidden_size = 64
-        config.use_vha_attention = True
-        config.vha_postmix_rank = 2
-        config.recompute_granularity = None
-        config.recompute_modules = None
-        config.use_bias = False
-        config.attention_bias = False
-        config.softmax_scale = None
-        config.init_method = MagicMock()
-        config.output_layer_init_method = MagicMock()
-        config.tensor_model_parallel_size = 1
-        config.sliding_window = None
-
-        spec = SelfAttentionSublayersSpec(
-            qkv_proj=MagicMock(),
-            core_attention=MagicMock(),
-            o_proj=MagicMock(),
-        )
-
-        attn = SelfAttention(
-            config=config,
-            sublayers_spec=spec,
-            layer_number=1,
-        )
-        # Input: [batch, seq, num_heads_per_partition, head_dim]
-        # num_heads_per_partition = num_attention_heads // num_key_value_heads = 8 // 4 = 2
+        attn = self._make_vha_attn(mock_pg, mock_build)
+        # Input: [batch, seq, num_attention_heads // num_key_value_heads, q_head_dim] = [2,4,2,16]
         query = paddle.randn([2, 4, 2, 16])
         out = attn._apply_vha_premix(query)
         # Output: [batch, seq, num_attention_heads, head_dim]
@@ -393,43 +372,10 @@ class TestVHAAttentionInit(unittest.TestCase):
     )
     def test_vha_postmix_identity_at_init(self, mock_pg, mock_size, mock_build):
         """_apply_vha_postmix should be near-identity at init (V=0)."""
-        mock_pg.return_value = MagicMock()
-        mock_build.return_value = MagicMock()
-
-        config = MagicMock()
-        config.head_dim = 16
-        config.num_attention_heads = 8
-        config.num_key_value_heads = 4
-        config.hidden_size = 64
-        config.use_vha_attention = True
-        config.vha_postmix_rank = 2
-        config.recompute_granularity = None
-        config.recompute_modules = None
-        config.use_bias = False
-        config.attention_bias = False
-        config.softmax_scale = None
-        config.init_method = MagicMock()
-        config.output_layer_init_method = MagicMock()
-        config.tensor_model_parallel_size = 1
-        config.sliding_window = None
-
-        spec = SelfAttentionSublayersSpec(
-            qkv_proj=MagicMock(),
-            core_attention=MagicMock(),
-            o_proj=MagicMock(),
-        )
-
-        attn = SelfAttention(
-            config=config,
-            sublayers_spec=spec,
-            layer_number=1,
-        )
-        # Input: [batch, seq, num_heads * v_head_dim]
+        attn = self._make_vha_attn(mock_pg, mock_build)
         attn_out = paddle.randn([2, 4, 8 * 16])
         result = attn._apply_vha_postmix(attn_out)
-        # V is initialized to 0, so postmix should be identity
         self.assertEqual(list(result.shape), list(attn_out.shape))
-        # delta should be 0 since V=0
         diff = (result - attn_out).abs().max().item()
         self.assertAlmostEqual(diff, 0.0, places=5)
 

@@ -50,7 +50,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         with self.assertRaises(NotImplementedError) as ctx:
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 query,
                 key,
                 value,
@@ -73,7 +72,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         with self.assertRaises(NotImplementedError) as ctx:
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 query,
                 key,
                 value,
@@ -97,7 +95,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 query,
                 key,
                 value,
@@ -129,7 +126,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
             with self.assertRaises(AssertionError) as ctx:
                 FlashMaskContextParallel.forward(
                     mock_ctx,
-                    mock_config,
                     query,
                     key,
                     value,
@@ -173,7 +169,6 @@ class TestFlashMaskContextParallelForward(unittest.TestCase):
             ):
                 result = FlashMaskContextParallel.forward(
                     mock_ctx,
-                    mock_config,
                     query,
                     key,
                     value,

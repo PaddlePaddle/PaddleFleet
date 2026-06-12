@@ -25,7 +25,6 @@ sys.path.insert(
 
 
 import unittest
-from unittest.mock import MagicMock, patch
 
 
 class TestBackendSpecProviderProtocol(unittest.TestCase):
@@ -127,15 +126,7 @@ class TestLocalSpecProviderLayerNorm(unittest.TestCase):
 class TestLocalSpecProviderCoreAttention(unittest.TestCase):
     """Test LocalSpecProvider.core_attention method."""
 
-    @patch(
-        "paddlefleet.models.backends.get_context_parallel_group",
-        return_value=None,
-    )
-    @patch(
-        "paddlefleet.models.backends.get_context_parallel_world_size",
-        return_value=1,
-    )
-    def test_no_cp_returns_dot_product_attention(self, mock_size, mock_group):
+    def test_returns_dot_product_attention(self):
         from paddlefleet.models.backends import LocalSpecProvider
         from paddlefleet.transformer.dot_product_attention import (
             DotProductAttention,
@@ -144,24 +135,6 @@ class TestLocalSpecProviderCoreAttention(unittest.TestCase):
         provider = LocalSpecProvider()
         result = provider.core_attention()
         self.assertEqual(result, DotProductAttention)
-
-    @patch(
-        "paddlefleet.models.backends.get_context_parallel_group",
-        return_value=MagicMock(),
-    )
-    @patch(
-        "paddlefleet.models.backends.get_context_parallel_world_size",
-        return_value=4,
-    )
-    def test_cp_returns_cp_dot_product_attention(self, mock_size, mock_group):
-        from paddlefleet.models.backends import LocalSpecProvider
-        from paddlefleet.transformer.dot_product_attention import (
-            CPDotProductAttention,
-        )
-
-        provider = LocalSpecProvider()
-        result = provider.core_attention()
-        self.assertEqual(result, CPDotProductAttention)
 
 
 class TestLocalSpecProviderGroupedMLPLayers(unittest.TestCase):

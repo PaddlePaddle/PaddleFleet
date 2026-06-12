@@ -452,6 +452,27 @@ class GPTEmbedding(FleetLayer):
                     )
                     if self.config.clone_scatter_output_in_embedding:
                         decoder_input = decoder_input.clone()
+            # CP scatter for the plain (no-MTP, no-multimodal) path must happen
+            # before rope generation so that get_rotary_seq_len sees local seq len.
+            if (
+                not self.multimodal_embedding
+                and not (
+                    self.config.num_nextn_predict_layers
+                    and self.config.num_nextn_predict_layers > 0
+                    and not self.config.mtp_load_weight_only
+                )
+                and get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                assert not self.sequence_parallel, (
+                    "sequence_parallel is not supported when context_parallel scatter "
+                    "is applied in the plain (no-MTP, no-multimodal) path before RoPE "
+                    "generation."
+                )
+                decoder_input = ContextParallelScatterOp.apply(
+                    decoder_input, axis=1, mode=self.config.cp_balance_mode
+                )
+
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
         rotary_pos_cos = None

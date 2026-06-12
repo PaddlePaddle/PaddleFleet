@@ -160,7 +160,7 @@ if _CUTILE_AVAILABLE:
     ) -> tuple[Tensor, Tensor]:
         original_shape = input_logits.shape
         hc = original_shape[-1]
-        N_batch = input_logits.numel() // (hc * hc)
+        N_batch = input_logits.size // (hc * hc)
         TILE_SIZE = math.gcd(N_batch, 128)
         out = paddle.empty(shape=[N_batch, hc, hc], dtype=input_logits.dtype)
         M_init = paddle.empty(shape=[N_batch, hc, hc], dtype=input_logits.dtype)
@@ -188,7 +188,7 @@ if _CUTILE_AVAILABLE:
     ) -> Tensor:
         original_shape = grad_output.shape
         hc = original_shape[-1]
-        N_batch = grad_output.numel() // (hc * hc)
+        N_batch = grad_output.size // (hc * hc)
         TILE_SIZE = math.gcd(N_batch, 128)
         ws_M = paddle.empty(
             shape=[N_batch * 2 * num_iterations, hc, hc], dtype="float32"
@@ -1233,7 +1233,7 @@ else:
             f"got shape {list(input_logits.shape)}"
         )
         hc = input_logits.shape[-1]
-        N_batch = input_logits.numel() // (hc * hc)
+        N_batch = input_logits.size // (hc * hc)
         assert N_batch <= _INT32_MAX, (
             f"fused_sinkhorn: N_batch={N_batch} exceeds int32 max ({_INT32_MAX})"
         )
@@ -1343,7 +1343,7 @@ else:
             f"fused_proj_rms: N={N} exceeds max supported tile size 256. "
             f"weight.shape={list(weight.shape)}. Check if weight needs transposing."
         )
-        M = x.numel() // K
+        M = x.size // K
         assert M <= _INT32_MAX, (
             f"fused_proj_rms: M={M} (x reshaped to [M, K]) exceeds int32 max ({_INT32_MAX})"
         )
