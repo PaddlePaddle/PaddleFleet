@@ -237,6 +237,7 @@ jobs:
           PY_VERSION_SHORT="${PY_VERSION//./}"
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            echo "testing..."
           else
             # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
             if [[ ${{ matrix.cuda.bos_CUDA }} == cu129 ]]; then
@@ -525,6 +526,7 @@ jobs:
           cd dist
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            echo "testing..."
           else
             # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
             export AK=paddle
