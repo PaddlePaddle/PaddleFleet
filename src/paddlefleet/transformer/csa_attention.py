@@ -390,7 +390,8 @@ def _apply_rope(
     config: TransformerConfig,
     rotary_seq_len: int,
     ratio: int = 1,
-    doc_lens_cutoff: Tensor | None = None,
+    doc_lens_cutoff: Tensor | None = None,  # for token compressed, such as kv
+    doc_lens: Tensor | None = None,  # for token not compressed, such as q
     position_offset: int = 0,
 ) -> Tensor:
     """Apply RoPE to the last pos_dim dims, leaving first nope_dim unchanged.
@@ -409,14 +410,17 @@ def _apply_rope(
         doc_lens_cutoff: per-doc cutoff lengths for compressed RoPE (ratio > 1)
         position_offset: global position offset for CP (cp_rank * sq_local)
     """
-    if doc_lens_cutoff is not None:
-        assert ratio > 1, (
-            "Document cutoff RoPE is only used for compressed positions."
-        )
+    assert not (doc_lens_cutoff is not None and doc_lens is not None), (
+        "Both doc_lens_cutoff and doc_lens are set, but only one is needed, or both of them are none."
+    )
+    if doc_lens_cutoff is not None:  # KV token + document mask
         compressed_doc_lens = (doc_lens_cutoff // ratio).cast("int32")
         max_compressed_doc_len = int(compressed_doc_lens.max().item())
         max_cutoff_doc_len = max_compressed_doc_len * ratio
         result = rotary_pos_emb_module(max_cutoff_doc_len, packed_seq=False)
+    elif doc_lens is not None:  # Q token + document mask
+        max_doc_len = int(doc_lens.max().item())
+        result = rotary_pos_emb_module(max_doc_len, packed_seq=False)
     else:
         total_seq_len = (
             (rotary_seq_len + position_offset) * ratio
@@ -432,7 +436,7 @@ def _apply_rope(
     # applied in the Megatron DSv4 CSA path, so keep Paddle CSA identical here.
     mscale = 1.0
     # freqs: [1, total_seq_len, pos_dim]
-    if doc_lens_cutoff is not None:
+    if doc_lens_cutoff is not None:  # KV token + document mask
         freqs = freqs[:, :max_cutoff_doc_len:ratio, :, :]
         doc_freqs = [
             freqs[:, : int(doc_len.item()), :, :]
@@ -455,7 +459,33 @@ def _apply_rope(
                 axis=1,
             )
         freqs = freqs[:, :rotary_seq_len, :, :]
-    elif ratio > 1:
+    elif doc_lens is not None:  # Q token + document mask
+        freqs = freqs[:, :max_doc_len, :, :]
+        doc_freqs = [
+            freqs[:, : int(doc_len.item()), :, :]
+            for doc_len in doc_lens
+            if int(doc_len.item()) > 0
+        ]
+
+        if doc_freqs:
+            freqs = paddle.concat(doc_freqs, axis=1)
+        else:
+            freqs = freqs[:, :0, :, :]
+        if freqs.shape[1] < rotary_seq_len:
+            pad_len = rotary_seq_len - freqs.shape[1]
+            freqs = paddle.concat(
+                [
+                    freqs,
+                    paddle.zeros(
+                        [1, pad_len, 1, freqs.shape[-1]], dtype=freqs.dtype
+                    ),
+                ],
+                axis=1,
+            )
+        freqs = freqs[
+            :, position_offset : position_offset + rotary_seq_len, :, :
+        ]
+    elif ratio > 1:  # CP without document mask -> KV
         freqs = freqs[:, position_offset * ratio : total_seq_len : ratio, :][
             :, :rotary_seq_len, :
         ]
@@ -1432,7 +1462,11 @@ class CSAIndexer(nn.Layer):
         compressor so that indexer K is computed over the full global sequence.
         """
         b, sq, _ = x.shape
-
+        doc_lens = (
+            get_doc_lens(startend_row_indices)
+            if startend_row_indices is not None
+            else None
+        )
         # Q path
         q, _ = self.linear_wq_b(qr)  # [b, sq, n_heads * head_dim]
         q = q.reshape([b, sq, self.index_n_heads, self.index_head_dim])
@@ -1445,6 +1479,7 @@ class CSAIndexer(nn.Layer):
                 self.config,
                 sq,
                 ratio=1,
+                doc_lens=doc_lens,
                 position_offset=position_offset,
             )
         q = rotate_activation(q)
