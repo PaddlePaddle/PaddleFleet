@@ -12,17 +12,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit test: verify tilelang vs cudnn backends for CSA sparse attention.
+"""Verify TileLang and cuDNN CSA sparse attention backends agree."""
 
-Tests various shapes (small/large batch, seq, heads, topk) and checks:
-  1. Both backends run without error
-  2. Numerical agreement between backends (cosine sim, max abs diff)
-  3. Backward gradients agree
-"""
+import unittest
 
 import paddle
 
-paddle.set_device("gpu:0")
+try:
+    import paddlefleet_ops
+
+    from paddlefleet.tilelang_ops.attn import sparse_mqa
+
+    _HAS_FLASH_MLA = (
+        paddlefleet_ops.is_flash_mla_available()
+        and sparse_mqa._flash_mla_sparse_fwd is not None
+    )
+except (ImportError, RuntimeError, AttributeError):
+    _HAS_FLASH_MLA = False
+
+try:
+    from paddlefleet.cudnn_ops import csa_sparse_attn_bwd_cudnn
+
+    _HAS_CUDNN_SPARSE_BWD = callable(csa_sparse_attn_bwd_cudnn)
+except (ImportError, RuntimeError, AttributeError):
+    _HAS_CUDNN_SPARSE_BWD = False
+
+
+TEST_CASES = [
+    (1, 128, 256, 64, 512, 64, "small-basic"),
+    (2, 128, 256, 64, 512, 64, "batch2"),
+    (4, 128, 256, 64, 512, 64, "batch4"),
+    (1, 64, 128, 64, 512, 64, "tiny-seq"),
+    (1, 256, 512, 64, 512, 128, "medium-seq"),
+    (1, 512, 1024, 64, 512, 128, "large-seq"),
+    (1, 1, 256, 64, 512, 64, "single-token"),
+    (2, 1, 128, 64, 512, 64, "single-token-batch2"),
+    (2, 256, 512, 64, 512, 192, "large-topk-192"),
+    (1, 128, 512, 64, 512, 256, "large-topk-256"),
+    (8, 64, 128, 64, 512, 64, "batch8"),
+    (1, 1, 64, 64, 512, 64, "minimal"),
+]
+
+COS_THRESHOLDS = {
+    "out": 0.99,
+    "dq": 0.95,
+    "dkv": 0.95,
+    "d_sink": 0.95,
+}
 
 
 def cosine_sim(a, b):
@@ -39,25 +75,28 @@ def max_abs_diff(a, b):
     return float((a.cast("float32") - b.cast("float32")).abs().max())
 
 
-def make_inputs(B, S, S_kv, H, D, topk, dtype="bfloat16"):
-    """MQA layout: q=[B,S,H,D], kv=[B,S_kv,D] (single KV head, compressed)."""
-    q = paddle.randn([B, S, H, D]).cast(dtype)
+def make_inputs(batch_size, seq_len, kv_seq_len, num_heads, head_dim, topk):
+    q = paddle.randn([batch_size, seq_len, num_heads, head_dim]).cast(
+        "bfloat16"
+    )
     q.stop_gradient = False
-    # kv is MQA-style: [B, S_kv, D] where D == head_dim
-    kv = paddle.randn([B, S_kv, D]).cast(dtype)
+
+    kv = paddle.randn([batch_size, kv_seq_len, head_dim]).cast("bfloat16")
     kv.stop_gradient = False
-    attn_sink = paddle.randn([H]).cast("float32") * 0.1
+
+    attn_sink = paddle.randn([num_heads]).cast("float32") * 0.1
     attn_sink.stop_gradient = False
-    # Random topk indices in [0, S_kv)
-    topk_idxs = paddle.randint(0, S_kv, [B, S, topk]).cast("int32")
-    softmax_scale = 1.0 / (D**0.5)
+
+    topk_idxs = paddle.randint(0, kv_seq_len, [batch_size, seq_len, topk]).cast(
+        "int32"
+    )
+    softmax_scale = 1.0 / (head_dim**0.5)
     return q, kv, attn_sink, topk_idxs, softmax_scale
 
 
 def run_forward_backward(q, kv, attn_sink, topk_idxs, softmax_scale, backend):
     from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
 
-    # Clone inputs for independent gradient computation
     q_c = q.detach().clone()
     q_c.stop_gradient = False
     kv_c = kv.detach().clone()
@@ -68,111 +107,83 @@ def run_forward_backward(q, kv, attn_sink, topk_idxs, softmax_scale, backend):
     out = csa_sparse_attn(
         q_c, kv_c, attn_sink_c, topk_idxs, softmax_scale, backend=backend
     )
-    loss = out.sum()
-    loss.backward()
+    out.sum().backward()
 
     return out, q_c.grad, kv_c.grad, attn_sink_c.grad
 
 
-def run_single_shape(B, S, S_kv, H, D, topk, label=""):
-    print(f"\n{'=' * 60}")
-    print(
-        f"Test: {label}  B={B}, S={S}, S_kv={S_kv}, H={H}, D={D}, topk={topk}"
-    )
-    print(f"{'=' * 60}")
-
+def run_single_shape(
+    batch_size, seq_len, kv_seq_len, num_heads, head_dim, topk
+):
     q, kv, attn_sink, topk_idxs, softmax_scale = make_inputs(
-        B, S, S_kv, H, D, topk
+        batch_size, seq_len, kv_seq_len, num_heads, head_dim, topk
     )
 
-    # --- tilelang ---
-    try:
-        out_tl, dq_tl, dkv_tl, dsink_tl = run_forward_backward(
-            q, kv, attn_sink, topk_idxs, softmax_scale, backend="tilelang"
-        )
-        print(f"  tilelang forward OK, out shape={list(out_tl.shape)}")
-    except Exception as e:
-        print(f"  tilelang FAILED: {e}")
-        return False
+    out_tl, dq_tl, dkv_tl, dsink_tl = run_forward_backward(
+        q, kv, attn_sink, topk_idxs, softmax_scale, backend="tilelang"
+    )
+    out_cu, dq_cu, dkv_cu, dsink_cu = run_forward_backward(
+        q, kv, attn_sink, topk_idxs, softmax_scale, backend="cudnn"
+    )
 
-    # --- cudnn ---
-    try:
-        out_cu, dq_cu, dkv_cu, dsink_cu = run_forward_backward(
-            q, kv, attn_sink, topk_idxs, softmax_scale, backend="cudnn"
-        )
-        print(f"  cudnn forward OK, out shape={list(out_cu.shape)}")
-    except Exception as e:
-        print(f"  cudnn FAILED: {e}")
-        return False
+    if dsink_tl is None or dsink_cu is None:
+        return False, {"d_sink": None}
 
-    # --- Compare forward ---
-    cos_out = cosine_sim(out_tl, out_cu)
-    mad_out = max_abs_diff(out_tl, out_cu)
-    print(f"  Forward: cosine={cos_out:.6f}, max_abs_diff={mad_out:.6f}")
+    metrics = {
+        "out": (cosine_sim(out_tl, out_cu), max_abs_diff(out_tl, out_cu)),
+        "dq": (cosine_sim(dq_tl, dq_cu), max_abs_diff(dq_tl, dq_cu)),
+        "dkv": (cosine_sim(dkv_tl, dkv_cu), max_abs_diff(dkv_tl, dkv_cu)),
+        "d_sink": (
+            cosine_sim(dsink_tl, dsink_cu),
+            max_abs_diff(dsink_tl, dsink_cu),
+        ),
+    }
+    passed = all(
+        metrics[name][0] > COS_THRESHOLDS[name] for name in COS_THRESHOLDS
+    )
+    return passed, metrics
 
-    # --- Compare backward ---
-    cos_dq = cosine_sim(dq_tl, dq_cu)
-    mad_dq = max_abs_diff(dq_tl, dq_cu)
-    print(f"  dq:      cosine={cos_dq:.6f}, max_abs_diff={mad_dq:.6f}")
 
-    cos_dkv = cosine_sim(dkv_tl, dkv_cu)
-    mad_dkv = max_abs_diff(dkv_tl, dkv_cu)
-    print(f"  dkv:     cosine={cos_dkv:.6f}, max_abs_diff={mad_dkv:.6f}")
+@unittest.skipUnless(
+    paddle.is_compiled_with_cuda(),
+    "CSA sparse attention backend comparison requires CUDA",
+)
+@unittest.skipUnless(
+    _HAS_FLASH_MLA and _HAS_CUDNN_SPARSE_BWD,
+    "CSA sparse attention backend comparison requires FlashMLA and cuDNN sparse backward",
+)
+class TestCSASparseAttentionBackends(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            paddle.set_device("gpu:0")
+        except Exception as exc:
+            raise unittest.SkipTest(f"gpu:0 is not available: {exc}")
+        paddle.seed(2026)
 
-    if dsink_tl is not None and dsink_cu is not None:
-        cos_dsink = cosine_sim(dsink_tl, dsink_cu)
-        mad_dsink = max_abs_diff(dsink_tl, dsink_cu)
-        print(
-            f"  d_sink:  cosine={cos_dsink:.6f}, max_abs_diff={mad_dsink:.6f}"
-        )
-
-    # Thresholds for bf16
-    passed = cos_out > 0.99 and cos_dq > 0.95
-    print(f"  PASS: {passed}")
-    return passed
+    def test_tilelang_and_cudnn_backends_match(self):
+        for case in TEST_CASES:
+            (
+                batch_size,
+                seq_len,
+                kv_seq_len,
+                num_heads,
+                head_dim,
+                topk,
+                label,
+            ) = case
+            with self.subTest(label=label):
+                passed, metrics = run_single_shape(
+                    batch_size,
+                    seq_len,
+                    kv_seq_len,
+                    num_heads,
+                    head_dim,
+                    topk,
+                )
+                self.assertTrue(passed, f"{label} metrics={metrics}")
+                paddle.device.cuda.empty_cache()
 
 
 if __name__ == "__main__":
-    # DSv4 uses H=64 heads, D=512 (head_dim for kv is H*D compressed)
-    # topk alignment: SM100 requires multiples of 64
-    test_cases = [
-        # (B, S, S_kv, H, D, topk, label)
-        # Basic shapes
-        (1, 128, 256, 64, 512, 64, "small-basic"),
-        (2, 128, 256, 64, 512, 64, "batch2"),
-        (4, 128, 256, 64, 512, 64, "batch4"),
-        # Varying sequence lengths
-        (1, 64, 128, 64, 512, 64, "tiny-seq"),
-        (1, 256, 512, 64, 512, 128, "medium-seq"),
-        (1, 512, 1024, 64, 512, 128, "large-seq"),
-        # Edge: single query token
-        (1, 1, 256, 64, 512, 64, "single-token"),
-        (2, 1, 128, 64, 512, 64, "single-token-batch2"),
-        # Large topk (non-aligned to 64)
-        (2, 256, 512, 64, 512, 192, "large-topk-192"),
-        (1, 128, 512, 64, 512, 256, "large-topk-256"),
-        # Stress: large batch + large seq
-        (8, 64, 128, 64, 512, 64, "batch8"),
-        # Minimal: smallest valid config
-        (1, 1, 64, 64, 512, 64, "minimal"),
-    ]
-
-    results = []
-    for B, S, S_kv, H, D, topk, label in test_cases:
-        try:
-            passed = run_single_shape(B, S, S_kv, H, D, topk, label)
-            results.append((label, passed))
-        except Exception as e:
-            print(f"  EXCEPTION: {e}")
-            results.append((label, False))
-        # Free GPU memory
-        paddle.device.cuda.empty_cache()
-
-    print(f"\n\n{'=' * 60}")
-    print("SUMMARY")
-    print(f"{'=' * 60}")
-    for label, passed in results:
-        status = "PASS" if passed else "FAIL"
-        print(f"  [{status}] {label}")
-    total_pass = sum(1 for _, p in results if p)
-    print(f"\n  {total_pass}/{len(results)} passed")
+    unittest.main()
