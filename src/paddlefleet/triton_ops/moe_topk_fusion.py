@@ -381,6 +381,7 @@ def _routing_map_fwd_kernel(
     n_experts,
     seq_len,  # explicit seq_len for boundary checks during block processing
     moe_k,  # runtime parameter: the actual moe_k value
+    pad_token_id,  # runtime parameter: token id used for padding
     has_input_ids: tl.constexpr,
     has_pure_text_mask: tl.constexpr,
     BLOCK_M: tl.constexpr,  # block size along the sequence dim (e.g., 32, 64)
@@ -428,8 +429,10 @@ def _routing_map_fwd_kernel(
     is_valid = tl.full((BLOCK_M,), 1, dtype=tl.int1)
 
     if has_input_ids:
-        in_ids = tl.load(input_ids_ptr + offs_m, mask=mask_m, other=0)
-        is_valid = is_valid & (in_ids != 0)
+        in_ids = tl.load(
+            input_ids_ptr + offs_m, mask=mask_m, other=pad_token_id
+        )
+        is_valid = is_valid & (in_ids != pad_token_id)
 
     if has_pure_text_mask:
         p_mask = tl.load(is_pure_text_line_ptr + offs_m, mask=mask_m, other=0)
@@ -516,7 +519,11 @@ def _routing_map_fwd_kernel(
 
 
 def routing_map_fusion_forward(
-    gate_probs, topk_indices, input_ids=None, is_pure_text_line=None
+    gate_probs,
+    topk_indices,
+    input_ids=None,
+    is_pure_text_line=None,
+    pad_token_id=0,
 ):
     """
     Get routing_map using Triton kernel.
@@ -526,6 +533,7 @@ def routing_map_fusion_forward(
         topk_indices: Topk expert indices [seq_len, moe_k]
         input_ids: Input token IDs [seq_len] (optional, for padding mask)
         is_pure_text_line: Pure text line mask [seq_len] (optional)
+        pad_token_id: Token ID treated as padding (default 0)
 
     Returns:
         routing_map: Routing map [seq_len, n_experts]
@@ -572,6 +580,7 @@ def routing_map_fusion_forward(
         n_experts=n_experts,
         seq_len=seq_len,
         moe_k=moe_k,
+        pad_token_id=pad_token_id,
         has_input_ids=input_ids is not None,
         has_pure_text_mask=is_pure_text_line is not None,
         BLOCK_M=BLOCK_M,
