@@ -201,6 +201,7 @@ jobs:
             # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
+            echo "Testing..."
           else
             # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
             export AK=paddle

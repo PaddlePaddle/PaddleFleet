@@ -7,7 +7,6 @@ on:
       - "develop"
     tags:
       - 'v*'
-
 permissions: read-all
 
 env:
@@ -23,7 +22,7 @@ jobs:
   check-packages-changes:
     name: Check packages directory changes
     runs-on:
-      group: Fleet-H-single-card
+      group: APPROVAL
     outputs:
       packages_changed: ${{ steps.check.outputs.packages_changed }}
     steps:
@@ -52,7 +51,7 @@ jobs:
     needs: check-packages-changes
     if: needs.check-packages-changes.outputs.packages_changed == 'true'
     runs-on:
-      group: Fleet-H-single-card
+      group: APPROVAL
     env:
       AK: ${{ secrets.BOS_CREDENTIAL_AK }}
       SK: ${{ secrets.BOS_CREDENTIAL_SK }}
@@ -587,7 +586,7 @@ jobs:
         if: github.ref_type != 'tag'
         run: |
           set -e
-          python -m pip install --break-system-packages requests
+          python -m pip install requests
           wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
           WHEEL_FILE=$(cat "${{ matrix.flavor.name_key }}")
           echo "Notify paddletest for ${WHEEL_FILE} (${{ matrix.flavor.bos_CUDA }})"
