@@ -9,10 +9,6 @@ on:
       - 'release/**'
     tags:
       - 'v*'
-  pull_request:
-    branches:
-      - "release/**"
-      - "develop"
 
 permissions: read-all
 
@@ -155,28 +151,27 @@ jobs:
           git rev-parse HEAD > commitid
           ls paddlefleet-*.whl | head -n1 > paddlefleet-${{ matrix.xpu.bos_XPU }}-linux_x86_64.whl.name
           if [[ "${{ github.event_name }}" != "push" ]]; then
-            # python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet
             export AK=paddle
             export SK=paddle
-            # python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            # python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
-            # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            # python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet
-            echo "Testing..."
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet
           else
-            # python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet
             export AK=paddle
             export SK=paddle
-            # python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            # python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
-            # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py paddlefleet-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           fi
           if [[ "${{ github.ref_type }}" != "tag" ]]; then
             export AK=paddle
@@ -193,28 +188,27 @@ jobs:
           git rev-parse HEAD > commitid
           ls paddlefleet_ops-*.whl | head -n1 > paddlefleet_ops-${{ matrix.xpu.bos_XPU }}-linux_x86_64.whl.name
           if [[ "${{ github.event_name }}" != "push" ]]; then
-            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
             export AK=paddle
             export SK=paddle
-            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             cp paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            # python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
-            # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
-            echo "Testing..."
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
           else
-            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.xpu.bos_XPU }}/paddlefleet-ops
             export AK=paddle
             export SK=paddle
-            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.xpu.bos_XPU }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             cp paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            # python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
-            # python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
+            python ../bos/BosClient.py commitid paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.xpu.bos_XPU }}
           fi
           if [[ "${{ github.ref_type }}" != "tag" ]]; then
             export AK=paddle
