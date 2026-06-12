@@ -34,6 +34,7 @@ def sparse_mqa_fwd(
     block_I=64,
     num_stages=2,
     threads=256,
+    D_chunk=128,
 ):
     assert dim == tilelang.math.next_power_of_2(dim), (
         f"dim must be power of 2, got {dim}"
@@ -58,6 +59,7 @@ def sparse_mqa_fwd(
     attn_sink_shape = [heads]
     indices_dtype = T.int32
     dtype = T.bfloat16
+    score_dtype = T.tfloat32
     accum_dtype = T.float32
 
     H = heads
@@ -65,6 +67,9 @@ def sparse_mqa_fwd(
     BI = block_I
     NI = tilelang.cdiv(topk, block_I)
     D = dim
+    DC = D_chunk
+    assert D % DC == 0, f"dim ({D}) must be divisible by D_chunk ({DC})"
+    N_DC = D // DC
 
     if heads > 64:
         assert heads % 64 == 0, "heads should be a multiple of 64"
@@ -87,15 +92,19 @@ def sparse_mqa_fwd(
             bx,
             by,
         ):
-            Q_shared = T.alloc_shared([H_per_block, D], dtype)
-            KV_shared = T.alloc_shared([BI, D], dtype)
-            O_shared = T.alloc_shared([H_per_block, D], dtype)
-            Lse_shared = T.alloc_shared([H_per_block], accum_dtype)
+            Q_shared = T.alloc_shared([H_per_block, DC], score_dtype)
+            KV_shared = T.alloc_shared([BI, DC], score_dtype)
+            KV_shared_bf16 = T.alloc_shared([BI, DC], dtype)
+            S_shared = T.alloc_shared([H_per_block, BI], dtype)
+            O_shared = T.alloc_shared([H_per_block, DC], dtype)
             mask = T.alloc_fragment([BI], "bool")
 
-            acc_o = T.alloc_fragment([H_per_block, D], accum_dtype)
+            # Per-chunk output accumulators (GEMM-compatible layout)
+            acc_o_0 = T.alloc_fragment([H_per_block, DC], accum_dtype)
+            acc_o_1 = T.alloc_fragment([H_per_block, DC], accum_dtype)
+            acc_o_2 = T.alloc_fragment([H_per_block, DC], accum_dtype)
+            acc_o_3 = T.alloc_fragment([H_per_block, DC], accum_dtype)
             acc_s = T.alloc_fragment([H_per_block, BI], accum_dtype)
-            S_shared = T.alloc_shared([H_per_block, BI], dtype)
             sumexp = T.alloc_fragment([H_per_block], accum_dtype)
             sumexp_i = T.alloc_fragment([H_per_block], accum_dtype)
             alpha = T.alloc_fragment([H_per_block], accum_dtype)
@@ -103,7 +112,10 @@ def sparse_mqa_fwd(
             m_i_prev = T.alloc_fragment([H_per_block], accum_dtype)
             m_i_log2 = T.alloc_fragment([H_per_block], accum_dtype)
 
-            T.fill(acc_o, 0)
+            T.fill(acc_o_0, 0)
+            T.fill(acc_o_1, 0)
+            T.fill(acc_o_2, 0)
+            T.fill(acc_o_3, 0)
             T.fill(sumexp, 0)
             T.fill(m_i, -(2**30))
 
@@ -113,28 +125,34 @@ def sparse_mqa_fwd(
             H0 = 0 if REPLICATE_H == 1 else (bx % REPLICATE_H) * 64
             H1 = H0 + H_per_block
 
-            T.copy(Q[b_i, s_i, H0:H1, :D], Q_shared)
-
-            for i_i in T.Pipelined(NI, num_stages=num_stages):
+            for i_i in T.Serial(NI):
                 for bi_i in T.Parallel(BI):
                     mask[bi_i] = Indices[b_i, s_i, i_i * BI + bi_i] != -1
 
-                for bi_i, d_i in T.Parallel(BI, D):
-                    KV_shared[bi_i, d_i] = KV[
-                        b_i, Indices[b_i, s_i, i_i * BI + bi_i], d_i
-                    ]
-
+                # Score GEMM: K-reduction across D-chunks (tf32)
                 for h_i, bi_i in T.Parallel(H_per_block, BI):
                     acc_s[h_i, bi_i] = T.if_then_else(
                         mask[bi_i], 0, -T.infinity(acc_s.dtype)
                     )
-                T.gemm(
-                    Q_shared,
-                    KV_shared,
-                    acc_s,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                )
+                for d_c in range(N_DC):
+                    T.copy(
+                        Q[b_i, s_i, H0:H1, d_c * DC : (d_c + 1) * DC], Q_shared
+                    )
+                    for bi_i, d_i in T.Parallel(BI, DC):
+                        KV_shared[bi_i, d_i] = KV[
+                            b_i,
+                            Indices[b_i, s_i, i_i * BI + bi_i],
+                            d_c * DC + d_i,
+                        ]
+                    T.gemm(
+                        Q_shared,
+                        KV_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow,
+                    )
+
+                # Online softmax
                 T.copy(m_i, m_i_prev)
                 T.reduce_max(acc_s, m_i, dim=1, clear=False)
                 for h_i in T.Parallel(H_per_block):
@@ -148,16 +166,60 @@ def sparse_mqa_fwd(
                 T.reduce_sum(acc_s, sumexp_i, dim=1)
                 for h_i in T.Parallel(H_per_block):
                     sumexp[h_i] = sumexp[h_i] * alpha[h_i] + sumexp_i[h_i]
-                for h_i, d_i in T.Parallel(H_per_block, D):
-                    acc_o[h_i, d_i] = acc_o[h_i, d_i] * alpha[h_i]
+                # Rescale per-chunk accumulators
+                for h_i, d_i in T.Parallel(H_per_block, DC):
+                    acc_o_0[h_i, d_i] = acc_o_0[h_i, d_i] * alpha[h_i]
+                for h_i, d_i in T.Parallel(H_per_block, DC):
+                    acc_o_1[h_i, d_i] = acc_o_1[h_i, d_i] * alpha[h_i]
+                for h_i, d_i in T.Parallel(H_per_block, DC):
+                    acc_o_2[h_i, d_i] = acc_o_2[h_i, d_i] * alpha[h_i]
+                for h_i, d_i in T.Parallel(H_per_block, DC):
+                    acc_o_3[h_i, d_i] = acc_o_3[h_i, d_i] * alpha[h_i]
 
+                # Value GEMMs (unrolled per D-chunk)
                 T.copy(acc_s, S_shared)
+                for bi_i, d_i in T.Parallel(BI, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        b_i, Indices[b_i, s_i, i_i * BI + bi_i], 0 * DC + d_i
+                    ]
                 T.gemm(
-                    S_shared, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullRow
+                    S_shared,
+                    KV_shared_bf16,
+                    acc_o_0,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+                for bi_i, d_i in T.Parallel(BI, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        b_i, Indices[b_i, s_i, i_i * BI + bi_i], 1 * DC + d_i
+                    ]
+                T.gemm(
+                    S_shared,
+                    KV_shared_bf16,
+                    acc_o_1,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+                for bi_i, d_i in T.Parallel(BI, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        b_i, Indices[b_i, s_i, i_i * BI + bi_i], 2 * DC + d_i
+                    ]
+                T.gemm(
+                    S_shared,
+                    KV_shared_bf16,
+                    acc_o_2,
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
+                for bi_i, d_i in T.Parallel(BI, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        b_i, Indices[b_i, s_i, i_i * BI + bi_i], 3 * DC + d_i
+                    ]
+                T.gemm(
+                    S_shared,
+                    KV_shared_bf16,
+                    acc_o_3,
+                    policy=T.GemmWarpPolicy.FullRow,
                 )
 
-            # Update max to include sink logit for numerical stability
-            # m_i_log2: global max in log2 space (includes both KV scores and sink)
+            # AttnSink epilogue
             for h_i in T.Parallel(H_per_block):
                 m_i_log2[h_i] = T.max(
                     m_i[h_i] * sm_scale,
@@ -169,12 +231,26 @@ def sparse_mqa_fwd(
                 sumexp[h_i] = sumexp[h_i] * alpha[h_i] + T.exp2(
                     AttnSink[H0 + h_i] * 1.44269504 - m_i_log2[h_i]
                 )
-            for h_i, d_i in T.Parallel(H_per_block, D):
-                acc_o[h_i, d_i] = acc_o[h_i, d_i] * alpha[h_i] / sumexp[h_i]
+            for h_i, d_i in T.Parallel(H_per_block, DC):
+                acc_o_0[h_i, d_i] = acc_o_0[h_i, d_i] * alpha[h_i] / sumexp[h_i]
+            for h_i, d_i in T.Parallel(H_per_block, DC):
+                acc_o_1[h_i, d_i] = acc_o_1[h_i, d_i] * alpha[h_i] / sumexp[h_i]
+            for h_i, d_i in T.Parallel(H_per_block, DC):
+                acc_o_2[h_i, d_i] = acc_o_2[h_i, d_i] * alpha[h_i] / sumexp[h_i]
+            for h_i, d_i in T.Parallel(H_per_block, DC):
+                acc_o_3[h_i, d_i] = acc_o_3[h_i, d_i] * alpha[h_i] / sumexp[h_i]
             for h_i in T.Parallel(H_per_block):
                 sumexp[h_i] = T.log2(sumexp[h_i]) + m_i_log2[h_i]
 
-            T.copy(acc_o, Output[b_i, s_i, H0:H1, :])
+            # Write output per chunk
+            T.copy(acc_o_0, O_shared)
+            T.copy(O_shared, Output[b_i, s_i, H0:H1, 0 * DC : 1 * DC])
+            T.copy(acc_o_1, O_shared)
+            T.copy(O_shared, Output[b_i, s_i, H0:H1, 1 * DC : 2 * DC])
+            T.copy(acc_o_2, O_shared)
+            T.copy(O_shared, Output[b_i, s_i, H0:H1, 2 * DC : 3 * DC])
+            T.copy(acc_o_3, O_shared)
+            T.copy(O_shared, Output[b_i, s_i, H0:H1, 3 * DC : 4 * DC])
             T.copy(sumexp, Lse[b_i, s_i, H0:H1])
 
     return main
@@ -189,6 +265,7 @@ def sparse_mqa_fwd_interface(
     block_I=64,
     num_stages=2,
     threads=256,
+    D_chunk=128,
 ):
     """Forward interface for DSv4 sparse MQA attention."""
     assert (
@@ -215,6 +292,7 @@ def sparse_mqa_fwd_interface(
         block_I=block_I,
         num_stages=num_stages,
         threads=threads,
+        D_chunk=D_chunk,
     )
     out, lse = kernel(q, kv, attn_sink, topk_idxs)
     return out, lse
