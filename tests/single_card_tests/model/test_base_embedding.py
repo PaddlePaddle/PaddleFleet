@@ -90,6 +90,7 @@ class TestGPTEmbeddingFillFeatureBranch(unittest.TestCase):
         cfg.num_nextn_predict_layers = None
         cfg.mtp_load_weight_only = False
         cfg.sequence_parallel = False
+        cfg.pad_token_id = 0
         emb.config = cfg
 
         input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 0, 5, 0]])
