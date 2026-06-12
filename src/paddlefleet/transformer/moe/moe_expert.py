@@ -437,7 +437,16 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.weight2.fp8 = (w2_fp8, w2_scale)
         self.weight2.transposed_fp8 = (w2t_fp8, w2t_scale)
 
-    def forward(self, hidden_states, topk_indices, topk_scores, use_fp8=False):
+    def forward(
+        self,
+        hidden_states,
+        topk_indices,
+        topk_scores,
+        use_fp8=False,
+        tokens_per_expert=None,
+        fp8_scale=None,
+        fp8_combine_grad_handle=None,
+    ):
         self.convert_weights_to_sonic_layout()
         hidden_states = run_sonic_moe(
             hidden_states,
@@ -448,6 +457,9 @@ class SonicMoEExpert(GroupedMLPExpert):
             self.weight1,
             self.weight2,
             use_fp8,
+            tokens_per_expert=tokens_per_expert,
+            fp8_scale=fp8_scale,
+            fp8_combine_grad_handle=fp8_combine_grad_handle,
         )
         return hidden_states
 
