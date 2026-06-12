@@ -255,7 +255,7 @@ jobs:
           pip install --break-system-packages --upgrade pip
           pip install --break-system-packages uv
           python -m pip install --break-system-packages bce-python-sdk==0.8.74
-          pip install --break-system-packages requests
+          python -m pip install --break-system-packages requests
           '
 
       - name: Build wheel
@@ -295,7 +295,7 @@ jobs:
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           # upload to paddletest
-          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py --no-check-certificate
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
           python notify_paddle_link.py ${{ matrix.cuda.notify_CUDA }} paddlefleet-*.whl paddlefleet
           '
 
