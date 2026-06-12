@@ -35,7 +35,8 @@ jobs:
   consume:
     name: Consume on APPROVAL (${{ matrix.cuda.bos_CUDA }}-${{ matrix.cuda.platform }})
     needs: produce
-    runs-on: APPROVAL
+    runs-on:
+      group: APPROVAL
     strategy:
       fail-fast: false
       matrix:
