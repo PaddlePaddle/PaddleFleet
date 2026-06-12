@@ -16,7 +16,7 @@ on:
 permissions: read-all
 
 concurrency:
-  group: ${{ github.workflow }}-all-${{ github.sha }}
+  group: ${{ github.workflow }}-${{ github.ref_name }}-all-${{ github.sha }}
   cancel-in-progress: true
 
 env:
@@ -119,7 +119,7 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
-          git submodule update --init --recursive
+          uv cache clean paddlepaddle-gpu
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
@@ -144,6 +144,7 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu126/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu129/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu130/paddlefleet
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu132/paddlefleet
             export AK=paddle
             export SK=paddle
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
@@ -153,6 +154,7 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu126/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu129/paddlefleet
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu130/paddlefleet
+            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu132/paddlefleet
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           # upload to paddletest
@@ -251,7 +253,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
-          git submodule update --init --recursive
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"

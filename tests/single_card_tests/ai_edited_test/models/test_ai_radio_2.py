@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 import paddle
 
 from paddlefleet.models.vision.radio import HAVE_EINOPS, RADIOViTModel
+from paddlefleet.transformer.paddle_norm import LayerNorm as FleetLayerNorm
 
 
 def _make_mock_config():
@@ -275,7 +276,7 @@ class TestRADIOViTModelForwardCUDA(unittest.TestCase):
         model = RADIOViTModel(
             transformer_config=config,
             transformer_layer_spec=spec,
-            ln_pre_impl=paddle.nn.LayerNorm,
+            ln_pre_impl=FleetLayerNorm,
             img_h=16,
             img_w=16,
             patch_dim=16,

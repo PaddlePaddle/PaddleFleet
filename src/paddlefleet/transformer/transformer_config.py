@@ -73,6 +73,11 @@ class TransformerConfig(ModelParallelConfig):
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
 
+    enable_mtp_magic_send: bool = False
+    """When True, use magic send mechanism for MTP: broadcast input_ids to last PP stage
+    and re-embed there, instead of pre-computing shifted embeddings at first stage
+    and concatenating them through the pipeline."""
+
     experimental_dataflow: bool = False
     """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
     separate input instead of being appended to attn_mask_startend_row_indices.
@@ -194,6 +199,53 @@ class TransformerConfig(ModelParallelConfig):
     rotary_interleaved: bool = False
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
     first half and second half (LLaMa style). Default to False."""
+
+    use_vha_attention: bool = False
+    """If True, enables VHA premix/postmix extensions in standard self-attention."""
+
+    vha_postmix_rank: int | None = None
+    """Rank of the VHA postmix low-rank head mixing matrices."""
+
+    vha_q_lora_rank: int | None = None
+    """Rank of the VHA Q low-rank projection. When set, Q projects to this rank per head before premix expansion."""
+
+    swa_vha_q_lora_rank: int | None = None
+    """VHA Q low-rank projection rank for SWA layers. Defaults to swa_head_dim in __post_init__."""
+
+    swa_vha_postmix_rank: int | None = None
+    """VHA postmix rank for SWA layers. Defaults to swa_num_attention_heads // 4."""
+
+    attention_value_scale: float | None = None
+    """Scale factor applied to the value tensor before attention computation. If None, no scaling
+    is applied. Used in architectures like MiMo that scale V for training stability."""
+
+    add_full_attention_sink_bias: bool = False
+    """Whether to add a learnable attention sink bias for full (non-SWA) attention layers.
+    When True, softmax_type is promoted to 'learnable' for full attention layers."""
+
+    add_swa_attention_sink_bias: bool = True
+    """Whether to add a learnable attention sink bias for sliding window attention (SWA) layers.
+    When True, softmax_type is promoted to 'learnable' for SWA layers."""
+
+    swa_head_dim: int | None = None
+    """Dimension of query/key heads for sliding window attention layers. Defaults to head_dim."""
+
+    swa_v_head_dim: int | None = None
+    """Dimension of value heads for sliding window attention layers. Defaults to v_head_dim."""
+
+    swa_num_attention_heads: int | None = None
+    """Number of attention heads for sliding window attention layers. Defaults to num_attention_heads."""
+
+    swa_num_key_value_heads: int | None = None
+    """Number of key/value heads (GQA groups) for sliding window attention layers. Defaults to num_key_value_heads."""
+
+    swa_rope_theta: float | None = None
+    """The base period of the RoPE embeddings for sliding window attention layers. Defaults to rope_theta."""
+
+    head_wise_swa_ratio: float = 0.0
+    """Ratio of KV heads that use sliding window attention within an SWA layer.
+    0.0 means all heads use SWA; values between 0 and 1 create a mix where
+    the first (1 - ratio) * num_heads are full attention and the rest are SWA."""
 
     multi_latent_attention: bool = False
     """Whether to use multi-latent attention."""
@@ -496,6 +548,12 @@ class TransformerConfig(ModelParallelConfig):
     List[str]: each layer has its separate communication type.
     """
 
+    cp_balance_mode: str = "dualchunk_allgather"
+    """Context parallel scatter/gather layout mode.
+    "dualchunk_allgather": balanced front+rear chunk splitting (default).
+    "contiguous_allgather": simple rank-order contiguous slicing.
+    """
+
     ####################
     # fp8
     ####################
@@ -516,6 +574,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_ue8m0: bool = False
     """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
+
+    use_fp8_qat: bool = False
+    """Whether to enable FP8 Quantization-Aware Training (QAT)."""
 
     ####################
     # initialization
@@ -585,12 +646,12 @@ class TransformerConfig(ModelParallelConfig):
     mhc_init_gating_factor: float = 0.01
     """Initial value of Gating Factor (alpha in paper)."""
 
-    mhc_recompute_layer_num: int | None = None
-    """Number of layers per mHC recompute block.
+    use_fused_mhc: bool = False
+    """Use fused triton kernels for mHC operations (sinkhorn, h_aggregate, h_post_bda, proj_rms).
+    Requires cuTile to be available."""
 
-    When set, every `mhc_recompute_layer_num` layers form a recompute block.
-    If None, all layers in the transformer block share a single recompute block.
-    Must be a positive integer when set."""
+    high_precision_mhc: bool = True
+    """Use high precision (float32) for mHC forward and backward computation."""
 
     ####################
     # miscellaneous
@@ -623,7 +684,7 @@ class TransformerConfig(ModelParallelConfig):
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
 
-    v_head_dim: int = 128
+    v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
     rope_type: str = "yarn"
@@ -786,6 +847,13 @@ class TransformerConfig(ModelParallelConfig):
     final sparse MQA attention TileLang path.
     """
 
+    csa_indexer_backend: str = "tilelang"
+    """CSA indexer backward backend.
+
+    One of {"tilelang", "cudnn"}. Default "tilelang" preserves the legacy
+    path.
+    """
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.
@@ -830,6 +898,7 @@ class TransformerConfig(ModelParallelConfig):
         "csa_tilelang_backend": "csa_tilelang_backend",
         "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
         "csa_tilelang_enable_sparse_attn": "csa_tilelang_enable_sparse_attn",
+        "csa_indexer_backend": "csa_indexer_backend",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -886,14 +955,52 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.enable_mtp_magic_send:
+            assert self.num_nextn_predict_layers == 1, (
+                "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
+            )
+            assert self.pipeline_model_parallel_size > 1, (
+                "enable_mtp_magic_send requires pipeline_model_parallel_size > 1"
+            )
+            if (
+                self.virtual_pipeline_model_parallel_size is not None
+                and self.virtual_pipeline_model_parallel_size > 1
+            ):
+                assert self.overlap_p2p_comm, (
+                    "enable_mtp_magic_send with vpp requires overlap_p2p_comm=True"
+                )
+                assert self.variable_seq_lengths, (
+                    "enable_mtp_magic_send with vpp requires variable_seq_lengths=True"
+                )
+
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
 
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
 
+        if self.v_head_dim is None:
+            self.v_head_dim = self.head_dim
+
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
+
+        if self.swa_head_dim is None:
+            self.swa_head_dim = self.head_dim
+        if self.swa_v_head_dim is None:
+            self.swa_v_head_dim = self.v_head_dim
+        if self.swa_num_attention_heads is None:
+            self.swa_num_attention_heads = self.num_attention_heads
+        if self.swa_num_key_value_heads is None:
+            self.swa_num_key_value_heads = self.num_key_value_heads
+        if self.swa_rope_theta is None:
+            self.swa_rope_theta = self.rope_theta
+
+        if self.vha_q_lora_rank is None:
+            self.vha_q_lora_rank = self.head_dim
+
+        if self.swa_vha_q_lora_rank is None:
+            self.swa_vha_q_lora_rank = self.swa_head_dim
 
         if self.num_key_value_heads % self.tensor_model_parallel_size != 0:
             raise ValueError(
@@ -1023,16 +1130,6 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        # Hyper-connection (mHC) validation
-        if self.enable_hyper_connections:
-            if self.mhc_recompute_layer_num is not None and (
-                not isinstance(self.mhc_recompute_layer_num, int)
-                or self.mhc_recompute_layer_num < 1
-            ):
-                raise ValueError(
-                    "mhc_recompute_layer_num must be a positive integer."
-                )
-
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:
@@ -1076,6 +1173,11 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "csa_tilelang_enable_sparse_attn=True requires csa_tilelang_backend='attention_paddle_compat'."
                 )
+            if self.csa_indexer_backend not in {"tilelang", "cudnn"}:
+                raise ValueError(
+                    f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
+                    "Must be one of {'tilelang', 'cudnn'}."
+                )
 
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
@@ -1117,3 +1219,54 @@ class TransformerConfig(ModelParallelConfig):
                     f"num_experts_per_tok ({self.num_experts_per_tok}) "
                     f"when moe_n_hash_layers > 0."
                 )
+
+        if self.window_attn_skip_freq is not None:
+            if (
+                isinstance(self.window_attn_skip_freq, int)
+                and self.window_attn_skip_freq <= 0
+            ):
+                raise ValueError(
+                    f"window_attn_skip_freq must be a positive integer when "
+                    f"specified as int, but got {self.window_attn_skip_freq}."
+                )
+
+        if (
+            self.num_nextn_predict_layers > 0
+            and self.window_attn_skip_freq is not None
+        ):
+            if not isinstance(self.window_attn_skip_freq, list):
+                raise TypeError(
+                    f"window_attn_skip_freq must be a list of length "
+                    f"num_hidden_layers + num_nextn_predict_layers "
+                    f"({self.num_hidden_layers} + {self.num_nextn_predict_layers} = "
+                    f"{self.num_hidden_layers + self.num_nextn_predict_layers}) "
+                    f"when num_nextn_predict_layers > 0, "
+                    f"but got {type(self.window_attn_skip_freq).__name__} instead."
+                )
+            if (
+                len(self.window_attn_skip_freq)
+                != self.num_hidden_layers + self.num_nextn_predict_layers
+            ):
+                raise ValueError(
+                    f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
+                    f"must equal num_hidden_layers + num_nextn_predict_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
+                )
+
+        if (
+            self.num_nextn_predict_layers == 0
+            and self.window_attn_skip_freq is not None
+        ):
+            if (
+                isinstance(self.window_attn_skip_freq, list)
+                and len(self.window_attn_skip_freq) != self.num_hidden_layers
+            ):
+                raise ValueError(
+                    f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
+                    f"must equal num_hidden_layers ({self.num_hidden_layers})."
+                )
+
+        if not (0.0 <= self.head_wise_swa_ratio <= 1.0):
+            raise ValueError(
+                f"head_wise_swa_ratio must be between 0.0 and 1.0, "
+                f"but got {self.head_wise_swa_ratio}."
+            )

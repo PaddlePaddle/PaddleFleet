@@ -194,13 +194,18 @@ class EcosystemLibrary:
 
 def check_submodule_updated():
     if backends.IS_NVIDIA:
-        if not (
-            (PKG_ROOT / "third_party" / "DeepGEMM" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "DeepEP" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "HybridEP" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "quack" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "sonic-moe" / ".git").exists()
-            and (PKG_ROOT / "third_party" / "flash-attention" / ".git").exists()
+        third_parties = [
+            "DeepGEMM",
+            "DeepEP",
+            "HybridEP",
+            "quack",
+            "sonic-moe",
+            "flash-attention",
+            "FlashMLA",
+        ]
+        if not all(
+            (PKG_ROOT / "third_party" / third_party / ".git").exists()
+            for third_party in third_parties
         ):
             logger.error(
                 "\033[91m Found uninitialized submodules. Please use 'git submodule update --init --recursive' to fix!\033[0m"
@@ -322,10 +327,7 @@ def get_special_build_deps():
             else:
                 deps.append("nvidia-nvshmem-cu12>=3.3.9,<3.5")
         elif cuda_major == 13:
-            if cuda_minor == 0:
-                deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
-            else:
-                deps.append("nvidia-nvshmem-cu13>=3.3.9,<3.5")
+            deps.append("paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5")
         else:
             raise ValueError(
                 f"Unsupported CUDA version: {cuda_major}.{cuda_minor}."
@@ -412,6 +414,20 @@ def get_libs():
                 "flash_mask/flashmask_attention_v3/cutlass/include",
             ],
         ),
+        EcosystemLibrary(
+            name="FlashMLA",
+            source_rel_path="third_party/FlashMLA",
+            artifacts=[
+                Artifact("flash_mla", "flash_mla"),
+            ],
+            extra_env={
+                "PADDLE_CUDA_ARCH_LIST": "",
+                "FLASH_MLA_DISABLE_SM90": str("9.0" not in _deep_ep_arch),
+                "FLASH_MLA_DISABLE_SM100": str(
+                    (cuda_major, cuda_minor) <= (12, 8)
+                ),
+            },
+        ),
     ]
     if (cuda_major, cuda_minor) >= (12, 9):
         LIBRARIES.append(
@@ -445,6 +461,15 @@ def get_libs():
                 source_rel_path="third_party/sonic-moe",
                 artifacts=[
                     Artifact("sonicmoe", "sonicmoe"),
+                ],
+            )
+        )
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="cudnn",
+                source_rel_path="third_party/cudnn-frontend",
+                artifacts=[
+                    Artifact("cudnn", "cudnn"),
                 ],
             )
         )

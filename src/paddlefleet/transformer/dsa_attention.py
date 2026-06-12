@@ -80,10 +80,15 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
         Hadamard-transformed tensor of the same shape.
     """
     original_shape = x.shape
+    output_dtype = x.dtype
     dim = original_shape[-1]
     assert dim > 0 and (dim & (dim - 1)) == 0, (
         f"hadamard_transform requires dim to be a power of 2, got {dim}"
     )
+
+    # Megatron uses fast_hadamard_transform, whose bf16 path accumulates in fp32
+    # and casts back to bf16. Keep the same numeric contract here.
+    x = x.cast("float32")
 
     # Flatten batch dims: (..., dim) -> (batch, dim)
     x = x.reshape([-1, dim])
@@ -97,7 +102,7 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
         x = x.reshape([-1, dim])
         h *= 2
 
-    return x.reshape(original_shape) * scale
+    return (x.reshape(original_shape) * scale).cast(output_dtype)
 
 
 def rotate_activation(x: Tensor) -> Tensor:
@@ -535,9 +540,19 @@ def fused_qk_topk_naive(
         index_scores = index_scores + mask
 
     topk_k = min(index_topk, index_scores.shape[-1])
-    topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)[1]
+    topk_values, topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)
     topk_indices = paddle.clip(
         topk_indices, min=0, max=index_scores.shape[-1] - 1
+    )
+    # Mark indices whose scores are -inf as invalid (-1). This happens when
+    # a document-aware mask blocks cross-document compressed positions.
+    # The tilelang kernel handles this internally, but the naive path needs
+    # explicit invalidation so downstream sparse attention ignores them.
+    invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
+    topk_indices = paddle.where(
+        invalid_topk,
+        paddle.full_like(topk_indices, -1),
+        topk_indices,
     )
 
     return index_scores, topk_indices
@@ -949,37 +964,51 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         Returns:
             indexer_loss: scalar KL divergence loss
         """
-        # Step 1: Compute index_scores from (q, weights, k)
-        index_scores = _compute_index_scores_fused(q, weights, k)  # [b, sq, sk]
+        with paddle.amp.auto_cast(False):
+            # Step 1: Compute index_scores from (q, weights, k)
+            index_scores = _compute_index_scores_fused(
+                q, weights, k
+            )  # [b, sq, sk]
 
-        # Step 2: Apply mask and select topk
-        mask = _normalize_dsa_mask(mask)
-        if mask is not None:
-            masked_scores = index_scores + mask
-        else:
-            masked_scores = index_scores
-        topk_k = min(topk, masked_scores.shape[-1])
-        topk_indices = paddle.topk(masked_scores, k=topk_k, axis=-1)[1]
-        # Clamp indices to valid range: paddle.topk may return garbage indices
-        # for -inf input values
-        topk_indices = paddle.clip(
-            topk_indices, min=0, max=masked_scores.shape[-1] - 1
-        )
+            # Step 2: Apply mask and select topk
+            mask = _normalize_dsa_mask(mask)
+            if mask is not None:
+                masked_scores = index_scores + mask
+            else:
+                masked_scores = index_scores
+            topk_k = min(topk, masked_scores.shape[-1])
+            topk_values, topk_indices = paddle.topk(
+                masked_scores, k=topk_k, axis=-1
+            )
+            # Clamp indices to valid range: paddle.topk may return garbage indices
+            # for -inf input values
+            topk_indices = paddle.clip(
+                topk_indices, min=0, max=masked_scores.shape[-1] - 1
+            )
+            # Mark indices whose scores are -inf as invalid (-1). This happens
+            # when a document-aware mask blocks cross-document compressed
+            # positions.
+            invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
+            topk_indices = paddle.where(
+                invalid_topk,
+                paddle.full_like(topk_indices, -1),
+                topk_indices,
+            )
 
-        FusedDSAIndexerLoss._last_topk_indices = topk_indices.detach()
+            FusedDSAIndexerLoss._last_topk_indices = topk_indices.detach()
 
-        # Step 3: Compute KL loss (use masked_scores)
-        indexer_loss = _compute_dsa_indexer_loss(
-            masked_scores,
-            topk_indices,
-            query,
-            key,
-            softmax_scale,
-            loss_coeff,
-            sparse_loss,
-            tp_group,
-            causal_mask_override=mask,
-        )
+            # Step 3: Compute KL loss (use masked_scores)
+            indexer_loss = _compute_dsa_indexer_loss(
+                masked_scores,
+                topk_indices,
+                query,
+                key,
+                softmax_scale,
+                loss_coeff,
+                sparse_loss,
+                tp_group,
+                causal_mask_override=mask,
+            )
 
         ctx.save_for_backward(q, weights, k, query, key, topk_indices)
         ctx.softmax_scale = softmax_scale
@@ -1000,20 +1029,21 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         """
         q, weights, k, query, key, topk_indices = ctx.saved_tensor()
 
-        grad_q, grad_weights, grad_k = _bwd_fused_indexer_loss(
-            q,
-            weights,
-            k,
-            query,
-            key,
-            topk_indices,
-            ctx.softmax_scale,
-            ctx.loss_coeff,
-            ctx.sparse_loss,
-            grad_loss,
-            ctx.tp_group,
-            causal_mask_override=ctx.causal_mask_override,
-        )
+        with paddle.amp.auto_cast(False):
+            grad_q, grad_weights, grad_k = _bwd_fused_indexer_loss(
+                q,
+                weights,
+                k,
+                query,
+                key,
+                topk_indices,
+                ctx.softmax_scale,
+                ctx.loss_coeff,
+                ctx.sparse_loss,
+                grad_loss,
+                ctx.tp_group,
+                causal_mask_override=ctx.causal_mask_override,
+            )
 
         return grad_q, grad_weights, grad_k, None, None, None
 
@@ -1045,7 +1075,20 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
 class DSAIndexerLossLoggingHelper:
     """Helper class for logging sparse attention indexer losses across layers and ranks."""
 
-    tracker: dict = {}
+    tracker = {}
+    num_layers = None
+
+    @staticmethod
+    def get_total_num_layers(config):
+        mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
+        nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
+        return config.num_hidden_layers + (mtp_num_layers or nextn_num_layers)
+
+    @staticmethod
+    def register_total_num_layers(config):
+        DSAIndexerLossLoggingHelper.num_layers = (
+            DSAIndexerLossLoggingHelper.get_total_num_layers(config)
+        )
 
     @staticmethod
     def save_loss_to_tracker(
@@ -1084,11 +1127,30 @@ class DSAIndexerLossLoggingHelper:
         tracker["avg_group"] = None
 
     @staticmethod
-    def reduce_loss_in_tracker():
-        """Collect and reduce the indexer losses across ranks."""
+    def _infer_num_layers(num_layers: int | None = None):
+        if num_layers is not None:
+            return num_layers
         tracker = DSAIndexerLossLoggingHelper.tracker
+        if "values" in tracker:
+            return tracker["values"].shape[0]
+        return DSAIndexerLossLoggingHelper.num_layers
+
+    @staticmethod
+    def reduce_loss_in_tracker(num_layers: int | None = None):
+        """Collect and reduce the indexer losses across ranks.
+
+        PP all-reduce must be called on every rank in the pipeline group.
+        Ranks without local indexer layers lazily create a zero tracker so they
+        still participate in the collective and do not hang other ranks.
+        """
+        tracker = DSAIndexerLossLoggingHelper.tracker
+        num_layers = DSAIndexerLossLoggingHelper._infer_num_layers(num_layers)
         if "values" not in tracker:
-            return
+            if num_layers is None:
+                return
+            tracker["values"] = paddle.zeros([num_layers])
+            tracker["reduce_group"] = None
+            tracker["avg_group"] = None
         values = tracker["values"]
 
         # PP all-reduce
@@ -1121,6 +1183,8 @@ class DSAIndexerLossLoggingHelper:
         iteration: int,
         writer=None,
         total_loss_dict: dict | None = None,
+        num_layers: int | None = None,
+        csa_compress_ratios: list[int] | None = None,
     ):
         """Track the sparse attention indexer metrics for logging.
 
@@ -1129,15 +1193,28 @@ class DSAIndexerLossLoggingHelper:
             iteration: Current training iteration.
             writer: TensorBoard writer (optional).
             total_loss_dict: Dictionary to accumulate total losses (optional).
+            num_layers: Total number of layers with indexer metrics.
+            csa_compress_ratios: Per-layer CSA compress ratios.
         """
-        DSAIndexerLossLoggingHelper.reduce_loss_in_tracker()
+        num_layers = DSAIndexerLossLoggingHelper._infer_num_layers(num_layers)
+        DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(
+            num_layers=num_layers
+        )
         tracker = DSAIndexerLossLoggingHelper.tracker
         if "values" not in tracker:
             return
 
         indexer_loss_values = tracker["values"] * loss_scale
-        num_layers = indexer_loss_values.shape[0]
-        avg_indexer_loss = indexer_loss_values.sum() / num_layers
+        if csa_compress_ratios is not None:
+            num_indexer_layers = sum(
+                1 for ratio in csa_compress_ratios if ratio == 4
+            )
+        else:
+            num_indexer_layers = indexer_loss_values.shape[0]
+        if num_indexer_layers == 0:
+            DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
+            return
+        avg_indexer_loss = indexer_loss_values.sum() / num_indexer_layers
 
         if total_loss_dict is not None:
             if "indexer loss" in total_loss_dict:
@@ -1187,11 +1264,16 @@ class DSAttention(FleetLayer):
         softmax_scale: float,
         k_channels: int | None = None,
         v_channels: int | None = None,
+        is_mtp_layer: bool = False,
+        is_swa: bool = False,
+        num_attention_heads: int | None = None,
+        num_key_value_heads: int | None = None,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
     ):
         super().__init__(config=config)
 
+        DSAIndexerLossLoggingHelper.register_total_num_layers(config)
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
 
@@ -1393,7 +1475,9 @@ class DSAttention(FleetLayer):
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,
-                    num_layers=self.config.num_hidden_layers,
+                    num_layers=DSAIndexerLossLoggingHelper.get_total_num_layers(
+                        self.config
+                    ),
                 )
             core_attn_out = DSAIndexerLossAutoScaler.apply(
                 core_attn_out, indexer_loss

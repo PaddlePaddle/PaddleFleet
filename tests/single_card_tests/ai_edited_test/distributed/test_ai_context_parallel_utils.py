@@ -377,7 +377,6 @@ class TestContextParallelUtils(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 mock_q,
                 mock_q,
                 mock_q,
@@ -396,7 +395,6 @@ class TestContextParallelUtils(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 mock_q,
                 mock_q,
                 mock_q,
@@ -415,7 +413,6 @@ class TestContextParallelUtils(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 mock_q,
                 mock_q,
                 mock_q,
@@ -447,7 +444,6 @@ class TestContextParallelUtils(unittest.TestCase):
         ):
             FlashMaskContextParallel.forward(
                 mock_ctx,
-                mock_config,
                 mock_q,
                 mock_q,
                 mock_q,

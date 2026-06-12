@@ -100,6 +100,7 @@ def _make_hc_config(**overrides):
         "num_residual_streams": 4,
         "mhc_sinkhorn_iterations": 5,
         "mhc_init_gating_factor": 0.01,
+        "high_precision_mhc": True,
     }
     hc_defaults.update(overrides)
     return _make_config(**hc_defaults)
@@ -232,6 +233,33 @@ class TestHyperConnectionModule(unittest.TestCase):
         self.assertEqual(list(aggregated.shape), [10, self.C])
         self.assertEqual(list(h_res.shape), [10, self.n, self.n])
         self.assertEqual(list(h_post.shape), [10, self.n])
+
+    def test_forward_high_precision_mhc_switch(self):
+        """high_precision_mhc should choose float32 or bfloat16 compute output."""
+        cases = (
+            (True, paddle.float32),
+            (False, paddle.bfloat16),
+        )
+        for high_precision_mhc, expected_dtype in cases:
+            with self.subTest(high_precision_mhc=high_precision_mhc):
+                config = _make_hc_config(high_precision_mhc=high_precision_mhc)
+                module = HyperConnectionModule(config=config, layer_number=1)
+                module = paddle.amp.decorate(
+                    models=module, level="O2", dtype="bfloat16"
+                )
+                x = paddle.randn([2, 4, self.n * self.C]).astype("bfloat16")
+
+                aggregated, h_res, h_post = module(x)
+
+                self.assertEqual(
+                    module.config.high_precision_mhc, high_precision_mhc
+                )
+                self.assertEqual(aggregated.dtype, expected_dtype)
+                self.assertEqual(h_res.dtype, expected_dtype)
+                self.assertEqual(h_post.dtype, expected_dtype)
+                self.assertEqual(list(aggregated.shape), [2, 4, self.C])
+                self.assertEqual(list(h_res.shape), [2, 4, self.n, self.n])
+                self.assertEqual(list(h_post.shape), [2, 4, self.n])
 
     # ---------- compute_mappings ----------
 
@@ -413,6 +441,44 @@ class TestHyperConnectionModule(unittest.TestCase):
             fused=False,
         )
         self.assertFalse(paddle.isnan(result).any().item())
+
+    def test_fused_h_res_h_post_bda_high_precision_fast_path(self):
+        """high_precision_mhc should choose float32 or bfloat16 BDA output."""
+        B, S = 2, 4
+        cases = (
+            (True, paddle.float32),
+            (False, paddle.bfloat16),
+        )
+        for high_precision_mhc, expected_dtype in cases:
+            with self.subTest(high_precision_mhc=high_precision_mhc):
+                config = _make_hc_config(high_precision_mhc=high_precision_mhc)
+                module = HyperConnectionModule(config=config, layer_number=1)
+                module = paddle.amp.decorate(
+                    models=module, level="O2", dtype="bfloat16"
+                )
+                x = paddle.randn([B, S, self.n * self.C]).astype("bfloat16")
+                _, h_res, h_post = module(x)
+                layer_output = paddle.randn([B, S, self.C]).astype("bfloat16")
+                bias = paddle.randn([self.C]).astype("bfloat16")
+
+                result = module.fused_h_res_h_post_bda(
+                    h_res=h_res,
+                    original_residual=x,
+                    h_post=h_post,
+                    layer_output_with_bias=(layer_output, bias),
+                    dropout_prob=0.0,
+                    training=False,
+                    fused=False,
+                )
+
+                self.assertEqual(
+                    module.config.high_precision_mhc, high_precision_mhc
+                )
+                self.assertEqual(result.dtype, expected_dtype)
+                self.assertEqual(list(result.shape), [B, S, self.n * self.C])
+                self.assertFalse(
+                    paddle.isnan(result.astype("float32")).any().item()
+                )
 
     # ---------- input_expand / output_contract ----------
 

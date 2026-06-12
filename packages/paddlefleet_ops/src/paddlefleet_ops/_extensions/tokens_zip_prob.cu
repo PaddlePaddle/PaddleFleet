@@ -180,10 +180,14 @@ std::vector<paddle::Tensor> tokens_zip_prob_seq_subbatch_impl(
   int64_t zipped_rows = zipped_expertwise_rowmap_shape[0];
   int64_t num_expert = zipped_expertwise_rowmap_shape[1];
   int64_t topk = dispatched_indices_shape[1];
+  PD_CHECK(num_expert > 0,
+           "num_expert must be > 0 for tokens_zip_prob_seq_subbatch.");
   PD_CHECK(num_expert <= static_cast<int64_t>(std::numeric_limits<int>::max()),
            "num_expert must be <= INT_MAX for tokens_zip_prob_seq_subbatch.");
   PD_CHECK(topk <= static_cast<int64_t>(std::numeric_limits<int>::max()),
            "topk must be <= INT_MAX for tokens_zip_prob_seq_subbatch.");
+  PD_CHECK(subbatch_rows > 0,
+           "subbatch_rows must be > 0 for tokens_zip_prob_seq_subbatch.");
   int num_expert_int = static_cast<int>(num_expert);
   int topk_int = static_cast<int>(topk);
 

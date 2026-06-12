@@ -170,14 +170,30 @@ __global__ void VectorizedFusedSwiGLUBwd(const T* __restrict__ x,
         float silu_g = g_eff * sig_g;
         float swiglu_val = silu_g * v_eff;
 
-        local_d_scale_sum += dout * swiglu_val;
+        //   sum(swiglu_val.cast(dtype) * d_out.cast(scale_dtype))
+        // Same-type multiply preserves native precision (bf16*bf16→bf16)
+        // matching reference bit-exact; mixed types promote to float.
+        // Only applied to the clamp path to avoid affecting non-clamp
+        // numerical behaviour.
+        if constexpr (kHasClamp) {
+          if constexpr (std::is_same_v<T, ScaleT>) {
+            local_d_scale_sum += static_cast<float>(
+                static_cast<T>(swiglu_val) * static_cast<ScaleT>(dout_ptr[i]));
+          } else {
+            local_d_scale_sum +=
+                static_cast<float>(static_cast<T>(swiglu_val)) *
+                static_cast<float>(static_cast<ScaleT>(dout_ptr[i]));
+          }
+        } else {
+          local_d_scale_sum += dout * swiglu_val;
+        }
 
         float d_u = dout * s;
 
         if constexpr (kHasClamp) {
           dv_buffer[i] = static_cast<T>(d_u * silu_g * v_mask);
           float d_g_val =
-              d_u * v_eff * sig_g * (1.0f + g_eff * (1.0f - sig_g)) * g_mask;
+              d_u * sig_g * (1.0f + g_eff * (1.0f - sig_g)) * v_eff * g_mask;
           dg_buffer[i] = static_cast<T>(d_g_val);
         } else {
           dv_buffer[i] = static_cast<T>(d_u * silu_g);
@@ -290,8 +306,21 @@ __global__ void VectorizedFusedSwiGLUWeightedBwd(
         // forward result
         out_buffer[i] = static_cast<T>(swiglu_val * p);
 
-        // d_probs accumulation (sum of dout * swiglu_val, no scale multiplier)
-        local_d_probs_sum += dout * swiglu_val;
+        //   sum(swiglu_val.cast(dtype) * d_out.cast(probs_dtype))
+        // Same-type multiply preserves native precision (bf16*bf16→bf16)
+        // matching reference bit-exact; only applied to clamp path.
+        if constexpr (kHasClamp) {
+          if constexpr (std::is_same_v<T, ScaleT>) {
+            local_d_probs_sum += static_cast<float>(
+                static_cast<T>(swiglu_val) * static_cast<ScaleT>(dout_ptr[i]));
+          } else {
+            local_d_probs_sum +=
+                static_cast<float>(static_cast<T>(swiglu_val)) *
+                static_cast<float>(static_cast<ScaleT>(dout_ptr[i]));
+          }
+        } else {
+          local_d_probs_sum += dout * swiglu_val;
+        }
 
         // d_u = dout * p
         float d_u = dout * p;
@@ -299,7 +328,7 @@ __global__ void VectorizedFusedSwiGLUWeightedBwd(
         if constexpr (kHasClamp) {
           dv_buffer[i] = static_cast<T>(d_u * silu_g * v_mask);
           float d_g_val =
-              d_u * v_eff * sig_g * (1.0f + g_eff * (1.0f - sig_g)) * g_mask;
+              d_u * sig_g * (1.0f + g_eff * (1.0f - sig_g)) * v_eff * g_mask;
           dg_buffer[i] = static_cast<T>(d_g_val);
         } else {
           dv_buffer[i] = static_cast<T>(d_u * silu_g);
@@ -405,7 +434,12 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
   auto hidden2 = x.shape()[1];
   auto hidden_size = hidden2 / 2;
   auto d_x = paddle::empty_like(x);
+  // Align d_scale shape: keepdim semantics -> [rows, 1] for clamp path,
+  // empty_like for non-clamp (pre-existing behaviour).
   auto d_scale = paddle::empty_like(scale);
+  if constexpr (kHasClamp) {
+    d_scale = paddle::empty({rows, 1}, scale.dtype(), x.place());
+  }
 
   if (rows == 0 || hidden_size == 0) {
     return {d_x, d_scale};
@@ -475,6 +509,9 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
   int64_t hidden_size = hidden2 / 2;
   auto d_x = paddle::empty_like(x);
   auto d_probs = paddle::empty_like(probs);
+  if constexpr (kHasClamp) {
+    d_probs = paddle::empty({rows, 1}, probs.dtype(), x.place());
+  }
   auto out = paddle::empty({rows, hidden_size}, x.dtype(), x.place());
 
   if (rows == 0 || hidden_size == 0) {
@@ -620,12 +657,21 @@ PD_BUILD_GRAD_OP(fused_swiglu_scale)
     .Outputs({paddle::Grad("X"), paddle::Grad("Scale")})
     .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleBackward));
 
+// Clamp InferShape: d_scale always [rows, 1] matching Megatron keepdim
+// semantics.
+std::vector<std::vector<int64_t>> FusedGradClampInferShape(
+    std::vector<int64_t> x_shape,
+    std::vector<int64_t> scale_shape,
+    std::vector<int64_t> dout_shape) {
+  return {x_shape, {x_shape[0], 1}};
+}
+
 PD_BUILD_OP(fused_swiglu_scale_clamp_bwd)
     .Inputs({"X", "Scale", "DOut"})
     .Outputs({"DX", "DScale"})
     .Attrs({"clamp_value: double"})
     .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleClampBackward))
-    .SetInferShapeFn(PD_INFER_SHAPE(FusedGradInferShape))
+    .SetInferShapeFn(PD_INFER_SHAPE(FusedGradClampInferShape))
     .SetInferDtypeFn(PD_INFER_DTYPE(FusedGradInferDtype));
 
 PD_BUILD_OP(fused_swiglu_scale_clamp)
@@ -640,7 +686,8 @@ PD_BUILD_GRAD_OP(fused_swiglu_scale_clamp)
     .Inputs({"X", "Scale", paddle::Grad("Out")})
     .Outputs({paddle::Grad("X"), paddle::Grad("Scale")})
     .Attrs({"clamp_value: double"})
-    .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleClampBackward));
+    .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleClampBackward))
+    .SetInferShapeFn(PD_INFER_SHAPE(FusedGradClampInferShape));
 
 // ---- Weighted backward (fused forward + backward in one launch) ----
 
@@ -659,10 +706,19 @@ std::vector<paddle::DataType> WeightedBwdInferDtype(
   return {x_dtype, probs_dtype, x_dtype};
 }
 
+// Clamp InferShape: d_probs always [rows, 1] matching Megatron keepdim
+// semantics.
+std::vector<std::vector<int64_t>> WeightedBwdClampInferShape(
+    std::vector<int64_t> x_shape,
+    std::vector<int64_t> probs_shape,
+    std::vector<int64_t> dout_shape) {
+  return {x_shape, {x_shape[0], 1}, {x_shape[0], x_shape[1] / 2}};
+}
+
 PD_BUILD_OP(fused_swiglu_weighted_clamp_bwd)
     .Inputs({"X", "Probs", "DOut"})
     .Outputs({"DX", "DProbs", "Out"})
     .Attrs({"clamp_value: double"})
     .SetKernelFn(PD_KERNEL(FusedSwiGLUWeightedClampBackward))
-    .SetInferShapeFn(PD_INFER_SHAPE(WeightedBwdInferShape))
+    .SetInferShapeFn(PD_INFER_SHAPE(WeightedBwdClampInferShape))
     .SetInferDtypeFn(PD_INFER_DTYPE(WeightedBwdInferDtype));

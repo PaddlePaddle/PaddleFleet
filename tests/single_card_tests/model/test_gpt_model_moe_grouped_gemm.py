@@ -32,6 +32,9 @@ import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 
+REPO_FLAG = os.getenv("repo_flag")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
+
 
 def get_gpu_models_via_nvidia_smi():
     try:
@@ -62,6 +65,10 @@ version, cuda_minor = get_cuda_version()
 print("CUDA version:", version)
 
 
+@unittest.skipIf(
+    SKIP_TESTS,
+    f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')",
+)
 class TestGPTModel(unittest.TestCase):
     def setUp(self):
         seed = 46
