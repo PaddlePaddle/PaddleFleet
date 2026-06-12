@@ -1565,17 +1565,9 @@ class AllGatherTokenDispatcher(nn.Layer):
             topk_indices.detach().cast("int64"), self.moe_group
         )
         # Padding tokens have topk_indices == -1 (set by TopKRouter).
-        # Clean them: clip indices to >= 0 and zero out corresponding weights
-        # so that downstream bincount / SonicMoE kernels never see negative
-        # expert ids.  This mirrors the ``safe_indices`` logic in
-        # ``_indices_to_dense_metadata`` used by the deepep path.
+        # Keep the sentinel in indices so SonicMoE metadata can treat those
+        # slots as masked; only zero the corresponding routing weights below.
         self._padding_mask = self._global_topk_indices < 0
-        if self._padding_mask.any():
-            self._global_topk_indices = paddle.where(
-                self._padding_mask,
-                paddle.zeros_like(self._global_topk_indices),
-                self._global_topk_indices,
-            )
         # Router-local AllGather: every token has exactly one origin rank,
         # so the topk_weights gradient flowing back from sonic-moe's
         # _DownProjection (shape [seq_global, K]) must be *scattered* (slice
@@ -1659,8 +1651,13 @@ class AllGatherTokenDispatcher(nn.Layer):
         already complete.
         """
         indices = self._global_topk_indices
+        flat_indices = indices.reshape([-1]).cast("int64")
+        valid_indices = paddle.masked_select(
+            flat_indices,
+            flat_indices >= 0,
+        )
         tokens_per_expert = paddle.bincount(
-            indices.reshape([-1]).cast("int64"),
+            valid_indices,
             minlength=self.num_experts,
         )
         return (
