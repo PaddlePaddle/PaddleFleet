@@ -31,10 +31,12 @@ except (ImportError, RuntimeError, AttributeError):
     _HAS_FLASH_MLA = False
 
 try:
+    import cudnn  # noqa: F401
+
     from paddlefleet.cudnn_ops import csa_sparse_attn_bwd_cudnn
 
     _HAS_CUDNN_SPARSE_BWD = callable(csa_sparse_attn_bwd_cudnn)
-except (ImportError, RuntimeError, AttributeError):
+except (ImportError, ModuleNotFoundError, RuntimeError, AttributeError):
     _HAS_CUDNN_SPARSE_BWD = False
 
 
