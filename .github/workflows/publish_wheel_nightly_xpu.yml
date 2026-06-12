@@ -236,8 +236,7 @@ jobs:
   upload-to-paddletest:
     needs: publish-wheel-xpu
     if: github.repository == 'PaddlePaddle/PaddleFleet'
-    runs-on:
-      group: Fleet-H-single-card
+    runs-on: paddle-bot
     env:
       PR_ID: ${{ github.event.pull_request.number || '0' }}
       COMMIT_ID: ${{ github.event.pull_request.head.sha || github.sha }}

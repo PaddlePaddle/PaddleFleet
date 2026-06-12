@@ -552,8 +552,7 @@ jobs:
     name: Upload ops wheel to paddletest (${{ matrix.flavor.label }}, ${{ matrix.flavor.bos_CUDA }}, py${{ matrix.flavor.python_version }})
     needs: [publish-ops-wheel, publish-ops-wheel-paddle-dev, publish-ops-wheel-arm]
     if: github.repository == 'PaddlePaddle/PaddleFleet'
-    runs-on:
-      group: Fleet-H-single-card
+    runs-on: paddle-bot
     env:
       PR_ID: "0"
       COMMIT_ID: ${{ github.sha }}
