@@ -285,6 +285,7 @@ jobs:
             export AK=paddle
             export SK=paddle
             # python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
+            python ../bos/BosClient.py paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-py3-none-linux_aarch64.whl
@@ -294,9 +295,6 @@ jobs:
             echo "testing..."
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
-          # upload to paddletest
-          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
-          python notify_paddle_link.py ${{ matrix.cuda.bos_CUDA }} paddlefleet-*.whl paddlefleet
           '
 
       - name: Cleanup
@@ -307,7 +305,7 @@ jobs:
           docker rm -f ${{ env.container_name }}
   
   upload-to-paddletest:
-    needs: [publish-wheel]
+    needs: [publish-wheel, publish-wheel-arm]
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: paddle-bot
     env:
@@ -322,11 +320,18 @@ jobs:
           - {notify_CUDA: cu129, artifact_CUDA: cu130, platform: linux_x86_64}
           - {notify_CUDA: cu130, artifact_CUDA: cu130, platform: linux_x86_64}
           - {notify_CUDA: cu132, artifact_CUDA: cu130, platform: linux_x86_64}
+          - {notify_CUDA: cu130, artifact_CUDA: cu130, platform: linux_aarch64}
     steps:
       - name: Download wheel name artifact
+        if: matrix.cuda.platform == 'linux_x86_64'
         uses: actions/download-artifact@v4
         with:
           name: whl-name-${{ matrix.cuda.artifact_CUDA }}-${{ matrix.cuda.platform }}
+
+      - name: Download arm wheel name from bos
+        if: matrix.cuda.platform == 'linux_aarch64'
+        run: |
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${COMMIT_ID}/paddlefleet-${{ matrix.cuda.artifact_CUDA }}-${{ matrix.cuda.platform }}.whl.name --no-check-certificate
 
       - name: Upload wheel to paddletest
         run: |
