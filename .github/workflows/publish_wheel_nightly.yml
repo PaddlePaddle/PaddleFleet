@@ -255,7 +255,6 @@ jobs:
           pip install --break-system-packages --upgrade pip
           pip install --break-system-packages uv
           python -m pip install --break-system-packages bce-python-sdk==0.8.74
-          pip install --break-system-packages -r requirements.txt
           '
 
       - name: Build wheel
@@ -310,7 +309,7 @@ jobs:
     needs: [publish-wheel]
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
-      group: APPROVAL
+      group: Fleet-H-single-card
     env:
       PR_ID: ${{ github.event.pull_request.number || '0' }}
       COMMIT_ID: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -23,7 +23,7 @@ jobs:
   check-packages-changes:
     name: Check packages directory changes
     runs-on:
-      group: APPROVAL
+      group: Fleet-H-single-card
     outputs:
       packages_changed: ${{ steps.check.outputs.packages_changed }}
     steps:
@@ -52,7 +52,7 @@ jobs:
     needs: check-packages-changes
     if: needs.check-packages-changes.outputs.packages_changed == 'true'
     runs-on:
-      group: APPROVAL
+      group: Fleet-H-single-card
     env:
       AK: ${{ secrets.BOS_CREDENTIAL_AK }}
       SK: ${{ secrets.BOS_CREDENTIAL_SK }}
@@ -553,7 +553,7 @@ jobs:
     needs: [publish-ops-wheel, publish-ops-wheel-paddle-dev, publish-ops-wheel-arm]
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
-      group: APPROVAL
+      group: Fleet-H-single-card
     env:
       PR_ID: "0"
       COMMIT_ID: ${{ github.sha }}
