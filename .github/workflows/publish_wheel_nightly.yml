@@ -7,7 +7,7 @@ on:
       - 'develop'
     tags:
       - 'v*'
-      
+
 permissions: read-all
 
 concurrency:
@@ -249,7 +249,6 @@ jobs:
           pip install --break-system-packages --upgrade pip
           pip install --break-system-packages uv
           python -m pip install --break-system-packages bce-python-sdk==0.8.74
-          python -m pip install --break-system-packages requests
           '
 
       - name: Build wheel
