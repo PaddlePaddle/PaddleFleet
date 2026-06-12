@@ -189,7 +189,6 @@ jobs:
           pip install --upgrade pip
           pip install uv
           python -m pip install bce-python-sdk==0.8.74
-          python -m pip install time
           python -m pip install requests
           '
 
@@ -237,27 +236,27 @@ jobs:
           PY_VERSION="${{ matrix.python_version }}"
           PY_VERSION_SHORT="${PY_VERSION//./}"
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
           else
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
             if [[ ${{ matrix.cuda.bos_CUDA }} == cu129 ]]; then
               if [[ ${{ matrix.python_version }} == 3.10 || ${{ matrix.python_version }} == 3.12 ]]; then
                 if [[ ${{ github.ref_name }} == "develop" ]]; then
                   cp paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-                  python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+                  # python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
                   rm paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
                 else
                   cp paddlefleet_ops-*.whl paddlefleet_ops-0.0.0.post-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-                  python ../bos/BosClient.py paddlefleet_ops-0.0.0.post-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+                  # python ../bos/BosClient.py paddlefleet_ops-0.0.0.post-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
                   rm paddlefleet_ops-0.0.0.post-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
                 fi
               fi
             fi
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}/paddle-release
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}/paddle-release
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-release
+            # python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-release
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           # upload to paddletest
@@ -397,9 +396,9 @@ jobs:
           PY_VERSION_SHORT="${PY_VERSION//./}"
           export AK=paddle
           export SK=paddle
-          python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}/paddle-develop
+          # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}/paddle-develop
           mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-          python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-develop
+          # python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-develop
           # upload to paddletest
           wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
           python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet_ops-*.whl paddlefleet-ops
@@ -491,8 +490,7 @@ jobs:
           pip install --break-system-packages --upgrade pip
           pip install --break-system-packages uv
           python -m pip install --break-system-packages bce-python-sdk==0.8.74
-          python -m pip install time
-          python -m pip install requests
+          python -m pip install --break-system-packages requests
           '
 
       - name: Build wheel
@@ -526,16 +524,16 @@ jobs:
           tar -xf bos_new.tar.gz -C bos
           cd dist
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
           else
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl
-            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+            # python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           # upload to paddletest

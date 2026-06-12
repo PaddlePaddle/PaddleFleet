@@ -110,7 +110,6 @@ jobs:
           pip install --upgrade pip
           pip install uv
           python -m pip install bce-python-sdk==0.8.74
-          python -m pip install time
           python -m pip install requests
           '
 
@@ -248,8 +247,7 @@ jobs:
           pip install --break-system-packages --upgrade pip
           pip install --break-system-packages uv
           python -m pip install --break-system-packages bce-python-sdk==0.8.74
-          python -m pip install time
-          python -m pip install requests
+          python -m pip install --break-system-packages requests
           '
 
       - name: Build wheel
