@@ -12,20 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""cuDNN frontend ops bridged into PaddleFleet."""
-
-__all__ = ["csa_indexer_bwd", "csa_sparse_attn_bwd_cudnn"]
-
-
-def __getattr__(name):
-    if name == "csa_indexer_bwd":
-        from .indexer.csa_indexer_bwd_cudnn import csa_indexer_bwd
-
-        globals()[name] = csa_indexer_bwd
-        return csa_indexer_bwd
-    if name == "csa_sparse_attn_bwd_cudnn":
-        from .attn.csa_sparse_attn_bwd_cudnn import csa_sparse_attn_bwd_cudnn
-
-        globals()[name] = csa_sparse_attn_bwd_cudnn
-        return csa_sparse_attn_bwd_cudnn
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+from .csa_sparse_attn_bwd_cudnn import (
+    csa_sparse_attn_bwd_cudnn as csa_sparse_attn_bwd_cudnn,
+)
