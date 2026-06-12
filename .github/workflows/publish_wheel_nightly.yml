@@ -7,6 +7,10 @@ on:
       - 'develop'
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - 'release/**'
+      - 'develop'
 
 
 permissions: read-all
@@ -151,6 +155,9 @@ jobs:
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu130/paddlefleet
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          # upload to paddletest
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet-*.whl paddlefleet 
           '
 
       - name: Cleanup

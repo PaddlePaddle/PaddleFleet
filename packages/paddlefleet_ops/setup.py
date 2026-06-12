@@ -282,4 +282,4 @@ if backends.IS_NVIDIA:
 elif backends.IS_XPU:
     setup_install_no_extension()
 else:
-    logging.error("\033[31m Error: Do not support this backend now.\033[0m\n")
+    logging.error("\033[31m Error: Do not support this backend now\033[0m\n")

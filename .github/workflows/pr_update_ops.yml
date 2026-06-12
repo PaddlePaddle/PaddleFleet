@@ -7,6 +7,10 @@ on:
       - 'develop'
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - 'release/**'
+      - 'develop'
 
 
 permissions: read-all
@@ -242,6 +246,10 @@ jobs:
             python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-release
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          # upload to paddletest
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet_ops-*.whl paddlefleet-ops 
+          
           '
 
       - name: Cleanup
@@ -372,6 +380,10 @@ jobs:
           python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}/paddle-develop
           mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
           python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-develop
+          # upload to paddletest
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet_ops-*.whl paddlefleet-ops 
+
           '
 
       - name: Cleanup
