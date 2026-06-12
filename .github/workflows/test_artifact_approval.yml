@@ -1,0 +1,65 @@
+name: Test artifact on APPROVAL runner
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.github/workflows/test_artifact_approval.yml'
+  workflow_dispatch:
+
+jobs:
+  produce:
+    name: Produce artifact (matrix ${{ matrix.cuda.bos_CUDA }}-${{ matrix.cuda.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda:
+          - {bos_CUDA: cu130, platform: linux_x86_64}
+          - {bos_CUDA: cu130, platform: linux_aarch64}
+    steps:
+      - name: Generate fake wheel name
+        run: |
+          FNAME="paddlefleet-0.0.0.dev$(date +%s)-${{ matrix.cuda.bos_CUDA }}-${{ matrix.cuda.platform }}.whl"
+          echo "$FNAME" > whl-name.txt
+          echo "Generated: $FNAME"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whl-name-${{ matrix.cuda.bos_CUDA }}-${{ matrix.cuda.platform }}
+          path: whl-name.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  consume:
+    name: Consume on APPROVAL (${{ matrix.cuda.bos_CUDA }}-${{ matrix.cuda.platform }})
+    needs: produce
+    runs-on: APPROVAL
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda:
+          - {bos_CUDA: cu130, platform: linux_x86_64}
+          - {bos_CUDA: cu130, platform: linux_aarch64}
+    steps:
+      - name: Show runner info
+        run: |
+          echo "Runner OS: $RUNNER_OS"
+          echo "Runner name: $RUNNER_NAME"
+          uname -a || true
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: whl-name-${{ matrix.cuda.bos_CUDA }}-${{ matrix.cuda.platform }}
+
+      - name: Read wheel name
+        run: |
+          ls -la
+          WHEEL_FILE=$(cat whl-name.txt)
+          echo "WHEEL_FILE=$WHEEL_FILE"
+          if [[ -z "$WHEEL_FILE" ]]; then
+            echo "ERROR: empty wheel name"
+            exit 1
+          fi
