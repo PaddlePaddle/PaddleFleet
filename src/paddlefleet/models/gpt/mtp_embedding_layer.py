@@ -95,7 +95,10 @@ class MTPEmbeddingLayer(FleetLayer):
             self.config.expert_model_parallel_size > 1
             and self.config.tensor_model_parallel_size < 2
         ):
-            text_padding_indices = input_ids == 0
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            text_padding_indices = input_ids == pad_token_id
             input_embeds = fill_feature(input_embeds, text_padding_indices, 0)
 
         dict_args["mtp_input_embeds"] = input_embeds
