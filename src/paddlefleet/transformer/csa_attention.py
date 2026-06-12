@@ -1172,7 +1172,7 @@ class Compressor(nn.Layer):
         if sq < ratio:
             return None
 
-        if self.config.high_precision_compressor:
+        if getattr(self.config, "high_precision_compressor", False):
             with paddle.amp.auto_cast(enable=False):
                 kv = paddle.matmul(
                     x.cast("float32"), self.linear_wkv.weight.cast("float32")
@@ -1324,7 +1324,7 @@ class Compressor(nn.Layer):
             axis=2
         )  # [b, n_compressed, head_dim]
 
-        if self.config.high_precision_compressor:
+        if getattr(self.config, "high_precision_compressor", False):
             with paddle.amp.auto_cast(enable=False):
                 var = kv.square().mean(-1, keepdim=True)
                 kv = kv * paddle.rsqrt(var + self.norm.variance_epsilon)
