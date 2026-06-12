@@ -122,6 +122,7 @@ def bwd(
     indices_dtype=T.int32,
     dtype=T.bfloat16,
     accum_dtype=T.float32,
+    D_chunk=128,
 ):
     assert topk % block_size == 0, (
         f"topk ({topk}) must be divisible by block_size ({block_size})"
@@ -132,6 +133,8 @@ def bwd(
     if sm_scale is None:
         sm_scale = D ** (-0.5)
     sm_scale_mul_reciprocal_log2 = sm_scale * 1.44269504  # log2(e)
+
+    score_dtype = T.tfloat32
 
     q_shape = [B, S, H, D]
     kv_shape = [B, S_kv, D]
@@ -147,6 +150,9 @@ def bwd(
     NH = padded_H // block_H
     BS = block_size
     NS = tilelang.cdiv(topk, block_size)
+    DC = D_chunk
+    assert D % DC == 0, f"D ({D}) must be divisible by D_chunk ({DC})"
+    N_DC = D // DC
 
     split_store = 2
 
@@ -164,29 +170,38 @@ def bwd(
         dAttnSink: T.Tensor(attn_sink_shape, accum_dtype),
     ):
         with T.Kernel(S, B, NH, threads=threads) as (s_i, by, bz):
-            Q_shared = T.alloc_shared([block_H, D], dtype)
-            KV_shared = T.alloc_shared([BS, D], dtype)
-            dO_shared = T.alloc_shared([block_H, D], dtype)
+            Q_shared = T.alloc_shared([block_H, DC], score_dtype)
+            Q_shared_bf16 = T.alloc_shared([block_H, DC], dtype)
+            KV_shared = T.alloc_shared([BS, DC], score_dtype)
+            KV_shared_bf16 = T.alloc_shared([BS, DC], dtype)
+            dO_shared = T.alloc_shared([block_H, DC], score_dtype)
+            dO_shared_bf16 = T.alloc_shared([block_H, DC], dtype)
             mask = T.alloc_fragment([BS], "bool")
 
             P_shared_cast = T.alloc_shared([block_H, BS], dtype)
             dP_shared_cast = T.alloc_shared([block_H, BS], dtype)
-            dQ_shared = T.alloc_shared([block_H, D], dtype)
+            dQ_shared = T.alloc_shared([block_H, DC], dtype)
 
             acc_p = T.alloc_fragment([block_H, BS], accum_dtype)
             acc_dp = T.alloc_fragment([block_H, BS], accum_dtype)
-            acc_dq = T.alloc_fragment([block_H, D], accum_dtype)
-            acc_dkv = T.alloc_fragment([BS, D], accum_dtype)
-            acc_dkv_shared = T.alloc_shared([BS // split_store, D], accum_dtype)
-
-            T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, :D], Q_shared)
-            T.copy(
-                dO[by, s_i, bz * block_H : (bz + 1) * block_H, :D], dO_shared
+            acc_dq_0 = T.alloc_fragment([block_H, DC], accum_dtype)
+            acc_dq_1 = T.alloc_fragment([block_H, DC], accum_dtype)
+            acc_dq_2 = T.alloc_fragment([block_H, DC], accum_dtype)
+            acc_dq_3 = T.alloc_fragment([block_H, DC], accum_dtype)
+            acc_dkv_0 = T.alloc_fragment([BS, DC], accum_dtype)
+            acc_dkv_1 = T.alloc_fragment([BS, DC], accum_dtype)
+            acc_dkv_2 = T.alloc_fragment([BS, DC], accum_dtype)
+            acc_dkv_3 = T.alloc_fragment([BS, DC], accum_dtype)
+            acc_dkv_shared = T.alloc_shared(
+                [BS // split_store, DC], accum_dtype
             )
 
-            T.clear(acc_dq)
+            T.fill(acc_dq_0, 0)
+            T.fill(acc_dq_1, 0)
+            T.fill(acc_dq_2, 0)
+            T.fill(acc_dq_3, 0)
 
-            for i_i in T.Pipelined(NS, num_stages=num_stages):
+            for i_i in T.Serial(NS):
                 for bi_i in T.Parallel(BS):
                     mask[bi_i] = Indices[by, s_i, i_i * BS + bi_i] != -1
 
@@ -195,11 +210,80 @@ def bwd(
                         mask[bi_i], 0, -T.infinity(acc_p.dtype)
                     )
 
-                for bi_i, d_i in T.Parallel(BS, D):
+                # Score recomputation (tf32, K-reduction across D-chunks)
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        0 * DC : 1 * DC,
+                    ],
+                    Q_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
                     KV_shared[bi_i, d_i] = KV[
-                        by, Indices[by, s_i, i_i * BS + bi_i], d_i
+                        by, Indices[by, s_i, i_i * BS + bi_i], 0 * DC + d_i
                     ]
-
+                T.gemm(
+                    Q_shared,
+                    KV_shared,
+                    acc_p,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        1 * DC : 2 * DC,
+                    ],
+                    Q_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 1 * DC + d_i
+                    ]
+                T.gemm(
+                    Q_shared,
+                    KV_shared,
+                    acc_p,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        2 * DC : 3 * DC,
+                    ],
+                    Q_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 2 * DC + d_i
+                    ]
+                T.gemm(
+                    Q_shared,
+                    KV_shared,
+                    acc_p,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        3 * DC : 4 * DC,
+                    ],
+                    Q_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 3 * DC + d_i
+                    ]
                 T.gemm(
                     Q_shared,
                     KV_shared,
@@ -217,14 +301,87 @@ def bwd(
 
                 T.copy(acc_p, P_shared_cast)
 
-                # dP = P * (dO @ KV^T - Delta)
+                # dP = dO @ KV^T (tf32, K-reduction across D-chunks)
+                T.clear(acc_dp)
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        0 * DC : 1 * DC,
+                    ],
+                    dO_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 0 * DC + d_i
+                    ]
                 T.gemm(
                     dO_shared,
                     KV_shared,
                     acc_dp,
                     transpose_B=True,
                     policy=T.GemmWarpPolicy.FullCol,
-                    clear_accum=True,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        1 * DC : 2 * DC,
+                    ],
+                    dO_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 1 * DC + d_i
+                    ]
+                T.gemm(
+                    dO_shared,
+                    KV_shared,
+                    acc_dp,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        2 * DC : 3 * DC,
+                    ],
+                    dO_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 2 * DC + d_i
+                    ]
+                T.gemm(
+                    dO_shared,
+                    KV_shared,
+                    acc_dp,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        3 * DC : 4 * DC,
+                    ],
+                    dO_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 3 * DC + d_i
+                    ]
+                T.gemm(
+                    dO_shared,
+                    KV_shared,
+                    acc_dp,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
                 )
 
                 for h_i, bi_i in T.Parallel(block_H, BS):
@@ -239,62 +396,255 @@ def bwd(
 
                 T.copy(acc_dp, dP_shared_cast)
 
-                # dQ += dP @ KV
+                # dQ += dS @ KV (bf16, per D-chunk unrolled)
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 0 * DC + d_i
+                    ]
                 T.gemm(
                     dP_shared_cast,
-                    KV_shared,
-                    acc_dq,
+                    KV_shared_bf16,
+                    acc_dq_0,
                     policy=T.GemmWarpPolicy.FullCol,
                 )
 
-                # dKV += dP^T @ Q + P^T @ dO
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 1 * DC + d_i
+                    ]
                 T.gemm(
                     dP_shared_cast,
-                    Q_shared,
-                    acc_dkv,
+                    KV_shared_bf16,
+                    acc_dq_1,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 2 * DC + d_i
+                    ]
+                T.gemm(
+                    dP_shared_cast,
+                    KV_shared_bf16,
+                    acc_dq_2,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 3 * DC + d_i
+                    ]
+                T.gemm(
+                    dP_shared_cast,
+                    KV_shared_bf16,
+                    acc_dq_3,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                # dKV += dS^T @ Q + P^T @ dO (bf16, per D-chunk unrolled)
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        0 * DC : 1 * DC,
+                    ],
+                    Q_shared_bf16,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        0 * DC : 1 * DC,
+                    ],
+                    dO_shared_bf16,
+                )
+                T.clear(acc_dkv_0)
+                T.gemm(
+                    dP_shared_cast,
+                    Q_shared_bf16,
+                    acc_dkv_0,
                     transpose_A=True,
                     policy=T.GemmWarpPolicy.FullCol,
-                    clear_accum=True,
                 )
                 T.gemm(
                     P_shared_cast,
-                    dO_shared,
-                    acc_dkv,
+                    dO_shared_bf16,
+                    acc_dkv_0,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        1 * DC : 2 * DC,
+                    ],
+                    Q_shared_bf16,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        1 * DC : 2 * DC,
+                    ],
+                    dO_shared_bf16,
+                )
+                T.clear(acc_dkv_1)
+                T.gemm(
+                    dP_shared_cast,
+                    Q_shared_bf16,
+                    acc_dkv_1,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.gemm(
+                    P_shared_cast,
+                    dO_shared_bf16,
+                    acc_dkv_1,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        2 * DC : 3 * DC,
+                    ],
+                    Q_shared_bf16,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        2 * DC : 3 * DC,
+                    ],
+                    dO_shared_bf16,
+                )
+                T.clear(acc_dkv_2)
+                T.gemm(
+                    dP_shared_cast,
+                    Q_shared_bf16,
+                    acc_dkv_2,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.gemm(
+                    P_shared_cast,
+                    dO_shared_bf16,
+                    acc_dkv_2,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        3 * DC : 4 * DC,
+                    ],
+                    Q_shared_bf16,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        3 * DC : 4 * DC,
+                    ],
+                    dO_shared_bf16,
+                )
+                T.clear(acc_dkv_3)
+                T.gemm(
+                    dP_shared_cast,
+                    Q_shared_bf16,
+                    acc_dkv_3,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.gemm(
+                    P_shared_cast,
+                    dO_shared_bf16,
+                    acc_dkv_3,
                     transpose_A=True,
                     policy=T.GemmWarpPolicy.FullCol,
                 )
 
                 # Atomic store dKV with split to reduce register pressure
-                for s in range(split_store):
-                    for bi_i, d_i in T.Parallel(BS, D):
-                        if bi_i < BS // split_store:
-                            acc_dkv_shared[bi_i, d_i] = acc_dkv[
-                                bi_i + s * (BS // split_store), d_i
-                            ]
-
-                    for bi_i, d_i in T.Parallel(BS // split_store, D // 4):
-                        T.atomic_addx4(
-                            dKV[
-                                by,
-                                Indices[
+                for d_c in range(N_DC):
+                    for s in range(split_store):
+                        for bi_i, d_i in T.Parallel(BS, DC):
+                            if bi_i < BS // split_store:
+                                acc_dkv_shared[bi_i, d_i] = T.if_then_else(
+                                    d_c == 0,
+                                    acc_dkv_0[
+                                        bi_i + s * (BS // split_store), d_i
+                                    ],
+                                    T.if_then_else(
+                                        d_c == 1,
+                                        acc_dkv_1[
+                                            bi_i + s * (BS // split_store), d_i
+                                        ],
+                                        T.if_then_else(
+                                            d_c == 2,
+                                            acc_dkv_2[
+                                                bi_i + s * (BS // split_store),
+                                                d_i,
+                                            ],
+                                            acc_dkv_3[
+                                                bi_i + s * (BS // split_store),
+                                                d_i,
+                                            ],
+                                        ),
+                                    ),
+                                )
+                        for bi_i, d_i in T.Parallel(BS // split_store, DC // 4):
+                            T.atomic_addx4(
+                                dKV[
                                     by,
-                                    s_i,
-                                    i_i * BS + bi_i + s * (BS // split_store),
+                                    Indices[
+                                        by,
+                                        s_i,
+                                        i_i * BS
+                                        + bi_i
+                                        + s * (BS // split_store),
+                                    ],
+                                    d_c * DC + d_i * 4,
                                 ],
-                                d_i * 4,
-                            ],
-                            acc_dkv_shared[bi_i, d_i * 4],
-                        )
+                                acc_dkv_shared[bi_i, d_i * 4],
+                            )
 
             # Store dQ
-            T.copy(acc_dq, dQ_shared)
+            T.copy(acc_dq_0, dQ_shared)
             T.copy(
-                dQ_shared, dQ[by, s_i, bz * block_H : (bz + 1) * block_H, :D]
+                dQ_shared,
+                dQ[by, s_i, bz * block_H : (bz + 1) * block_H, 0 * DC : 1 * DC],
+            )
+            T.copy(acc_dq_1, dQ_shared)
+            T.copy(
+                dQ_shared,
+                dQ[by, s_i, bz * block_H : (bz + 1) * block_H, 1 * DC : 2 * DC],
+            )
+            T.copy(acc_dq_2, dQ_shared)
+            T.copy(
+                dQ_shared,
+                dQ[by, s_i, bz * block_H : (bz + 1) * block_H, 2 * DC : 3 * DC],
+            )
+            T.copy(acc_dq_3, dQ_shared)
+            T.copy(
+                dQ_shared,
+                dQ[by, s_i, bz * block_H : (bz + 1) * block_H, 3 * DC : 4 * DC],
             )
 
-            # dAttnSink[h] = -sum_{b,s}( Delta[b,s,h] * p_sink[b,s,h] )
-            # where p_sink = exp(attn_sink[h]) / Z = exp2(attn_sink[h]*log2e - LSE)
-            # attn_sink is a pre-scaled logit, so only convert to log2 base (no sm_scale)
+            # dAttnSink
             for h_i in T.Parallel(block_H):
                 T.atomic_add(
                     dAttnSink[bz * block_H + h_i],
@@ -329,6 +679,7 @@ def bwd_det(
     indices_dtype=T.int32,
     dtype=T.bfloat16,
     accum_dtype=T.float32,
+    D_chunk=128,
 ):
     """Deterministic backward: writes dKV/dAttnSink to per-block buffers (no atomics)."""
     assert topk % block_size == 0
@@ -338,6 +689,8 @@ def bwd_det(
     if sm_scale is None:
         sm_scale = D ** (-0.5)
     sm_scale_mul_reciprocal_log2 = sm_scale * 1.44269504
+
+    score_dtype = T.tfloat32
 
     q_shape = [B, S, H, D]
     kv_shape = [B, S_kv, D]
@@ -353,6 +706,9 @@ def bwd_det(
     NH = padded_H // block_H
     BS = block_size
     NS = tilelang.cdiv(topk, block_size)
+    DC = D_chunk
+    assert D % DC == 0, f"D ({D}) must be divisible by D_chunk ({DC})"
+    N_DC = D // DC
 
     split_store = 2
 
@@ -370,28 +726,35 @@ def bwd_det(
         dAttnSink_buf: T.Tensor([S, B, H], accum_dtype),
     ):
         with T.Kernel(S, B, NH, threads=threads) as (s_i, by, bz):
-            Q_shared = T.alloc_shared([block_H, D], dtype)
-            KV_shared = T.alloc_shared([BS, D], dtype)
-            dO_shared = T.alloc_shared([block_H, D], dtype)
+            Q_shared = T.alloc_shared([block_H, DC], score_dtype)
+            Q_shared_bf16 = T.alloc_shared([block_H, DC], dtype)
+            KV_shared = T.alloc_shared([BS, DC], score_dtype)
+            KV_shared_bf16 = T.alloc_shared([BS, DC], dtype)
+            dO_shared = T.alloc_shared([block_H, DC], score_dtype)
+            dO_shared_bf16 = T.alloc_shared([block_H, DC], dtype)
             mask = T.alloc_fragment([BS], "bool")
 
             P_shared_cast = T.alloc_shared([block_H, BS], dtype)
             dP_shared_cast = T.alloc_shared([block_H, BS], dtype)
-            dQ_shared = T.alloc_shared([block_H, D], dtype)
+            dQ_shared = T.alloc_shared([block_H, DC], dtype)
 
             acc_p = T.alloc_fragment([block_H, BS], accum_dtype)
             acc_dp = T.alloc_fragment([block_H, BS], accum_dtype)
-            acc_dq = T.alloc_fragment([block_H, D], accum_dtype)
-            acc_dkv = T.alloc_fragment([BS, D], accum_dtype)
+            acc_dq_0 = T.alloc_fragment([block_H, DC], accum_dtype)
+            acc_dq_1 = T.alloc_fragment([block_H, DC], accum_dtype)
+            acc_dq_2 = T.alloc_fragment([block_H, DC], accum_dtype)
+            acc_dq_3 = T.alloc_fragment([block_H, DC], accum_dtype)
+            acc_dkv_0 = T.alloc_fragment([BS, DC], accum_dtype)
+            acc_dkv_1 = T.alloc_fragment([BS, DC], accum_dtype)
+            acc_dkv_2 = T.alloc_fragment([BS, DC], accum_dtype)
+            acc_dkv_3 = T.alloc_fragment([BS, DC], accum_dtype)
 
-            T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, :D], Q_shared)
-            T.copy(
-                dO[by, s_i, bz * block_H : (bz + 1) * block_H, :D], dO_shared
-            )
+            T.fill(acc_dq_0, 0)
+            T.fill(acc_dq_1, 0)
+            T.fill(acc_dq_2, 0)
+            T.fill(acc_dq_3, 0)
 
-            T.clear(acc_dq)
-
-            for i_i in T.Pipelined(NS, num_stages=num_stages):
+            for i_i in T.Serial(NS):
                 for bi_i in T.Parallel(BS):
                     mask[bi_i] = Indices[by, s_i, i_i * BS + bi_i] != -1
 
@@ -400,11 +763,80 @@ def bwd_det(
                         mask[bi_i], 0, -T.infinity(acc_p.dtype)
                     )
 
-                for bi_i, d_i in T.Parallel(BS, D):
+                # Score recomputation (tf32, unrolled)
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        0 * DC : 1 * DC,
+                    ],
+                    Q_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
                     KV_shared[bi_i, d_i] = KV[
-                        by, Indices[by, s_i, i_i * BS + bi_i], d_i
+                        by, Indices[by, s_i, i_i * BS + bi_i], 0 * DC + d_i
                     ]
-
+                T.gemm(
+                    Q_shared,
+                    KV_shared,
+                    acc_p,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        1 * DC : 2 * DC,
+                    ],
+                    Q_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 1 * DC + d_i
+                    ]
+                T.gemm(
+                    Q_shared,
+                    KV_shared,
+                    acc_p,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        2 * DC : 3 * DC,
+                    ],
+                    Q_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 2 * DC + d_i
+                    ]
+                T.gemm(
+                    Q_shared,
+                    KV_shared,
+                    acc_p,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        3 * DC : 4 * DC,
+                    ],
+                    Q_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 3 * DC + d_i
+                    ]
                 T.gemm(
                     Q_shared,
                     KV_shared,
@@ -421,13 +853,87 @@ def bwd_det(
 
                 T.copy(acc_p, P_shared_cast)
 
+                # dP = dO @ KV^T (tf32, unrolled)
+                T.clear(acc_dp)
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        0 * DC : 1 * DC,
+                    ],
+                    dO_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 0 * DC + d_i
+                    ]
                 T.gemm(
                     dO_shared,
                     KV_shared,
                     acc_dp,
                     transpose_B=True,
                     policy=T.GemmWarpPolicy.FullCol,
-                    clear_accum=True,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        1 * DC : 2 * DC,
+                    ],
+                    dO_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 1 * DC + d_i
+                    ]
+                T.gemm(
+                    dO_shared,
+                    KV_shared,
+                    acc_dp,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        2 * DC : 3 * DC,
+                    ],
+                    dO_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 2 * DC + d_i
+                    ]
+                T.gemm(
+                    dO_shared,
+                    KV_shared,
+                    acc_dp,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        3 * DC : 4 * DC,
+                    ],
+                    dO_shared,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 3 * DC + d_i
+                    ]
+                T.gemm(
+                    dO_shared,
+                    KV_shared,
+                    acc_dp,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
                 )
 
                 for h_i, bi_i in T.Parallel(block_H, BS):
@@ -442,37 +948,223 @@ def bwd_det(
 
                 T.copy(acc_dp, dP_shared_cast)
 
+                # dQ += dS @ KV (bf16, per D-chunk)
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 0 * DC + d_i
+                    ]
                 T.gemm(
                     dP_shared_cast,
-                    KV_shared,
-                    acc_dq,
+                    KV_shared_bf16,
+                    acc_dq_0,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 1 * DC + d_i
+                    ]
+                T.gemm(
+                    dP_shared_cast,
+                    KV_shared_bf16,
+                    acc_dq_1,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 2 * DC + d_i
+                    ]
+                T.gemm(
+                    dP_shared_cast,
+                    KV_shared_bf16,
+                    acc_dq_2,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    KV_shared_bf16[bi_i, d_i] = KV[
+                        by, Indices[by, s_i, i_i * BS + bi_i], 3 * DC + d_i
+                    ]
+                T.gemm(
+                    dP_shared_cast,
+                    KV_shared_bf16,
+                    acc_dq_3,
                     policy=T.GemmWarpPolicy.FullCol,
                 )
 
+                # dKV += dS^T @ Q + P^T @ dO (bf16, per D-chunk)
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        0 * DC : 1 * DC,
+                    ],
+                    Q_shared_bf16,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        0 * DC : 1 * DC,
+                    ],
+                    dO_shared_bf16,
+                )
+                T.clear(acc_dkv_0)
                 T.gemm(
                     dP_shared_cast,
-                    Q_shared,
-                    acc_dkv,
+                    Q_shared_bf16,
+                    acc_dkv_0,
                     transpose_A=True,
                     policy=T.GemmWarpPolicy.FullCol,
-                    clear_accum=True,
                 )
                 T.gemm(
                     P_shared_cast,
-                    dO_shared,
-                    acc_dkv,
+                    dO_shared_bf16,
+                    acc_dkv_0,
                     transpose_A=True,
                     policy=T.GemmWarpPolicy.FullCol,
                 )
 
-                # Deterministic: write dKV to per-block buffer (no atomics)
-                for bi_i, d_i in T.Parallel(BS, D):
-                    dKV_buf[by, s_i, i_i * BS + bi_i, d_i] = acc_dkv[bi_i, d_i]
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        1 * DC : 2 * DC,
+                    ],
+                    Q_shared_bf16,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        1 * DC : 2 * DC,
+                    ],
+                    dO_shared_bf16,
+                )
+                T.clear(acc_dkv_1)
+                T.gemm(
+                    dP_shared_cast,
+                    Q_shared_bf16,
+                    acc_dkv_1,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.gemm(
+                    P_shared_cast,
+                    dO_shared_bf16,
+                    acc_dkv_1,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        2 * DC : 3 * DC,
+                    ],
+                    Q_shared_bf16,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        2 * DC : 3 * DC,
+                    ],
+                    dO_shared_bf16,
+                )
+                T.clear(acc_dkv_2)
+                T.gemm(
+                    dP_shared_cast,
+                    Q_shared_bf16,
+                    acc_dkv_2,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.gemm(
+                    P_shared_cast,
+                    dO_shared_bf16,
+                    acc_dkv_2,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                T.copy(
+                    Q[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        3 * DC : 4 * DC,
+                    ],
+                    Q_shared_bf16,
+                )
+                T.copy(
+                    dO[
+                        by,
+                        s_i,
+                        bz * block_H : (bz + 1) * block_H,
+                        3 * DC : 4 * DC,
+                    ],
+                    dO_shared_bf16,
+                )
+                T.clear(acc_dkv_3)
+                T.gemm(
+                    dP_shared_cast,
+                    Q_shared_bf16,
+                    acc_dkv_3,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+                T.gemm(
+                    P_shared_cast,
+                    dO_shared_bf16,
+                    acc_dkv_3,
+                    transpose_A=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
+
+                # Write dKV_buf
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    dKV_buf[by, s_i, i_i * BS + bi_i, 0 * DC + d_i] = acc_dkv_0[
+                        bi_i, d_i
+                    ]
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    dKV_buf[by, s_i, i_i * BS + bi_i, 1 * DC + d_i] = acc_dkv_1[
+                        bi_i, d_i
+                    ]
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    dKV_buf[by, s_i, i_i * BS + bi_i, 2 * DC + d_i] = acc_dkv_2[
+                        bi_i, d_i
+                    ]
+                for bi_i, d_i in T.Parallel(BS, DC):
+                    dKV_buf[by, s_i, i_i * BS + bi_i, 3 * DC + d_i] = acc_dkv_3[
+                        bi_i, d_i
+                    ]
 
             # Store dQ
-            T.copy(acc_dq, dQ_shared)
+            T.copy(acc_dq_0, dQ_shared)
             T.copy(
-                dQ_shared, dQ[by, s_i, bz * block_H : (bz + 1) * block_H, :D]
+                dQ_shared,
+                dQ[by, s_i, bz * block_H : (bz + 1) * block_H, 0 * DC : 1 * DC],
+            )
+            T.copy(acc_dq_1, dQ_shared)
+            T.copy(
+                dQ_shared,
+                dQ[by, s_i, bz * block_H : (bz + 1) * block_H, 1 * DC : 2 * DC],
+            )
+            T.copy(acc_dq_2, dQ_shared)
+            T.copy(
+                dQ_shared,
+                dQ[by, s_i, bz * block_H : (bz + 1) * block_H, 2 * DC : 3 * DC],
+            )
+            T.copy(acc_dq_3, dQ_shared)
+            T.copy(
+                dQ_shared,
+                dQ[by, s_i, bz * block_H : (bz + 1) * block_H, 3 * DC : 4 * DC],
             )
 
             # Deterministic: write dAttnSink to per-block buffer (no atomics)
