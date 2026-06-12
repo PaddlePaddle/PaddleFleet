@@ -62,6 +62,8 @@ inline int LimitGridDim(int64_t n) {
   return static_cast<int>(std::min<int64_t>(n, 1024 * 1024));
 }
 
+inline int GetSwiGLURowGridSize(int64_t rows) { return LimitGridDim(rows); }
+
 #ifdef __CUDACC__
 template <typename T>
 T** GetTensorDevicePtrs(const std::vector<paddle::Tensor>& tensors,

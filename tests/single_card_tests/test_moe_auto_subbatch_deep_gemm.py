@@ -40,7 +40,10 @@ from paddle import nn
 from paddle.device.cuda.memory_analyzer import MemoryAnalysisTool
 
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.transformer.moe.fp8_utils import tilewise_quant
+from paddlefleet.transformer.moe.fp8_utils import (
+    fused_stack_quant_without_cache,
+    tilewise_quant,
+)
 from paddlefleet.transformer.moe.fusion_layer_utils import (
     FusionMoePyLayer,
     MlpNode,
@@ -111,6 +114,51 @@ class FakeDeepGemmMOELayer(nn.Layer):
     def clear_main_grad(self):
         self.grouped_gemm_experts.weight1.main_grad = None
         self.grouped_gemm_experts.weight2.main_grad = None
+
+    def fp8_quant_weight(self, quant_transpose=True):
+        """Simulate FP8QuantWeightCallback: quant bf16 weights to fp8 stacked tensors."""
+        w1 = self.grouped_gemm_experts.weight1
+        w2 = self.grouped_gemm_experts.weight2
+        local_expert_num = w1.shape[0]
+        w1_list = [w1[i, :, :] for i in range(local_expert_num)]
+        w2_list = [w2[i, :, :] for i in range(local_expert_num)]
+
+        # Non-transpose version
+        fp8_w1, fp8_s1 = fused_stack_quant_without_cache(
+            w1_list, transpose=False
+        )
+        w1.fp8_weight_stacked = fp8_w1
+        w1.fp8_scale_stacked = fp8_s1
+
+        fp8_w2, fp8_s2 = fused_stack_quant_without_cache(
+            w2_list, transpose=False
+        )
+        w2.fp8_weight_stacked = fp8_w2
+        w2.fp8_scale_stacked = fp8_s2
+
+        # Transpose version
+        if quant_transpose:
+            fp8_w1_t, fp8_s1_t = fused_stack_quant_without_cache(
+                w1_list, transpose=True
+            )
+            w1.fp8_weight_stacked_transpose = fp8_w1_t
+            w1.fp8_scale_stacked_transpose = fp8_s1_t
+
+            fp8_w2_t, fp8_s2_t = fused_stack_quant_without_cache(
+                w2_list, transpose=True
+            )
+            w2.fp8_weight_stacked_transpose = fp8_w2_t
+            w2.fp8_scale_stacked_transpose = fp8_s2_t
+        else:
+            w1.fp8_weight_stacked_transpose = None
+            w1.fp8_scale_stacked_transpose = None
+            w2.fp8_weight_stacked_transpose = None
+            w2.fp8_scale_stacked_transpose = None
+
+    def clear_weight_storage(self):
+        """Simulate optimizer.clear_param_storage: clear bf16 weight memory."""
+        self.grouped_gemm_experts.weight1._clear_to_zero_allocation()
+        self.grouped_gemm_experts.weight2._clear_to_zero_allocation()
 
 
 @contextlib.contextmanager
@@ -315,6 +363,114 @@ class TestAutoSubbatchDeepGemm(unittest.TestCase):
         logging.info("case8 (deep_gemm recompute, tight_both)")
         cases["case8 (tight_both)"] = self.run_moe_layer(
             tight_forward=True, tight_backward=True, **kwargs
+        )
+
+        for name, result in cases.items():
+            with self.subTest(case=name):
+                self.compare_results(ref_out, result)
+
+    def test_auto_subbatch_deep_gemm_offline_quant(self):
+        """deep_gemm + offline fp8 quant + clear bf16 weight: simulates FP8QuantWeightCallback.
+
+        After offline quant, bf16 weight memory is cleared (memory_size=0).
+        Forward/backward must work using only fp8_weight_stacked attributes.
+        """
+        # First get reference output BEFORE clearing weight
+        ref_out = self.run_moe_layer(is_ref=True)
+
+        # Now simulate FP8QuantWeightCallback: quant + clear bf16
+        self.moe_layer.fp8_quant_weight(quant_transpose=False)
+        self.moe_layer.clear_weight_storage()
+
+        cases = {}
+        # no recompute
+        kwargs = {"recompute_moe_gate_up": False}
+
+        logging.info("case9 (offline_quant, plenty)")
+        cases["case9 (plenty)"] = self.run_moe_layer(**kwargs)
+        logging.info("case10 (offline_quant, tight_fwd)")
+        cases["case10 (tight_fwd)"] = self.run_moe_layer(
+            tight_forward=True, **kwargs
+        )
+        logging.info("case11 (offline_quant, tight_bwd)")
+        cases["case11 (tight_bwd)"] = self.run_moe_layer(
+            tight_backward=True, **kwargs
+        )
+        logging.info("case12 (offline_quant, tight_both)")
+        cases["case12 (tight_both)"] = self.run_moe_layer(
+            tight_forward=True, tight_backward=True, **kwargs
+        )
+
+        # with recompute
+        kwargs_rc = {"recompute_moe_gate_up": True}
+
+        logging.info("case9r (offline_quant+recompute, plenty)")
+        cases["case9r (plenty)"] = self.run_moe_layer(**kwargs_rc)
+        logging.info("case10r (offline_quant+recompute, tight_fwd)")
+        cases["case10r (tight_fwd)"] = self.run_moe_layer(
+            tight_forward=True, **kwargs_rc
+        )
+        logging.info("case11r (offline_quant+recompute, tight_bwd)")
+        cases["case11r (tight_bwd)"] = self.run_moe_layer(
+            tight_backward=True, **kwargs_rc
+        )
+        logging.info("case12r (offline_quant+recompute, tight_both)")
+        cases["case12r (tight_both)"] = self.run_moe_layer(
+            tight_forward=True, tight_backward=True, **kwargs_rc
+        )
+
+        for name, result in cases.items():
+            with self.subTest(case=name):
+                self.compare_results(ref_out, result)
+
+    def test_auto_subbatch_deep_gemm_offline_quant_transpose(self):
+        """deep_gemm + offline fp8 quant with quant_transpose=True + clear bf16 weight.
+
+        When quant_transpose=True, fp8_weight_stacked_transpose is pre-computed.
+        The per-expert fallback should use the pre-computed transpose directly.
+        """
+        # First get reference output BEFORE clearing weight
+        ref_out = self.run_moe_layer(is_ref=True)
+
+        # Simulate FP8QuantWeightCallback with quant_transpose=True
+        self.moe_layer.fp8_quant_weight(quant_transpose=True)
+        self.moe_layer.clear_weight_storage()
+
+        cases = {}
+        # no recompute
+        kwargs = {"recompute_moe_gate_up": False}
+
+        logging.info("case13 (offline_quant_transpose, plenty)")
+        cases["case13 (plenty)"] = self.run_moe_layer(**kwargs)
+        logging.info("case14 (offline_quant_transpose, tight_fwd)")
+        cases["case14 (tight_fwd)"] = self.run_moe_layer(
+            tight_forward=True, **kwargs
+        )
+        logging.info("case15 (offline_quant_transpose, tight_bwd)")
+        cases["case15 (tight_bwd)"] = self.run_moe_layer(
+            tight_backward=True, **kwargs
+        )
+        logging.info("case16 (offline_quant_transpose, tight_both)")
+        cases["case16 (tight_both)"] = self.run_moe_layer(
+            tight_forward=True, tight_backward=True, **kwargs
+        )
+
+        # with recompute
+        kwargs_rc = {"recompute_moe_gate_up": True}
+
+        logging.info("case13r (offline_quant_transpose+recompute, plenty)")
+        cases["case13r (plenty)"] = self.run_moe_layer(**kwargs_rc)
+        logging.info("case14r (offline_quant_transpose+recompute, tight_fwd)")
+        cases["case14r (tight_fwd)"] = self.run_moe_layer(
+            tight_forward=True, **kwargs_rc
+        )
+        logging.info("case15r (offline_quant_transpose+recompute, tight_bwd)")
+        cases["case15r (tight_bwd)"] = self.run_moe_layer(
+            tight_backward=True, **kwargs_rc
+        )
+        logging.info("case16r (offline_quant_transpose+recompute, tight_both)")
+        cases["case16r (tight_both)"] = self.run_moe_layer(
+            tight_forward=True, tight_backward=True, **kwargs_rc
         )
 
         for name, result in cases.items():

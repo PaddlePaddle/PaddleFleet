@@ -811,7 +811,7 @@ class FlashMaskAttnCpFunctor(PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, config, q, k, v, hold_tensors):
+    def forward(ctx, q, k, v, hold_tensors):
         """
         The forward pass for the masked attention surrogate layer.
         It saves all necessary tensors, including `startend_row_indices`, for the backward pass.
@@ -820,11 +820,12 @@ class FlashMaskAttnCpFunctor(PyLayer):
         result_attention = hold_tensors["result_attention"]
         softmax_lse = hold_tensors["softmax_lse"]
         startend_row_indices = hold_tensors["startend_row_indices"]
+        fa_version = hold_tensors["fa_version"]
         group = hold_tensors["group"]
         causal = hold_tensors["causal"]
 
+        ctx.fa_version = fa_version
         ctx.save_for_backward(
-            config,
             q,
             k,
             v,
@@ -845,7 +846,6 @@ class FlashMaskAttnCpFunctor(PyLayer):
         """
         # Retrieve saved tensors
         (
-            config,
             q,
             k,
             v,
@@ -855,11 +855,11 @@ class FlashMaskAttnCpFunctor(PyLayer):
             group,
             causal,
         ) = ctx.saved_tensor()
+        fa_version = ctx.fa_version
 
         # Compute gradients
         query_grad, key_grad, value_grad = (
             cp_flashmask_allgatherkv_balance_backward(
-                config,
                 q,
                 k,
                 v,
@@ -869,6 +869,7 @@ class FlashMaskAttnCpFunctor(PyLayer):
                 grad,
                 group,
                 causal,
+                fa_version,
             )
         )
 
@@ -894,7 +895,6 @@ class RefinedRcomputeFlashMaskCpAttention:
 
     def forward(
         self,
-        config,
         query_states,
         key_states,
         value_states,
@@ -928,7 +928,7 @@ class RefinedRcomputeFlashMaskCpAttention:
                 "queue should not be empty"
             )
             attn_output = self._second_fwd(
-                config, query_states, key_states, value_states
+                query_states, key_states, value_states
             )
 
         return attn_output
@@ -976,7 +976,7 @@ class RefinedRcomputeFlashMaskCpAttention:
             f"Current query sequence length: {query_states.shape[1]}"
         )
 
-        result_attention, softmax_lse, startend_row_indices = (
+        result_attention, softmax_lse, startend_row_indices, fa_version = (
             cp_flashmask_allgatherkv_balance_forward(
                 query_states,
                 key_states,
@@ -992,6 +992,7 @@ class RefinedRcomputeFlashMaskCpAttention:
             "result_attention": result_attention,
             "softmax_lse": softmax_lse,
             "startend_row_indices": startend_row_indices,
+            "fa_version": fa_version,
             "group": group,
             "causal": causal,
         }
@@ -999,14 +1000,14 @@ class RefinedRcomputeFlashMaskCpAttention:
         self._hold_tensors_queue.put(hold_tensors)
         return result_attention
 
-    def _second_fwd(self, config, query_states, key_states, value_states):
+    def _second_fwd(self, query_states, key_states, value_states):
         """
         The second forward pass for masked attention. It reconstructs the graph
         by calling the `FlashMaskAttnFunctor` surrogate layer.
         """
         hold_tensors = self._hold_tensors_queue.get()
         output = FlashMaskAttnCpFunctor.apply(
-            config, query_states, key_states, value_states, hold_tensors
+            query_states, key_states, value_states, hold_tensors
         )
         return output
 

@@ -29,6 +29,21 @@ from .vmm_utils import (
     tokens_zip_unique_add_with_subbatch,
 )
 
+if paddlefleet_ops.is_sonic_moe_available():
+    from paddlefleet_ops.sonicmoe.enums import ActivationType
+    from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
+        deepep_topk_to_sonic_metadata,
+    )
+    from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
+        _differentiable_router_scores,
+    )
+    from paddlefleet_ops.sonicmoe.functional import (
+        _DownProjection,
+        _refresh_fp8_config,
+        _UpProjection,
+    )
+    from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+
 logger = logging.getLogger(__name__)
 
 
@@ -285,8 +300,9 @@ class MlpNode:
             len(self.tokens_per_expert),
         )
         if recompute_moe_premute:
-            assert not moe_expert_fusion, (
-                "moe_expert_fusion must be disabled when recompute_unzipped = True"
+            assert moe_expert_fusion == moe_deep_gemm, (
+                f"recompute_moe_premute requires moe_expert_fusion == moe_deep_gemm"
+                f" (got moe_expert_fusion={moe_expert_fusion}, moe_deep_gemm={moe_deep_gemm})"
             )
             assert recompute_moe_gate_up, (
                 "recompute_moe_gate_up must be enabled when recompute_moe_premute = True"
@@ -299,30 +315,44 @@ class MlpNode:
         self.moe_subbatch_token_num_after_dispatch = (
             moe_subbatch_token_num_after_dispatch
         )
+        _has_static_subbatch = (
+            self.moe_subbatch_token_num_after_dispatch is not None
+            and self.moe_subbatch_token_num_after_dispatch > 0
+        )
 
-        if self.moe_subbatch_token_num_after_dispatch is not None:
+        if _has_static_subbatch:
             assert (
-                self.moe_subbatch_token_num_after_dispatch > 0
-                and self.moe_subbatch_token_num_after_dispatch % FP8_ALIGN == 0
+                self.moe_subbatch_token_num_after_dispatch % FP8_ALIGN == 0
             ), self.moe_subbatch_token_num_after_dispatch
-            assert not moe_expert_fusion, (
-                "moe_expert_fusion must be disabled when moe_subbatch_token_num_after_dispatch > 0"
-            )
-            assert recompute_moe_gate_up, (
-                "recompute_moe_gate_up must be enabled when moe_subbatch_token_num_after_dispatch > 0"
+            assert moe_expert_fusion == moe_deep_gemm, (
+                "static subbatch requires moe_expert_fusion == moe_deep_gemm"
+                f" (got moe_expert_fusion={moe_expert_fusion}, moe_deep_gemm={moe_deep_gemm})"
             )
             assert dequant_input, (
                 "dequant_input must be enabled when moe_subbatch_token_num_after_dispatch > 0"
             )
+            if not recompute_moe_gate_up:
+                logger.warning(
+                    "Auto-enabling recompute_moe_gate_up: static subbatch splits"
+                    " forward into multiple chunks that overwrite intermediate"
+                    " activations (o1), recompute is required to reconstruct them"
+                    " during backward."
+                )
+                recompute_moe_gate_up = True
 
-        if not self.moe_expert_fusion and (
-            (
-                self.moe_subbatch_token_num_after_dispatch is not None
-                and self.moe_subbatch_token_num_after_dispatch > 0
-            )
-            or use_auto_subbatch
-        ):
-            # Keep per-expert gemm nodes local-indexed.
+        # Per-expert gemm node list is needed when:
+        #   no subbatch:     never
+        #   static subbatch: always (regardless of deep_gemm)
+        #   auto_subbatch:   only when moe_expert_fusion=False (fusion mode uses runtime fallback)
+        _need_per_expert_nodes = _has_static_subbatch or (
+            use_auto_subbatch and not moe_expert_fusion
+        )
+        if _need_per_expert_nodes:
+            # For deep_gemm: set moe_expert_fusion=False at MlpNode level to route into
+            # per-expert loop; each node internally keeps moe_expert_fusion=True for
+            # grouped gemm API with sliced [1,K,N] weight.
+            if moe_deep_gemm:
+                self.moe_expert_fusion = False
             self.experts_group_gemm_node = [
                 ExpertsGroupGemmContiguousNode(
                     custom_map,
@@ -776,12 +806,25 @@ class MlpNode:
                 # deep_gemm: slice stacked weight to [1, K, N]
                 gemm_node.moe_expert_fusion = True
                 parent = fused_gemm_node.grouped_gemm_experts
-                sliced = type("_SlicedGroupedExpert", (), {})()
-                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
-                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
-                sliced._parent = parent
-                sliced._local_id = local_id
-                gemm_node.grouped_gemm_experts = sliced
+                if hasattr(parent.weight1, "fp8_weight_stacked"):
+                    from paddlefleet.transformer.moe.fp8_utils import (
+                        _PerExpertWeightProxy,
+                    )
+
+                    gemm_node.grouped_gemm_experts = _PerExpertWeightProxy(
+                        parent, local_id
+                    )
+                else:
+                    sliced = type("_SlicedGroupedExpert", (), {})()
+                    sliced.weight1 = parent.weight1._slice(
+                        local_id, local_id + 1
+                    )
+                    sliced.weight2 = parent.weight2._slice(
+                        local_id, local_id + 1
+                    )
+                    sliced._parent = parent
+                    sliced._local_id = local_id
+                    gemm_node.grouped_gemm_experts = sliced
                 # Regenerate m_indices for single expert; global m_indices has wrong range
                 gemm_node.m_indices = gemm_node.gen_m_indices(
                     [tokens_per_expert]
@@ -1789,6 +1832,8 @@ class MlpNode:
         ):
             # Per-expert backward path (non-fusion)
             bwd_path = "per_expert"
+            self._ensure_weight_grad()
+            self._slice_weight_grad()
             output = paddle.empty(
                 [0, hidden_states_out_grad_shape[-1]], dtype=paddle.float32
             )
@@ -1955,14 +2000,18 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         )
 
         if is_first_fwd:
+            # Under full recompute's first forward (no_grad), the inner PyLayer's
+            # backward will never be called. Release intermediate state immediately.
             ctx.node.release_mem()
 
         # Expose node on moe_layer for diagnostic access
         custom_map._fusion_node = ctx.node
 
-        cached_tensors = ctx.node.cached_tensors()
-        ctx.save_for_backward(cached_tensors)
-        ctx.node.clear_cached_tensors()
+        if not is_first_fwd:
+            # Normal forward with grad: save state for backward.
+            cached_tensors = ctx.node.cached_tensors()
+            ctx.save_for_backward(cached_tensors)
+            ctx.node.clear_cached_tensors()
         return out
 
     @staticmethod
@@ -2124,3 +2173,90 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             ctx.original_probs_shape,
         )
         return hidden_states_grad, dispatched_probs_grad
+
+
+def run_sonic_moe(
+    hidden_states, topk_indices, topk_scores, K, E, w1, w2, fp8=False
+):
+    T = hidden_states.shape[0]
+    stream_id = paddle.device.current_stream()
+
+    valid = topk_indices >= 0
+    valid_experts = topk_indices[valid].cast(paddle.int32)
+    tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
+        paddle.int32
+    )
+
+    (
+        expert_frequency_offset,
+        x_gather_idx,
+        s_scatter_idx,
+        s_reverse_scatter_idx,
+        num_activated_expert_per_token_offset,
+        _router_scores,
+        TK_padded,
+        total_pad_rows,
+        _N_recv,
+        _score_src_idx,
+    ) = deepep_topk_to_sonic_metadata(
+        topk_indices.cast(paddle.int32),
+        topk_scores,
+        tokens_per_expert,
+        E,
+        block=128 if fp8 else 1,
+    )
+
+    s_scatter_idx.stop_gradient = True
+    activation_type = ActivationType("swiglu")
+
+    total_expert_freq = TK_padded
+    scores_for_down = _differentiable_router_scores(
+        topk_scores,
+        topk_indices.cast(paddle.int32),
+        num_activated_expert_per_token_offset,
+        TK_padded - total_pad_rows,
+        TK_padded,
+        E,
+        score_src_idx=_score_src_idx,
+    )
+
+    with enable_fp8(fp8):
+        _refresh_fp8_config()
+        y1, z = _UpProjection.apply(
+            hidden_states,
+            w1.permute([1, 2, 0]),
+            None,
+            expert_frequency_offset,
+            total_expert_freq,
+            K,
+            stream_id,
+            x_gather_idx,
+            s_scatter_idx,
+            s_reverse_scatter_idx,
+            num_activated_expert_per_token_offset,
+            True,  # is_varlen_k
+            activation_type,
+            is_inference_mode_enabled=False,
+            use_low_precision_postact_buffer=False,
+        )
+        hidden_states = _DownProjection.apply(
+            y1,
+            z,
+            w2.permute([1, 2, 0]),
+            None,
+            scores_for_down,
+            s_scatter_idx,
+            expert_frequency_offset,
+            T,
+            K,
+            stream_id,
+            x_gather_idx,
+            s_scatter_idx,
+            s_reverse_scatter_idx,
+            num_activated_expert_per_token_offset,
+            True,  # is_varlen_k
+            activation_type,
+            None,
+        )
+
+    return hidden_states

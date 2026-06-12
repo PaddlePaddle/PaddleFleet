@@ -24,16 +24,31 @@ Reference: mHC paper - Manifold-Constrained Hyper-Connections for transformers.
 from __future__ import annotations
 
 import math
+import os
 from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
 from paddle import Tensor, nn
 
+from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+_ACCURACY_COMPATIBLE_KERNEL: bool = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
+
+
+def _use_accuracy_compatible_kernel() -> bool:
+    """Switch for Megatron-aligned (accuracy-compatible) numeric paths.
+
+    Controlled by the ``FLAGS_use_accuracy_compatible_kernel`` env variable.
+    """
+    return _ACCURACY_COMPATIBLE_KERNEL
 
 
 class SinkhornKnopp(paddle.autograd.PyLayer):
@@ -46,49 +61,65 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
     Reference: Eq. (9) in mHC paper - M^{(t)} = T_c(T_r(M^{(t-1)}))
     """
 
-    eps = 1e-6
-
     @staticmethod
-    def _sinkhorn_normalize(M: Tensor, num_iterations: int) -> Tensor:
+    def _sinkhorn_normalize(
+        M: Tensor, num_iterations: int, eps: float = 1e-6
+    ) -> Tensor:
         """
         Apply Sinkhorn-Knopp normalization iterations.
 
         Args:
             M: [..., n, n] - positive matrix to normalize
             num_iterations: Number of Sinkhorn iterations
+            eps: Small constant for numerical stability
 
         Returns:
             M: [..., n, n] - doubly stochastic matrix
         """
         for _ in range(num_iterations):
             # T_r: Row normalization
-            M = M / M.sum(axis=-1, keepdim=True).clip(min=SinkhornKnopp.eps)
+            M = M / M.sum(axis=-1, keepdim=True).clip(min=eps)
             # T_c: Column normalization
-            M = M / M.sum(axis=-2, keepdim=True).clip(min=SinkhornKnopp.eps)
+            M = M / M.sum(axis=-2, keepdim=True).clip(min=eps)
         return M
 
     @staticmethod
-    def forward(ctx, H_res_logits: Tensor, num_iterations: int) -> Tensor:
+    def forward(
+        ctx, H_res_logits: Tensor, num_iterations: int, eps: float = 1e-6
+    ) -> Tensor:
         """
         Project to doubly stochastic matrix via iterative row/col normalization.
 
         Args:
             H_res_logits: [..., n, n] - raw logits for residual mixing matrix
             num_iterations: Number of Sinkhorn iterations (paper uses 20)
+            eps: Small constant for numerical stability
 
         Returns:
             H_res: [..., n, n] - doubly stochastic matrix
         """
-        # Stabilized exp: subtract row-wise max to prevent overflow
-        M_init = paddle.exp(
-            H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
-        )
-
-        M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations)
+        # Stabilized exp: subtract row-wise max to prevent overflow.
+        # Under FLAGS_use_accuracy_compatible_kernel, force this outside AMP
+        # so the Paddle native path preserves the BF16 contract used by
+        # Megatron's torch implementation.
+        if _use_accuracy_compatible_kernel():
+            with paddle.amp.auto_cast(enable=False):
+                M_init = paddle.exp(
+                    H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+                )
+                M = SinkhornKnopp._sinkhorn_normalize(
+                    M_init, num_iterations, eps
+                )
+        else:
+            M_init = paddle.exp(
+                H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+            )
+            M = SinkhornKnopp._sinkhorn_normalize(M_init, num_iterations, eps)
 
         # Save initial M for backward recomputation
         ctx.save_for_backward(M_init)
         ctx.num_iterations = num_iterations
+        ctx.eps = eps
         return M
 
     @staticmethod
@@ -98,6 +129,7 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         """
         (M_init,) = ctx.saved_tensor()
         num_iterations = ctx.num_iterations
+        eps = ctx.eps
 
         with paddle.enable_grad():
             # Recompute forward with autograd enabled
@@ -105,7 +137,7 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
             M_input.stop_gradient = False
 
             M_current = SinkhornKnopp._sinkhorn_normalize(
-                M_input, num_iterations
+                M_input, num_iterations, eps
             )
 
             # Compute dL/dM_input via autograd
@@ -121,6 +153,66 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         grad_input = grad_M_init * M_init
 
         return grad_input
+
+
+def native_sinkhorn(
+    input_logits: Tensor, num_iterations: int, eps: float = 1e-6
+) -> Tensor:
+    """Native Sinkhorn-Knopp (PyLayer wrapper)."""
+    return SinkhornKnopp.apply(input_logits, num_iterations, eps)
+
+
+def native_proj_rms(
+    x: Tensor, weight: Tensor, eps: float = 1e-6
+) -> tuple[Tensor, Tensor]:
+    """Native fused projection + RMS normalization."""
+    nC = x.shape[-1]
+    r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)
+    r = 1.0 / (r + eps)
+    proj = paddle.matmul(x, weight)
+    return proj, r
+
+
+def native_h_aggregate(x_streams: Tensor, h_pre: Tensor) -> Tensor:
+    """Native n-stream weighted aggregation: out = sum_j(h_pre_j * x_j)."""
+    return (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
+
+
+def native_h_post_bda(
+    h_res: Tensor,
+    original_residual: Tensor,
+    h_post: Tensor,
+    x: Tensor,
+    bias: Tensor | None,
+) -> Tensor:
+    """Native H_res @ residual + H_post * (x [+ bias]).
+
+    Args:
+        h_res: [..., n, n] - residual mixing matrix
+        original_residual: [..., n, C] - n-stream hidden states
+        h_post: [..., n] - expansion weights
+        x: [..., C] - layer output
+        bias: [C] or None
+
+    Returns:
+        output: [..., n, C]
+    """
+    leading_shape = original_residual.shape[:-2]
+    n, C = original_residual.shape[-2], original_residual.shape[-1]
+    num_tokens = math.prod(leading_shape)
+
+    h_res_batched = h_res.reshape([num_tokens, n, n])
+    residual_batched = original_residual.reshape([num_tokens, n, C])
+    mixed = paddle.bmm(h_res_batched, residual_batched).reshape(
+        [*leading_shape, n, C]
+    )
+
+    x_expanded = h_post.unsqueeze(-1) * x.unsqueeze(-2)  # [..., n, C]
+    if bias is not None:
+        bias = bias.reshape([1] * len(leading_shape) + [1, C])
+        bias_expanded = h_post.unsqueeze(-1) * bias
+        return x_expanded + bias_expanded + mixed
+    return x_expanded + mixed
 
 
 class HyperConnectionModule(nn.Layer):
@@ -187,12 +279,40 @@ class HyperConnectionModule(nn.Layer):
 
         self.norm_eps = 1e-6
 
+        # Choose implementation: fused kernels vs native reference.
+        if config.use_fused_mhc:
+            from paddlefleet.fusions.fused_mhc_kernels import (
+                fused_h_aggregate,
+                fused_h_post_bda,
+                fused_proj_rms,
+                fused_sinkhorn,
+            )
+
+            self._sinkhorn_op = fused_sinkhorn
+            self._h_aggregate_op = fused_h_aggregate
+            self._h_post_bda_op = fused_h_post_bda
+            self._proj_rms_op = fused_proj_rms
+        else:
+            self._sinkhorn_op = native_sinkhorn
+            self._h_aggregate_op = native_h_aggregate
+            self._h_post_bda_op = native_h_post_bda
+            self._proj_rms_op = native_proj_rms
+
         self._init_weights()
 
     def _init_weights(self) -> None:
         """Initialize weights for stable training."""
-        # Xavier uniform for mapping projection
-        nn.initializer.XavierUniform()(self.mapping_proj.weight)
+        # Xavier uniform for mapping projection.
+        # Use the model-parallel RNG tracker so that the initialization is
+        # controlled by PaddleFleet's RNG state (seeded once at model init)
+        # rather than the per-layer pipeline seed (base_seed + layer_index).
+        # This prevents layer_index shifts (e.g. from MTPEmbeddingLayer insertion
+        # in magic_send mode) from changing the weights.
+        if paddle.distributed.get_world_size() <= 1:
+            nn.initializer.XavierUniform()(self.mapping_proj.weight)
+        else:
+            with get_cuda_rng_tracker().fork():
+                nn.initializer.XavierUniform()(self.mapping_proj.weight)
 
         # Set sequence_parallel attribute on parameters for gradient synchronization
         if self.config.sequence_parallel:
@@ -209,10 +329,26 @@ class HyperConnectionModule(nn.Layer):
         Args:
             x: [..., n*C] - n-stream hidden states
         """
-        nC = x.shape[-1]
-        r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
-        r = 1.0 / (r + self.norm_eps)  # [..., 1]
-        proj = self.mapping_proj(x)  # [..., n^2 + 2n]
+        if _use_accuracy_compatible_kernel():
+            nC = x.shape[-1]
+            weight = self.mapping_proj.weight
+            r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
+            r = (1.0 / (r + self.norm_eps)).astype(x.dtype)  # [..., 1]
+            # Match Megatron clean path: torch.matmul(x, weight.t()). Paddle
+            # nn.Linear uses a different BF16 cuBLAS path for this shape and
+            # drifts before the first HC BDA.
+            x_2d = x.reshape([-1, nC])
+            weight_out_in = weight.t().contiguous()
+            proj_2d = paddle.matmul(x_2d, weight_out_in, transpose_y=True)
+            proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
+        else:
+            ori_dtype = x.dtype
+            proj, r = self._proj_rms_op(
+                x, self.mapping_proj.weight.astype(ori_dtype), self.norm_eps
+            )
+            if not self.config.high_precision_mhc:
+                r = r.astype(ori_dtype)
+
         return proj, r
 
     def _compute_h(
@@ -241,10 +377,12 @@ class HyperConnectionModule(nn.Layer):
         h = r * proj * alpha_ + self.bias
         # H_pre = σ(α_pre * (θ_pre @ x̃) + b_pre)
         h_pre = h[..., : self.n].sigmoid()  # [..., n]
-
         # H_post = 2σ(α_post * (θ_post @ x̃) + b_post)
         h_post = h[..., self.n : 2 * self.n].sigmoid() * 2  # [..., n]
         h_res = h[..., 2 * self.n :]
+        if _use_accuracy_compatible_kernel():
+            h_pre = h_pre.astype(proj.dtype)
+            h_post = h_post.astype(proj.dtype)
         return h_pre, h_post, h_res
 
     def compute_mappings(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -264,9 +402,10 @@ class HyperConnectionModule(nn.Layer):
         leading_shape = x.shape[:-1]
         proj, r = self._projection_and_get_norm(x)
         h_pre, h_post, h_res = self._compute_h(proj, r)
-        h_res = SinkhornKnopp.apply(
+        h_res = self._sinkhorn_op(
             h_res.reshape([*leading_shape, self.n, self.n]),
             self.sinkhorn_iterations,
+            self.norm_eps,
         )  # [..., n, n]
 
         return h_pre, h_post, h_res
@@ -290,10 +429,17 @@ class HyperConnectionModule(nn.Layer):
         # Reshape to [..., n, C]
         x_streams = x.reshape([*leading_shape, self.n, C])
 
-        # Weighted sum: [..., n, C] * [..., n, 1] -> sum over n -> [..., C]
-        aggregated = (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
-
-        return aggregated
+        if _use_accuracy_compatible_kernel():
+            # Weighted sum: [..., n, C] * [..., n, 1] -> sum over n -> [..., C]
+            aggregated = (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
+            if aggregated.dtype != x.dtype:
+                aggregated = aggregated.astype(x.dtype)
+            return aggregated
+        else:
+            aggregated = self._h_aggregate_op(x_streams, h_pre)
+            if aggregated.dtype != x.dtype:
+                aggregated = aggregated.astype(x.dtype)
+            return aggregated
 
     def apply_h_res(self, h_res: Tensor, residual: Tensor) -> Tensor:
         """
@@ -310,8 +456,18 @@ class HyperConnectionModule(nn.Layer):
         C = self.hidden_size
         num_tokens = math.prod(leading_shape)
 
-        # Reshape for bmm: [..., n, n] -> [batch, n, n]
-        h_res_batched = h_res.reshape([num_tokens, n, n])
+        if _use_accuracy_compatible_kernel():
+            # Megatron clean path applies H_res.T to residual.
+            ndim = h_res.ndim
+            perm = [*list(range(ndim - 2)), ndim - 1, ndim - 2]
+            h_res_batched = (
+                h_res.astype(residual.dtype)
+                .transpose(perm)
+                .reshape([num_tokens, n, n])
+            )
+        else:
+            # Reshape for bmm: [..., n, n] -> [batch, n, n]
+            h_res_batched = h_res.reshape([num_tokens, n, n])
         # [..., n*C] -> [..., n, C] -> [batch, n, C]
         residual_batched = residual.reshape([num_tokens, n, C])
 
@@ -390,11 +546,17 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (for fused kernel)
             h_post: [..., n] - expansion weights
         """
-        # Compute mappings
-        h_pre, h_post, h_res = self.compute_mappings(hidden_states)
+        with paddle.amp.auto_cast(enable=False):
+            # Compute mappings
+            if (
+                not _use_accuracy_compatible_kernel()
+                and self.config.high_precision_mhc
+            ):
+                hidden_states = hidden_states.astype("float32")
+            h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
-        # Aggregate for layer input
-        aggregated = self.aggregate(hidden_states, h_pre)
+            # Aggregate for layer input
+            aggregated = self.aggregate(hidden_states, h_pre)
 
         return aggregated, h_res, h_post
 
@@ -477,7 +639,18 @@ class HyperConnectionModule(nn.Layer):
         rsqrt = paddle.rsqrt(
             hidden_states.square().mean(-1, keepdim=True) + eps
         )
-        mixes = F.linear(hidden_states, head_fn) * rsqrt
+        if _use_accuracy_compatible_kernel():
+            # Match Torch F.linear(x, weight[out,in]) kernel selection. Paddle
+            # F.linear(x, weight[in,out]) uses a different cuBLAS path and
+            # causes BF16 ulp drift in DSv4 final output contraction.
+            head_fn_out_in = head_fn.transpose([1, 0]).contiguous()
+            with paddle.amp.auto_cast(False):
+                proj = paddle.matmul(
+                    hidden_states, head_fn_out_in, transpose_y=True
+                )
+            mixes = proj * rsqrt
+        else:
+            mixes = F.linear(hidden_states, head_fn) * rsqrt
         pre = F.sigmoid(mixes * scale + base) + eps
         y = paddle.sum(
             pre.unsqueeze(-1)
@@ -522,23 +695,43 @@ class HyperConnectionModule(nn.Layer):
         Returns:
             output: [..., n*C] - final output after all operations
         """
-        # Step 1: Apply H_res to original residual
-        mixed = self.apply_h_res(h_res, original_residual)
+        with paddle.amp.auto_cast(enable=False):
+            x, bias = layer_output_with_bias
 
-        # Step 2: Apply H_post to layer output
-        x, bias = layer_output_with_bias
-        x_expanded = self._apply_h_post(x, h_post)
-        bias_expanded = (
-            self._apply_h_post(bias, h_post) if bias is not None else None
-        )
+            # Fast path: no dropout — use fused/native h_post_bda kernel
+            if not _use_accuracy_compatible_kernel() and (
+                dropout_prob == 0.0 or not training
+            ):
+                leading_shape = original_residual.shape[:-1]
+                n = self.n
+                C = self.hidden_size
+                orig_reshaped = original_residual.reshape(
+                    [*leading_shape, n, C]
+                )
+                if self.config.high_precision_mhc:
+                    orig_reshaped = orig_reshaped.astype("float32")
+                    x = x.astype("float32")
+                    if bias is not None:
+                        bias = bias.astype("float32")
+                output = self._h_post_bda_op(
+                    h_res, orig_reshaped, h_post, x, bias
+                )
+                return output.reshape([*leading_shape, n * C])
 
-        # Step 3: Bias-dropout-add
-        if bias_expanded is not None:
-            x_expanded = x_expanded + bias_expanded
-        out = paddle.nn.functional.dropout(
-            x_expanded, p=dropout_prob, training=training
-        )
-        output = out + mixed
+            # Sequential path: used when dropout required OR accuracy-compatible kernel is NOT enabled
+            mixed = self.apply_h_res(h_res, original_residual)
+
+            x_expanded = self._apply_h_post(x, h_post)
+            bias_expanded = (
+                self._apply_h_post(bias, h_post) if bias is not None else None
+            )
+
+            if bias_expanded is not None:
+                x_expanded = x_expanded + bias_expanded
+            out = paddle.nn.functional.dropout(
+                x_expanded, p=dropout_prob, training=training
+            )
+            output = out + mixed
 
         return output
 
@@ -584,6 +777,7 @@ class HyperConnectionContractLayer(FleetLayer):
         )
 
         self.num_mtp = getattr(config, "num_nextn_predict_layers", 0) or 0
+        self.magic_send = getattr(config, "enable_mtp_magic_send", False)
 
         # Learned contraction parameters (DSv4 style, always used)
         n = self.n
@@ -613,30 +807,50 @@ class HyperConnectionContractLayer(FleetLayer):
         hidden_states = dict_args["hidden_states"]
 
         # When MTP is enabled, preserve multi-stream for MTP input
-        if self.mtp_enabled and self.num_mtp > 0:
+        if (
+            self.mtp_enabled
+            and self.num_mtp > 0
+            and not getattr(self.config, "mtp_load_weight_only", False)
+        ):
             dict_args["mhc_multistream"] = hidden_states
 
-            # Split into main backbone + MTP chunks
-            chunks = paddle.split(hidden_states, self.num_mtp + 1)
+            if self.magic_send:
+                # magic_send: hidden_states is pure backbone [B, S, n*H]
+                # Magic send: backbone processes only main sequence, no MTP chunks concatenated.
+                # Simply contract the entire tensor.
+                dict_args["hidden_states"] = (
+                    HyperConnectionModule.learned_output_contract(
+                        hidden_states,
+                        self.hc_head_fn,
+                        self.hc_head_base,
+                        self.hc_head_scale,
+                        self.n,
+                        self.config.rms_norm_eps,
+                    )
+                )
+            else:
+                # Non-magic_send: backbone output is [backbone_chunk | mtp_chunks...] concatenated.
+                # Split, contract main backbone, slice MTP chunks.
+                chunks = paddle.split(hidden_states, self.num_mtp + 1)
 
-            # Main backbone: learned contraction [s, b, n*h] -> [s, b, h]
-            main_contracted = HyperConnectionModule.learned_output_contract(
-                chunks[0],
-                self.hc_head_fn,
-                self.hc_head_base,
-                self.hc_head_scale,
-                self.n,
-                self.config.rms_norm_eps,
-            )
+                # Main backbone: learned contraction [s, b, n*h] -> [s, b, h]
+                main_contracted = HyperConnectionModule.learned_output_contract(
+                    chunks[0],
+                    self.hc_head_fn,
+                    self.hc_head_base,
+                    self.hc_head_scale,
+                    self.n,
+                    self.config.rms_norm_eps,
+                )
 
-            # 为了后面MTP slice、取shape的时候兼容,原本也是expand过来的[[s,b,h]...]
-            mtp_contracted = [
-                c[..., : c.shape[-1] // self.n] for c in chunks[1:]
-            ]
+                # 为了后面MTP slice、取shape的时候兼容,原本也是expand过来的[[s,b,h]...]
+                mtp_contracted = [
+                    c[..., : c.shape[-1] // self.n] for c in chunks[1:]
+                ]
 
-            dict_args["hidden_states"] = paddle.concat(
-                [main_contracted, *mtp_contracted]
-            )
+                dict_args["hidden_states"] = paddle.concat(
+                    [main_contracted, *mtp_contracted]
+                )
 
         else:
             # Learned output contraction: [s, b, n*h] -> [s, b, h]

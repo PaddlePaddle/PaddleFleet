@@ -12,4 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+from .csa_indexer_bwd_cudnn import csa_indexer_bwd
+
+__all__ = ["csa_indexer_bwd"]

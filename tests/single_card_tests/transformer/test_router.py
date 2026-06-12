@@ -61,6 +61,9 @@ class MockTransformerConfig:
         self.context_parallel_size = 1
         self.sequence_parallel = False
 
+        # Experimental version flag
+        self.gpt_model_use_experimental_version = False
+
         # Internal storage to simulate the .get() method behavior
         self._extra_conf = {"seq_aux": False}
 

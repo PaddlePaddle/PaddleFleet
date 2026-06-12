@@ -48,9 +48,12 @@ from paddlefleet.models.gpt.lm_head import (
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
+from paddlefleet.models.gpt.mtp_embedding_layer import MTPEmbeddingLayer
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
+    SelfAttentionVHA,
+    SelfAttentionVHASublayersSpec,
 )
 from paddlefleet.transformer.block_attn_res import (
     BlockAttnRes,
@@ -147,15 +150,52 @@ def get_attention_spec(
 
     use_qk_norm = getattr(config, "use_qk_norm", False)
     qk_l2_norm = getattr(config, "qk_l2_norm", False)
+    gated_attention = getattr(config, "gated_attention", False)
+    align_mode = getattr(config, "gpt_model_use_experimental_version", None)
 
     if attention_layer_type == "self_attention":
+        if getattr(config, "use_vha_attention", False):
+            return LayerSpec(
+                layer=SelfAttentionVHA,
+                extra_kwargs={
+                    "attn_mask_type": attn_mask_type,
+                    "is_mtp_layer": is_mtp_layer,
+                },
+                sublayers_spec=SelfAttentionVHASublayersSpec(
+                    q_proj=backend.column_parallel_linear(),
+                    k_proj=backend.column_parallel_linear(),
+                    v_proj=backend.column_parallel_linear(),
+                    gate_proj=backend.column_parallel_linear()
+                    if getattr(config, "gated_attention", False)
+                    else None,
+                    qkv_proj=backend.column_parallel_linear(),
+                    core_attention=backend.core_attention(),
+                    o_proj=backend.row_parallel_linear(),
+                    q_norm=(
+                        L2Norm
+                        if qk_l2_norm
+                        else (qk_norm if use_qk_norm else IdentityOp)
+                    ),
+                    k_norm=(
+                        L2Norm
+                        if qk_l2_norm
+                        else (qk_norm if use_qk_norm else IdentityOp)
+                    ),
+                ),
+            )
         return LayerSpec(
             layer=SelfAttention,
-            extra_kwargs={"attn_mask_type": attn_mask_type},
+            extra_kwargs={
+                "attn_mask_type": attn_mask_type,
+                "is_mtp_layer": is_mtp_layer,
+            },
             sublayers_spec=SelfAttentionSublayersSpec(
                 qkv_proj=backend.column_parallel_linear(),
                 core_attention=backend.core_attention(),
                 o_proj=backend.row_parallel_linear(),
+                gate_proj=backend.column_parallel_linear()
+                if gated_attention and align_mode
+                else IdentityOp,
                 q_norm=(
                     L2Norm
                     if qk_l2_norm
@@ -227,6 +267,7 @@ def get_attention_spec(
             layer=attn_cls,
             extra_kwargs={
                 "attn_mask_type": attn_mask_type,
+                "is_mtp_layer": is_mtp_layer,
             },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
@@ -400,12 +441,14 @@ def get_gpt_layer_local_spec(
             config=config,
             attention_layer_type="multi_latent_attention",
             attn_mask_type=AttnMaskType.causal,
+            is_mtp_layer=is_mtp_layer,
         )
     else:
         self_attn_spec = get_attention_spec(
             config=config,
             attention_layer_type=attention_layer_type,
             attn_mask_type=attn_mask_type,
+            is_mtp_layer=is_mtp_layer,
         )
 
     # mHC: build HC LayerSpec for sublayers_spec
@@ -439,6 +482,7 @@ def get_gpt_layer_local_spec(
         extra_kwargs={
             "config": config,
             "layer_number": layer_number,
+            "is_mtp_layer": is_mtp_layer,
             "hidden_dropout_prob": config.hidden_dropout_prob
             if config is not None
             else None,
@@ -616,6 +660,7 @@ def get_gpt_spec(
     ] = "learned_absolute",
     rotary_percent: float = 1.0,
     rotary_base: int = 10000,
+    swa_rotary_base: int = 10000,
     rope_scaling: bool = False,
     parallel_output: bool = False,
     tie_word_embeddings: bool = False,
@@ -638,6 +683,7 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
+            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
         }
         embedding_extra_kwargs = {
@@ -649,6 +695,7 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
+            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
         }
         embedding_extra_kwargs = {
@@ -662,6 +709,7 @@ def get_gpt_spec(
         rope_embedding_extra_kwargs = {
             "rotary_percent": rotary_percent,
             "rotary_base": rotary_base,
+            "swa_rotary_base": swa_rotary_base,
             "rope_scaling": rope_scaling,
             "mrope_section": config.mrope_section,
         }
@@ -764,6 +812,14 @@ def get_gpt_spec(
             HyperConnectionExpandLayer,
         )
 
+    # MTP magic send: re-embed input_ids at the last stage
+    mtp_embedding_spec = None
+    if config.enable_mtp_magic_send and config.num_nextn_predict_layers > 0:
+        mtp_embedding_spec = LayerSpec(
+            layer=MTPEmbeddingLayer,
+            extra_kwargs={"config": config},
+        )
+
     return LayerSpec(
         layer=GPTModel,
         extra_kwargs={
@@ -792,6 +848,7 @@ def get_gpt_spec(
             else None,
             tail_empty_layers=tail_empty_layers_spec,
             mtp=mtp_layers_spec,
+            mtp_embedding=mtp_embedding_spec,
             mtp_lm_head=mtp_lm_head_spec,
             mtp_loss=mtp_loss_spec,
             layer_norm=LayerSpec(

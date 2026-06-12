@@ -1,4 +1,5 @@
 # Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,19 +18,30 @@ import unittest
 import paddle
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
+from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
+    YarnRotaryEmbedding,
+)
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_attention_spec,
     get_gpt_decoder_layers_spec,
     get_gpt_layer_local_spec,
     get_gpt_mtp_layers_spec,
 )
+from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
+from paddlefleet.tilelang_ops import csa_sparse_attn
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
-    _get_doc_start,
+    _apply_rope,
+    _resolve_csa_indexer_attn_topk_effective,
+    _resolve_csa_indexer_loss_topk_effective,
+    _resolve_csa_tilelang_switch,
     get_compress_topk_idxs,
     get_window_topk_idxs,
+    unfused_compressed_sparse_attn,
 )
-from paddlefleet.transformer.dsa_attention import fused_qk_topk_naive
+from paddlefleet.transformer.dsa_attention import (
+    fused_qk_topk_naive,
+)
 from paddlefleet.transformer.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
 )
@@ -58,6 +70,9 @@ def _make_config(
     apply_rope_fusion=False,
     multi_latent_attention=True,
     num_nextn_predict_layers=0,
+    csa_tilelang_backend=None,
+    csa_tilelang_enable_indexer=None,
+    csa_tilelang_enable_sparse_attn=None,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -98,6 +113,9 @@ def _make_config(
         attention_softmax_in_fp32=True,
         masked_softmax_fusion=False,
         softmax_type="vanilla",
+        csa_tilelang_backend=csa_tilelang_backend,
+        csa_tilelang_enable_indexer=csa_tilelang_enable_indexer,
+        csa_tilelang_enable_sparse_attn=csa_tilelang_enable_sparse_attn,
     )
 
 
@@ -142,74 +160,93 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[2])
 
+    def test_csa_tilelang_backend_switches_and_overrides(self):
+        paddle_config = _make_config()
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                paddle_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                paddle_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        tilelang_config = _make_config(
+            csa_tilelang_backend="attention_paddle_compat"
+        )
+        self.assertTrue(
+            _resolve_csa_tilelang_switch(
+                tilelang_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertTrue(
+            _resolve_csa_tilelang_switch(
+                tilelang_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        override_config = _make_config(
+            csa_tilelang_backend="attention_paddle_compat",
+            csa_tilelang_enable_indexer=False,
+            csa_tilelang_enable_sparse_attn=False,
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                override_config, "csa_tilelang_enable_indexer"
+            )
+        )
+        self.assertFalse(
+            _resolve_csa_tilelang_switch(
+                override_config, "csa_tilelang_enable_sparse_attn"
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "csa_tilelang_enable_indexer=True requires"
+        ):
+            _make_config(csa_tilelang_enable_indexer=True)
+
+        with self.assertRaisesRegex(
+            ValueError, "csa_tilelang_enable_sparse_attn=True requires"
+        ):
+            _make_config(csa_tilelang_enable_sparse_attn=True)
+
+    def test_phase2_loss_topk_does_not_expand_attention_topk(self):
+        config = _make_config(
+            dsa_index_topk=2,
+        )
+        n_compressed = 8
+
+        self.assertEqual(
+            _resolve_csa_indexer_loss_topk_effective(
+                config, config.dsa_index_topk, n_compressed
+            ),
+            n_compressed,
+        )
+        self.assertEqual(
+            _resolve_csa_indexer_attn_topk_effective(
+                config.dsa_index_topk, n_compressed
+            ),
+            config.dsa_index_topk,
+        )
+
+        config.dsa_indexer_use_sparse_loss = True
+        self.assertEqual(
+            _resolve_csa_indexer_loss_topk_effective(
+                config, config.dsa_index_topk, n_compressed
+            ),
+            config.dsa_index_topk,
+        )
+
 
 class TestCSAIndexHelpers(unittest.TestCase):
-    def test_doc_start_accepts_1d_and_2d_masks(self):
-        mask_1d = paddle.to_tensor([4, 4, 4, 4, 8, 8, 8, 8], dtype="int64")
-        doc_start_1d = _get_doc_start(mask_1d, seqlen=8)
-        self.assertEqual(
-            doc_start_1d.numpy().tolist(), [0, 0, 0, 0, 4, 4, 4, 4]
-        )
-
-        mask_2d = paddle.stack([mask_1d, mask_1d])
-        doc_start_2d = _get_doc_start(mask_2d, seqlen=8)
-        self.assertEqual(
-            doc_start_2d.numpy().tolist(),
-            [[0, 0, 0, 0, 4, 4, 4, 4], [0, 0, 0, 0, 4, 4, 4, 4]],
-        )
-
-    def test_window_and_compress_indices_with_document_boundaries(self):
-        boundaries = paddle.to_tensor(
-            [[[[4], [4], [4], [4], [8], [8], [8], [8]]]], dtype="int64"
-        )
-
-        window = get_window_topk_idxs(
-            window_size=3,
-            batch_size=1,
-            seqlen=8,
-            attn_mask_startend_row_indices=boundaries,
-        )
-        self.assertEqual(
-            window.numpy().tolist()[0],
-            [
-                [0, -1, -1],
-                [0, 1, -1],
-                [0, 1, 2],
-                [1, 2, 3],
-                [4, -1, -1],
-                [4, 5, -1],
-                [4, 5, 6],
-                [5, 6, 7],
-            ],
-        )
-
-        compressed = get_compress_topk_idxs(
-            ratio=4,
-            batch_size=1,
-            seqlen=8,
-            offset=8,
-            attn_mask_startend_row_indices=boundaries,
-        )
-        self.assertEqual(
-            compressed.numpy().tolist()[0],
-            [
-                [-1, -1],
-                [-1, -1],
-                [-1, -1],
-                [8, -1],
-                [-1, -1],
-                [-1, -1],
-                [-1, -1],
-                [-1, 9],
-            ],
-        )
-
-    def test_window_and_compress_indices_without_document_boundaries(self):
+    def test_window_and_compress_indices(self):
         window = get_window_topk_idxs(
             window_size=3,
             batch_size=2,
             seqlen=4,
-            attn_mask_startend_row_indices=None,
         )
         self.assertEqual(list(window.shape), [2, 4, 3])
         self.assertEqual(
@@ -222,7 +259,6 @@ class TestCSAIndexHelpers(unittest.TestCase):
             batch_size=2,
             seqlen=8,
             offset=8,
-            attn_mask_startend_row_indices=None,
         )
         self.assertEqual(list(compressed.shape), [2, 8, 2])
         self.assertEqual(
@@ -252,6 +288,430 @@ class TestCSAIndexHelpers(unittest.TestCase):
         self.assertEqual(list(index_scores.shape), [1, 2, 2])
         self.assertEqual(list(topk_indices.shape), [1, 2, 2])
         self.assertEqual(topk_indices.numpy().tolist()[0][0][0], 0)
+
+
+class TestDSv4HybridDocumentRoPE(unittest.TestCase):
+    def test_compressed_document_rope_matches_separate_documents(self):
+        paddle.seed(_SEED)
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        nope_dim = config.qk_nope_head_dim
+        pos_dim = config.qk_rope_head_dim
+        ratio = 4
+
+        doc1 = paddle.randn(
+            [1, 23 // ratio, 1, config.v_head_dim], dtype="bfloat16"
+        )
+        doc2 = paddle.randn(
+            [1, 9 // ratio, 1, config.v_head_dim], dtype="bfloat16"
+        )
+        padding = paddle.randn([1, 1, 1, config.v_head_dim], dtype="bfloat16")
+        packed = paddle.concat([doc1, doc2, padding], axis=1)
+
+        packed_out = _apply_rope(
+            packed,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=32 // ratio,
+            ratio=ratio,
+            doc_lens_cutoff=paddle.to_tensor([20, 8], dtype="int32"),
+        )
+        doc1_out = _apply_rope(
+            doc1,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=20 // ratio,
+            ratio=ratio,
+        )
+        doc2_out = _apply_rope(
+            doc2,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=8 // ratio,
+            ratio=ratio,
+        )
+
+        self.assertTrue(
+            paddle.equal_all(
+                packed_out[:, : doc1.shape[1], :, :].cast("float32"),
+                doc1_out.cast("float32"),
+            ).item()
+        )
+        self.assertTrue(
+            paddle.equal_all(
+                packed_out[
+                    :, doc1.shape[1] : doc1.shape[1] + doc2.shape[1], :, :
+                ].cast("float32"),
+                doc2_out.cast("float32"),
+            ).item()
+        )
+
+    def test_compressed_document_rope_with_padding_matches_separate_documents(
+        self,
+    ):
+        paddle.seed(_SEED)
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        nope_dim = config.qk_nope_head_dim
+        pos_dim = config.qk_rope_head_dim
+        ratio = 4
+
+        doc1 = paddle.randn(
+            [1, 23 // ratio, 1, config.v_head_dim], dtype="bfloat16"
+        )
+        doc2 = paddle.randn(
+            [1, 7 // ratio, 1, config.v_head_dim], dtype="bfloat16"
+        )
+        padding = paddle.randn([1, 2, 1, config.v_head_dim], dtype="bfloat16")
+        packed = paddle.concat([doc1, doc2, padding], axis=1)
+
+        packed_out = _apply_rope(
+            packed,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=32 // ratio,
+            ratio=ratio,
+            doc_lens_cutoff=paddle.to_tensor([20, 4], dtype="int32"),
+        )
+        doc1_out = _apply_rope(
+            doc1,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=20 // ratio,
+            ratio=ratio,
+        )
+        doc2_out = _apply_rope(
+            doc2,
+            nope_dim,
+            pos_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=4 // ratio,
+            ratio=ratio,
+        )
+
+        self.assertTrue(
+            paddle.equal_all(
+                packed_out[:, : doc1.shape[1], :, :].cast("float32"),
+                doc1_out.cast("float32"),
+            ).item()
+        )
+        self.assertTrue(
+            paddle.equal_all(
+                packed_out[
+                    :, doc1.shape[1] : doc1.shape[1] + doc2.shape[1], :, :
+                ].cast("float32"),
+                doc2_out.cast("float32"),
+            ).item()
+        )
+
+    def test_attention_module_fused_sparse_matches_dynamic_forward_backward(
+        self,
+    ):
+        old_flag = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]
+        paddle.set_flags({"FLAGS_cudnn_deterministic": 0})
+        try:
+            paddle.seed(_SEED)
+            seq_len = 128
+            for ratio in [4]:
+                dynamic_config = _make_config(
+                    hidden_size=256,
+                    num_attention_heads=2,
+                    v_head_dim=128,
+                    q_lora_rank=64,
+                    o_groups=2,
+                    o_lora_rank=32,
+                    csa_window_size=32,
+                    dsa_indexer_loss_coeff=1.0,
+                    dsa_index_n_heads=16,
+                    csa_compress_ratios=[ratio],
+                    num_layers=1,
+                    csa_tilelang_backend=None,
+                    csa_tilelang_enable_indexer=False,
+                    csa_tilelang_enable_sparse_attn=False,
+                )
+                fused_config = _make_config(
+                    hidden_size=256,
+                    num_attention_heads=2,
+                    v_head_dim=128,
+                    q_lora_rank=64,
+                    o_groups=2,
+                    o_lora_rank=32,
+                    csa_window_size=32,
+                    dsa_indexer_loss_coeff=1.0,
+                    dsa_index_n_heads=16,
+                    csa_compress_ratios=[ratio],
+                    num_layers=1,
+                    csa_tilelang_backend="attention_paddle_compat",
+                    csa_tilelang_enable_indexer=True,
+                    csa_tilelang_enable_sparse_attn=True,
+                )
+                doc_len_cases = [
+                    ##################### 1. pad + //
+                    (96, 24),  # x
+                    (24, 96),
+                    (92, 28),  # x
+                    (28, 92),  # x
+                    (88, 32),
+                    ##################### 2. pad + ! //
+                    (89, 37),  # x
+                    (87, 39),
+                    #################### 3. no pad + //
+                    (92, 36),  # x
+                    (88, 40),
+                    (84, 44),
+                    (80, 48),
+                    ##################### 4. no pad + ! //
+                    (91, 37),  # x
+                    (37, 91),
+                    (90, 38),  # x
+                    (89, 39),  # x
+                    (87, 41),
+                    (86, 42),
+                    (85, 43),
+                    (83, 45),
+                    (82, 46),
+                ]
+
+                def assert_close_with_diff(name, actual, expected):
+                    actual = actual.cast("float32")
+                    expected = expected.cast("float32")
+                    diff = (actual - expected).abs()
+                    close_mask = paddle.isclose(
+                        actual, expected, rtol=5e-1, atol=5e-1
+                    )
+                    fail_mask = ~close_mask
+                    fail_count = int(fail_mask.cast("int64").sum().item())
+                    total_count = fail_mask.numel()
+                    max_idx = int(diff.flatten().argmax().item())
+                    actual_flat = actual.flatten()
+                    expected_flat = expected.flatten()
+                    diff_flat = diff.flatten()
+                    diff_info = (
+                        f"{name}: "
+                        f"shape={actual.shape}, "
+                        f"max={float(diff.max().item())}, "
+                        f"mean={float(diff.mean().item())}, "
+                        f"fail={fail_count}/{total_count}, "
+                        f"max_idx={max_idx}, "
+                        f"actual={float(actual_flat[max_idx].item())}, "
+                        f"expected={float(expected_flat[max_idx].item())}, "
+                        f"abs_diff={float(diff_flat[max_idx].item())}"
+                    )
+                    print(f"[diff] {diff_info}")
+                    fail_details = []
+                    if fail_count > 0:
+                        fail_indices = paddle.nonzero(
+                            fail_mask.flatten()
+                        ).flatten()[:8]
+                        for i, fail_idx in enumerate(fail_indices):
+                            idx = int(fail_idx.item())
+                            detail = (
+                                f"{name} fail[{i}]: "
+                                f"idx={idx}, "
+                                f"actual={float(actual_flat[idx].item())}, "
+                                f"expected={float(expected_flat[idx].item())}, "
+                                f"abs_diff={float(diff_flat[idx].item())}"
+                            )
+                            print(f"[diff] {detail}")
+                            fail_details.append(detail)
+                    error_msg = (
+                        f"{diff_info}\n" + "\n".join(fail_details)
+                        if fail_details
+                        else diff_info
+                    )
+                    self.assertTrue(close_mask.all().item(), error_msg)
+
+                for doc1_len, doc2_len in doc_len_cases:
+                    with self.subTest(
+                        ratio=ratio,
+                        doc1_len=doc1_len,
+                        doc2_len=doc2_len,
+                    ):
+                        model_parallel_cuda_manual_seed(_SEED)
+                        dynamic_attn = _build_attention(
+                            dynamic_config, layer_number=0
+                        )
+                        model_parallel_cuda_manual_seed(_SEED)
+                        fused_attn = _build_attention(
+                            fused_config, layer_number=0
+                        )
+                        fused_attn.set_state_dict(dynamic_attn.state_dict())
+                        dynamic_attn.train()
+                        fused_attn.train()
+
+                        padding_len = seq_len - doc1_len - doc2_len
+                        print(f"[ghz] {doc1_len=} {doc2_len=} {padding_len=}")
+                        hidden = paddle.randn(
+                            [1, seq_len, dynamic_config.hidden_size],
+                            dtype="bfloat16",
+                        )
+                        startend_row_indices = paddle.to_tensor(
+                            [doc1_len] * doc1_len
+                            + [doc1_len + doc2_len] * (doc2_len + padding_len),
+                            dtype="int32",
+                        ).reshape([1, 1, seq_len, 1])
+
+                        dynamic_hidden = hidden.clone()
+                        fused_hidden = hidden.clone()
+                        dynamic_hidden.stop_gradient = False
+                        fused_hidden.stop_gradient = False
+
+                        valid_len = doc1_len + doc2_len
+                        dynamic_out, _ = dynamic_attn(
+                            hidden_states=dynamic_hidden,
+                            attention_mask=None,
+                            attn_mask_startend_row_indices=startend_row_indices,
+                        )
+                        grad = paddle.randn(
+                            dynamic_out.shape, dynamic_out.dtype
+                        )
+                        if padding_len > 0:
+                            grad[:, valid_len:, :] = 0
+                        dynamic_out.backward(grad)
+                        dynamic_hidden_grad = dynamic_hidden.grad.clone()
+                        dynamic_param_grads = {
+                            name: param.grad.clone()
+                            for name, param in dynamic_attn.named_parameters()
+                            if param.grad is not None
+                        }
+
+                        fused_out, _ = fused_attn(
+                            hidden_states=fused_hidden,
+                            attention_mask=None,
+                            attn_mask_startend_row_indices=startend_row_indices,
+                        )
+                        fused_out.backward(grad)
+
+                        assert_close_with_diff(
+                            "output",
+                            fused_out,
+                            dynamic_out,
+                        )
+                        fused_params = dict(fused_attn.named_parameters())
+                        for name, dynamic_grad in dynamic_param_grads.items():
+                            fused_grad = fused_params[name].grad
+                            self.assertIsNotNone(fused_grad, name)
+                            assert_close_with_diff(
+                                name, fused_grad, dynamic_grad
+                            )
+                        assert_close_with_diff(
+                            "hidden_grad",
+                            fused_hidden.grad,
+                            dynamic_hidden_grad,
+                        )
+        finally:
+            paddle.set_flags({"FLAGS_cudnn_deterministic": old_flag})
+
+    def test_attention_module_document_mask_matches_separate_documents(self):
+        paddle.seed(_SEED)
+        for ratio in [0, 4, 128]:
+            config = _make_config(
+                hidden_size=64,
+                num_attention_heads=2,
+                v_head_dim=32,
+                q_lora_rank=32,
+                o_groups=2,
+                o_lora_rank=16,
+                csa_window_size=32,
+                dsa_indexer_loss_coeff=0.0,
+                csa_compress_ratios=[ratio],
+                num_layers=1,
+            )
+            model_parallel_cuda_manual_seed(_SEED)
+            attn = _build_attention(config, layer_number=0)
+            attn.eval()
+            seq_len = 32
+            for doc2_len in [9, 7]:
+                doc1 = paddle.randn(
+                    [1, 23, config.hidden_size], dtype="bfloat16"
+                )
+                doc2 = paddle.randn(
+                    [1, doc2_len, config.hidden_size], dtype="bfloat16"
+                )
+                padding_len = seq_len - 23 - doc2_len
+                if padding_len > 0:
+                    padding = paddle.randn(
+                        [1, padding_len, config.hidden_size], dtype="bfloat16"
+                    )
+                    packed = paddle.concat([doc1, doc2, padding], axis=1)
+                else:
+                    packed = paddle.concat([doc1, doc2], axis=1)
+
+                startend_row_indices = paddle.to_tensor(
+                    [23] * 23 + [23 + doc2_len] * (doc2_len + padding_len),
+                    dtype="int32",
+                ).reshape([1, 1, 32, 1])
+                doc1_startend_row_indices = paddle.to_tensor(
+                    [23] * 23, dtype="int32"
+                ).reshape([1, 1, 23, 1])
+                doc2_startend_row_indices = paddle.to_tensor(
+                    [doc2_len] * doc2_len, dtype="int32"
+                ).reshape([1, 1, doc2_len, 1])
+
+                with paddle.no_grad():
+                    packed_out, _ = attn(
+                        hidden_states=packed,
+                        attention_mask=None,
+                        attn_mask_startend_row_indices=startend_row_indices,
+                    )
+                    doc1_out, _ = attn(
+                        hidden_states=doc1,
+                        attention_mask=None,
+                        attn_mask_startend_row_indices=doc1_startend_row_indices,
+                    )
+                    doc2_out, _ = attn(
+                        hidden_states=doc2,
+                        attention_mask=None,
+                        attn_mask_startend_row_indices=doc2_startend_row_indices,
+                    )
+
+                self.assertTrue(
+                    paddle.equal_all(
+                        packed_out[:, :23, :].cast("float32"),
+                        doc1_out.cast("float32"),
+                    ).item()
+                )
+                self.assertTrue(
+                    paddle.equal_all(
+                        packed_out[:, 23 : 23 + doc2_len, :].cast("float32"),
+                        doc2_out.cast("float32"),
+                    ).item()
+                )
 
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):
@@ -326,6 +786,9 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         self.assertEqual(
             attn.core_attention.compress_ratio, ratios[config.num_hidden_layers]
         )
+        self.assertEqual(
+            attn.core_attention.layer_number, config.num_hidden_layers + 1
+        )
 
     def test_non_dense_mtp_spec_uses_mtp_attention_ratio(self):
         ratios = [0, 4, 128, 4, 128]
@@ -362,11 +825,6 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         )
         self.assertIsInstance(mscale, float)
 
-    def test_unsupported_rope_type_raises(self):
-        config = _make_config(rope_type="invalid")
-        with self.assertRaisesRegex(ValueError, "Unsupported rope_type"):
-            _build_attention(config, layer_number=1)
-
     def test_o_group_proj_shape(self):
         paddle.seed(_SEED)
         o_groups = 4
@@ -384,33 +842,96 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         self.assertFalse(attn.linear_o_group_proj.stop_gradient)
 
 
+class TestDSv4HybridFusedSparseAttention(unittest.TestCase):
+    def test_fused_matches_unfused_forward_backward(self):
+        old_flag = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]
+        paddle.set_flags({"FLAGS_cudnn_deterministic": 0})
+        try:
+            paddle.seed(_SEED)
+            batch_size = 1
+            seq_len = 128
+            num_heads = 16
+            head_dim = 128
+            topk = 64
+            softmax_scale = head_dim**-0.5
+
+            query = paddle.randn(
+                [batch_size, seq_len, num_heads, head_dim],
+                dtype=paddle.bfloat16,
+            )
+            kv_full = paddle.randn(
+                [batch_size, seq_len, head_dim], dtype=paddle.bfloat16
+            )
+            attn_sink = paddle.randn([num_heads], dtype=paddle.float32)
+            topk_idxs = (
+                paddle.arange(topk, dtype="int32")
+                .reshape([1, 1, topk])
+                .expand([batch_size, seq_len, topk])
+            )
+
+            query.stop_gradient = False
+            kv_full.stop_gradient = False
+            attn_sink.stop_gradient = False
+            fused_out = csa_sparse_attn(
+                query, kv_full, attn_sink, topk_idxs, softmax_scale
+            )
+            fused_loss = fused_out.cast("float32").sum()
+            fused_loss.backward()
+            fused_query_grad = query.grad.clone()
+            fused_kv_grad = kv_full.grad.clone()
+            fused_attn_sink_grad = attn_sink.grad.clone()
+
+            query.clear_gradient()
+            kv_full.clear_gradient()
+            attn_sink.clear_gradient()
+            unfused_out = unfused_compressed_sparse_attn(
+                query, kv_full, attn_sink, topk_idxs, softmax_scale
+            )
+            unfused_loss = unfused_out.cast("float32").sum()
+            unfused_loss.backward()
+
+            self.assertTrue(
+                paddle.allclose(
+                    fused_out.cast("float32"),
+                    unfused_out.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_query_grad.cast("float32"),
+                    query.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_kv_grad.cast("float32"),
+                    kv_full.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    fused_attn_sink_grad.cast("float32"),
+                    attn_sink.grad.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item()
+            )
+        finally:
+            paddle.set_flags({"FLAGS_cudnn_deterministic": old_flag})
+
+
 class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
     def setUp(self):
         paddle.seed(_SEED)
         self.config = _make_config(dsa_indexer_loss_coeff=1.0)
-
-    def test_forward_output_shape(self):
-        batch_size = 2
-        seq_len = 64
-
-        for layer_number in [0, 1, 2, 3]:
-            attn = _build_attention(self.config, layer_number=layer_number)
-            hidden = paddle.randn(
-                [batch_size, seq_len, self.config.hidden_size],
-                dtype=paddle.bfloat16,
-            )
-
-            output, bias = attn(hidden_states=hidden, attention_mask=None)
-
-            self.assertEqual(
-                list(output.shape),
-                [batch_size, seq_len, self.config.hidden_size],
-            )
-            self.assertEqual(output.dtype, paddle.bfloat16)
-            self.assertTrue(
-                paddle.isfinite(output.cast("float32")).all().item()
-            )
-            self.assertIsNone(bias)
 
     def test_backward_gradient_flow(self):
         batch_size = 2

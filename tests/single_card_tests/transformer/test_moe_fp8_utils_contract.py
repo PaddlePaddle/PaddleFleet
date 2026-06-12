@@ -88,9 +88,7 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
             [[1.0, 2.0], [14.0, 14.0], [22.0, 22.0]],
         )
         self.assertIs(node.tokens_per_expert, token_counts)
-        self.assertEqual(
-            node.tokens_per_expert_indices.numpy().tolist(), [0, 1, 1]
-        )
+        self.assertEqual(node.m_indices.numpy().tolist(), [0, 1, 1])
 
     def test_fwd_gate_up_runs_bf16_path_with_list_counts(self):
         node = _new_bf16_node(moe_deep_gemm=True)
@@ -110,9 +108,7 @@ class TestExpertsGroupGemmContiguousNodeCounts(unittest.TestCase):
             out.numpy().tolist(),
             [[3.0, 3.0], [7.0, 7.0], [5.0, 6.0]],
         )
-        self.assertEqual(
-            node.tokens_per_expert_indices.numpy().tolist(), [0, 0, 1]
-        )
+        self.assertEqual(node.m_indices.numpy().tolist(), [0, 0, 1])
 
     def test_fwd_gate_up_can_reuse_cached_input(self):
         node = _new_bf16_node(moe_deep_gemm=False)

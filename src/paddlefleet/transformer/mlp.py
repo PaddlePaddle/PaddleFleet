@@ -40,7 +40,6 @@ from paddlefleet.fusions.fused_bias_geglu import (
 from paddlefleet.fusions.fused_bias_gelu import bias_gelu_impl
 from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
-    clamped_weighted_bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
 from paddlefleet.transformer.layer import FleetLayer
@@ -185,6 +184,19 @@ class MLP(FleetLayer):
         _use_paddle_swiglu = getattr(
             self.config, "gpt_model_use_experimental_version", False
         )
+        if (
+            self.config.use_bias
+            and self.config.gpt_model_use_experimental_version
+            and self.config.tensor_model_parallel_size == 1
+        ):
+            hidden_states = paddle.incubate.nn.functional.fused_linear(
+                hidden_states, self.up_gate_proj.weight, self.up_gate_proj.bias
+            )
+            hidden_states = F.swiglu(hidden_states)
+            output = paddle.incubate.nn.functional.fused_linear(
+                hidden_states, self.down_proj.weight, self.down_proj.bias
+            )
+            return output, None
 
         if (
             _use_paddle_swiglu
@@ -198,23 +210,17 @@ class MLP(FleetLayer):
             if per_token_scale is not None:
                 if self.hidden_act == F.silu and self.config.gated_linear_unit:
                     # dtype is handled inside the fused kernel
-                    if self.config.activation_func_clamp_value is not None:
-                        intermediate_parallel = (
-                            clamped_weighted_bias_swiglu_impl(
-                                intermediate_parallel,
-                                bias_parallel,
-                                per_token_scale.unsqueeze(-1),
-                                self.config.activation_func_clamp_value,
-                                self.config.activation_func_fp8_input_store,
-                            )
-                        )
-                    else:
-                        intermediate_parallel = weighted_bias_swiglu_impl(
-                            intermediate_parallel,
-                            bias_parallel,
-                            per_token_scale.unsqueeze(-1),
-                            self.config.activation_func_fp8_input_store,
-                        )
+                    intermediate_parallel = weighted_bias_swiglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        per_token_scale.unsqueeze(-1),
+                        getattr(
+                            self.config,
+                            "activation_func_fp8_input_store",
+                            False,
+                        ),
+                        self.config.activation_func_clamp_value,
+                    )
                 elif (
                     self.hidden_act == quick_gelu
                     and self.config.gated_linear_unit
@@ -223,7 +229,11 @@ class MLP(FleetLayer):
                         intermediate_parallel,
                         bias_parallel,
                         per_token_scale.unsqueeze(-1),
-                        self.config.activation_func_fp8_input_store,
+                        getattr(
+                            self.config,
+                            "activation_func_fp8_input_store",
+                            False,
+                        ),
                         self.config.glu_linear_offset,
                         self.config.activation_func_clamp_value,
                     )
@@ -245,18 +255,16 @@ class MLP(FleetLayer):
                 elif (
                     self.hidden_act == F.silu and self.config.gated_linear_unit
                 ):
-                    """
                     intermediate_parallel = bias_swiglu_impl(
                         intermediate_parallel,
                         bias_parallel,
-                        self.config.activation_func_fp8_input_store,
-                        self.config.cpu_offloading
-                        and self.config.cpu_offloading_activations
-                        and False,
-                    )
-                    """
-                    intermediate_parallel = bias_swiglu_impl(
-                        intermediate_parallel, bias_parallel
+                        fp8_input_store=getattr(
+                            self.config,
+                            "activation_func_fp8_input_store",
+                            False,
+                        ),
+                        cpu_offload_input=False,
+                        clamp_value=self.config.activation_func_clamp_value,
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")

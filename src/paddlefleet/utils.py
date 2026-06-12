@@ -143,6 +143,17 @@ def scaled_init_method_normal(sigma, num_layers, multiplier=2.0):
     return functools.partial(paddle.nn.init.normal_, mean=0.0, std=std)
 
 
+def get_magic_init_method(sigma):
+    """Magic init method: randn(...).scale(sigma) under fp32 default dtype guard."""
+
+    def init_method(weight):
+        weight.set_value(
+            paddle.randn(weight.shape, dtype=weight.dtype).scale(sigma)
+        )
+
+    return init_method
+
+
 def get_pg_size(group=None):
     """Get world size for a distributed group.
 
@@ -267,15 +278,19 @@ def is_paddle_min_version(version, check_equality=True):
 ########################
 
 
-def get_batch_on_this_cp_rank(inputs):
+def get_batch_on_this_cp_rank(inputs, cp_balance_mode="dualchunk_allgather"):
     if isinstance(inputs, paddle.Tensor):
-        return ContextParallelScatterOp.apply(inputs, axis=-1)
+        return ContextParallelScatterOp.apply(
+            inputs, axis=-1, mode=cp_balance_mode
+        )
     elif isinstance(inputs, dict):
         res = {}
         keys = ["input_ids", "position_ids", "labels"]
         for k, tensor in inputs.items():
             if k in keys:
-                res[k] = ContextParallelScatterOp.apply(tensor, axis=-1)
+                res[k] = ContextParallelScatterOp.apply(
+                    tensor, axis=-1, mode=cp_balance_mode
+                )
             else:
                 res[k] = tensor
     elif isinstance(inputs, list):

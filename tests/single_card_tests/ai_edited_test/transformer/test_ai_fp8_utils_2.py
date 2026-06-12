@@ -158,7 +158,7 @@ class TestExpertsGroupGemmContiguousNodeMore(unittest.TestCase):
         output = node.fwd_gate_up(x, weight, 1, [0])
 
         self.assertEqual(output.shape, [0, 6])
-        self.assertEqual(node.tokens_per_expert_indices.shape, [0])
+        self.assertEqual(node.m_indices.shape, [0])
 
 
 if __name__ == "__main__":

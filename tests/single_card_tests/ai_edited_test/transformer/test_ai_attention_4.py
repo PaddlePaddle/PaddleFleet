@@ -97,6 +97,7 @@ class TestCrossAttentionInitValidation(unittest.TestCase):
         config.recompute_granularity = None
         config.recompute_modules = None
         config.tensor_model_parallel_size = 1
+        config.sliding_window = None
 
         spec = CrossAttentionSublayersSpec()
         with self.assertRaises(ValueError):
@@ -145,6 +146,8 @@ class TestAttentionInitAttributes(unittest.TestCase):
         config.recompute_granularity = None
         config.recompute_modules = None
         config.tensor_model_parallel_size = 1
+        config.sliding_window = None
+        config.use_vha_attention = False
 
         spec = SelfAttentionSublayersSpec()
         attn = SelfAttention(
@@ -178,6 +181,8 @@ class TestAttentionInitAttributes(unittest.TestCase):
         config.recompute_granularity = None
         config.recompute_modules = None
         config.tensor_model_parallel_size = 1
+        config.sliding_window = None
+        config.use_vha_attention = False
 
         spec = SelfAttentionSublayersSpec()
         attn = SelfAttention(

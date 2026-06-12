@@ -24,6 +24,7 @@ sys.path.insert(
 )
 
 import unittest
+import unittest.mock
 from unittest.mock import MagicMock
 
 import paddle
@@ -274,6 +275,192 @@ class TestGPTEmbeddingBuildScheduleNode(unittest.TestCase):
         emb = GPTEmbedding.__new__(GPTEmbedding)
         node = emb.build_schedule_node()
         self.assertIsInstance(node, ScheduleNode)
+
+
+class TestGPTEmbeddingSWARotaryPosEmb(unittest.TestCase):
+    """Tests for SWA rotary position embedding branches in forward."""
+
+    def _make_embedding(self):
+        emb = GPTEmbedding.__new__(GPTEmbedding)
+        emb.__dict__.setdefault("_parameters", {})
+        emb.__dict__.setdefault("_buffers", {})
+        emb.__dict__.setdefault("_sub_layers", {})
+        emb.__dict__.setdefault("_loaddict_holder", {})
+        emb.__dict__.setdefault("_non_persistable_buffers", set())
+        emb.__dict__.setdefault("_non_persistable_buffer_names_set", set())
+        emb.config = MagicMock()
+        emb.config.sequence_parallel = False
+        emb.config.multimodal_embedding = False
+        emb.config.expert_model_parallel_size = 1
+        emb.config.num_nextn_predict_layers = 0
+        emb.config.apply_rope_fusion = False
+        emb.rotary_pos_emb = None
+        emb.mrope_section = None
+        emb.sequence_parallel = False
+        return emb
+
+    def test_swa_rope_path(self):
+        """Test SWA rotary pos emb via rope path (L502-515)."""
+        emb = self._make_embedding()
+        emb.position_embedding_type = "rope"
+        mock_swa = MagicMock()
+        mock_swa.get_rotary_seq_len = MagicMock(return_value=4)
+        mock_swa.return_value = paddle.randn([1, 4, 1, 16])
+        emb.swa_rotary_pos_emb = mock_swa
+
+        decoder_input = paddle.randn([2, 4, 64])
+        result = emb.forward(
+            dict_args={"input_ids": None},
+            decoder_input=decoder_input,
+        )
+        mock_swa.assert_called_once()
+        self.assertIn("swa_rotary_pos_emb", result)
+        self.assertIsNotNone(result["swa_rotary_pos_emb"])
+
+    def test_swa_mrope_path(self):
+        """Test SWA rotary pos emb via mrope path (L517-523)."""
+        emb = self._make_embedding()
+        emb.position_embedding_type = "mrope"
+        mock_swa = MagicMock()
+        mock_swa.return_value = paddle.randn([2, 4, 16])
+        emb.swa_rotary_pos_emb = mock_swa
+        emb.mrope_section = [4, 4, 8]
+
+        decoder_input = paddle.randn([2, 4, 64])
+        result = emb.forward(
+            dict_args={
+                "input_ids": None,
+                "position_ids": paddle.zeros([2, 4], dtype="int64"),
+            },
+            decoder_input=decoder_input,
+        )
+        mock_swa.assert_called_once()
+        self.assertIsNotNone(result["swa_rotary_pos_emb"])
+
+    def test_swa_apply_rope_fusion(self):
+        """Test apply_rope_fusion cos/sin computation (L525-528)."""
+        emb = self._make_embedding()
+        emb.position_embedding_type = "rope"
+        emb.config.apply_rope_fusion = True
+        mock_swa = MagicMock()
+        mock_swa.get_rotary_seq_len = MagicMock(return_value=4)
+        mock_swa.return_value = paddle.randn([1, 4, 1, 16])
+        emb.swa_rotary_pos_emb = mock_swa
+
+        decoder_input = paddle.randn([2, 4, 64])
+        result = emb.forward(
+            dict_args={"input_ids": None},
+            decoder_input=decoder_input,
+        )
+        self.assertIsNotNone(result.get("swa_rotary_pos_cos"))
+        self.assertIsNotNone(result.get("swa_rotary_pos_sin"))
+
+    def test_swa_sequence_parallel_rope(self):
+        """Test sequence_parallel transpose for rope SWA (L535-539)."""
+        emb = self._make_embedding()
+        emb.position_embedding_type = "rope"
+        emb.config.sequence_parallel = True
+        mock_swa = MagicMock()
+        mock_swa.get_rotary_seq_len = MagicMock(return_value=4)
+        # Shape: [1, S, 1, head_dim]
+        mock_swa.return_value = paddle.randn([1, 4, 1, 16])
+        emb.swa_rotary_pos_emb = mock_swa
+
+        decoder_input = paddle.randn([2, 4, 64])
+        result = emb.forward(
+            dict_args={"input_ids": None},
+            decoder_input=decoder_input,
+        )
+        # After transpose: [S, 1, 1, head_dim]
+        swa_emb = result["swa_rotary_pos_emb"]
+        self.assertEqual(list(swa_emb.shape), [4, 1, 1, 16])
+
+    def test_swa_sequence_parallel_mrope(self):
+        """Test sequence_parallel transpose for mrope SWA (L530-534)."""
+        emb = self._make_embedding()
+        emb.position_embedding_type = "mrope"
+        emb.config.sequence_parallel = True
+        mock_swa = MagicMock()
+        # Shape: [B, S, head_dim]
+        mock_swa.return_value = paddle.randn([2, 4, 16])
+        emb.swa_rotary_pos_emb = mock_swa
+        emb.mrope_section = [4, 4, 8]
+
+        decoder_input = paddle.randn([2, 4, 64])
+        result = emb.forward(
+            dict_args={
+                "input_ids": None,
+                "position_ids": paddle.zeros([2, 4], dtype="int64"),
+            },
+            decoder_input=decoder_input,
+        )
+        # After transpose: [S, B, head_dim]
+        swa_emb = result["swa_rotary_pos_emb"]
+        self.assertEqual(list(swa_emb.shape), [4, 2, 16])
+
+
+class TestGPTEmbeddingCPScatterSPAssert(unittest.TestCase):
+    """Test assertion: sequence_parallel not supported with CP scatter in plain path."""
+
+    def _make_embedding(self):
+        emb = GPTEmbedding.__new__(GPTEmbedding)
+        emb.__dict__.setdefault("_parameters", {})
+        emb.__dict__.setdefault("_buffers", {})
+        emb.__dict__.setdefault("_sub_layers", {})
+        emb.__dict__.setdefault("_loaddict_holder", {})
+        emb.__dict__.setdefault("_non_persistable_buffers", set())
+        emb.__dict__.setdefault("_non_persistable_buffer_names_set", set())
+        emb.config = MagicMock()
+        emb.config.sequence_parallel = False
+        emb.config.multimodal_embedding = False
+        emb.config.expert_model_parallel_size = 1
+        emb.config.tensor_model_parallel_size = 1
+        emb.config.num_nextn_predict_layers = 0
+        emb.config.mtp_load_weight_only = False
+        emb.config.apply_rope_fusion = False
+        emb.config.experimental_dataflow = True
+        emb.config.cp_balance_mode = "padding"
+        emb.config.clone_scatter_output_in_embedding = False
+        emb.position_embedding_type = "none"
+        emb.rotary_pos_emb = None
+        emb.mrope_section = None
+        emb.sequence_parallel = True
+        emb.multimodal_embedding = False
+        mock_embedding = MagicMock()
+        mock_embedding.return_value = paddle.randn([2, 8, 64])
+        emb.embedding = mock_embedding
+        return emb
+
+    @unittest.mock.patch(
+        "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
+        return_value=2,
+    )
+    def test_sp_with_cp_scatter_plain_path_raises(self, mock_cp_ws):
+        """sequence_parallel + CP scatter in plain path should raise AssertionError."""
+        emb = self._make_embedding()
+        input_ids = paddle.ones([2, 8], dtype="int64")
+        with self.assertRaises(AssertionError) as ctx:
+            emb.forward(dict_args={"input_ids": input_ids})
+        self.assertIn("sequence_parallel is not supported", str(ctx.exception))
+
+    @unittest.mock.patch(
+        "paddlefleet.models.gpt.gpt_embedding.ContextParallelScatterOp"
+    )
+    @unittest.mock.patch(
+        "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
+        return_value=2,
+    )
+    def test_no_sp_with_cp_scatter_plain_path_passes(
+        self, mock_cp_ws, mock_cp_op
+    ):
+        """Without sequence_parallel, CP scatter in plain path should not raise."""
+        emb = self._make_embedding()
+        emb.sequence_parallel = False
+        mock_cp_op.apply.return_value = paddle.randn([2, 8, 64])
+        input_ids = paddle.ones([2, 8], dtype="int64")
+        # Should not raise
+        result = emb.forward(dict_args={"input_ids": input_ids})
+        self.assertIn("hidden_states", result)
 
 
 if __name__ == "__main__":

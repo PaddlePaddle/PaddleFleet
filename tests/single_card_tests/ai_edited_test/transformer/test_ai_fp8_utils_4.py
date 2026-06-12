@@ -48,6 +48,9 @@ class TensorBox:
     def _apply_backward_hook(self):
         self.hook_called = True
 
+    def _slice(self, start, end):
+        return TensorBox(self.tensor[start:end], hasattr(self, "main_grad"))
+
 
 class Projection:
     def __init__(self, shape, with_main_grad=False):

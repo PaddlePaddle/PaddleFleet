@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include "paddle/phi/backends/gpu/gpu_context.h"
 #include "paddle/phi/core/kernel_registry.h"
 #include "paddle/phi/core/tensor_utils.h"
@@ -180,7 +182,15 @@ __device__ __forceinline__ float fast_swiglu(const __nv_bfloat16 x,
     x_f = fminf(x_f, cv);
     y_f = fmaxf(fminf(y_f, cv), -cv);
   }
-  const float silu = x_f * __frcp_rn(1.0f + __expf(-x_f));
+  // Use IEEE division for clamp path to match reference bit-exact,
+  // fast reciprocal for non-clamp (pre-existing behaviour).
+  const float silu = [&] {
+    if constexpr (kHasClamp) {
+      return x_f * (1.0f / (1.0f + __expf(-x_f)));
+    } else {
+      return x_f * __frcp_rn(1.0f + __expf(-x_f));
+    }
+  }();
   return silu * y_f;
 }
 
@@ -212,10 +222,41 @@ fast_swiglu_vec4(const bfloat16x4_t& lhs,
     y_f_w = fmaxf(fminf(y_f_w, cv), -cv);
   }
 
-  const float silu_x = x_f_x * __frcp_rn(1.0f + __expf(-x_f_x));
-  const float silu_y = x_f_y * __frcp_rn(1.0f + __expf(-x_f_y));
-  const float silu_z = x_f_z * __frcp_rn(1.0f + __expf(-x_f_z));
-  const float silu_w = x_f_w * __frcp_rn(1.0f + __expf(-x_f_w));
+  // Use IEEE division for clamp path to match reference bit-exact,
+  // fast reciprocal for non-clamp (pre-existing behaviour).
+  const float sig_x = [&] {
+    if constexpr (kHasClamp) {
+      return 1.0f / (1.0f + __expf(-x_f_x));
+    } else {
+      return __frcp_rn(1.0f + __expf(-x_f_x));
+    }
+  }();
+  const float sig_y = [&] {
+    if constexpr (kHasClamp) {
+      return 1.0f / (1.0f + __expf(-x_f_y));
+    } else {
+      return __frcp_rn(1.0f + __expf(-x_f_y));
+    }
+  }();
+  const float sig_z = [&] {
+    if constexpr (kHasClamp) {
+      return 1.0f / (1.0f + __expf(-x_f_z));
+    } else {
+      return __frcp_rn(1.0f + __expf(-x_f_z));
+    }
+  }();
+  const float sig_w = [&] {
+    if constexpr (kHasClamp) {
+      return 1.0f / (1.0f + __expf(-x_f_w));
+    } else {
+      return __frcp_rn(1.0f + __expf(-x_f_w));
+    }
+  }();
+
+  const float silu_x = x_f_x * sig_x;
+  const float silu_y = x_f_y * sig_y;
+  const float silu_z = x_f_z * sig_z;
+  const float silu_w = x_f_w * sig_w;
 
   return {silu_x * y_f_x, silu_y * y_f_y, silu_z * y_f_z, silu_w * y_f_w};
 }
@@ -259,7 +300,8 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16* __restrict__ Xin,
       static_cast<int64_t>(threadIdx.x) * elements_per_thread;
   const unsigned int mask = 0xffffffff;  // whole warp mask
 
-  for (int64_t base_y = blockIdx.y; base_y < rows; base_y += gridDim.y) {
+  for (int64_t base_y = static_cast<int64_t>(blockIdx.y); base_y < rows;
+       base_y += static_cast<int64_t>(gridDim.y)) {
     const int64_t in_y_idx = base_y;
     const int64_t in_x_idx = static_cast<int64_t>(blockIdx.x) *
                                  static_cast<int64_t>(blockDim.x) *
@@ -330,8 +372,8 @@ __global__ void FusedSPAQKernelVec4(const phi::bfloat16* __restrict__ Xin,
       if constexpr (ue8m0) {
         const size_t row_idx = in_y_idx;
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx =
-            (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
+        const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                           row_idx * 4 + (col_idx & 0x3);
         const uint8_t exp =
             (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
         uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
@@ -368,7 +410,8 @@ __global__ void FusedSPAQKernelVec8(const phi::bfloat16* __restrict__ Xin,
       static_cast<int64_t>(threadIdx.x) * elements_per_thread;
   const unsigned int mask = 0xffffffff;
 
-  for (int64_t base_y = blockIdx.y; base_y < rows; base_y += gridDim.y) {
+  for (int64_t base_y = static_cast<int64_t>(blockIdx.y); base_y < rows;
+       base_y += static_cast<int64_t>(gridDim.y)) {
     const int64_t in_x_idx =
         ((static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x)) *
          elements_per_thread) +
@@ -456,8 +499,8 @@ __global__ void FusedSPAQKernelVec8(const phi::bfloat16* __restrict__ Xin,
       const float inv_scale = __frcp_rn(scale);
       if constexpr (ue8m0) {
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx =
-            (col_idx >> 2) * (rows << 2) + base_y * 4 + (col_idx & 0x3);
+        const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                           static_cast<size_t>(base_y) * 4 + (col_idx & 0x3);
         const uint8_t exp =
             (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
         uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
@@ -498,7 +541,8 @@ __global__ void FusedSPAQKernel(const phi::bfloat16* __restrict__ Xin,
       threadIdx.x / 128;  // 0 or 1, two quant blocks per block
   const int64_t in_y_idx = static_cast<int64_t>(blockIdx.y);
   const int64_t in_x_idx =
-      static_cast<int64_t>(blockIdx.x) * blockDim.x + x_offset;
+      static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) +
+      static_cast<int64_t>(x_offset);
   const int64_t src_idx = in_y_idx * cols + in_x_idx;
 
   // Load data and compute swiGLU activation
@@ -578,8 +622,8 @@ __global__ void FusedSPAQKernel(const phi::bfloat16* __restrict__ Xin,
       if constexpr (ue8m0) {
         const size_t row_idx = g_output_y_offset;
         const size_t col_idx = in_x_idx >> 7;
-        const size_t idx =
-            (col_idx >> 2) * (rows << 2) + row_idx * 4 + (col_idx & 0x3);
+        const size_t idx = (col_idx >> 2) * (static_cast<size_t>(rows) * 4) +
+                           row_idx * 4 + (col_idx & 0x3);
         const uint8_t exp =
             (reinterpret_cast<const int&>(inv_scale) >> 23) & 0xFF;
         uint8_t* const dst = reinterpret_cast<uint8_t*>(scales) + idx;
@@ -725,6 +769,15 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
     const int64_t token_num = input_dim[0];
     const int64_t hidden_size = input_dim[1];
 
+    constexpr int64_t kMaxRowsForUe8m0ScaleIndex =
+        static_cast<int64_t>(std::numeric_limits<size_t>::max() / 4);
+    PADDLE_ENFORCE_LE(
+        rows,
+        kMaxRowsForUe8m0ScaleIndex,
+        common::errors::InvalidArgument(
+            "rows is too large for ue8m0 scale index calculation, got %ld.",
+            rows));
+
     PADDLE_ENFORCE(hidden_size % 1024 == 0,
                    "hidden_size must be divisible by 1024");
     const int64_t hidden_size_scale = hidden_size / 2 / 128;
@@ -741,10 +794,16 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
                        {1, padded_token_num},
                        paddle::DataType::INT32,
                        x.place());
+    if (token_num == 0 || hidden_size == 0) {
+      return {out, scale};
+    }
   } else {
     scale = GetEmptyTensor(
         {rows, (cols / 2 + 127) / 128}, phi::DataType::FLOAT32, place);
     out = GetEmptyTensor({rows, cols / 2}, phi::DataType::FLOAT8_E4M3FN, place);
+    if (rows == 0 || cols == 0) {
+      return {out, scale};
+    }
   }
 
   // Get data pointers

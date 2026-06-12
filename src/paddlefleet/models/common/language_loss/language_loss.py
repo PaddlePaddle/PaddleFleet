@@ -14,6 +14,8 @@
 
 
 import functools
+import hashlib
+import os
 
 import numpy as np
 import paddle
@@ -35,8 +37,43 @@ from paddlefleet.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+def _loss_md5_enabled() -> bool:
+    return os.environ.get("LOG_LOSS_MD5", "0") == "1"
+
+
+def _use_accuracy_compatible_kernel() -> bool:
+    """Switch for Megatron-aligned (accuracy-compatible) numeric paths.
+
+    Controlled by the ``FLAGS_use_accuracy_compatible_kernel`` env variable.
+    """
+    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+
+
+def _tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
+    """Calculate MD5 hash of a tensor, **for debugging only**.
+
+    Note: internally calls .numpy() which triggers GPU→CPU synchronization
+    and blocks the async training pipeline. Do NOT use in the forward pass.
+    """
+    tensor_for_md5 = tensor.detach().cast(dtype)
+    return hashlib.md5(tensor_for_md5.numpy().tobytes()).hexdigest()
+
+
+def _print_scalar_loss_md5(prefix: str, name: str, loss: Tensor) -> None:
+    if not _loss_md5_enabled():
+        return
+    rank = paddle.distributed.get_rank()
+    loss_tensor = loss.detach().cast("float32").reshape([1])
+    print(
+        f"[{prefix}] rank={rank} {name}={loss_tensor.item():.20f} "
+        f"{name}_md5={_tensor_md5(loss_tensor)}",
+        flush=True,
+    )
 
 
 class DistributedSoftmaxOp(PyLayer):
@@ -232,8 +269,12 @@ class LanguageLoss(FleetLayer):
             loss = loss_1d.reshape([B, S])
 
             if get_context_parallel_world_size() > 1:
-                loss = ContextParallelGatherOp.apply(loss, axis=1)
-                labels = ContextParallelGatherOp.apply(labels, axis=1)
+                loss = ContextParallelGatherOp.apply(
+                    loss, axis=1, mode=self.config.cp_balance_mode
+                )
+                labels = ContextParallelGatherOp.apply(
+                    labels, axis=1, mode=self.config.cp_balance_mode
+                )
 
             lossmask = labels != self.ignored_index
             if (~lossmask).all():
@@ -290,8 +331,12 @@ class LanguageLoss(FleetLayer):
             loss = self.loss_func(logits.cast("float32"), labels)
 
         if get_context_parallel_world_size() > 1:
-            loss = ContextParallelGatherOp.apply(loss, axis=1)
-            labels = ContextParallelGatherOp.apply(labels, axis=1)
+            loss = ContextParallelGatherOp.apply(
+                loss, axis=1, mode=self.config.cp_balance_mode
+            )
+            labels = ContextParallelGatherOp.apply(
+                labels, axis=1, mode=self.config.cp_balance_mode
+            )
 
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
@@ -380,7 +425,9 @@ class LanguageLoss(FleetLayer):
             and self.config.experimental_dataflow
         ):
             # In EB data flow and CP size > 1, scatter labels to cp local
-            labels = ContextParallelScatterOp.apply(labels, axis=1)
+            labels = ContextParallelScatterOp.apply(
+                labels, axis=1, mode=self.config.cp_balance_mode
+            )
         if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
@@ -423,22 +470,35 @@ class LanguageLoss(FleetLayer):
                             # In EB data flow and CP size > 1, since we do not use _forward
                             # we need to scatter labels to cp local here.
                             labels_cur_depth = ContextParallelScatterOp.apply(
-                                labels_cur_depth, axis=1
+                                labels_cur_depth,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
 
-                        loss_matrix_cur_depth = self.loss_func(
-                            logits_cur_depth.cast("float32"), labels_cur_depth
-                        )
+                        if self.config.fused_linear_ce_loss_chunk > 0:
+                            loss_matrix_cur_depth = self._forward(
+                                logits_cur_depth,
+                                labels_cur_depth,
+                            )
+                        else:
+                            loss_matrix_cur_depth = self.loss_func(
+                                logits_cur_depth.cast("float32"),
+                                labels_cur_depth,
+                            )
 
                         if get_context_parallel_world_size() > 1:
                             # In EB data flow and CP size > 1, loss and labels need to be gathered back.
                             loss_matrix_cur_depth = (
                                 ContextParallelGatherOp.apply(
-                                    loss_matrix_cur_depth, axis=1
+                                    loss_matrix_cur_depth,
+                                    axis=1,
+                                    mode=self.config.cp_balance_mode,
                                 )
                             )
                             labels_cur_depth = ContextParallelGatherOp.apply(
-                                labels_cur_depth, axis=1
+                                labels_cur_depth,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
 
                         lossmask_cur_depth = (
@@ -470,7 +530,9 @@ class LanguageLoss(FleetLayer):
                     target_p_self_op_dist = nn.Softmax(axis=2)(logits[0])
                 if get_context_parallel_world_size() > 1:
                     target_p_self_op_dist = ContextParallelGatherOp.apply(
-                        target_p_self_op_dist, axis=1
+                        target_p_self_op_dist,
+                        axis=1,
+                        mode=self.config.cp_balance_mode,
                     )
 
                 def padding(tensor, left=False, pad_len=1):
@@ -512,7 +574,9 @@ class LanguageLoss(FleetLayer):
                         )
                         if get_context_parallel_world_size() > 1:
                             target_p = ContextParallelScatterOp.apply(
-                                target_p, axis=1
+                                target_p,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
                         plogp = target_p * out_logp
 
@@ -520,7 +584,9 @@ class LanguageLoss(FleetLayer):
                         xishu = lossmask.sum() + 1e-5
                         if get_context_parallel_world_size() > 1:
                             lossmask = ContextParallelScatterOp.apply(
-                                lossmask, axis=1
+                                lossmask,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
 
                         ploss = -paddle.sum(lossmask * plogp)
@@ -539,30 +605,67 @@ class LanguageLoss(FleetLayer):
                         ploss = ploss / xishu
                         mtp_loss.append(ploss)
 
-            # Store detached MTP loss tensors into class-level tracker.
+            # Store detached MTP loss tensors into class-level tracker and global_training_logs.
             # Use .detach() instead of .item() to avoid GPU synchronization on every
             # micro-batch. The trainer will call .item() only at logging steps.
             for i, loss_val in enumerate(mtp_loss):
                 LanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
                     loss_val.detach()
                 )
+                _print_scalar_loss_md5(
+                    "MTP_LOSS_PATH_MD5",
+                    f"mtp{i + 1}.final_loss",
+                    loss_val,
+                )
+
+            logs = get_global_training_logs()
+            if logs is not None and hasattr(logs, "update"):
+                for i, loss_val in enumerate(mtp_loss):
+                    logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
             def add_loss(main_loss, loss):
-                if self.config.add_mtp_loss:
-                    return main_loss + loss
+                if _use_accuracy_compatible_kernel():
+                    # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
+                    # This matches Megatron's behavior where MTP contributes to training
+                    # gradients without affecting the reported loss value.
+                    if self.config.add_mtp_loss:
+                        return main_loss + loss - loss.detach()
+                    else:
+                        return main_loss
                 else:
-                    return main_loss + loss - loss.detach()
+                    # Original behavior
+                    if self.config.add_mtp_loss:
+                        return main_loss + loss
+                    else:
+                        return main_loss + loss - loss.detach()
 
             if self.config.gpt_model_use_experimental_version:
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
                 loss = lm_loss
-                num_mtp = len(mtp_loss)
-                for mtp_l in mtp_loss:
-                    loss = add_loss(
-                        loss,
-                        self.config.mtp_loss_scaling_factor * mtp_l / num_mtp,
-                    )
+                if _use_accuracy_compatible_kernel():
+                    # Megatron-aligned: only add MTP loss when add_mtp_loss=True.
+                    # Use add_loss() to keep single maintenance point for compat
+                    # behavior (loss + val - val.detach() for gradient-only flow).
+                    if self.config.add_mtp_loss:
+                        num_mtp = len(mtp_loss)
+                        for mtp_l in mtp_loss:
+                            mtp_val = (
+                                self.config.mtp_loss_scaling_factor
+                                * mtp_l
+                                / num_mtp
+                            )
+                            loss = add_loss(loss, mtp_val)
+                else:
+                    # Original behavior: always use add_loss
+                    num_mtp = len(mtp_loss)
+                    for mtp_l in mtp_loss:
+                        loss = add_loss(
+                            loss,
+                            self.config.mtp_loss_scaling_factor
+                            * mtp_l
+                            / num_mtp,
+                        )
             else:
                 loss = add_loss(
                     lm_loss,
@@ -612,19 +715,39 @@ class MainLanguageLoss(LanguageLoss):
         else:
             lm_loss = self._forward(logits, lm_labels)
 
-        # Store detached MTP loss tensors into class-level tracker.
+        # Store detached MTP loss tensors into class-level tracker and global_training_logs.
         # Use .detach() instead of .item() to avoid GPU synchronization on every
         # micro-batch. The trainer will call .item() only at logging steps.
         for i, loss_val in enumerate(mtp_loss):
             MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
                 loss_val.detach()
             )
+            _print_scalar_loss_md5(
+                "MTP_LOSS_PATH_MD5",
+                f"mtp{i + 1}.final_loss",
+                loss_val,
+            )
+
+        # Also write to global_training_logs to read
+        logs = get_global_training_logs()
+        if logs is not None and hasattr(logs, "update"):
+            for i, loss_val in enumerate(mtp_loss):
+                logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
         def add_loss(main_loss, loss):
-            if self.config.add_mtp_loss:
-                return main_loss + loss
+            if _use_accuracy_compatible_kernel():
+                # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
+                # This matches Megatron's behavior
+                if self.config.add_mtp_loss:
+                    return main_loss + loss - loss.detach()
+                else:
+                    return main_loss
             else:
-                return main_loss + loss - loss.detach()
+                # Original behavior
+                if self.config.add_mtp_loss:
+                    return main_loss + loss
+                else:
+                    return main_loss + loss - loss.detach()
 
         loss = add_loss(
             lm_loss,
