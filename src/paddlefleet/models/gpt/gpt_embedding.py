@@ -457,6 +457,11 @@ class GPTEmbedding(FleetLayer):
                 and get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
             ):
+                assert not self.sequence_parallel, (
+                    "sequence_parallel is not supported when context_parallel scatter "
+                    "is applied in the plain (no-MTP, no-multimodal) path before RoPE "
+                    "generation."
+                )
                 decoder_input = ContextParallelScatterOp.apply(
                     decoder_input, axis=1, mode=self.config.cp_balance_mode
                 )
