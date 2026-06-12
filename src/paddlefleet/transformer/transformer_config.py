@@ -542,12 +542,6 @@ class TransformerConfig(ModelParallelConfig):
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""
 
-    moe_allgather_gate_overlap: bool = False
-    """Whether to overlap AllGather of hidden_states with gate computation in the
-    AllGather MoE dispatcher. When True, the AllGather is issued asynchronously on
-    the comm stream before the gate runs on the calc stream. When False, the
-    AllGather runs synchronously inside dispatch_preprocess (no overlap)."""
-
     moe_latent_size: int | None = None
     """The latent dimension size for latent MoE. Positive values enable latent MoE."""
 

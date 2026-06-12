@@ -41,8 +41,10 @@ from .moe_utils import (
     AllGatherGroupOp,
     ReduceScatterGroupOp,
     _AllToAll,
+    all_gather_group,
     manual_backward,
     permute,
+    reduce_scatter_group,
     sort_chunks_by_idxs,
     unpermute,
     use_accuracy_compatible_kernel,
@@ -1202,202 +1204,6 @@ class _RouterAllGather(paddle.autograd.PyLayer):
         return out
 
 
-class _AllGatherFP8(paddle.autograd.PyLayer):
-    """AllGather with fp8 blockwise quantization for 2x communication bandwidth savings.
-
-    Mirrors DeepEP's fp8_dispatch path but for AllGather/ReduceScatter collective
-    semantics:
-
-    Forward:
-        1. Quantize bf16 [T_local, H] → fp8 [T_local, H] + scale [T_local, H//128]
-           using 1x128 blockwise quantization (same format as DeepEP fp8_dispatch).
-        2. AllGather fp8 via uint8 bitcast (NCCL-compatible) → [T_global, H].
-        3. AllGather scale (float32) → [T_global, H//128].
-
-    Returns ``(fp8_global, scale_global)`` — the raw fp8 hidden states and the
-    global scale tensor.  **No dequantisation** is performed: the consumer
-    (``run_sonic_moe`` / ``_UpProjection``) receives ``(fp8, scale)`` as
-    ``prequant_activation_payload`` and consumes the fp8 data natively, avoiding
-    a redundant quant → dequant → requant round trip and matching DeepEP's
-    ``{"scale": scale}`` contract exactly.
-
-    Backward:
-        Straight-through estimator: ReduceScatter(grad_bf16_global) → grad_bf16_local.
-        Quantisation round-off gradient is ignored (standard QAT practice).
-
-    Communication bandwidth vs plain AllGatherGroupOp:
-        fp8 data:  T_local * H * 1B  (vs 2B bf16) → 50% saving
-        scale:     T_local * (H//128) * 4B           → ~1.6% overhead at H=8192
-        Net:       ~48% bandwidth reduction.
-    """
-
-    @staticmethod
-    def forward(ctx, x, group, use_ue8m0=False):
-        """Forward: quantize → AllGather(fp8) → AllGather(scale).
-
-        Args:
-            x: bf16 input [T_local, H].
-            group: EP group.
-            use_ue8m0: deprecated — kept for signature compatibility with dispatch
-                       config; the DeepEP quant function is used instead of
-                       ``fp8_quant_blockwise`` and does not support ue8m0 scales.
-        """
-        ctx.group = group
-        ctx.input_shape = list(x.shape)
-        if group is None or group.nranks == 1:
-            return x.clone(), None
-
-        # Quantize locally: bf16 [T_local, H] → fp8 [T_local, H] + scale
-        # Reuses DeepEP's quantize_activation_blockscaled_fast (1x128 blockwise)
-        # so the allgather path's FP8 format is identical to the deepep+sonic_moe
-        # path, enabling the same prequant_activation_payload contract downstream.
-        assert quantize_activation_blockscaled_fast is not None, (
-            "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
-        )
-        if not x.is_contiguous():
-            x = x.contiguous()
-        x_fp8, scale = quantize_activation_blockscaled_fast(
-            x, scale_dtype=paddle.int32
-        )
-
-        T_local, H = x_fp8.shape
-        T_global = T_local * group.nranks
-        H128 = scale.shape[1]  # H // 128
-
-        # AllGather fp8 data via uint8 bitcast (float8_e4m3fn bit pattern preserved;
-        # uint8 is supported by NCCL AllGather unlike float8_e4m3fn).
-        x_fp8_global_uint8 = paddle.empty([T_global, H], dtype="uint8")
-        paddle.distributed.stream.all_gather(
-            x_fp8_global_uint8,
-            x_fp8.view("uint8"),
-            group=group,
-            use_calc_stream=True,
-        )
-        x_fp8_global = x_fp8_global_uint8.view("float8_e4m3fn")  # [T_global, H]
-
-        # AllGather scale [T_global, H//128] (float32, NCCL-supported dtype)
-        scale_global = paddle.empty([T_global, H128], dtype=scale.dtype)
-        paddle.distributed.stream.all_gather(
-            scale_global, scale, group=group, use_calc_stream=True
-        )
-
-        # Skip dequant — the consumer (run_sonic_moe / _UpProjection) handles
-        # fp8 input natively via prequant_activation_payload, matching DeepEP.
-        return x_fp8_global, scale_global
-
-    @staticmethod
-    def backward(ctx, grad_output, grad_scale=None):
-        del grad_scale
-        group = ctx.group
-        if group is None or group.nranks == 1:
-            return grad_output
-        parallelism = group.nranks
-        out_shape = list(grad_output.shape)
-        out_shape[0] //= parallelism
-        output = paddle.empty(out_shape, dtype=grad_output.dtype)
-        paddle.distributed.stream.reduce_scatter(
-            output,
-            grad_output,
-            op=paddle.distributed.ReduceOp.SUM,
-            group=group,
-            use_calc_stream=True,
-        )
-        return output
-
-
-class _AllGatherCombineAsync(paddle.autograd.PyLayer):
-    """ReduceScatter combine for the AllGather dispatcher with shared-expert overlap.
-
-    Forward semantics match ``ReduceScatterGroupOp.apply(x, group)`` (sum across
-    EP ranks then scatter on axis 0). The async variant launches the ReduceScatter
-    on the calc stream with ``sync_op=False`` and runs ``fn(*fn_args)`` (the
-    shared-expert subgraph) while the collective is in flight; both finish before
-    the layer returns. Backward is the AllGather of ``grad_output`` plus the
-    backward of the captured ``fn`` graph (via :func:`manual_backward`).
-
-    Mirrors :class:`fused_a2a.DeepEPCombineAsync` in spirit but uses NCCL
-    reduce_scatter directly (AllGather mode has no DeepEP buffer). The
-    collective runs on the dedicated communication stream
-    (``use_calc_stream=False, sync_op=False``) while the shared-expert mlp
-    runs on the calc stream; ``task.wait()`` cross-syncs before returning.
-    """
-
-    @staticmethod
-    def forward(ctx, x, group, *fn_args, fn, is_first_fwd=False):
-        if group is None or group.nranks == 1:
-            combined_x = x.clone()
-            ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
-            ctx.group = group
-            return (combined_x,) + fn_out  # noqa: RUF005
-
-        output_shape = list(x.shape)
-        if output_shape[0] % group.nranks != 0:
-            raise ValueError(
-                f"AllGather combine: token dim {output_shape[0]} not divisible by "
-                f"EP={group.nranks}"
-            )
-        output_shape[0] = output_shape[0] // group.nranks
-        combined_x = paddle.empty(shape=output_shape, dtype=x.dtype)
-        # Async reduce-scatter on the dedicated comm stream (returns a task).
-        task = paddle.distributed.stream.reduce_scatter(
-            combined_x,
-            x,
-            op=paddle.distributed.ReduceOp.SUM,
-            group=group,
-            sync_op=False,
-            use_calc_stream=False,
-        )
-
-        try:
-            ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
-        finally:
-            # Always wait for the async NCCL task to prevent rank hang
-            # even if manual_backward raises.
-            task.wait()
-
-        ctx.group = group
-        ctx.input_shape = list(x.shape)
-        return (combined_x,) + fn_out  # noqa: RUF005
-
-    @staticmethod
-    def backward(ctx, grad_output, *fn_out_grads):
-        group = ctx.group
-        if group is None or group.nranks == 1:
-            if ctx.bwf is not None:
-                fn_args_grads = ctx.bwf(*fn_out_grads)
-            else:
-                fn_args_grads = tuple(
-                    paddle.zeros_like(g) for g in fn_out_grads
-                )
-            grad_x = grad_output.clone()
-            return (grad_x,) + fn_args_grads  # noqa: RUF005
-
-        # Backward of ReduceScatter is AllGather along axis 0. Issue the
-        # collective *before* running the shared-expert backward so that all
-        # ranks enter NCCL together; if ``ctx.bwf`` raises on some ranks the
-        # ``finally`` still drains the in-flight task and prevents a
-        # cross-rank deadlock (mirrors the forward try/finally).
-        global_shape = list(ctx.input_shape)
-        grad_x = paddle.empty(shape=global_shape, dtype=grad_output.dtype)
-        task = paddle.distributed.stream.all_gather(
-            grad_x,
-            grad_output.contiguous(),
-            group=group,
-            sync_op=False,
-            use_calc_stream=False,
-        )
-        try:
-            if ctx.bwf is not None:
-                fn_args_grads = ctx.bwf(*fn_out_grads)
-            else:
-                fn_args_grads = tuple(
-                    paddle.zeros_like(g) for g in fn_out_grads
-                )
-        finally:
-            task.wait()
-        return (grad_x,) + fn_args_grads  # noqa: RUF005
-
-
 class _PreAllGatherResult(paddle.autograd.PyLayer):
     """Wraps a pre-issued async AllGather result with proper autograd.
 
@@ -1426,6 +1232,94 @@ class _PreAllGatherResult(paddle.autograd.PyLayer):
         # Paddle. Verified by ``test_consumes_fake_handle``.
         grad_input = ReduceScatterGroupOp.apply(grad, ctx.group)
         return grad_input
+
+
+class _PreAllGatherFP8Result(paddle.autograd.PyLayer):
+    """FP8 counterpart of :class:`_PreAllGatherResult`.
+
+    Consumes a handle pre-issued by ``AllGatherTokenDispatcher.pre_allgather``
+    when ``fp8_dispatch=True``: local quantize ran on calc stream before this,
+    and two async AllGathers (fp8 uint8 view + fp32 scale) were launched on
+    the comm stream so they overlap with gate compute. Forward waits both
+    tasks and returns ``(fp8_global, scale_global)``.
+
+    Backward ignores Paddle's dtype-aligned fp8 grad for the fp8 output edge.
+    Sonic-MoE writes its native bf16 ``dx`` into ``grad_handle`` before this
+    PyLayer is called; we ReduceScatter that bf16 tensor back to the local
+    shard to avoid any fp8 reduction or dtype cast here.
+    """
+
+    @staticmethod
+    def forward(ctx, hidden_states, handle):
+        handle["task_x"].wait()
+        handle["task_s"].wait()
+        ctx.group = handle["group"]
+        ctx.grad_handle = handle["grad_handle"]
+        x_fp8_global = handle["x_fp8_global_uint8"].view("float8_e4m3fn")
+        scale_global = handle["scale_global"]
+        # Avoid materializing the fp8 grad_output buffer that Paddle would
+        # otherwise allocate to match the fp8 forward output dtype/shape.
+        # Backward only consumes the bf16 dx from ctx.grad_handle.
+        ctx.set_materialize_grads(False)
+        return x_fp8_global, scale_global
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_scale=None):
+        del grad_output, grad_scale
+        group = ctx.group
+        grad_handle = ctx.grad_handle
+        dx_global = grad_handle.pop("dx_global", None)
+        if dx_global is None:
+            raise RuntimeError(
+                "AllGather fp8 backward expected Sonic-MoE to provide "
+                "bf16 dx_global before ReduceScatter."
+            )
+        if group is None or group.nranks == 1:
+            return dx_global
+        grad_input = ReduceScatterGroupOp.apply(dx_global, group)
+        return grad_input
+
+
+class _AllGatherCombineAsync(paddle.autograd.PyLayer):
+    """ReduceScatter combine fused with a user-supplied subgraph (e.g. shared experts).
+
+    AllGather-path counterpart of :class:`DeepEPCombineAsync`. Forward
+    ReduceScatters ``x`` across the EP group and, with the same calc/comm
+    overlap pattern, runs ``fn(*fn_args)`` via :func:`manual_backward` so
+    its backward graph is captured. Backward AllGathers the incoming
+    gradient (dual of ReduceScatter) and invokes the cached ``bwf`` to
+    produce gradients for ``fn_args``.
+
+    Forward signature: ``(x, group, *fn_args, fn, is_first_fwd)``.
+    Backward returns ``(grad_x, *fn_args_grads)`` — Paddle's PyLayer
+    skips non-tensor positional args (``group``) when matching arity.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        group,
+        *fn_args,
+        fn,
+        is_first_fwd=False,
+    ):
+        combined_x = reduce_scatter_group(x, group=group)
+
+        if fn is None:
+            raise ValueError(
+                "_AllGatherCombineAsync requires a non-None fn for overlap."
+            )
+        ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+        ctx.group = group
+
+        return (combined_x,) + fn_out  # noqa: RUF005
+
+    @staticmethod
+    def backward(ctx, grad_output, *fn_out_grads):
+        grad_x = all_gather_group(grad_output, group=ctx.group)
+        fn_args_grads = ctx.bwf(*fn_out_grads)
+        return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
 class AllGatherTokenDispatcher(nn.Layer):
@@ -1483,6 +1377,7 @@ class AllGatherTokenDispatcher(nn.Layer):
         # kernels (``run_sonic_moe``) as ``prequant_activation_payload`` to
         # skip redundant re-quantization, mirroring DeepEP's contract.
         self._fp8_dispatch_scale = None
+        self._fp8_dispatch_grad_handle = None
         # Cache for the overlap-combine path (set by ``token_combine``,
         # consumed by ``combine_postprocess``).
         self._overlap_combined = None
@@ -1493,10 +1388,14 @@ class AllGatherTokenDispatcher(nn.Layer):
         Called **before** gate computation so that the AllGather runs on the
         dedicated NCCL comm stream while the gate MLP runs on the calc stream.
         The result is stored in ``self._pre_ag_handle`` and consumed by
-        :meth:`dispatch_preprocess`.  When fp8_dispatch is enabled the
-        AllGather involves a quantize→AllGather→dequant pipeline that is
-        harder to make async; in that case we fall back to the synchronous
-        path inside ``dispatch_preprocess``.
+        :meth:`dispatch_preprocess`.
+
+        Two flavors:
+        - bf16 path: a single async AllGather on the comm stream.
+        - fp8 path (``fp8_dispatch=True``): quantize locally (calc stream),
+          then issue two async AllGathers (fp8 uint8 view + fp32 scale) on
+          the comm stream so both overlap with gate compute. Consumed via
+          :class:`_PreAllGatherFP8Result`.
         """
         if self.moe_group is None or self.moe_group.nranks == 1:
             self._pre_ag_handle = None
@@ -1509,7 +1408,11 @@ class AllGatherTokenDispatcher(nn.Layer):
         # previous handle.
         if self._pre_ag_handle is not None:
             try:
-                self._pre_ag_handle["task"].wait()
+                if "task" in self._pre_ag_handle:
+                    self._pre_ag_handle["task"].wait()
+                else:
+                    self._pre_ag_handle["task_x"].wait()
+                    self._pre_ag_handle["task_s"].wait()
             except (RuntimeError, OSError) as _e:
                 logger.warning(
                     "pre_allgather: leftover async task wait failed (%s), "
@@ -1518,18 +1421,56 @@ class AllGatherTokenDispatcher(nn.Layer):
                 )
             self._pre_ag_handle = None
 
-        if self.fp8_dispatch:
-            # FP8 AllGather is a multi-step pipeline (quant → AllGather uint8
-            # + scale → dequant).  Making it async is non-trivial; fall back
-            # to the synchronous _AllGatherFP8 path in dispatch_preprocess.
-            self._pre_ag_handle = None
-            return
-
         if len(hidden_states.shape) == 3:
             _, _, d_model = hidden_states.shape
         else:
             _, d_model = hidden_states.shape
         reshaped_input = hidden_states.reshape([-1, d_model]).contiguous()
+
+        if self.fp8_dispatch:
+            # FP8 async path: quantize on calc stream, then issue both
+            # AllGathers (fp8 data + scale) on the comm stream so they
+            # overlap with gate MLP. quantize_activation_blockscaled_fast
+            # itself runs on the calc stream and finishes before the
+            # comm-stream collectives consume its outputs (NCCL handles
+            # the cross-stream sync).
+            assert quantize_activation_blockscaled_fast is not None, (
+                "Cannot find quantize_activation_blockscaled_fast, "
+                "please update sonicmoe."
+            )
+            x_fp8, scale = quantize_activation_blockscaled_fast(
+                reshaped_input, scale_dtype=paddle.int32
+            )
+            T_local, H = x_fp8.shape
+            T_global = T_local * self.moe_group.nranks
+            H128 = scale.shape[1]
+            x_fp8_global_uint8 = paddle.empty([T_global, H], dtype="uint8")
+            task_x = paddle.distributed.stream.all_gather(
+                x_fp8_global_uint8,
+                x_fp8.view("uint8"),
+                group=self.moe_group,
+                sync_op=False,
+                use_calc_stream=False,
+            )
+            scale_global = paddle.empty([T_global, H128], dtype=scale.dtype)
+            task_s = paddle.distributed.stream.all_gather(
+                scale_global,
+                scale,
+                group=self.moe_group,
+                sync_op=False,
+                use_calc_stream=False,
+            )
+            grad_handle = {}
+            self._pre_ag_handle = {
+                "x_fp8_global_uint8": x_fp8_global_uint8,
+                "scale_global": scale_global,
+                "task_x": task_x,
+                "task_s": task_s,
+                "group": self.moe_group,
+                "grad_handle": grad_handle,
+                "fp8": True,
+            }
+            return
 
         output_shape = list(reshaped_input.shape)
         output_shape[0] = output_shape[0] * self.moe_group.nranks
@@ -1579,20 +1520,32 @@ class AllGatherTokenDispatcher(nn.Layer):
             _, d_model = hidden_states.shape
         reshaped_input = hidden_states.reshape([-1, d_model]).contiguous()
 
-        # Reset fp8 dispatch scale — will be set below only when fp8 path is taken.
+        # Reset fp8 dispatch state — will be set below only when fp8 path is taken.
         self._fp8_dispatch_scale = None
+        self._fp8_dispatch_grad_handle = None
 
         # AllGather hidden_states along token dim across the EP group.
         # If pre_allgather() was called before gate, reuse the async result;
         # otherwise fall back to the synchronous path.
         if self._pre_ag_handle is not None:
-            global_hidden_states = _PreAllGatherResult.apply(
-                reshaped_input, self._pre_ag_handle
-            )
+            if self._pre_ag_handle.get("fp8", False):
+                global_hidden_states, self._fp8_dispatch_scale = (
+                    _PreAllGatherFP8Result.apply(
+                        reshaped_input, self._pre_ag_handle
+                    )
+                )
+                self._fp8_dispatch_grad_handle = self._pre_ag_handle[
+                    "grad_handle"
+                ]
+            else:
+                global_hidden_states = _PreAllGatherResult.apply(
+                    reshaped_input, self._pre_ag_handle
+                )
             self._pre_ag_handle = None
         elif self.fp8_dispatch:
-            global_hidden_states, self._fp8_dispatch_scale = _AllGatherFP8.apply(
-                reshaped_input, self.moe_group, self.use_ue8m0
+            raise RuntimeError(
+                "AllGatherTokenDispatcher.fp8_dispatch=True requires "
+                "pre_allgather() to be issued before dispatch_preprocess."
             )
         else:
             global_hidden_states = AllGatherGroupOp.apply(
@@ -1660,6 +1613,7 @@ class AllGatherTokenDispatcher(nn.Layer):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = True,
     ):
         """No-op pass-through for the AllGather path.
 
@@ -1669,6 +1623,11 @@ class AllGatherTokenDispatcher(nn.Layer):
         signature compatibility with other dispatchers; the actual FP8
         quantization is handled inside ``dispatch_preprocess``.
 
+        ``using_sonic_moe`` must be True on this path: the AllGather
+        dispatcher feeds ``_global_topk_indices`` directly into
+        ``SonicMoEExpert.forward`` / ``run_sonic_moe`` (see
+        ``dispatch_preprocess``). Any other expert path is unsupported here.
+
         Returns:
             tuple: ``(global_tokens, fp8_handle)``. When ``_fp8_dispatch_scale``
             was captured during :meth:`dispatch_preprocess` (fp8 path), the handle
@@ -1676,8 +1635,17 @@ class AllGatherTokenDispatcher(nn.Layer):
             fused kernels can reuse the dispatch scale as
             ``prequant_activation_payload``.
         """
+        if not using_sonic_moe:
+            raise ValueError(
+                "AllGatherTokenDispatcher requires using_sonic_moe=True; "
+                "the AllGather path is only wired for the fused SonicMoE "
+                "expert kernels. Switch dispatcher type or enable SonicMoE."
+            )
         fp8_handle = (
-            {"scale": self._fp8_dispatch_scale}
+            {
+                "scale": self._fp8_dispatch_scale,
+                "allgather_grad_handle": self._fp8_dispatch_grad_handle,
+            }
             if self._fp8_dispatch_scale is not None
             else None
         )

@@ -189,20 +189,6 @@ class MoELayer(nn.Layer):
                         "SonicMoE module is not available",
                     )
                 )
-        # Cross-field consistency: moe_allgather_gate_overlap only takes
-        # effect on the 'allgather' dispatcher; warn loudly if it's set
-        # together with another dispatcher type so users don't assume
-        # the overlap is in play.
-        if (
-            getattr(config, "moe_allgather_gate_overlap", False)
-            and config.moe_token_dispatcher_type != "allgather"
-        ):
-            logger.warning(
-                "moe_allgather_gate_overlap=True is only honoured when "
-                "moe_token_dispatcher_type='allgather'; current type is "
-                "%r, the flag will be ignored.",
-                config.moe_token_dispatcher_type,
-            )
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_deep_gemm = config.moe_deep_gemm
 
@@ -740,19 +726,18 @@ class MoELayer(nn.Layer):
         return self.unpermute(expert_outs)
 
     def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
-        """If AllGather-gate overlap is enabled, issue the async AllGather now.
+        """Issue the async AllGather before gate so it overlaps with gate compute.
 
-        Overlap hidden_states AllGather with gate computation: issue the async
-        AllGather on the comm stream before the gate runs on the calc stream.
-        The result is consumed inside ``dispatch_preprocess`` via
-        ``_PreAllGatherResult``. For latent MoE: ``fc1_latent_proj`` is hoisted
-        here so the AllGather targets the latent-space tensor; gate still runs
-        on the original hidden_states.
+        Always-on for the 'allgather' dispatcher when EP > 1: AllGather runs on
+        the comm stream while gate MLP runs on the calc stream; the result is
+        consumed inside ``dispatch_preprocess`` via ``_PreAllGatherResult``
+        (or ``_PreAllGatherFP8Result`` when ``fp8_dispatch=True``). For latent
+        MoE, ``fc1_latent_proj`` is hoisted here so the AllGather targets the
+        latent-space tensor; gate still runs on the original hidden_states.
         """
         if (
             self.moe_token_dispatcher_type == "allgather"
             and self.expert_model_parallel_size > 1
-            and self.config.moe_allgather_gate_overlap
         ):
             if self.use_latent_moe:
                 self._latent_hidden = self.fc1_latent_proj(hidden_states)
@@ -898,8 +883,12 @@ class MoELayer(nn.Layer):
             elif self.using_sonic_moe:
                 use_fp8 = self.fp8 is not None
                 fp8_scale = None
+                fp8_allgather_grad_handle = None
                 if fp8_dispatched_handle is not None:
                     fp8_scale = fp8_dispatched_handle["scale"]
+                    fp8_allgather_grad_handle = fp8_dispatched_handle.get(
+                        "allgather_grad_handle"
+                    )
                 hidden_states = self.grouped_gemm_experts(
                     dispatched_hidden_states,
                     dispatched_indices,
@@ -908,6 +897,7 @@ class MoELayer(nn.Layer):
                     tokens_per_expert=tokens_per_expert,
                     fp8_scale=fp8_scale,
                     fp8_combine_grad_handle=fp8_combine_grad_handle,
+                    fp8_allgather_grad_handle=fp8_allgather_grad_handle,
                 )
             else:
                 hidden_states = FusionMoePyLayer.apply(

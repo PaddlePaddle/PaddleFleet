@@ -568,6 +568,7 @@ class SonicMoEExpert(GroupedMLPExpert):
         tokens_per_expert=None,
         fp8_scale=None,
         fp8_combine_grad_handle=None,
+        fp8_allgather_grad_handle=None,
     ):
         self.convert_weights_to_sonic_layout()
         hidden_states = run_sonic_moe(
@@ -582,6 +583,7 @@ class SonicMoEExpert(GroupedMLPExpert):
             tokens_per_expert=tokens_per_expert,
             fp8_scale=fp8_scale,
             fp8_combine_grad_handle=fp8_combine_grad_handle,
+            fp8_allgather_grad_handle=fp8_allgather_grad_handle,
         )
         return hidden_states
 

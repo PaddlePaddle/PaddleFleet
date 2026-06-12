@@ -2187,6 +2187,7 @@ def run_sonic_moe(
     tokens_per_expert=None,
     fp8_scale=None,
     fp8_combine_grad_handle=None,
+    fp8_allgather_grad_handle=None,
 ):
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
@@ -2264,6 +2265,7 @@ def run_sonic_moe(
             is_inference_mode_enabled=False,
             use_low_precision_postact_buffer=False,
             prequant_activation_payload=fp8_hidden_states,
+            fp8_allgather_grad_handle=fp8_allgather_grad_handle,
         )
         hidden_states = _DownProjection.apply(
             y1,
