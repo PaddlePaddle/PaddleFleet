@@ -93,10 +93,10 @@ jobs:
           cd dist
           if [[ ${{ github.ref_name }} == "develop" ]]; then
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
-            python ../../bos/BosClient.py paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+            # python ../../bos/BosClient.py paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
           else
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl
-            python ../../bos/BosClient.py paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+            # python ../../bos/BosClient.py paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           # upload to paddletest
@@ -491,8 +491,8 @@ jobs:
           pip install --break-system-packages --upgrade pip
           pip install --break-system-packages uv
           python -m pip install --break-system-packages bce-python-sdk==0.8.74
-          pip install time
-          pip install requests
+          python -m pip install time
+          python -m pip install requests
           '
 
       - name: Build wheel
