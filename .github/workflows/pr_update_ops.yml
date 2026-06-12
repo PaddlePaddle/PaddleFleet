@@ -78,6 +78,8 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           pip install bce-python-sdk==0.8.74
+          pip install time
+          pip install requests
           response=$(curl -L \
           -H "Accept: application/vnd.github+json" \
           -H "Authorization: Bearer ${{ github.token }}" \
@@ -100,6 +102,9 @@ jobs:
           mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl
           python ../../bos/BosClient.py paddlefleet_ops-0.0.0-cp310-cp310-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          # upload to paddletest
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          python notify_paddle_link.py cuda129 paddlefleet-ops/*.whl paddlefleet-ops
 
   clone:
     name: Clone PaddleFleet
@@ -187,6 +192,8 @@ jobs:
           pip install --upgrade pip
           pip install uv
           python -m pip install bce-python-sdk==0.8.74
+          python -m pip install time
+          python -m pip install requests
           '
 
       - name: Build wheel
@@ -248,8 +255,8 @@ jobs:
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           # upload to paddletest
           wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
-          python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet_ops-*.whl paddlefleet-ops 
-          
+          python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet_ops-*.whl paddlefleet-ops
+
           '
 
       - name: Cleanup
@@ -336,6 +343,8 @@ jobs:
           pip install --upgrade pip
           pip install uv
           python -m pip install bce-python-sdk==0.8.74
+          python -m pip install time
+          python -m pip install requests
           '
 
       - name: Build wheel
@@ -382,7 +391,7 @@ jobs:
           python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-develop
           # upload to paddletest
           wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
-          python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet_ops-*.whl paddlefleet-ops 
+          python notify_paddle_link.py  ${{ matrix.cuda.bos_CUDA }} paddlefleet_ops-*.whl paddlefleet-ops
 
           '
 
@@ -471,6 +480,8 @@ jobs:
           pip install --break-system-packages --upgrade pip
           pip install --break-system-packages uv
           python -m pip install --break-system-packages bce-python-sdk==0.8.74
+          pip install time
+          pip install requests
           '
 
       - name: Build wheel

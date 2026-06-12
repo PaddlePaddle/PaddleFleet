@@ -106,6 +106,8 @@ jobs:
           # pip cache dir
           python -m pip install --upgrade pip
           python -m pip install bce-python-sdk==0.8.74
+          python -m pip install time
+          python -m pip install requests
           python -m pip uninstall -y paddlepaddle-xpu fastdeploy-xpu paddlefleet
           python -m pip install --pre paddlepaddle-xpu -i https://www.paddlepaddle.org.cn/packages/nightly/xpu-p800
           '
