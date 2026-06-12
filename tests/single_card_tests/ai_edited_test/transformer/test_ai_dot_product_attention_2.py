@@ -30,7 +30,6 @@ import paddle
 
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.dot_product_attention import (
-    CPDotProductAttention,
     DotProductAttention,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -116,14 +115,14 @@ class TestDotProductAttentionConstruction(unittest.TestCase):
         mock_pg.return_value = mock_pg_obj
 
         config = _make_config(context_parallel_size=2)
-        with self.assertRaises(AssertionError):
-            DotProductAttention(
-                config,
-                layer_number=1,
-                attn_mask_type="padding",
-                attention_type="self",
-                pg_collection=mock_pg_obj,
-            )
+        dpa = DotProductAttention(
+            config,
+            layer_number=1,
+            attn_mask_type="padding",
+            attention_type="self",
+            pg_collection=mock_pg_obj,
+        )
+        self.assertIsInstance(dpa, DotProductAttention)
 
     @patch.object(ProcessGroupCollection, "use_mpu_process_groups")
     def test_pg_collection_without_tp_raises(self, mock_pg):
@@ -237,22 +236,8 @@ class TestDotProductAttentionNumHeads(unittest.TestCase):
         self.assertEqual(dpa.num_query_groups_per_partition, 2)
 
 
-class TestCPDotProductAttention(unittest.TestCase):
-    """Test CPDotProductAttention."""
-
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size"
-    )
-    def test_construction(self, mock_cp_size):
-        mock_cp_size.return_value = 4
-        config = _make_config()
-        cpa = CPDotProductAttention(
-            config,
-            layer_number=1,
-            attn_mask_type="padding",
-            attention_type="self",
-        )
-        self.assertEqual(cpa.context_parallel_size, 4)
+class TestDotProductAttentionContextParallel(unittest.TestCase):
+    """Tests for DotProductAttention with context parallelism (formerly CPDotProductAttention)."""
 
     @patch(
         "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size"
@@ -260,7 +245,7 @@ class TestCPDotProductAttention(unittest.TestCase):
     def test_forward_asserts_packed_seq(self, mock_cp_size):
         mock_cp_size.return_value = 2
         config = _make_config()
-        cpa = CPDotProductAttention(
+        attn = DotProductAttention(
             config,
             layer_number=1,
             attn_mask_type="padding",
@@ -271,7 +256,7 @@ class TestCPDotProductAttention(unittest.TestCase):
         v = paddle.randn([1, 4, 2, 16])
         mask = paddle.zeros([1, 1, 4, 4], dtype="float32")
         with self.assertRaises(AssertionError):
-            cpa(q, k, v, mask, packed_seq_params="fake")
+            attn(q, k, v, mask, packed_seq_params="fake")
 
     @patch(
         "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size"
@@ -279,7 +264,7 @@ class TestCPDotProductAttention(unittest.TestCase):
     def test_forward_asserts_attention_bias(self, mock_cp_size):
         mock_cp_size.return_value = 2
         config = _make_config()
-        cpa = CPDotProductAttention(
+        attn = DotProductAttention(
             config,
             layer_number=1,
             attn_mask_type="padding",
@@ -290,7 +275,7 @@ class TestCPDotProductAttention(unittest.TestCase):
         v = paddle.randn([1, 4, 2, 16])
         mask = paddle.zeros([1, 1, 4, 4], dtype="float32")
         with self.assertRaises(AssertionError):
-            cpa(q, k, v, mask, attention_bias="fake")
+            attn(q, k, v, mask, attention_bias="fake")
 
 
 if __name__ == "__main__":

@@ -40,10 +40,21 @@ from .moe_utils import (
     permute,
     sort_chunks_by_idxs,
     unpermute,
+    use_accuracy_compatible_kernel,
 )
 
 HAVE_HYBRID_EP = False
 HYBRID_EP_LOAD_CACHED_KERNELS = True
+
+
+def _sort_chunks_like_tokens(
+    input: paddle.Tensor,
+    split_sizes: list[int],
+    sorted_idxs: list[int],
+) -> paddle.Tensor:
+    chunks = paddle.split(input, split_sizes, axis=0)
+    return paddle.concat([chunks[i] for i in sorted_idxs], axis=0)
+
 
 try:
     from paddlefleet_ops import is_hybrid_ep_available
@@ -966,6 +977,19 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
         ) = permute(reshaped_input, self.routing_map)
+        if use_accuracy_compatible_kernel():
+            num_routed_tokens = int(tokens_per_expert.sum().item())
+            routing_map = self.routing_map.cast(paddle.bool).T.contiguous()
+            flat_sorted = paddle.argsort(
+                routing_map.reshape([-1]).cast("int32"),
+                descending=True,
+                stable=True,
+            )[:num_routed_tokens]
+            self.permuted_local_probs = paddle.index_select(
+                self.probs.T.contiguous().reshape([-1]),
+                flat_sorted,
+                axis=0,
+            )
         self.permutated_local_input_tokens_shape = (
             permutated_local_input_tokens.shape
         )
@@ -987,6 +1011,17 @@ class AllToAllTokenDispatcher(nn.Layer):
             in_split_sizes=self.input_split_sizes,
             group=self.moe_group,
         )
+        if use_accuracy_compatible_kernel():
+            # Match Megatron's all-to-all backward numerics by routing probs through a
+            # 2D [tokens, 1] tensor, like hidden-state dispatch.
+            global_input_probs_2d = _AllToAll.apply(
+                [self.output_shape_tokens[0], 1],
+                self.permuted_local_probs.unsqueeze(-1),
+                out_split_sizes=self.output_splits,
+                in_split_sizes=self.input_split_sizes,
+                group=self.moe_group,
+            )
+            self.global_input_probs = global_input_probs_2d.squeeze(-1)
 
         return global_input_tokens, None
 
@@ -1005,11 +1040,21 @@ class AllToAllTokenDispatcher(nn.Layer):
         ).T.ravel()
 
         if self.num_local_experts > 1 and not self.is_empty_tokens:
+            split_sizes_list = (
+                self.num_global_tokens_per_local_expert.ravel().tolist()
+            )
+            sorted_idxs_list = self.sort_input_by_local_experts.tolist()
             global_input_tokens, _ = sort_chunks_by_idxs(
                 global_input_tokens,
                 self.num_global_tokens_per_local_expert.ravel(),
                 self.sort_input_by_local_experts,
             )
+            if use_accuracy_compatible_kernel():
+                self.global_input_probs = _sort_chunks_like_tokens(
+                    self.global_input_probs,
+                    split_sizes_list,
+                    sorted_idxs_list,
+                )
         sorted_tokens = global_input_tokens
         self.tokens_per_expert_post_gather = self.tokens_per_expert
         return sorted_tokens, self.tokens_per_expert_post_gather
@@ -1043,7 +1088,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.reshaped_input_shape,
-            probs=self.probs,
+            probs=(None if use_accuracy_compatible_kernel() else self.probs),
             routing_map=self.routing_map,
         )
 

@@ -179,25 +179,6 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         return moe_layer
 
     @staticmethod
-    def _sonic_interleaved_to_split_grad(grad):
-        grad = grad.reshape([grad.shape[0], -1, 2, grad.shape[2]])
-        gate = grad[:, :, 0, :].transpose([0, 2, 1])
-        up = grad[:, :, 1, :].transpose([0, 2, 1])
-        return paddle.concat([gate, up], axis=-1)
-
-    @classmethod
-    def _aligned_grad_for_compare(
-        cls, name, grad, transpose_grouped_gemm=False
-    ):
-        if not transpose_grouped_gemm:
-            return grad
-        if "grouped_gemm_experts.weight1" in name:
-            return cls._sonic_interleaved_to_split_grad(grad)
-        if "grouped_gemm_experts.weight2" in name:
-            return grad.transpose([0, 2, 1])
-        return grad
-
-    @staticmethod
     def _collect_grads(layer):
         grads = {}
         for name, param in layer.named_parameters():
@@ -216,6 +197,31 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
             if param.grad is not None:
                 param.grad.zero_()
 
+    def _flush_sonic_expert_layout(self, moe_layer):
+        expert = getattr(moe_layer, "grouped_gemm_experts", None)
+        if not hasattr(expert, "flush_to_grouped_layout"):
+            return
+
+        weight_ptrs = (expert.weight1.data_ptr(), expert.weight2.data_ptr())
+        grad_ptrs = []
+        for param in (expert.weight1, expert.weight2):
+            grad = getattr(param, "main_grad", None)
+            if grad is None:
+                grad = param.grad
+            grad_ptrs.append(None if grad is None else grad.data_ptr())
+
+        expert.flush_to_grouped_layout()
+
+        self.assertEqual(expert.weight1.data_ptr(), weight_ptrs[0])
+        self.assertEqual(expert.weight2.data_ptr(), weight_ptrs[1])
+        for param, grad_ptr in zip((expert.weight1, expert.weight2), grad_ptrs):
+            if grad_ptr is None:
+                continue
+            grad = getattr(param, "main_grad", None)
+            if grad is None:
+                grad = param.grad
+            self.assertEqual(grad.data_ptr(), grad_ptr)
+
     def _run_accumulated_forward_backward(self, moe_layer, input_data_list):
         self._clear_grads(moe_layer)
         losses = []
@@ -228,6 +234,7 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
                 loss = output.sum()
             loss.backward()
             losses.append(loss.item())
+        self._flush_sonic_expert_layout(moe_layer)
         return (
             losses[-1],
             output.detach().clone(),
@@ -238,9 +245,8 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         """Test MoELayer precision: BF16 sonic-moe vs baseline, FP8 vs BF16.
 
         Both baseline and sonic layers are built with the same seed.
-        GroupedMLPExpert.__init__ ensures sonic weights are initialized
-        from the same baseline values via _split_to_sonic_interleaved,
-        so the weights are mathematically equivalent.
+        SonicMoEExpert reuses GroupedMLPExpert initialization, so expert
+        weights are initialized in the same layout and values as baseline.
 
         Uses BMMFunction (moe_deep_gemm=False) for the baseline to avoid
         a known bug in DeepGEMMBMMFunction that corrupts expert outputs
@@ -305,7 +311,7 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
             f"(bl={loss_bl}, bf16={loss_bf16})",
         )
 
-        # Gradient comparison (with format conversion for expert weights)
+        # Gradient comparison. Sonic expert params keep GroupedMLP layout.
         gate_key = "gate.weight"
         if gate_key in grads_bl and gate_key in grads_bf16:
             diff = calc_diff(grads_bl[gate_key], grads_bf16[gate_key])
@@ -316,8 +322,7 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
 
         w1_key = "grouped_gemm_experts.weight1"
         if w1_key in grads_bl and w1_key in grads_bf16:
-            g_sonic = self._sonic_interleaved_to_split_grad(grads_bf16[w1_key])
-            diff = calc_diff(grads_bl[w1_key], g_sonic)
+            diff = calc_diff(grads_bl[w1_key], grads_bf16[w1_key])
             print(
                 f"BF16 sonic vs Baseline: grad diff = {diff:.6e} for {w1_key}"
             )
@@ -325,8 +330,7 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
 
         w2_key = "grouped_gemm_experts.weight2"
         if w2_key in grads_bl and w2_key in grads_bf16:
-            g_sonic = grads_bf16[w2_key].transpose([0, 2, 1])
-            diff = calc_diff(grads_bl[w2_key], g_sonic)
+            diff = calc_diff(grads_bl[w2_key], grads_bf16[w2_key])
             print(
                 f"BF16 sonic vs Baseline: grad diff = {diff:.6e} for {w2_key}"
             )

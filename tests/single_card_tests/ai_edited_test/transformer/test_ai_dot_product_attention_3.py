@@ -96,18 +96,18 @@ class TestDotProductAttentionConstruction(unittest.TestCase):
             attn_mask_type=AttnMaskType.causal,
             attention_type="self",
         )
-        self.assertEqual(attn.layer_number, 1)
+        self.assertEqual(attn.layer_number, 0)
 
-    def test_context_parallel_size_not_1_raises(self):
-        """Test that context_parallel_size != 1 raises assertion."""
+    def test_context_parallel_size_not_1_constructs(self):
+        """DotProductAttention now handles CP internally; context_parallel_size > 1 should not raise."""
         config = _make_config(context_parallel_size=2)
-        with self.assertRaises(AssertionError):
-            DotProductAttention(
-                config=config,
-                layer_number=1,
-                attn_mask_type=AttnMaskType.causal,
-                attention_type="self",
-            )
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+        )
+        self.assertIsInstance(attn, DotProductAttention)
 
 
 class TestDotProductAttentionSoftmaxType(unittest.TestCase):

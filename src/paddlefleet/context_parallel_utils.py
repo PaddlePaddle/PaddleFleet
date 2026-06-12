@@ -340,25 +340,111 @@ def reduce_scatter_any_axis_balance(input_tensor, axis, group=None):
     return result
 
 
+# ===========================================================================
+# Contiguous CP primitives (rank r owns [r*chunk, (r+1)*chunk])
+# ===========================================================================
+
+
+def scatter_contiguous(input_tensor, group=None, axis=0):
+    """Contiguous scatter: rank r gets slice [r*chunk, (r+1)*chunk] along axis."""
+    if group is None:
+        hcg = fleet.get_hybrid_communicate_group()
+        group = hcg.get_context_parallel_group()
+    nranks = group.nranks
+    if nranks == 1:
+        return input_tensor.clone()
+    rank = group.rank
+    chunk_size = input_tensor.shape[axis] // nranks
+    result = paddle.slice(
+        input_tensor,
+        axes=[axis],
+        starts=[rank * chunk_size],
+        ends=[(rank + 1) * chunk_size],
+    )
+    return paddle.assign(result)
+
+
+def all_gather_contiguous(input_tensor, group=None, axis=0):
+    """Contiguous all-gather: concatenate all ranks' local tensors in rank order."""
+    if group is None:
+        hcg = fleet.get_hybrid_communicate_group()
+        group = hcg.get_context_parallel_group()
+    nranks = group.nranks
+    if nranks == 1:
+        return input_tensor.clone()
+    if axis == 0:
+        shape = list(input_tensor.shape)
+        shape[0] *= nranks
+        gathered = paddle.empty(shape=shape, dtype=input_tensor.dtype)
+        dist.stream.all_gather(
+            gathered,
+            input_tensor.contiguous(),
+            group=group,
+            use_calc_stream=True,
+        )
+        return gathered
+    else:
+        tensor_list = [
+            paddle.empty(input_tensor.shape, dtype=input_tensor.dtype)
+            for _ in range(nranks)
+        ]
+        dist.stream.all_gather(
+            tensor_list,
+            input_tensor.contiguous(),
+            group=group,
+            use_calc_stream=True,
+        )
+        return paddle.concat(tensor_list, axis=axis)
+
+
+def reduce_scatter_contiguous(input_tensor, axis, group=None):
+    """Contiguous reduce-scatter: reduce_scatter for axis=0, alltoall+sum otherwise."""
+    if group is None:
+        hcg = fleet.get_hybrid_communicate_group()
+        group = hcg.get_context_parallel_group()
+    nranks = group.nranks
+    if nranks == 1:
+        return input_tensor.clone()
+    if axis == 0:
+        output_shape = list(input_tensor.shape)
+        output_shape[0] //= nranks
+        output = paddle.empty(shape=output_shape, dtype=input_tensor.dtype)
+        dist.stream.reduce_scatter(
+            output,
+            input_tensor.contiguous(),
+            op=dist.ReduceOp.SUM,
+            group=group,
+            use_calc_stream=True,
+        )
+        return output
+    else:
+        chunks = paddle.split(input_tensor, nranks, axis=axis)
+        bufs = [
+            paddle.empty(chunks[0].shape, dtype=input_tensor.dtype)
+            for _ in range(nranks)
+        ]
+        dist.stream.alltoall(
+            bufs,
+            [c.contiguous() for c in chunks],
+            group=group,
+            use_calc_stream=True,
+        )
+        return (
+            paddle.stack(bufs).cast("float32").sum(0).cast(input_tensor.dtype)
+        )
+
+
 class ContextParallelScatterOp(PyLayer):
     """
     Context parallel scatter operation using PyLayer for automatic differentiation.
-    Forward: Scatter input tensor using balanced splitting
-    Backward: All-gather gradients using balanced reconstruction
+    Forward: Scatter input tensor (balanced or contiguous based on mode)
+    Backward: All-gather gradients (inverse of forward scatter)
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, axis=0):
-        """
-        Forward pass: scatter input tensor across context parallel ranks.
-        Args:
-            ctx: Context object for saving information for backward pass
-            input_tensor (paddle.Tensor): Input tensor to scatter
-            axis (int): Axis along which to scatter
-        Returns:
-            paddle.Tensor: Scattered tensor chunk
-        """
+    def forward(ctx, input_tensor, axis=0, mode="dualchunk_allgather"):
         ctx.axis = axis
+        ctx.mode = mode
         hcg = fleet.get_hybrid_communicate_group()
 
         assert hcg.get_context_parallel_world_size() > 1, (
@@ -369,43 +455,30 @@ class ContextParallelScatterOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
+        if mode == "contiguous_allgather":
+            return scatter_contiguous(input_tensor, group=group, axis=axis)
         return scatter_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        """
-        Backward pass: all-gather gradients.
-        Args:
-            ctx: Context object with saved information
-            grad_output (paddle.Tensor): Gradient of output
-        Returns:
-            tuple: Gradients for input arguments
-        """
-        grad_input = all_gather_balance(
-            grad_output, axis=ctx.axis, group=ctx.group
-        )
-        return grad_input
+        if ctx.mode == "contiguous_allgather":
+            return all_gather_contiguous(
+                grad_output, group=ctx.group, axis=ctx.axis
+            )
+        return all_gather_balance(grad_output, axis=ctx.axis, group=ctx.group)
 
 
 class ContextParallelGatherOp(PyLayer):
     """
     Context parallel gather operation using PyLayer for automatic differentiation.
-    Forward: All-gather input tensor using balanced reconstruction
-    Backward: Scatter gradients using balanced splitting
+    Forward: All-gather input tensor (balanced or contiguous based on mode)
+    Backward: Scatter gradients (inverse of forward gather)
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, axis=0):
-        """
-        Forward pass: all-gather input tensor across context parallel ranks.
-        Args:
-            ctx: Context object for saving information for backward pass
-            input_tensor (paddle.Tensor): Input tensor to gather
-            axis (int): Axis along which to gather
-        Returns:
-            paddle.Tensor: Gathered full tensor
-        """
+    def forward(ctx, input_tensor, axis=0, mode="dualchunk_allgather"):
         ctx.axis = axis
+        ctx.mode = mode
         hcg = fleet.get_hybrid_communicate_group()
 
         assert hcg.get_context_parallel_world_size() > 1, (
@@ -416,45 +489,30 @@ class ContextParallelGatherOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
+        if mode == "contiguous_allgather":
+            return all_gather_contiguous(input_tensor, group=group, axis=axis)
         return all_gather_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        """
-        Backward pass: scatter gradients.
-        Args:
-            ctx: Context object with saved information
-            grad_output (paddle.Tensor): Gradient of output
-        Returns:
-            tuple: Gradients for input arguments
-        """
-        grad_input = scatter_balance(
-            grad_output, axis=ctx.axis, group=ctx.group
-        )
-        return grad_input
+        if ctx.mode == "contiguous_allgather":
+            return scatter_contiguous(
+                grad_output, group=ctx.group, axis=ctx.axis
+            )
+        return scatter_balance(grad_output, axis=ctx.axis, group=ctx.group)
 
 
 class ContextParallelAllGatherOp(PyLayer):
     """
     Context parallel all-gather operation with gradient reduction.
-    Forward: All-gather input tensor (e.g., [batch, seq_len/n, hidden] -> [batch, seq_len, hidden])
-    Backward: Reduce-scatter gradients with balanced distribution
-    This operation is similar to AllGatherOp but maintains context parallel state
-    after gradient aggregation.
+    Forward: All-gather input tensor (balanced or contiguous based on mode)
+    Backward: Reduce-scatter gradients (sum + scatter)
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, axis):
-        """
-        Forward pass: all-gather input tensor.
-        Args:
-            ctx: Context object for saving information
-            input_tensor (paddle.Tensor): Input tensor with shape [batch, seq_len/n, hidden]
-            axis (int): Axis along which to gather
-        Returns:
-            paddle.Tensor: Gathered tensor with shape [batch, seq_len, hidden]
-        """
+    def forward(ctx, input_tensor, axis, mode="dualchunk_allgather"):
         ctx.axis = axis
+        ctx.mode = mode
         hcg = fleet.get_hybrid_communicate_group()
 
         assert hcg.get_context_parallel_world_size() > 1, (
@@ -465,22 +523,19 @@ class ContextParallelAllGatherOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
+        if mode == "contiguous_allgather":
+            return all_gather_contiguous(input_tensor, group=group, axis=axis)
         return all_gather_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        """
-        Backward pass: reduce-scatter gradients.
-        Args:
-            ctx: Context object with saved information
-            grad_output (paddle.Tensor): Gradient with shape [batch, seq_len, hidden]
-        Returns:
-            tuple: Gradients with shape [batch, seq_len/n, hidden]
-        """
-        grad_input = reduce_scatter_any_axis_balance(
+        if ctx.mode == "contiguous_allgather":
+            return reduce_scatter_contiguous(
+                grad_output, axis=ctx.axis, group=ctx.group
+            )
+        return reduce_scatter_any_axis_balance(
             grad_output, axis=ctx.axis, group=ctx.group
         )
-        return grad_input
 
 
 def preprocess_index(
@@ -562,7 +617,10 @@ def cp_flashmask_allgatherkv_balance_forward(
         causal (bool): Whether to use causal attention
         is_training (bool): Whether in training mode
     Returns:
-        tuple: (output, log_sum_exp, processed_indices)
+        tuple: (output, log_sum_exp, processed_indices, fa_version)
+            ``fa_version`` is the effective FlashAttention version actually
+            used by the forward kernel and must be passed to the backward
+            counterpart to keep fwd/bwd consistent.
     """
     paddle.base.core.nvprof_nvtx_push(
         "cp_flashmask_allgatherkv_balance_forward"
@@ -593,6 +651,18 @@ def cp_flashmask_allgatherkv_balance_forward(
     fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
         "FLAGS_flash_attn_version"
     ]
+    # Apply deterministic override here so forward and backward use the same
+    # effective fa_version (mirrors backward's previous logic and the
+    # framework flashmask_attention's internal deterministic fallback).
+    deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+        "FLAGS_cudnn_deterministic"
+    ]
+    if "block_mask" in inspect.signature(flashmask_attention).parameters:
+        if deterministic and query.shape[-1] > 128:
+            fa_version = 2
+    elif deterministic:
+        fa_version = 2
+
     if fa_version == 4 and _flash_mask_available:
         output, log_sum_exp = _flash_attn_fwd(
             query,
@@ -615,11 +685,10 @@ def cp_flashmask_allgatherkv_balance_forward(
         )
 
     paddle.base.core.nvprof_nvtx_pop()
-    return output, log_sum_exp, startend_row_indices
+    return output, log_sum_exp, startend_row_indices, fa_version
 
 
 def cp_flashmask_allgatherkv_balance_backward(
-    config,
     query,
     key,
     value,
@@ -629,6 +698,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     output_grad,
     group,
     causal,
+    fa_version: int,
 ):
     """
     Backward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -644,6 +714,9 @@ def cp_flashmask_allgatherkv_balance_backward(
         output_grad (paddle.Tensor): Gradient of output
         group (paddle.distributed.Group): Communication group
         causal (bool): Whether causal attention was used
+        fa_version (int): FlashAttention version that was actually used by the
+            forward kernel. Must be propagated from the forward call to keep
+            fwd/bwd consistent.
     Returns:
         tuple: (query_grad, key_grad, value_grad)
     """
@@ -655,12 +728,6 @@ def cp_flashmask_allgatherkv_balance_backward(
     key_gathered = all_gather_balance(key, axis=1, group=group)
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
-    fa_version = config.fa_version
-    if "block_mask" in inspect.signature(flashmask_attention).parameters:
-        if config.deterministic_mode and query.shape[-1] > 128:
-            fa_version = 2
-    elif config.deterministic_mode:
-        fa_version = 2
     if fa_version == 2:
         # Create seed offset tensor (required for gradient computation)
         seed_offset = paddle.zeros(
@@ -895,7 +962,6 @@ class FlashMaskContextParallel(PyLayer):
     @staticmethod
     def forward(
         ctx,
-        config,
         query,
         key,
         value,
@@ -951,7 +1017,7 @@ class FlashMaskContextParallel(PyLayer):
         )
 
         # Perform forward pass
-        output, log_sum_exp, startend_row_indices = (
+        output, log_sum_exp, startend_row_indices, fa_version = (
             cp_flashmask_allgatherkv_balance_forward(
                 query, key, value, startend_row_indices, group, causal, training
             )
@@ -963,7 +1029,7 @@ class FlashMaskContextParallel(PyLayer):
         )
         ctx.group = group
         ctx.causal = causal
-        ctx.config = config
+        ctx.fa_version = fa_version
 
         return output
 
@@ -983,12 +1049,11 @@ class FlashMaskContextParallel(PyLayer):
         )
         group = ctx.group
         causal = ctx.causal
-        config = ctx.config
+        fa_version = ctx.fa_version
 
         # Compute gradients
         query_grad, key_grad, value_grad = (
             cp_flashmask_allgatherkv_balance_backward(
-                config,
                 query,
                 key,
                 value,
@@ -998,6 +1063,7 @@ class FlashMaskContextParallel(PyLayer):
                 output_grad,
                 group,
                 causal,
+                fa_version,
             )
         )
 
@@ -1005,7 +1071,6 @@ class FlashMaskContextParallel(PyLayer):
 
 
 def flashmask_attention_cp(
-    config,
     query,
     key,
     value,
@@ -1050,7 +1115,6 @@ def flashmask_attention_cp(
         ```
     """
     output = FlashMaskContextParallel.apply(
-        config,
         query,
         key,
         value,

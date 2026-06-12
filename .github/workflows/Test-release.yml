@@ -22,7 +22,7 @@ env:
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
   build_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:cuda12.9-cudnn9.9-trt10.5-gcc11"
-  formers_branch: "release/1.1"
+  formers_branch: "release/1.2"
 
 defaults:
   run:
@@ -34,7 +34,7 @@ jobs:
     if: ${{ inputs.can-skip != 'true' }}
     uses: ./.github/workflows/check-bypass.yml
     with:
-      workflow-name: 'test-release'
+      workflow-name: "test-release"
     secrets:
       github-token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
       - name: git diff and check
         id: check_files
         if: |
@@ -113,143 +113,6 @@ jobs:
               echo "packages_changed=false" >> $GITHUB_OUTPUT
             fi
           fi
-
-  build_whl-310:
-    name: Build Fleet whl py310
-    needs: [check-bypass, check_documents_type, check-packages-changes]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' && needs.check-packages-changes.outputs.packages_changed == 'true' }}
-    runs-on:
-      group: GZ_BD-CPU
-    outputs:
-      root_whl_name: ${{ steps.save_whl_names.outputs.root_whl }}
-      ops_whl_name: ${{ steps.save_whl_names.outputs.ops_whl }}
-    env:
-      TASK: fleet-ci-paddle-release-build-whl-${{ github.event.pull_request.number }}
-      PIP_CACHE_DIR: /home/.cache/pip
-      CACHE_DIR: /home/.cache
-      CCACHE_DIR: "/home/data/shared/.ccache/l1" # L1 cache on machine shared dir
-      CCACHE_SECONDARY_STORAGE: "file:///home/data/cfs/.ccache/l2" # L2 cache on cfs
-      CCACHE_MAXSIZE: 50G
-      CCACHE_LIMIT_MULTIPLE: 0.8
-      UV_HTTP_TIMEOUT: 600
-      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
-    steps:
-      - name: Check docker image and run container
-        run: |
-          container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
-          echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $build_image
-          docker run -d -t --name ${container_name} \
-            -v "/home/data/cfs:/home/data/cfs" \
-            -v "/home/data/cfs/.cache:/home/.cache" \
-            -v "/home/data/shared:/home/data/shared" \
-            -v ${{ github.workspace }}/../../..:/root \
-            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v ${{ github.workspace }}:/paddle \
-            -e no_proxy \
-            -e CACHE_DIR \
-            -e PIP_CACHE_DIR \
-            -e CCACHE_DIR \
-            -e CCACHE_SECONDARY_STORAGE \
-            -e CCACHE_MAXSIZE \
-            -e CCACHE_LIMIT_MULTIPLE \
-            -e UV_HTTP_TIMEOUT \
-            -e PR_ID \
-            -e COMMIT_ID \
-            -e PADDLE_CUDA_ARCH_LIST="8.0;9.0" \
-            -e BRANCH \
-            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
-            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
-            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
-            -e GITHUB_REPO_NAME=${{ github.repository }} \
-            -w /paddle --network=host $build_image
-
-      - name: uv build whl
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          rm -rf * .[^.]*
-          set -x
-          source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
-          git config --global --add safe.directory /paddle
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git checkout ${BRANCH}
-          git log -1
-          git pull --no-edit origin pull/${PR_ID}/head
-          git submodule update --init --recursive
-          export UV_HTTP_TIMEOUT=300
-          echo "uv build"
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
-          export UV_PYTHON=3.10
-          export IS_NVIDIA=True
-          mkdir -p /root/.cache/pip
-          pip cache dir
-          pip install --upgrade pip
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          uv build --wheel --package paddlefleet --out-dir dist --clear -v
-          ROOT_WHL=$(ls dist/paddlefleet-*.whl | head -n1)
-          echo "ROOT_WHL=$(basename $ROOT_WHL)" > dist/whl_names.txt
-          ls -lh dist
-          cat dist/whl_names.txt
-          '
-
-      - name: uv build ops whl
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          set -x
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.10.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-3.10.0/bin/:${PATH}
-          export UV_PYTHON=3.10
-          export IS_NVIDIA=True
-          export UV_HTTP_TIMEOUT=300
-          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install packaging "setuptools>=66.1.0" wheel "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
-          OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
-          echo "OPS_WHL=$(basename $OPS_WHL)" >> dist/whl_names.txt
-          ls -lh dist
-          cat dist/whl_names.txt
-          '
-
-      - name: Save wheel file names as outputs
-        id: save_whl_names
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'cat /paddle/dist/whl_names.txt'
-          ROOT_WHL=$(docker exec -t ${{ env.container_name }} /bin/bash -c 'grep ROOT_WHL /paddle/dist/whl_names.txt | cut -d= -f2' | tr -d '\r')
-          OPS_WHL=$(docker exec -t ${{ env.container_name }} /bin/bash -c 'grep OPS_WHL /paddle/dist/whl_names.txt 2>/dev/null | cut -d= -f2' | tr -d '\r')
-          echo "ROOT_WHL: $ROOT_WHL"
-          echo "OPS_WHL: $OPS_WHL"
-          echo "root_whl=$ROOT_WHL" >> $GITHUB_OUTPUT
-          echo "ops_whl=$OPS_WHL" >> $GITHUB_OUTPUT
-
-      - name: upload whl to BOS
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          export AK=paddle
-          export SK=paddle
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-3.12.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-3.12.0/bin/:${PATH}
-          export UV_PYTHON=3.12
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          cd /
-          if [ ! -f "bos/BosClient.py" ]; then
-            wget -q --no-proxy -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
-            mkdir bos
-            tar xf bos_new.tar.gz -C bos
-          fi
-          target_path="paddle-github-action/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}"
-          tar zcf paddlefleet-310.tar.gz paddle
-          python /bos/BosClient.py paddlefleet-310.tar.gz ${target_path}
-          '
-      - name: Terminate and delete the container
-        if: ${{ always() }}
-        run: |
-          set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
-          docker rm -f ${{ env.container_name }}
 
   build_whl:
     name: Build Fleet whl
@@ -315,7 +178,6 @@ jobs:
           git checkout ${BRANCH}
           git log -1
           git pull --no-edit origin pull/${PR_ID}/head
-          git submodule update --init --recursive
           export UV_HTTP_TIMEOUT=300
           echo "uv build"
           export LD_LIBRARY_PATH=/opt/_internal/cpython-3.12.0/lib/:${LD_LIBRARY_PATH}
@@ -343,8 +205,9 @@ jobs:
           export UV_PYTHON=3.12
           export IS_NVIDIA=True
           export UV_HTTP_TIMEOUT=300
+          git submodule update --init --recursive
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install packaging "setuptools>=66.1.0" wheel "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+          pip install packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3" "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
           uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           OPS_WHL=$(ls dist/paddlefleet_ops-*.whl | head -n1)
           echo "OPS_WHL=$(basename $OPS_WHL)" >> dist/whl_names.txt
@@ -399,8 +262,6 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
-
-
 
   single_card_test:
     name: Unit test (single card)
@@ -461,7 +322,7 @@ jobs:
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib einops
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           echo "paddlefleet commit:"
@@ -469,7 +330,7 @@ jobs:
           '
 
       - name: Single card test
-        timeout-minutes: 50
+        timeout-minutes: 60
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xce '
           pwd
@@ -557,7 +418,6 @@ jobs:
             -e repo_flag="paddlefleet" \
             -w /paddle --network host ${docker_image}
 
-
       - name: Clone PaddleFleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -579,7 +439,7 @@ jobs:
           '
 
       - name: Multi-card test
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           export WITH_COVERAGE=ON
@@ -621,7 +481,6 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
-
 
   integration-test-H20-single-card:
     needs: [check-bypass, build_whl, check_documents_type]
@@ -674,7 +533,6 @@ jobs:
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
-
 
       - name: Install PaddleFleet
         run: |
@@ -871,7 +729,6 @@ jobs:
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
-
 
       - name: Install PaddleFleet
         run: |
@@ -1188,7 +1045,6 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash PaddleFleet/ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
-
   integration-test-a100:
     needs: [check-bypass, build_whl, check_documents_type]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
@@ -1232,7 +1088,6 @@ jobs:
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
             -w /workspace --network host ${docker_image}
-
 
       - name: Install PaddleFleet
         run: |
@@ -1431,7 +1286,6 @@ jobs:
           bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
           '
 
-
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         timeout-minutes: 10
@@ -1492,7 +1346,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          python-version: "3.10"
       - name: coverage file download
         shell: bash
         run: |

@@ -171,6 +171,7 @@ class TestLanguageLossForwardWithMTP(unittest.TestCase):
         mock_config.add_mtp_loss = False
         mock_config.mtp_loss_scaling_factor = 1.0
         mock_config.recompute_modules = None
+        mock_config.gpt_model_use_experimental_version = False
 
         loss_fn = LanguageLoss(config=mock_config)
         logits = [

@@ -341,7 +341,7 @@ class TestFusedSwiGLUScale(unittest.TestCase):
         )
         # dprobs[row] = sum_h(dout * silu(clamp(g)) * clamp(v))
         dprobs_ref = paddle.sum(
-            dout.astype("float32") * swiglu, axis=-1
+            dout.astype("float32") * swiglu, axis=-1, keepdim=True
         ).astype("bfloat16")
 
         # The point of this test is exercising the kernel's row grid-stride
@@ -351,7 +351,7 @@ class TestFusedSwiGLUScale(unittest.TestCase):
         # any block-wide reduction.
         self.assertEqual(out.shape, [rows, hidden])
         self.assertEqual(dx.shape, [rows, 2 * hidden])
-        self.assertEqual(dprobs.shape, [rows])
+        self.assertEqual(dprobs.shape, [rows, 1])
         np.testing.assert_allclose(
             out.astype("float32").numpy(),
             out_ref.astype("float32").numpy(),

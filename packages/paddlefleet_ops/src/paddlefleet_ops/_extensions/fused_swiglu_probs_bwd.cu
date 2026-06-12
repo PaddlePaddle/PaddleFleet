@@ -277,7 +277,7 @@ std::vector<paddle::Tensor> SwigluProbsGradCUDABackward(
            "moe_intermediate_size must be > 0, but got ",
            moe_intermediate_size);
 
-  if (o1_outer_dim == 0) {
+  if (o1.numel() == 0 || do2_s.numel() == 0 || unzipped_probs.numel() == 0) {
     return {do1, probs_grad, o2_s};
   }
 

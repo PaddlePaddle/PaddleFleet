@@ -182,7 +182,15 @@ __device__ __forceinline__ float fast_swiglu(const __nv_bfloat16 x,
     x_f = fminf(x_f, cv);
     y_f = fmaxf(fminf(y_f, cv), -cv);
   }
-  const float silu = x_f * __frcp_rn(1.0f + __expf(-x_f));
+  // Use IEEE division for clamp path to match reference bit-exact,
+  // fast reciprocal for non-clamp (pre-existing behaviour).
+  const float silu = [&] {
+    if constexpr (kHasClamp) {
+      return x_f * (1.0f / (1.0f + __expf(-x_f)));
+    } else {
+      return x_f * __frcp_rn(1.0f + __expf(-x_f));
+    }
+  }();
   return silu * y_f;
 }
 
@@ -214,10 +222,41 @@ fast_swiglu_vec4(const bfloat16x4_t& lhs,
     y_f_w = fmaxf(fminf(y_f_w, cv), -cv);
   }
 
-  const float silu_x = x_f_x * __frcp_rn(1.0f + __expf(-x_f_x));
-  const float silu_y = x_f_y * __frcp_rn(1.0f + __expf(-x_f_y));
-  const float silu_z = x_f_z * __frcp_rn(1.0f + __expf(-x_f_z));
-  const float silu_w = x_f_w * __frcp_rn(1.0f + __expf(-x_f_w));
+  // Use IEEE division for clamp path to match reference bit-exact,
+  // fast reciprocal for non-clamp (pre-existing behaviour).
+  const float sig_x = [&] {
+    if constexpr (kHasClamp) {
+      return 1.0f / (1.0f + __expf(-x_f_x));
+    } else {
+      return __frcp_rn(1.0f + __expf(-x_f_x));
+    }
+  }();
+  const float sig_y = [&] {
+    if constexpr (kHasClamp) {
+      return 1.0f / (1.0f + __expf(-x_f_y));
+    } else {
+      return __frcp_rn(1.0f + __expf(-x_f_y));
+    }
+  }();
+  const float sig_z = [&] {
+    if constexpr (kHasClamp) {
+      return 1.0f / (1.0f + __expf(-x_f_z));
+    } else {
+      return __frcp_rn(1.0f + __expf(-x_f_z));
+    }
+  }();
+  const float sig_w = [&] {
+    if constexpr (kHasClamp) {
+      return 1.0f / (1.0f + __expf(-x_f_w));
+    } else {
+      return __frcp_rn(1.0f + __expf(-x_f_w));
+    }
+  }();
+
+  const float silu_x = x_f_x * sig_x;
+  const float silu_y = x_f_y * sig_y;
+  const float silu_z = x_f_z * sig_z;
+  const float silu_w = x_f_w * sig_w;
 
   return {silu_x * y_f_x, silu_y * y_f_y, silu_z * y_f_z, silu_w * y_f_w};
 }
@@ -755,10 +794,16 @@ static std::vector<paddle::Tensor> FusedWeightedSwigluActQuantImpl(
                        {1, padded_token_num},
                        paddle::DataType::INT32,
                        x.place());
+    if (token_num == 0 || hidden_size == 0) {
+      return {out, scale};
+    }
   } else {
     scale = GetEmptyTensor(
         {rows, (cols / 2 + 127) / 128}, phi::DataType::FLOAT32, place);
     out = GetEmptyTensor({rows, cols / 2}, phi::DataType::FLOAT8_E4M3FN, place);
+    if (rows == 0 || cols == 0) {
+      return {out, scale};
+    }
   }
 
   // Get data pointers

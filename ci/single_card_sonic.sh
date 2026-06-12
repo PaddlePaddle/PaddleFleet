@@ -32,7 +32,7 @@ for test_file in "${test_cases_list[@]}"; do
 
     echo "Running single card test: $test_file"
     run_count=$((run_count + 1))
-    coverage run -m pytest "$test_file"
+    coverage run -m pytest -s "$test_file"
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo "Test FAILED: $test_file, see log for details..."

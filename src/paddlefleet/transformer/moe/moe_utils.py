@@ -15,6 +15,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 import paddle
@@ -42,6 +43,64 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from paddle.distributed.communication.group import Group
+
+
+_USE_ACCURACY_COMPATIBLE_KERNEL = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
+
+
+def use_accuracy_compatible_kernel() -> bool:
+    """Unified switch for accuracy-compatible (Megatron-aligned) numeric paths.
+
+    Controlled via the ``FLAGS_use_accuracy_compatible_kernel`` environment
+    variable. When enabled, modules switch to fp32-accumulating / Torch-aligned
+    kernels at the cost of throughput.
+    """
+    return _USE_ACCURACY_COMPATIBLE_KERNEL
+
+
+def _unpermute_scatter(
+    permuted_tokens: paddle.Tensor, sorted_indices: paddle.Tensor, restore_shape
+) -> paddle.Tensor:
+    output_tokens = paddle.zeros(restore_shape, dtype=permuted_tokens.dtype)
+    output_tokens.scatter_(
+        index=sorted_indices, updates=permuted_tokens, overwrite=False
+    )
+    return output_tokens
+
+
+def _unpermute_fp32_accum(
+    permuted_tokens: paddle.Tensor, sorted_indices: paddle.Tensor, restore_shape
+) -> paddle.Tensor:
+    output_tokens = paddle.zeros(restore_shape, dtype="float32")
+    output_tokens.scatter_(
+        index=sorted_indices,
+        updates=permuted_tokens.cast("float32"),
+        overwrite=False,
+    )
+    return output_tokens.cast(permuted_tokens.dtype)
+
+
+class ApplyPermutedProbs(PyLayer):
+    """tokens * probs with fp32-accumulated probs gradient."""
+
+    @staticmethod
+    def forward(ctx, permuted_tokens, permuted_probs):
+        ctx.input_dtype = permuted_tokens.dtype
+        ctx.save_for_backward(permuted_tokens, permuted_probs)
+        return permuted_tokens * permuted_probs.unsqueeze(-1)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        permuted_tokens, permuted_probs = ctx.saved_tensor()
+        grad_tokens = grad_output * permuted_probs.unsqueeze(-1)
+        grad_probs = (
+            permuted_tokens.cast("float32") * grad_output.cast("float32")
+        ).sum(axis=-1)
+        return grad_tokens.cast(ctx.input_dtype), grad_probs.cast(
+            permuted_probs.dtype
+        )
 
 
 def barrier_ep(ep_group):
@@ -113,7 +172,6 @@ def unpermute(
         paddle.Tensor: The tokens restored to their original order.
     """
     assert not drop_and_pad, "token-drop and pads is not supported"
-    _, hidden = restore_shape
 
     if probs is not None:
         assert routing_map is not None, (
@@ -122,22 +180,22 @@ def unpermute(
         permuted_probs = probs.T.contiguous().masked_select(
             routing_map.T.contiguous().cast(paddle.bool)
         )
-        permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
+        if use_accuracy_compatible_kernel():
+            permuted_tokens = ApplyPermutedProbs.apply(
+                permuted_tokens, permuted_probs
+            )
+        else:
+            permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
 
-    # Create an output tensor filled with zeros
-    output_tokens = paddle.zeros(restore_shape, dtype=permuted_tokens.dtype)
-    # Scatter add the permuted_input back to the original positions
-    # if scatter_add_ is not None:
-    #     # NOTE: this expand will cause a big memory usage, so disable this method
-    #     sorted_indices = sorted_indices.unsqueeze(1).expand(-1, hidden)
-    #     output_tokens.scatter_add_(0, sorted_indices, permuted_tokens)
-    # else:
-    # NOTE: Calling multiple times of scatter_ will not accumulate,
-    # Instead, it reset to zero and then accumulated again.
-    # so can't do subbatch here.
-    output_tokens.scatter_(
-        index=sorted_indices, updates=permuted_tokens, overwrite=False
-    )
+    if use_accuracy_compatible_kernel():
+        output_tokens = _unpermute_fp32_accum(
+            permuted_tokens, sorted_indices, restore_shape
+        )
+    else:
+        output_tokens = _unpermute_scatter(
+            permuted_tokens, sorted_indices, restore_shape
+        )
+
     return output_tokens
 
 

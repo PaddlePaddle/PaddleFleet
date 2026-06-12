@@ -21,7 +21,6 @@ import paddle.nn.functional as F
 
 from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
-    fused_swiglu_scale_clamp_forward,
     fused_swiglu_scale_forward,
 )
 
@@ -755,8 +754,8 @@ class ExpertsGroupGemmContiguousNode:
         fwd_down_bf16
         """
 
-        if self.clamp_value is not None:
-            o2 = fused_swiglu_scale_clamp_forward(
+        if self.clamp_value is not None and self.clamp_value > 0:
+            o2 = fused_swiglu_scale_forward(
                 o1, unzipped_probs, self.clamp_value
             )
         else:
@@ -852,7 +851,7 @@ class ExpertsGroupGemmContiguousNode:
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
-        if self.clamp_value is not None:
+        if self.clamp_value is not None and self.clamp_value > 0:
             o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant_clamp(
                 o1,
                 unzipped_probs,
@@ -953,7 +952,7 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        if self.clamp_value is not None:
+        if self.clamp_value is not None and self.clamp_value > 0:
             do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
                 o1, unzipped_probs, do2_s, float(self.clamp_value)
             )
@@ -1072,7 +1071,7 @@ class ExpertsGroupGemmContiguousNode:
                 )
 
         with paddle.amp.auto_cast(False):
-            if self.clamp_value is not None:
+            if self.clamp_value is not None and self.clamp_value > 0:
                 do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
                     o1,
                     unzipped_probs,

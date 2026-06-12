@@ -278,15 +278,19 @@ def is_paddle_min_version(version, check_equality=True):
 ########################
 
 
-def get_batch_on_this_cp_rank(inputs):
+def get_batch_on_this_cp_rank(inputs, cp_balance_mode="dualchunk_allgather"):
     if isinstance(inputs, paddle.Tensor):
-        return ContextParallelScatterOp.apply(inputs, axis=-1)
+        return ContextParallelScatterOp.apply(
+            inputs, axis=-1, mode=cp_balance_mode
+        )
     elif isinstance(inputs, dict):
         res = {}
         keys = ["input_ids", "position_ids", "labels"]
         for k, tensor in inputs.items():
             if k in keys:
-                res[k] = ContextParallelScatterOp.apply(tensor, axis=-1)
+                res[k] = ContextParallelScatterOp.apply(
+                    tensor, axis=-1, mode=cp_balance_mode
+                )
             else:
                 res[k] = tensor
     elif isinstance(inputs, list):

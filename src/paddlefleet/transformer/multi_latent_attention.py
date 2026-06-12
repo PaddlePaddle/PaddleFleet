@@ -52,13 +52,6 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
-try:
-    from paddlefleet.transformer.dot_product_attention import (
-        CPDotProductAttention,
-    )
-except Exception:
-    CPDotProductAttention = None
-
 
 def _ec_compatible_rope_apply(
     q_pe,
@@ -67,6 +60,7 @@ def _ec_compatible_rope_apply(
     rope_base=1000000.0,
     position_offset=0,
     position_ids=None,
+    cp_balance_mode="dualchunk_allgather",
 ):
     """Apply RoPE using EC's complex multiplication method (no YaRN, no mscale).
 
@@ -117,7 +111,9 @@ def _ec_compatible_rope_apply(
     if get_context_parallel_world_size() > 1:
         # In EB dataflow and CP size > 1, freqs_cis is [b, s/cp, 1, d] in local
         # so, we need to scatter freqs_cis here
-        freqs_cis = ContextParallelScatterOp.apply(freqs_cis, axis=1)
+        freqs_cis = ContextParallelScatterOp.apply(
+            freqs_cis, axis=1, mode=cp_balance_mode
+        )
 
     # MD5 debug
     import hashlib as _hl
@@ -248,6 +244,7 @@ class MultiLatentAttention(Attention):
         attention_type: str,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -256,12 +253,11 @@ class MultiLatentAttention(Attention):
             attention_type=attention_type,
             attn_mask_type=attn_mask_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
 
-        self.query_projection_size = (
-            self.config.v_head_dim * self.config.num_attention_heads
-        )
+        self.out_projection_size = self.v_head_dim * self.num_attention_heads
 
         self.q_head_dim = (
             self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
@@ -277,14 +273,14 @@ class MultiLatentAttention(Attention):
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=1.0,
-                rotary_base=self.config.rope_theta,
+                rotary_base=self.rope_theta,
                 cp_group=self.pg_collection.cp,
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.config.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
-                rotary_base=self.config.rope_theta,
+                rotary_base=self.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
                 original_max_position_embeddings=self.config.original_max_position_embeddings,
                 beta_fast=self.config.beta_fast,
@@ -305,9 +301,13 @@ class MultiLatentAttention(Attention):
             layer_number=self.layer_number,
             attn_mask_type=self.attn_mask_type,
             attention_type=self.attention_type,
+            is_mtp_layer=self.is_mtp_layer,
+            is_swa=self.is_swa,
             softmax_scale=self.softmax_scale,
             k_channels=self.q_head_dim,
-            v_channels=self.config.v_head_dim,
+            v_channels=self.v_head_dim,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=1,
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
         )
@@ -315,7 +315,7 @@ class MultiLatentAttention(Attention):
         # Output.
         self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
-            self.query_projection_size,
+            self.out_projection_size,
             self.config.hidden_size,
             config=self.config,
             init_method=self.config.output_layer_init_method,
@@ -333,7 +333,7 @@ class MultiLatentAttention(Attention):
             self.gate_proj = build_spec_layer(
                 sublayers_spec.gate_proj,
                 self.config.hidden_size,
-                self.query_projection_size,
+                self.out_projection_size,
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
@@ -373,7 +373,7 @@ class MultiLatentAttention(Attention):
         qk_nope_head_dim = self.config.qk_nope_head_dim
         qk_rope_head_dim = self.config.qk_rope_head_dim
         kv_lora_rank = self.config.kv_lora_rank
-        v_head_dim = self.config.v_head_dim
+        v_head_dim = self.v_head_dim
         num_heads = self.num_attention_heads_per_partition
 
         # Split query into nope and rope parts
@@ -612,6 +612,7 @@ class MLASelfAttention(MultiLatentAttention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
     ):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -624,6 +625,7 @@ class MLASelfAttention(MultiLatentAttention):
             attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         if self.config.q_lora_rank is None:
@@ -631,7 +633,7 @@ class MLASelfAttention(MultiLatentAttention):
             self.q_proj = build_spec_layer(
                 sublayers_spec.q_proj,
                 self.config.hidden_size,
-                self.config.num_attention_heads * self.q_head_dim,
+                self.num_attention_heads * self.q_head_dim,
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
@@ -659,7 +661,7 @@ class MLASelfAttention(MultiLatentAttention):
             self.q_b_proj = build_spec_layer(
                 sublayers_spec.q_b_proj,
                 self.config.q_lora_rank,
-                self.config.num_attention_heads * self.q_head_dim,
+                self.num_attention_heads * self.q_head_dim,
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
@@ -687,8 +689,8 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
-            self.config.num_attention_heads
-            * (self.config.qk_nope_head_dim + self.config.v_head_dim),
+            self.num_attention_heads
+            * (self.config.qk_nope_head_dim + self.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -713,6 +715,17 @@ class MLASelfAttention(MultiLatentAttention):
             config=self.config,
             eps=self.config.rms_norm_eps,
         )
+
+    def _is_cudagraph_active(self) -> bool:
+        """Check if CUDA Graph capture or replay is currently active.
+
+        Uses forward_meta.step_use_cudagraph flag set on core_attention.config
+        by FastDeploy's model runner before CUDA graph capture/replay.
+        """
+        forward_meta = getattr(self.core_attention.config, "forward_meta", None)
+        if forward_meta is None:
+            return False
+        return getattr(forward_meta, "step_use_cudagraph", False)
 
     def get_query_key_value_tensors(
         self,
@@ -774,6 +787,7 @@ class MLASelfAttention(MultiLatentAttention):
                 rotary_pos_emb, mscale = self.rotary_pos_emb(
                     rotary_seq_len,
                     packed_seq=packed_seq,
+                    position_ids=None if self.training else position_ids,
                 )
                 # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
                 # mscale = 1.0
@@ -923,7 +937,7 @@ class MLASelfAttention(MultiLatentAttention):
             kv = kv.view(
                 *kv.size()[:-1],
                 self.num_attention_heads_per_partition,
-                self.config.qk_nope_head_dim + self.config.v_head_dim,
+                self.config.qk_nope_head_dim + self.v_head_dim,
             )
 
             # if self.layer_number == 0:
@@ -979,11 +993,19 @@ class MLASelfAttention(MultiLatentAttention):
                     sin,
                     self.config.qk_rope_head_dim,
                     self.config.qk_nope_head_dim,
-                    self.config.v_head_dim,
+                    self.v_head_dim,
                     cu_seqlens_kv,
                     cp_rank,
                     cp_size,
                 )
+
+                # dynamic_inference not supported for now
+                if not self.training:
+                    raise NotImplementedError(
+                        "apply_rope_fusion does not support dynamic inference yet."
+                    )
+
+                k_pe = None
             else:
                 # Determine seq length:
                 #   packed 3D [t, n, d]      -> dim 0
@@ -995,16 +1017,21 @@ class MLASelfAttention(MultiLatentAttention):
                     q_len = q.size(1)
 
                 # Determine RoPE start position from position_ids (for decode offset)
-                if position_ids is not None and position_ids.numel() == q_len:
-                    start_pos = int(position_ids.flatten()[0].item())
-                else:
-                    start_pos = 0
+                # .item() triggers D2H sync which is forbidden inside CUDA graph capture:
+                # it causes cudaErrorStreamCaptureUnsupported (900), invalidating the stream
+                # BEFORE the try/except can save it.  Guard with _is_cudagraph_active() so
+                # we never attempt the sync during capture at all.
+                start_pos = 0
+                if position_ids is not None and not self._is_cudagraph_active():
+                    # Normal path: works when not inside CUDA Graph capture
+                    if position_ids.numel() == q_len:
+                        start_pos = int(position_ids.flatten()[0].item())
 
                 if get_context_parallel_world_size() > 1:
                     # In EB dataflow and CP size > 1, rotary_pos_emb is [1, s, 1, d];
                     # we need to scatter it to [1, s/cp, 1, d] here.
                     rotary_pos_emb = ContextParallelScatterOp.apply(
-                        rotary_pos_emb, axis=1
+                        rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
                     )
                 elif (
                     packed_seq_params is None
@@ -1021,14 +1048,24 @@ class MLASelfAttention(MultiLatentAttention):
                         # Recompute with the correct offset.
                         if self.config.rope_type == "rope":
                             rotary_pos_emb = self.rotary_pos_emb(
-                                q_len, offset=start_pos, packed_seq=packed_seq
+                                q_len,
+                                offset=start_pos,
+                                packed_seq=packed_seq,
+                                position_ids=None
+                                if self.training
+                                else position_ids,
                             )
                         else:
                             # mscale is constant for Yarn (depends only on
                             # model hyper-params), so we can safely drop the
                             # recomputed value and keep the outer-scope one.
                             rotary_pos_emb, _ = self.rotary_pos_emb(
-                                q_len, offset=start_pos, packed_seq=packed_seq
+                                q_len,
+                                offset=start_pos,
+                                packed_seq=packed_seq,
+                                position_ids=None
+                                if self.training
+                                else position_ids,
                             )
 
                 # Replace paddle.split with zero-copy slice views.
@@ -1039,7 +1076,7 @@ class MLASelfAttention(MultiLatentAttention):
                 # value: [num_tokens, n, v_head_dim]
                 k_no_pe, value = paddle.split(
                     kv,
-                    [self.config.qk_nope_head_dim, self.config.v_head_dim],
+                    [self.config.qk_nope_head_dim, self.v_head_dim],
                     axis=-1,
                 )
 
@@ -1063,9 +1100,10 @@ class MLASelfAttention(MultiLatentAttention):
                         q_pos_emb,
                         k_pos_emb,
                         q_len,
-                        rope_base=self.config.rope_theta,  # Must match EC's config.rope_theta
+                        rope_base=self.rope_theta,  # Must match EC's config.rope_theta
                         position_offset=start_pos,
                         position_ids=position_ids,
+                        cp_balance_mode=self.config.cp_balance_mode,
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)
