@@ -46,6 +46,9 @@ class TransformerConfig(ModelParallelConfig):
     num_hidden_layers: int = 1
     """Number of transformer layers in a transformer block."""
 
+    pad_token_id: int = 0
+    """Token ID used for padding."""
+
     num_nextn_predict_layers: int = 0
     """Number of Multi-Token Prediction (MTP) Layers."""
 
