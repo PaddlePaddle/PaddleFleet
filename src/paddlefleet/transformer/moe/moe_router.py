@@ -192,7 +192,7 @@ def gate_detach_matmul(
 
 
 def _apply_routing_map_fusion(
-    gates, top_idx, input_ids_none_zero_mask, input_ids=None
+    gates, top_idx, input_ids_none_zero_mask, input_ids=None, pad_token_id=0
 ):
     from paddlefleet.triton_ops import routing_map_fusion_forward
 
@@ -205,6 +205,7 @@ def _apply_routing_map_fusion(
         top_idx,
         input_ids=fused_input_ids,
         is_pure_text_line=None,
+        pad_token_id=pad_token_id,
     )
     mask = fused_mask.cast(gates.dtype)
     return mask, top_idx, exp_counts
@@ -1150,8 +1151,15 @@ class TopKRouter(StandardMoERouter):
             l_zloss = None
 
         if getattr(self.config, "routing_map_fusion", False):
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
             mask, top_idx, exp_counts = _apply_routing_map_fusion(
-                gates, top_idx, input_ids_none_zero_mask, input_ids
+                gates,
+                top_idx,
+                input_ids_none_zero_mask,
+                input_ids,
+                pad_token_id=pad_token_id,
             )
         else:
             with paddle.amp.auto_cast(enable=False):

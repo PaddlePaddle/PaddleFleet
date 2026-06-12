@@ -362,6 +362,64 @@ class TestMTPEmbeddingLayer(unittest.TestCase):
             ).item()
         )
 
+    def test_fill_feature_uses_custom_pad_token_id(self):
+        """When pad_token_id != 0, only that id triggers fill_feature zeroing."""
+        layer = MTPEmbeddingLayer(
+            config=_cfg(
+                vocab_size=1024,
+                hidden_size=64,
+                expert_model_parallel_size=4,
+                pad_token_id=42,
+            )
+        )
+        # Force non-zero weights so fill_feature's effect is observable
+        # (perform_initialization=False otherwise leaves weights at zero).
+        layer.embed_tokens.weight.set_value(
+            paddle.ones_like(layer.embed_tokens.weight)
+        )
+        # Position 1 holds id 0 (must remain non-zero), position 3 holds id 42 (must be zeroed).
+        ids = paddle.to_tensor([[5, 0, 7, 42, 9]])
+        input_ids_for_mtp.clear()
+        input_ids_for_mtp.append(ids)
+        result = layer.forward({"hidden_states": paddle.randn([1, 4, 64])})
+        embeds = result["mtp_input_embeds"]
+        self.assertTrue(
+            paddle.allclose(embeds[0, 3, :], paddle.zeros([64])).item()
+        )
+        # id == 0 must NOT be treated as padding when pad_token_id == 42.
+        self.assertFalse(
+            paddle.allclose(embeds[0, 1, :], paddle.zeros([64])).item()
+        )
+
+    def test_fill_feature_handles_none_pad_token_id(self):
+        """A runtime-None pad_token_id falls back to 0 instead of erroring."""
+        layer = MTPEmbeddingLayer(
+            config=_cfg(
+                vocab_size=1024, hidden_size=64, expert_model_parallel_size=4
+            )
+        )
+        # Override after construction to simulate external config injecting None.
+        layer.config.pad_token_id = None
+        layer.embed_tokens.weight.set_value(
+            paddle.ones_like(layer.embed_tokens.weight)
+        )
+        ids = paddle.to_tensor([[5, 0, 7, 8, 9]])
+        input_ids_for_mtp.clear()
+        input_ids_for_mtp.append(ids)
+        result = layer.forward({"hidden_states": paddle.randn([1, 4, 64])})
+        # Fallback treats id 0 as padding.
+        self.assertTrue(
+            paddle.allclose(
+                result["mtp_input_embeds"][0, 1, :], paddle.zeros([64])
+            ).item()
+        )
+        # id != 0 stays non-zero.
+        self.assertFalse(
+            paddle.allclose(
+                result["mtp_input_embeds"][0, 0, :], paddle.zeros([64])
+            ).item()
+        )
+
 
 class TestWrappedPaddleNormPipe(unittest.TestCase):
     def test_magic_send_vs_non_magic_send(self):
