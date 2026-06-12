@@ -192,12 +192,11 @@ class GPTEmbedding(FleetLayer):
                 self.config.expert_model_parallel_size > 1
                 and self.config.tensor_model_parallel_size < 2
             ):
-                text_padding_indices = input_ids == self.config.pad_token_id
+                text_padding_indices = input_ids == 0
                 decoder_input = fill_feature(
                     decoder_input, text_padding_indices, 0
                 )
-                input_ids_for_moe_mask = paddle.ones_like(input_ids)
-                input_ids_for_moe_mask[text_padding_indices] = 0
+                input_ids_for_moe_mask = input_ids
             if (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
@@ -208,17 +207,13 @@ class GPTEmbedding(FleetLayer):
                 )
                 # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
                 if input_ids_for_moe_mask is not None:
-                    # Slice the 0/1 padding mask (already keyed by pad_token_id),
-                    # NOT the raw input_ids — otherwise pad_token_id != 0 would
-                    # leak non-zero pad tokens through TopKRouter's `!= 0` check.
-                    moe_mask_full = input_ids_for_moe_mask
-                    # Main backbone mask: [B, max_seq]
+                    # Main backbone input_ids: [B, max_seq]
                     # Use .contiguous() because slices are non-contiguous and PP P2P send requires contiguous tensors.
-                    input_ids_for_moe_mask = moe_mask_full[
+                    input_ids_for_moe_mask = input_ids[
                         :, : -self.config.num_nextn_predict_layers
                     ].contiguous()
-                    # Construct per-depth MTP mask: for depth k, use
-                    # moe_mask_full[:, (k+1):(k+1+max_seq)] matching embedding shift
+                    # Construct per-depth MTP input_ids: for depth k, use
+                    # input_ids[:, (k+1):(k+1+max_seq)] matching embedding shift
                     seq_length = (
                         input_ids.shape[1]
                         - self.config.num_nextn_predict_layers
@@ -226,9 +221,7 @@ class GPTEmbedding(FleetLayer):
                     mtp_ids_list = []
                     for depth in range(self.config.num_nextn_predict_layers):
                         mtp_ids_list.append(
-                            moe_mask_full[
-                                :, (depth + 1) : (depth + 1 + seq_length)
-                            ]
+                            input_ids[:, (depth + 1) : (depth + 1 + seq_length)]
                         )
                     # [B, num_mtp, max_seq] - paddle.stack creates a new contiguous tensor
                     mtp_input_ids_for_moe_mask = paddle.stack(
