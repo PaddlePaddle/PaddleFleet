@@ -255,6 +255,7 @@ jobs:
           pip install --break-system-packages --upgrade pip
           pip install --break-system-packages uv
           python -m pip install --break-system-packages bce-python-sdk==0.8.74
+          pip install --break-system-packages -r requirements.txt
           '
 
       - name: Build wheel
@@ -293,16 +294,10 @@ jobs:
             echo "testing..."
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          # upload to paddletest
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py --no-check-certificate
+          python notify_paddle_link.py ${{ matrix.cuda.notify_CUDA }} paddlefleet-*.whl paddlefleet
           '
-
-      - name: Upload wheel name artifact
-        if: github.ref_type == 'branch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: whl-name-${{ matrix.cuda.bos_CUDA }}-linux_aarch64
-          path: dist/paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name
-          if-no-files-found: error
-          retention-days: 1
 
       - name: Cleanup
         if: ${{ always() }}
@@ -312,7 +307,7 @@ jobs:
           docker rm -f ${{ env.container_name }}
   
   upload-to-paddletest:
-    needs: [publish-wheel, publish-wheel-arm]
+    needs: [publish-wheel]
     if: github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
       group: APPROVAL
@@ -328,7 +323,6 @@ jobs:
           - {notify_CUDA: cu129, artifact_CUDA: cu130, platform: linux_x86_64}
           - {notify_CUDA: cu130, artifact_CUDA: cu130, platform: linux_x86_64}
           - {notify_CUDA: cu132, artifact_CUDA: cu130, platform: linux_x86_64}
-          - {notify_CUDA: cu130, artifact_CUDA: cu130, platform: linux_aarch64}
     steps:
       - name: Download wheel name artifact
         uses: actions/download-artifact@v4
