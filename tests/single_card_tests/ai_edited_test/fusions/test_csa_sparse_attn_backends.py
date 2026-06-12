@@ -74,7 +74,7 @@ def run_forward_backward(q, kv, attn_sink, topk_idxs, softmax_scale, backend):
     return out, q_c.grad, kv_c.grad, attn_sink_c.grad
 
 
-def test_single_shape(B, S, S_kv, H, D, topk, label=""):
+def run_single_shape(B, S, S_kv, H, D, topk, label=""):
     print(f"\n{'=' * 60}")
     print(
         f"Test: {label}  B={B}, S={S}, S_kv={S_kv}, H={H}, D={D}, topk={topk}"
@@ -160,7 +160,7 @@ if __name__ == "__main__":
     results = []
     for B, S, S_kv, H, D, topk, label in test_cases:
         try:
-            passed = test_single_shape(B, S, S_kv, H, D, topk, label)
+            passed = run_single_shape(B, S, S_kv, H, D, topk, label)
             results.append((label, passed))
         except Exception as e:
             print(f"  EXCEPTION: {e}")
