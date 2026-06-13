@@ -486,11 +486,16 @@ class DotProductAttention(FleetLayer):
 
             is_causal = attn_mask_type == AttnMaskType.causal
             if self.context_parallel_size > 1:
-                flashmask_attention_func = (
-                    self.rr_flashmask_attention_cp_func
-                    if use_rr_flash_attention
-                    else flashmask_attention_cp
-                )
+                if use_rr_flash_attention:
+                    assert self.softmax_offset is None, (
+                        "sink attention is not supported when using "
+                        "rr_attention with context parallel."
+                    )
+                    flashmask_attention_func = (
+                        self.rr_flashmask_attention_cp_func
+                    )
+                else:
+                    flashmask_attention_func = flashmask_attention_cp
                 is_causal = (
                     False  # only support non-causal for flashmask_attention_cp
                 )
@@ -511,9 +516,14 @@ class DotProductAttention(FleetLayer):
                 flashmask_attention_func = flashmask_attention
 
             if self.softmax_offset is not None:
-                flashmask_attention_func = partial(
-                    sink_attention, sink=self.softmax_offset
-                )
+                if self.context_parallel_size > 1:
+                    flashmask_attention_func = partial(
+                        flashmask_attention_func, sink=self.softmax_offset
+                    )
+                else:
+                    flashmask_attention_func = partial(
+                        sink_attention, sink=self.softmax_offset
+                    )
 
             # TODO(umiswing): move this padding to flash_mask_facade,
             # flash_mask_facade wrap the padding logic for fa/fm function call,
