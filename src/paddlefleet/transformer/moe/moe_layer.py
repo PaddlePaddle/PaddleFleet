@@ -175,7 +175,10 @@ class MoELayer(nn.Layer):
         self.use_ue8m0 = config.use_ue8m0
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
-        self.fp8_dispatch = bool(config.fp8)
+        fp8_dispatch_enabled = bool(config.fp8) and os.getenv("SONIC_MOE_DISABLE_FP8_DISPATCH", "0") != "1"
+        self.fp8_dispatch_forward = fp8_dispatch_enabled and os.getenv("SONIC_MOE_DISABLE_FP8_DISPATCH_FORWARD", "0") != "1"
+        self.fp8_combine_backward = fp8_dispatch_enabled and os.getenv("SONIC_MOE_DISABLE_FP8_COMBINE_BACKWARD", "0") != "1"
+        self.fp8_dispatch = self.fp8_dispatch_forward and self.fp8_combine_backward
         self.fp8_wgrad = config.fp8_wgrad
         self.moe_expert_fusion = config.moe_expert_fusion
         self.moe_subbatch_token_num_after_dispatch = (
@@ -303,6 +306,8 @@ class MoELayer(nn.Layer):
                     raise ValueError(
                         "moe_expert_fusion is only supported when moe_token_dispatcher_type is 'deepep' or 'hybridep' and on GPU architecture SM90 or higher. If these conditions are not met, please set it to false in the configuration yaml."
                     )
+                self.fp8_dispatch_forward = False
+                self.fp8_combine_backward = False
                 self.fp8_dispatch = False
 
         if self.fp8:
@@ -461,7 +466,7 @@ class MoELayer(nn.Layer):
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts,
-                    fp8_dispatch=self.fp8_dispatch,
+                    fp8_dispatch=self.fp8_dispatch_forward,
                     use_ue8m0=self.use_ue8m0,
                 )
             else:
@@ -522,7 +527,11 @@ class MoELayer(nn.Layer):
                         p.is_distributed = True
 
         self.use_rr_deepep_combine = False
-        print(f"====== fp8_dispatch:{self.fp8_dispatch}")
+        print(
+            f"====== fp8_dispatch:{self.fp8_dispatch}, "
+            f"fp8_dispatch_forward:{self.fp8_dispatch_forward}, "
+            f"fp8_combine_backward:{self.fp8_combine_backward}"
+        )
 
     def rr_recompute_update(self, in_full_recompute, in_mlp_recompute):
         if (
@@ -674,7 +683,7 @@ class MoELayer(nn.Layer):
         hidden_states, fp8_dispatched_handle = (
             self.token_dispatcher.token_dispatch(
                 hidden_states,
-                self.fp8_dispatch,
+                self.fp8_dispatch_forward,
                 async_finish=async_finish,
                 use_ue8m0=self.use_ue8m0,
                 using_sonic_moe=self.using_sonic_moe,
@@ -870,7 +879,7 @@ class MoELayer(nn.Layer):
                 tokens_per_expert,
             )
         fp8_combine_grad_handle = (
-            {} if self.fp8_dispatch and self.using_sonic_moe else None
+            {} if self.fp8_combine_backward and self.using_sonic_moe else None
         )
 
         with profile("fusion_mlp"):
@@ -934,7 +943,7 @@ class MoELayer(nn.Layer):
                     hidden_states,
                     combine_overlap_handle,
                     use_rr_deepep_combine=self.use_rr_deepep_combine,
-                    fp8_dispatch=self.fp8_dispatch and self.using_sonic_moe,
+                    fp8_dispatch=self.fp8_combine_backward and self.using_sonic_moe,
                     combine_grad_handle=fp8_combine_grad_handle,
                 )
 
@@ -1002,7 +1011,7 @@ class MoELayer(nn.Layer):
                     hidden_states,
                     token_indices,
                     token_weights,
-                    self.fp8_dispatch,
+                    self.fp8_dispatch_forward,
                     async_finish=async_finish,
                     use_ue8m0=self.use_ue8m0,
                 )
