@@ -322,5 +322,17 @@ class TestMagicInit(unittest.TestCase):
             )
 
 
+class TestPadTokenId(unittest.TestCase):
+    """Tests for the pad_token_id field on TransformerConfig."""
+
+    def test_default_is_zero(self):
+        config = TransformerConfig(num_hidden_layers=2)
+        self.assertEqual(config.pad_token_id, 0)
+
+    def test_override_value(self):
+        config = TransformerConfig(num_hidden_layers=2, pad_token_id=151643)
+        self.assertEqual(config.pad_token_id, 151643)
+
+
 if __name__ == "__main__":
     unittest.main()
