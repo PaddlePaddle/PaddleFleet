@@ -21,6 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+# === save_tensor 插桩结束 ===
 import paddle
 import paddlefleet_ops
 from paddle import framework, nn
@@ -29,6 +30,14 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     GatherOp,
     ScatterOp,
     mark_as_sequence_parallel_parameter,
+)
+
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import (
+    _pf_grad_info,
+    _pf_tensor_info as _pf_ti,
+    is_bit_exact as _is_bit_exact,
+    pf_dump_grad_hook as _pf_dump_grad_hook,
 )
 
 if TYPE_CHECKING:
@@ -122,6 +131,32 @@ class GradDtypeUnguard(PyLayer):
     def backward(ctx, grad):
         """backward"""
         return grad
+
+
+# === [反向对齐 align-grad] 三路 clone PyLayer ===
+# 目的: 把 hidden_states 拆三路 (router/dispatcher/shared) 时, 反向 grad
+#       聚合顺序在 PF / MG autograd 引擎里不一致, 导致 cp11b_grad_aggregated
+#       差 1 ULP (PF md5=49361bcf25178bed, MG md5=b07c72a94f1bd16d).
+# 单测 unit_test_bf16_sum_order.py 已确认: 严格按
+#       (g_dispatcher + g_shared) + g_router
+# 顺序累加(每步走 bf16 round)能 bit-exact 复现 MG 聚合 grad b07c72a94f1bd16d.
+# 本 PyLayer 强制把 PF 三路反向累加顺序固定为该顺序, 对齐 MG.
+class ThreePathCloneAlignMG(PyLayer):
+    """Three-way differentiable identity clone with MG-aligned backward sum order."""
+
+    @staticmethod
+    def forward(ctx, x):
+        # 三路 differentiable identity, 数值等同 x.clone()*3, 不改前向.
+        return x.clone(), x.clone(), x.clone()
+
+    @staticmethod
+    def backward(ctx, g_router, g_dispatcher, g_shared):
+        # 反向: 严格按 MG autograd 顺序聚合
+        # step1: dispatcher + shared (bf16 step round)
+        # step2: + router (bf16 step round)
+        partial = g_dispatcher + g_shared
+        out = partial + g_router
+        return out
 
 
 @dataclass
@@ -979,6 +1014,104 @@ class MoELayer(nn.Layer):
         residuals = hidden_states
 
         layer_idx = getattr(self, "layer_number", None)
+        # === 插桩: MoE input ===
+        _pf_ti("input", hidden_states, layer_idx, prefix="PF MoE")
+        # === 插桩结束 ===
+
+        # === 插桩: clone hidden_states 拆分 shared 和 router 两路反向梯度 ===
+        # 让 shared 路和 router 路有独立的 grad 累积点，便于在 backward 拆 cp11b
+        if hidden_states.stop_gradient is False:
+            hidden_states.register_hook(
+                _pf_grad_info(
+                    "cp11b_grad_aggregated",
+                    layer_num=layer_idx,
+                    prefix="GRAD PF MoE",
+                )
+            )
+            # === [反向对齐 align-grad] 同时 dump 聚合 grad, 用于单测核对 sum 顺序 ===
+            # _pf_dump_grad_hook 内部按 GLM_ALIGN_LOG 自动 no-op, 不需要 sys.path
+            hidden_states.register_hook(
+                _pf_dump_grad_hook(
+                    f"moe_three_paths_L{layer_idx}", "aggregated"
+                )
+            )
+            # === dump 结束 ===
+            # # === 反向对齐: 用 MG npy 替换 cp11b_grad_aggregated ===
+            # # MG layer_number = PF layer_idx + 1 (MG 1-based offset)
+            # _PF_ALIGN_BASE = "/root/paddlejob/share-storage/gpfs/system-public/zhanghonggeng/glm_45/logs/align_grad/moe_align"
+            # hidden_states.register_hook(
+            #     _pf_align_and_print_grad(
+            #         "cp11b_grad_aggregated",
+            #         base_path=_PF_ALIGN_BASE,
+            #         layer_id=(layer_idx + 1),  # PF L1 -> MG L2
+            #         print_layer_num=layer_idx,
+            #         prefix="GRAD PF MoE(ALIGNED)",
+            #     )
+            # )
+        # === 插桩结束 ===
+
+        # === [反向对齐 align-grad] 探针: 把 hidden_states 拆三路独立 grad 节点 ===
+        # 目的: cp11b_grad_aggregated 是 router/dispatcher/shared 三路反向 grad 求和后的结果,
+        # 拆成三份独立 clone 后, 三路反向各自落点不同, 可以分别 dump + 单测对齐.
+        # clone() 是 differentiable identity, 不改前向数值; 反向时三个 clone.grad 之和 = 原 hidden_states.grad.
+        _three_paths_enabled = hidden_states.stop_gradient is False
+        if _three_paths_enabled:
+            _DUMP_TAG_TP_PF = f"moe_three_paths_L{layer_idx}"
+
+            _hs_router_path = hidden_states.clone()
+            _hs_dispatcher_path = hidden_states.clone()
+            _hs_shared_path = hidden_states.clone()
+            # === [反向对齐 align-grad] 用 ThreePathCloneAlignMG 替换上面的 3x clone ===
+            # 目的: 固定反向 grad 累加顺序为 (dispatcher+shared)+router, 对齐 MG.
+            # 上面 3 行原 clone() 反向走 PF autograd 默认累加顺序 = (router+shared)+dispatcher
+            # -> cp11b_grad_aggregated md5=49361bcf25178bed (PF 当前)
+            # 改用 PyLayer 后预期 md5=b07c72a94f1bd16d (= MG)
+            _hs_router_path, _hs_dispatcher_path, _hs_shared_path = (
+                ThreePathCloneAlignMG.apply(hidden_states)
+            )
+            # === 替换结束 ===
+
+            _hs_router_path.register_hook(
+                _pf_grad_info(
+                    "cp11b_three_paths_router_grad",
+                    layer_num=layer_idx,
+                    prefix="GRAD PF MoE",
+                )
+            )
+            _hs_dispatcher_path.register_hook(
+                _pf_grad_info(
+                    "cp11b_three_paths_dispatcher_grad",
+                    layer_num=layer_idx,
+                    prefix="GRAD PF MoE",
+                )
+            )
+            _hs_shared_path.register_hook(
+                _pf_grad_info(
+                    "cp11b_three_paths_shared_grad",
+                    layer_num=layer_idx,
+                    prefix="GRAD PF MoE",
+                )
+            )
+            # 跨框架 dump 由 align_dump_utils 集中托管, GLM_ALIGN_LOG=0 时自动 no-op
+            _hs_router_path.register_hook(
+                _pf_dump_grad_hook(_DUMP_TAG_TP_PF, "router")
+            )
+            _hs_dispatcher_path.register_hook(
+                _pf_dump_grad_hook(_DUMP_TAG_TP_PF, "dispatcher")
+            )
+            _hs_shared_path.register_hook(
+                _pf_dump_grad_hook(_DUMP_TAG_TP_PF, "shared")
+            )
+
+            # 替换三路输入: residuals(shared), self.gate(router), fusion_moe_forward/custom_forward/single_card(dispatcher)
+            residuals = _hs_shared_path
+            hidden_states_for_router = _hs_router_path
+            hidden_states_for_dispatcher = _hs_dispatcher_path
+        else:
+            hidden_states_for_router = hidden_states
+            hidden_states_for_dispatcher = hidden_states
+        # === [反向对齐 align-grad] 探针结束 ===
+
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
         (
             capacity,
@@ -990,13 +1123,29 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(
-            hidden_states,
+            hidden_states_for_router,
             input_ids=input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
         # probs: combine weights in [S, E] sparse layout (non-selected positions are 0) [seq_len, num_experts]
         # mask (routing_map): binary selection matrix [seq_len, num_experts]
         # capacity, priorities are used for dropping tokens, currently they are not used
+
+        # === 插桩: gate outputs ===
+        _pf_ti("router_probs(scores)", probs, layer_idx, prefix="PF MoE")
+        _pf_ti("router_routing_map", mask, layer_idx, prefix="PF MoE")
+        # === 插桩结束 ===
+
+        # === 插桩: probs 反向 hook（dispatch 内部 probs 路径分歧定位） ===
+        if probs.stop_gradient is False:
+            probs.register_hook(
+                _pf_grad_info(
+                    "cp11d_probs_grad_at_moe_layer",
+                    layer_num=layer_idx,
+                    prefix="GRAD PF MoE",
+                )
+            )
+        # === 插桩结束 ===
 
         _log_moe_md5(probs, "probs", layer_idx)
         _log_moe_md5(mask, "routing_mask", layer_idx)
@@ -1018,7 +1167,7 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states,
+                    hidden_states_for_dispatcher,
                     probs,
                     mask,
                     combine_overlap_handle,
@@ -1027,18 +1176,22 @@ class MoELayer(nn.Layer):
                 )
             else:
                 output = self.custom_forward(
-                    hidden_states,
+                    hidden_states_for_dispatcher,
                     probs,
                     mask,
                     topk_weights=topk_weights,
                     topk_indices=topk_indices,
                 )
         else:
-            if len(hidden_states.shape) == 3:
-                batch_size, seq_len, d_model = hidden_states.shape
-                reshaped_input = hidden_states.reshape([-1, d_model])
+            if len(hidden_states_for_dispatcher.shape) == 3:
+                batch_size, seq_len, d_model = (
+                    hidden_states_for_dispatcher.shape
+                )
+                reshaped_input = hidden_states_for_dispatcher.reshape(
+                    [-1, d_model]
+                )
             else:
-                reshaped_input = hidden_states
+                reshaped_input = hidden_states_for_dispatcher
             # Latent MoE: project to latent space before single-card MoE
             if self.use_latent_moe:
                 reshaped_input = self.fc1_latent_proj(reshaped_input)
@@ -1047,15 +1200,30 @@ class MoELayer(nn.Layer):
                     reshaped_input, mask, probs, topk_indices, topk_weights
                 )
             else:
-                output = self._forward_single_card_moe(
-                    reshaped_input, topk_indices, topk_weights
-                )
+                if _is_bit_exact():
+                    output = self._forward_single_card_moe(
+                        reshaped_input,
+                        topk_indices,
+                        topk_weights,
+                        routing_map=mask,
+                    )
+                else:
+                    output = self._forward_single_card_moe(
+                        reshaped_input, topk_indices, topk_weights
+                    )
             # Latent MoE: project back from latent space
             if self.use_latent_moe:
                 output = self.fc2_latent_proj(output)
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
 
+        # === 插桩: routed output ===
+        _pf_ti("routed_output", output, layer_idx, prefix="PF MoE")
+        # hook 移到 aux_loss 之后，见下方
+        # === 插桩结束 ===
+
+        # [对齐修复-方案B] aux_loss 由 moe_layer 继续处理（router 内 recompute 会断 grad）。
+        # AddAuxiliaryLoss 包裹 output，backward 时 grad_loss=1 触发 l_aux backward。
         if self.training and self.router_aux_loss_coef and aux_loss is not None:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
             output = AddAuxiliaryLoss.apply(output, aux_loss)
@@ -1073,6 +1241,19 @@ class MoELayer(nn.Layer):
 
         _log_moe_md5(output, "moe_final_output", layer_idx)
 
+        # === 插桩: final_moe_output ===
+        _pf_ti("final_moe_output", output, layer_idx, prefix="PF MoE")
+        if output.stop_gradient is False:
+            output.retain_grads()
+            output.register_hook(
+                _pf_grad_info(
+                    "final_moe_output",
+                    layer_num=layer_idx,
+                    prefix="GRAD PF MoE",
+                )
+            )
+        # === 插桩结束 ===
+
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
         return output, None  # None is bias
@@ -1082,6 +1263,7 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         selected_experts: paddle.Tensor,
         topk_weights: paddle.Tensor,
+        routing_map: paddle.Tensor = None,
     ) -> paddle.Tensor:
         """
         Forward without expert parallelism
@@ -1094,6 +1276,12 @@ class MoELayer(nn.Layer):
         Returns:
             output: Output hidden states, shape: [seq_len, hidden_size]
         """
+        # === 对齐分支: 设置 GLM_ALIGN_BIT_EXACT=1 启用，完全对齐 MG 的 permute→experts→gather+sum 流程 ===
+        if _is_bit_exact():
+            return self._forward_single_card_moe_deterministic(
+                hidden_states, selected_experts, topk_weights, routing_map
+            )
+        # === 对齐分支结束，以下为原始代码 ===
 
         _, d_model = hidden_states.shape
         final_hidden_states = paddle.zeros_like(
@@ -1132,6 +1320,252 @@ class MoELayer(nn.Layer):
             )
             final_hidden_states = final_hidden_states + final_hidden_states_tmp
         return final_hidden_states.cast(hidden_states.dtype)
+
+    def _forward_single_card_moe_deterministic(
+        self,
+        hidden_states: paddle.Tensor,
+        selected_experts: paddle.Tensor,
+        topk_weights: paddle.Tensor,
+        routing_map: paddle.Tensor,
+    ) -> paddle.Tensor:
+        """
+        确定性 MoE forward — 完全对齐 MG 的 permute → experts → gather+sum(unpermute) 流程
+        仅在设置 GLM_ALIGN_BIT_EXACT=1 时被调用，用于逐位精度对齐。
+        """
+        num_tokens, d_model = hidden_states.shape
+
+        # ========== Step 1: Permute (对齐 MG moe_utils.py:permute) ==========
+        routing_map_bool = routing_map.cast("bool")
+        routing_map_T = routing_map_bool.T  # [num_experts, num_tokens]
+
+        token_indices = (
+            paddle.arange(num_tokens, dtype="int64")
+            .unsqueeze(0)
+            .expand([self.num_experts, num_tokens])
+        )
+        sorted_indices = token_indices[
+            routing_map_T
+        ]  # masked_select equivalent
+
+        permuted_input = hidden_states.index_select(sorted_indices, axis=0)
+        tokens_per_expert = routing_map_T.cast("int64").sum(axis=-1)
+
+        # 构建完整 probs 矩阵并 masked_select
+        full_probs = paddle.zeros(
+            [num_tokens, self.num_experts], dtype=topk_weights.dtype
+        )
+        token_idx_2d = (
+            paddle.arange(num_tokens, dtype="int64")
+            .unsqueeze(1)
+            .expand_as(selected_experts)
+        )
+        full_probs[
+            token_idx_2d.reshape([-1]), selected_experts.reshape([-1])
+        ] = topk_weights.reshape([-1])
+        permuted_probs = full_probs.T[routing_map_T]
+
+        # === DEBUG ===
+        _pf_ti(
+            "permuted_input",
+            permuted_input,
+            getattr(self, "layer_number", None),
+            prefix="PF MoE",
+        )
+        _pf_ti(
+            "tokens_per_expert",
+            tokens_per_expert,
+            getattr(self, "layer_number", None),
+            prefix="PF MoE",
+        )
+        if permuted_input.stop_gradient is False:
+            permuted_input.retain_grads()
+            permuted_input.register_hook(
+                _pf_grad_info(
+                    "permuted_input",
+                    layer_num=getattr(self, "layer_number", None),
+                    prefix="GRAD PF MoE",
+                )
+            )
+
+        # ========== Step 2: Expert 计算 (对齐 MG SequentialMLP) ==========
+        tokens_per_expert_list = tokens_per_expert.tolist()
+        tokens_list = paddle.split(
+            permuted_input, tokens_per_expert_list, axis=0
+        )
+        probs_list = paddle.split(
+            permuted_probs, tokens_per_expert_list, axis=0
+        )
+
+        output_local_list = []
+        from paddlefleet.fusions.fused_bias_swiglu import (
+            weighted_bias_swiglu_impl,
+        )
+
+        for expert_idx, (expert_layer, tokens, probs) in enumerate(
+            zip(self.experts, tokens_list, probs_list)
+        ):
+            if tokens.shape[0] == 0:
+                output_local_list.append(tokens)
+                continue
+
+            # === GRAD DEBUG: expert0 input ===
+            if expert_idx == 0 and tokens.stop_gradient is False:
+                tokens.retain_grads()
+                tokens.register_hook(
+                    _pf_grad_info(
+                        "expert0_input(permuted_input_slice)",
+                        layer_num=getattr(self, "layer_number", None),
+                        prefix="GRAD PF MoE",
+                    )
+                )
+            # === GRAD DEBUG END ===
+
+            fc1_out, _ = expert_layer.up_gate_proj(tokens)
+            # === DEBUG: expert0 中间值 ===
+            if expert_idx == 0:
+                _pf_ti(
+                    "DEBUG_expert0_fc1_out",
+                    fc1_out,
+                    getattr(self, "layer_number", None),
+                    prefix="PF MoE",
+                )
+                _pf_ti(
+                    "DEBUG_expert0_probs",
+                    probs,
+                    getattr(self, "layer_number", None),
+                    prefix="PF MoE",
+                )
+            act_out = weighted_bias_swiglu_impl(
+                fc1_out, None, probs.unsqueeze(-1)
+            )
+            act_out = act_out.cast(tokens.dtype)
+            if expert_idx == 0:
+                _pf_ti(
+                    "DEBUG_expert0_swiglu_out",
+                    act_out,
+                    getattr(self, "layer_number", None),
+                    prefix="PF MoE",
+                )
+            expert_out, _ = expert_layer.down_proj(act_out)
+            if expert_idx == 0:
+                _pf_ti(
+                    "DEBUG_expert0_fc2_out",
+                    expert_out,
+                    getattr(self, "layer_number", None),
+                    prefix="PF MoE",
+                )
+                _pf_ti(
+                    "DEBUG_expert0_fc1_weight",
+                    expert_layer.up_gate_proj.weight,
+                    getattr(self, "layer_number", None),
+                    prefix="PF MoE",
+                )
+                _pf_ti(
+                    "DEBUG_expert0_fc2_weight",
+                    expert_layer.down_proj.weight,
+                    getattr(self, "layer_number", None),
+                    prefix="PF MoE",
+                )
+            # === DEBUG END ===
+
+            # === GRAD DEBUG: expert0 中间梯度 ===
+            if expert_idx == 0:
+                _ln = getattr(self, "layer_number", None)
+                if fc1_out.stop_gradient is False:
+                    fc1_out.retain_grads()
+                    fc1_out.register_hook(
+                        _pf_grad_info(
+                            "expert0_fc1_out",
+                            layer_num=_ln,
+                            prefix="GRAD PF MoE",
+                        )
+                    )
+                if act_out.stop_gradient is False:
+                    act_out.retain_grads()
+                    act_out.register_hook(
+                        _pf_grad_info(
+                            "expert0_act_out(after_probs)",
+                            layer_num=_ln,
+                            prefix="GRAD PF MoE",
+                        )
+                    )
+                if expert_out.stop_gradient is False:
+                    expert_out.retain_grads()
+                    expert_out.register_hook(
+                        _pf_grad_info(
+                            "expert0_fc2_out",
+                            layer_num=_ln,
+                            prefix="GRAD PF MoE",
+                        )
+                    )
+            # === GRAD DEBUG END ===
+
+            output_local_list.append(expert_out.cast(hidden_states.dtype))
+
+        expert_raw_output = paddle.concat(output_local_list, axis=0)
+
+        # === DEBUG ===
+        _pf_ti(
+            "expert_raw_output",
+            expert_raw_output,
+            getattr(self, "layer_number", None),
+            prefix="PF MoE",
+        )
+        if expert_raw_output.stop_gradient is False:
+            expert_raw_output.retain_grads()
+            expert_raw_output.register_hook(
+                _pf_grad_info(
+                    "expert_raw_output",
+                    layer_num=getattr(self, "layer_number", None),
+                    prefix="GRAD PF MoE",
+                )
+            )
+
+        # ========== Step 3: Unpermute (确定性 gather+sum) ==========
+        expert_offsets = paddle.zeros([self.num_experts + 1], dtype="int64")
+        expert_offsets[1:] = paddle.cumsum(tokens_per_expert)
+        position_in_expert_T = routing_map_T.cast("int64").cumsum(axis=-1) - 1
+        global_position = position_in_expert_T + expert_offsets[:-1].unsqueeze(
+            1
+        )
+        global_position_per_token = global_position.T
+        topk = int(routing_map_bool.cast("int64").sum(axis=-1)[0].item())
+        valid_positions = global_position_per_token * routing_map_bool.cast(
+            "int64"
+        )
+        reverse_indices = valid_positions[routing_map_bool].reshape(
+            [num_tokens, topk]
+        )
+        # 用 embedding lookup 替代 index_select（反向是确定性的 scatter，无累加）
+        gathered = paddle.nn.functional.embedding(
+            reverse_indices.reshape([-1]), expert_raw_output
+        )
+        gathered = gathered.reshape([num_tokens, topk, d_model])
+
+        # === 插桩: dispatch 反向中间节点 ===
+        _ln = getattr(self, "layer_number", None)
+        if gathered.stop_gradient is False:
+            gathered.register_hook(
+                _pf_grad_info(
+                    "dispatch_gathered(before_sum)",
+                    layer_num=_ln,
+                    prefix="GRAD PF MoE",
+                )
+            )
+
+        output_tokens = gathered.sum(axis=1).cast(gathered.dtype)
+
+        if output_tokens.stop_gradient is False:
+            output_tokens.register_hook(
+                _pf_grad_info(
+                    "dispatch_output_tokens(after_sum)",
+                    layer_num=_ln,
+                    prefix="GRAD PF MoE",
+                )
+            )
+        # === 插桩结束 ===
+
+        return output_tokens.cast(hidden_states.dtype)
 
     def _forward_single_card_grouped_gemm_moe(
         self,

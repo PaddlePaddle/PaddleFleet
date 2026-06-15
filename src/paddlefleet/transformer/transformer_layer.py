@@ -22,6 +22,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+# === save_tensor 插桩结束 ===
 import paddle
 from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import (
@@ -32,6 +33,11 @@ from paddle.distributed.fleet.meta_parallel import (
 from paddle.distributed.fleet.utils import recompute
 from paddlefleet_ops import is_deep_ep_available
 
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import (
+    _pf_grad_info,
+    _pf_tensor_info,
+)
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
@@ -890,6 +896,23 @@ class TransformerLayer(nn.Layer):
         # Residual connection.
         residual = hidden_states
 
+        # === 插桩: CP3 layer_input ===
+        _pf_tensor_info(
+            "cp3_layer_input",
+            hidden_states,
+            self.layer_number,
+            prefix="PF TransformerLayer",
+        )
+        if not hidden_states.stop_gradient:
+            hidden_states.register_hook(
+                _pf_grad_info(
+                    "cp3_layer_input",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === 插桩结束 ===
+
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
             input_layernorm_output = recompute(
@@ -901,6 +924,23 @@ class TransformerLayer(nn.Layer):
         self._log_md5(
             input_layernorm_output, "input_layernorm_out", self.layer_number
         )
+
+        # === 插桩: CP4 input_layernorm ===
+        _pf_tensor_info(
+            "cp4_input_layernorm",
+            input_layernorm_output,
+            self.layer_number,
+            prefix="PF TransformerLayer",
+        )
+        if not input_layernorm_output.stop_gradient:
+            input_layernorm_output.register_hook(
+                _pf_grad_info(
+                    "cp4_input_layernorm",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === 插桩结束 ===
 
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
@@ -957,10 +997,44 @@ class TransformerLayer(nn.Layer):
         # Residual connection.
         residual = hidden_states
 
+        # === 插桩: CP10 attn_residual ===
+        _pf_tensor_info(
+            "cp10_attn_residual",
+            hidden_states,
+            self.layer_number,
+            prefix="PF TransformerLayer",
+        )
+        if not hidden_states.stop_gradient:
+            hidden_states.register_hook(
+                _pf_grad_info(
+                    "cp10_attn_residual",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === 插桩结束 ===
+
         # Optional Layer norm after self-attention
         pre_cross_attn_layernorm_output = self.pre_cross_attn_layernorm(
             hidden_states
         )
+
+        # === 插桩: CP11 post_attn_layernorm ===
+        _pf_tensor_info(
+            "cp11_post_attn_layernorm",
+            pre_cross_attn_layernorm_output,
+            self.layer_number,
+            prefix="PF TransformerLayer",
+        )
+        if not pre_cross_attn_layernorm_output.stop_gradient:
+            pre_cross_attn_layernorm_output.register_hook(
+                _pf_grad_info(
+                    "cp11_post_attn_layernorm",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === 插桩结束 ===
 
         # Cross attention.
         attention_output_with_bias = self.cross_attention(
@@ -1018,6 +1092,17 @@ class TransformerLayer(nn.Layer):
                 hidden_states
             )
 
+        # === GRAD DEBUG: pre_mlp_layernorm 输出 ===
+        if not post_attention_layernorm_output.stop_gradient:
+            post_attention_layernorm_output.register_hook(
+                _pf_grad_info(
+                    "cp11b_pre_mlp_layernorm_out",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === GRAD DEBUG END ===
+
         self._log_md5(
             post_attention_layernorm_output,
             "post_attn_layernorm_out",
@@ -1073,6 +1158,22 @@ class TransformerLayer(nn.Layer):
             )
             self._log_md5(_mlp_tensor, "mlp_out", self.layer_number)
 
+        # === GRAD DEBUG: mlp output (before bda/residual) ===
+        _mlp_out_tensor = (
+            mlp_output_with_bias[0]
+            if isinstance(mlp_output_with_bias, tuple)
+            else mlp_output_with_bias
+        )
+        if not _mlp_out_tensor.stop_gradient:
+            _mlp_out_tensor.register_hook(
+                _pf_grad_info(
+                    "cp12d_mlp_output(before_bda)",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === GRAD DEBUG END ===
+
         with paddle.enable_grad():
             if block_attention_residuals:
                 mlp_out, mlp_bias = mlp_output_with_bias
@@ -1093,6 +1194,23 @@ class TransformerLayer(nn.Layer):
 
         if is_first_fwd:
             hidden_states.stop_gradient = False
+
+        # === 插桩: CP13 mlp_residual ===
+        _pf_tensor_info(
+            "cp13_mlp_residual",
+            hidden_states,
+            self.layer_number,
+            prefix="PF TransformerLayer",
+        )
+        if not hidden_states.stop_gradient:
+            hidden_states.register_hook(
+                _pf_grad_info(
+                    "cp13_mlp_residual",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === 插桩结束 ===
 
         return hidden_states
 

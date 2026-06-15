@@ -21,6 +21,10 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
 
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import _pf_grad_info, _pf_tensor_info
+
+# === save_tensor 插桩结束 ===
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     _initialize_affine_weight_cpu,
@@ -158,6 +162,12 @@ class GPTLMHead(ColumnParallelLinear):
                 f"[LOSS_PATH_MD5] rank={rank} lm_head_logits shape={list(logits.shape)} md5={l_md5}",
                 flush=True,
             )
+
+        # === 插桩: CP15 logits ===
+        _pf_tensor_info("cp15_logits", logits, prefix="PF LMHead")
+        if not logits.stop_gradient:
+            logits.register_hook(_pf_grad_info("cp15_logits", prefix="GRAD PF"))
+        # === 插桩结束 ===
 
         return logits
 

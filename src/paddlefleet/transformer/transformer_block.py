@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
+
+# === save_tensor 插桩结束 ===
 from typing import TYPE_CHECKING
 
 import paddle
@@ -25,6 +27,9 @@ from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet import tensor_parallel
+
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import _pf_grad_info, _pf_tensor_info
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
@@ -267,5 +272,15 @@ class TransformerBlock(FleetLayer):
         # Final layer norm.
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
+
+        # === 插桩: CP14 final_layernorm ===
+        _pf_tensor_info(
+            "cp14_final_layernorm", hidden_states, prefix="PF TransformerBlock"
+        )
+        if not hidden_states.stop_gradient:
+            hidden_states.register_hook(
+                _pf_grad_info("cp14_final_layernorm", prefix="GRAD PF")
+            )
+        # === 插桩结束 ===
 
         return hidden_states
