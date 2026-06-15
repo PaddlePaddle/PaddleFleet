@@ -185,7 +185,7 @@ def native_h_post_bda(
     x: Tensor,
     bias: Tensor | None,
 ) -> Tensor:
-    """Native H_res @ residual + H_post * (x [+ bias]).
+    """Native H_res.T @ residual + H_post * (x [+ bias]).
 
     Args:
         h_res: [..., n, n] - residual mixing matrix
@@ -201,7 +201,7 @@ def native_h_post_bda(
     n, C = original_residual.shape[-2], original_residual.shape[-1]
     num_tokens = math.prod(leading_shape)
 
-    h_res_batched = h_res.reshape([num_tokens, n, n])
+    h_res_batched = h_res.reshape([num_tokens, n, n]).transpose([0, 2, 1])
     residual_batched = original_residual.reshape([num_tokens, n, C])
     mixed = paddle.bmm(h_res_batched, residual_batched).reshape(
         [*leading_shape, n, C]
@@ -445,7 +445,7 @@ class HyperConnectionModule(nn.Layer):
         """
         Apply H_res to residual using H_res weights.
 
-        Computes: H_res @ residual
+        Computes: H_res.T @ residual
 
         Args:
             h_res: [..., n, n] - residual mixing matrix
@@ -467,7 +467,9 @@ class HyperConnectionModule(nn.Layer):
             )
         else:
             # Reshape for bmm: [..., n, n] -> [batch, n, n]
-            h_res_batched = h_res.reshape([num_tokens, n, n])
+            ndim = h_res.ndim
+            perm = [*list(range(ndim - 2)), ndim - 1, ndim - 2]
+            h_res_batched = h_res.transpose(perm).reshape([num_tokens, n, n])
         # [..., n*C] -> [..., n, C] -> [batch, n, C]
         residual_batched = residual.reshape([num_tokens, n, C])
 
@@ -677,7 +679,7 @@ class HyperConnectionModule(nn.Layer):
         Currently implements the operations sequentially using native PaddlePaddle.
 
         The computation flow is:
-            1. mixed = H_res @ original_residual (apply_h_res)
+            1. mixed = H_res^T @ original_residual (apply_h_res)
             2. expanded = H_post^T @ layer_output (apply_h_post)
             3. output = dropout(expanded + bias) + mixed (bias-dropout-add)
 

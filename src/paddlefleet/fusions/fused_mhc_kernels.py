@@ -331,14 +331,13 @@ if _CUTILE_AVAILABLE:
         hp_tile = ct.load(
             hp, index=(pid, 0), shape=(TILE_SIZE, N), padding_mode=PAD_ZERO
         )
-        hp_2d = ct.reshape(hp_tile, (N, 1))
+        hp_exp = ct.expand_dims(hp_tile, axis=2)  # (TILE_SIZE, N, 1)
         hr_tile = ct.load(
             hr,
             index=(pid, 0, 0),
             shape=(TILE_SIZE, N, N),
             padding_mode=PAD_ZERO,
         )
-        hr_2d = ct.reshape(hr_tile, (N, N))
         for ct_idx in range(num_c_tiles):
             orig_tile = ct.load(
                 orig,
@@ -346,25 +345,23 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
             )
-            orig_2d = ct.reshape(orig_tile, (N, TILE_C))
             x_tile = ct.load(
                 x,
                 index=(pid, ct_idx),
                 shape=(TILE_SIZE, TILE_C),
                 padding_mode=PAD_ZERO,
             )
-            x_2d = ct.reshape(x_tile, (1, TILE_C))
-            out_2d = hp_2d * x_2d
+            x_exp = ct.expand_dims(x_tile, axis=1)  # (TILE_SIZE, 1, TILE_C)
+            out_tile = hp_exp * x_exp  # (TILE_SIZE, N, TILE_C)
             for j in range(N):
-                out_2d += ct.extract(hr_2d, (0, j), shape=(N, 1)) * ct.extract(
-                    orig_2d, (j, 0), shape=(1, TILE_C)
+                hr_row = ct.extract(hr_tile, (0, j, 0), shape=(TILE_SIZE, 1, N))
+                hr_col = ct.reshape(hr_row, (TILE_SIZE, N, 1))
+                orig_row = ct.extract(
+                    orig_tile, (0, j, 0), shape=(TILE_SIZE, 1, TILE_C)
                 )
+                out_tile = out_tile + hr_col * orig_row
             ct.store(
-                out,
-                index=(pid, 0, ct_idx),
-                tile=ct.reshape(out_2d, (TILE_SIZE, N, TILE_C)).astype(
-                    out.dtype
-                ),
+                out, index=(pid, 0, ct_idx), tile=out_tile.astype(out.dtype)
             )
 
     @ct.kernel
@@ -384,14 +381,13 @@ if _CUTILE_AVAILABLE:
         hp_tile = ct.load(
             hp, index=(pid, 0), shape=(TILE_SIZE, N), padding_mode=PAD_ZERO
         )
-        hp_2d = ct.reshape(hp_tile, (N, 1))
+        hp_exp = ct.expand_dims(hp_tile, axis=2)  # (TILE_SIZE, N, 1)
         hr_tile = ct.load(
             hr,
             index=(pid, 0, 0),
             shape=(TILE_SIZE, N, N),
             padding_mode=PAD_ZERO,
         )
-        hr_2d = ct.reshape(hr_tile, (N, N))
         for ct_idx in range(num_c_tiles):
             orig_tile = ct.load(
                 orig,
@@ -399,7 +395,6 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
             )
-            orig_2d = ct.reshape(orig_tile, (N, TILE_C))
             x_tile = ct.load(
                 x,
                 index=(pid, ct_idx),
@@ -409,20 +404,19 @@ if _CUTILE_AVAILABLE:
             bias_tile = ct.load(
                 bias, index=(ct_idx,), shape=(TILE_C,), padding_mode=PAD_ZERO
             )
-            xb_2d = ct.reshape(x_tile, (1, TILE_C)) + ct.reshape(
-                bias_tile, (1, TILE_C)
-            )
-            out_2d = hp_2d * xb_2d
+            xb_exp = ct.expand_dims(
+                x_tile + bias_tile, axis=1
+            )  # (TILE_SIZE, 1, TILE_C)
+            out_tile = hp_exp * xb_exp  # (TILE_SIZE, N, TILE_C)
             for j in range(N):
-                out_2d += ct.extract(hr_2d, (0, j), shape=(N, 1)) * ct.extract(
-                    orig_2d, (j, 0), shape=(1, TILE_C)
+                hr_row = ct.extract(hr_tile, (0, j, 0), shape=(TILE_SIZE, 1, N))
+                hr_col = ct.reshape(hr_row, (TILE_SIZE, N, 1))
+                orig_row = ct.extract(
+                    orig_tile, (0, j, 0), shape=(TILE_SIZE, 1, TILE_C)
                 )
+                out_tile = out_tile + hr_col * orig_row
             ct.store(
-                out,
-                index=(pid, 0, ct_idx),
-                tile=ct.reshape(out_2d, (TILE_SIZE, N, TILE_C)).astype(
-                    out.dtype
-                ),
+                out, index=(pid, 0, ct_idx), tile=out_tile.astype(out.dtype)
             )
 
     @ct.kernel
@@ -481,12 +475,12 @@ if _CUTILE_AVAILABLE:
                 g_x_2d += ct.extract(
                     hp_2d, (0, j), shape=(1, 1)
                 ).item() * ct.extract(go_2d, (j, 0), shape=(1, TILE_C))
-                g_orig_2d += ct.extract(hr_2d, (j, 0), shape=(1, N)).reshape(
-                    (N, 1)
+                g_orig_2d += ct.extract(
+                    hr_2d, (0, j), shape=(N, 1)
                 ) * ct.extract(go_2d, (j, 0), shape=(1, TILE_C))
             acc_g_hp_2d += ct.sum(go_2d * x_2d, axis=1, keepdims=True)
             acc_g_hr_2d += ct.sum(
-                ct.expand_dims(go_2d, axis=1) * ct.expand_dims(orig_2d, axis=0),
+                ct.expand_dims(go_2d, axis=0) * ct.expand_dims(orig_2d, axis=1),
                 axis=2,
             )
             ct.store(
@@ -574,12 +568,12 @@ if _CUTILE_AVAILABLE:
                 g_x_2d += ct.extract(
                     hp_2d, (0, j), shape=(1, 1)
                 ).item() * ct.extract(go_2d, (j, 0), shape=(1, TILE_C))
-                g_orig_2d += ct.extract(hr_2d, (j, 0), shape=(1, N)).reshape(
-                    (N, 1)
+                g_orig_2d += ct.extract(
+                    hr_2d, (0, j), shape=(N, 1)
                 ) * ct.extract(go_2d, (j, 0), shape=(1, TILE_C))
             acc_g_hp_2d += ct.sum(go_2d * xb_2d, axis=1, keepdims=True)
             acc_g_hr_2d += ct.sum(
-                ct.expand_dims(go_2d, axis=1) * ct.expand_dims(orig_2d, axis=0),
+                ct.expand_dims(go_2d, axis=0) * ct.expand_dims(orig_2d, axis=1),
                 axis=2,
             )
             ct.store(
