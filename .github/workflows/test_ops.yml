@@ -61,7 +61,7 @@ jobs:
   upload-pr-ops:
     name: Upload PR ops whl
     needs: check-packages-changes
-    if: needs.check-packages-changes.outputs.packages_changed == 'true'
+    if: needs.check-packages-changes.outputs.packages_changed == 'true' && github.event_name != 'pull_request'
     runs-on:
       group: APPROVAL
     env:
