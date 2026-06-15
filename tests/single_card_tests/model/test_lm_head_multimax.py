@@ -409,6 +409,75 @@ class TestFusedMultimaxNumerical(unittest.TestCase):
             paddle.allclose(gt_ref, t_f.grad, atol=1e-3, rtol=1e-3).item()
         )
 
+    def test_fused_multimax_partial_freeze_respects_per_param_stop_gradient(
+        self,
+    ):
+        """Freeze only one of multimax_ranges/multimax_ts; the other stays
+        trainable. The kernel emits both grads (multimax_requires_grad is the
+        OR of the two), but the backward must respect each param's individual
+        stop_gradient: the frozen param must NOT receive a grad (its .grad
+        stays None and main_grad is untouched), while the trainable param
+        gets the correct grad.
+
+        Regression for: backward loop only checked `param is None or g is
+        None` and silently wrote grads to frozen multimax params.
+        """
+        from paddlefleet.triton_ops.fused_linear_cross_entropy import (
+            LigerFusedLinearCrossEntropyFunction,
+        )
+
+        # Case A: freeze multimax_ranges, keep multimax_ts trainable.
+        x, w, targets, ranges, ts, ig = self._make_inputs()
+        x_f = x.detach().clone()
+        x_f.stop_gradient = False
+        w_f = w.detach().clone()
+        w_f.stop_gradient = False
+        r_f = ranges.detach().clone()
+        r_f.stop_gradient = True  # frozen
+        t_f = ts.detach().clone()
+        t_f.stop_gradient = False
+
+        loss = LigerFusedLinearCrossEntropyFunction.apply(
+            x_f, w_f, targets, None, ig, "none", 1, False, r_f, t_f
+        ).sum()
+        loss.backward()
+
+        _, _, _, _, gt_ref = self._run_reference(x, w, targets, ranges, ts, ig)
+        self.assertIsNone(
+            r_f.grad,
+            "frozen multimax_ranges received a grad despite stop_gradient=True",
+        )
+        self.assertIsNotNone(t_f.grad)
+        self.assertTrue(
+            paddle.allclose(gt_ref, t_f.grad, atol=1e-3, rtol=1e-3).item()
+        )
+
+        # Case B: freeze multimax_ts, keep multimax_ranges trainable.
+        x, w, targets, ranges, ts, ig = self._make_inputs()
+        x_f = x.detach().clone()
+        x_f.stop_gradient = False
+        w_f = w.detach().clone()
+        w_f.stop_gradient = False
+        r_f = ranges.detach().clone()
+        r_f.stop_gradient = False
+        t_f = ts.detach().clone()
+        t_f.stop_gradient = True  # frozen
+
+        loss = LigerFusedLinearCrossEntropyFunction.apply(
+            x_f, w_f, targets, None, ig, "none", 1, False, r_f, t_f
+        ).sum()
+        loss.backward()
+
+        _, _, _, gr_ref, _ = self._run_reference(x, w, targets, ranges, ts, ig)
+        self.assertIsNone(
+            t_f.grad,
+            "frozen multimax_ts received a grad despite stop_gradient=True",
+        )
+        self.assertIsNotNone(r_f.grad)
+        self.assertTrue(
+            paddle.allclose(gr_ref, r_f.grad, atol=1e-3, rtol=1e-3).item()
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
