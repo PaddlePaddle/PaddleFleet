@@ -136,7 +136,7 @@ class TestCudnnIndexerForward(unittest.TestCase):
         B, S_q, H_i, D_i, ratio = 1, 64, 64, 128, 4
         S_k = S_q // ratio
         q, k, w = _make_indexer_inputs(B, S_q, S_k, H_i, D_i, seed=2028)
-        scores = self.cudnn_indexer_forward(q, k, w, ratio=ratio)
+        scores = self.cudnn_indexer_forward(q, k, w, ratio=ratio, sm_scale=1.0)
         ref_scores, _ = _paddle_indexer_scores_and_topk(
             q, k, w, ratio=ratio, topk=S_k
         )

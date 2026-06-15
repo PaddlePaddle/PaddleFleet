@@ -81,7 +81,7 @@ def _validate_indexer_inputs(index_q, index_k_comp, weights):
         )
 
 
-def cudnn_indexer_forward(index_q, index_k_comp, weights, ratio=4):
+def cudnn_indexer_forward(index_q, index_k_comp, weights, ratio=4, sm_scale=None):
     """Compute indexer scores using cuDNN CuTe-DSL kernel (SM100).
 
     Args:
@@ -89,15 +89,19 @@ def cudnn_indexer_forward(index_q, index_k_comp, weights, ratio=4):
         index_k_comp:  [B, S_k, D_i] bf16, compressed indexer keys.
         weights:       [B, S_q, H_i] bf16, per-head weights.
         ratio:         compression ratio for the causal mask.
+        sm_scale:      scale factor applied to QK scores (default: dim**-0.5).
 
     Returns:
         scores: [B, S_q, S_k] fp32 Paddle tensor. Masked positions are -inf.
     """
+    if sm_scale is None:
+        sm_scale = float(index_q.shape[-1]) ** -0.5
     result = indexer_forward_wrapper(
         index_q.contiguous(),
         index_k_comp.unsqueeze(2).contiguous(),
         weights.contiguous(),
         ratio=int(ratio),
+        sm_scale=float(sm_scale),
     )
     return result["scores"]
 
@@ -172,12 +176,12 @@ def cudnn_indexer_topk_fwd(
             f"topk_effective must be positive, got {topk_effective}"
         )
 
+    # sm_scale combines base dim**-0.5 with any additional indexer_softmax_scale
+    _sm = float(index_q.shape[-1]) ** -0.5
     if float(indexer_softmax_scale) != 1.0:
-        weights = (weights.cast("float32") * float(indexer_softmax_scale)).cast(
-            weights.dtype
-        )
+        _sm = _sm * float(indexer_softmax_scale)
 
-    scores = cudnn_indexer_forward(index_q, index_k_comp, weights, ratio=ratio)
+    scores = cudnn_indexer_forward(index_q, index_k_comp, weights, ratio=ratio, sm_scale=_sm)
     return cudnn_indexer_topk(
         scores,
         int(index_q.shape[1]),
