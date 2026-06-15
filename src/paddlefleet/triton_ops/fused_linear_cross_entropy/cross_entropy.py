@@ -39,7 +39,7 @@ from ..triton_compat import enable_compat_on_triton_kernel
 
 @enable_compat_on_triton_kernel
 @triton.jit
-def liger_cross_entropy_kernel(
+def liger_cross_entropy_kernel(  # pragma: no cover - triton kernel body compiles to PTX, not python-instrumentable
     X_ptr,
     X_stride,
     Y_ptr,
@@ -116,7 +116,7 @@ def liger_cross_entropy_kernel(
 
 @enable_compat_on_triton_kernel
 @triton.jit
-def liger_cross_entropy_multimax_kernel(
+def liger_cross_entropy_multimax_kernel(  # pragma: no cover - triton kernel body compiles to PTX, not python-instrumentable
     X_ptr,
     X_stride,
     Y_ptr,
