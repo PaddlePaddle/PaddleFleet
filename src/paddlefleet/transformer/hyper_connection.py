@@ -201,7 +201,7 @@ def native_h_post_bda(
     n, C = original_residual.shape[-2], original_residual.shape[-1]
     num_tokens = math.prod(leading_shape)
 
-    h_res_batched = h_res.reshape([num_tokens, n, n])
+    h_res_batched = h_res.reshape([num_tokens, n, n]).transpose([0, 2, 1])
     residual_batched = original_residual.reshape([num_tokens, n, C])
     mixed = paddle.bmm(h_res_batched, residual_batched).reshape(
         [*leading_shape, n, C]
@@ -281,6 +281,9 @@ class HyperConnectionModule(nn.Layer):
 
         # Choose implementation: fused kernels vs native reference.
         if config.use_fused_mhc:
+            assert not config.use_fused_mhc, (
+                "for fuse branch, hres transpose is not support for fused_h_post_bda now"
+            )
             from paddlefleet.fusions.fused_mhc_kernels import (
                 fused_h_aggregate,
                 fused_h_post_bda,
@@ -467,7 +470,9 @@ class HyperConnectionModule(nn.Layer):
             )
         else:
             # Reshape for bmm: [..., n, n] -> [batch, n, n]
-            h_res_batched = h_res.reshape([num_tokens, n, n])
+            ndim = h_res.ndim
+            perm = [*list(range(ndim - 2)), ndim - 1, ndim - 2]
+            h_res_batched = h_res.transpose(perm).reshape([num_tokens, n, n])
         # [..., n*C] -> [..., n, C] -> [batch, n, C]
         residual_batched = residual.reshape([num_tokens, n, C])
 
