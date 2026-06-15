@@ -49,6 +49,52 @@ def _sorted_compare_indices(out_indices, ref_indices):
     return bool((out_sorted == ref_sorted).all().item())
 
 
+def _build_causal_mask(batch, seq_len, seq_len_comp, ratio):
+    comp_ids = paddle.arange(seq_len_comp, dtype="int64").reshape(
+        [1, 1, seq_len_comp]
+    )
+    valid_end = (
+        paddle.arange(1, seq_len + 1, dtype="int64").reshape(
+            [1, seq_len, 1]
+        )
+        // int(ratio)
+    )
+    valid = (comp_ids < valid_end).expand([batch, seq_len, seq_len_comp])
+    neg_inf = paddle.full(
+        [batch, seq_len, seq_len_comp], float("-inf"), dtype="float32"
+    )
+    return paddle.where(valid, paddle.zeros_like(neg_inf), neg_inf)
+
+
+def _paddle_indexer_scores_and_topk(index_q, index_k_comp, weights, ratio, topk):
+    from paddlefleet.transformer.dsa_attention import fused_qk_topk_naive
+
+    scores, indices = fused_qk_topk_naive(
+        index_q,
+        index_k_comp,
+        weights.cast("float32"),
+        index_topk=min(int(topk), int(index_k_comp.shape[1])),
+        mask=_build_causal_mask(
+            int(index_q.shape[0]),
+            int(index_q.shape[1]),
+            int(index_k_comp.shape[1]),
+            ratio,
+        ),
+    )
+    if indices.shape[-1] < int(topk):
+        padding = paddle.full(
+            [
+                int(index_q.shape[0]),
+                int(index_q.shape[1]),
+                int(topk) - int(indices.shape[-1]),
+            ],
+            -1,
+            dtype=indices.dtype,
+        )
+        indices = paddle.concat([indices, padding], axis=-1)
+    return scores, indices.cast("int32")
+
+
 # =========================================================================
 # Test cases
 # =========================================================================
@@ -60,7 +106,7 @@ class TestCudnnIndexerForward(unittest.TestCase):
     def setUp(self):
         _cuda_or_skip(self)
         paddle.set_device("gpu:0")
-        from paddlefleet.cudnn_ops.indexer.cudnn_indexer import (
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_forward,
         )
 
@@ -86,6 +132,21 @@ class TestCudnnIndexerForward(unittest.TestCase):
             f"Position 0 should be all -inf, got {row0}",
         )
 
+    def test_scores_match_paddle_reference(self):
+        B, S_q, H_i, D_i, ratio = 1, 64, 64, 128, 4
+        S_k = S_q // ratio
+        q, k, w = _make_indexer_inputs(B, S_q, S_k, H_i, D_i, seed=2028)
+        scores = self.cudnn_indexer_forward(q, k, w, ratio=ratio)
+        ref_scores, _ = _paddle_indexer_scores_and_topk(
+            q, k, w, ratio=ratio, topk=S_k
+        )
+        valid = paddle.isfinite(ref_scores)
+        max_abs_diff = (scores[valid] - ref_scores[valid]).abs().max().item()
+        self.assertTrue(
+            paddle.allclose(scores[valid], ref_scores[valid], rtol=1e-2, atol=1e-2).item(),
+            f"cuDNN indexer scores mismatch with Paddle reference, max_abs_diff={max_abs_diff}",
+        )
+
 
 class TestCudnnIndexerTopkFwd(unittest.TestCase):
     """Tests for cudnn_indexer_topk_fwd (combined score + top-K)."""
@@ -93,7 +154,7 @@ class TestCudnnIndexerTopkFwd(unittest.TestCase):
     def setUp(self):
         _cuda_or_skip(self)
         paddle.set_device("gpu:0")
-        from paddlefleet.cudnn_ops.indexer.cudnn_indexer import (
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk_fwd,
         )
 
@@ -166,6 +227,21 @@ class TestCudnnIndexerTopkFwd(unittest.TestCase):
         )
         self.assertEqual(list(indices.shape), [B, S_q, topk])
 
+    def test_index_sets_match_paddle_reference(self):
+        B, S_q, H_i, D_i, ratio, topk = 1, 64, 64, 128, 4, 8
+        S_k = S_q // ratio
+        q, k, w = _make_indexer_inputs(B, S_q, S_k, H_i, D_i, seed=2029)
+        indices, _ = self.cudnn_indexer_topk_fwd(
+            q, k, w, ratio=ratio, topk_effective=topk
+        )
+        _, ref_indices = _paddle_indexer_scores_and_topk(
+            q, k, w, ratio=ratio, topk=topk
+        )
+        self.assertTrue(
+            _sorted_compare_indices(indices, ref_indices),
+            "cuDNN and Paddle indexer top-k sets should match",
+        )
+
 
 class TestCudnnVsTileLangCrossValidation(unittest.TestCase):
     """Cross-validate cuDNN and TileLang indexer backends produce same sets."""
@@ -180,7 +256,7 @@ class TestCudnnVsTileLangCrossValidation(unittest.TestCase):
             self.csa_indexer_topk_fwd = csa_indexer_topk_fwd
         except Exception:
             self.skipTest("TileLang CSA indexer not available")
-        from paddlefleet.cudnn_ops.indexer.cudnn_indexer import (
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk_fwd,
         )
 

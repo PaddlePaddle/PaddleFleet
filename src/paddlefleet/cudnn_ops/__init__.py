@@ -39,9 +39,9 @@ def __getattr__(name):
         "cudnn_indexer_topk",
         "cudnn_indexer_topk_fwd",
     }:
-        from .indexer import cudnn_indexer
+        from .indexer import csa_indexer_fwd_cudnn
 
-        obj = getattr(cudnn_indexer, name)
+        obj = getattr(csa_indexer_fwd_cudnn, name)
         globals()[name] = obj
         return obj
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

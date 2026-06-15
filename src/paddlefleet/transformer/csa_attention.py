@@ -1832,7 +1832,7 @@ class CompressedSparseAttention(FleetLayer):
         # Optionally replace topk producer with fused compressed indexer
         # forward. This only swaps the indices fed to sparse attention.
         if use_cudnn_indexer and not use_tilelang_loss_path:
-            from paddlefleet.cudnn_ops.indexer.cudnn_indexer import (
+            from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
                 cudnn_indexer_topk_fwd,
             )
 
