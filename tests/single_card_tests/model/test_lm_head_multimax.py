@@ -68,7 +68,7 @@ class TestMultimaxLMHead(unittest.TestCase):
         ps.initialize_model_parallel(hcg)
         cls.strategy = strategy
 
-        # Config with multimax=lm_head
+        # Config with apply_multimax=[lm_head]
         cls.config_multimax = GPTConfig(
             num_hidden_layers=2,
             hidden_size=256,
@@ -90,7 +90,7 @@ class TestMultimaxLMHead(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             tie_word_embeddings=True,
-            multimax="lm_head",
+            apply_multimax=["lm_head"],
         )
         cls.model_multimax = gpt_builder(cls.config_multimax, num_stages=1)
 
@@ -116,7 +116,7 @@ class TestMultimaxLMHead(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             tie_word_embeddings=True,
-            multimax=None,
+            apply_multimax=None,
         )
         cls.model_no_multimax = gpt_builder(
             cls.config_no_multimax, num_stages=1
@@ -144,7 +144,7 @@ class TestMultimaxLMHead(unittest.TestCase):
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
             tie_word_embeddings=True,
-            multimax="lm_head",
+            apply_multimax=["lm_head"],
             fused_linear_ce_loss_chunk=1,
         )
         cls.model_fused = gpt_builder(cls.config_fused, num_stages=1)
@@ -158,7 +158,7 @@ class TestMultimaxLMHead(unittest.TestCase):
         return None
 
     def test_multimax_lmhead_creates_params(self):
-        """When multimax=lm_head, GPTLMHead should create multimax_ranges/ts params."""
+        """When apply_multimax=[lm_head], GPTLMHead should create multimax_ranges/ts params."""
         lm_head = self._find_lm_head(self.model_multimax)
         self.assertIsNotNone(lm_head)
         self.assertTrue(hasattr(lm_head, "use_multimax_lmhead"))
@@ -169,7 +169,7 @@ class TestMultimaxLMHead(unittest.TestCase):
         self.assertEqual(lm_head.multimax_ts.shape, [4])
 
     def test_no_multimax_lmhead_no_params(self):
-        """When multimax=None, GPTLMHead should NOT create multimax params."""
+        """When apply_multimax=None, GPTLMHead should NOT create multimax params."""
         lm_head = self._find_lm_head(self.model_no_multimax)
         self.assertIsNotNone(lm_head)
         self.assertFalse(getattr(lm_head, "use_multimax_lmhead", False))
@@ -184,7 +184,7 @@ class TestMultimaxLMHead(unittest.TestCase):
         self.assertTrue(paddle.allclose(lm_head.multimax_ts, zeros).item())
 
     def test_fused_path_returns_5tuple(self):
-        """With fused_linear_ce_loss_chunk>0 and multimax, forward returns 5-tuple.
+        """With fused_linear_ce_loss_chunk>0 and apply_multimax, forward returns 5-tuple.
         Also exercises the rank-0 [MULTIMAX-LMHEAD-APPLIED] one-shot warn banner
         at the top of the fused branch.
         """
@@ -208,7 +208,7 @@ class TestMultimaxLMHead(unittest.TestCase):
         self.assertTrue(getattr(lm_head, "_multimax_applied_logged", False))
 
     def test_unfused_path_applies_selu_and_logs(self):
-        """With multimax + fused_linear_ce_loss_chunk=0 (default), forward
+        """With apply_multimax + fused_linear_ce_loss_chunk=0 (default), forward
         returns logits (not a tuple) and applies SeLU via recompute.
         Exercises the unfused-path warn block + SeLU recompute branch.
         """
