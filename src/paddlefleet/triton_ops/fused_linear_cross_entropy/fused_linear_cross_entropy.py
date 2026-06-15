@@ -111,6 +111,14 @@ def fused_linear_cross_entropy_forward(
     if use_multimax:
         grad_multimax_ranges = paddle.zeros([4], dtype=paddle.float32)
         grad_multimax_ts = paddle.zeros([4], dtype=paddle.float32)
+        # Multimax param grads must be computed whenever EITHER param is
+        # trainable, independently of whether the upstream hidden states
+        # require grad. This covers the freeze-backbone / train-head-only
+        # regime where _input.stop_gradient=True but multimax_*.stop_gradient=False.
+        multimax_requires_grad = (
+            not multimax_ranges.stop_gradient
+            or not multimax_ts.stop_gradient
+        )
         # Extract scalar values once (one host<->device sync for an [4]
         # tensor; negligible vs the chunk's GEMM/CE cost). Using fp32 for
         # numerical stability inside the kernel.
@@ -123,6 +131,7 @@ def fused_linear_cross_entropy_forward(
     else:
         grad_multimax_ranges = None
         grad_multimax_ts = None
+        multimax_requires_grad = False
         _r_vals = None
         _t_vals = None
 
@@ -176,6 +185,7 @@ def fused_linear_cross_entropy_forward(
                 grad_t_ptr=grad_multimax_ts,
                 reduction=reduction,
                 HAS_GRADIENTS=input_requires_grad,
+                HAS_MULTIMAX_GRADIENTS=multimax_requires_grad,
                 BLOCK_SIZE=BLOCK_SIZE,
                 num_warps=32,
             )
@@ -272,18 +282,21 @@ def fused_linear_cross_entropy_backward(
     if grad_output.ndim >= 1:
         grad_output = grad_output.max().reshape([])
 
-    BT, H = grad_input.shape
-    n_rows = BT
-    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
+    if grad_input is not None:
+        BT, H = grad_input.shape
+        n_rows = BT
+        BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(H))
 
-    element_mul_kernel[(n_rows,)](
-        grad_input,
-        grad_input.stride(-2),
-        grad_output,
-        H,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=32,
-    )
+        element_mul_kernel[(n_rows,)](
+            grad_input,
+            grad_input.stride(-2),
+            grad_output,
+            H,
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=32,
+        )
+    else:
+        BLOCK_SIZE = MAX_FUSED_SIZE
 
     if grad_weight is not None:
         n_rows_w = grad_weight.shape[0]

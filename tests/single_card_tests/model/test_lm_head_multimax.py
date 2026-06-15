@@ -200,5 +200,169 @@ class TestMultimaxLMHead(unittest.TestCase):
         self.assertEqual(len(output), 5)
 
 
+@unittest.skipUnless(
+    paddle.is_compiled_with_cuda(), "fused multimax CE kernel requires CUDA"
+)
+class TestFusedMultimaxNumerical(unittest.TestCase):
+    """Numerical + backward parity for the fused multimax CE kernel.
+
+    Compares `LigerFusedLinearCrossEntropyFunction` (multimax branch) against
+    a Python reference: F.linear -> SeLU -> cross_entropy, including a sample
+    masked by `ignore_index`. Verifies loss and grads on all four trainable
+    inputs: `_input`, `weight`, `multimax_ranges`, `multimax_ts`.
+    """
+
+    def _selu(self, x, ranges, ts):
+        """Python ref SeLU matching the Triton kernel formula."""
+        r0, r1, r2, r3 = [ranges[i] for i in range(4)]
+        t0, t1, t2, t3 = [ts[i] for i in range(4)]
+        m0 = paddle.nn.functional.relu(r0 - x)
+        m1 = paddle.nn.functional.relu(x - r1)
+        m2 = paddle.nn.functional.relu(r2 - x)
+        m3 = paddle.nn.functional.relu(x - r3)
+        return x + t0 * m0 + t1 * m1 + t2 * m2 * m2 + t3 * m3 * m3
+
+    def _make_inputs(self, BT=6, H=8, V=12, ignore_index=-100):
+        paddle.seed(123)
+        x = paddle.randn([BT, H], dtype="float32")
+        w = paddle.randn([V, H], dtype="float32") * 0.1
+        targets = paddle.to_tensor(
+            [0, 3, 5, ignore_index, 7, 1], dtype="int64"
+        )
+        # Non-zero multimax params so SeLU is non-trivial.
+        ranges = paddle.to_tensor(
+            [0.5, -0.5, 0.2, -0.2], dtype="float32"
+        )
+        ts = paddle.to_tensor([0.3, 0.4, 0.1, 0.2], dtype="float32")
+        return x, w, targets, ranges, ts, ignore_index
+
+    def _run_reference(self, x, w, targets, ranges, ts, ignore_index):
+        x_ref = x.detach().clone()
+        x_ref.stop_gradient = False
+        w_ref = w.detach().clone()
+        w_ref.stop_gradient = False
+        r_ref = ranges.detach().clone()
+        r_ref.stop_gradient = False
+        t_ref = ts.detach().clone()
+        t_ref.stop_gradient = False
+
+        logits = paddle.nn.functional.linear(x_ref, w_ref.T)
+        modulated = self._selu(logits, r_ref, t_ref)
+        loss = paddle.nn.functional.cross_entropy(
+            modulated,
+            targets,
+            ignore_index=ignore_index,
+            reduction="sum",
+        )
+        loss.backward()
+        return loss, x_ref.grad, w_ref.grad, r_ref.grad, t_ref.grad
+
+    def _run_fused(self, x, w, targets, ranges, ts, ignore_index):
+        from paddlefleet.triton_ops.fused_linear_cross_entropy import (
+            LigerFusedLinearCrossEntropyFunction,
+        )
+
+        x_f = x.detach().clone()
+        x_f.stop_gradient = False
+        w_f = w.detach().clone()
+        w_f.stop_gradient = False
+        r_f = ranges.detach().clone()
+        r_f.stop_gradient = False
+        t_f = ts.detach().clone()
+        t_f.stop_gradient = False
+
+        loss_1d = LigerFusedLinearCrossEntropyFunction.apply(
+            x_f,
+            w_f,
+            targets,
+            None,  # bias
+            ignore_index,
+            "none",
+            1,  # num_chunks
+            False,  # ec_align
+            r_f,
+            t_f,
+        )
+        loss = loss_1d.sum()
+        loss.backward()
+        return loss, x_f.grad, w_f.grad, r_f.grad, t_f.grad
+
+    def test_fused_multimax_matches_reference(self):
+        x, w, targets, ranges, ts, ig = self._make_inputs()
+
+        loss_ref, gx_ref, gw_ref, gr_ref, gt_ref = self._run_reference(
+            x, w, targets, ranges, ts, ig
+        )
+        loss_fused, gx_f, gw_f, gr_f, gt_f = self._run_fused(
+            x, w, targets, ranges, ts, ig
+        )
+
+        # Loss (reduction='sum' on ref vs sum-of-1d on fused).
+        self.assertTrue(
+            paddle.allclose(loss_ref, loss_fused, atol=1e-3, rtol=1e-3).item(),
+            f"loss mismatch: ref={loss_ref.item()} fused={loss_fused.item()}",
+        )
+        # Input grad.
+        self.assertTrue(
+            paddle.allclose(gx_ref, gx_f, atol=1e-3, rtol=1e-3).item(),
+            f"grad_input mismatch (max abs diff="
+            f"{(gx_ref - gx_f).abs().max().item()})",
+        )
+        # multimax_ranges grad.
+        self.assertTrue(
+            paddle.allclose(gr_ref, gr_f, atol=1e-3, rtol=1e-3).item(),
+            f"grad_ranges mismatch: ref={gr_ref.numpy().tolist()} "
+            f"fused={gr_f.numpy().tolist()}",
+        )
+        # multimax_ts grad.
+        self.assertTrue(
+            paddle.allclose(gt_ref, gt_f, atol=1e-3, rtol=1e-3).item(),
+            f"grad_ts mismatch: ref={gt_ref.numpy().tolist()} "
+            f"fused={gt_f.numpy().tolist()}",
+        )
+
+    def test_fused_multimax_grads_when_input_frozen(self):
+        """Freeze backbone (input.stop_gradient=True) but keep multimax
+        params trainable: kernel must still emit non-zero grad_ranges/ts.
+        Regression for the prior `HAS_GRADIENTS=input_requires_grad` bug
+        that gated multimax param grads on the input grad.
+        """
+        from paddlefleet.triton_ops.fused_linear_cross_entropy import (
+            LigerFusedLinearCrossEntropyFunction,
+        )
+
+        x, w, targets, ranges, ts, ig = self._make_inputs()
+        x_f = x.detach().clone()
+        x_f.stop_gradient = True  # frozen backbone
+        w_f = w.detach().clone()
+        w_f.stop_gradient = True  # also freeze weight (head-only training)
+        r_f = ranges.detach().clone()
+        r_f.stop_gradient = False
+        t_f = ts.detach().clone()
+        t_f.stop_gradient = False
+
+        loss = LigerFusedLinearCrossEntropyFunction.apply(
+            x_f, w_f, targets, None, ig, "none", 1, False, r_f, t_f
+        ).sum()
+        loss.backward()
+
+        # Reference grads (from the full-grad path, then ignore x/w).
+        _, _, _, gr_ref, gt_ref = self._run_reference(
+            x, w, targets, ranges, ts, ig
+        )
+        self.assertIsNotNone(r_f.grad, "multimax_ranges.grad is None when frozen")
+        self.assertIsNotNone(t_f.grad, "multimax_ts.grad is None when frozen")
+        self.assertTrue(
+            paddle.allclose(gr_ref, r_f.grad, atol=1e-3, rtol=1e-3).item(),
+            f"frozen-input grad_ranges mismatch: ref={gr_ref.numpy().tolist()} "
+            f"got={r_f.grad.numpy().tolist()}",
+        )
+        self.assertTrue(
+            paddle.allclose(gt_ref, t_f.grad, atol=1e-3, rtol=1e-3).item(),
+            f"frozen-input grad_ts mismatch: ref={gt_ref.numpy().tolist()} "
+            f"got={t_f.grad.numpy().tolist()}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
