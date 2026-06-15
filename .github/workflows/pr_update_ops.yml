@@ -6,8 +6,7 @@ on:
       - "release/**"
       - "develop"
     tags:
-      - "v*"
-
+      - 'v*'
 permissions: read-all
 
 env:
@@ -87,11 +86,16 @@ jobs:
           if [[ ${{ github.ref_name }} == "develop" ]]; then
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
             python ../../bos/BosClient.py paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+            WHEEL_FILE=paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
           else
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl
             python ../../bos/BosClient.py paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+            WHEEL_FILE=paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          # upload to paddletest
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          python notify_paddle_link.py cu129 ${WHEEL_FILE} paddlefleet-ops
 
   clone:
     name: Clone PaddleFleet
@@ -224,6 +228,7 @@ jobs:
           cd dist
           PY_VERSION="${{ matrix.python_version }}"
           PY_VERSION_SHORT="${PY_VERSION//./}"
+          ls paddlefleet_ops-*.whl | head -n1 > paddlefleet_ops-paddle-release-${{ matrix.cuda.bos_CUDA }}-py${PY_VERSION_SHORT}-linux_x86_64.whl.name
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
           else
@@ -249,6 +254,15 @@ jobs:
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
+
+      - name: Upload wheel name artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: whl-name-paddle-release-${{ matrix.cuda.bos_CUDA }}-py${{ matrix.python_version }}-linux_x86_64
+          path: dist/paddlefleet_ops-paddle-release-*.whl.name
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Cleanup
         if: ${{ always() }}
@@ -501,6 +515,7 @@ jobs:
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
+          ls paddlefleet_ops-*.whl | head -n1 > paddlefleet_ops-arm-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
           else
@@ -516,6 +531,15 @@ jobs:
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
+
+      - name: Upload wheel name artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: whl-name-arm-${{ matrix.cuda.bos_CUDA }}-py${{ matrix.python_version }}-linux_aarch64
+          path: dist/paddlefleet_ops-arm-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Cleanup
         if: ${{ always() }}
@@ -563,6 +587,7 @@ jobs:
         if: github.ref_type != 'tag' && matrix.flavor.label == 'arm'
         run: |
           wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.flavor.name_key }} --no-check-certificate
+
 
       - name: Upload wheel to paddletest
         if: github.ref_type != 'tag'
