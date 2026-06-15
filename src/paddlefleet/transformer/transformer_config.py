@@ -293,13 +293,13 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use multimodal embedding."""
 
     apply_multimax: list[str] | None = None
-    """Submodules to apply learnable SeLU-style modulation to before softmax.
+    """Submodules to apply learnable SegLU-style modulation to before softmax.
 
     Mirrors the Megatron ``recompute_modules`` style: a list of submodule
     names. ``None`` (default) disables the feature globally. Currently
     supported list entries:
 
-    - ``"lm_head"``: apply SeLU(x, ranges, ts) on the LM-head logits before
+    - ``"lm_head"``: apply SegLU(x, ranges, ts) on the LM-head logits before
       the language-modeling softmax/cross-entropy. Adds two [4]-shape
       learnable parameters (multimax_ranges, multimax_ts) to the LM head.
       These are excluded from weight decay via the "multimax" substring

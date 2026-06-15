@@ -250,7 +250,7 @@ class LanguageLoss(FleetLayer):
             hidden_states, weight, bias = logits[:3]
             # Multimax lm_head fused path: GPTLMHead emits a 5-tuple
             # (hidden_states, weight, bias, multimax_ranges, multimax_ts)
-            # so SeLU is applied inside the chunked CE kernel without
+            # so SegLU is applied inside the chunked CE kernel without
             # materializing full [B, S, V] logits.
             multimax_ranges = logits[3] if len(logits) > 3 else None
             multimax_ts = logits[4] if len(logits) > 4 else None

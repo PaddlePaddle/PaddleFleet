@@ -21,13 +21,13 @@ Fused Cross Entropy Triton Kernel。
 避免 Paddle 原生实现中保存完整 softmax 中间张量带来的显存开销。
 
 Multimax variant (`liger_cross_entropy_multimax_kernel`) additionally fuses
-the learnable SeLU-style segmented modulation
-    SeLU(x) = x + t0·max(r0-x,0) + t1·max(x-r1,0)
+the learnable SegLU-style segmented modulation
+    SegLU(x) = x + t0·max(r0-x,0) + t1·max(x-r1,0)
                 + t2·max(r2-x,0)^2 + t3·max(x-r3,0)^2
-into the same kernel: SeLU is applied in registers during both the lse pass
+into the same kernel: SegLU is applied in registers during both the lse pass
 and the grad-write pass; per-row partial sums for grad_ranges/grad_ts are
 accumulated in registers and atomic-added to global [4]-shape fp32 buffers.
-This avoids materializing the four ReLU intermediates and SeLU output as
+This avoids materializing the four ReLU intermediates and SegLU output as
 separate tensors, dropping per-chunk peak memory back to ~1× [C, V].
 """
 
@@ -145,14 +145,14 @@ def liger_cross_entropy_multimax_kernel(  # pragma: no cover - triton kernel bod
     HAS_GRADIENTS: tl.constexpr,
     HAS_MULTIMAX_GRADIENTS: tl.constexpr,
 ):
-    """Liger CE kernel with fused SeLU activation + closed-form SeLU backward.
+    """Liger CE kernel with fused SegLU activation + closed-form SegLU backward.
 
-    Forward:  L = lse(SeLU(X)) - SeLU(X)[y]   (per row)
+    Forward:  L = lse(SegLU(X)) - SegLU(X)[y]   (per row)
     Backward: writes grad_x = dL/dX in place into X_ptr; atomic-adds the
               per-row partial sums for grad_ranges and grad_ts into the
               fp32 [4] global buffers grad_r_ptr / grad_t_ptr.
 
-    SeLU is computed in registers from the loaded X block, so no extra HBM
+    SegLU is computed in registers from the loaded X block, so no extra HBM
     traffic relative to the no-multimax kernel.
     """
     program_id = tl.program_id(0).to(tl.int64)
@@ -170,15 +170,15 @@ def liger_cross_entropy_multimax_kernel(  # pragma: no cover - triton kernel bod
 
     loss_ptr += program_id * loss_stride
 
-    # Apply SeLU to the y-th element (loss target) once.
+    # Apply SegLU to the y-th element (loss target) once.
     ori_X_y = tl.load(X_ptr + y).cast(tl.float32)
     my0 = tl.maximum(r0 - ori_X_y, 0.0)
     my1 = tl.maximum(ori_X_y - r1, 0.0)
     my2 = tl.maximum(r2 - ori_X_y, 0.0)
     my3 = tl.maximum(ori_X_y - r3, 0.0)
-    selu_X_y = ori_X_y + t0 * my0 + t1 * my1 + t2 * my2 * my2 + t3 * my3 * my3
+    seglu_X_y = ori_X_y + t0 * my0 + t1 * my1 + t2 * my2 * my2 + t3 * my3 * my3
 
-    # Pass 1: online lse over SeLU(X).
+    # Pass 1: online lse over SegLU(X).
     m = float("-inf")
     d = 0.0
     for i in range(0, n_cols, BLOCK_SIZE):
@@ -187,13 +187,13 @@ def liger_cross_entropy_multimax_kernel(  # pragma: no cover - triton kernel bod
         X_block = tl.load(
             X_ptr + X_offsets,
             mask=in_bounds,
-            other=0.0,  # finite filler; we re-mask SeLU output to -inf below
+            other=0.0,  # finite filler; we re-mask SegLU output to -inf below
         ).cast(tl.float32)
         m0_b = tl.maximum(r0 - X_block, 0.0)
         m1_b = tl.maximum(X_block - r1, 0.0)
         m2_b = tl.maximum(r2 - X_block, 0.0)
         m3_b = tl.maximum(X_block - r3, 0.0)
-        selu_b = (
+        seglu_b = (
             X_block
             + t0 * m0_b
             + t1 * m1_b
@@ -201,10 +201,10 @@ def liger_cross_entropy_multimax_kernel(  # pragma: no cover - triton kernel bod
             + t3 * m3_b * m3_b
         )
         # Padded lanes contribute -inf to lse so they vanish in exp().
-        selu_b = tl.where(in_bounds, selu_b, float("-inf"))
-        block_max = tl.max(selu_b)
+        seglu_b = tl.where(in_bounds, seglu_b, float("-inf"))
+        block_max = tl.max(seglu_b)
         m_new = tl.maximum(m, block_max)
-        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(selu_b - m_new))
+        d = d * tl.exp(m - m_new) + tl.sum(tl.exp(seglu_b - m_new))
         m = m_new
 
     lse = m + tl.log(d)
@@ -228,20 +228,20 @@ def liger_cross_entropy_multimax_kernel(  # pragma: no cover - triton kernel bod
                 mask=in_bounds,
                 other=0.0,
             ).cast(tl.float32)
-            # Recompute SeLU forward in registers (free vs HBM reload).
+            # Recompute SegLU forward in registers (free vs HBM reload).
             m0_b = tl.maximum(r0 - X_block, 0.0)
             m1_b = tl.maximum(X_block - r1, 0.0)
             m2_b = tl.maximum(r2 - X_block, 0.0)
             m3_b = tl.maximum(X_block - r3, 0.0)
-            selu_b = (
+            seglu_b = (
                 X_block
                 + t0 * m0_b
                 + t1 * m1_b
                 + t2 * m2_b * m2_b
                 + t3 * m3_b * m3_b
             )
-            # Softmax over SeLU output, then subtract one-hot at target.
-            grad_out = tl.exp(selu_b - m) / d
+            # Softmax over SegLU output, then subtract one-hot at target.
+            grad_out = tl.exp(seglu_b - m) / d
             grad_out = tl.where(X_offsets != y, grad_out, grad_out - 1.0)
             if reduction == "mean":
                 grad_out = grad_out / n_non_ignore
@@ -250,7 +250,7 @@ def liger_cross_entropy_multimax_kernel(  # pragma: no cover - triton kernel bod
             grad_out = tl.where(in_bounds, grad_out, 0.0)
 
             if HAS_GRADIENTS:
-                # SeLU backward: d_out/d_x = 1 - t0*1{r0>x} + t1*1{x>r1}
+                # SegLU backward: d_out/d_x = 1 - t0*1{r0>x} + t1*1{x>r1}
                 #                              - 2*t2*max(r2-x,0) + 2*t3*max(x-r3,0)
                 mask0 = (m0_b > 0.0).to(tl.float32)
                 mask1 = (m1_b > 0.0).to(tl.float32)
@@ -295,7 +295,7 @@ def liger_cross_entropy_multimax_kernel(  # pragma: no cover - triton kernel bod
 
     tl.debug_barrier()
 
-    loss = lse - selu_X_y
+    loss = lse - seglu_X_y
 
     if reduction == "mean":
         loss = loss / n_non_ignore

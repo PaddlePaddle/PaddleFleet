@@ -62,14 +62,14 @@ def fused_linear_cross_entropy_forward(
                   backward 中 main_grad.add_(grad_weight.T)。
         multimax_ranges, multimax_ts: 可选 [4]-shape 张量。若两者均提供，
             则使用 `liger_cross_entropy_multimax_kernel` 在 Triton 内核中
-            将 SeLU 段式调制 + CE + SeLU 反向 全部融合在两次扫描内完成；
+            将 SegLU 段式调制 + CE + SegLU 反向 全部融合在两次扫描内完成；
             grad_multimax_{ranges,ts} 通过 atomic_add 写入返回缓冲。
-            相比在 Python 中逐 chunk 计算 SeLU 前向 / 反向，可避免在 HBM
-            上物化 4 个 ReLU 中间张量与 SeLU 输出，将每个 chunk 的 vocab
+            相比在 Python 中逐 chunk 计算 SegLU 前向 / 反向，可避免在 HBM
+            上物化 4 个 ReLU 中间张量与 SegLU 输出，将每个 chunk 的 vocab
             轴显存峰值从 ~10× 降回 ~1×。
-            SeLU(x) = x + t0·max(r0-x,0) + t1·max(x-r1,0)
+            SegLU(x) = x + t0·max(r0-x,0) + t1·max(x-r1,0)
                      + t2·max(r2-x,0)^2 + t3·max(x-r3,0)^2
-            初始化为 0 时 SeLU 为恒等映射，与未启用路径数值一致。
+            初始化为 0 时 SegLU 为恒等映射，与未启用路径数值一致。
     """
     input_requires_grad = not _input.stop_gradient
     weight_requires_grad = not weight.stop_gradient
@@ -111,9 +111,9 @@ def fused_linear_cross_entropy_forward(
         else None
     )
 
-    # Multimax: SeLU is applied inside the Triton kernel
-    # (`liger_cross_entropy_multimax_kernel`), which fuses SeLU forward,
-    # online lse, softmax-grad, and SeLU backward in a single two-pass
+    # Multimax: SegLU is applied inside the Triton kernel
+    # (`liger_cross_entropy_multimax_kernel`), which fuses SegLU forward,
+    # online lse, softmax-grad, and SegLU backward in a single two-pass
     # scan over the chunk. Per-row partial sums for grad_ranges/grad_ts
     # are atomic-added into these fp32 [4] buffers from the kernel.
     use_multimax = multimax_ranges is not None and multimax_ts is not None
@@ -211,7 +211,7 @@ def fused_linear_cross_entropy_forward(
             )
 
         loss_1d[start_idx:end_idx] = loss_1d_slice
-        # kernel 已将梯度（含 SeLU 反向链式法则）原地写回 logits_chunk
+        # kernel 已将梯度（含 SegLU 反向链式法则）原地写回 logits_chunk
         grad_logits_chunk = logits_chunk
 
         if input_requires_grad:
