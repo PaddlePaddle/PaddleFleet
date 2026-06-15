@@ -177,7 +177,7 @@ class TestMultimaxLMHead(unittest.TestCase):
         self.assertFalse(hasattr(lm_head, "multimax_ts"))
 
     def test_multimax_params_init_zero(self):
-        """multimax params should init to zero (SeLU is identity at step 0)."""
+        """multimax params should init to zero (SegLU is identity at step 0)."""
         lm_head = self._find_lm_head(self.model_multimax)
         zeros = paddle.zeros_like(lm_head.multimax_ranges)
         self.assertTrue(paddle.allclose(lm_head.multimax_ranges, zeros).item())
@@ -207,10 +207,10 @@ class TestMultimaxLMHead(unittest.TestCase):
         # The one-shot flag must be set after first call.
         self.assertTrue(getattr(lm_head, "_multimax_applied_logged", False))
 
-    def test_unfused_path_applies_selu_and_logs(self):
+    def test_unfused_path_applies_seglu_and_logs(self):
         """With apply_multimax + fused_linear_ce_loss_chunk=0 (default), forward
-        returns logits (not a tuple) and applies SeLU via recompute.
-        Exercises the unfused-path warn block + SeLU recompute branch.
+        returns logits (not a tuple) and applies SegLU via recompute.
+        Exercises the unfused-path warn block + SegLU recompute branch.
         """
         lm_head = self._find_lm_head(self.model_multimax)
         self.assertIsNotNone(lm_head)
@@ -230,11 +230,12 @@ class TestMultimaxLMHead(unittest.TestCase):
         self.assertTrue(getattr(lm_head, "_multimax_applied_logged", False))
 
     def test_sharded_state_dict_with_multimax(self):
-        """sharded_state_dict on multimax lm_head should list multimax_ranges
-        and multimax_ts as replicated (shard axis None) when world_size > 1.
+        """sharded_state_dict on multimax lm_head: non-sharded params (the
+        multimax scalars) are intentionally absent from shard_rules — only
+        the sharded weight/bias appear when world_size > 1.
         We patch `build_sharded_state_dict` to capture the shard_rules dict
-        so we can directly assert the multimax branch's contents without
-        depending on the flex-checkpoint backend.
+        so we can assert directly without depending on the flex-checkpoint
+        backend.
         """
         from unittest import mock
 
@@ -257,7 +258,7 @@ class TestMultimaxLMHead(unittest.TestCase):
             lm_head.sharded_state_dict()
         self.assertIsNone(captured["shard_rules"])
 
-        # Force world_size>1 to exercise the multi-rank multimax shard-rules.
+        # Force world_size>1: only weight/bias appear in shard_rules.
         captured.clear()
         with (
             mock.patch.object(lm_head, "world_size", 2),
@@ -269,10 +270,8 @@ class TestMultimaxLMHead(unittest.TestCase):
         rules = captured["shard_rules"]
         self.assertEqual(rules.get("weight"), 0)
         self.assertEqual(rules.get("bias"), 0)
-        self.assertIn("multimax_ranges", rules)
-        self.assertIn("multimax_ts", rules)
-        self.assertIsNone(rules["multimax_ranges"])
-        self.assertIsNone(rules["multimax_ts"])
+        self.assertNotIn("multimax_ranges", rules)
+        self.assertNotIn("multimax_ts", rules)
 
 
 @unittest.skipUnless(
@@ -282,13 +281,13 @@ class TestFusedMultimaxNumerical(unittest.TestCase):
     """Numerical + backward parity for the fused multimax CE kernel.
 
     Compares `LigerFusedLinearCrossEntropyFunction` (multimax branch) against
-    a Python reference: F.linear -> SeLU -> cross_entropy, including a sample
+    a Python reference: F.linear -> SegLU -> cross_entropy, including a sample
     masked by `ignore_index`. Verifies loss and grads on all four trainable
     inputs: `_input`, `weight`, `multimax_ranges`, `multimax_ts`.
     """
 
-    def _selu(self, x, ranges, ts):
-        """Python ref SeLU matching the Triton kernel formula."""
+    def _seglu(self, x, ranges, ts):
+        """Python ref SegLU matching the Triton kernel formula."""
         r0, r1, r2, r3 = [ranges[i] for i in range(4)]
         t0, t1, t2, t3 = [ts[i] for i in range(4)]
         m0 = paddle.nn.functional.relu(r0 - x)
@@ -302,7 +301,7 @@ class TestFusedMultimaxNumerical(unittest.TestCase):
         x = paddle.randn([BT, H], dtype="float32")
         w = paddle.randn([V, H], dtype="float32") * 0.1
         targets = paddle.to_tensor([0, 3, 5, ignore_index, 7, 1], dtype="int64")
-        # Non-zero multimax params so SeLU is non-trivial.
+        # Non-zero multimax params so SegLU is non-trivial.
         ranges = paddle.to_tensor([0.5, -0.5, 0.2, -0.2], dtype="float32")
         ts = paddle.to_tensor([0.3, 0.4, 0.1, 0.2], dtype="float32")
         return x, w, targets, ranges, ts, ignore_index
@@ -318,7 +317,7 @@ class TestFusedMultimaxNumerical(unittest.TestCase):
         t_ref.stop_gradient = False
 
         logits = paddle.nn.functional.linear(x_ref, w_ref.T)
-        modulated = self._selu(logits, r_ref, t_ref)
+        modulated = self._seglu(logits, r_ref, t_ref)
         loss = paddle.nn.functional.cross_entropy(
             modulated,
             targets,
