@@ -242,7 +242,7 @@ class GPTLMHead(ColumnParallelLinear):
                 if not getattr(self, "_multimax_applied_logged", False):
                     try:
                         _rank = paddle.distributed.get_rank()
-                    except Exception:
+                    except Exception:  # pragma: no cover - defensive: fleet always inits before forward
                         _rank = 0
                     if _rank == 0:
                         warnings.warn(
@@ -289,7 +289,7 @@ class GPTLMHead(ColumnParallelLinear):
             if not getattr(self, "_multimax_applied_logged", False):
                 try:
                     _rank = paddle.distributed.get_rank()
-                except Exception:
+                except Exception:  # pragma: no cover - defensive: fleet always inits before forward
                     _rank = 0
                 if _rank == 0:
                     warnings.warn(
@@ -309,10 +309,10 @@ class GPTLMHead(ColumnParallelLinear):
                 SeLU, logits, self.multimax_ranges, self.multimax_ts
             )
 
-        # Loss-path MD5 probe: lm_head weight and logits
+        # Loss-path MD5 probe: lm_head weight and logits (debug-only, opt-in via env vars)
         import os
 
-        if (
+        if (  # pragma: no cover - debug-only MD5 probe gated by env vars
             os.environ.get("LOG_LAYER_MD5", "0") == "1"
             or os.environ.get("LOG_LOSS_MD5", "0") == "1"
         ):

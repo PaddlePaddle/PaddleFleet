@@ -184,9 +184,15 @@ class TestMultimaxLMHead(unittest.TestCase):
         self.assertTrue(paddle.allclose(lm_head.multimax_ts, zeros).item())
 
     def test_fused_path_returns_5tuple(self):
-        """With fused_linear_ce_loss_chunk>0 and multimax, forward returns 5-tuple."""
+        """With fused_linear_ce_loss_chunk>0 and multimax, forward returns 5-tuple.
+        Also exercises the rank-0 [MULTIMAX-LMHEAD-APPLIED] one-shot warn banner
+        at the top of the fused branch.
+        """
         lm_head = self._find_lm_head(self.model_fused)
         self.assertIsNotNone(lm_head)
+        # Reset the one-shot flag so the warn block executes.
+        if hasattr(lm_head, "_multimax_applied_logged"):
+            delattr(lm_head, "_multimax_applied_logged")
 
         # Create dummy input
         batch_size, seq_len, hidden_size = 2, 8, 256
@@ -198,6 +204,75 @@ class TestMultimaxLMHead(unittest.TestCase):
         # Should return 5-tuple: (hidden, weight, bias, multimax_ranges, multimax_ts)
         self.assertIsInstance(output, tuple)
         self.assertEqual(len(output), 5)
+        # The one-shot flag must be set after first call.
+        self.assertTrue(getattr(lm_head, "_multimax_applied_logged", False))
+
+    def test_unfused_path_applies_selu_and_logs(self):
+        """With multimax + fused_linear_ce_loss_chunk=0 (default), forward
+        returns logits (not a tuple) and applies SeLU via recompute.
+        Exercises the unfused-path warn block + SeLU recompute branch.
+        """
+        lm_head = self._find_lm_head(self.model_multimax)
+        self.assertIsNotNone(lm_head)
+        # Reset the one-shot flag so the warn block executes.
+        if hasattr(lm_head, "_multimax_applied_logged"):
+            delattr(lm_head, "_multimax_applied_logged")
+
+        batch_size, seq_len, hidden_size = 2, 8, 256
+        hidden_states = paddle.randn([seq_len, batch_size, hidden_size])
+
+        output = lm_head.forward({"hidden_states": hidden_states})
+        # Unfused path returns logits Tensor, not a tuple.
+        self.assertIsInstance(output, paddle.Tensor)
+        # Logits shape: [B, S, V] (transposed from [S, B, V] by sequence_parallel
+        # when enabled, otherwise produced directly).
+        self.assertEqual(output.shape[-1], self.config_multimax.vocab_size)
+        self.assertTrue(getattr(lm_head, "_multimax_applied_logged", False))
+
+    def test_sharded_state_dict_with_multimax(self):
+        """sharded_state_dict on multimax lm_head should list multimax_ranges
+        and multimax_ts as replicated (shard axis None) when world_size > 1.
+        We patch `build_sharded_state_dict` to capture the shard_rules dict
+        so we can directly assert the multimax branch's contents without
+        depending on the flex-checkpoint backend.
+        """
+        from unittest import mock
+
+        from paddlefleet.models.gpt import lm_head as lm_head_mod
+
+        lm_head = self._find_lm_head(self.model_multimax)
+        self.assertIsNotNone(lm_head)
+
+        captured = {}
+
+        def fake_build(state_dict, shard_rules, prefix):
+            captured["shard_rules"] = shard_rules
+            captured["prefix"] = prefix
+            return {"state_dict": state_dict, "shard_rules": shard_rules}
+
+        # world_size==1 branch: shard_rules is None.
+        with mock.patch.object(
+            lm_head_mod, "build_sharded_state_dict", side_effect=fake_build
+        ):
+            lm_head.sharded_state_dict()
+        self.assertIsNone(captured["shard_rules"])
+
+        # Force world_size>1 to exercise the multi-rank multimax shard-rules.
+        captured.clear()
+        with (
+            mock.patch.object(lm_head, "world_size", 2),
+            mock.patch.object(
+                lm_head_mod, "build_sharded_state_dict", side_effect=fake_build
+            ),
+        ):
+            lm_head.sharded_state_dict()
+        rules = captured["shard_rules"]
+        self.assertEqual(rules.get("weight"), 0)
+        self.assertEqual(rules.get("bias"), 0)
+        self.assertIn("multimax_ranges", rules)
+        self.assertIn("multimax_ts", rules)
+        self.assertIsNone(rules["multimax_ranges"])
+        self.assertIsNone(rules["multimax_ts"])
 
 
 @unittest.skipUnless(
