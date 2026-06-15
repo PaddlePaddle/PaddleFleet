@@ -399,6 +399,20 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
         ctx.weight_requires_grad = not weight.stop_gradient
         ctx.multimax_ranges_ref = multimax_ranges
         ctx.multimax_ts_ref = multimax_ts
+        # Cache stop_gradient at forward time. multimax_requires_grad in the
+        # forward (the kernel-level flag) is the OR of the two params' grad
+        # requirements, so when only one is frozen the kernel still produces
+        # both grads. The backward must respect each param's individual
+        # stop_gradient: a frozen param contributes nothing to main_grad and
+        # returns None at its PyLayer slot (cf. tensor_parallel/layers.py
+        # PyLayer contract: forward Tensor inputs with stop_gradient=True
+        # MUST get None at the matching backward position).
+        ctx.multimax_ranges_requires_grad = (
+            multimax_ranges is not None and not multimax_ranges.stop_gradient
+        )
+        ctx.multimax_ts_requires_grad = (
+            multimax_ts is not None and not multimax_ts.stop_gradient
+        )
         ctx.ec_align = ec_align
         return loss
 
@@ -452,15 +466,33 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
 
         # Multimax params: accumulate into main_grad when present (matches
         # the weight pattern); otherwise fall back to returning the grad
-        # so the standard autograd accumulator handles it.
+        # so the standard autograd accumulator handles it. Frozen params
+        # (stop_gradient=True) MUST get None at their PyLayer slot and
+        # MUST NOT touch main_grad / fire backward hooks, even though the
+        # kernel produced a grad tensor for them (multimax_requires_grad
+        # is the OR of the two params' grad-requirements).
         mm_ranges_out = None
         mm_ts_out = None
         if ctx.has_multimax:
-            for param, g, slot in (
-                (ctx.multimax_ranges_ref, grad_mm_ranges, "ranges"),
-                (ctx.multimax_ts_ref, grad_mm_ts, "ts"),
+            for param, g, slot, requires_grad in (
+                (
+                    ctx.multimax_ranges_ref,
+                    grad_mm_ranges,
+                    "ranges",
+                    ctx.multimax_ranges_requires_grad,
+                ),
+                (
+                    ctx.multimax_ts_ref,
+                    grad_mm_ts,
+                    "ts",
+                    ctx.multimax_ts_requires_grad,
+                ),
             ):
                 if param is None or g is None:
+                    continue
+                if not requires_grad:
+                    # Param was frozen at forward time; respect that here.
+                    # Leave mm_*_out as None for this slot.
                     continue
                 if hasattr(param, "main_grad"):
                     if param.main_grad is None:
