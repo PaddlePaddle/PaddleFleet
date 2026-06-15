@@ -12,6 +12,14 @@ on:
       commit:
         required: true
         type: string
+      arch:
+        required: false
+        type: choice
+        default: "ALL"
+        options:
+          - ALL
+          - "x86"
+          - "arm"
       cuda:
         required: false
         type: choice
@@ -87,6 +95,10 @@ jobs:
       - name: Check docker image and run container
         id: check-skip
         run: |
+          if ! [[ "${{ inputs.arch }}" == "ALL" || "${{ inputs.arch }}" == "x86" ]]; then
+            echo "no_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           if ! [[ ( "${{ inputs.python }}" == "ALL" || "${{ inputs.python }}" == "${{ matrix.python_version }}" ) && ( "${{ inputs.cuda }}" == "ALL" || "${{ inputs.cuda }}" == "${{ matrix.cuda.CUDA_VERSION }}" ) ]]; then
             echo "no_build=true" >> $GITHUB_OUTPUT
             exit 0
@@ -221,6 +233,10 @@ jobs:
       - name: Check docker image and run container
         id: check-skip
         run: |
+          if ! [[ "${{ inputs.arch }}" == "ALL" || "${{ inputs.arch }}" == "x86" ]]; then
+            echo "no_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           if ! [[ ( "${{ inputs.python }}" == "ALL" || "${{ inputs.python }}" == "${{ matrix.python_version }}" ) && ( "${{ inputs.cuda }}" == "ALL" || "${{ inputs.cuda }}" == "${{ matrix.cuda.CUDA_VERSION }}" ) ]]; then
             echo "no_build=true" >> $GITHUB_OUTPUT
             exit 0
@@ -325,3 +341,142 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
           exit 0
+
+  publish-ops-wheel-arm:
+    name: PR merge update ops arm (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
+    needs: clone
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    runs-on:
+      group: npu-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ["3.12"]
+        cuda:
+          - {CUDA_VERSION: CUDA13.0, bos_CUDA: cu130}
+    env:
+      TASK: PaddleFleet-nightly-arm-${{ matrix.cuda.CUDA_VERSION }}
+      PIP_CACHE_DIR: /home/.cache/pip
+      CACHE_DIR: /home/.cache
+      CCACHE_DIR: "/home/data/shared/.ccache/l1" # L1 cache on machine shared dir
+      CCACHE_SECONDARY_STORAGE: "file:///home/data/cfs/.ccache/l2" # L2 cache on cfs
+      CCACHE_MAXSIZE: 50G
+      CCACHE_LIMIT_MULTIPLE: 0.8
+      UV_HTTP_TIMEOUT: 600
+      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
+    steps:
+      - name: Check docker image and run container
+        run: |
+          if ! [[ "${{ inputs.arch }}" == "ALL" || "${{ inputs.arch }}" == "arm" ]]; then
+            echo "no_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev-arm-py312"
+          docker pull $docker_image
+          container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
+          echo "container_name=${container_name}" >> ${{ github.env }}
+          docker run -d -t --name ${container_name} \
+            -v "/home/data/cfs:/home/data/cfs" \
+            -v "/home/data/cfs/.cache:/home/.cache" \
+            -v "/home/data/shared:/home/data/shared" \
+            -v ${{ github.workspace }}/../../..:/root \
+            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
+            -v ${{ github.workspace }}:/workspace \
+            -e no_proxy \
+            -e CACHE_DIR \
+            -e PIP_CACHE_DIR \
+            -e CCACHE_DIR \
+            -e CCACHE_SECONDARY_STORAGE \
+            -e CCACHE_MAXSIZE \
+            -e CCACHE_LIMIT_MULTIPLE \
+            -e UV_HTTP_TIMEOUT \
+            -e PR_ID \
+            -e COMMIT_ID \
+            -e BRANCH \
+            --shm-size 128G \
+            --ulimit core=-1 \
+            --cap-add SYS_ADMIN \
+            --privileged=true \
+            -v /ssd1:/ssd1 \
+            -v /ssd2:/ssd2 \
+            -v /ssd3:/ssd3 \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
+            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
+            -e GITHUB_REPO_NAME=${{ github.repository }} \
+            -w /workspace --network=host $docker_image
+
+      - name: Install PaddleFleet
+        if: steps.check-skip.outputs.no_build != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          rm -rf * .[^.]*
+          source /root/proxy
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          echo "Extracting PaddleFleet.tar.gz"
+          tar -xf PaddleFleet.tar.gz --strip-components=1
+          rm PaddleFleet.tar.gz
+          git config --global --add safe.directory /workspace
+          git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
+          sed -i "s#packages/nightly/cu129#packages/nightly/${{ matrix.cuda.bos_CUDA }}#g" pyproject.toml
+          cat pyproject.toml
+          mkdir -p /root/.cache/pip
+          pip cache dir
+          pip install --break-system-packages --upgrade pip
+          pip install --break-system-packages uv
+          python -m pip install --break-system-packages bce-python-sdk==0.8.74
+          '
+
+      - name: Build wheel
+        if: steps.check-skip.outputs.no_build != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          set -e
+          export UV_PYTHON=${{ matrix.python_version }}
+          source /root/proxy
+          git reset --hard ${{ github.sha }}
+          uv cache clean paddlepaddle-gpu
+          git submodule update --init --recursive
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+            VERSION="${TAG_NAME#v}"
+            export PADDLEFLEET_VERSION=$VERSION
+          fi
+          export IS_NVIDIA=True
+          /usr/bin/python -m pip install --break-system-packages packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3"
+          /usr/bin/python -m pip install --break-system-packages "nvidia-nvshmem-cu13>=3.3.9,<3.5"
+          # HybridEP links against NVML by soname; install dev stubs for libnvidia-ml.so.1.
+          apt-get update && apt-get install -y --no-install-recommends libnvidia-ml-dev
+          rm -rf /var/lib/apt/lists/*
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v --python /usr/bin/python
+          '
+
+      - name: Upload wheel
+        if: steps.check-skip.outputs.no_build != 'true'
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          mkdir bos
+          tar -xf bos_new.tar.gz -C bos
+          cd dist
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+          else
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            export AK=paddle
+            export SK=paddle
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            PY_VERSION="${{ matrix.python_version }}"
+            PY_VERSION_SHORT="${PY_VERSION//./}"
+            mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl
+            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
+          fi
+          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
+          '
+
+      - name: Cleanup
+        if: ${{ always() }}
+        run: |
+          set +e
+          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
+          docker rm -f ${{ env.container_name }}
