@@ -567,6 +567,9 @@ class MultiTokenPredictionLayer(FleetLayer):
         rotary_pos_emb: paddle.Tensor | None = None,
         rotary_pos_cos: paddle.Tensor | None = None,
         rotary_pos_sin: paddle.Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | tuple[Tensor, Tensor] | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
         attention_bias: paddle.Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         attn_mask_startend_row_indices: paddle.Tensor | None = None,
@@ -596,6 +599,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "rotary_pos_emb": rotary_pos_emb,
                 "rotary_pos_cos": rotary_pos_cos,
                 "rotary_pos_sin": rotary_pos_sin,
+                "swa_rotary_pos_emb": swa_rotary_pos_emb,
+                "swa_rotary_pos_cos": swa_rotary_pos_cos,
+                "swa_rotary_pos_sin": swa_rotary_pos_sin,
                 "attention_bias": attention_bias,
                 "packed_seq_params": packed_seq_params,
                 "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
@@ -657,6 +663,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             rotary_pos_emb = kwargs.get("rotary_pos_emb", None)
             rotary_pos_cos = kwargs.get("rotary_pos_cos", None)
             rotary_pos_sin = kwargs.get("rotary_pos_sin", None)
+            swa_rotary_pos_emb = kwargs.get("swa_rotary_pos_emb", None)
+            swa_rotary_pos_cos = kwargs.get("swa_rotary_pos_cos", None)
+            swa_rotary_pos_sin = kwargs.get("swa_rotary_pos_sin", None)
             attention_bias = kwargs.get("attention_bias", None)
             packed_seq_params = kwargs.get("packed_seq_params", None)
             mtp_hidden_inputs_mask = kwargs.get("mtp_hidden_inputs_mask", None)
@@ -688,6 +697,15 @@ class MultiTokenPredictionLayer(FleetLayer):
                 else None,
                 rotary_pos_sin=rotary_pos_sin
                 if rotary_pos_sin is not None
+                else None,
+                swa_rotary_pos_emb=swa_rotary_pos_emb
+                if swa_rotary_pos_emb is not None
+                else None,
+                swa_rotary_pos_cos=swa_rotary_pos_cos
+                if swa_rotary_pos_cos is not None
+                else None,
+                swa_rotary_pos_sin=swa_rotary_pos_sin
+                if swa_rotary_pos_sin is not None
                 else None,
                 attention_bias=attention_bias
                 if attention_bias is not None
