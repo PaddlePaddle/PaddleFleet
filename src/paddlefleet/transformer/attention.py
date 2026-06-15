@@ -1465,7 +1465,7 @@ class SelfAttentionVHA(Attention):
         )
         query = self._apply_vha_premix(query)  # -> [b, sq, nh, hd]
 
-        if self.shared_kv is True:
+        if self.shared_kv:
             norm_key = shared_kv
         else:
             norm_key = key
