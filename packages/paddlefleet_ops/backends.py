@@ -70,7 +70,6 @@ def init_backend_type():
         return
     except Exception:
         # print("Backend is not Metax-GPU")
-        # print("Test build ops")
         pass
     if not (IS_NVIDIA or IS_XPU or IS_ILUVATAR_GPU or IS_METAX_GPU):
         logging.getLogger(
