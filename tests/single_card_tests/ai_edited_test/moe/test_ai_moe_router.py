@@ -1337,7 +1337,12 @@ class TestRoutingMapFusionWrapper(unittest.TestCase):
     """
 
     def _fake_routing_map_fusion(
-        self, gates, top_idx, input_ids=None, is_pure_text_line=None
+        self,
+        gates,
+        top_idx,
+        input_ids=None,
+        is_pure_text_line=None,
+        pad_token_id=0,
     ):
         # Return a binary mask with selected indices set, matching gates shape.
         fused_mask = paddle.zeros_like(gates).put_along_axis(
@@ -1512,7 +1517,12 @@ class TestForwardRoutingMapFusion(unittest.TestCase):
     (line ~1089)."""
 
     def _fake_routing_map_fusion_forward(
-        self, gates, top_idx, input_ids=None, is_pure_text_line=None
+        self,
+        gates,
+        top_idx,
+        input_ids=None,
+        is_pure_text_line=None,
+        pad_token_id=0,
     ):
         fused_mask = paddle.zeros_like(gates).put_along_axis(
             top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1

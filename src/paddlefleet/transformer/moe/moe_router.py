@@ -192,7 +192,7 @@ def gate_detach_matmul(
 
 
 def _apply_routing_map_fusion(
-    gates, top_idx, input_ids_none_zero_mask, input_ids=None
+    gates, top_idx, input_ids_none_zero_mask, input_ids=None, pad_token_id=0
 ):
     from paddlefleet.triton_ops import routing_map_fusion_forward
 
@@ -205,6 +205,7 @@ def _apply_routing_map_fusion(
         top_idx,
         input_ids=fused_input_ids,
         is_pure_text_line=None,
+        pad_token_id=pad_token_id,
     )
     mask = fused_mask.cast(gates.dtype)
     return mask, top_idx, exp_counts
@@ -448,7 +449,10 @@ class StandardMoERouter(nn.Layer):
             _ids = input_ids
             if _ids.ndim == 1:
                 _ids = _ids.unsqueeze(axis=0)
-            origin_valid_mask = (_ids != 0).astype(paddle.float32)
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            origin_valid_mask = (_ids != pad_token_id).astype(paddle.float32)
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
@@ -518,8 +522,13 @@ class StandardMoERouter(nn.Layer):
                 )
             else:
                 origin_input_ids = input_ids
-            origin_loss_mask = (origin_input_ids != 0).astype(paddle.float32)
-            loss_mask = (input_ids != 0).astype(paddle.float32)
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            origin_loss_mask = (origin_input_ids != pad_token_id).astype(
+                paddle.float32
+            )
+            loss_mask = (input_ids != pad_token_id).astype(paddle.float32)
             loss_mask = loss_mask.reshape([-1])
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
@@ -962,12 +971,19 @@ class TopKRouter(StandardMoERouter):
                     input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
             if input_ids is not None:
+                pad_token_id = getattr(self.config, "pad_token_id", 0)
+                if pad_token_id is None:
+                    pad_token_id = 0
                 if self.sequence_parallel:
                     input_ids_none_zero_mask = (
-                        (input_ids != 0).transpose([1, 0]).reshape([-1, 1])
+                        (input_ids != pad_token_id)
+                        .transpose([1, 0])
+                        .reshape([-1, 1])
                     )
                 else:
-                    input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
+                    input_ids_none_zero_mask = (
+                        input_ids != pad_token_id
+                    ).reshape([-1, 1])
                 batch_size_, seq_len_ = input_ids.shape
                 assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
                     f"input_ids shape mismatch with input: "
@@ -1135,8 +1151,15 @@ class TopKRouter(StandardMoERouter):
             l_zloss = None
 
         if getattr(self.config, "routing_map_fusion", False):
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
             mask, top_idx, exp_counts = _apply_routing_map_fusion(
-                gates, top_idx, input_ids_none_zero_mask, input_ids
+                gates,
+                top_idx,
+                input_ids_none_zero_mask,
+                input_ids,
+                pad_token_id=pad_token_id,
             )
         else:
             with paddle.amp.auto_cast(enable=False):

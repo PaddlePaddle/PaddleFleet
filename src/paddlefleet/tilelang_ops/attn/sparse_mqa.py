@@ -43,11 +43,16 @@ def _prepare_inputs(q, kv, attn_sink, topk_idxs):
     return q, kv, attn_sink, topk_idxs
 
 
-def sparse_attn(q, kv, attn_sink, topk_idxs, sm_scale=None):
+def sparse_attn(q, kv, attn_sink, topk_idxs, sm_scale=None, backend="tilelang"):
     q, kv, attn_sink, topk_idxs = _prepare_inputs(q, kv, attn_sink, topk_idxs)
-    out, lse = sparse_mqa_fwd.sparse_mqa_fwd_interface(
-        q, kv, attn_sink, topk_idxs, sm_scale=sm_scale
-    )
+    if backend == "cudnn":
+        out, lse, _ = flash_mla_sparse_attn(
+            q, kv, attn_sink, topk_idxs, sm_scale=sm_scale
+        )
+    else:
+        out, lse = sparse_mqa_fwd.sparse_mqa_fwd_interface(
+            q, kv, attn_sink, topk_idxs, sm_scale=sm_scale
+        )
     if not isinstance(out, paddle.Tensor) or not isinstance(lse, paddle.Tensor):
         raise RuntimeError(
             f"TileLang must return Paddle tensors, got output={type(out)!r}, lse={type(lse)!r}. "

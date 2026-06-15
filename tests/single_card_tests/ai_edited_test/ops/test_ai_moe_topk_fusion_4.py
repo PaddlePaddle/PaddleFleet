@@ -300,6 +300,7 @@ class TestMoETopkFusionKernelDefinitionsNoMock(unittest.TestCase):
             4,
             2,
             2,
+            0,  # pad_token_id
             True,
             True,
             2,

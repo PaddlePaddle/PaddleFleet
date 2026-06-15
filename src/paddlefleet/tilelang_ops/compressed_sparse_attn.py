@@ -64,21 +64,10 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         d_attn_sink = d_attn_sink.reshape(attn_sink.shape).cast(
             ctx.attn_sink_dtype
         )
-        return (
-            dq,
-            dkv,
-            d_attn_sink,
-            None,
-        )
+        return (dq, dkv, d_attn_sink, None)
 
 
-def csa_sparse_attn(
-    query,
-    kv_full,
-    attn_sink,
-    topk_idxs,
-    softmax_scale,
-):
+def csa_sparse_attn(query, kv_full, attn_sink, topk_idxs, softmax_scale):
     return CSASparseAttention.apply(
         query,
         kv_full,
