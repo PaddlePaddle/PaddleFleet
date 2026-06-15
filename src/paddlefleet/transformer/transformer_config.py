@@ -206,6 +206,9 @@ class TransformerConfig(ModelParallelConfig):
     use_vha_attention: bool = False
     """If True, enables VHA premix/postmix extensions in standard self-attention."""
 
+    vha_shared_kv: bool = False
+    """If True, enables Shared KV to reduce KVCache"""
+
     vha_postmix_rank: int | None = None
     """Rank of the VHA postmix low-rank head mixing matrices."""
 
