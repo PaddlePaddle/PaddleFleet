@@ -15,9 +15,10 @@
 # =============================================================================
 # Multimax lm_head support
 # -----------------------------------------------------------------------------
-# When TransformerConfig.multimax in {"lm_head", "all"}, GPTLMHead adds two
-# learnable [4]-shape parameters (multimax_ranges, multimax_ts) and applies a
-# SeLU-style segmented modulation to logits before softmax/cross-entropy:
+# When TransformerConfig.apply_multimax is a list containing "lm_head" (e.g.,
+# ``apply_multimax: [lm_head]``), GPTLMHead adds two learnable [4]-shape
+# parameters (multimax_ranges, multimax_ts) and applies a SeLU-style segmented
+# modulation to logits before softmax/cross-entropy:
 #
 #     logits = SeLU(logits, multimax_ranges, multimax_ts)
 #
@@ -33,8 +34,8 @@
 #     grep -E "MULTIMAX-(CONFIG|LMHEAD-CONFIRM|LMHEAD-APPLIED)" <train.log>
 #
 # Expected output (per rank holding the LM head):
-#   [MULTIMAX-CONFIG]            multimax=lm_head
-#   [MULTIMAX-LMHEAD-CONFIRM]    cls=... multimax=lm_head ranges.shape=[4] ...
+#   [MULTIMAX-CONFIG]            apply_multimax=['lm_head']
+#   [MULTIMAX-LMHEAD-CONFIRM]    cls=... apply_multimax=['lm_head'] ranges.shape=[4] ...
 #   [MULTIMAX-LMHEAD-APPLIED]    cls=... logits.shape=[...] ranges=[...] ts=[...]
 #                                (or path=fused for the fused-CE branch)
 #
@@ -186,8 +187,8 @@ class GPTLMHead(ColumnParallelLinear):
         # Names contain the "multimax" substring so the trainer's no-decay
         # filter excludes them from weight decay (mirrors timm's convention
         # of not decaying scalar/1-D learnable coefficients).
-        multimax_mode = getattr(self.config, "multimax", None)
-        self.use_multimax_lmhead = multimax_mode in ("lm_head", "all")
+        multimax_mode = getattr(self.config, "apply_multimax", None) or []
+        self.use_multimax_lmhead = "lm_head" in multimax_mode
         if self.use_multimax_lmhead:
             # Init to zero -> SeLU is identity at step 0, so resuming from a
             # checkpoint that lacks these params (loaded non-strictly) yields
@@ -208,18 +209,15 @@ class GPTLMHead(ColumnParallelLinear):
             # for the full sanity-check workflow.
             warnings.warn(
                 f"[MULTIMAX-LMHEAD-CONFIRM] cls={type(self).__name__} "
-                f"multimax={multimax_mode} "
+                f"apply_multimax={multimax_mode} "
                 f"ranges.shape={list(self.multimax_ranges.shape)} "
                 f"ts.shape={list(self.multimax_ts.shape)} "
                 f"dtype={self.config.params_dtype} "
                 f"fused_linear_ce_loss_chunk="
                 f"{getattr(self.config, 'fused_linear_ce_loss_chunk', 0)}"
             )
-        else:
-            warnings.warn(
-                f"[MULTIMAX-LMHEAD-CONFIRM] cls={type(self).__name__} "
-                f"multimax={multimax_mode} (disabled, no params created)"
-            )
+        # When the feature is disabled (default None / empty), stay silent --
+        # no banner, no params -- so default training runs are not noisy.
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTLMHead")

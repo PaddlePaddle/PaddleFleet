@@ -292,20 +292,25 @@ class TransformerConfig(ModelParallelConfig):
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
 
-    multimax: Literal["lm_head", "attn", "all"] | None = None
-    """Apply learnable SeLU-style modulation before softmax.
-    - ``None`` / ``null`` (default): disabled. An unset key, an empty value
-      (``multimax:``), or an explicit ``null`` in YAML/JSON all map to Python
-      ``None``, so the feature is opt-in and safe to leave out of model
-      configs.
-    - "lm_head": apply SeLU(x, ranges, ts) on the LM-head logits before the
-      language-modeling softmax/cross-entropy. Adds two [4]-shape learnable
-      parameters (multimax_ranges, multimax_ts) to the LM head. These are
-      excluded from weight decay via the "multimax" substring filter in the
-      trainer's no-decay rule.
-    - "attn": apply on attention scores before softmax (not implemented yet).
-    - "all": apply on both LM head and attention (not implemented yet, only
-      the lm_head branch will take effect).
+    apply_multimax: list[str] | None = None
+    """Submodules to apply learnable SeLU-style modulation to before softmax.
+
+    Mirrors the Megatron ``recompute_modules`` style: a list of submodule
+    names. ``None`` (default) disables the feature globally. Currently
+    supported list entries:
+
+    - ``"lm_head"``: apply SeLU(x, ranges, ts) on the LM-head logits before
+      the language-modeling softmax/cross-entropy. Adds two [4]-shape
+      learnable parameters (multimax_ranges, multimax_ts) to the LM head.
+      These are excluded from weight decay via the "multimax" substring
+      filter in the trainer's no-decay rule.
+    - ``"attention"``: apply on attention scores before softmax. Reserved;
+      not implemented yet (emits a warning if listed).
+
+    YAML/JSON behaviour:
+    - unset key, ``apply_multimax: null``, or empty list ``apply_multimax: []``
+      all map to Python ``None`` (feature disabled).
+    - ``apply_multimax: [lm_head]`` enables the LM-head branch.
     """
 
     gated_attention: bool = False
@@ -1306,24 +1311,38 @@ class TransformerConfig(ModelParallelConfig):
         #   grep MULTIMAX <train.log>
         import warnings as _warnings
 
-        _multimax = getattr(self, "multimax", None)
-        # Allow yaml/json to leave the field unset, set to ``null``, or pass an
-        # empty string -- all map to the canonical disabled sentinel ``None``.
-        if _multimax == "":
+        _multimax = getattr(self, "apply_multimax", None)
+        # Allow yaml/json to leave the field unset, set to ``null``, pass an
+        # empty string, or pass an empty list -- all map to the canonical
+        # disabled sentinel ``None``.
+        if _multimax in ("", []):
             _multimax = None
-            self.multimax = None
-        if _multimax is not None and _multimax not in (
-            "lm_head",
-            "attn",
-            "all",
-        ):
-            raise ValueError(
-                f"multimax must be one of None, 'lm_head', 'attn', 'all', "
-                f"got {_multimax!r}."
-            )
-        if _multimax in ("attn", "all"):
-            _warnings.warn(
-                f"[MULTIMAX-CONFIG] multimax={_multimax}: 'attn' branch is "
-                "not implemented yet; only the lm_head modulation will take effect."
-            )
-        _warnings.warn(f"[MULTIMAX-CONFIG] multimax={_multimax}")
+            self.apply_multimax = None
+        # Back-compat: a plain string is treated as a single-element list
+        # so older configs (apply_multimax: lm_head) keep working.
+        if isinstance(_multimax, str):
+            _multimax = [_multimax]
+            self.apply_multimax = _multimax
+        if _multimax is not None:
+            if not isinstance(_multimax, list) or not all(
+                isinstance(x, str) for x in _multimax
+            ):
+                raise ValueError(
+                    f"apply_multimax must be None or a list[str], "
+                    f"got {_multimax!r}."
+                )
+            _valid = {"lm_head", "attention"}
+            _bad = [x for x in _multimax if x not in _valid]
+            if _bad:
+                raise ValueError(
+                    f"apply_multimax entries must each be one of "
+                    f"{sorted(_valid)}, got invalid entries {_bad!r} "
+                    f"in {_multimax!r}."
+                )
+            if "attention" in _multimax:
+                _warnings.warn(
+                    f"[MULTIMAX-CONFIG] apply_multimax={_multimax}: "
+                    "'attention' branch is not implemented yet; only the "
+                    "lm_head modulation will take effect."
+                )
+            _warnings.warn(f"[MULTIMAX-CONFIG] apply_multimax={_multimax}")
