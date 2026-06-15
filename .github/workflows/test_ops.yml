@@ -11,7 +11,7 @@ on:
     branches:
       - "develop"
       - "release/**"
-      
+
 permissions: read-all
 
 env:
@@ -37,12 +37,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
       - name: Check if packages directory changed
         id: check
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "packages_changed=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git fetch origin ${{ github.event.pull_request.base.sha }} --depth=1
+            if git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} -- packages/ | grep -q .; then
+              echo "packages_changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "packages_changed=false" >> $GITHUB_OUTPUT
+            fi
           else
             if git diff --name-only HEAD~1 HEAD -- packages/ | grep -q .; then
               echo "packages_changed=true" >> $GITHUB_OUTPUT
