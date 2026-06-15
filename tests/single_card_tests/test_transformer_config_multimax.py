@@ -158,6 +158,53 @@ class TestMultimaxConfig(unittest.TestCase):
             f"unexpected unimplemented warning for empty string: {msgs}",
         )
 
+    def test_yaml_listconfig_accepted(self):
+        """Regression: YAML entry path returns OmegaConf ListConfig, not a
+        builtin list. The validator must normalize ListConfig to list so
+        the recommended ``apply_multimax: [lm_head]`` form works through
+        the --configs YAML pipeline."""
+        from omegaconf import OmegaConf
+
+        listcfg = OmegaConf.create(["lm_head"])
+        cfg = self._build(apply_multimax=listcfg)
+        self.assertEqual(cfg.apply_multimax, ["lm_head"])
+        # After validation the field must be a plain list (not ListConfig)
+        # so downstream `isinstance(..., list)` checks behave as expected.
+        self.assertIsInstance(cfg.apply_multimax, list)
+
+    def test_yaml_pipeline_end_to_end(self):
+        """End-to-end regression from load_yaml() through
+        core_transformer_config_from_args() with apply_multimax: [lm_head]."""
+        import os
+        import tempfile
+
+        from paddlefleet.training.arguments import (
+            core_transformer_config_from_args,
+        )
+        from paddlefleet.training.yaml_arguments import load_yaml
+
+        yaml_text = (
+            "model:\n"
+            "  num_hidden_layers: 4\n"
+            "  hidden_size: 64\n"
+            "  num_attention_heads: 4\n"
+            "  apply_multimax: [lm_head]\n"
+        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            f.write(yaml_text)
+            yaml_path = f.name
+        try:
+            args = load_yaml(yaml_path)
+            cfg = core_transformer_config_from_args(
+                args, config_class=self.TransformerConfig
+            )
+        finally:
+            os.unlink(yaml_path)
+        self.assertEqual(cfg.apply_multimax, ["lm_head"])
+        self.assertIsInstance(cfg.apply_multimax, list)
+
 
 if __name__ == "__main__":
     unittest.main()
