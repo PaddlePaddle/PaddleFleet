@@ -116,18 +116,13 @@ def fused_linear_cross_entropy_forward(
         # require grad. This covers the freeze-backbone / train-head-only
         # regime where _input.stop_gradient=True but multimax_*.stop_gradient=False.
         multimax_requires_grad = (
-            not multimax_ranges.stop_gradient
-            or not multimax_ts.stop_gradient
+            not multimax_ranges.stop_gradient or not multimax_ts.stop_gradient
         )
         # Extract scalar values once (one host<->device sync for an [4]
         # tensor; negligible vs the chunk's GEMM/CE cost). Using fp32 for
         # numerical stability inside the kernel.
-        _r_vals = [
-            float(v) for v in multimax_ranges.cast("float32").tolist()
-        ]
-        _t_vals = [
-            float(v) for v in multimax_ts.cast("float32").tolist()
-        ]
+        _r_vals = [float(v) for v in multimax_ranges.cast("float32").tolist()]
+        _t_vals = [float(v) for v in multimax_ts.cast("float32").tolist()]
     else:
         grad_multimax_ranges = None
         grad_multimax_ts = None
@@ -373,7 +368,14 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
             loss, grad_input, grad_weight, grad_bias = ret
             grad_mm_ranges = grad_mm_ts = None
         else:
-            loss, grad_input, grad_weight, grad_bias, grad_mm_ranges, grad_mm_ts = ret
+            (
+                loss,
+                grad_input,
+                grad_weight,
+                grad_bias,
+                grad_mm_ranges,
+                grad_mm_ts,
+            ) = ret
 
         ctx.save_for_backward(
             grad_input.detach() if grad_input is not None else None,

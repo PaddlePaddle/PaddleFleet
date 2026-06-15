@@ -226,13 +226,9 @@ class TestFusedMultimaxNumerical(unittest.TestCase):
         paddle.seed(123)
         x = paddle.randn([BT, H], dtype="float32")
         w = paddle.randn([V, H], dtype="float32") * 0.1
-        targets = paddle.to_tensor(
-            [0, 3, 5, ignore_index, 7, 1], dtype="int64"
-        )
+        targets = paddle.to_tensor([0, 3, 5, ignore_index, 7, 1], dtype="int64")
         # Non-zero multimax params so SeLU is non-trivial.
-        ranges = paddle.to_tensor(
-            [0.5, -0.5, 0.2, -0.2], dtype="float32"
-        )
+        ranges = paddle.to_tensor([0.5, -0.5, 0.2, -0.2], dtype="float32")
         ts = paddle.to_tensor([0.3, 0.4, 0.1, 0.2], dtype="float32")
         return x, w, targets, ranges, ts, ignore_index
 
@@ -350,7 +346,9 @@ class TestFusedMultimaxNumerical(unittest.TestCase):
         _, _, _, gr_ref, gt_ref = self._run_reference(
             x, w, targets, ranges, ts, ig
         )
-        self.assertIsNotNone(r_f.grad, "multimax_ranges.grad is None when frozen")
+        self.assertIsNotNone(
+            r_f.grad, "multimax_ranges.grad is None when frozen"
+        )
         self.assertIsNotNone(t_f.grad, "multimax_ts.grad is None when frozen")
         self.assertTrue(
             paddle.allclose(gr_ref, r_f.grad, atol=1e-3, rtol=1e-3).item(),
