@@ -40,6 +40,12 @@ def swiglu(y):
     return F.swiglu(y)
 
 
+def swiglu_eager(y):
+    """不带 fused op 的 eager 版本，用于对齐测试（和 MG 侧 swiglu_eager 一致）"""
+    y_1, y_2 = paddle.chunk(y, 2, axis=-1)
+    return F.silu(y_1) * y_2
+
+
 @jit_fuser
 def bias_swiglu(y, bias):
     """Performs SwiGLU activation with bias addition.
@@ -53,6 +59,12 @@ def bias_swiglu(y, bias):
     """
     y = y + bias
     return swiglu(y)
+
+
+def bias_swiglu_eager(y, bias):
+    """不带 fused op 的 eager 版本，用于对齐测试"""
+    y = y + bias
+    return swiglu_eager(y)
 
 
 @jit_fuser
@@ -81,6 +93,21 @@ def swiglu_back(g, y):
     return dx
 
 
+def swiglu_back_eager(g, y):
+    """手写 eager 版本的 swiglu backward，与 MG 侧 swiglu_back 完全一致"""
+    y_1, y_2 = paddle.chunk(y, 2, axis=-1)
+    return paddle.concat(
+        (
+            g
+            * paddle.nn.functional.sigmoid(y_1)
+            * (1 + y_1 * (1 - paddle.nn.functional.sigmoid(y_1)))
+            * y_2,
+            g * F.silu(y_1),
+        ),
+        axis=-1,
+    )
+
+
 @jit_fuser
 def bias_swiglu_back(g, y, bias):
     """Computes the gradient for the biased SwiGLU activation function.
@@ -107,6 +134,16 @@ def weighted_swiglu_back(g, y, weights):
     weights_grad = swiglu(y) * g.to(w_dtype)
     weights_grad = paddle.sum(weights_grad, dim=-1, keepdim=True)
     return input_grad.to(input_dtype), weights_grad.to(w_dtype)
+
+
+def weighted_swiglu_back_eager(g, y, weights):
+    """不带 fused op 的 eager 版本 weighted backward"""
+    input_dtype = y.dtype
+    w_dtype = weights.dtype
+    input_grad = swiglu_back_eager(g * weights, y)
+    weights_grad = swiglu_eager(y) * g.cast(w_dtype)
+    weights_grad = paddle.sum(weights_grad, axis=-1, keepdim=True)
+    return input_grad.cast(input_dtype), weights_grad.cast(w_dtype)
 
 
 @jit_fuser
@@ -290,7 +327,7 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
         ctx.clamp_value = clamp_value
         if clamp_value is not None and clamp_value > 0:
             return clamped_bias_swiglu(input, bias, clamp_value)
-        return bias_swiglu(input, bias)
+        return bias_swiglu_eager(input, bias)
 
     @staticmethod
     @nvtx_decorator()
@@ -313,7 +350,8 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
                 grad_output, input, bias, ctx.clamp_value
             )
         else:
-            tmp = bias_swiglu_back(grad_output, input, bias)
+            y = input + bias
+            tmp = swiglu_back_eager(grad_output, y)
         return tmp, tmp
 
 
@@ -350,7 +388,7 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
         ctx.clamp_value = clamp_value
         if clamp_value is not None and clamp_value > 0:
             return clamped_swiglu(input, clamp_value)
-        return swiglu(input)
+        return swiglu_eager(input)
 
     @staticmethod
     @nvtx_decorator()
@@ -369,14 +407,38 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
         if ctx.clamp_value is not None and ctx.clamp_value > 0:
             tmp = clamped_swiglu_back(grad_output, input, ctx.clamp_value)
         else:
-            tmp = swiglu_back(grad_output, input)
+            tmp = swiglu_back_eager(grad_output, input)
         return tmp
 
 
 class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
     @staticmethod
     # bias is an optional argument
-    def forward(ctx, input, weights, fp8_input_store, clamp_value=None):
+    def forward(ctx, input, weights, fp8_input_store):
+        input_for_backward = (
+            input.to(paddle.float8_e4m3fn) if fp8_input_store else input
+        )
+        ctx.save_for_backward(input_for_backward, weights)
+        ctx.ori_input_dtype = input.dtype
+        ctx.fp8_input_store = fp8_input_store
+        dtype = input.dtype
+        res = swiglu_eager(input) * weights
+        return res.cast(dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weights = ctx.saved_tensor()
+        input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
+        tmp, wgrad = weighted_swiglu_back_eager(grad_output, input, weights)
+        return tmp, wgrad
+
+
+class ClampedWeightedSwiGLUFunction(paddle.autograd.PyLayer):
+    """Clamped variant of WeightedSwiGLUFunction. Added without modifying
+    the non-clamp class above."""
+
+    @staticmethod
+    def forward(ctx, input, weights, fp8_input_store, clamp_value):
         input_for_backward = (
             input.to(paddle.float8_e4m3fn) if fp8_input_store else input
         )
@@ -477,9 +539,14 @@ def weighted_bias_swiglu_impl(
             "Bias is not supported for weighted swiglu fusion"
         )
     else:
-        output = WeightedSwiGLUFunction.apply(
-            input, weights, fp8_input_store, clamp_value
-        )
+        if clamp_value is not None and clamp_value > 0:
+            output = ClampedWeightedSwiGLUFunction.apply(
+                input, weights, fp8_input_store, clamp_value
+            )
+        else:
+            output = WeightedSwiGLUFunction.apply(
+                input, weights, fp8_input_store
+            )
 
     return (
         output

@@ -18,6 +18,13 @@ from __future__ import annotations
 import logging
 import warnings
 from dataclasses import dataclass
+
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import _pf_tensor_info
+
+_MLP_CALL_COUNT = [0]
+_MLP_DEBUG_EXPERT = [False]  # 由外部 moe_layer 设置，True 时打印中间结果
+# === save_tensor 插桩结束 ===
 from typing import TYPE_CHECKING
 
 import paddle
@@ -173,10 +180,29 @@ class MLP(FleetLayer):
 
     def forward(self, hidden_states, per_token_scale=None):
         """Perform the forward pass through the MLP block."""
+        _cur_layer = _MLP_CALL_COUNT[0]
+        _MLP_CALL_COUNT[0] += 1
+
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
         intermediate_parallel, bias_parallel = self.up_gate_proj(hidden_states)
         nvtx_range_pop(suffix="up_gate_proj")
+
+        # === 插桩: CP12a mlp_fc1_out (只看第一层 dense MLP) ===
+        if _cur_layer == 0:
+            _pf_tensor_info(
+                "cp12a_mlp_fc1_out", intermediate_parallel, 0, prefix="PF MLP"
+            )
+        # === 插桩结束 ===
+        # === DEBUG: expert0 fc1 输出 ===
+        if _MLP_DEBUG_EXPERT[0]:
+            _pf_tensor_info(
+                "DEBUG_expert0_fc1_out",
+                intermediate_parallel,
+                None,
+                prefix="DEBUG PF MLP",
+            )
+        # === DEBUG END ===
 
         nvtx_range_push(suffix="activation")
 
@@ -296,10 +322,41 @@ class MLP(FleetLayer):
                 intermediate_parallel = intermediate_parallel.to(original_dtype)
         nvtx_range_pop(suffix="activation")
 
+        # === 插桩: CP12b mlp_swiglu_out (只看第一层 dense MLP) ===
+        if _cur_layer == 0:
+            _pf_tensor_info(
+                "cp12b_mlp_swiglu_out",
+                intermediate_parallel,
+                0,
+                prefix="PF MLP",
+            )
+        # === 插桩结束 ===
+        # === DEBUG: expert0 swiglu 输出 ===
+        if _MLP_DEBUG_EXPERT[0]:
+            _pf_tensor_info(
+                "DEBUG_expert0_swiglu_out",
+                intermediate_parallel,
+                None,
+                prefix="DEBUG PF MLP",
+            )
+        # === DEBUG END ===
+
         # [s, b, h]
         nvtx_range_push(suffix="down_proj")
         output, output_bias = self.down_proj(intermediate_parallel)
         nvtx_range_pop(suffix="down_proj")
+
+        # === 插桩: CP12c mlp_fc2_out (只看第一层 dense MLP) ===
+        if _cur_layer == 0:
+            _pf_tensor_info("cp12c_mlp_fc2_out", output, 0, prefix="PF MLP")
+        # === 插桩结束 ===
+        # === DEBUG: expert0 fc2 输出 ===
+        if _MLP_DEBUG_EXPERT[0]:
+            _pf_tensor_info(
+                "DEBUG_expert0_fc2_out", output, None, prefix="DEBUG PF MLP"
+            )
+            _MLP_DEBUG_EXPERT[0] = False
+        # === DEBUG END ===
 
         if per_token_scale is not None and output_bias is not None:
             # if this MLP is an expert, and bias is required, we add the bias to output directly

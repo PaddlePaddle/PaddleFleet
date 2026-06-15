@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+
+# === save_tensor 插桩结束 ===
 import os
 from functools import partial
 from typing import TYPE_CHECKING
@@ -28,6 +30,15 @@ from paddle import nn
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     AllGatherOp,
     mark_as_sequence_parallel_parameter,
+)
+
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import (
+    _pf_grad_info,
+    _pf_tensor_info as _pf_ti,
+    is_bit_exact as _is_bit_exact,
+    pf_dump_forward as _pf_dump_forward,
+    pf_dump_grad_hook as _pf_dump_grad_hook,
 )
 
 if TYPE_CHECKING:
@@ -156,21 +167,53 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 WeightGradStore.enabled = False
                 return x_grad, None
         else:
-            w = w.T
-            x_g, w_g = matmul_grad(
-                x.cast(ctx.dtype),
-                w.cast(ctx.dtype),
-                y_grad,
-                False,
-                False,
-            )
-
-            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
-            w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
-            if w_grad is not None:
-                w_grad = w_grad.T
-
-            return x_grad, w_grad
+            if _is_bit_exact():
+                # [对齐修复-方案G] 按 dsv4 doc "router back / 对齐 Megatron Float16Module": 改用 bf16 GEMM。
+                # 单测 verify_fix_bf16_gemm.py 已验证: GPU paddle.matmul(g.bf16, w.bf16) 与 MG cp11b_router_grad
+                # bit-exact (md5=308bd877ff5d4539, max|diff|=0, nz=0/7421952)。
+                x_shape = x.shape
+                y_grad_shape = y_grad.shape
+                x_2d = x.reshape([-1, x_shape[-1]])
+                y_grad_2d = y_grad.reshape([-1, y_grad_shape[-1]])
+                y_grad_2d_bf16 = y_grad_2d.cast(paddle.bfloat16)
+                w_bf16 = w.cast(paddle.bfloat16)
+                x_2d_bf16 = x_2d.cast(paddle.bfloat16)
+                x_g_2d = paddle.matmul(
+                    y_grad_2d_bf16, w_bf16
+                )  # bf16 GEMM (cuBLAS bf16 inputs / fp32 accum)
+                w_g_bf16 = paddle.matmul(
+                    y_grad_2d_bf16, x_2d_bf16, transpose_x=True
+                )
+                w_g = w_g_bf16.cast(
+                    paddle.float32
+                )  # main_grad 仍是 fp32, MG wgrad 也是 cast 回 fp32
+                # [对齐修复-方案F] 保留原始 wgrad 到 weight._run_torch_gate_fp32_wgrad, 避免后续 cast/bucket 精度损失。
+                try:
+                    w._run_torch_gate_fp32_wgrad = w_g.detach()
+                except Exception as _e:
+                    print(
+                        f"[PF FusedGateDetachMatmul] attach fp32 wgrad failed: {_e}",
+                        flush=True,
+                    )
+                x_g = x_g_2d.reshape(x_shape)
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                return x_grad, w_grad
+            else:
+                # [原始路径] matmul_grad fp32 (PF 默认 backward, 与 GLM_ALIGN_BIT_EXACT=0 时保持一致)
+                w = w.T
+                x_g, w_g = matmul_grad(
+                    x.cast(ctx.dtype),
+                    w.cast(ctx.dtype),
+                    y_grad,
+                    False,
+                    False,
+                )
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                if w_grad is not None:
+                    w_grad = w_grad.T
+                return x_grad, w_grad
 
 
 def gate_detach_matmul(
@@ -253,7 +296,7 @@ class StandardMoERouter(nn.Layer):
         # Initialize gate weight with Normal distribution aligned with Megatron.
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
+            dtype="bfloat16",
             default_initializer=paddle.nn.initializer.Constant(0.0),
         )
         config.init_method(self.weight)
@@ -388,6 +431,63 @@ class StandardMoERouter(nn.Layer):
     def _cal_seq_aux_loss(
         self, probs, top_k, routing_map, seq_len, batch_size, input_ids=None
     ):
+        # === [反向对齐 align-grad] PF 主路 routing_map 是 scores+e_score_correction_bias topk 出来的;
+        # MG (DeepSeek-V3 标准) aux_loss 用的是 不带 bias 的 probs (== cp11c_aux_scores_normed) topk 出来的
+        # cp11c_aux_routing_map. 两侧公式相同, 仅 routing_map 来源不同 -> cost_coeff 不同 -> grad 不一致.
+        # 这里在 _cal_seq_aux_loss 入口重新计算 aux-only routing_map 替换入参,
+        # 与 MG forward log 中 cp11c_aux_routing_map md5=62b4dde35039c3cf 对齐.
+        # 仅在 GLM_ALIGN_BIT_EXACT=1 时启用; 默认走原路径不重算. ===
+        if _is_bit_exact():
+            # 打印旧主路 mask, 与 MG 旧路径对比 (期望与 PF Router:L*:mask md5 一致 = 705fe80651e5c707)
+            _pf_ti(
+                "cp11d_aux_routing_map_orig(main_with_bias)",
+                routing_map,
+                self._layer_number,
+                prefix="PF Router",
+            )
+
+            # 1) 用 probs (== cp11c_aux_scores_normed, sigmoid 后归一化, 不含 bias) 重新 topk
+            _probs_2d_pf = (
+                probs
+                if probs.dim() == 2
+                else probs.reshape([-1, probs.shape[-1]])
+            )
+            _aux_top_idx_pf = paddle.topk(
+                _probs_2d_pf, k=top_k, axis=-1
+            ).indices.cast("int64")
+            # 2) scatter 还原成 [num_tokens, num_experts] 0/1 mask
+            _aux_routing_map_pf = paddle.zeros_like(
+                _probs_2d_pf
+            ).put_along_axis_(
+                _aux_top_idx_pf,
+                paddle.to_tensor(1.0, dtype=_probs_2d_pf.dtype),
+                axis=-1,
+            )
+            # 3) reshape 回入参原 shape
+            _aux_routing_map_pf = _aux_routing_map_pf.reshape(routing_map.shape)
+
+            # 4) 打印新 aux-only mask, 期望与 MG Router:L*:cp11c_aux_routing_map md5=62b4dde35039c3cf 对齐
+            _pf_ti(
+                "cp11d_aux_routing_map_used(no_bias)",
+                _aux_routing_map_pf,
+                self._layer_number,
+                prefix="PF Router",
+            )
+
+            # 5) 替换入参 routing_map 为 aux-only mask
+            routing_map = _aux_routing_map_pf
+        # === [反向对齐 align-grad] 替换结束 ===
+
+        # === 插桩: aux loss 入参 probs (== gates_ori normalized) 反向 hook ===
+        if probs.stop_gradient is False:
+            probs.register_hook(
+                _pf_grad_info(
+                    "cp11d_aux_probs_in_grad",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF AuxLoss",
+                )
+            )
+        # === 插桩结束 ===
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
             self.tensor_model_parallel_size > 1
@@ -477,23 +577,124 @@ class StandardMoERouter(nn.Layer):
                     float(self.num_experts) / top_k, dtype="float32"
                 )
             )
+            # === [反向对齐 dump] aggregated grad (中央化, GLM_ALIGN_LOG=0 时 no-op) ===
+            _DUMP_TAG = f"auxloss_L{self._layer_number}"
+            # === 插桩: aux loss 中间变量反向 hook ===
+            if cost_coeff.stop_gradient is False:
+                cost_coeff.register_hook(
+                    _pf_grad_info(
+                        "cp11d_aux_cost_coeff_grad",
+                        layer_num=self._layer_number,
+                        prefix="GRAD PF AuxLoss",
+                    )
+                )
+            # [对齐回退-注释] 旧逻辑: probs.sum(seq) / denom 在 GPU backward 上和 MG `.mean(seq)` 不一致,
+            # 默认走原 sum/denom 路径; 仅在 GLM_ALIGN_BIT_EXACT=1 时切到 .mean(seq) 与 MG 对齐.
+            if _is_bit_exact():
+                _aggregated = all_probs.mean(axis=seq_axis)
+            else:
+                _aggregated = all_probs.sum(axis=seq_axis) / denom
+            if _aggregated.stop_gradient is False:
+                _aggregated.register_hook(
+                    _pf_grad_info(
+                        "cp11d_aux_aggregated_grad",
+                        layer_num=self._layer_number,
+                        prefix="GRAD PF AuxLoss",
+                    )
+                )
+                _aggregated.register_hook(
+                    _pf_dump_grad_hook(_DUMP_TAG, "aggregated")
+                )
+            _per_batch = (cost_coeff * _aggregated).sum(axis=1)
+            if _per_batch.stop_gradient is False:
+                _per_batch.register_hook(
+                    _pf_grad_info(
+                        "cp11d_aux_loss_pre_mean_grad",
+                        layer_num=self._layer_number,
+                        prefix="GRAD PF AuxLoss",
+                    )
+                )
+                _per_batch.register_hook(
+                    _pf_dump_grad_hook(_DUMP_TAG, "per_batch")
+                )
             # Align with ernie: use mean instead of sum/S
             # [B, E] -> [B] -> []
-            seq_aux_loss = (
-                (cost_coeff * all_probs.mean(axis=seq_axis)).sum(axis=1).mean()
-            )
+            seq_aux_loss = _per_batch.mean()
         else:
             # [B, E]
-            cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
-                denom
-                * paddle.to_tensor(top_k / self.num_experts, dtype="float32")
-            )
+            # [对齐回退-注释] 旧逻辑: tensor / (denom * paddle.to_tensor(top_k/E)) 走两次 GPU kernel
+            # (一次 mul + 一次 div), 与 MG `div_(seq*topk/E)` 单 kernel 路径浮点 round 不一致,
+            # 导致 cost_coeff 末位差 1 ULP, 进而 aggregated_grad/probs_in_grad md5 对不上.
+            # 默认走原 tensor 除法路径; 仅在 GLM_ALIGN_BIT_EXACT=1 时切到 Python float scalar 单除.
+            if _is_bit_exact():
+                # 对齐 MG: 用 Python float 单 scalar 一次除, GPU kernel 与 MG `div_` 一致, 输出 bit-exact.
+                _divisor_pf = (
+                    float(max_seq_len) * float(top_k) / float(self.num_experts)
+                )
+                cost_coeff = (
+                    routing_map.sum(axis=seq_axis, dtype="float32")
+                    / _divisor_pf
+                )
+            else:
+                cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
+                    denom
+                    * paddle.to_tensor(
+                        top_k / self.num_experts, dtype="float32"
+                    )
+                )
+            _DUMP_TAG = f"auxloss_L{self._layer_number}"
+            # === 插桩: aux loss 中间变量反向 hook ===
+            if cost_coeff.stop_gradient is False:
+                cost_coeff.register_hook(
+                    _pf_grad_info(
+                        "cp11d_aux_cost_coeff_grad",
+                        layer_num=self._layer_number,
+                        prefix="GRAD PF AuxLoss",
+                    )
+                )
+            # [对齐回退-注释] 旧逻辑: probs.sum(seq) / denom 在 GPU backward 上和 MG `.mean(seq)`
+            # 走不同的 reduction 内核, 导致 probs_in_grad 末位 1 ULP 抖动, md5 对不齐.
+            # 单测验证 (/tmp/aux_verify_v2.py): 切到 .mean() 后 probs_in_grad bit-exact 一致 (0e+00 diff).
+            # 默认走原 sum/denom 路径; 仅在 GLM_ALIGN_BIT_EXACT=1 时切到 .mean(seq) 与 MG 对齐.
+            if _is_bit_exact():
+                _aggregated = all_probs.mean(axis=seq_axis)
+            else:
+                _aggregated = all_probs.sum(axis=seq_axis) / denom
+            if _aggregated.stop_gradient is False:
+                _aggregated.register_hook(
+                    _pf_grad_info(
+                        "cp11d_aux_aggregated_grad",
+                        layer_num=self._layer_number,
+                        prefix="GRAD PF AuxLoss",
+                    )
+                )
+                _aggregated.register_hook(
+                    _pf_dump_grad_hook(_DUMP_TAG, "aggregated")
+                )
+            _per_batch = (cost_coeff * _aggregated).sum(axis=1)
+            if _per_batch.stop_gradient is False:
+                _per_batch.register_hook(
+                    _pf_grad_info(
+                        "cp11d_aux_loss_pre_mean_grad",
+                        layer_num=self._layer_number,
+                        prefix="GRAD PF AuxLoss",
+                    )
+                )
+                _per_batch.register_hook(
+                    _pf_dump_grad_hook(_DUMP_TAG, "per_batch")
+                )
             # [B, E] -> [B] -> []
-            seq_aux_loss = (
-                (cost_coeff * all_probs.sum(axis=seq_axis) / denom)
-                .sum(axis=1)
-                .mean()
+            seq_aux_loss = _per_batch.mean()
+        # === 插桩: aux loss 最终标量反向 hook ===
+        if seq_aux_loss.stop_gradient is False:
+            seq_aux_loss.register_hook(
+                _pf_grad_info(
+                    "cp12_aux_loss_grad",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF AuxLoss",
+                )
             )
+        # === 插桩结束 ===
         return seq_aux_loss
 
     def _cal_z_loss(self, logits, input_ids=None) -> paddle.Tensor:
@@ -734,15 +935,33 @@ class StandardMoERouter(nn.Layer):
         assert self.e_score_correction_bias is not None, (
             "e_score_correction_bias is None"
         )
+        # 对齐 MG: expert_bias 经过 Float16Module bf16 截断, 仅在 GLM_ALIGN_BIT_EXACT=1 时启用
+        if _is_bit_exact():
+            _bias = (
+                self.e_score_correction_bias.detach()
+                .cast(paddle.bfloat16)
+                .cast(paddle.float32)
+            )
+        else:
+            _bias = self.e_score_correction_bias.detach()
+        _pf_ti(
+            "e_score_correction_bias",
+            _bias,
+            self._layer_number,
+            prefix="PF Router",
+        )
         if not self.config.gpt_model_use_experimental_version:
             scores_for_choice = scores.reshape(
                 [bsz_seq_len, -1]
-            ) + self.e_score_correction_bias.detach().unsqueeze(0)
+            ) + _bias.unsqueeze(0)
         else:
-            scores_for_choice = (
-                scores.reshape([bsz_seq_len, -1])
-                + self.e_score_correction_bias.detach()
-            )
+            scores_for_choice = scores.reshape([bsz_seq_len, -1]) + _bias
+        _pf_ti(
+            "scores_for_choice",
+            scores_for_choice,
+            self._layer_number,
+            prefix="PF Router",
+        )
         if n_group == 1:
             topk_weight, topk_idx = paddle.topk(
                 scores_for_choice, k=k, axis=-1, sorted=True
@@ -769,7 +988,18 @@ class StandardMoERouter(nn.Layer):
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        topk_weight = scores.take_along_axis(topk_idx, axis=1)
+        # === MG 对齐: PR968 修改, take_along_axis -> gather_nd, 让 backward scatter accumulation 顺序更接近 Torch gather.backward, 避免 router path sub-ULP backward residual ===
+        # 默认走 take_along_axis 原路径; 仅在 GLM_ALIGN_BIT_EXACT=1 时切到 gather_nd.
+        if _is_bit_exact():
+            row_idx = paddle.arange(
+                bsz_seq_len, dtype=topk_idx.dtype
+            ).unsqueeze(-1)
+            row_idx = row_idx.expand(topk_idx.shape)
+            gather_idx = paddle.stack([row_idx, topk_idx], axis=-1)
+            topk_weight = paddle.gather_nd(scores, gather_idx)
+        else:
+            topk_weight = scores.take_along_axis(topk_idx, axis=1)
+        # === MG 对齐结束 ===
 
         return topk_weight, topk_idx
 
@@ -998,6 +1228,44 @@ class TopKRouter(StandardMoERouter):
                 getattr(self.config, "dw_p2p_overlap", False),
             )
 
+        # === 插桩: router ===
+        _pf_ti("input", input, self._layer_number, prefix="PF Router")
+        _pf_ti(
+            "gate_weight", self.weight, self._layer_number, prefix="PF Router"
+        )
+        _pf_ti(
+            "raw_logits(after_linear)",
+            logits,
+            self._layer_number,
+            prefix="PF Router",
+        )
+        # === 插桩结束 ===
+
+        # === 插桩: router 内部 logits 反向 hook（gate linear 输出） ===
+        if logits.stop_gradient is False:
+            logits.register_hook(
+                _pf_grad_info(
+                    "cp11c_router_logits_grad(after_gating)",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF Router",
+                )
+            )
+        # === 插桩结束 ===
+
+        # === [反向对齐 align-grad] dump gate Linear 输入 (hidden,weight) + logits grad ===
+        # 与 MG router.py forward 对应位置同步保存, 用于 dgrad/wgrad 单算子重放,
+        # 以验证 cp11c -> cp11b router 路 1 ULP diff 是否来自 gate Linear backward GEMM.
+        # 中央化: 通过 paddlefleet.align_dump_utils.pf_dump_forward / pf_dump_grad_hook 落盘,
+        # GLM_ALIGN_LOG=0 时这些 helper 自身为 no-op, 不会写文件.
+        _DUMP_TAG_GD_PF = f"gate_linear_L{self._layer_number}"
+        _pf_dump_forward(
+            _DUMP_TAG_GD_PF,
+            {"hidden": input, "weight": self.weight, "logits_fwd": logits},
+        )
+        if logits.stop_gradient is False:
+            logits.register_hook(_pf_dump_grad_hook(_DUMP_TAG_GD_PF, "logits"))
+        # === [反向对齐 align-grad] dump 结束 ===
+
         _log_moe_md5(logits, "gate_logits", self._layer_number)
 
         # ---- Hash routing branch ----
@@ -1036,7 +1304,36 @@ class TopKRouter(StandardMoERouter):
             return (None, top_gate, top_idx, probs, mask, None, None, None)
         # ---- end hash routing ----
 
+        # [原代码]
         gates = self.gate_score_func(logits)
+        # [对齐修复-方案B] 用 _DualSigmoidRouter 一次性产出 gates 和 gates_ori，
+        # backward 时合并两条梯度后一次性回传给 logits，消除累加顺序 diff。
+        # gates, gates_ori = _DualSigmoidRouter.apply(logits)
+
+        # === 插桩: scores after scoring_func ===
+        _pf_ti(
+            f"scores(after_{self.scoring_func})",
+            gates,
+            self._layer_number,
+            prefix="PF Router",
+        )
+        # === 插桩: scores(after_sigmoid) 反向 hook（与 MG cp11c_scores_after_sigmoid_grad 对齐）===
+        if gates.stop_gradient is False:
+            # 强制反向对齐流程:
+            # 1) 先打印原始 PF grad（黄色，便于和 MG 原值对比，确认 diff 仍存在）
+            # 2) 用 MG 保存的 npy 替换 grad，同时打印替换后的值（绿色）
+            # Paddle register_hook 按注册顺序执行，前一个 hook 的返回值喂给下一个 hook
+            # 所以这里 print hook 先注册 -> 看到 PF 原始 grad；align hook 后注册 -> 替换 grad 给上游
+
+            # 第一个 hook: 打印原始 PF 端 grad
+            gates.register_hook(
+                _pf_grad_info(
+                    "cp11c_scores_after_sigmoid_grad",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF Router",
+                )
+            )
+        # === 插桩结束 ===
 
         if input_ids_none_zero_mask is not None:
             # input_ids_none_zero_mask shape: [b*s,1]
@@ -1049,8 +1346,24 @@ class TopKRouter(StandardMoERouter):
 
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
 
-        # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
-        gates_ori = gates.clone()
+        # [原代码] Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
+        # gates_ori = gates.clone()
+        # [对齐修复-方案A] gates_ori = paddle.nn.functional.sigmoid(logits)
+        # gates_ori = paddle.nn.functional.sigmoid(logits)
+        # [对齐修复-方案C] 对齐 MG compute_routing_scores_for_aux_loss: aux 分支从 logits 重新 fp32 sigmoid，避免 clone 回灌到 gates。
+        gates_ori = paddle.nn.functional.sigmoid(
+            logits.cast(paddle.float32)
+        ).cast(logits.dtype)
+        if input_ids_none_zero_mask is not None:
+            gates_ori = gates_ori * valid_mask
+        if gates_ori.stop_gradient is False:
+            gates_ori.register_hook(
+                _pf_grad_info(
+                    "cp11c_aux_scores_pre_norm_grad",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF Router",
+                )
+            )
         if self.scoring_func == "sigmoid":
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
@@ -1063,6 +1376,20 @@ class TopKRouter(StandardMoERouter):
                 gates_ori = gates_ori / paddle.clip(
                     gates_ori.sum(-1, keepdim=True), min=1e-12
                 )
+        if gates_ori.stop_gradient is False:
+            gates_ori.register_hook(
+                _pf_grad_info(
+                    "cp11c_aux_scores_normed_grad",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF Router",
+                )
+            )
+        _pf_ti(
+            "cp11c_aux_scores_normed",
+            gates_ori,
+            self._layer_number,
+            prefix="PF Router",
+        )
 
         if getattr(self.config, "moe_topk_fusion", False):
             # Use MoETopkFusion Triton kernel for bit-exact alignment.
@@ -1151,11 +1478,39 @@ class TopKRouter(StandardMoERouter):
             exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
 
         # norm
+        _pf_ti(
+            "topk_weights_raw(before_norm)",
+            top_gate,
+            self._layer_number,
+            prefix="PF Router",
+        )
+        # === 插桩: topk_weights_raw(before_norm) 反向 hook（与 MG cp11c_topk_weights_raw_grad 对齐）===
+        if top_gate.stop_gradient is False:
+            top_gate.register_hook(
+                _pf_grad_info(
+                    "cp11c_topk_weights_raw_grad",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF Router",
+                )
+            )
+        # === 插桩结束 ===
         if self.norm_topk_prob:
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
-                denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+                # [原始代码] fp32 sum 归一化
+                # denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+                # [对齐修复-注释] 如 torch 2.9.1 仍不能对齐，改用 fp64 sum:
+                _sum_f64 = top_gate.cast(paddle.float64).sum(
+                    axis=-1, keepdim=True
+                )
+                denominator = _sum_f64.cast(paddle.float32) + 1e-20
+                _pf_ti(
+                    "topk_sum",
+                    denominator,
+                    self._layer_number,
+                    prefix="PF Router",
+                )
                 top_gate = top_gate / denominator
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
 
@@ -1176,6 +1531,44 @@ class TopKRouter(StandardMoERouter):
 
         _log_moe_md5(probs, "probs", self._layer_number)
         _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
+
+        # === 插桩: final topk_weights/indices ===
+        _pf_ti(
+            "topk_weights(after_norm)",
+            top_gate,
+            self._layer_number,
+            prefix="PF Router",
+        )
+        _pf_ti("topk_indices", top_idx, self._layer_number, prefix="PF Router")
+        _pf_ti("mask", mask, self._layer_number, prefix="PF Router")
+        # === 插桩: topk_weights(after_norm) 反向 hook（与 MG cp11c_topk_weights_normed_grad 对齐）===
+        if top_gate.stop_gradient is False:
+            top_gate.register_hook(
+                _pf_grad_info(
+                    "cp11c_topk_weights_normed_grad",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF Router",
+                )
+            )
+        # === 插桩结束 ===
+
+        # === 插桩: router 内部 probs/top_gate 反向 hook ===
+        # [改名] 与 MG 保持一致: probs_grad -> scores_grad, 物理量相同(sparse [N,E])
+        if probs.stop_gradient is False:
+            probs.register_hook(
+                _pf_grad_info(
+                    "cp11c_router_scores_grad(final)",
+                    layer_num=self._layer_number,
+                    prefix="GRAD PF Router",
+                )
+            )
+        # [PF 独有, 注释掉] cp11c_router_top_gate_grad(final) - MG 无对应 hook
+        # if top_gate.stop_gradient is False:
+        #     top_gate.register_hook(
+        #         _pf_grad_info("cp11c_router_top_gate_grad(final)",
+        #                       layer_num=self._layer_number, prefix="GRAD PF Router")
+        #     )
+        # === 插桩结束 ===
 
         if self.topk_method == "noaux_tc":
             with paddle.no_grad():

@@ -25,9 +25,13 @@ from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
 from paddle.distributed.fleet.meta_parallel import ScheduleNode
+
+# === save_tensor 插桩结束 ===
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import _pf_grad_info, _pf_tensor_info
 from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
@@ -329,6 +333,14 @@ class LanguageLoss(FleetLayer):
             loss = sb_loss_func(logits, labels)
         else:
             loss = self.loss_func(logits.cast("float32"), labels)
+
+        # === 插桩: CP16 loss_per_token ===
+        _pf_tensor_info("cp16_loss_per_token", loss, prefix="PF LanguageLoss")
+        if not loss.stop_gradient:
+            loss.register_hook(
+                _pf_grad_info("cp16_loss_per_token", prefix="GRAD PF")
+            )
+        # === 插桩结束 ===
 
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(

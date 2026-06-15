@@ -27,6 +27,11 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
 )
 
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import (
+    _pf_grad_info,
+    _pf_tensor_info,
+)
 from paddlefleet.context_parallel_utils import (
     ContextParallelScatterOp,
     mark_context_parallel_parameter_disable_scale_grad,
@@ -39,6 +44,8 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.transformer.layer import FleetLayer
+
+# === save_tensor 插桩结束 ===
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -144,6 +151,9 @@ class GPTEmbedding(FleetLayer):
         packed_seq_params: PackedSeqParams = None,
     ):
         input_ids = dict_args["input_ids"]
+        # === 插桩: CP0 input_ids ===
+        _pf_tensor_info("cp0_input_ids", input_ids, prefix="PF Embedding")
+        # === 插桩结束 ===
         labels = dict_args.get("labels", None)
         if labels is not None:
             labels = labels.cuda()
@@ -187,6 +197,17 @@ class GPTEmbedding(FleetLayer):
                 if self.multimodal_embedding
                 else position_ids,
             )
+            # === 插桩: CP1 embedding_output ===
+            _pf_tensor_info(
+                "cp1_embedding_output", decoder_input, prefix="PF Embedding"
+            )
+            if not decoder_input.stop_gradient:
+                decoder_input.register_hook(
+                    _pf_grad_info(
+                        "cp1_embedding_output", prefix="GRAD PF Embedding"
+                    )
+                )
+            # === 插桩结束 ===
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
             if (
                 self.config.expert_model_parallel_size > 1
