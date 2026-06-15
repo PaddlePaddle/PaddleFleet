@@ -518,6 +518,7 @@ jobs:
           ls paddlefleet_ops-*.whl | head -n1 > paddlefleet_ops-arm-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
+            echo "testing..."
           else
             # python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
             echo "testing..."
