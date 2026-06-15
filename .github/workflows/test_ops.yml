@@ -563,7 +563,7 @@ jobs:
   upload-to-paddletest:
     name: Upload ops wheel to paddletest (${{ matrix.flavor.label }}, ${{ matrix.flavor.bos_CUDA }}, py${{ matrix.flavor.python_version }})
     needs: [publish-ops-wheel, publish-ops-wheel-paddle-dev, publish-ops-wheel-arm]
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: paddle-bot
     env:
       PR_ID: ${{ github.event.pull_request.number || '0' }}
@@ -591,12 +591,14 @@ jobs:
     steps:
       - name: Download wheel name artifact
         if: github.ref_type != 'tag' && matrix.flavor.label != 'arm'
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: ${{ matrix.flavor.artifact_name }}
 
       - name: Download arm wheel name from bos
         if: github.ref_type != 'tag' && matrix.flavor.label == 'arm'
+        continue-on-error: true
         run: |
           wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.flavor.name_key }} --no-check-certificate
 
@@ -604,6 +606,10 @@ jobs:
         if: github.ref_type != 'tag'
         run: |
           set -e
+          if [[ ! -f "${{ matrix.flavor.name_key }}" ]]; then
+            echo "Skip paddletest notify: ${{ matrix.flavor.name_key }} not found"
+            exit 0
+          fi
           python -m pip install requests
           wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
           WHEEL_FILE=$(cat "${{ matrix.flavor.name_key }}")
