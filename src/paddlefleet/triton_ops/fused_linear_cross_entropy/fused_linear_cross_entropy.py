@@ -73,6 +73,15 @@ def fused_linear_cross_entropy_forward(
     """
     input_requires_grad = not _input.stop_gradient
     weight_requires_grad = not weight.stop_gradient
+    bias_requires_grad = bias is not None and not bias.stop_gradient
+    # The Triton kernel writes softmax-grad (= grad_logits) in-place into
+    # logits_chunk whenever ANY of {input, weight, bias} needs a gradient,
+    # since grad_logits feeds all three downstream GEMMs. Gating this on
+    # `input_requires_grad` alone breaks the freeze-backbone / train-head
+    # case where _input.stop_gradient=True but weight.stop_gradient=False.
+    needs_grad_logits = (
+        input_requires_grad or weight_requires_grad or bias_requires_grad
+    )
     orig_dtype = _input.dtype
 
     BT, H = _input.shape
@@ -88,7 +97,7 @@ def fused_linear_cross_entropy_forward(
     )
     # ec_align 模式：grad_weight 使用 [H, V] 布局，与 ernie-core 的 GEMM shape 一致。
     # 默认模式：grad_weight 使用 [V, H] 布局（与 weight.shape 一致，main_grad 可直接 add_）。
-    if input_requires_grad and weight_requires_grad:
+    if weight_requires_grad:
         grad_weight = (
             paddle.zeros([H, V], dtype=paddle.float32)
             if ec_align
@@ -98,7 +107,7 @@ def fused_linear_cross_entropy_forward(
         grad_weight = None
     grad_bias = (
         paddle.zeros([bias.shape[0]], dtype=paddle.float32)
-        if (input_requires_grad and bias is not None)
+        if bias_requires_grad
         else None
     )
 
@@ -179,7 +188,7 @@ def fused_linear_cross_entropy_forward(
                 grad_r_ptr=grad_multimax_ranges,
                 grad_t_ptr=grad_multimax_ts,
                 reduction=reduction,
-                HAS_GRADIENTS=input_requires_grad,
+                HAS_GRADIENTS=needs_grad_logits,
                 HAS_MULTIMAX_GRADIENTS=multimax_requires_grad,
                 BLOCK_SIZE=BLOCK_SIZE,
                 num_warps=32,
@@ -196,7 +205,7 @@ def fused_linear_cross_entropy_forward(
                 n_non_ignore=total_n_non_ignore,
                 ignore_index=ignore_index,
                 reduction=reduction,
-                HAS_GRADIENTS=input_requires_grad,
+                HAS_GRADIENTS=needs_grad_logits,
                 BLOCK_SIZE=BLOCK_SIZE,
                 num_warps=32,
             )

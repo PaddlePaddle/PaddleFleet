@@ -361,6 +361,54 @@ class TestFusedMultimaxNumerical(unittest.TestCase):
             f"got={t_f.grad.numpy().tolist()}",
         )
 
+    def test_fused_multimax_grads_when_only_input_frozen(self):
+        """Freeze only the backbone input; keep weight + multimax trainable.
+        This is the head-only-training regime flagged in CR: the kernel must
+        still write grad_logits (so weight grad is populated) and emit
+        non-zero multimax param grads, even though x.stop_gradient=True.
+        Regression for the `HAS_GRADIENTS=input_requires_grad` gating bug
+        and for the `grad_weight` allocation being conditioned on
+        `input_requires_grad and weight_requires_grad`.
+        """
+        from paddlefleet.triton_ops.fused_linear_cross_entropy import (
+            LigerFusedLinearCrossEntropyFunction,
+        )
+
+        x, w, targets, ranges, ts, ig = self._make_inputs()
+        x_f = x.detach().clone()
+        x_f.stop_gradient = True  # frozen backbone
+        w_f = w.detach().clone()
+        w_f.stop_gradient = False  # LM head weight is trainable
+        r_f = ranges.detach().clone()
+        r_f.stop_gradient = False
+        t_f = ts.detach().clone()
+        t_f.stop_gradient = False
+
+        loss = LigerFusedLinearCrossEntropyFunction.apply(
+            x_f, w_f, targets, None, ig, "none", 1, False, r_f, t_f
+        ).sum()
+        loss.backward()
+
+        _, _, gw_ref, gr_ref, gt_ref = self._run_reference(
+            x, w, targets, ranges, ts, ig
+        )
+        self.assertIsNotNone(
+            w_f.grad, "weight.grad is None when only input is frozen"
+        )
+        self.assertTrue(
+            paddle.allclose(gw_ref, w_f.grad, atol=1e-3, rtol=1e-3).item(),
+            f"frozen-input grad_weight max abs diff="
+            f"{(gw_ref - w_f.grad).abs().max().item()}",
+        )
+        self.assertIsNotNone(r_f.grad)
+        self.assertIsNotNone(t_f.grad)
+        self.assertTrue(
+            paddle.allclose(gr_ref, r_f.grad, atol=1e-3, rtol=1e-3).item()
+        )
+        self.assertTrue(
+            paddle.allclose(gt_ref, t_f.grad, atol=1e-3, rtol=1e-3).item()
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
