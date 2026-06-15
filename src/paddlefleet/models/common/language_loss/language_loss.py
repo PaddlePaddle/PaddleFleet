@@ -328,6 +328,11 @@ class LanguageLoss(FleetLayer):
             )
             loss = sb_loss_func(logits, labels)
         else:
+            if (
+                self.config.gpt_model_use_experimental_version
+                and self.config.sequence_parallel
+            ):
+                logits = logits.reshape([labels.shape[0], -1, logits.shape[-1]])
             loss = self.loss_func(logits.cast("float32"), labels)
 
         if get_context_parallel_world_size() > 1:
@@ -396,6 +401,8 @@ class LanguageLoss(FleetLayer):
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
             if self.config.gpt_model_use_experimental_version:
+                if get_tensor_model_parallel_world_size() > 1:
+                    loss = loss.squeeze(-1)
                 loss_2d = loss.cast(paddle.float32) * lossmask.reshape(
                     labels.shape
                 )
@@ -481,6 +488,17 @@ class LanguageLoss(FleetLayer):
                                 labels_cur_depth,
                             )
                         else:
+                            if (
+                                self.config.gpt_model_use_experimental_version
+                                and self.config.sequence_parallel
+                            ):
+                                logits_cur_depth = logits_cur_depth.reshape(
+                                    [
+                                        labels_cur_depth.shape[0],
+                                        -1,
+                                        logits_cur_depth.shape[-1],
+                                    ]
+                                )
                             loss_matrix_cur_depth = self.loss_func(
                                 logits_cur_depth.cast("float32"),
                                 labels_cur_depth,

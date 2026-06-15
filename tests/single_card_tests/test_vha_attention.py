@@ -95,6 +95,7 @@ class TestSelfAttentionVHA(unittest.TestCase):
         config.output_layer_init_method = scaled_init_method_normal(
             0.02, 1, 2.0
         )
+        config.gpt_model_use_experimental_version = False
         config.rms_norm_eps = 1e-5
         config.context_parallel_size = 1
         config.apply_query_key_layer_scaling = False
@@ -361,6 +362,7 @@ class TestSelfAttentionExperimentalVersion(unittest.TestCase):
         config.rotary_interleaved = False
         config.multi_latent_attention = False
         config.init_method = init_method_normal(0.02)
+        config.max_sequence_length = 16
         config.output_layer_init_method = scaled_init_method_normal(
             0.02, 1, 2.0
         )

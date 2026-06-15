@@ -124,7 +124,10 @@ class GPTLMHead(ColumnParallelLinear):
             logits = recompute_handler(hidden_states, self.weight.T)
         else:
             logits, _ = super().forward(hidden_states, self.weight.T)
-        if self.config.sequence_parallel:
+        if (
+            not self.config.gpt_model_use_experimental_version
+            and self.config.sequence_parallel
+        ):
             logits = logits.transpose([1, 0, 2]).contiguous()
 
         # Loss-path MD5 probe: lm_head weight and logits
