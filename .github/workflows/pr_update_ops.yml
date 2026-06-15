@@ -416,7 +416,8 @@ jobs:
       matrix:
         python_version: ["3.12"]
         cuda:
-          - {CUDA_VERSION: CUDA13.0, bos_CUDA: cu130}
+          - {CUDA_VERSION: CUDA13.0, bos_CUDA: cu130, IMAGE_TAG: cuda130-dev-arm-py312}
+          - {CUDA_VERSION: CUDA13.2, bos_CUDA: cu132, IMAGE_TAG: cuda132-dev-arm-py312}
     env:
       TASK: PaddleFleet-nightly-arm-${{ matrix.cuda.CUDA_VERSION }}
       PIP_CACHE_DIR: /home/.cache/pip
@@ -430,7 +431,7 @@ jobs:
     steps:
       - name: Check docker image and run container
         run: |
-          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev-arm-py312"
+          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:${{ matrix.cuda.IMAGE_TAG }}"
           docker pull $docker_image
           container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
@@ -493,7 +494,10 @@ jobs:
           source /root/proxy
           git reset --hard ${{ github.sha }}
           uv cache clean paddlepaddle-gpu
+          uv build --wheel -v
+          /usr/bin/python -m pip install --break-system-packages dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           git submodule update --init --recursive
+          git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
