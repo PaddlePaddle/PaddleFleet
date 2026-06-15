@@ -1685,13 +1685,13 @@ class CompressedSparseAttention(FleetLayer):
             "csa_tilelang_enable_indexer",
         )
         use_cudnn_indexer = self.config.csa_indexer_backend == "cudnn"
-        # The fused TileLang indexer-loss path is only active during the
+        # The fused selected-set indexer-loss path is only active during the
         # grad-enabled forward. Full recompute runs the first forward under
         # no_grad; that pass should only materialize main-attention indices.
-        # cuDNN backend overrides: skip fused loss path, use cuDNN topk only.
+        # cuDNN backend reuses the selected-set loss tensors and dispatches
+        # its backward through TileLangCSAIndexerLossAutoScaler.
         use_tilelang_loss_path = (
-            use_tilelang_indexer
-            and indexer_backend != "cudnn"
+            (use_tilelang_indexer or use_cudnn_indexer)
             and self.training
             and paddle.is_grad_enabled()
         )
@@ -1831,7 +1831,7 @@ class CompressedSparseAttention(FleetLayer):
 
         # Optionally replace topk producer with fused compressed indexer
         # forward. This only swaps the indices fed to sparse attention.
-        if use_cudnn_indexer and not use_tilelang_loss_path:
+        if use_cudnn_indexer:
             from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
                 cudnn_indexer_topk_fwd,
             )

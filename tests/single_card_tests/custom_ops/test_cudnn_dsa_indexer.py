@@ -174,17 +174,18 @@ class TestCudnnIndexerTopkFwd(unittest.TestCase):
 
     def test_early_positions_all_invalid(self):
         """Positions 0..ratio-2 have (s+1)//ratio==0 -> all indices -1."""
-        B, S_q, H_i, D_i, ratio, topk = 1, 64, 64, 128, 4, 8
+        B, S_q, H_i, D_i, ratio, topk = 2, 64, 64, 128, 4, 8
         S_k = S_q // ratio
         q, k, w = _make_indexer_inputs(B, S_q, S_k, H_i, D_i)
         indices, _ = self.cudnn_indexer_topk_fwd(
             q, k, w, ratio=ratio, topk_effective=topk
         )
-        for s in range(ratio - 1):
-            self.assertTrue(
-                _all_equal(indices[0, s, :], -1),
-                f"Position {s} should be all -1",
-            )
+        for b in range(B):
+            for s in range(ratio - 1):
+                self.assertTrue(
+                    _all_equal(indices[b, s, :], -1),
+                    f"batch {b}, position {s} should be all -1",
+                )
 
     def test_valid_indices_in_causal_range(self):
         """All non-negative indices satisfy idx < (s+1)//ratio."""
@@ -194,15 +195,17 @@ class TestCudnnIndexerTopkFwd(unittest.TestCase):
         indices, _ = self.cudnn_indexer_topk_fwd(
             q, k, w, ratio=ratio, topk_effective=topk
         )
-        for s in range(S_q):
-            max_valid = (s + 1) // ratio
-            row = indices[0, s, :].numpy()
-            for idx in row:
-                if idx >= 0:
-                    self.assertLess(
-                        idx, max_valid,
-                        f"pos {s}: index {idx} >= max_valid {max_valid}",
-                    )
+        for b in range(B):
+            for s in range(S_q):
+                max_valid = (s + 1) // ratio
+                row = indices[b, s, :].numpy()
+                for idx in row:
+                    if idx >= 0:
+                        self.assertLess(
+                            idx,
+                            max_valid,
+                            f"batch {b}, pos {s}: index {idx} >= max_valid {max_valid}",
+                        )
 
     def test_topk_length_matches_valid_count(self):
         B, S_q, H_i, D_i, ratio, topk = 1, 64, 32, 128, 4, 4
@@ -228,7 +231,7 @@ class TestCudnnIndexerTopkFwd(unittest.TestCase):
         self.assertEqual(list(indices.shape), [B, S_q, topk])
 
     def test_index_sets_match_paddle_reference(self):
-        B, S_q, H_i, D_i, ratio, topk = 1, 64, 64, 128, 4, 8
+        B, S_q, H_i, D_i, ratio, topk = 2, 64, 64, 128, 4, 8
         S_k = S_q // ratio
         q, k, w = _make_indexer_inputs(B, S_q, S_k, H_i, D_i, seed=2029)
         indices, _ = self.cudnn_indexer_topk_fwd(
@@ -263,7 +266,7 @@ class TestCudnnVsTileLangCrossValidation(unittest.TestCase):
         self.cudnn_indexer_topk_fwd = cudnn_indexer_topk_fwd
 
     def test_index_sets_match(self):
-        B, S_q, H_i, D_i, ratio, topk = 1, 64, 64, 128, 4, 8
+        B, S_q, H_i, D_i, ratio, topk = 2, 64, 64, 128, 4, 8
         S_k = S_q // ratio
         q, k, w = _make_indexer_inputs(B, S_q, S_k, H_i, D_i, seed=42)
         cudnn_indices, _ = self.cudnn_indexer_topk_fwd(
