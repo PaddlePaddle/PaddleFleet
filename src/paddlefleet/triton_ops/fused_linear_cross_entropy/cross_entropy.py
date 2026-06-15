@@ -143,6 +143,7 @@ def liger_cross_entropy_multimax_kernel(
     reduction: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     HAS_GRADIENTS: tl.constexpr,
+    HAS_MULTIMAX_GRADIENTS: tl.constexpr,
 ):
     """Liger CE kernel with fused SeLU activation + closed-form SeLU backward.
 
@@ -208,7 +209,7 @@ def liger_cross_entropy_multimax_kernel(
 
     lse = m + tl.log(d)
 
-    if HAS_GRADIENTS:
+    if HAS_GRADIENTS or HAS_MULTIMAX_GRADIENTS:
         # Per-row scalar accumulators for grad_ranges and grad_ts.
         gr0 = 0.0
         gr1 = 0.0
@@ -248,44 +249,49 @@ def liger_cross_entropy_multimax_kernel(
             # and the param-grad reductions).
             grad_out = tl.where(in_bounds, grad_out, 0.0)
 
-            # SeLU backward: d_out/d_x = 1 - t0*1{r0>x} + t1*1{x>r1}
-            #                              - 2*t2*max(r2-x,0) + 2*t3*max(x-r3,0)
-            mask0 = (m0_b > 0.0).to(tl.float32)
-            mask1 = (m1_b > 0.0).to(tl.float32)
-            dx_dx = (
-                1.0
-                - t0 * mask0
-                + t1 * mask1
-                - 2.0 * t2 * m2_b
-                + 2.0 * t3 * m3_b
-            )
-            grad_x = grad_out * dx_dx
-            tl.store(X_ptr + X_offsets, grad_x, mask=in_bounds)
+            if HAS_GRADIENTS:
+                # SeLU backward: d_out/d_x = 1 - t0*1{r0>x} + t1*1{x>r1}
+                #                              - 2*t2*max(r2-x,0) + 2*t3*max(x-r3,0)
+                mask0 = (m0_b > 0.0).to(tl.float32)
+                mask1 = (m1_b > 0.0).to(tl.float32)
+                dx_dx = (
+                    1.0
+                    - t0 * mask0
+                    + t1 * mask1
+                    - 2.0 * t2 * m2_b
+                    + 2.0 * t3 * m3_b
+                )
+                grad_x = grad_out * dx_dx
+                tl.store(X_ptr + X_offsets, grad_x, mask=in_bounds)
 
-            # Per-row partial sums for grad_ts and grad_ranges.
-            #   d_out/d_t0 = m0,   d_out/d_t1 = m1
-            #   d_out/d_t2 = m2^2, d_out/d_t3 = m3^2
-            #   d_out/d_r0 =  t0*1{r0>x},  d_out/d_r1 = -t1*1{x>r1}
-            #   d_out/d_r2 =  2*t2*m2,     d_out/d_r3 = -2*t3*m3
-            gt0 += tl.sum(grad_out * m0_b)
-            gt1 += tl.sum(grad_out * m1_b)
-            gt2 += tl.sum(grad_out * m2_b * m2_b)
-            gt3 += tl.sum(grad_out * m3_b * m3_b)
-            gr0 += t0 * tl.sum(grad_out * mask0)
-            gr1 += -t1 * tl.sum(grad_out * mask1)
-            gr2 += 2.0 * t2 * tl.sum(grad_out * m2_b)
-            gr3 += -2.0 * t3 * tl.sum(grad_out * m3_b)
+            if HAS_MULTIMAX_GRADIENTS:
+                # Per-row partial sums for grad_ts and grad_ranges.
+                #   d_out/d_t0 = m0,   d_out/d_t1 = m1
+                #   d_out/d_t2 = m2^2, d_out/d_t3 = m3^2
+                #   d_out/d_r0 =  t0*1{r0>x},  d_out/d_r1 = -t1*1{x>r1}
+                #   d_out/d_r2 =  2*t2*m2,     d_out/d_r3 = -2*t3*m3
+                mm0 = (m0_b > 0.0).to(tl.float32)
+                mm1 = (m1_b > 0.0).to(tl.float32)
+                gt0 += tl.sum(grad_out * m0_b)
+                gt1 += tl.sum(grad_out * m1_b)
+                gt2 += tl.sum(grad_out * m2_b * m2_b)
+                gt3 += tl.sum(grad_out * m3_b * m3_b)
+                gr0 += t0 * tl.sum(grad_out * mm0)
+                gr1 += -t1 * tl.sum(grad_out * mm1)
+                gr2 += 2.0 * t2 * tl.sum(grad_out * m2_b)
+                gr3 += -2.0 * t3 * tl.sum(grad_out * m3_b)
 
-        # One atomic_add per row per scalar (8 total). Race-free across
-        # programs and well below kernel runtime.
-        tl.atomic_add(grad_r_ptr + 0, gr0)
-        tl.atomic_add(grad_r_ptr + 1, gr1)
-        tl.atomic_add(grad_r_ptr + 2, gr2)
-        tl.atomic_add(grad_r_ptr + 3, gr3)
-        tl.atomic_add(grad_t_ptr + 0, gt0)
-        tl.atomic_add(grad_t_ptr + 1, gt1)
-        tl.atomic_add(grad_t_ptr + 2, gt2)
-        tl.atomic_add(grad_t_ptr + 3, gt3)
+        if HAS_MULTIMAX_GRADIENTS:
+            # One atomic_add per row per scalar (8 total). Race-free across
+            # programs and well below kernel runtime.
+            tl.atomic_add(grad_r_ptr + 0, gr0)
+            tl.atomic_add(grad_r_ptr + 1, gr1)
+            tl.atomic_add(grad_r_ptr + 2, gr2)
+            tl.atomic_add(grad_r_ptr + 3, gr3)
+            tl.atomic_add(grad_t_ptr + 0, gt0)
+            tl.atomic_add(grad_t_ptr + 1, gt1)
+            tl.atomic_add(grad_t_ptr + 2, gt2)
+            tl.atomic_add(grad_t_ptr + 3, gt3)
 
     tl.debug_barrier()
 
