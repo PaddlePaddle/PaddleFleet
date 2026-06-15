@@ -1315,6 +1315,21 @@ class TransformerConfig(ModelParallelConfig):
         import warnings as _warnings
 
         _multimax = getattr(self, "apply_multimax", None)
+        # YAML entry path returns OmegaConf containers (ListConfig), not
+        # builtin list. Normalize to a plain Python list before any
+        # isinstance(_multimax, list) check; otherwise the recommended
+        # `apply_multimax: [lm_head]` form is rejected.
+        try:
+            from omegaconf import (
+                ListConfig as _ListConfig,
+                OmegaConf as _OmegaConf,
+            )
+
+            if isinstance(_multimax, _ListConfig):
+                _multimax = _OmegaConf.to_container(_multimax, resolve=True)
+                self.apply_multimax = _multimax
+        except ImportError:
+            pass
         # Allow yaml/json to leave the field unset, set to ``null``, pass an
         # empty string, or pass an empty list -- all map to the canonical
         # disabled sentinel ``None``.
