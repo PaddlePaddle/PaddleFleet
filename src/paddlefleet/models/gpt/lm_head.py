@@ -15,8 +15,8 @@
 # =============================================================================
 # Multimax lm_head support
 # -----------------------------------------------------------------------------
-# When TransformerConfig.apply_multimax is a list containing "lm_head" (e.g.,
-# ``apply_multimax: [lm_head]``), GPTLMHead adds two learnable [4]-shape
+# When TransformerConfig.multimax_modules is a list containing "lm_head" (e.g.,
+# ``multimax_modules: [lm_head]``), GPTLMHead adds two learnable [4]-shape
 # parameters (multimax_ranges, multimax_ts) and applies a SegLU-style segmented
 # modulation to logits before softmax/cross-entropy:
 #
@@ -36,8 +36,8 @@
 #     grep -E "MULTIMAX-(CONFIG|LMHEAD-CONFIRM|LMHEAD-APPLIED)" <train.log>
 #
 # Expected output (per rank holding the LM head):
-#   [MULTIMAX-CONFIG]            apply_multimax=['lm_head']
-#   [MULTIMAX-LMHEAD-CONFIRM]    cls=... apply_multimax=['lm_head'] ranges.shape=[4] ...
+#   [MULTIMAX-CONFIG]            multimax_modules=['lm_head']
+#   [MULTIMAX-LMHEAD-CONFIRM]    cls=... multimax_modules=['lm_head'] ranges.shape=[4] ...
 #   [MULTIMAX-LMHEAD-APPLIED]    cls=... logits.shape=[...] ranges=[...] ts=[...]
 #                                (or path=fused for the fused-CE branch)
 #
@@ -193,7 +193,7 @@ class GPTLMHead(ColumnParallelLinear):
         # Names contain the "multimax" substring so the trainer's no-decay
         # filter excludes them from weight decay (mirrors timm's convention
         # of not decaying scalar/1-D learnable coefficients).
-        multimax_mode = getattr(self.config, "apply_multimax", None) or []
+        multimax_mode = getattr(self.config, "multimax_modules", None) or []
         self.use_multimax_lmhead = "lm_head" in multimax_mode
         if self.use_multimax_lmhead:
             # Cold-start init to zero -> SegLU is identity at step 0, so the
@@ -218,7 +218,7 @@ class GPTLMHead(ColumnParallelLinear):
             # for the full sanity-check workflow.
             warnings.warn(
                 f"[MULTIMAX-LMHEAD-CONFIRM] cls={type(self).__name__} "
-                f"apply_multimax={multimax_mode} "
+                f"multimax_modules={multimax_mode} "
                 f"ranges.shape={list(self.multimax_ranges.shape)} "
                 f"ts.shape={list(self.multimax_ts.shape)} "
                 f"dtype={self.config.params_dtype} "
