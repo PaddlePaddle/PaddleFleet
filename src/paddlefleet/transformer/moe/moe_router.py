@@ -30,6 +30,10 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     mark_as_sequence_parallel_parameter,
 )
 
+from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
+    GatherOpLegacy,
+)
+
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -37,13 +41,17 @@ from paddle._C_ops import matmul_grad
 from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
 )
+from paddle.distributed.fleet.utils.sequence_parallel_utils import ScatterOp
 
 from paddlefleet.context_parallel_utils import (
     ContextParallelAllGatherOp,
     ContextParallelGatherOp,
     ContextParallelScatterOp,
 )
-from paddlefleet.parallel_state import get_context_parallel_world_size
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+    get_tensor_model_parallel_group,
+)
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
 # MD5 logging for MoE router precision debugging
@@ -421,8 +429,25 @@ class StandardMoERouter(nn.Layer):
                     [-1, local_seq_len, self.num_experts]
                 )
             batch_size = all_probs.shape[0]
-            # [B, S, E]
-            routing_map = routing_map.reshape([batch_size, seq_len, -1])
+            # [B, S, E]: align with EC by GatherOp + split on routing_map
+            if self.sequence_parallel and self.tensor_model_parallel_size > 1:
+                tp_group = get_tensor_model_parallel_group()
+                routing_map_gathered = GatherOpLegacy.apply(
+                    routing_map, 0, tp_group
+                ).reshape(
+                    [
+                        -1,
+                        seq_len * self.tensor_model_parallel_size,
+                        routing_map.shape[-1],
+                    ]
+                )
+                routing_map = paddle.split(
+                    routing_map_gathered,
+                    num_or_sections=self.tensor_model_parallel_size,
+                    axis=1,
+                )[tp_group.rank]
+            else:
+                routing_map = routing_map.reshape([batch_size, seq_len, -1])
             max_seq_len = local_seq_len
         else:
             # [B, S, E]
@@ -438,6 +463,15 @@ class StandardMoERouter(nn.Layer):
         # fixed max_seq_len. PF's input_ids plays the role of EC's origin_input_ids.
         # [B, 1]
         if input_ids is not None:
+            if (
+                self.config.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
+                b, s = input_ids.shape
+                input_ids = AllGatherOp.apply(input_ids.reshape([-1])).reshape(
+                    [b, -1]
+                )
             if (
                 get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
@@ -512,16 +546,25 @@ class StandardMoERouter(nn.Layer):
             paddle.Tensor: The z loss value.
         """
         if input_ids is not None:
+            origin_input_ids = input_ids
+            if (
+                self.config.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
+                b, s = input_ids.shape
+                origin_input_ids = AllGatherOp.apply(
+                    origin_input_ids.reshape([-1])
+                ).reshape([b, -1])
             if (
                 get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
             ):
                 # In EB data flow, we need to gather input_ids here to get right denom.
                 origin_input_ids = ContextParallelGatherOp.apply(
-                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                    origin_input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
-            else:
-                origin_input_ids = input_ids
+
             pad_token_id = getattr(self.config, "pad_token_id", 0)
             if pad_token_id is None:
                 pad_token_id = 0
@@ -993,9 +1036,57 @@ class TopKRouter(StandardMoERouter):
             else:
                 input_ids_none_zero_mask = None
         elif len(input.shape) == 2:
-            raise ValueError(
-                "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
+            if not self.config.gpt_model_use_experimental_version:
+                raise ValueError(
+                    "input must be a 3D tensor when "
+                    "gpt_model_use_experimental_version=True."
+                )
+            cp_size = (
+                get_context_parallel_world_size()
+                if getattr(self.config, "experimental_dataflow", False)
+                else 1
             )
+            tp_size = (
+                self.tensor_model_parallel_size if self.sequence_parallel else 1
+            )
+            seq_len = self.config.max_sequence_length // (cp_size * tp_size)
+            batch_size = input.shape[0] // seq_len
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+                and input_ids is not None
+            ):
+                # In EB dataflow, shape of input_ids [b, s],
+                # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
+                # so we need to scatter input_ids here to avid the assertion below
+                input_ids = ContextParallelScatterOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
+            if (
+                input_ids is not None
+                and self.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # SP: input_ids [b, s/cp] -> [b, s/(cp*tp)]
+                b, s = input_ids.shape
+                input_ids = ScatterOp.apply(input_ids.reshape([-1])).reshape(
+                    [b, -1]
+                )
+            if input_ids is not None:
+                pad_token_id = getattr(self.config, "pad_token_id", 0)
+                if pad_token_id is None:
+                    pad_token_id = 0
+                input_ids_none_zero_mask = (input_ids != pad_token_id).reshape(
+                    [-1, 1]
+                )
+                batch_size_, seq_len_ = input_ids.shape
+                assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
+                    f"input_ids shape mismatch with input: "
+                    f"input_ids=[{batch_size_}, {seq_len_}], "
+                    f"expected [batch_size={batch_size}, seq_len={seq_len}]"
+                )
+            else:
+                input_ids_none_zero_mask = None
 
         # Hash routing requires input_ids; verify early.
         if self.is_hash_layer and input_ids is None:
