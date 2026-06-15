@@ -93,6 +93,45 @@ class TestMultimaxConfig(unittest.TestCase):
             f"expected [MULTIMAX-CONFIG] banner, got: {msgs}",
         )
 
+    def test_none_explicit_no_unimplemented_warning(self):
+        """multimax=None explicitly: only the [MULTIMAX-CONFIG] banner fires;
+        no 'not implemented' warning (which is reserved for attn/all)."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            self._build(multimax=None)
+        msgs = [str(x.message) for x in w]
+        self.assertFalse(
+            any("not implemented" in m for m in msgs),
+            f"unexpected unimplemented warning for None: {msgs}",
+        )
+        self.assertTrue(
+            any("[MULTIMAX-CONFIG]" in m and "None" in m for m in msgs),
+            f"expected [MULTIMAX-CONFIG] multimax=None banner, got: {msgs}",
+        )
+
+    def test_invalid_value_message_lists_choices(self):
+        """ValueError message must enumerate the valid options so users can
+        self-correct without reading the code."""
+        with self.assertRaises(ValueError) as ctx:
+            self._build(multimax="lm-head")  # hyphen, not underscore
+        msg = str(ctx.exception)
+        for choice in ("lm_head", "attn", "all"):
+            self.assertIn(choice, msg, f"missing choice {choice!r} in: {msg}")
+        self.assertIn("lm-head", msg, "offending value not echoed")
+
+    def test_empty_string_does_not_warn_unimplemented(self):
+        """Empty string is canonicalized to None; must not emit an
+        'attn/all not implemented' warning meant for those modes."""
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            cfg = self._build(multimax="")
+        self.assertIsNone(cfg.multimax)
+        msgs = [str(x.message) for x in w]
+        self.assertFalse(
+            any("not implemented" in m for m in msgs),
+            f"unexpected unimplemented warning for empty string: {msgs}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
