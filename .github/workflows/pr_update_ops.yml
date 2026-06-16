@@ -506,7 +506,7 @@ jobs:
           # HybridEP links against NVML by soname; install dev stubs for libnvidia-ml.so.1.
           apt-get update && apt-get install -y --no-install-recommends libnvidia-ml-dev
           rm -rf /var/lib/apt/lists/*
-          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v --python /usr/bin/python
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           '
 
       - name: Upload wheel

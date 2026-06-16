@@ -418,7 +418,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -456,7 +456,7 @@ jobs:
           # HybridEP links against NVML by soname; install dev stubs for libnvidia-ml.so.1.
           apt-get update && apt-get install -y --no-install-recommends libnvidia-ml-dev
           rm -rf /var/lib/apt/lists/*
-          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v --python /usr/bin/python
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           '
 
       - name: Upload wheel
@@ -488,3 +488,4 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+          exit 0
