@@ -41,6 +41,7 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
+from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -892,7 +893,8 @@ class TransformerLayer(nn.Layer):
 
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
-            input_layernorm_output = recompute(
+            self.input_layernorm_recompute = RecomputeWithoutOutput()
+            input_layernorm_output = self.input_layernorm_recompute.recompute(
                 self.input_layernorm, hidden_states
             )
         else:
@@ -935,6 +937,15 @@ class TransformerLayer(nn.Layer):
                 layer_idx=self.layer_number,
                 use_cache=kwargs.get("use_cache", False),
             )
+        if self.recompute_input_layernorm:
+            if isinstance(attention_output_with_bias, tuple):
+                self.input_layernorm_recompute.discard_output_and_register_recompute(
+                    attention_output_with_bias[0]
+                )
+            else:
+                self.input_layernorm_recompute.discard_output_and_register_recompute(
+                    attention_output_with_bias
+                )
 
         with paddle.enable_grad():
             if block_attention_residuals:
@@ -1010,8 +1021,11 @@ class TransformerLayer(nn.Layer):
 
         # Optional Layer norm post the cross-attention.
         if self.recompute_post_attention_layernorm:
-            post_attention_layernorm_output = recompute(
-                self.post_attention_layernorm, hidden_states
+            self.post_attention_layernorm_recompute = RecomputeWithoutOutput()
+            post_attention_layernorm_output = (
+                self.post_attention_layernorm_recompute.recompute(
+                    self.post_attention_layernorm, hidden_states
+                )
             )
         else:
             post_attention_layernorm_output = self.post_attention_layernorm(
@@ -1060,6 +1074,16 @@ class TransformerLayer(nn.Layer):
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+
+        if self.recompute_post_attention_layernorm:
+            if isinstance(mlp_output_with_bias, tuple):
+                self.post_attention_layernorm_recompute.discard_output_and_register_recompute(
+                    mlp_output_with_bias[0]
+                )
+            else:
+                self.post_attention_layernorm_recompute.discard_output_and_register_recompute(
+                    mlp_output_with_bias
+                )
 
         # Log MLP raw output before BDA
         if (
@@ -1191,7 +1215,10 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         # LayerNorm on aggregated single stream
         if self.recompute_input_layernorm:
-            input_layernorm_output = recompute(self.input_layernorm, aggregated)
+            self.input_layernorm_recompute = RecomputeWithoutOutput()
+            input_layernorm_output = self.input_layernorm_recompute.recompute(
+                self.input_layernorm, aggregated
+            )
         else:
             input_layernorm_output = self.input_layernorm(aggregated)
 
@@ -1224,6 +1251,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
             )
+
+        if self.recompute_input_layernorm:
+            if isinstance(attention_output_with_bias, tuple):
+                self.input_layernorm_recompute.discard_output_and_register_recompute(
+                    attention_output_with_bias[0]
+                )
+            else:
+                self.input_layernorm_recompute.discard_output_and_register_recompute(
+                    attention_output_with_bias
+                )
 
         # mHC: fused H_res + H_post + bias-dropout-add
         hidden_states = (
@@ -1284,8 +1321,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         # LayerNorm on aggregated single stream
         if self.recompute_post_attention_layernorm:
-            post_attention_layernorm_output = recompute(
-                self.post_attention_layernorm, aggregated
+            self.post_attention_layernorm_recompute = RecomputeWithoutOutput()
+            post_attention_layernorm_output = (
+                self.post_attention_layernorm_recompute.recompute(
+                    self.post_attention_layernorm, aggregated
+                )
             )
         else:
             post_attention_layernorm_output = self.post_attention_layernorm(
@@ -1332,6 +1372,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+
+        if self.recompute_post_attention_layernorm:
+            if isinstance(mlp_output_with_bias, tuple):
+                self.post_attention_layernorm_recompute.discard_output_and_register_recompute(
+                    mlp_output_with_bias[0]
+                )
+            else:
+                self.post_attention_layernorm_recompute.discard_output_and_register_recompute(
+                    mlp_output_with_bias
+                )
 
         # mHC: fused H_res + H_post + bias-dropout-add
         hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
