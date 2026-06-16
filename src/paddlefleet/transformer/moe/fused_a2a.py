@@ -71,9 +71,13 @@ def get_hidden_bytes(x: paddle.Tensor) -> int:
     return x.shape[1] * max(x.element_size(), 2)
 
 
-def _normalize_fp8_scale_for_deepep(x_fp8: paddle.Tensor, scale: paddle.Tensor):
+def _normalize_fp8_scale_for_deepep(
+    x_fp8: paddle.Tensor, scale: paddle.Tensor, use_ue8m0: bool = False
+):
     num_tokens = x_fp8.shape[0]
     num_scales = x_fp8.shape[1] // 128
+    if use_ue8m0:
+        num_scales //= 4
     if scale.shape[0] == num_scales:
         scale = scale.T.contiguous()
     else:
@@ -409,7 +413,9 @@ class DeepEPDispatch(PyLayer):
                 return_transpose_only=False,
                 using_ue8m0_scale=use_ue8m0,
             )
-            scale = _normalize_fp8_scale_for_deepep(x_fp8, scale)
+            scale = _normalize_fp8_scale_for_deepep(
+                x_fp8, scale, use_ue8m0=use_ue8m0
+            )
             x = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
             x,

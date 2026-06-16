@@ -115,6 +115,17 @@ class TestFusedA2A(unittest.TestCase):
         result = _normalize_fp8_scale_for_deepep(x_fp8, scale)
         self.assertEqual(result.shape, [3, 2])
 
+    def test_normalize_fp8_scale_for_deepep_supports_ue8m0(self):
+        """Test UE8M0 packed scale width is accepted and transposed."""
+        from paddlefleet.transformer.moe.fused_a2a import (
+            _normalize_fp8_scale_for_deepep,
+        )
+
+        x_fp8 = paddle.zeros([4, 512], dtype=paddle.float8_e4m3fn)
+        scale = paddle.ones([1, 4], dtype=paddle.int32)
+        result = _normalize_fp8_scale_for_deepep(x_fp8, scale, use_ue8m0=True)
+        self.assertEqual(result.shape, [4, 1])
+
     def test_normalize_fp8_scale_for_deepep_rejects_invalid_shape(self):
         """Test invalid FP8 scale shape fails before DeepEP dispatch."""
         from paddlefleet.transformer.moe.fused_a2a import (
