@@ -328,20 +328,34 @@ class DSv4HybridAttention(Attention):
             mscale = 1.0
             freqs = freqs[:, position_offset : position_offset + sq, :]
 
-            content_part = core_attn_out[..., :nope_dim]
-            rot_part = core_attn_out[..., nope_dim:]
+            if self.config.apply_rope_fusion:
+                from paddlefleet.triton_ops import fused_apply_mla_rope_inplace
 
-            rot_part = _apply_rotary_pos_emb_bshd(
-                rot_part,
-                freqs,
-                mscale=mscale,
-                rotary_interleaved=False,
-                multi_latent_attention=True,
-                inverse=True,
-                mla_output_remove_interleaving=True,
-            )
-            core_attn_out = paddle.concat([content_part, rot_part], axis=-1)
-            core_attn_out = core_attn_out.reshape([b, sq, -1])
+                # The clone is necessary because sparse attention depends on core_attn_out
+                # for backward. However, it is still 10x faster than the unfused path.
+                core_attn_out = fused_apply_mla_rope_inplace(
+                    core_attn_out,
+                    freqs,
+                    nope_dim,
+                    mscale,
+                    inverse=True,
+                    clone_input=True,
+                )
+            else:
+                content_part = core_attn_out[..., :nope_dim]
+                rot_part = core_attn_out[..., nope_dim:]
+
+                rot_part = _apply_rotary_pos_emb_bshd(
+                    rot_part,
+                    freqs,
+                    mscale=mscale,
+                    rotary_interleaved=False,
+                    multi_latent_attention=True,
+                    inverse=True,
+                    mla_output_remove_interleaving=True,
+                )
+                core_attn_out = paddle.concat([content_part, rot_part], axis=-1)
+                core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Grouped output projection
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
@@ -523,17 +537,22 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             freqs = freqs[:, position_offset : position_offset + sq, :]
 
             # Q RoPE: split nope/pe, apply RoPE to pe part
-            q_nope = q[..., :nope_dim]
-            q_pe = q[..., nope_dim:]
-            q_pe = _apply_rotary_pos_emb_bshd(
-                q_pe,
-                freqs,
-                mscale=mscale,
-                rotary_interleaved=False,
-                multi_latent_attention=True,
-                mla_output_remove_interleaving=True,
-            )
-            query = paddle.concat([q_nope, q_pe], axis=-1)
+            if self.config.apply_rope_fusion:
+                from paddlefleet.triton_ops import fused_apply_mla_rope_inplace
+
+                query = fused_apply_mla_rope_inplace(q, freqs, nope_dim, mscale)
+            else:
+                q_nope = q[..., :nope_dim]
+                q_pe = q[..., nope_dim:]
+                q_pe = _apply_rotary_pos_emb_bshd(
+                    q_pe,
+                    freqs,
+                    mscale=mscale,
+                    rotary_interleaved=False,
+                    multi_latent_attention=True,
+                    mla_output_remove_interleaving=True,
+                )
+                query = paddle.concat([q_nope, q_pe], axis=-1)
 
             # KV RoPE: split nope/pe, apply RoPE to pe part
             kv_nope = kv[..., :nope_dim]

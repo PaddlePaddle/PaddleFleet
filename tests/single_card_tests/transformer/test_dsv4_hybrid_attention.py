@@ -1049,6 +1049,24 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
                 paddle.isfinite(output.cast("float32")).all().item()
             )
 
+    def test_rope_fusion(self):
+        batch_size = 2
+        seq_len = 128
+        self.config.apply_rope_fusion = True
+        attn = _build_attention(self.config, layer_number=2)
+        hidden = paddle.randn(
+            [batch_size, seq_len, self.config.hidden_size],
+            dtype=paddle.bfloat16,
+        )
+
+        output, _ = attn(hidden_states=hidden, attention_mask=None)
+
+        self.assertEqual(
+            list(output.shape),
+            [batch_size, seq_len, self.config.hidden_size],
+        )
+        self.assertTrue(paddle.isfinite(output.float()).all().item())
+
 
 class TestDSv4HybridQKV(unittest.TestCase):
     def setUp(self):
