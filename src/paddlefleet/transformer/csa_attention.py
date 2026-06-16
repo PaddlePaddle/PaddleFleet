@@ -1719,7 +1719,10 @@ class CompressedSparseAttention(FleetLayer):
             self.config,
             "csa_tilelang_enable_indexer",
         )
-        use_cudnn_indexer = self.config.csa_indexer_backend == "cudnn"
+        indexer_backend = getattr(
+            self.config, "csa_indexer_backend", "tilelang"
+        )
+        use_cudnn_indexer = indexer_backend == "cudnn"
         # The fused selected-set indexer-loss path is only active during the
         # grad-enabled forward. Full recompute runs the first forward under
         # no_grad; that pass should only materialize main-attention indices.
@@ -1787,7 +1790,7 @@ class CompressedSparseAttention(FleetLayer):
                 float(self.softmax_scale),
                 float(indexer_loss_coeff),
                 self.tp_group,
-                indexer_backend=str(self.config.csa_indexer_backend)
+                indexer_backend=indexer_backend
                 if use_cudnn_indexer
                 else "tilelang",
             )
@@ -1799,7 +1802,7 @@ class CompressedSparseAttention(FleetLayer):
                 topk_probs,
                 target,
                 float(indexer_loss_coeff),
-                str(self.config.csa_indexer_backend),
+                indexer_backend,
             )
             if indexer_loss_coeff > 0 and paddle.is_grad_enabled():
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
