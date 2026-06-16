@@ -887,6 +887,14 @@ class TransformerLayer(nn.Layer):
                 otherwise None.
         """
 
+        # Ensure BF16 precision for consistent gradient accumulation
+        # This aligns with Megatron-LM's behavior where hidden_states
+        # stays in BF16 throughout the forward pass
+        if hasattr(self, 'config') and hasattr(self.config, 'params_dtype'):
+            target_dtype = self.config.params_dtype
+            if hidden_states.dtype != target_dtype:
+                hidden_states = hidden_states.cast(target_dtype)
+
         # Residual connection.
         residual = hidden_states
 

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import warnings
 from typing import TYPE_CHECKING
@@ -357,8 +358,9 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
         ctx.save_for_backward(weight, bias)
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.tp_group = tp_group
-        output = paddle.matmul(input, weight)
-
+        # output = paddle.matmul(input, weight)
+        output = paddle.nn.functional.linear(input, weight)
+            
         if bias is not None:
             output = output + bias
         return output
@@ -516,7 +518,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         if bias is not None:
             output = paddle.nn.functional.linear(total_input, weight, bias)
         else:
-            output = paddle.matmul(total_input, weight)
+            # output = paddle.matmul(total_input, weight.t().contiguous().t())
+            output = paddle.nn.functional.linear(total_input, weight)
         return output
 
     @staticmethod

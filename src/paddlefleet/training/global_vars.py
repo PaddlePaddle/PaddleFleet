@@ -68,6 +68,12 @@ def _set_timers():
     _GLOBAL_TIMERS = Timers()
 
 
+def set_profile_timers(timers):
+    """Set profile timers from external source."""
+    global _GLOBAL_TIMERS
+    _GLOBAL_TIMERS = timers
+
+
 def _ensure_var_is_initialized(var, name):
     """Make sure the input variable is not None."""
     assert var is not None, f"{name} is not initialized."

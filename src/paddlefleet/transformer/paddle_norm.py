@@ -143,6 +143,13 @@ class LayerNorm(paddle.nn.Layer):
 
 class FusedRMSNorm(RMSNorm):
     def forward(self, hidden_states: Tensor):
+        # Ensure BF16 precision for consistent gradient accumulation
+        input_dtype = hidden_states.dtype
+        target_dtype = self.weight.dtype
+        
+        if input_dtype != target_dtype:
+            hidden_states = hidden_states.cast(target_dtype)
+        
         rms_norm_out = rms_norm(
             hidden_states,
             hidden_states.shape[-1:],
