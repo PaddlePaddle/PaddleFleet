@@ -15,6 +15,7 @@
 # limitations under the License.
 """FP8 Utils"""
 
+import os
 import numpy
 import paddle
 import paddle.nn.functional as F
@@ -693,9 +694,14 @@ class ExpertsGroupGemmContiguousNode:
                         start_idx:end_idx
                     ].contiguous()
                     expert_w2_i = expert_w2[i].T.contiguous()
-                    do2_s_list.append(
-                        F.linear(x=unzipped_grad_i, weight=expert_w2_i)
-                    )
+                    if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false"):
+                        do2_s_list.append(
+                            paddle.matmul(unzipped_grad_i, expert_w2_i)
+                        )
+                    else:
+                        do2_s_list.append(
+                            F.linear(x=unzipped_grad_i, weight=expert_w2_i)
+                        )
                     start_idx = end_idx
                 do2_s = paddle.concat(do2_s_list, axis=0)
         else:
@@ -833,7 +839,10 @@ class ExpertsGroupGemmContiguousNode:
                     end_idx = start_idx + token_num
                     do1_i = do1[start_idx:end_idx].contiguous()
                     expert_w1_i = expert_w1[i].T.contiguous()
-                    dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
+                    if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false"):
+                        dx_list.append(paddle.matmul(do1_i, expert_w1_i))
+                    else:
+                        dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
                     start_idx = end_idx
                 dx = paddle.concat(dx_list, axis=0)
         else:
