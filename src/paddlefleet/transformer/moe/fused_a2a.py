@@ -71,6 +71,24 @@ def get_hidden_bytes(x: paddle.Tensor) -> int:
     return x.shape[1] * max(x.element_size(), 2)
 
 
+def _normalize_fp8_scale_for_deepep(x_fp8: paddle.Tensor, scale: paddle.Tensor):
+    num_tokens = x_fp8.shape[0]
+    num_scales = x_fp8.shape[1] // 128
+    if scale.shape[0] == num_scales:
+        scale = scale.T.contiguous()
+    else:
+        scale = scale.contiguous()
+    if scale.shape[0] > num_tokens:
+        scale = scale[:num_tokens, :]
+    if scale.shape[0] != num_tokens or scale.shape[1] != num_scales:
+        raise RuntimeError(
+            "Invalid FP8 scale shape for DeepEP dispatch: "
+            f"scale={scale.shape}, x_fp8={x_fp8.shape}, "
+            f"expected [{num_tokens}, {num_scales}]"
+        )
+    return scale
+
+
 def configure_buffer(num_sms=None, dispatch_config=None, combine_config=None):
     """
     Configure the runtime parameters for deep_ep kernels.
@@ -391,20 +409,7 @@ class DeepEPDispatch(PyLayer):
                 return_transpose_only=False,
                 using_ue8m0_scale=use_ue8m0,
             )
-            num_tokens = x_fp8.shape[0]
-            num_scales = x_fp8.shape[1] // 128
-            if scale.shape[0] == num_scales:
-                scale = scale.T.contiguous()
-            else:
-                scale = scale.contiguous()
-            if scale.shape[0] > num_tokens:
-                scale = scale[:num_tokens, :]
-            if scale.shape[0] != num_tokens or scale.shape[1] != num_scales:
-                raise RuntimeError(
-                    "Invalid FP8 scale shape for DeepEP dispatch: "
-                    f"scale={scale.shape}, x_fp8={x_fp8.shape}, "
-                    f"expected [{num_tokens}, {num_scales}]"
-                )
+            scale = _normalize_fp8_scale_for_deepep(x_fp8, scale)
             x = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
             x,
