@@ -60,7 +60,10 @@ from paddlefleet.transformer.utils import (
 
 
 def build_document_rope_freqs(
-    rotary_pos_emb: nn.Layer, sq: int, startend_row_indices: Tensor
+    rotary_pos_emb: nn.Layer,
+    sq: int,
+    startend_row_indices: Tensor,
+    position_offset: int = 0,
 ):
     """Build RoPE frequencies that restart from zero for each document."""
     assert (
@@ -78,12 +81,14 @@ def build_document_rope_freqs(
     freqs = freqs.squeeze(0).squeeze(1)
     doc_freqs = [freqs[: int(doc_len.item())] for doc_len in doc_lens]
     freqs = paddle.concat(doc_freqs, axis=0)
-    if freqs.shape[0] < sq:
+    needed_len = position_offset + sq
+    if freqs.shape[0] < needed_len:
         freqs = paddle.concat(
             [
                 freqs,
                 paddle.zeros(
-                    [sq - freqs.shape[0], freqs.shape[-1]], dtype=freqs.dtype
+                    [needed_len - freqs.shape[0], freqs.shape[-1]],
+                    dtype=freqs.dtype,
                 ),
             ],
             axis=0,
@@ -306,7 +311,10 @@ class DSv4HybridAttention(Attention):
             # Get RoPE frequencies for inverse
             if startend_row_indices is not None:
                 freqs, mscale = build_document_rope_freqs(
-                    self.rotary_pos_emb, sq, startend_row_indices
+                    self.rotary_pos_emb,
+                    sq,
+                    startend_row_indices,
+                    position_offset=position_offset,
                 )
             else:
                 # Get RoPE frequencies for inverse; use global positions in CP mode
@@ -496,7 +504,10 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             # Get RoPE frequencies
             if startend_row_indices is not None:
                 freqs, mscale = build_document_rope_freqs(
-                    self.rotary_pos_emb, sq, startend_row_indices
+                    self.rotary_pos_emb,
+                    sq,
+                    startend_row_indices,
+                    position_offset=position_offset,
                 )
             else:
                 # Get RoPE frequencies for global positions

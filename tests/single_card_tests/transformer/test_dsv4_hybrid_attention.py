@@ -44,6 +44,7 @@ from paddlefleet.transformer.dsa_attention import (
 )
 from paddlefleet.transformer.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
+    build_document_rope_freqs,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -291,6 +292,48 @@ class TestCSAIndexHelpers(unittest.TestCase):
 
 
 class TestDSv4HybridDocumentRoPE(unittest.TestCase):
+    def test_document_rope_freqs_with_position_offset_pads_to_local_slice(self):
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        sq_local = 4
+        position_offset = 4
+        needed_len = position_offset + sq_local
+        startend_row_indices = paddle.to_tensor(
+            [2, 2, 2, 2, 2, 2, 2, 2], dtype="int32"
+        ).reshape([1, 1, 8, 1])
+
+        freqs, _ = build_document_rope_freqs(
+            rotary_pos_emb,
+            sq_local,
+            startend_row_indices,
+            position_offset=position_offset,
+        )
+        local_freqs = freqs[
+            :, position_offset : position_offset + sq_local, :, :
+        ]
+
+        self.assertEqual(
+            list(local_freqs.shape),
+            [1, sq_local, 1, config.qk_pos_emb_head_dim],
+        )
+        self.assertTrue(
+            paddle.equal_all(
+                local_freqs[:, -2:, :, :],
+                paddle.zeros_like(local_freqs[:, -2:, :, :]),
+            ).item()
+        )
+
     def test_compressed_document_rope_matches_separate_documents(self):
         paddle.seed(_SEED)
         config = _make_config(rope_type="yarn")

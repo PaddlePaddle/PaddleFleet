@@ -471,8 +471,9 @@ def _apply_rope(
             freqs = paddle.concat(doc_freqs, axis=1)
         else:
             freqs = freqs[:, :0, :, :]
-        if freqs.shape[1] < rotary_seq_len:
-            pad_len = rotary_seq_len - freqs.shape[1]
+        needed_len = position_offset + rotary_seq_len
+        if freqs.shape[1] < needed_len:
+            pad_len = needed_len - freqs.shape[1]
             freqs = paddle.concat(
                 [
                     freqs,
@@ -482,9 +483,7 @@ def _apply_rope(
                 ],
                 axis=1,
             )
-        freqs = freqs[
-            :, position_offset : position_offset + rotary_seq_len, :, :
-        ]
+        freqs = freqs[:, position_offset:needed_len, :, :]
     elif ratio > 1:  # CP without document mask -> KV
         freqs = freqs[:, position_offset * ratio : total_seq_len : ratio, :][
             :, :rotary_seq_len, :
