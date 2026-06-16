@@ -754,17 +754,25 @@ def _compute_tilelang_csa_indexer_loss_forward(
             cudnn_indexer_topk,
         )
 
-        scores = cudnn_indexer_forward(index_q, index_k_comp, weights, ratio=int(ratio))
+        scores = cudnn_indexer_forward(
+            index_q, index_k_comp, weights, ratio=int(ratio)
+        )
         topk_indices, _ = cudnn_indexer_topk(
             scores, int(index_q.shape[1]), int(ratio), int(topk_effective)
         )
         # Gather scores at topk positions and softmax to get probs
         # topk_indices: [B, Sq, topk], scores: [B, Sq, Sk]
         invalid_mask = topk_indices < 0
-        safe_indices = paddle.where(invalid_mask, paddle.zeros_like(topk_indices), topk_indices)
-        topk_scores = paddle.take_along_axis(scores, safe_indices.cast("int64"), axis=2)
+        safe_indices = paddle.where(
+            invalid_mask, paddle.zeros_like(topk_indices), topk_indices
+        )
+        topk_scores = paddle.take_along_axis(
+            scores, safe_indices.cast("int64"), axis=2
+        )
         topk_scores = paddle.where(
-            invalid_mask, paddle.full_like(topk_scores, float("-inf")), topk_scores
+            invalid_mask,
+            paddle.full_like(topk_scores, float("-inf")),
+            topk_scores,
         )
         # Avoid NaN from softmax on all-(-inf) rows: zero them before softmax.
         row_valid = (~invalid_mask).any(axis=-1, keepdim=True)  # [B, Sq, 1]

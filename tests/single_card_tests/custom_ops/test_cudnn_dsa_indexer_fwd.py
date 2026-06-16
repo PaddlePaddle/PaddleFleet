@@ -12,16 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for cuDNN DSA indexer via DLPack bridge."""
+"""Unit tests for cuDNN DSA indexer forward.
+
+Covers:
+- csa_indexer_fwd_cudnn.py (_validate_indexer_inputs, cudnn_indexer_forward,
+  cudnn_indexer_topk, cudnn_indexer_topk_fwd)
+- cudnn_ops/__init__.py (lazy __getattr__ for fwd symbols)
+- cudnn_ops/indexer/__init__.py (lazy __getattr__ for fwd symbols)
+"""
 
 import unittest
 
 import paddle
 
-
 # =========================================================================
 # Helpers
 # =========================================================================
+
+_SKIP_CONDITION = (
+    not paddle.is_compiled_with_cuda()
+    or paddle.device.cuda.get_device_capability()[0] != 10
+)
+_SKIP_REASON = "cuDNN DSA indexer requires Blackwell GPU (SM10x)"
+
+
+def _require_sm100(cls):
+    return unittest.skipIf(_SKIP_CONDITION, _SKIP_REASON)(cls)
 
 
 def _cuda_or_skip(testcase):
@@ -53,12 +69,9 @@ def _build_causal_mask(batch, seq_len, seq_len_comp, ratio):
     comp_ids = paddle.arange(seq_len_comp, dtype="int64").reshape(
         [1, 1, seq_len_comp]
     )
-    valid_end = (
-        paddle.arange(1, seq_len + 1, dtype="int64").reshape(
-            [1, seq_len, 1]
-        )
-        // int(ratio)
-    )
+    valid_end = paddle.arange(1, seq_len + 1, dtype="int64").reshape(
+        [1, seq_len, 1]
+    ) // int(ratio)
     valid = (comp_ids < valid_end).expand([batch, seq_len, seq_len_comp])
     neg_inf = paddle.full(
         [batch, seq_len, seq_len_comp], float("-inf"), dtype="float32"
@@ -66,7 +79,9 @@ def _build_causal_mask(batch, seq_len, seq_len_comp, ratio):
     return paddle.where(valid, paddle.zeros_like(neg_inf), neg_inf)
 
 
-def _paddle_indexer_scores_and_topk(index_q, index_k_comp, weights, ratio, topk):
+def _paddle_indexer_scores_and_topk(
+    index_q, index_k_comp, weights, ratio, topk
+):
     from paddlefleet.transformer.dsa_attention import fused_qk_topk_naive
 
     scores, indices = fused_qk_topk_naive(
@@ -96,16 +111,141 @@ def _paddle_indexer_scores_and_topk(index_q, index_k_comp, weights, ratio, topk)
 
 
 # =========================================================================
-# Test cases
+# Test cases: input validation
 # =========================================================================
 
 
+@_require_sm100
+class TestValidateIndexerInputs(unittest.TestCase):
+    """Tests for _validate_indexer_inputs."""
+
+    def setUp(self):
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+            _validate_indexer_inputs,
+        )
+
+        self._validate = _validate_indexer_inputs
+        self.B, self.S, self.H, self.D = 1, 16, 32, 128
+        self.Sk = self.S // 4
+        self.index_q = paddle.zeros(
+            [self.B, self.S, self.H, self.D], dtype="bfloat16"
+        )
+        self.index_k = paddle.zeros([self.B, self.Sk, self.D], dtype="bfloat16")
+        self.weights = paddle.zeros([self.B, self.S, self.H], dtype="bfloat16")
+
+    def test_valid_inputs_pass(self):
+        self._validate(self.index_q, self.index_k, self.weights)
+
+    def test_type_error_index_q(self):
+        with self.assertRaises(TypeError):
+            self._validate([1, 2], self.index_k, self.weights)
+
+    def test_type_error_index_k(self):
+        with self.assertRaises(TypeError):
+            self._validate(self.index_q, "bad", self.weights)
+
+    def test_type_error_weights(self):
+        with self.assertRaises(TypeError):
+            self._validate(self.index_q, self.index_k, 123)
+
+    def test_wrong_ndim_index_q(self):
+        with self.assertRaises(ValueError):
+            self._validate(
+                paddle.zeros([self.B, self.S, self.H], dtype="bfloat16"),
+                self.index_k,
+                self.weights,
+            )
+
+    def test_wrong_ndim_index_k(self):
+        with self.assertRaises(ValueError):
+            self._validate(
+                self.index_q,
+                paddle.zeros([self.B, self.Sk, self.D, 1], dtype="bfloat16"),
+                self.weights,
+            )
+
+    def test_wrong_ndim_weights(self):
+        with self.assertRaises(ValueError):
+            self._validate(
+                self.index_q,
+                self.index_k,
+                paddle.zeros([self.B, self.S], dtype="bfloat16"),
+            )
+
+    def test_batch_mismatch(self):
+        with self.assertRaises(ValueError):
+            self._validate(
+                self.index_q,
+                paddle.zeros([2, self.Sk, self.D], dtype="bfloat16"),
+                self.weights,
+            )
+
+    def test_shape_mismatch_dim(self):
+        with self.assertRaises(ValueError):
+            self._validate(
+                self.index_q,
+                paddle.zeros([self.B, self.Sk, 64], dtype="bfloat16"),
+                self.weights,
+            )
+
+    def test_invalid_heads(self):
+        with self.assertRaises(ValueError):
+            self._validate(
+                paddle.zeros([self.B, self.S, 16, self.D], dtype="bfloat16"),
+                paddle.zeros([self.B, self.Sk, self.D], dtype="bfloat16"),
+                paddle.zeros([self.B, self.S, 16], dtype="bfloat16"),
+            )
+
+    def test_invalid_dim(self):
+        with self.assertRaises(ValueError):
+            self._validate(
+                paddle.zeros([self.B, self.S, 32, 64], dtype="bfloat16"),
+                paddle.zeros([self.B, self.Sk, 64], dtype="bfloat16"),
+                paddle.zeros([self.B, self.S, 32], dtype="bfloat16"),
+            )
+
+
+@_require_sm100
+class TestTopkEffectiveValidation(unittest.TestCase):
+    """Tests for cudnn_indexer_topk_fwd topk_effective <= 0."""
+
+    def test_topk_effective_zero_raises(self):
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+            cudnn_indexer_topk_fwd,
+        )
+
+        B, S, H, D = 1, 16, 32, 128
+        Sk = S // 4
+        q = paddle.zeros([B, S, H, D], dtype="bfloat16")
+        k = paddle.zeros([B, Sk, D], dtype="bfloat16")
+        w = paddle.zeros([B, S, H], dtype="bfloat16")
+        with self.assertRaises(ValueError):
+            cudnn_indexer_topk_fwd(q, k, w, topk_effective=0)
+
+    def test_topk_effective_negative_raises(self):
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+            cudnn_indexer_topk_fwd,
+        )
+
+        B, S, H, D = 1, 16, 32, 128
+        Sk = S // 4
+        q = paddle.zeros([B, S, H, D], dtype="bfloat16")
+        k = paddle.zeros([B, Sk, D], dtype="bfloat16")
+        w = paddle.zeros([B, S, H], dtype="bfloat16")
+        with self.assertRaises(ValueError):
+            cudnn_indexer_topk_fwd(q, k, w, topk_effective=-1)
+
+
+# =========================================================================
+# Test cases: forward kernel
+# =========================================================================
+
+
+@_require_sm100
 class TestCudnnIndexerForward(unittest.TestCase):
     """Tests for cudnn_indexer_forward (score computation)."""
 
     def setUp(self):
-        _cuda_or_skip(self)
-        paddle.set_device("gpu:0")
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_forward,
         )
@@ -143,17 +283,18 @@ class TestCudnnIndexerForward(unittest.TestCase):
         valid = paddle.isfinite(ref_scores)
         max_abs_diff = (scores[valid] - ref_scores[valid]).abs().max().item()
         self.assertTrue(
-            paddle.allclose(scores[valid], ref_scores[valid], rtol=1e-2, atol=1e-2).item(),
+            paddle.allclose(
+                scores[valid], ref_scores[valid], rtol=1e-2, atol=1e-2
+            ).item(),
             f"cuDNN indexer scores mismatch with Paddle reference, max_abs_diff={max_abs_diff}",
         )
 
 
+@_require_sm100
 class TestCudnnIndexerTopkFwd(unittest.TestCase):
     """Tests for cudnn_indexer_topk_fwd (combined score + top-K)."""
 
     def setUp(self):
-        _cuda_or_skip(self)
-        paddle.set_device("gpu:0")
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk_fwd,
         )
@@ -246,12 +387,11 @@ class TestCudnnIndexerTopkFwd(unittest.TestCase):
         )
 
 
+@_require_sm100
 class TestCudnnVsTileLangCrossValidation(unittest.TestCase):
     """Cross-validate cuDNN and TileLang indexer backends produce same sets."""
 
     def setUp(self):
-        _cuda_or_skip(self)
-        paddle.set_device("gpu:0")
         try:
             paddle.enable_compat(scope={"tilelang"}, silent=True)
             from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
@@ -279,6 +419,40 @@ class TestCudnnVsTileLangCrossValidation(unittest.TestCase):
             _sorted_compare_indices(cudnn_indices, tl_indices),
             "cuDNN and TileLang indexer top-k sets should match",
         )
+
+
+# =========================================================================
+# Test cases: lazy __getattr__ imports
+# =========================================================================
+
+
+@_require_sm100
+class TestLazyGetattr(unittest.TestCase):
+    """Tests for lazy __getattr__ in cudnn_ops and cudnn_ops/indexer packages."""
+
+    def test_cudnn_ops_unknown_attr(self):
+        import paddlefleet.cudnn_ops as pkg
+
+        with self.assertRaises(AttributeError):
+            _ = pkg.nonexistent_symbol_xyz
+
+    def test_cudnn_ops_indexer_unknown_attr(self):
+        import paddlefleet.cudnn_ops.indexer as pkg
+
+        with self.assertRaises(AttributeError):
+            _ = pkg.nonexistent_symbol_xyz
+
+    def test_cudnn_ops_resolves_cudnn_indexer_forward(self):
+        import paddlefleet.cudnn_ops as pkg
+
+        fn = pkg.cudnn_indexer_forward
+        self.assertTrue(callable(fn))
+
+    def test_cudnn_ops_indexer_resolves_cudnn_indexer_topk(self):
+        import paddlefleet.cudnn_ops.indexer as pkg
+
+        fn = pkg.cudnn_indexer_topk
+        self.assertTrue(callable(fn))
 
 
 if __name__ == "__main__":

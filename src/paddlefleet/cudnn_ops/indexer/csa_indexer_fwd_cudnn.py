@@ -76,12 +76,12 @@ def _validate_indexer_inputs(index_q, index_k_comp, weights):
             f"cuDNN IndexerForward requires H_i (qhead_per_kv_head) in {{32, 64}}, got {heads}"
         )
     if dim != 128:
-        raise ValueError(
-            f"cuDNN IndexerForward requires D_i=128, got {dim}"
-        )
+        raise ValueError(f"cuDNN IndexerForward requires D_i=128, got {dim}")
 
 
-def cudnn_indexer_forward(index_q, index_k_comp, weights, ratio=4, sm_scale=None):
+def cudnn_indexer_forward(
+    index_q, index_k_comp, weights, ratio=4, sm_scale=None
+):
     """Compute indexer scores using cuDNN CuTe-DSL kernel (SM100).
 
     Args:
@@ -134,14 +134,10 @@ def cudnn_indexer_topk(scores, sq, ratio, topk):
         next_n=1,
         return_val=False,
     )
-    topk_indices = result["indices"].reshape([batch, sq, topk_k]).cast(
-        "int32"
-    )
+    topk_indices = result["indices"].reshape([batch, sq, topk_k]).cast("int32")
 
     if topk_k < topk:
-        padding = paddle.full(
-            [batch, sq, topk - topk_k], -1, dtype="int32"
-        )
+        padding = paddle.full([batch, sq, topk - topk_k], -1, dtype="int32")
         topk_indices = paddle.concat([topk_indices, padding], axis=-1)
 
     topk_length = (topk_indices >= 0).sum(axis=-1).cast("int32")
@@ -181,7 +177,9 @@ def cudnn_indexer_topk_fwd(
     if float(indexer_softmax_scale) != 1.0:
         _sm = _sm * float(indexer_softmax_scale)
 
-    scores = cudnn_indexer_forward(index_q, index_k_comp, weights, ratio=ratio, sm_scale=_sm)
+    scores = cudnn_indexer_forward(
+        index_q, index_k_comp, weights, ratio=ratio, sm_scale=_sm
+    )
     return cudnn_indexer_topk(
         scores,
         int(index_q.shape[1]),
