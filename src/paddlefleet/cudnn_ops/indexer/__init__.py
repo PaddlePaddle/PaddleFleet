@@ -12,28 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .csa_indexer_bwd_cudnn import csa_indexer_bwd
+from .csa_indexer_fwd_cudnn import (
+    cudnn_indexer_forward,
+    cudnn_indexer_topk,
+    cudnn_indexer_topk_fwd,
+)
+
 __all__ = [
     "csa_indexer_bwd",
     "cudnn_indexer_forward",
     "cudnn_indexer_topk",
     "cudnn_indexer_topk_fwd",
 ]
-
-
-def __getattr__(name):
-    if name == "csa_indexer_bwd":
-        from .csa_indexer_bwd_cudnn import csa_indexer_bwd
-
-        globals()[name] = csa_indexer_bwd
-        return csa_indexer_bwd
-    if name in {
-        "cudnn_indexer_forward",
-        "cudnn_indexer_topk",
-        "cudnn_indexer_topk_fwd",
-    }:
-        from . import csa_indexer_fwd_cudnn
-
-        obj = getattr(csa_indexer_fwd_cudnn, name)
-        globals()[name] = obj
-        return obj
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

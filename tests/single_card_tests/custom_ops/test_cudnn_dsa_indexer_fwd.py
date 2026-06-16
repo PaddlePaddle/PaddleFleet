@@ -422,13 +422,13 @@ class TestCudnnVsTileLangCrossValidation(unittest.TestCase):
 
 
 # =========================================================================
-# Test cases: lazy __getattr__ imports
+# Test cases: package imports
 # =========================================================================
 
 
 @_require_sm100
-class TestLazyGetattr(unittest.TestCase):
-    """Tests for lazy __getattr__ in cudnn_ops and cudnn_ops/indexer packages."""
+class TestPackageImports(unittest.TestCase):
+    """Tests for cudnn_ops and cudnn_ops/indexer package exports."""
 
     def test_cudnn_ops_unknown_attr(self):
         import paddlefleet.cudnn_ops as pkg

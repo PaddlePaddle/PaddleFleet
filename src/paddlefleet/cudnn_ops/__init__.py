@@ -14,6 +14,14 @@
 
 """cuDNN frontend ops bridged into PaddleFleet."""
 
+from .attn.csa_sparse_attn_bwd_cudnn import csa_sparse_attn_bwd_cudnn
+from .indexer.csa_indexer_bwd_cudnn import csa_indexer_bwd
+from .indexer.csa_indexer_fwd_cudnn import (
+    cudnn_indexer_forward,
+    cudnn_indexer_topk,
+    cudnn_indexer_topk_fwd,
+)
+
 __all__ = [
     "csa_indexer_bwd",
     "csa_sparse_attn_bwd_cudnn",
@@ -21,27 +29,3 @@ __all__ = [
     "cudnn_indexer_topk",
     "cudnn_indexer_topk_fwd",
 ]
-
-
-def __getattr__(name):
-    if name == "csa_indexer_bwd":
-        from .indexer.csa_indexer_bwd_cudnn import csa_indexer_bwd
-
-        globals()[name] = csa_indexer_bwd
-        return csa_indexer_bwd
-    if name == "csa_sparse_attn_bwd_cudnn":
-        from .attn.csa_sparse_attn_bwd_cudnn import csa_sparse_attn_bwd_cudnn
-
-        globals()[name] = csa_sparse_attn_bwd_cudnn
-        return csa_sparse_attn_bwd_cudnn
-    if name in {
-        "cudnn_indexer_forward",
-        "cudnn_indexer_topk",
-        "cudnn_indexer_topk_fwd",
-    }:
-        from .indexer import csa_indexer_fwd_cudnn
-
-        obj = getattr(csa_indexer_fwd_cudnn, name)
-        globals()[name] = obj
-        return obj
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
