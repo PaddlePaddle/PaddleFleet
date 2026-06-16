@@ -463,9 +463,9 @@ def _apply_rope(
     elif doc_lens is not None:  # Q token + document mask
         freqs = freqs[:, :max_doc_len, :, :]
         doc_freqs = [
-            freqs[:, : int(doc_len.item()), :, :]
-            for doc_len in doc_lens
-            if int(doc_len.item()) > 0
+            freqs[:, :doc_len, :, :]
+            for doc_len in doc_lens.tolist()
+            if doc_len > 0
         ]
 
         if doc_freqs:
