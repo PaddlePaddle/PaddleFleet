@@ -24,12 +24,12 @@ Returns selected compressed KV indices and per-row valid counts.
 from __future__ import annotations
 
 import paddle
-from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_forward.api import (
-    indexer_forward_wrapper,
-)
-from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_top_k.api import (
-    indexer_top_k_wrapper,
-)
+from paddlefleet_ops import CUDNN_FRONTEND_HINT, is_cudnn_frontend_available
+
+
+def _require_cudnn_frontend():
+    if not is_cudnn_frontend_available():
+        raise ImportError(CUDNN_FRONTEND_HINT)
 
 
 def _validate_indexer_inputs(index_q, index_k_comp, weights):
@@ -96,6 +96,11 @@ def cudnn_indexer_forward(
     """
     if sm_scale is None:
         sm_scale = float(index_q.shape[-1]) ** -0.5
+    _require_cudnn_frontend()
+    from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_forward.api import (
+        indexer_forward_wrapper,
+    )
+
     result = indexer_forward_wrapper(
         index_q.contiguous(),
         index_k_comp.unsqueeze(2).contiguous(),
@@ -127,6 +132,11 @@ def cudnn_indexer_topk(scores, sq, ratio, topk):
 
     q_idx = paddle.arange(sq, dtype="int32")
     seq_lens = paddle.clip((q_idx + 1) // int(ratio), max=sk).tile([batch])
+    _require_cudnn_frontend()
+    from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_top_k.api import (
+        indexer_top_k_wrapper,
+    )
+
     result = indexer_top_k_wrapper(
         scores.reshape([batch * sq, sk]).contiguous(),
         seq_lens,
