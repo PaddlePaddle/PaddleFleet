@@ -254,10 +254,9 @@ class DSv4HybridAttention(Attention):
         Returns:
             (output [b, sq, hidden_size], bias=None)
         """
-        # startend_row_indices = kwargs.get(
-        #     "attn_mask_startend_row_indices", None
-        # )
-        startend_row_indices = None
+        startend_row_indices = kwargs.get(
+            "attn_mask_startend_row_indices", None
+        )
 
         # Get Q, K, V tensors
         # In CP mode, pass position_offset so RoPE uses correct global positions.
