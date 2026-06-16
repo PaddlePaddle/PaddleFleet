@@ -23,6 +23,7 @@ from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
 from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
 from .vmm_utils import (
+    auto_subbatch_allocator_backend,
     find_max_concurrent_subbatch_size,
     find_max_sequence_subbatch_size,
     merge_subbatch_cast,
@@ -402,14 +403,6 @@ class MlpNode:
         self.use_fp8_mlp = use_fp8_mlp
         self.use_auto_subbatch = use_auto_subbatch
         self.moe_subbatch_diag = moe_subbatch_diag
-        if self.use_auto_subbatch:
-            (vmm_flag,) = paddle.framework.get_flags(
-                "FLAGS_use_virtual_memory_auto_growth"
-            ).values()
-            assert vmm_flag, (
-                "use_auto_subbatch requires FLAGS_use_virtual_memory_auto_growth=True"
-            )
-
         if self.moe_subbatch_token_num_after_dispatch is not None:
             self.min_auto_subbatch_rows = (
                 self.moe_subbatch_token_num_after_dispatch
@@ -1314,8 +1307,9 @@ class MlpNode:
 
         if self.moe_subbatch_diag:
             logger.info(
-                "[AutoSubbatch FWD] path=%s, total_tokens=%d, "
+                "[AutoSubbatch FWD] backend=%s, path=%s, total_tokens=%d, "
                 "subbatch_rows=%d, zip_unzip_fusion=%s",
+                auto_subbatch_allocator_backend(),
                 fwd_path,
                 num_unzipped_tokens,
                 subbatch_rows,
@@ -1620,8 +1614,9 @@ class MlpNode:
 
         if self.moe_subbatch_diag:
             logger.info(
-                "[AutoSubbatch BWD] path=%s, total_tokens=%d, "
+                "[AutoSubbatch BWD] backend=%s, path=%s, total_tokens=%d, "
                 "subbatch_rows=%d, zip_unzip_fusion=%s",
+                auto_subbatch_allocator_backend(),
                 bwd_path,
                 num_unzipped_tokens,
                 subbatch_rows,
