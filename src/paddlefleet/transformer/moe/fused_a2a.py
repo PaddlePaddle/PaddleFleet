@@ -391,7 +391,20 @@ class DeepEPDispatch(PyLayer):
                 return_transpose_only=False,
                 using_ue8m0_scale=use_ue8m0,
             )
-            scale = scale.T.contiguous()
+            num_tokens = x_fp8.shape[0]
+            num_scales = x_fp8.shape[1] // 128
+            if scale.shape[0] == num_scales:
+                scale = scale.T.contiguous()
+            else:
+                scale = scale.contiguous()
+            if scale.shape[0] > num_tokens:
+                scale = scale[:num_tokens, :]
+            if scale.shape[0] != num_tokens or scale.shape[1] != num_scales:
+                raise RuntimeError(
+                    "Invalid FP8 scale shape for DeepEP dispatch: "
+                    f"scale={scale.shape}, x_fp8={x_fp8.shape}, "
+                    f"expected [{num_tokens}, {num_scales}]"
+                )
             x = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
             x,
