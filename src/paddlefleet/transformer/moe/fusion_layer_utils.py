@@ -48,6 +48,38 @@ if paddlefleet_ops.is_sonic_moe_available():
 logger = logging.getLogger(__name__)
 
 
+def _copy_sonic_fp8_weight_attrs(src, dst):
+    for attr_name in ("fp8", "transposed_fp8"):
+        attr = getattr(src, attr_name, None)
+        if attr is None:
+            raise RuntimeError(
+                f"Sonic FP8 forward requires weight.{attr_name} attribute; "
+                "call quant_weight() before FP8 forward."
+            )
+        setattr(dst, attr_name, attr)
+
+
+class _SonicFP8WeightCarrier(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, weight):
+        carrier = paddle.empty([1], dtype=weight.dtype).as_strided(
+            [weight.shape[1], weight.shape[2], weight.shape[0]], [0, 0, 0]
+        )
+        carrier.stop_gradient = weight.stop_gradient
+        _copy_sonic_fp8_weight_attrs(weight, carrier)
+        return carrier
+
+    @staticmethod
+    def backward(ctx, grad):
+        if grad is None:
+            return None
+        return grad.transpose([2, 0, 1])
+
+
+def _make_sonic_fp8_weight_carrier(weight):
+    return _SonicFP8WeightCarrier.apply(weight)
+
+
 class UnZipNode:
     """
     UnZipNode 类用于对输入的token 矩阵根据分发索引进行解压操作,得到专家需要处理的 token。
@@ -2237,14 +2269,12 @@ def run_sonic_moe(
     if fp8_scale is not None:
         fp8_hidden_states = (hidden_states, fp8_scale)
 
-    w1_sonic = w1.permute([1, 2, 0])
-    w2_sonic = w2.permute([1, 2, 0])
     if fp8:
-        for attr_name in ("fp8", "transposed_fp8"):
-            if hasattr(w1, attr_name):
-                setattr(w1_sonic, attr_name, getattr(w1, attr_name))
-            if hasattr(w2, attr_name):
-                setattr(w2_sonic, attr_name, getattr(w2, attr_name))
+        w1_sonic = _make_sonic_fp8_weight_carrier(w1)
+        w2_sonic = _make_sonic_fp8_weight_carrier(w2)
+    else:
+        w1_sonic = w1.permute([1, 2, 0])
+        w2_sonic = w2.permute([1, 2, 0])
 
     with enable_fp8(fp8):
         _refresh_fp8_config()

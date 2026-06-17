@@ -40,6 +40,7 @@ from .moe_utils import (
 
 try:
     from paddlefleet_ops import deep_gemm as paddlefleet_deep_gemm
+    from paddlefleet_ops.sonicmoe.functional import clear_all_fp8_weight_caches
     from paddlefleet_ops.sonicmoe.quack_utils import quantize_native_fp8_weights
 except (ImportError, RuntimeError):
     pass
@@ -328,16 +329,22 @@ class SonicMoEExpert(GroupedMLPExpert):
     _SONIC_LAYOUT = "sonic"
 
     @staticmethod
-    def _grouped_w1_to_sonic(weight):
-        gate, up = paddle.chunk(weight, 2, axis=-1)
-        gate = gate.transpose([0, 2, 1])
-        up = up.transpose([0, 2, 1])
-        return paddle.stack([gate, up], axis=2).reshape(
-            [weight.shape[0], -1, weight.shape[1]]
+    def _is_tensor_initialized(tensor):
+        return (
+            not hasattr(tensor, "_is_initialized") or tensor._is_initialized()
         )
 
     @staticmethod
+    def _grouped_w1_to_sonic(weight):
+        target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
+        gate, up = paddle.chunk(weight, 2, axis=-1)
+        gate = gate.transpose([0, 2, 1])
+        up = up.transpose([0, 2, 1])
+        return paddle.stack([gate, up], axis=2).reshape(target_shape)
+
+    @staticmethod
     def _sonic_w1_to_grouped(weight):
+        target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
         weight = weight.reshape([weight.shape[0], -1, 2, weight.shape[2]])
         gate = weight[:, :, 0, :].transpose([0, 2, 1])
         up = weight[:, :, 1, :].transpose([0, 2, 1])
@@ -345,10 +352,14 @@ class SonicMoEExpert(GroupedMLPExpert):
 
     @staticmethod
     def _transpose_w2_layout(weight):
+        # if not SonicMoEExpert._is_tensor_initialized(weight):
+        #     return weight
         return weight.transpose([0, 2, 1])
 
     @staticmethod
     def _assign_tensor(tensor, value):
+        if tensor is value:
+            return
         if not value.is_contiguous():
             value = value.contiguous()
         if list(tensor.shape) != list(value.shape):
@@ -395,7 +406,11 @@ class SonicMoEExpert(GroupedMLPExpert):
                 (self.weight1, weight1_converter),
                 (self.weight2, weight2_converter),
             ):
-                self._assign_tensor(param, converter(param))
+                if not SonicMoEExpert._is_tensor_initialized(param):
+                    shape = param.shape
+                    param.get_tensor()._set_dims([shape[0], shape[2], shape[1]])
+                else:
+                    self._assign_tensor(param, converter(param))
                 self._convert_grad_layout(param, converter)
         self._weights_layout = target_layout
 
@@ -436,6 +451,12 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.weight1.transposed_fp8 = (w1t_fp8, w1t_scale)
         self.weight2.fp8 = (w2_fp8, w2_scale)
         self.weight2.transposed_fp8 = (w2t_fp8, w2t_scale)
+
+    def clear_fp8_weights(self):
+        clear_all_fp8_weight_caches()
+        for weight in (self.weight1, self.weight2):
+            weight.fp8 = None
+            weight.transposed_fp8 = None
 
     def forward(
         self,
