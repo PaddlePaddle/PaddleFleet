@@ -199,7 +199,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
 
 
 def csa_sparse_attn(
-    query, kv_full, attn_sink, topk_idxs, softmax_scale, backend="cudnn"
+    query, kv_full, attn_sink, topk_idxs, softmax_scale, backend="tilelang"
 ):
     """Unified CSA sparse attention entry point.
 

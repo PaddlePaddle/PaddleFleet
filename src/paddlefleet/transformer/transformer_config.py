@@ -873,15 +873,15 @@ class TransformerConfig(ModelParallelConfig):
     path.
     """
 
-    csa_sparse_attn_backend: str = "cudnn"
+    csa_sparse_attn_backend: str = "tilelang"
     """CSA sparse attention backend. Single switch selecting one of three
     implementations of the final sparse MQA attention.
 
     One of {"unfused", "tilelang", "cudnn"}:
       * "unfused": pure-Paddle einsum forward + Paddle autograd backward
         (non-fused reference path).
-      * "tilelang": TileLang sparse MQA kernel forward + backward.
-      * "cudnn" (default): FlashMLA sparse forward kernel + cuDNN DSA backward
+      * "tilelang" (default): TileLang sparse MQA kernel forward + backward.
+      * "cudnn": FlashMLA sparse forward kernel + cuDNN DSA backward
         kernel.
     """
 

@@ -2298,7 +2298,7 @@ class CompressedSparseAttention(FleetLayer):
             else attn_sink.cast("float32")
         )
         sparse_attn_backend = getattr(
-            self.config, "csa_sparse_attn_backend", "cudnn"
+            self.config, "csa_sparse_attn_backend", "tilelang"
         )
         return csa_sparse_attn(
             query,
