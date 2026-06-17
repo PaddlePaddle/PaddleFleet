@@ -2042,14 +2042,17 @@ def _hybrid_ep_prepare_expert_counts(
         "HybridEP manager must populate padded_tokens_per_expert before "
         "HybridEPMoePyLayer runs."
     )
+    num_permuted_tokens = manager.num_permuted_tokens
+    assert num_permuted_tokens is not None, (
+        "HybridEP manager must populate num_permuted_tokens before "
+        "HybridEPMoePyLayer runs."
+    )
     padded_tokens_per_expert_tensor = padded_tokens_per_expert.astype("int64")
 
     if not use_fp8_mlp or not moe_expert_fusion:
         padded_tokens_per_expert_list = padded_tokens_per_expert_tensor.tolist()
-        return padded_tokens_per_expert_list, sum(padded_tokens_per_expert_list)
-    return padded_tokens_per_expert_tensor, paddle.sum(
-        padded_tokens_per_expert_tensor
-    )
+        return padded_tokens_per_expert_list, num_permuted_tokens
+    return padded_tokens_per_expert_tensor, num_permuted_tokens
 
 
 def _pad_front_rows(tensor, target_shape):
