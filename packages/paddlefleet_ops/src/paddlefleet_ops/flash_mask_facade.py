@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import inspect
-from functools import partial
 
 import paddle
 
@@ -55,11 +54,24 @@ def flashmask_attention(
     softmax_scale: float | None = None,
     block_mask: paddle.Tensor | None = None,
     use_varlen: bool = False,
+    learnable_sink: paddle.Tensor | None = None,
 ):
     if use_varlen:
         assert (
             "use_varlen" in inspect.signature(_flashmask_attention).parameters
         ), "The flash_mask installed does not support use_varlen"
+
+    if learnable_sink is not None:
+        if (
+            "learnable_sink"
+            not in inspect.signature(_flashmask_attention).parameters
+        ):
+            raise NotImplementedError(
+                "learnable_sink (softmax sink) requires FA4 (cute backend); the "
+                "installed flash_mask / current device (e.g. H-card fa2/fa3) does "
+                "not support it. Disable the attention sink or run on a "
+                "FA4-capable device."
+            )
 
     if "xpu" in paddle.get_device():
         fa_version = 2
@@ -90,12 +102,14 @@ def flashmask_attention(
         )
         value = paddle.concat([value, value_padding], axis=-1)
 
+    extra_kwargs = {}
     if use_varlen:
-        flashmask_attention_func = partial(
-            _flashmask_attention, use_varlen=True
-        )
-    else:
-        flashmask_attention_func = _flashmask_attention
+        # use_varlen is no longer used and will be removed soon.
+        extra_kwargs["use_varlen"] = True
+    if learnable_sink is not None:
+        extra_kwargs["learnable_sink"] = learnable_sink
+
+    flashmask_attention_func = _flashmask_attention
 
     outs = flashmask_attention_func(
         query=query,
@@ -113,6 +127,7 @@ def flashmask_attention(
         name=name,
         softmax_scale=softmax_scale,
         block_mask=block_mask,
+        **extra_kwargs,
     )
 
     if return_softmax_lse:
