@@ -1836,6 +1836,7 @@ class TestCSAForwardTileLangFwdOnlyPath(unittest.TestCase):
             dsa_indexer_use_sparse_loss=False,
             csa_tilelang_enable_indexer=True,
             csa_tilelang_enable_sparse_attn=False,
+            csa_indexer_backend="tilelang",
             init_method=None,
             init_method_std=0.02,
             layernorm_epsilon=1e-5,

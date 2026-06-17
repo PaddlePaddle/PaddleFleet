@@ -739,21 +739,56 @@ def _compute_tilelang_csa_indexer_loss_forward(
     loss_coeff: float,
     tp_group=None,
     seq_offset: int = 0,
+    indexer_backend: str = "tilelang",
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     from paddlefleet.tilelang_ops import (
         csa_attn_target_reducesum,
         csa_indexer_topk_fwd,
     )
 
-    topk_indices, topk_probs = csa_indexer_topk_fwd(
-        index_q,
-        index_k_comp,
-        weights,
-        ratio=int(ratio),
-        topk_effective=int(topk_effective),
-        seq_offset=int(seq_offset),
-        valid_range=valid_range,
-    )
+    if indexer_backend == "cudnn":
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+            cudnn_indexer_forward,
+            cudnn_indexer_topk,
+        )
+
+        scores = cudnn_indexer_forward(
+            index_q, index_k_comp, weights, ratio=int(ratio)
+        )
+        topk_indices, _ = cudnn_indexer_topk(
+            scores, int(index_q.shape[1]), int(ratio), int(topk_effective)
+        )
+        # Gather scores at topk positions and softmax to get probs
+        # topk_indices: [B, Sq, topk], scores: [B, Sq, Sk]
+        invalid_mask = topk_indices < 0
+        safe_indices = paddle.where(
+            invalid_mask, paddle.zeros_like(topk_indices), topk_indices
+        )
+        topk_scores = paddle.take_along_axis(
+            scores, safe_indices.cast("int64"), axis=2
+        )
+        topk_scores = paddle.where(
+            invalid_mask,
+            paddle.full_like(topk_scores, float("-inf")),
+            topk_scores,
+        )
+        # Avoid NaN from softmax on all-(-inf) rows: zero them before softmax.
+        row_valid = (~invalid_mask).any(axis=-1, keepdim=True)  # [B, Sq, 1]
+        topk_scores = paddle.where(
+            row_valid, topk_scores, paddle.zeros_like(topk_scores)
+        )
+        topk_probs = paddle.nn.functional.softmax(topk_scores, axis=-1)
+        topk_probs = topk_probs * row_valid.cast(topk_probs.dtype)
+    else:
+        topk_indices, topk_probs = csa_indexer_topk_fwd(
+            index_q,
+            index_k_comp,
+            weights,
+            ratio=int(ratio),
+            topk_effective=int(topk_effective),
+            seq_offset=int(seq_offset),
+            valid_range=valid_range,
+        )
 
     if tp_group is not None and getattr(tp_group, "nranks", 1) > 1:
         target = _compute_attn_target_on_selected_set(
@@ -1659,11 +1694,19 @@ class CompressedSparseAttention(FleetLayer):
             self.config,
             "csa_tilelang_enable_indexer",
         )
-        # The fused TileLang indexer-loss path is only active during the
+        indexer_backend = getattr(
+            self.config, "csa_indexer_backend", "tilelang"
+        )
+        use_cudnn_indexer = indexer_backend == "cudnn"
+        # The fused selected-set indexer-loss path is only active during the
         # grad-enabled forward. Full recompute runs the first forward under
         # no_grad; that pass should only materialize main-attention indices.
+        # cuDNN backend reuses the selected-set loss tensors and dispatches
+        # its backward through TileLangCSAIndexerLossAutoScaler.
         use_tilelang_loss_path = (
-            use_tilelang_indexer and self.training and paddle.is_grad_enabled()
+            (use_tilelang_indexer or use_cudnn_indexer)
+            and self.training
+            and paddle.is_grad_enabled()
         )
         loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
             self.config,
@@ -1722,6 +1765,9 @@ class CompressedSparseAttention(FleetLayer):
                 float(self.softmax_scale),
                 float(indexer_loss_coeff),
                 self.tp_group,
+                indexer_backend=indexer_backend
+                if use_cudnn_indexer
+                else "tilelang",
             )
             tilelang_indexer_loss_state = (
                 q_indexer_bf,
@@ -1731,7 +1777,7 @@ class CompressedSparseAttention(FleetLayer):
                 topk_probs,
                 target,
                 float(indexer_loss_coeff),
-                str(self.config.csa_indexer_backend),
+                indexer_backend,
             )
             if indexer_loss_coeff > 0 and paddle.is_grad_enabled():
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
@@ -1799,9 +1845,32 @@ class CompressedSparseAttention(FleetLayer):
                 mask=causal_mask,
             )
 
-        # Optionally replace topk producer with TileLang fused compressed
-        # indexer forward. This only swaps the indices fed to sparse attention.
-        if use_tilelang_indexer and not use_tilelang_loss_path:
+        # Optionally replace topk producer with fused compressed indexer
+        # forward. This only swaps the indices fed to sparse attention.
+        # When use_tilelang_loss_path is active and cuDNN was used there,
+        # topk_indices_compressed already comes from cuDNN fwd; skip redundant call.
+        if use_cudnn_indexer and not use_tilelang_loss_path:
+            from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+                cudnn_indexer_topk_fwd,
+            )
+
+            with paddle.no_grad():
+                q_indexer_cu, k_indexer_cu, weights_indexer_cu = (
+                    self.indexer.forward_before_topk(
+                        x_det, qr_det, startend_row_indices
+                    )
+                )
+                cu_topk_indices, _cu_topk_length = cudnn_indexer_topk_fwd(
+                    q_indexer_cu,
+                    k_indexer_cu,
+                    weights_indexer_cu,
+                    ratio=self.compress_ratio,
+                    topk_effective=attn_topk_effective,
+                )
+
+            topk_indices_compressed = cu_topk_indices
+
+        elif use_tilelang_indexer and not use_tilelang_loss_path:
             from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
 
             with paddle.no_grad():
