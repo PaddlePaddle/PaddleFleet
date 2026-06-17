@@ -28,6 +28,7 @@ from paddle.distributed.fleet.meta_parallel import ScheduleNode
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
+from paddlefleet.accuracy_compatible_patch import LossScaleBeforeBackward
 from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
@@ -40,18 +41,11 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 
 def _loss_md5_enabled() -> bool:
     return os.environ.get("LOG_LOSS_MD5", "0") == "1"
-
-
-def _use_accuracy_compatible_kernel() -> bool:
-    """Switch for Megatron-aligned (accuracy-compatible) numeric paths.
-
-    Controlled by the ``FLAGS_use_accuracy_compatible_kernel`` env variable.
-    """
-    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 
 
 def _tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
@@ -633,6 +627,9 @@ class LanguageLoss(FleetLayer):
                         ploss = ploss / xishu
                         mtp_loss.append(ploss)
 
+            if apply_dsv4_accuracy_compatible_patch():
+                LossScaleBeforeBackward.record(lm_loss)
+
             # Store detached MTP loss tensors into class-level tracker and global_training_logs.
             # Use .detach() instead of .item() to avoid GPU synchronization on every
             # micro-batch. The trainer will call .item() only at logging steps.
@@ -652,12 +649,12 @@ class LanguageLoss(FleetLayer):
                     logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
             def add_loss(main_loss, loss):
-                if _use_accuracy_compatible_kernel():
+                if apply_dsv4_accuracy_compatible_patch():
                     # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
                     # This matches Megatron's behavior where MTP contributes to training
                     # gradients without affecting the reported loss value.
                     if self.config.add_mtp_loss:
-                        return main_loss + loss - loss.detach()
+                        return loss - loss.detach() + main_loss
                     else:
                         return main_loss
                 else:
@@ -671,7 +668,7 @@ class LanguageLoss(FleetLayer):
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
                 loss = lm_loss
-                if _use_accuracy_compatible_kernel():
+                if apply_dsv4_accuracy_compatible_patch():
                     # Megatron-aligned: only add MTP loss when add_mtp_loss=True.
                     # Use add_loss() to keep single maintenance point for compat
                     # behavior (loss + val - val.detach() for gradient-only flow).
@@ -701,10 +698,16 @@ class LanguageLoss(FleetLayer):
                     * sum(mtp_loss)
                     / len(mtp_loss),
                 )
+            if apply_dsv4_accuracy_compatible_patch():
+                loss = LossScaleBeforeBackward.scale(loss)
 
             return loss
         else:
-            return self._forward(logits, labels)
+            loss = self._forward(logits, labels)
+            if apply_dsv4_accuracy_compatible_patch():
+                LossScaleBeforeBackward.record(loss)
+                loss = LossScaleBeforeBackward.scale(loss)
+            return loss
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="LanguageLoss")
@@ -763,7 +766,7 @@ class MainLanguageLoss(LanguageLoss):
                 logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
         def add_loss(main_loss, loss):
-            if _use_accuracy_compatible_kernel():
+            if apply_dsv4_accuracy_compatible_patch():
                 # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
                 # This matches Megatron's behavior
                 if self.config.add_mtp_loss:

@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 from paddlefleet import utils
 from paddlefleet.recompute_utils import need_recompute_in_first_n
 from paddlefleet.transformer.utils import profile
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
@@ -50,7 +51,7 @@ from .fusion_layer_utils import (
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
-from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
+from .moe_utils import AddAuxiliaryLoss
 from .token_dispatcher import (
     AllToAllTokenDispatcher,
     MoEFlexTokenDispatcher,
@@ -597,13 +598,13 @@ class MoELayer(nn.Layer):
             dispatched_input, num_or_sections=tokens_per_expert, axis=0
         )
         scale_chunks = None
-        if use_accuracy_compatible_kernel():
+        if apply_dsv4_accuracy_compatible_patch():
             per_token_scale = getattr(
                 self.token_dispatcher, "global_input_probs", None
             )
             if per_token_scale is None:
                 raise RuntimeError(
-                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                    "APPLY_DSV4_ACCURACY_COMPATIBLE_PATCH requires dispatched "
                     "router probabilities from the token dispatcher."
                 )
             scale_chunks = paddle.split(
@@ -980,11 +981,32 @@ class MoELayer(nn.Layer):
         """
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             hidden_states = GatherOp.apply(hidden_states)
+        sequence_first_moe = (
+            apply_dsv4_accuracy_compatible_patch() and hidden_states.ndim == 3
+        )
+        if sequence_first_moe:
+            hidden_states = hidden_states.transpose([1, 0, 2]).contiguous()
+            if input_ids is not None and input_ids.ndim == 2:
+                input_ids = input_ids.transpose([1, 0]).contiguous()
         orig_shape = hidden_states.shape
         residuals = hidden_states
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
+
+        if apply_dsv4_accuracy_compatible_patch():
+            from paddlefleet.accuracy_compatible_patch import MoEInputBranches
+
+            routed_input, gate_input, shared_residuals = MoEInputBranches.apply(
+                hidden_states
+            )
+        else:
+            routed_input, gate_input, shared_residuals = (
+                hidden_states,
+                hidden_states,
+                hidden_states,
+            )
+
         (
             capacity,
             topk_weights,
@@ -995,7 +1017,7 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(
-            hidden_states,
+            gate_input,
             input_ids=input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
@@ -1016,14 +1038,14 @@ class MoELayer(nn.Layer):
         ):
             combine_overlap_handle = {
                 "fn": self.shared_experts,
-                "fn_args": (residuals,),
+                "fn_args": (shared_residuals,),
             }
         else:
             combine_overlap_handle = None
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states,
+                    routed_input,
                     probs,
                     mask,
                     combine_overlap_handle,
@@ -1032,7 +1054,7 @@ class MoELayer(nn.Layer):
                 )
             else:
                 output = self.custom_forward(
-                    hidden_states,
+                    routed_input,
                     probs,
                     mask,
                     topk_weights=topk_weights,
@@ -1073,11 +1095,13 @@ class MoELayer(nn.Layer):
             if combine_overlap_handle is not None:
                 shared_output = combine_overlap_handle["fn_out"][0]
             else:
-                shared_output = self.shared_experts(residuals)[0]
+                shared_output = self.shared_experts(shared_residuals)[0]
             output = output + shared_output
 
         _log_moe_md5(output, "moe_final_output", layer_idx)
 
+        if sequence_first_moe:
+            output = output.transpose([1, 0, 2]).contiguous()
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
         return output, None  # None is bias

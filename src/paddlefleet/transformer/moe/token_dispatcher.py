@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING
 import paddle
 from paddle import nn
 
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
+
 if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
@@ -40,7 +42,6 @@ from .moe_utils import (
     permute,
     sort_chunks_by_idxs,
     unpermute,
-    use_accuracy_compatible_kernel,
 )
 
 HAVE_HYBRID_EP = False
@@ -485,6 +486,7 @@ class _DeepEPManager(_DispatchManager):
         self.token_probs = None
         # Handle used for combine operation
         self.handle = None
+        self.global_input_probs = None
 
         if fused_dispatch is None:
             raise ImportError(
@@ -536,6 +538,7 @@ class _DeepEPManager(_DispatchManager):
         self.tokens_per_expert = states["tokens_per_expert"]
         self.dispatched_indices = states["dispatched_indices"]
         self.dispatched_probs = dispatched_probs
+        self.global_input_probs = None
 
         return hidden_states, scale
 
@@ -561,6 +564,7 @@ class _DeepEPManager(_DispatchManager):
         self.tokens_per_expert = states["tokens_per_expert"]
         self.dispatched_indices = states["dispatched_indices"]
         self.dispatched_probs = dispatched_probs
+        self.global_input_probs = None
 
         return hidden_states, scale
 
@@ -577,15 +581,20 @@ class _DeepEPManager(_DispatchManager):
                 - routing_map: Multihot vector.
                 - probs: Multihot probabilities.
         """
+        if apply_dsv4_accuracy_compatible_patch():
+            from paddlefleet.accuracy_compatible_patch import (
+                indices_to_multihot,
+            )
+
+            return indices_to_multihot(indices, probs, self.num_local_experts)
+
         batch_size = indices.shape[0]
         multihot_routing_map = paddle.zeros(
             (batch_size, self.num_local_experts), dtype=paddle.int64
         )
-
         multihot_probs = paddle.zeros(
             (batch_size, self.num_local_experts), dtype=paddle.float32
         )
-
         mask = indices != -1
         valid_indices = indices[mask]
         row_indices = paddle.arange(batch_size).repeat_interleave(
@@ -643,6 +652,12 @@ class _DeepEPManager(_DispatchManager):
                 self.dispatched_indices, self.dispatched_probs
             )
         )
+        if apply_dsv4_accuracy_compatible_patch():
+            self.global_input_probs = (
+                self.dispatched_probs.T.contiguous().masked_select(
+                    self.dispatched_routing_map.T.contiguous().cast(paddle.bool)
+                )
+            )
         self.hidden_shape_before_permute = hidden_states.shape
         hidden_states, self.reversed_mapping_for_combine = permute(
             hidden_states,
@@ -663,7 +678,11 @@ class _DeepEPManager(_DispatchManager):
             self.reversed_mapping_for_combine,
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.dispatched_routing_map,
-            probs=self.dispatched_probs,
+            probs=(
+                None
+                if apply_dsv4_accuracy_compatible_patch()
+                else self.dispatched_probs
+            ),
         )
         return hidden_states.to(input_dtype)
 
@@ -758,6 +777,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         if manager_cls is _HybridEPManager:
             manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
         self._comm_manager = manager_cls(**manager_kwargs)
+        self.global_input_probs = None
 
     def dispatch_preprocess(
         self,
@@ -768,6 +788,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         topk_indices: paddle.Tensor | None = None,
     ):
         self.hidden_shape = hidden_states.shape
+        self.global_input_probs = None
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
         self._comm_manager.setup_metadata(
             routing_map, probs, topk_weights, topk_indices
@@ -781,6 +802,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         token_indices: paddle.Tensor,
     ):
         self.hidden_shape = hidden_states.shape
+        self.global_input_probs = None
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
         self._comm_manager.routing_map = None
         self._comm_manager.routing_probs = None
@@ -826,6 +848,9 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
                 hidden_states
             )
         )
+        self.global_input_probs = getattr(
+            self._comm_manager, "global_input_probs", None
+        )
         tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
 
         return global_input_tokens, tokens_per_expert
@@ -862,6 +887,9 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             self._comm_manager.get_permuted_hidden_states_by_experts(
                 hidden_states
             )
+        )
+        self.global_input_probs = getattr(
+            self._comm_manager, "global_input_probs", None
         )
         tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
 
@@ -977,14 +1005,13 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
         ) = permute(reshaped_input, self.routing_map)
-        if use_accuracy_compatible_kernel():
-            num_routed_tokens = int(tokens_per_expert.sum().item())
+        if apply_dsv4_accuracy_compatible_patch():
             routing_map = self.routing_map.cast(paddle.bool).T.contiguous()
             flat_sorted = paddle.argsort(
                 routing_map.reshape([-1]).cast("int32"),
                 descending=True,
                 stable=True,
-            )[:num_routed_tokens]
+            )[: int(tokens_per_expert.sum().item())]
             self.permuted_local_probs = paddle.index_select(
                 self.probs.T.contiguous().reshape([-1]),
                 flat_sorted,
@@ -1011,7 +1038,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             in_split_sizes=self.input_split_sizes,
             group=self.moe_group,
         )
-        if use_accuracy_compatible_kernel():
+        if apply_dsv4_accuracy_compatible_patch():
             # Match Megatron's all-to-all backward numerics by routing probs through a
             # 2D [tokens, 1] tensor, like hidden-state dispatch.
             global_input_probs_2d = _AllToAll.apply(
@@ -1040,20 +1067,16 @@ class AllToAllTokenDispatcher(nn.Layer):
         ).T.ravel()
 
         if self.num_local_experts > 1 and not self.is_empty_tokens:
-            split_sizes_list = (
-                self.num_global_tokens_per_local_expert.ravel().tolist()
-            )
-            sorted_idxs_list = self.sort_input_by_local_experts.tolist()
             global_input_tokens, _ = sort_chunks_by_idxs(
                 global_input_tokens,
                 self.num_global_tokens_per_local_expert.ravel(),
                 self.sort_input_by_local_experts,
             )
-            if use_accuracy_compatible_kernel():
-                self.global_input_probs = _sort_chunks_like_tokens(
+            if apply_dsv4_accuracy_compatible_patch():
+                self.global_input_probs, _ = sort_chunks_by_idxs(
                     self.global_input_probs,
-                    split_sizes_list,
-                    sorted_idxs_list,
+                    self.num_global_tokens_per_local_expert.ravel(),
+                    self.sort_input_by_local_experts,
                 )
         sorted_tokens = global_input_tokens
         self.tokens_per_expert_post_gather = self.tokens_per_expert
@@ -1088,7 +1111,9 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.reshaped_input_shape,
-            probs=(None if use_accuracy_compatible_kernel() else self.probs),
+            probs=(
+                None if apply_dsv4_accuracy_compatible_patch() else self.probs
+            ),
             routing_map=self.routing_map,
         )
 

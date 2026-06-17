@@ -43,6 +43,7 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
 from paddlefleet.transformer.attention import Attention
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -52,6 +53,10 @@ if TYPE_CHECKING:
 
 def _q_rms_norm(q: Tensor, eps: float) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
+    if apply_dsv4_accuracy_compatible_patch():
+        from paddlefleet.accuracy_compatible_patch import CompatibleQRMSNorm
+
+        return CompatibleQRMSNorm.apply(q, eps)
     return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
 
 
@@ -262,6 +267,8 @@ class DSv4HybridAttention(Attention):
         startend_row_indices = kwargs.get(
             "attn_mask_startend_row_indices", None
         )
+        if apply_dsv4_accuracy_compatible_patch():
+            startend_row_indices = None
 
         # Get Q, K, V tensors
         # In CP mode, pass position_offset so RoPE uses correct global positions.
@@ -364,9 +371,25 @@ class DSv4HybridAttention(Attention):
         wo_a_weight = self.linear_o_group_proj.reshape(
             [self.o_local_groups, self.config.o_lora_rank, -1]
         )
-        core_attn_out = paddle.einsum(
-            "...gd,grd->...gr", core_attn_out, wo_a_weight
-        )
+        if apply_dsv4_accuracy_compatible_patch() and b > 1:
+            from paddlefleet.accuracy_compatible_patch import (
+                CompatibleOGroupProjection,
+            )
+
+            call_idx = getattr(self, "_ogroup_projection_call_idx", 0)
+            self._ogroup_projection_call_idx = call_idx + 1
+            core_attn_out = CompatibleOGroupProjection.apply(
+                core_attn_out,
+                self.linear_o_group_proj,
+                self.o_local_groups,
+                self.config.o_lora_rank,
+                self.layer_number,
+                call_idx,
+            )
+        else:
+            core_attn_out = paddle.einsum(
+                "...gd,grd->...gr", core_attn_out, wo_a_weight
+            )
         core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Output projection

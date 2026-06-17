@@ -39,6 +39,7 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -137,6 +138,39 @@ class GPTEmbedding(FleetLayer):
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTEmbedding")
 
+    def _embed_shifted_mtp(
+        self,
+        input_ids: Tensor,
+        position_ids: Tensor | None,
+        depth: int,
+        seq_length: int,
+    ):
+        shift = depth + 1
+        shifted_input_ids = input_ids[:, shift:seq_length]
+        pad_input_ids = paddle.zeros(
+            [input_ids.shape[0], shift],
+            dtype=input_ids.dtype,
+        )
+        mtp_input_ids = paddle.concat(
+            [shifted_input_ids, pad_input_ids],
+            axis=1,
+        )
+        mtp_position_ids = None
+        if not self.multimodal_embedding and position_ids is not None:
+            shifted_position_ids = position_ids[:, shift:seq_length]
+            pad_position_ids = paddle.zeros(
+                [position_ids.shape[0], shift],
+                dtype=position_ids.dtype,
+            )
+            mtp_position_ids = paddle.concat(
+                [shifted_position_ids, pad_position_ids],
+                axis=1,
+            )
+        return self.embedding(
+            input_ids=mtp_input_ids,
+            position_ids=mtp_position_ids,
+        )
+
     def forward(
         self,
         dict_args: dict,
@@ -234,9 +268,27 @@ class GPTEmbedding(FleetLayer):
                     )
                     mtp_ids_list = []
                     for depth in range(self.config.num_nextn_predict_layers):
-                        mtp_ids_list.append(
-                            input_ids[:, (depth + 1) : (depth + 1 + seq_length)]
-                        )
+                        if apply_dsv4_accuracy_compatible_patch():
+                            pad_ids = paddle.zeros(
+                                [input_ids.shape[0], depth + 1],
+                                dtype=input_ids.dtype,
+                            )
+                            mtp_ids_list.append(
+                                paddle.concat(
+                                    [
+                                        input_ids[:, depth + 1 : seq_length],
+                                        pad_ids,
+                                    ],
+                                    axis=1,
+                                )
+                            )
+                        else:
+                            mtp_ids_list.append(
+                                input_ids[
+                                    :,
+                                    (depth + 1) : (depth + 1 + seq_length),
+                                ]
+                            )
                     # [B, num_mtp, max_seq] - paddle.stack creates a new contiguous tensor
                     mtp_input_ids_for_moe_mask = paddle.stack(
                         mtp_ids_list, axis=1
@@ -319,13 +371,22 @@ class GPTEmbedding(FleetLayer):
                         )  # change to [S, B, H]
                     mtp_emb_res = [inputs_embeds]
                     for depth in range(self.config.num_nextn_predict_layers):
-                        inputs_embeds_mtp = paddle.concat(
-                            [
-                                inputs_embeds_ori[:, (depth + 1) :, :],
-                                inputs_embeds_extra[:, : (depth + 1), :],
-                            ],
-                            axis=1,
-                        )
+                        if apply_dsv4_accuracy_compatible_patch():
+                            inputs_embeds_mtp = self._embed_shifted_mtp(
+                                input_ids,
+                                position_ids,
+                                depth,
+                                seq_length,
+                            )
+                        else:
+                            shift = depth + 1
+                            inputs_embeds_mtp = paddle.concat(
+                                [
+                                    inputs_embeds_ori[:, (depth + 1) :, :],
+                                    inputs_embeds_extra[:, : (depth + 1), :],
+                                ],
+                                axis=1,
+                            )
 
                         if (
                             get_context_parallel_world_size() > 1

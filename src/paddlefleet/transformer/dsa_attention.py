@@ -49,6 +49,7 @@ from paddlefleet.tensor_parallel.mappings import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
@@ -85,6 +86,11 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     assert dim > 0 and (dim & (dim - 1)) == 0, (
         f"hadamard_transform requires dim to be a power of 2, got {dim}"
     )
+
+    if apply_dsv4_accuracy_compatible_patch():
+        from paddlefleet.accuracy_compatible_patch import CompatibleHadamard
+
+        return CompatibleHadamard.apply(x, scale)
 
     # Megatron uses fast_hadamard_transform, whose bf16 path accumulates in fp32
     # and casts back to bf16. Keep the same numeric contract here.
@@ -913,9 +919,14 @@ def _bwd_fused_indexer_loss(
         "sbht,tbd->sbhd", grad_scores, k.cast("float32")
     )  # [sq, b, h, d]
     # ∂L/∂k = einsum('sbht,sbhd->tbd', grad_scores, q)
-    grad_k = paddle.einsum(
-        "sbht,sbhd->tbd", grad_scores, q.cast("float32")
-    )  # [sk, b, d]
+    if apply_dsv4_accuracy_compatible_patch():
+        from paddlefleet.accuracy_compatible_patch import compatible_einsum
+
+        grad_k = compatible_einsum(grad_scores, q)
+    else:
+        grad_k = paddle.einsum(
+            "sbht,sbhd->tbd", grad_scores, q.cast("float32")
+        )  # [sk, b, d]
     del grad_scores
 
     return (

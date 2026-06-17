@@ -15,7 +15,6 @@
 # limitations under the License.
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
 import paddle
@@ -37,27 +36,12 @@ from paddlefleet.tensor_parallel.random import (
     get_expert_parallel_rng_tracker_name,
 )
 from paddlefleet.training.global_vars import get_global_training_logs
-from paddlefleet.utils import get_pg_size
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch, get_pg_size
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from paddle.distributed.communication.group import Group
-
-
-_USE_ACCURACY_COMPATIBLE_KERNEL = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
-
-
-def use_accuracy_compatible_kernel() -> bool:
-    """Unified switch for accuracy-compatible (Megatron-aligned) numeric paths.
-
-    Controlled via the ``FLAGS_use_accuracy_compatible_kernel`` environment
-    variable. When enabled, modules switch to fp32-accumulating / Torch-aligned
-    kernels at the cost of throughput.
-    """
-    return _USE_ACCURACY_COMPATIBLE_KERNEL
 
 
 def _unpermute_scatter(
@@ -141,7 +125,14 @@ def permute(
     sorted_indices = token_indices.masked_select(routing_map)
 
     # use the mapping to permute the tokens
-    permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+    if apply_dsv4_accuracy_compatible_patch():
+        permuted_input = (
+            tokens.cast("float32")
+            .index_select(axis=0, index=sorted_indices)
+            .cast(tokens.dtype)
+        )
+    else:
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
 
     return permuted_input, sorted_indices
 
@@ -180,14 +171,14 @@ def unpermute(
         permuted_probs = probs.T.contiguous().masked_select(
             routing_map.T.contiguous().cast(paddle.bool)
         )
-        if use_accuracy_compatible_kernel():
+        if apply_dsv4_accuracy_compatible_patch():
             permuted_tokens = ApplyPermutedProbs.apply(
                 permuted_tokens, permuted_probs
             )
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
 
-    if use_accuracy_compatible_kernel():
+    if apply_dsv4_accuracy_compatible_patch():
         output_tokens = _unpermute_fp32_accum(
             permuted_tokens, sorted_indices, restore_shape
         )
