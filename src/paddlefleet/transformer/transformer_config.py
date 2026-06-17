@@ -1224,14 +1224,6 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
-            if (
-                self.csa_indexer_backend == "cudnn"
-                and self.context_parallel_size > 1
-            ):
-                raise ValueError(
-                    "csa_indexer_backend='cudnn' is not supported in the "
-                    "context-parallel CSA indexer path."
-                )
             if self.csa_sparse_attn_backend not in {
                 "unfused",
                 "tilelang",
