@@ -2002,8 +2002,9 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         # Expose node on moe_layer for diagnostic access
         custom_map._fusion_node = ctx.node
 
-        if not is_first_fwd:
-            # Normal forward with grad: save state for backward.
+        if is_first_fwd:
+            ctx.node.clear_cached_tensors()
+        else:
             cached_tensors = ctx.node.cached_tensors()
             ctx.save_for_backward(cached_tensors)
             ctx.node.clear_cached_tensors()
