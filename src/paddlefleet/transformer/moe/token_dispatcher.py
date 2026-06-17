@@ -393,6 +393,7 @@ class _HybridEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ) -> paddle.Tensor:
         return self.dispatch_overlap(
             hidden_states,
@@ -408,6 +409,8 @@ class _HybridEPManager(_DispatchManager):
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
         use_rr_deepep_combine: bool = False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ) -> paddle.Tensor:
         del async_finish, use_rr_deepep_combine
         if combine_overlap_handle is not None:
@@ -1021,6 +1024,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
         global_input_tokens = _AllToAll.apply(
