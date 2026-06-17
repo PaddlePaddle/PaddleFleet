@@ -650,6 +650,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.tensor_model_parallel_size = 1
         config.cp_balance_mode = "contiguous_allgather"
         config.csa_indexer_backend = "tilelang"
+        config.csa_sparse_attn_backend = "unfused"
 
         sublayers = DSv4HybridSelfAttentionSublayersSpec(
             linear_q_down_proj=_TestLinear,
