@@ -638,7 +638,6 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.dsa_indexer_loss_coeff = 0.0
         config.dsa_indexer_use_sparse_loss = False
         config.csa_tilelang_enable_indexer = False
-        config.csa_tilelang_enable_sparse_attn = False
         config.init_method = None
         config.init_method_std = 0.02
         config.output_layer_init_method = None
