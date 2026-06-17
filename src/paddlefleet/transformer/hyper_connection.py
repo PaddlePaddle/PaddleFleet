@@ -447,8 +447,13 @@ class HyperConnectionModule(nn.Layer):
         C = self.hidden_size
         num_tokens = math.prod(leading_shape)
 
-        # Reshape for bmm: [..., n, n] -> [batch, n, n]
-        h_res_batched = h_res.reshape([num_tokens, n, n])
+        if apply_dsv4_accuracy_compatible_patch():
+            h_res_batched = h_res.reshape([num_tokens, n, n])
+        else:
+            # Reshape for bmm: [..., n, n] -> [batch, n, n]
+            ndim = h_res.ndim
+            perm = [*list(range(ndim - 2)), ndim - 1, ndim - 2]
+            h_res_batched = h_res.transpose(perm).reshape([num_tokens, n, n])
         # [..., n*C] -> [..., n, C] -> [batch, n, C]
         residual_batched = residual.reshape([num_tokens, n, C])
 
