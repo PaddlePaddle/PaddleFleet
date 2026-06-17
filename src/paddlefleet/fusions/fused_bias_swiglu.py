@@ -21,7 +21,10 @@ import paddle
 import paddle.nn.functional as F
 
 from paddlefleet.jit import jit_fuser
-from paddlefleet.utils import nvtx_decorator
+from paddlefleet.utils import (
+    nvtx_decorator,
+    apply_dsv4_accuracy_compatible_patch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,11 +161,21 @@ def clamped_swiglu_back(g, y, clamp_value):
     # Clamp masks in g.dtype
     y1_mask = (y_1 <= clamp_value).cast(g.dtype)
     y2_mask = ((y_2 >= -clamp_value) & (y_2 <= clamp_value)).cast(g.dtype)
-    sig = F.sigmoid(y_1_clamped)
-    grad_y1 = (
-        g * sig * (1.0 + y_1_clamped * (1.0 - sig)) * y_2_clamped * y1_mask
-    )
-    grad_y2 = g * (y_1_clamped * sig) * y2_mask  # silu = x * sigmoid(x)
+    if apply_dsv4_accuracy_compatible_patch():
+        grad_y1 = (
+            g
+            * F.sigmoid(y_1_clamped)
+            * (1.0 + y_1_clamped * (1.0 - F.sigmoid(y_1_clamped)))
+            * y_2_clamped
+            * y1_mask
+        )
+        grad_y2 = g * F.silu(y_1_clamped) * y2_mask
+    else:
+        sig = F.sigmoid(y_1_clamped)
+        grad_y1 = (
+            g * sig * (1.0 + y_1_clamped * (1.0 - sig)) * y_2_clamped * y1_mask
+        )
+        grad_y2 = g * (y_1_clamped * sig) * y2_mask  # silu = x * sigmoid(x)
     return paddle.concat([grad_y1, grad_y2], axis=-1).cast(dtype)
 
 
@@ -251,7 +264,11 @@ def clamped_weighted_swiglu_back(g, y, weights, clamp_value):
     w_dtype = weights.dtype
     input_grad = clamped_swiglu_back(g * weights, y, clamp_value)
     weights_grad = clamped_swiglu(y, clamp_value) * g.cast(w_dtype)
-    weights_grad = paddle.sum(weights_grad, axis=-1, keepdim=True)
+    if apply_dsv4_accuracy_compatible_patch():
+        from paddlefleet.accuracy_compatible_patch import sum_for_small_rows
+        weights_grad = sum_for_small_rows(weights_grad)
+    else:
+        weights_grad = paddle.sum(weights_grad, axis=-1, keepdim=True)
     return input_grad.cast(input_dtype), weights_grad.cast(w_dtype)
 
 

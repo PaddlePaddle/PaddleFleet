@@ -77,6 +77,7 @@ from paddlefleet.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
     _initialize_affine_weight_gpu,
 )
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 from paddlefleet.transformer.identity_op import IdentityOp
 
 
@@ -232,6 +233,12 @@ class GPTLMHead(ColumnParallelLinear):
         return ScheduleNode(self.forward, name="GPTLMHead")
 
     def _forward(self, hidden_states: paddle.Tensor):
+        use_sequence_first_linear = (
+            apply_dsv4_accuracy_compatible_patch()
+            and not self.config.sequence_parallel
+        )
+        if use_sequence_first_linear:
+            hidden_states = hidden_states.transpose([1, 0, 2]).contiguous()
         # Fused linear + cross-entropy path: skip materializing [B, S, V] logits
         # and delegate the linear projection into LanguageLoss, which will call
         # LigerFusedLinearCrossEntropyFunction.
@@ -277,6 +284,8 @@ class GPTLMHead(ColumnParallelLinear):
             logits = recompute_handler(hidden_states, self.weight.T)
         else:
             logits, _ = super().forward(hidden_states, self.weight.T)
+        if use_sequence_first_linear:
+            logits = logits.transpose([1, 0, 2]).contiguous()
         if (
             not self.config.gpt_model_use_experimental_version
             and self.config.sequence_parallel

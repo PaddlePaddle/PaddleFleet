@@ -53,6 +53,7 @@ from paddlefleet.parallel_state import (
     get_tensor_model_parallel_group,
 )
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 # MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
@@ -107,6 +108,10 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         ctx.dw_p2p_overlap = dw_p2p_overlap
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
+        if apply_dsv4_accuracy_compatible_patch():
+            return paddle.matmul(
+                x.cast(ctx.dtype), w.cast(ctx.dtype), transpose_y=True
+            )
         w = w.T
         return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
@@ -259,10 +264,14 @@ class StandardMoERouter(nn.Layer):
                 f"seq_aux is True but routing_type is {self.routing_type}. Please check."
             )
 
+        router_weight_dtype = "float32"
+        if apply_dsv4_accuracy_compatible_patch():
+            router_weight_dtype = "bfloat16"
+
         # Initialize gate weight with Normal distribution aligned with Megatron.
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
+            dtype=router_weight_dtype,
             default_initializer=paddle.nn.initializer.Constant(0.0),
         )
         config.init_method(self.weight)
@@ -915,6 +924,7 @@ class StandardMoERouter(nn.Layer):
 
     def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         self._setup_hash_layer(layer_number, is_mtp_layer)
 
     def _setup_hash_layer(self, layer_number, is_mtp_layer: bool = False):
@@ -994,6 +1004,7 @@ class TopKRouter(StandardMoERouter):
     def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self._layer_number = layer_number
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
     def forward(self, input, input_ids=None):
@@ -1033,6 +1044,11 @@ class TopKRouter(StandardMoERouter):
                     f"input_ids=[{batch_size_}, {seq_len_}], "
                     f"expected [batch_size={batch_size}, seq_len={seq_len}]"
                 )
+                if (
+                    apply_dsv4_accuracy_compatible_patch()
+                    and self.is_mtp_layer
+                ):
+                    input_ids_none_zero_mask = None
             else:
                 input_ids_none_zero_mask = None
         elif len(input.shape) == 2:

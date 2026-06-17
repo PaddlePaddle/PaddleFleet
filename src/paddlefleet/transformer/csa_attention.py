@@ -24,8 +24,6 @@ Components:
 """
 
 from __future__ import annotations
-
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -38,10 +36,7 @@ from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
 from paddlefleet.transformer import FleetLayer
-
-_ACCURACY_COMPATIBLE_KERNEL: bool = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -569,17 +564,21 @@ def unfused_compressed_sparse_attn(
         # Softmax with attention sink
         # sink: [np] -> [1, np, 1, 1]
         sink = attn_sink.reshape([1, np_heads, 1, 1])
-        # Compute stable softmax: max over scores and sink
-        scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
-        scores_max = paddle.maximum(scores_max, sink)
+        if apply_dsv4_accuracy_compatible_patch():
+            from paddlefleet.accuracy_compatible_patch import (
+                CompatibleCSASinkSoftmax,
+            )
 
-        exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
-        exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
-
-        sum_exp = (
-            exp_scores.sum(axis=-1, keepdim=True) + exp_sink
-        )  # [b, np, sq, 1]
-        attn_weights = exp_scores / sum_exp  # [b, np, sq, topk]
+            attn_weights = CompatibleCSASinkSoftmax.apply(
+                scores, sink.cast("float32")
+            )
+        else:
+            scores_max = scores.max(axis=-1, keepdim=True)
+            scores_max = paddle.maximum(scores_max, sink)
+            exp_scores = paddle.exp(scores - scores_max)
+            exp_sink = paddle.exp(sink - scores_max)
+            sum_exp = exp_scores.sum(axis=-1, keepdim=True) + exp_sink
+            attn_weights = exp_scores / sum_exp
 
         # Weighted sum: [b, np, sq, topk] x [b, sq, topk, hn] -> [b, np, sq, hn]
         output = paddle.einsum("bnsk,bskh->bnsh", attn_weights, kv_g)
@@ -1124,8 +1123,8 @@ class Compressor(nn.Layer):
                 else 0.02
             ),
         )
-        self._cast_to_low_precision = False
-
+        if not apply_dsv4_accuracy_compatible_patch():
+            self._cast_to_low_precision = False
         self.norm = build_spec_layer(
             sublayers_spec.norm,
             config=config,
@@ -1266,7 +1265,8 @@ class Compressor(nn.Layer):
 
             # APE: [ratio, coff * head_dim] -> [1, 1, ratio, coff * head_dim]
             ape = self.ape.reshape([1, 1, ratio, -1])
-            ape = ape.cast(score.dtype) if _ACCURACY_COMPATIBLE_KERNEL else ape
+            if apply_dsv4_accuracy_compatible_patch():
+                ape = ape.cast(score.dtype)
             score = score + ape
 
             if self.overlap:
@@ -1343,7 +1343,8 @@ class Compressor(nn.Layer):
 
         # APE: [ratio, coff * head_dim] -> [1, 1, ratio, coff * head_dim]
         ape = self.ape.reshape([1, 1, ratio, -1])
-        ape = ape.cast(score.dtype) if _ACCURACY_COMPATIBLE_KERNEL else ape
+        if apply_dsv4_accuracy_compatible_patch():
+            ape = ape.cast(score.dtype)
         score = score + ape
 
         if self.overlap:
@@ -1629,7 +1630,8 @@ class CompressedSparseAttention(FleetLayer):
             dtype="float32",
             default_initializer=nn.initializer.Constant(0.0),
         )
-        self._cast_to_low_precision = False
+        if not apply_dsv4_accuracy_compatible_patch():
+            self._cast_to_low_precision = False
 
         # Conditionally build Compressor (ratio > 1)
         if self.compress_ratio > 1:
@@ -2364,7 +2366,7 @@ class CompressedSparseAttention(FleetLayer):
     ):
         attn_sink_fp32 = (
             attn_sink.cast("bfloat16").cast("float32")
-            if _ACCURACY_COMPATIBLE_KERNEL
+            if apply_dsv4_accuracy_compatible_patch()
             else attn_sink.cast("float32")
         )
         if _resolve_csa_tilelang_switch(

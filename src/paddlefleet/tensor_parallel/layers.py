@@ -39,6 +39,7 @@ from ..parallel_state import (
 # from ..dist_checkpointing.mapping import ShardedStateDict
 # from ..transformer.utils import make_sharded_tensors_for_checkpoint
 from ..utils import (
+    apply_dsv4_accuracy_compatible_patch,
     divide,
     get_pg_rank,
     get_pg_size,
@@ -309,7 +310,10 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         else:
             masked_input = input_
         # Get the embeddings.
-        if self.deterministic_mode:
+        if (
+            self.deterministic_mode
+            or apply_dsv4_accuracy_compatible_patch()
+        ):
             output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
@@ -357,7 +361,12 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
         ctx.save_for_backward(weight, bias)
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.tp_group = tp_group
-        output = paddle.matmul(input, weight)
+        if apply_dsv4_accuracy_compatible_patch():
+            output = paddle.matmul(
+                input, weight.t().contiguous(), transpose_y=True
+            )
+        else:
+            output = paddle.matmul(input, weight)
 
         if bias is not None:
             output = output + bias
@@ -367,7 +376,11 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
     def backward(ctx, grad_output):
         """Backward with frozen weight."""
         (weight, bias) = ctx.saved_tensor()
-        grad_input = grad_output.matmul(weight.t())
+        if apply_dsv4_accuracy_compatible_patch():
+            from paddlefleet.accuracy_compatible_patch import te_matmul
+            grad_input = te_matmul(grad_output, weight)
+        else:
+            grad_input = grad_output.matmul(weight.t())
 
         if ctx.allreduce_dgrad:
             # All-reduce. Note: here async and sync are effectively the same.
@@ -515,6 +528,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         if bias is not None:
             output = paddle.nn.functional.linear(total_input, weight, bias)
+        elif apply_dsv4_accuracy_compatible_patch():
+            output = paddle.matmul(
+                total_input, weight.t().contiguous(), transpose_y=True
+            )
         else:
             output = paddle.matmul(total_input, weight)
         return output
@@ -569,14 +586,27 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 total_input = all_gather_buffer
             else:
                 total_input = input
-        if input_needs_grad:
-            grad_input = grad_output.matmul(weight.t())
-        else:
+        if not input_needs_grad:
             grad_input = None
+        elif apply_dsv4_accuracy_compatible_patch():
+            from paddlefleet.accuracy_compatible_patch import te_matmul
+            grad_input = te_matmul(grad_output, weight)
+        else:
+            grad_input = grad_output.matmul(weight.t())
 
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
             handle.wait()
+
+        seqfirst_grad_weight = None
+        if wgrad_compute and apply_dsv4_accuracy_compatible_patch():
+            from paddlefleet.accuracy_compatible_patch import (
+                linear_seqfirst_wgrad,
+            )
+
+            seqfirst_grad_weight = linear_seqfirst_wgrad(
+                input, grad_output, weight
+            )
 
         if wgrad_compute:
             grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
@@ -644,7 +674,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            grad_weight = total_input.t().matmul(grad_output)
+            if seqfirst_grad_weight is not None:
+                grad_weight = seqfirst_grad_weight
+            else:
+                grad_weight = total_input.t().matmul(grad_output)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:

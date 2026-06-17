@@ -46,6 +46,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider
@@ -486,15 +487,28 @@ class MultiTokenPredictionLayer(FleetLayer):
 
             # e_proj: [.., h] -> [.., h/tp]
             e_out, _ = self.e_proj(decoder_input)
-            # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
-            # 这里hs_streams是4D tensor: [b,s,n,h]会导致算梯度的时候调用.t()报错，必须reshape到更低维度
-            orig_shape = list(hs_streams.shape)  # [s/sp, b, n, h]
-            if self.tensor_parallel > 1 and self.sequence_parallel:
-                # [s/sp, b, n, h] --> [s, b, n, h]
-                orig_shape[0] = orig_shape[0] * self.tensor_parallel
-            hs_flat = hs_streams.reshape([-1, orig_shape[-1]])  # [s/sp*b*n, h]
-            h_out, _ = self.h_proj(hs_flat)  # [s*b*n, h/tp]
-            h_out = h_out.reshape([*orig_shape[:-1], -1])  # [s, b, n, h/tp]
+            # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp].
+            # For mbs>1 Paddle reaches this point as [B, S, N, H], while
+            # Megatron flattens [S, B, N, H] for the weight-gradient GEMM.
+            # The transpose is forward-equivalent but aligns the wgrad
+            # accumulation order.
+            if (
+                apply_dsv4_accuracy_compatible_patch()
+                and hs_streams.ndim == 4
+            ):
+                orig_shape = hs_streams.shape
+                hs_seqfirst = hs_streams.transpose([1, 0, 2, 3]).contiguous()
+                seqfirst_shape = hs_seqfirst.shape
+                hs_flat = hs_seqfirst.reshape([-1, seqfirst_shape[-1]])
+                h_out, _ = self.h_proj(hs_flat)
+                h_out = h_out.reshape([*seqfirst_shape[:-1], -1])
+                h_out = h_out.transpose([1, 0, 2, 3]).contiguous()
+            else:
+                # hs_streams is 4D, so flatten before ColumnParallelLinear.
+                orig_shape = hs_streams.shape
+                hs_flat = hs_streams.reshape([-1, orig_shape[-1]])
+                h_out, _ = self.h_proj(hs_flat)
+                h_out = h_out.reshape([*orig_shape[:-1], -1])
             # Broadcast add before gather (saves one all-gather vs gathering separately)
             hidden_states = e_out.unsqueeze(-2) + h_out
             if self.tensor_parallel > 1:

@@ -21,6 +21,7 @@ import functools
 import inspect
 import math
 import operator
+import os
 import warnings
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -545,3 +546,7 @@ def deprecate_inference_params(inference_context, inference_params):
         )
         return inference_params
     return inference_context
+
+
+def apply_dsv4_accuracy_compatible_patch():
+    return os.environ.get("APPLY_DSV4_ACCURACY_COMPATIBLE_PATCH", "0") == "1"

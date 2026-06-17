@@ -36,6 +36,7 @@ except ImportError:
 from paddle.distributed.fleet.meta_parallel import ScheduleNode
 
 from paddlefleet.jit import jit_fuser
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -73,8 +74,11 @@ class RMSNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        # Ensure hidden_states dtype matches weight dtype for rms_norm
-        if hidden_states.dtype != self.weight.dtype:
+        if apply_dsv4_accuracy_compatible_patch():
+            axes = [1, 0, 2, 3] if hidden_states.ndim == 4 else [1, 0, 2]
+            hidden_states = hidden_states.transpose(axes).contiguous()
+        elif hidden_states.dtype != self.weight.dtype:
+            # Ensure hidden_states dtype matches weight dtype for rms_norm.
             hidden_states = hidden_states.astype(self.weight.dtype)
         rms_norm_out = rms_norm(
             hidden_states,
@@ -83,9 +87,13 @@ class RMSNorm(paddle.nn.Layer):
             self.variance_epsilon,
         )
         if isinstance(rms_norm_out, (tuple, list)):
-            return rms_norm_out[0].astype(self.weight.dtype)
+            output = rms_norm_out[0]
         else:
-            return rms_norm_out.astype(self.weight.dtype)
+            output = rms_norm_out
+        output = output.astype(self.weight.dtype)
+        if apply_dsv4_accuracy_compatible_patch():
+            output = output.transpose(axes).contiguous()
+        return output
 
     def enable_sequence_parallel(self):
         mark_as_sequence_parallel_parameter(self.weight)
@@ -143,6 +151,9 @@ class LayerNorm(paddle.nn.Layer):
 
 class FusedRMSNorm(RMSNorm):
     def forward(self, hidden_states: Tensor):
+        if apply_dsv4_accuracy_compatible_patch():
+            axes = [1, 0, 2, 3] if hidden_states.ndim == 4 else [1, 0, 2]
+            hidden_states = hidden_states.transpose(axes).contiguous()
         rms_norm_out = rms_norm(
             hidden_states,
             hidden_states.shape[-1:],
@@ -150,9 +161,13 @@ class FusedRMSNorm(RMSNorm):
             self.variance_epsilon,
         )
         if isinstance(rms_norm_out, (tuple, list)):
-            return rms_norm_out[0].astype(self.weight.dtype)
+            output = rms_norm_out[0]
         else:
-            return rms_norm_out.astype(self.weight.dtype)
+            output = rms_norm_out
+        output = output.astype(self.weight.dtype)
+        if apply_dsv4_accuracy_compatible_patch():
+            output = output.transpose(axes).contiguous()
+        return output
 
 
 class RMSNormTriton(RMSNorm):
