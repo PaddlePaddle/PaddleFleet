@@ -520,6 +520,9 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
+    shared_expert_fp8: bool = False
+    """Whether to enable FP8 weight quantization for shared experts."""
+
     moe_deep_gemm: bool = True
     """Whether to use DeepGEMM for the bf16 grouped-gemm MoE path. This option only takes effect when
     ``moe_expert_fusion=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""

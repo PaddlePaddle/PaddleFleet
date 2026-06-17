@@ -299,6 +299,16 @@ class MoELayer(nn.Layer):
                     )
                 self.fp8_dispatch = False
 
+        self._shared_expert_fp8 = config.shared_expert_fp8 and self.fp8
+        assert not (
+            self._shared_expert_fp8 and self.moe_shared_expert_overlap
+        ), (
+            "shared_expert_fp8 and moe_shared_expert_overlap cannot be enabled simultaneously."
+        )
+        assert not (
+            self._shared_expert_fp8 and config.tensor_model_parallel_size > 1
+        ), "shared_expert_fp8 does not support tensor_model_parallel_size > 1."
+
         if self.fp8:
             if paddle.version.cuda() == "12.6":
                 raise NotImplementedError(
@@ -371,6 +381,18 @@ class MoELayer(nn.Layer):
             self.shared_experts = self.shared_expert_class(**shared_expert_args)
         else:
             self.shared_experts = None
+
+        # Shared Expert FP8: online mode by default (re-quantize each forward).
+        # Offline mode can be activated externally via
+        # ``self.shared_experts.enable_offline_fp8_quant()``.
+        if (
+            getattr(self, "_shared_expert_fp8", False)
+            and self.shared_experts is not None
+        ):
+            self.shared_experts._shared_expert_fp8 = True
+            logging.info(
+                "[MoELayer] Shared expert FP8 forward enabled (online mode)"
+            )
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
@@ -1264,6 +1286,13 @@ class MoELayer(nn.Layer):
                         [expert.down_proj.weight],
                         quant_transpose=quant_transpose,
                     )
+
+        # Quantize shared expert weights
+        if (
+            getattr(self, "_shared_expert_fp8", False)
+            and self.shared_experts is not None
+        ):
+            self.shared_experts._quantize_weights()
 
     def use_fp8(self):
         if self.moe_use_fusion_node and self.fp8:
