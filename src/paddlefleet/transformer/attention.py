@@ -946,7 +946,7 @@ class SelfAttention(Attention):
                     [
                         -1,
                         self.config.max_sequence_length
-                        // get_context_parallel_world_size(),
+                        // max(get_context_parallel_world_size(), 1),
                         gate.shape[-1],
                     ]
                 )
@@ -974,9 +974,8 @@ class SelfAttention(Attention):
             if not split_qkv:
                 split_arg_list = [num_heads, num_kv_heads, num_kv_heads]
                 return mixed_qkv, split_arg_list
-            seq_len_local = (
-                self.config.max_sequence_length
-                // get_context_parallel_world_size()
+            seq_len_local = self.config.max_sequence_length // max(
+                get_context_parallel_world_size(), 1
             )
             query, key, value = paddle.split(
                 mixed_qkv.reshape(
