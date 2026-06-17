@@ -22,8 +22,8 @@ import paddle.nn.functional as F
 
 from paddlefleet.jit import jit_fuser
 from paddlefleet.utils import (
-    nvtx_decorator,
     apply_dsv4_accuracy_compatible_patch,
+    nvtx_decorator,
 )
 
 logger = logging.getLogger(__name__)
@@ -266,6 +266,7 @@ def clamped_weighted_swiglu_back(g, y, weights, clamp_value):
     weights_grad = clamped_swiglu(y, clamp_value) * g.cast(w_dtype)
     if apply_dsv4_accuracy_compatible_patch():
         from paddlefleet.accuracy_compatible_patch import sum_for_small_rows
+
         weights_grad = sum_for_small_rows(weights_grad)
     else:
         weights_grad = paddle.sum(weights_grad, axis=-1, keepdim=True)

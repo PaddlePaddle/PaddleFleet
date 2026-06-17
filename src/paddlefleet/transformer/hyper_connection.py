@@ -632,7 +632,6 @@ class HyperConnectionModule(nn.Layer):
                 dtype,
             )
 
-
         rsqrt = paddle.rsqrt(
             hidden_states.square().mean(-1, keepdim=True) + eps
         )

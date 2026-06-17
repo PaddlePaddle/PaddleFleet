@@ -28,12 +28,11 @@ from paddle.distributed.fleet.meta_parallel import ScheduleNode
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
+from paddlefleet.accuracy_compatible_patch import LossScaleBeforeBackward
 from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
 )
-from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
-from paddlefleet.accuracy_compatible_patch import LossScaleBeforeBackward
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_world_size,
@@ -42,6 +41,7 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 
 def _loss_md5_enabled() -> bool:

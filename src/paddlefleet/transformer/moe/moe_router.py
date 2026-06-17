@@ -1044,10 +1044,7 @@ class TopKRouter(StandardMoERouter):
                     f"input_ids=[{batch_size_}, {seq_len_}], "
                     f"expected [batch_size={batch_size}, seq_len={seq_len}]"
                 )
-                if (
-                    apply_dsv4_accuracy_compatible_patch()
-                    and self.is_mtp_layer
-                ):
+                if apply_dsv4_accuracy_compatible_patch() and self.is_mtp_layer:
                     input_ids_none_zero_mask = None
             else:
                 input_ids_none_zero_mask = None

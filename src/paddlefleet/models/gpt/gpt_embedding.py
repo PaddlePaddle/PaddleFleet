@@ -382,8 +382,8 @@ class GPTEmbedding(FleetLayer):
                             shift = depth + 1
                             inputs_embeds_mtp = paddle.concat(
                                 [
-                                    inputs_embeds_ori[:, (depth + 1):, :],
-                                    inputs_embeds_extra[:, :(depth + 1), :],
+                                    inputs_embeds_ori[:, (depth + 1) :, :],
+                                    inputs_embeds_extra[:, : (depth + 1), :],
                                 ],
                                 axis=1,
                             )

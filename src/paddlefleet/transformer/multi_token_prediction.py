@@ -492,10 +492,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             # Megatron flattens [S, B, N, H] for the weight-gradient GEMM.
             # The transpose is forward-equivalent but aligns the wgrad
             # accumulation order.
-            if (
-                apply_dsv4_accuracy_compatible_patch()
-                and hs_streams.ndim == 4
-            ):
+            if apply_dsv4_accuracy_compatible_patch() and hs_streams.ndim == 4:
                 orig_shape = hs_streams.shape
                 hs_seqfirst = hs_streams.transpose([1, 0, 2, 3]).contiguous()
                 seqfirst_shape = hs_seqfirst.shape

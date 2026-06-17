@@ -37,7 +37,6 @@ from paddlefleet import parallel_state
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
-from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
@@ -50,6 +49,7 @@ from paddlefleet.tensor_parallel.mappings import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
@@ -89,6 +89,7 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
 
     if apply_dsv4_accuracy_compatible_patch():
         from paddlefleet.accuracy_compatible_patch import CompatibleHadamard
+
         return CompatibleHadamard.apply(x, scale)
 
     # Megatron uses fast_hadamard_transform, whose bf16 path accumulates in fp32

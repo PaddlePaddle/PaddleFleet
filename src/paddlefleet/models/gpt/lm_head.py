@@ -77,8 +77,8 @@ from paddlefleet.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
     _initialize_affine_weight_gpu,
 )
-from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 from paddlefleet.transformer.identity_op import IdentityOp
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 
 def SegLU(x, ranges, ts):

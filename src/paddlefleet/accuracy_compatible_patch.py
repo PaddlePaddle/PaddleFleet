@@ -1,3 +1,17 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import math
@@ -7,6 +21,7 @@ import sys
 import paddle
 from paddle import Tensor
 from paddle.utils import dlpack as paddle_dlpack
+
 
 def _import_torch():
     site_packages = os.environ.get("MEGATRON_SITE_PACKAGES", "")
@@ -129,6 +144,7 @@ class CompatibleHadamard(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, x: Tensor, scale: float):
         from fast_hadamard_transform import hadamard_transform
+
         scale = float(scale)
         ctx.scale = scale
         x_t = _to_torch(x)
@@ -138,9 +154,11 @@ class CompatibleHadamard(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, grad_output: Tensor):
         from fast_hadamard_transform import hadamard_transform
+
         grad_t = _to_torch(grad_output)
         grad_x_t = hadamard_transform(grad_t, scale=ctx.scale)
         return _to_paddle(grad_x_t)
+
 
 class CompatibleOGroupProjection(paddle.autograd.PyLayer):
     @staticmethod
@@ -162,9 +180,11 @@ class CompatibleOGroupProjection(paddle.autograd.PyLayer):
         ctx.save_for_backward(x, weight)
 
         x_seqfirst = x.detach().transpose([1, 0, 2, 3]).contiguous()
-        weight_grouped = weight.detach().reshape(
-            [o_local_groups, o_lora_rank, -1]
-        ).contiguous()
+        weight_grouped = (
+            weight.detach()
+            .reshape([o_local_groups, o_lora_rank, -1])
+            .contiguous()
+        )
         x_t = _to_torch(x_seqfirst).detach()
         weight_t = _to_torch(weight_grouped).detach()
         out_t = torch.einsum("...gd,grd->...gr", x_t, weight_t)
@@ -177,12 +197,14 @@ class CompatibleOGroupProjection(paddle.autograd.PyLayer):
 
         x, weight = ctx.saved_tensor()
         x_seqfirst = x.detach().transpose([1, 0, 2, 3]).contiguous()
-        grad_seqfirst = grad_output.detach().transpose(
-            [1, 0, 2, 3]
-        ).contiguous()
-        weight_grouped = weight.detach().reshape(
-            [ctx.o_local_groups, ctx.o_lora_rank, -1]
-        ).contiguous()
+        grad_seqfirst = (
+            grad_output.detach().transpose([1, 0, 2, 3]).contiguous()
+        )
+        weight_grouped = (
+            weight.detach()
+            .reshape([ctx.o_local_groups, ctx.o_lora_rank, -1])
+            .contiguous()
+        )
 
         x_t = _to_torch(x_seqfirst).detach()
         grad_t = _to_torch(grad_seqfirst).detach()
@@ -207,6 +229,7 @@ class CompatibleOGroupProjection(paddle.autograd.PyLayer):
             weight._dsv4_attn_o_group_seqfirst_wgrad = prev + w_grad_accum
         return x_grad, w_grad
 
+
 class CompatibleQRMSNorm(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, q: Tensor, eps: float) -> Tensor:
@@ -226,11 +249,10 @@ class CompatibleQRMSNorm(paddle.autograd.PyLayer):
         )
         return grad_q
 
+
 class CompatibleEmbeddingIndexBackward(paddle.autograd.PyLayer):
     @staticmethod
-    def forward(
-        ctx, masked_input: Tensor, weight: Tensor
-    ) -> Tensor:
+    def forward(ctx, masked_input: Tensor, weight: Tensor) -> Tensor:
         ctx.save_for_backward(masked_input, weight)
         return weight[masked_input]
 
@@ -251,6 +273,7 @@ class CompatibleEmbeddingIndexBackward(paddle.autograd.PyLayer):
 
         grad_weight = _to_paddle(grad_weight_t)
         return None, grad_weight
+
 
 def te_matmul(grad_output: Tensor, weight: Tensor) -> Tensor:
     torch = _import_torch()
@@ -394,11 +417,7 @@ def _hc_mapping_wgrad(
 def _register_hc_mapping_seqfirst_wgrad_hook(
     proj_2d: Tensor, x: Tensor, weight: Tensor
 ) -> None:
-    if (
-        len(x.shape) != 3
-        or x.shape[0] <= 1
-        or proj_2d.stop_gradient
-    ):
+    if len(x.shape) != 3 or x.shape[0] <= 1 or proj_2d.stop_gradient:
         return
 
     batch_size, seq_len, hidden_width = x.shape
@@ -426,6 +445,7 @@ def _register_hc_mapping_seqfirst_wgrad_hook(
             _accumulate_hc_mapping_seqfirst_wgrad(weight, w_grad)
 
     proj_2d.register_hook(_seqfirst_wgrad_hook)
+
 
 class TorchOrderRmsScale(paddle.autograd.PyLayer):
     @staticmethod
@@ -600,9 +620,7 @@ class CompatibleLearnedOutputContract(paddle.autograd.PyLayer):
             with torch.enable_grad():
                 hidden_seq_t = hidden_seq_input_t.to(torch.float32)
                 head_seq_oi_t = (
-                    head_seq_t.to(torch.float32)
-                    .transpose(0, 1)
-                    .contiguous()
+                    head_seq_t.to(torch.float32).transpose(0, 1).contiguous()
                 )
                 base_seq_f32_t = base_seq_t.to(torch.float32)
                 scale_seq_f32_t = scale_seq_t.to(torch.float32)

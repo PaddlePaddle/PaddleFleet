@@ -982,8 +982,7 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             hidden_states = GatherOp.apply(hidden_states)
         sequence_first_moe = (
-            apply_dsv4_accuracy_compatible_patch()
-            and hidden_states.ndim == 3
+            apply_dsv4_accuracy_compatible_patch() and hidden_states.ndim == 3
         )
         if sequence_first_moe:
             hidden_states = hidden_states.transpose([1, 0, 2]).contiguous()
@@ -997,8 +996,9 @@ class MoELayer(nn.Layer):
 
         if apply_dsv4_accuracy_compatible_patch():
             from paddlefleet.accuracy_compatible_patch import MoEInputBranches
-            routed_input, gate_input, shared_residuals = (
-                MoEInputBranches.apply(hidden_states)
+
+            routed_input, gate_input, shared_residuals = MoEInputBranches.apply(
+                hidden_states
             )
         else:
             routed_input, gate_input, shared_residuals = (

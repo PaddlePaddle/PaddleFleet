@@ -655,9 +655,7 @@ class _DeepEPManager(_DispatchManager):
         if apply_dsv4_accuracy_compatible_patch():
             self.global_input_probs = (
                 self.dispatched_probs.T.contiguous().masked_select(
-                    self.dispatched_routing_map.T.contiguous().cast(
-                        paddle.bool
-                    )
+                    self.dispatched_routing_map.T.contiguous().cast(paddle.bool)
                 )
             )
         self.hidden_shape_before_permute = hidden_states.shape
@@ -1114,9 +1112,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.reshaped_input_shape,
             probs=(
-                None
-                if apply_dsv4_accuracy_compatible_patch()
-                else self.probs
+                None if apply_dsv4_accuracy_compatible_patch() else self.probs
             ),
             routing_map=self.routing_map,
         )

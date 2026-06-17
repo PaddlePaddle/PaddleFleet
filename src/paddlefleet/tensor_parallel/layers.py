@@ -310,10 +310,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         else:
             masked_input = input_
         # Get the embeddings.
-        if (
-            self.deterministic_mode
-            or apply_dsv4_accuracy_compatible_patch()
-        ):
+        if self.deterministic_mode or apply_dsv4_accuracy_compatible_patch():
             output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
@@ -378,6 +375,7 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
         (weight, bias) = ctx.saved_tensor()
         if apply_dsv4_accuracy_compatible_patch():
             from paddlefleet.accuracy_compatible_patch import te_matmul
+
             grad_input = te_matmul(grad_output, weight)
         else:
             grad_input = grad_output.matmul(weight.t())
@@ -590,6 +588,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             grad_input = None
         elif apply_dsv4_accuracy_compatible_patch():
             from paddlefleet.accuracy_compatible_patch import te_matmul
+
             grad_input = te_matmul(grad_output, weight)
         else:
             grad_input = grad_output.matmul(weight.t())

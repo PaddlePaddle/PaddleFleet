@@ -126,9 +126,11 @@ def permute(
 
     # use the mapping to permute the tokens
     if apply_dsv4_accuracy_compatible_patch():
-        permuted_input = tokens.cast("float32").index_select(
-            axis=0, index=sorted_indices
-        ).cast(tokens.dtype)
+        permuted_input = (
+            tokens.cast("float32")
+            .index_select(axis=0, index=sorted_indices)
+            .cast(tokens.dtype)
+        )
     else:
         permuted_input = tokens.index_select(axis=0, index=sorted_indices)
 

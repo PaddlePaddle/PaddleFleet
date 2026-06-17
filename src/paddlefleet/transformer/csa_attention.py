@@ -24,6 +24,7 @@ Components:
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -36,7 +37,6 @@ from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
 from paddlefleet.transformer import FleetLayer
-from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -48,6 +48,7 @@ from paddlefleet.transformer.utils import (
     get_doc_lens,
     get_doc_starts,
 )
+from paddlefleet.utils import apply_dsv4_accuracy_compatible_patch
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
