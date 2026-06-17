@@ -22,14 +22,20 @@ import paddle
 from paddle import Tensor
 from paddle.utils import dlpack as paddle_dlpack
 
+_MEGATRON_SITE_PACKAGES = os.environ.get("MEGATRON_SITE_PACKAGES", "")
+_TORCH = None
+
 
 def _import_torch():
-    site_packages = os.environ.get("MEGATRON_SITE_PACKAGES", "")
-    if site_packages and site_packages not in sys.path:
-        sys.path.insert(0, site_packages)
+    global _TORCH
+    if _TORCH is not None:
+        return _TORCH
+    if _MEGATRON_SITE_PACKAGES and _MEGATRON_SITE_PACKAGES not in sys.path:
+        sys.path.insert(0, _MEGATRON_SITE_PACKAGES)
     import torch
 
-    return torch
+    _TORCH = torch
+    return _TORCH
 
 
 def _to_torch(tensor):

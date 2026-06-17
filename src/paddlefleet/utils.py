@@ -33,6 +33,10 @@ import paddle
 from paddlefleet import parallel_state
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 
+_APPLY_DSV4_ACCURACY_COMPATIBLE_PATCH = (
+    os.environ.get("APPLY_DSV4_ACCURACY_COMPATIBLE_PATCH", "0") == "1"
+)
+
 try:
     from packaging.version import Version as PkgVersion
 
@@ -549,4 +553,4 @@ def deprecate_inference_params(inference_context, inference_params):
 
 
 def apply_dsv4_accuracy_compatible_patch():
-    return os.environ.get("APPLY_DSV4_ACCURACY_COMPATIBLE_PATCH", "0") == "1"
+    return _APPLY_DSV4_ACCURACY_COMPATIBLE_PATCH
