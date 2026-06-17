@@ -659,20 +659,18 @@ class TestCudnnCsaIndexerBwd(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests: cudnn_ops/__init__.py (lazy __getattr__)
+# Tests: cudnn_ops/__init__.py imports
 # ---------------------------------------------------------------------------
 
 
 class TestCudnnOpsInit(unittest.TestCase):
-    """Cover paddlefleet.cudnn_ops.__init__.py lazy import mechanism."""
+    """Cover paddlefleet.cudnn_ops.__init__.py direct imports."""
 
     def test_export_csa_indexer_bwd(self):
         import paddlefleet.cudnn_ops as cudnn_ops_mod
 
         fn = cudnn_ops_mod.csa_indexer_bwd
         self.assertTrue(callable(fn))
-        # Second access should be cached in globals
-        self.assertIs(cudnn_ops_mod.csa_indexer_bwd, fn)
 
     def test_unknown_attribute_raises(self):
         import paddlefleet.cudnn_ops as cudnn_ops_mod
