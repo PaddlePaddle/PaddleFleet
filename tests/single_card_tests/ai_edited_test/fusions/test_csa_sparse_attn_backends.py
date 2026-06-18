@@ -21,11 +21,11 @@ import paddle
 try:
     import paddlefleet_ops
 
-    from paddlefleet.tilelang_ops.attn import sparse_mqa
+    from paddlefleet.cudnn_ops.attn import csa_sparse_attn_fwd_cudnn
 
     _HAS_FLASH_MLA = (
         paddlefleet_ops.is_flash_mla_available()
-        and sparse_mqa._flash_mla_sparse_fwd is not None
+        and csa_sparse_attn_fwd_cudnn._flash_mla_sparse_fwd is not None
     )
 except (ImportError, RuntimeError, AttributeError):
     _HAS_FLASH_MLA = False

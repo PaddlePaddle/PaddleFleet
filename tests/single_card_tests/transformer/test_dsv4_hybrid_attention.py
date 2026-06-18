@@ -18,6 +18,10 @@ import unittest
 import paddle
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
+from paddlefleet.fusions.csa_sparse_attn import (
+    csa_sparse_attn,
+    unfused_compressed_sparse_attn,
+)
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
@@ -28,7 +32,6 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_layers_spec,
 )
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.tilelang_ops import csa_sparse_attn
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
     _apply_rope,
@@ -37,7 +40,6 @@ from paddlefleet.transformer.csa_attention import (
     _resolve_csa_tilelang_switch,
     get_compress_topk_idxs,
     get_window_topk_idxs,
-    unfused_compressed_sparse_attn,
 )
 from paddlefleet.transformer.dsa_attention import (
     fused_qk_topk_naive,
@@ -73,7 +75,7 @@ def _make_config(
     num_nextn_predict_layers=0,
     csa_tilelang_backend=None,
     csa_tilelang_enable_indexer=None,
-    csa_tilelang_enable_sparse_attn=None,
+    csa_sparse_attn_backend="unfused",
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -116,7 +118,7 @@ def _make_config(
         softmax_type="vanilla",
         csa_tilelang_backend=csa_tilelang_backend,
         csa_tilelang_enable_indexer=csa_tilelang_enable_indexer,
-        csa_tilelang_enable_sparse_attn=csa_tilelang_enable_sparse_attn,
+        csa_sparse_attn_backend=csa_sparse_attn_backend,
     )
 
 
@@ -168,11 +170,6 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 paddle_config, "csa_tilelang_enable_indexer"
             )
         )
-        self.assertFalse(
-            _resolve_csa_tilelang_switch(
-                paddle_config, "csa_tilelang_enable_sparse_attn"
-            )
-        )
 
         tilelang_config = _make_config(
             csa_tilelang_backend="attention_paddle_compat"
@@ -182,25 +179,14 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 tilelang_config, "csa_tilelang_enable_indexer"
             )
         )
-        self.assertTrue(
-            _resolve_csa_tilelang_switch(
-                tilelang_config, "csa_tilelang_enable_sparse_attn"
-            )
-        )
 
         override_config = _make_config(
             csa_tilelang_backend="attention_paddle_compat",
             csa_tilelang_enable_indexer=False,
-            csa_tilelang_enable_sparse_attn=False,
         )
         self.assertFalse(
             _resolve_csa_tilelang_switch(
                 override_config, "csa_tilelang_enable_indexer"
-            )
-        )
-        self.assertFalse(
-            _resolve_csa_tilelang_switch(
-                override_config, "csa_tilelang_enable_sparse_attn"
             )
         )
 
@@ -209,10 +195,23 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         ):
             _make_config(csa_tilelang_enable_indexer=True)
 
+    def test_csa_sparse_attn_backend_validation(self):
+        for backend in ("unfused", "tilelang", "cudnn"):
+            cfg = _make_config(csa_sparse_attn_backend=backend)
+            self.assertEqual(cfg.csa_sparse_attn_backend, backend)
+
         with self.assertRaisesRegex(
-            ValueError, "csa_tilelang_enable_sparse_attn=True requires"
+            ValueError, "csa_sparse_attn_backend='paddle' is invalid"
         ):
-            _make_config(csa_tilelang_enable_sparse_attn=True)
+            _make_config(csa_sparse_attn_backend="paddle")
+
+    def test_removed_enable_sparse_attn_switch_raises(self):
+        with self.assertRaisesRegex(
+            ValueError, "csa_tilelang_enable_sparse_attn has been removed"
+        ):
+            cfg = _make_config()
+            cfg.csa_tilelang_enable_sparse_attn = True
+            cfg.__post_init__()
 
     def test_phase2_loss_topk_does_not_expand_attention_topk(self):
         config = _make_config(
@@ -505,7 +504,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
                     num_layers=1,
                     csa_tilelang_backend=None,
                     csa_tilelang_enable_indexer=False,
-                    csa_tilelang_enable_sparse_attn=False,
+                    csa_sparse_attn_backend="unfused",
                 )
                 fused_config = _make_config(
                     hidden_size=256,
@@ -521,7 +520,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
                     num_layers=1,
                     csa_tilelang_backend="attention_paddle_compat",
                     csa_tilelang_enable_indexer=True,
-                    csa_tilelang_enable_sparse_attn=True,
+                    csa_sparse_attn_backend="tilelang",
                 )
                 doc_len_cases = [
                     ##################### 1. pad + //
@@ -918,7 +917,12 @@ class TestDSv4HybridFusedSparseAttention(unittest.TestCase):
             kv_full.stop_gradient = False
             attn_sink.stop_gradient = False
             fused_out = csa_sparse_attn(
-                query, kv_full, attn_sink, topk_idxs, softmax_scale
+                query,
+                kv_full,
+                attn_sink,
+                topk_idxs,
+                softmax_scale,
+                backend="tilelang",
             )
             fused_loss = fused_out.cast("float32").sum()
             fused_loss.backward()
