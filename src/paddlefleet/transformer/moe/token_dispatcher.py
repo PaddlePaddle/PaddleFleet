@@ -1713,10 +1713,17 @@ class AllGatherTokenDispatcher(nn.Layer):
                 )
             self._pre_ag_handle = None
         elif self.fp8_dispatch:
-            raise RuntimeError(
-                "AllGatherTokenDispatcher.fp8_dispatch=True requires "
-                "pre_allgather() to be issued before dispatch_preprocess."
+            # Overlap disabled (moe_allgather_gate_overlap=False): no handle was
+            # pre-issued before gate. Issue the fp8 AllGather synchronously here
+            # and consume it immediately, so fp8 dispatch still works without the
+            # gate-overlap optimization.
+            self.pre_allgather(reshaped_input)
+            global_hidden_states, self._fp8_dispatch_scale = (
+                _PreAllGatherFP8Result.apply(
+                    reshaped_input, self._pre_ag_handle
+                )
             )
+            self._pre_ag_handle = None
         else:
             global_hidden_states = AllGatherGroupOp.apply(
                 reshaped_input, self.moe_group

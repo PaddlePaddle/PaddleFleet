@@ -169,6 +169,7 @@ class MoELayer(nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
@@ -730,16 +731,18 @@ class MoELayer(nn.Layer):
     def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
         """Issue the async AllGather before gate so it overlaps with gate compute.
 
-        Always-on for the 'allgather' dispatcher when EP > 1: AllGather runs on
-        the comm stream while gate MLP runs on the calc stream; the result is
-        consumed inside ``dispatch_preprocess`` via ``_PreAllGatherResult``
-        (or ``_PreAllGatherFP8Result`` when ``fp8_dispatch=True``). For latent
-        MoE, ``fc1_latent_proj`` is hoisted here so the AllGather targets the
+        Enabled for the 'allgather' dispatcher when EP > 1 and
+        ``moe_allgather_gate_overlap=True``: AllGather runs on the comm stream
+        while gate MLP runs on the calc stream; the result is consumed inside
+        ``dispatch_preprocess`` via ``_PreAllGatherResult`` (or
+        ``_PreAllGatherFP8Result`` when ``fp8_dispatch=True``). For latent MoE,
+        ``fc1_latent_proj`` is hoisted here so the AllGather targets the
         latent-space tensor; gate still runs on the original hidden_states.
         """
         if (
             self.moe_token_dispatcher_type == "allgather"
             and self.expert_model_parallel_size > 1
+            and self.moe_allgather_gate_overlap
         ):
             if self.use_latent_moe:
                 self._latent_hidden = self.fc1_latent_proj(hidden_states)
