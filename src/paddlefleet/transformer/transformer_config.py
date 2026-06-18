@@ -73,6 +73,9 @@ class TransformerConfig(ModelParallelConfig):
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
+    mtp_shared_last_layer: bool = False
+    """When True, MTP layers share the last backbone TransformerLayer parameters."""
+
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
 
@@ -984,6 +987,15 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.mtp_shared_last_layer:
+            # When MTP reuses the last backbone TransformerLayer's parameters,
+            # the MTP transformer block must have an identical structure to the
+            # backbone-last layer (same MoE / dense shape). Force-disable
+            # use_dense_mtp so the MTP layer matches whatever the backbone is.
+            assert not self.use_dense_mtp, (
+                "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
+            )
+
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"

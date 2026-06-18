@@ -431,6 +431,10 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         self.offload_context = nullcontext()
 
+    @property
+    def transformer_layer_weights(self):
+        return self.transformer_layer.named_parameters()
+
     def _concat_embeddings(
         self,
         hidden_states: paddle.Tensor,
