@@ -214,9 +214,10 @@ class GroupedMLPExpert(FleetLayer):
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             # Use config.init_method / config.output_layer_init_method
-            # which are functions that take a tensor and initialize it in-place.
-            self.config.init_method(self.weight1)
-            self.config.output_layer_init_method(self.weight2)
+            # which are functions that take a tensor and initialize it using sharedbuffer.
+            if self.training:
+                self.config.init_method(self.weight1)
+                self.config.output_layer_init_method(self.weight2)
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
