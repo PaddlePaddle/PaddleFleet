@@ -11,17 +11,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 import unittest
 
 try:

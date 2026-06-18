@@ -12,23 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 import unittest
 
 import numpy as np
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
 
 import paddlefleet
 from paddlefleet.process_groups_config import ProcessGroupCollection

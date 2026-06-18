@@ -11,23 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 
 # Tests for src/paddlefleet/_extensions/flashmask/block_mask_utils.py
 # Dedicated tests for bitonic_argsort_device, top_p_kernel, _compare_and_swap,
 # _bitonic_merge
-
 import types
 import unittest
 

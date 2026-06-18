@@ -11,19 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
-
 # Tests for src/paddlefleet/training/global_vars.py
 # Additional tests for get_args, set_args, destroy_global_vars,
 # get_timers, _set_timers, set_global_variables, unset_global_variables,

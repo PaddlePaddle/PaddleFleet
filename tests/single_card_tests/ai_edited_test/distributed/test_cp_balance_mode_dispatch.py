@@ -26,19 +26,6 @@ Covers:
 Single-card tests using mocked distributed groups.
 """
 
-import os
-import sys
-
-# Insert local src/ before site-packages so we test the dev version
-_project_root = os.path.dirname(
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    )
-)
-sys.path.insert(0, os.path.join(_project_root, "src"))
-
 import unittest
 from unittest import mock
 

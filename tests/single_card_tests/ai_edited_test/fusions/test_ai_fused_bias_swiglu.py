@@ -21,8 +21,6 @@ for _ in range(10):
     _repo_root = os.path.dirname(_repo_root)
     if os.path.isdir(os.path.join(_repo_root, "src", "paddlefleet")):
         break
-sys.path.insert(0, _repo_root)
-sys.path.insert(0, os.path.join(_repo_root, "src"))
 for _mod in list(sys.modules.keys()):
     if _mod == "paddlefleet" or _mod.startswith("paddlefleet."):
         del sys.modules[_mod]

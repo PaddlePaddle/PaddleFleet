@@ -11,19 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
-
 # Extra tests for paddlefleet/tensor_parallel/mappings.py
 # Focus on: AllToAll, all_gather_last_dim, reduce_scatter_last_dim,
 # all_to_all_sp2hp, all_to_all_hp2sp, symbolic functions

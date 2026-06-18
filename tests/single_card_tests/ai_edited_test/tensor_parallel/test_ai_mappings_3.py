@@ -11,19 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
-
 # Extra tests for paddlefleet/tensor_parallel/mappings.py
 # Focus on: _reduce_scatter_along_first_dim with input_split_sizes,
 # _gather_along_first_dim with output_split_sizes,
