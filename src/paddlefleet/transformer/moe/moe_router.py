@@ -1042,7 +1042,7 @@ class TopKRouter(StandardMoERouter):
                     "gpt_model_use_experimental_version=True."
                 )
             cp_size = (
-                get_context_parallel_world_size()
+                max(get_context_parallel_world_size(), 1)
                 if getattr(self.config, "experimental_dataflow", False)
                 else 1
             )
@@ -1052,7 +1052,7 @@ class TopKRouter(StandardMoERouter):
             seq_len = self.config.max_sequence_length // (cp_size * tp_size)
             batch_size = input.shape[0] // seq_len
             if (
-                get_context_parallel_world_size() > 1
+                max(get_context_parallel_world_size(), 1) > 1
                 and self.config.experimental_dataflow
                 and input_ids is not None
             ):

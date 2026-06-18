@@ -367,6 +367,7 @@ jobs:
       no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
     steps:
       - name: Check docker image and run container
+        id: check-skip
         run: |
           if ! [[ "${{ inputs.arch }}" == "ALL" || "${{ inputs.arch }}" == "arm" ]]; then
             echo "no_build=true" >> $GITHUB_OUTPUT
@@ -417,7 +418,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -441,7 +442,7 @@ jobs:
           source /root/proxy
           uv cache clean paddlepaddle-gpu
           uv build --wheel -v
-          /usr/bin/python -m pip install --break-system-packages dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
+          python -m pip install --break-system-packages dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           git submodule update --init --recursive
           git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
@@ -450,12 +451,12 @@ jobs:
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          /usr/bin/python -m pip install --break-system-packages packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3"
-          /usr/bin/python -m pip install --break-system-packages "nvidia-nvshmem-cu13>=3.3.9,<3.5"
+          python -m pip install --break-system-packages packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3"
+          python -m pip install --break-system-packages "nvidia-nvshmem-cu13>=3.3.9,<3.5"
           # HybridEP links against NVML by soname; install dev stubs for libnvidia-ml.so.1.
           apt-get update && apt-get install -y --no-install-recommends libnvidia-ml-dev
           rm -rf /var/lib/apt/lists/*
-          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v --python /usr/bin/python
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           '
 
       - name: Upload wheel
@@ -487,3 +488,4 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+          exit 0
