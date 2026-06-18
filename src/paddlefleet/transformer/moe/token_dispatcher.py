@@ -15,6 +15,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,7 @@ from paddle import nn
 if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
+logger = logging.getLogger(__name__)
 
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
@@ -34,11 +36,16 @@ from .fused_a2a import (
     get_hybrid_ep_buffer,
     hybrid_ep_combine,
     hybrid_ep_dispatch,
+    quantize_activation_blockscaled_fast,
 )
 from .moe_utils import (
     AllGatherGroupOp,
+    ReduceScatterGroupOp,
     _AllToAll,
+    all_gather_group,
+    manual_backward,
     permute,
+    reduce_scatter_group,
     sort_chunks_by_idxs,
     unpermute,
     use_accuracy_compatible_kernel,
@@ -922,13 +929,33 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             hidden_states
         )
 
-    def token_combine(self, hidden_states: paddle.Tensor, async_finish=False):
+    def token_combine(
+        self,
+        hidden_states: paddle.Tensor,
+        combine_overlap_handle: dict | None = None,
+        async_finish=False,
+        fp8_combine_grad_handle: dict | None = None,
+    ):
+        del fp8_combine_grad_handle
+        if combine_overlap_handle is not None:
+            raise ValueError(
+                "MoEFlexTokenDispatcher (alltoall) does not support "
+                "combine_overlap_handle"
+            )
         return self._comm_manager.combine(
             hidden_states, async_finish=async_finish
         )
 
     def combine_postprocess(self, hidden_states: paddle.Tensor):
         return hidden_states.reshape(self.hidden_shape)
+
+    def get_dispatched_routing(self):
+        """Return (dispatched_indices, dispatched_probs, tokens_per_expert)."""
+        return (
+            self._comm_manager.dispatched_indices,
+            self._comm_manager.dispatched_probs,
+            self._comm_manager.tokens_per_expert,
+        )
 
     def token_permutation(
         self,
@@ -1161,7 +1188,9 @@ class AllToAllTokenDispatcher(nn.Layer):
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
+        fp8_combine_grad_handle: dict | None = None,
     ):
+        del combine_overlap_handle, async_finish, fp8_combine_grad_handle
         permutated_local_input_tokens = _AllToAll.apply(
             self.permutated_local_input_tokens_shape,
             hidden_states,
@@ -1179,5 +1208,736 @@ class AllToAllTokenDispatcher(nn.Layer):
             probs=(None if use_accuracy_compatible_kernel() else self.probs),
             routing_map=self.routing_map,
         )
-
         return output
+
+
+class _RouterAllGather(paddle.autograd.PyLayer):
+    """AllGather for router-local tensors (allgather dispatcher only).
+
+    Forward: same as ``AllGatherGroupOp`` — concatenates the local
+    ``[seq_local, ...]`` tensor across the EP group along axis 0 to
+    ``[seq_global, ...]``.
+
+    Backward: **scatter (not reduce-scatter)**. Each token has exactly one
+    origin rank — its router lives there and only there. Only the slice owned
+    by the current rank is a valid gradient for *this* rank's router; the rest
+    belongs to other ranks' routers and must not be summed in.
+    ``AllGatherGroupOp`` was designed for hidden_states (unique-per-rank
+    pre-AllGather, hence reduce-scatter on backward); reusing it for
+    router-local metadata is a semantics mismatch.
+
+    Gradient shape: this layer's output (``_global_topk_weights``, shape
+    ``[T_global, K]``) is consumed downstream *only* through
+    ``_differentiable_router_scores``, which gathers it via
+    ``dispatched_probs.reshape(-1)[gather_idx]``. SonicMoE's ``_DownProjection``
+    emits a 1-D ``ds`` over the gathered/padded layout, but that flows back
+    through ``_GatherRouterScores`` (scatter into a flat ``[T_global*K]``
+    buffer) and the ``reshape(-1)`` op, whose autograd restores the original
+    2-D ``[T_global, K]`` shape. So the gradient arriving here matches the
+    forward output shape exactly; no flattening reaches this edge.
+    """
+
+    @staticmethod
+    def forward(ctx, input, group):
+        ctx.group = group
+        ctx.input_shape = list(input.shape)
+        if group is None or group.nranks == 1:
+            return input.clone()
+        output_shape = list(input.shape)
+        output_shape[0] = output_shape[0] * group.nranks
+        output = paddle.empty(shape=output_shape, dtype=input.dtype)
+        paddle.distributed.stream.all_gather(
+            output, input, group=group, use_calc_stream=True
+        )
+        return output
+
+    @staticmethod
+    def backward(ctx, grad):
+        group = ctx.group
+        local_shape = ctx.input_shape
+        if group is None or group.nranks == 1:
+            if list(grad.shape) != local_shape:
+                grad = grad.reshape(local_shape)
+            return grad
+        # The incoming grad matches the forward output shape
+        # ([T_global, *trailing]); see class docstring for why no flattening
+        # reaches this edge. Split along axis 0 and take this rank's segment
+        # (scatter — no cross-rank reduction).
+        global_shape = [local_shape[0] * group.nranks, *local_shape[1:]]
+        if list(grad.shape) != global_shape:
+            # Defensive: a downstream kernel emitted an unexpected layout.
+            # Reshape only if the element count still matches, else fail loud.
+            expected_numel = 1
+            for _d in global_shape:
+                expected_numel *= _d
+            if int(grad.numel()) != expected_numel:
+                raise ValueError(
+                    "_RouterAllGather.backward: incoming grad has "
+                    f"{int(grad.numel())} elements but the AllGather'd router "
+                    f"tensor requires {expected_numel} (global_shape="
+                    f"{global_shape})."
+                )
+            grad = grad.reshape(global_shape)
+        chunks = paddle.split(grad, num_or_sections=group.nranks, axis=0)
+        out = chunks[group.rank].contiguous()
+        if list(out.shape) != local_shape:
+            out = out.reshape(local_shape)
+        return out
+
+
+class _PreAllGatherResult(paddle.autograd.PyLayer):
+    """Wraps a pre-issued async AllGather result with proper autograd.
+
+    Used by :class:`AllGatherTokenDispatcher` to overlap the hidden_states
+    AllGather (issued on the comm stream before gate) with gate computation
+    (on the calc stream).  This layer ``task.wait()``-s for the async
+    AllGather to complete and returns the pre-filled output buffer.
+    Backward is ReduceScatter (same as ``AllGatherGroupOp`` backward).
+    """
+
+    @staticmethod
+    def forward(ctx, hidden_states, handle):
+        # handle: dict {"output": Tensor, "task": Task, "group": Group}
+        handle["task"].wait()
+        ctx.group = handle["group"]
+        return handle["output"]
+
+    @staticmethod
+    def backward(ctx, grad):
+        # Backward of AllGather is ReduceScatter.
+        # ``handle`` is a plain dict (not a Tensor): Paddle's PyLayer
+        # counts only tensor positional args when matching backward
+        # returns to forward inputs, so backward must return exactly 1
+        # value (the grad for ``hidden_states``). Adding a ``None`` for
+        # ``handle`` would raise a tuple-arity mismatch on current
+        # Paddle. Verified by ``test_consumes_fake_handle``.
+        grad_input = ReduceScatterGroupOp.apply(grad, ctx.group)
+        return grad_input
+
+
+class _PreAllGatherFP8Result(paddle.autograd.PyLayer):
+    """FP8 counterpart of :class:`_PreAllGatherResult`.
+
+    Consumes a handle pre-issued by ``AllGatherTokenDispatcher.pre_allgather``
+    when ``fp8_dispatch=True``: local quantize ran on calc stream before this,
+    and two async AllGathers (fp8 uint8 view + fp32 scale) were launched on
+    the comm stream so they overlap with gate compute. Forward waits both
+    tasks and returns ``(fp8_global, scale_global)``.
+
+    The fp8 output is fed straight into SonicMoE's fused ``_UpProjection`` as
+    ``prequant_activation_payload=(x_fp8_global, scale_global)``. On backward,
+    ``_UpProjection`` produces a **bf16** ``dx`` for that activation input,
+    which the autograd engine delivers here as ``grad_output`` on the fp8
+    output edge (Paddle would normally try to materialize an fp8-typed grad to
+    match the fp8 forward output dtype; ``set_grad_in_dtype_consistent(False)``
+    + ``set_materialize_grads(False)`` disable that so we receive the native
+    bf16 grad untouched). Backward then ReduceScatters that bf16 ``dx`` back to
+    the local token shard — the dual of the forward AllGather — without any
+    fp8 reduction or dtype cast.
+    """
+
+    @staticmethod
+    def forward(ctx, hidden_states, handle):
+        handle["task_x"].wait()
+        handle["task_s"].wait()
+        ctx.group = handle["group"]
+        x_fp8_global = handle["x_fp8_global_uint8"].view("float8_e4m3fn")
+        scale_global = handle["scale_global"]
+        # The fp8 output carries a bf16 gradient (SonicMoE's _UpProjection emits
+        # bf16 dx for its activation input). Tell Paddle not to coerce the
+        # incoming grad to the fp8 output dtype, and not to materialize a zero
+        # fp8 grad buffer if the edge is unused.
+        if hasattr(ctx, "set_grad_in_dtype_consistent"):
+            ctx.set_grad_in_dtype_consistent(False)
+        ctx.set_materialize_grads(False)
+        return x_fp8_global, scale_global
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_scale=None):
+        # grad_output: bf16 dx [T_global, H] from _UpProjection.backward.
+        # grad_scale: gradient for the AllGather'd scale tensor — the scale is
+        # consumed only as a non-differentiable prequant payload, so it is None.
+        del grad_scale
+        group = ctx.group
+        if grad_output is None:
+            # No gradient reached the fp8 activation edge (e.g. recompute warm-up
+            # / inference). Nothing to scatter back.
+            return None
+        if group is None or group.nranks == 1:
+            return grad_output
+        grad_input = ReduceScatterGroupOp.apply(grad_output, group)
+        return grad_input
+
+
+def _reduce_scatter_async(input, group):
+    """Async ReduceScatter (sum, axis 0) on the comm stream. Returns ``(output, task)``.
+
+    Issues a non-blocking ReduceScatter on the dedicated NCCL comm stream so
+    the caller can run independent compute on the calc stream and only
+    ``task.wait()`` right before consuming ``output``. Mirrors the async
+    AllGather pattern used by ``pre_allgather``.
+    """
+    input = input.contiguous()
+    out_shape = list(input.shape)
+    assert out_shape[0] % group.nranks == 0, (
+        f"ReduceScatter input rows {out_shape[0]} not divisible by "
+        f"nranks {group.nranks}"
+    )
+    out_shape[0] //= group.nranks
+    output = paddle.empty(shape=out_shape, dtype=input.dtype)
+    task = paddle.distributed.stream.reduce_scatter(
+        output,
+        input,
+        op=paddle.distributed.ReduceOp.SUM,
+        group=group,
+        sync_op=False,
+        use_calc_stream=False,
+    )
+    return output, task
+
+
+def _all_gather_async(input, group):
+    """Async AllGather (axis 0) on the comm stream. Returns ``(output, task)``.
+
+    Dual of :func:`_reduce_scatter_async`; used by the combine backward to
+    overlap the gradient AllGather with the shared-expert backward compute.
+    """
+    input = input.contiguous()
+    out_shape = list(input.shape)
+    out_shape[0] *= group.nranks
+    output = paddle.empty(shape=out_shape, dtype=input.dtype)
+    task = paddle.distributed.stream.all_gather(
+        output,
+        input,
+        group=group,
+        sync_op=False,
+        use_calc_stream=False,
+    )
+    return output, task
+
+
+class _AllGatherCombineAsync(paddle.autograd.PyLayer):
+    """ReduceScatter combine fused with a user-supplied subgraph (e.g. shared experts).
+
+    AllGather-path counterpart of :class:`DeepEPCombineAsync`. Forward issues
+    the combine ReduceScatter on the **comm stream** (async), then runs
+    ``fn(*fn_args)`` (the shared-expert subgraph) on the **calc stream** via
+    :func:`manual_backward` so the two genuinely overlap, and only waits on the
+    collective right before returning. Backward mirrors this: the gradient
+    AllGather (dual of ReduceScatter) is issued async on the comm stream while
+    ``bwf`` runs the shared-expert backward on the calc stream, then waits.
+
+    Forward signature: ``(x, group, *fn_args, fn, is_first_fwd)``.
+    Backward returns ``(grad_x, *fn_args_grads)`` — Paddle's PyLayer
+    skips non-tensor positional args (``group``) when matching arity.
+
+    Overlap is valid because ``fn``'s inputs (local hidden states) are
+    independent of ``x`` (the gathered expert outputs), so the shared-expert
+    compute has no data dependency on the in-flight combine collective — the
+    same precondition that makes ``DeepEPCombineAsync`` correct. Async only
+    changes the execution stream/timing; the ReduceScatter/AllGather semantics
+    (and thus numerics) are identical to the synchronous path, and combine
+    stays bf16 in both directions to match deepep — ``_DownProjection.backward``
+    self-quantizes ``dout`` to fp8, which (since AllGather is a lossless row
+    concat) is numerically identical to quantizing before the collective.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        group,
+        *fn_args,
+        fn,
+        is_first_fwd=False,
+    ):
+        if fn is None:
+            raise ValueError(
+                "_AllGatherCombineAsync requires a non-None fn for overlap."
+            )
+        ctx.group = group
+
+        if group is None or group.nranks == 1:
+            combined_x = x.clone()
+            ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+            return (combined_x,) + fn_out  # noqa: RUF005
+
+        # 1) Issue the combine ReduceScatter on the comm stream (async). NCCL
+        #    inserts the cross-stream dependency on ``x`` (produced on calc
+        #    stream) automatically.
+        combined_x, task = _reduce_scatter_async(x, group)
+        # 2) Run the shared-expert subgraph on the calc stream so it overlaps
+        #    with the in-flight ReduceScatter (its inputs are independent of x).
+        ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+        # 3) Synchronize before the combined output is consumed downstream.
+        task.wait()
+
+        return (combined_x,) + fn_out  # noqa: RUF005
+
+    @staticmethod
+    def backward(ctx, grad_output, *fn_out_grads):
+        group = ctx.group
+        if group is None or group.nranks == 1:
+            grad_x = grad_output.clone()
+            fn_args_grads = ctx.bwf(*fn_out_grads)
+            return (grad_x,) + fn_args_grads  # noqa: RUF005
+
+        # Dual of forward: AllGather the gradient on the comm stream (async)
+        # while the shared-expert backward runs on the calc stream, then wait.
+        grad_x, task = _all_gather_async(grad_output, group)
+        fn_args_grads = ctx.bwf(*fn_out_grads)
+        task.wait()
+        return (grad_x,) + fn_args_grads  # noqa: RUF005
+
+
+
+class AllGatherTokenDispatcher(nn.Layer):
+    """
+    AllGather + ReduceScatter EP dispatcher (fused-kernel only).
+
+    Every expert is sharded along its ``intermediate`` dim into ``ep_size``
+    partitions; every rank therefore holds one shard of *every* expert. The
+    forward path is:
+
+        [seq/ep, h] --AllGather(ep)--> [seq, h]
+                  --SonicMoE fused _UpProjection / _DownProjection
+                    (gather + grouped GEMM + activation + scatter, no
+                    explicit permute / unpermute)-->
+                  [seq, h] --ReduceScatter(ep, sum)--> [seq/ep, h]
+
+    Routing is computed *before* the AllGather, so each rank only knows its
+    local routing map. The dispatcher AllGathers ``hidden_states`` plus the
+    compact ``[N, topk]`` routing tensors so that every rank performs the
+    same expert compute on the global token list (saving bandwidth versus
+    AllGathering the full ``[N, num_experts]`` sparse tensors).
+
+    This dispatcher only reuses SonicMoE's fused expert-compute kernels; it
+    does not engage any other SonicMoE component (router, dispatcher, fp8
+    protocol).
+    """
+
+    def __init__(
+        self,
+        moe_group: Group,
+        expert_model_parallel_size: int,
+        num_experts: int,
+        fp8_dispatch: bool = False,
+        use_ue8m0: bool = False,
+    ):
+        nn.Layer.__init__(self)
+        self.moe_group = moe_group
+        self.ep_size = expert_model_parallel_size
+        self.num_experts = num_experts
+        # In allgather mode every rank holds a shard of every expert.
+        self.num_local_experts = num_experts
+        # fp8 dispatch quantizes hidden_states to fp8 *before* the AllGather so
+        # the inter-rank communication carries fp8 bytes (plus a compact
+        # blockwise scale) instead of bf16, mirroring DeepEP. The fp8 activation
+        # is consumed directly by SonicMoE's fused ``_UpProjection`` via
+        # ``prequant_activation_payload=(x_fp8, scale)`` (no re-quantization).
+        # Backward: ``_UpProjection`` emits a bf16 ``dx`` for its activation
+        # input — which is exactly ``_PreAllGatherFP8Result``'s fp8 output edge.
+        # ``_PreAllGatherFP8Result`` declares grad-dtype inconsistency so it can
+        # receive that bf16 grad on its fp8 output and ReduceScatter it back to
+        # the local shard.
+        self.fp8_dispatch = fp8_dispatch
+        self.use_ue8m0 = use_ue8m0
+        # Handle for a pre-issued async AllGather of hidden_states (set by
+        # ``pre_allgather``, consumed by ``dispatch_preprocess``).
+        self._pre_ag_handle: dict | None = None
+        # Populated by ``dispatch_preprocess`` — global routing metadata
+        # after AllGather across the EP group.
+        self._global_topk_indices = None
+        self._global_topk_weights = None
+        # Populated by ``dispatch_preprocess`` when fp8_dispatch is active —
+        # the AllGather'd blockwise scale tensor, reused by downstream fused
+        # kernels (``run_sonic_moe``) as ``prequant_activation_payload`` to
+        # skip redundant re-quantization, mirroring DeepEP's contract.
+        self._fp8_dispatch_scale = None
+        # Cache for the overlap-combine path (set by ``token_combine``,
+        # consumed by ``combine_postprocess``).
+        self._overlap_combined = None
+
+    def pre_allgather(self, hidden_states: paddle.Tensor):
+        """Issue an async AllGather for *hidden_states* on the comm stream.
+
+        Called **before** gate computation so that the AllGather runs on the
+        dedicated NCCL comm stream while the gate MLP runs on the calc stream.
+        The result is stored in ``self._pre_ag_handle`` and consumed by
+        :meth:`dispatch_preprocess`.
+
+        Two flavors:
+        - bf16 path: a single async AllGather on the comm stream.
+        - fp8 path (``fp8_dispatch=True``): quantize locally (calc stream),
+          then issue two async AllGathers (fp8 uint8 view + fp32 scale) on
+          the comm stream so both overlap with gate compute. Consumed via
+          :class:`_PreAllGatherFP8Result`.
+        """
+        if self.moe_group is None or self.moe_group.nranks == 1:
+            self._pre_ag_handle = None
+            return
+
+        # Drain any leftover handle from a previous (possibly aborted)
+        # forward, so its NCCL task and output buffer are released before
+        # we issue a new one. This protects against OOM retries / aborted
+        # iterations where ``dispatch_preprocess`` never consumed the
+        # previous handle.
+        if self._pre_ag_handle is not None:
+            try:
+                if "task" in self._pre_ag_handle:
+                    self._pre_ag_handle["task"].wait()
+                else:
+                    self._pre_ag_handle["task_x"].wait()
+                    self._pre_ag_handle["task_s"].wait()
+            except (RuntimeError, OSError) as _e:
+                logger.warning(
+                    "pre_allgather: leftover async task wait failed (%s), "
+                    "discarding handle.",
+                    _e,
+                )
+            self._pre_ag_handle = None
+
+        if len(hidden_states.shape) == 3:
+            _, _, d_model = hidden_states.shape
+        else:
+            _, d_model = hidden_states.shape
+        reshaped_input = hidden_states.reshape([-1, d_model]).contiguous()
+
+        if self.fp8_dispatch:
+            # FP8 async path: quantize on calc stream, then issue both
+            # AllGathers (fp8 data + scale) on the comm stream so they
+            # overlap with gate MLP. quantize_activation_blockscaled_fast
+            # itself runs on the calc stream and finishes before the
+            # comm-stream collectives consume its outputs (NCCL handles
+            # the cross-stream sync).
+            assert quantize_activation_blockscaled_fast is not None, (
+                "Cannot find quantize_activation_blockscaled_fast, "
+                "please update sonicmoe."
+            )
+            x_fp8, scale = quantize_activation_blockscaled_fast(
+                reshaped_input, scale_dtype=paddle.int32
+            )
+            T_local, H = x_fp8.shape
+            T_global = T_local * self.moe_group.nranks
+            H128 = scale.shape[1]
+            x_fp8_global_uint8 = paddle.empty([T_global, H], dtype="uint8")
+            task_x = paddle.distributed.stream.all_gather(
+                x_fp8_global_uint8,
+                x_fp8.view("uint8"),
+                group=self.moe_group,
+                sync_op=False,
+                use_calc_stream=False,
+            )
+            scale_global = paddle.empty([T_global, H128], dtype=scale.dtype)
+            task_s = paddle.distributed.stream.all_gather(
+                scale_global,
+                scale,
+                group=self.moe_group,
+                sync_op=False,
+                use_calc_stream=False,
+            )
+            self._pre_ag_handle = {
+                "x_fp8_global_uint8": x_fp8_global_uint8,
+                "scale_global": scale_global,
+                "task_x": task_x,
+                "task_s": task_s,
+                "group": self.moe_group,
+                "fp8": True,
+            }
+            return
+
+        output_shape = list(reshaped_input.shape)
+        output_shape[0] = output_shape[0] * self.moe_group.nranks
+        global_hidden_states = paddle.empty(
+            shape=output_shape, dtype=reshaped_input.dtype
+        )
+        task = paddle.distributed.stream.all_gather(
+            global_hidden_states,
+            reshaped_input,
+            group=self.moe_group,
+            sync_op=False,
+            use_calc_stream=False,
+        )
+
+        self._pre_ag_handle = {
+            "output": global_hidden_states,
+            "task": task,
+            "group": self.moe_group,
+        }
+
+    def dispatch_preprocess(
+        self,
+        hidden_states: paddle.Tensor,
+        probs: paddle.Tensor,
+        mask: paddle.Tensor,  # routing_map
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
+    ) -> paddle.Tensor:
+        """AllGather hidden_states and topk metadata across the EP group.
+
+        Reuses ``_pre_ag_handle`` if :meth:`pre_allgather` was called;
+        otherwise performs a sync AllGather (FP8 path when ``fp8_dispatch``
+        is on, plain bf16 otherwise). The unpermuted global hidden states
+        are returned — fused SonicMoE kernels handle gather/scatter inside
+        the expert compute, so no explicit permute happens here.
+
+        Side effects: caches ``_global_topk_indices`` and
+        ``_global_topk_weights`` for the fused expert compute, and sets
+        ``tokens_per_expert = None`` (the consumer recomputes it).
+
+        Raises:
+            ValueError: if ``topk_indices`` or ``topk_weights`` is None.
+        """
+        if len(hidden_states.shape) == 3:
+            _, _, d_model = hidden_states.shape
+        else:
+            _, d_model = hidden_states.shape
+        reshaped_input = hidden_states.reshape([-1, d_model]).contiguous()
+
+        # Reset fp8 dispatch state — will be set below only when fp8 path is taken.
+        self._fp8_dispatch_scale = None
+
+        # AllGather hidden_states along token dim across the EP group.
+        # If pre_allgather() was called before gate, reuse the async result;
+        # otherwise fall back to the synchronous path.
+        if self._pre_ag_handle is not None:
+            if self._pre_ag_handle.get("fp8", False):
+                global_hidden_states, self._fp8_dispatch_scale = (
+                    _PreAllGatherFP8Result.apply(
+                        reshaped_input, self._pre_ag_handle
+                    )
+                )
+            else:
+                global_hidden_states = _PreAllGatherResult.apply(
+                    reshaped_input, self._pre_ag_handle
+                )
+            self._pre_ag_handle = None
+        elif self.fp8_dispatch:
+            raise RuntimeError(
+                "AllGatherTokenDispatcher.fp8_dispatch=True requires "
+                "pre_allgather() to be issued before dispatch_preprocess."
+            )
+        else:
+            global_hidden_states = AllGatherGroupOp.apply(
+                reshaped_input, self.moe_group
+            )
+
+        # Memory-saving fused path: skip permute entirely; the fused SonicMoE
+        # kernels (_UpProjection/_DownProjection) handle gather/scatter
+        # internally. We only AllGather the topk metadata and return the
+        # unpermuted global hidden states.
+        if topk_indices is None or topk_weights is None:
+            raise ValueError(
+                "AllGatherTokenDispatcher requires topk_indices and "
+                "topk_weights to be provided."
+            )
+        # Indices are routing IDs in [0, num_experts) (or -1 for padding), so
+        # int32 covers the range with room to spare (num_experts << 2^31) while
+        # halving the AllGather payload vs int64. The downstream SonicMoE
+        # metadata kernel (deepep_topk_to_sonic_metadata) casts to int32 anyway.
+        self._global_topk_indices = AllGatherGroupOp.apply(
+            topk_indices.detach().cast("int32"), self.moe_group
+        )
+        # Padding tokens have topk_indices == -1 (set by TopKRouter).
+        # Keep the sentinel in indices so SonicMoE metadata can treat those
+        # slots as masked; only zero the corresponding routing weights below.
+        self._padding_mask = self._global_topk_indices < 0
+        # Router-local AllGather: every token has exactly one origin rank,
+        # so the topk_weights gradient flowing back from sonic-moe's
+        # _DownProjection (shape [seq_global, K]) must be *scattered* (slice
+        # this rank's segment), not reduce-scattered. _RouterAllGather
+        # implements scatter on backward, which is the correct semantics
+        # for router-owned tensors and lets the router receive main-loss
+        # gradients on this rank — matching the alltoall/deepep contract
+        # where router weights are also trained by the main loss via the
+        # unpermute(probs=...) multiplication.
+        self._global_topk_weights = _RouterAllGather.apply(
+            topk_weights.cast(probs.dtype), self.moe_group
+        )
+        # Zero out weights for padding tokens (indices were clipped above).
+        # Apply the mask unconditionally: a ``.any()`` guard would force a
+        # GPU->CPU sync every step just to decide whether to run the where.
+        # ``_padding_mask`` is already a bool tensor (``< 0``), so feed it to
+        # ``paddle.where`` directly — the previous bool->float->bool cast was a
+        # no-op roundtrip. Numerically identical (all-False mask leaves the
+        # weights untouched).
+        self._global_topk_weights = paddle.where(
+            self._padding_mask,
+            paddle.zeros_like(self._global_topk_weights),
+            self._global_topk_weights,
+        )
+        # NOTE: tokens_per_expert is intentionally NOT computed here.
+        # The allgather branch of fusion_moe_forward (moe_layer.py) passes
+        # `_global_topk_indices` directly to `SonicMoEExpert.forward()` /
+        # `run_sonic_moe`, which internally computes the token counts and
+        # cumsum offsets needed by the fused kernels. A bincount here would
+        # be pure waste. We return None to keep the dispatcher contract
+        # `(global_input_tokens, tokens_per_expert)` but the consumer
+        # ignores it on this path.
+        self.tokens_per_expert = None
+        # Return unpermuted global hidden states — fused kernels do the rest
+        return global_hidden_states
+
+    def token_dispatch(
+        self,
+        permuted_global_input_tokens: paddle.Tensor,
+        fp8_dispatch: bool = False,
+        async_finish: bool = False,
+        use_ue8m0: bool = False,
+        using_sonic_moe: bool = True,
+    ):
+        """No-op pass-through for the AllGather path.
+
+        After :meth:`dispatch_preprocess`, every rank already holds the full
+        global token list, so no further inter-rank communication is needed.
+        ``fp8_dispatch`` / ``async_finish`` / ``use_ue8m0`` are accepted for
+        signature compatibility with other dispatchers; the actual FP8
+        quantization is handled inside ``dispatch_preprocess``.
+
+        ``using_sonic_moe`` must be True on this path: the AllGather
+        dispatcher feeds ``_global_topk_indices`` directly into
+        ``SonicMoEExpert.forward`` / ``run_sonic_moe`` (see
+        ``dispatch_preprocess``). Any other expert path is unsupported here.
+
+        Returns:
+            tuple: ``(global_tokens, fp8_handle)``. When ``_fp8_dispatch_scale``
+            was captured during :meth:`dispatch_preprocess` (fp8 path), the handle
+            is ``{"scale": scale}`` matching DeepEP's contract so downstream
+            fused kernels can reuse the dispatch scale as
+            ``prequant_activation_payload``.
+        """
+        if not using_sonic_moe:
+            raise ValueError(
+                "AllGatherTokenDispatcher requires using_sonic_moe=True; "
+                "the AllGather path is only wired for the fused SonicMoE "
+                "expert kernels. Switch dispatcher type or enable SonicMoE."
+            )
+        fp8_handle = (
+            {"scale": self._fp8_dispatch_scale}
+            if self._fp8_dispatch_scale is not None
+            else None
+        )
+        return permuted_global_input_tokens, fp8_handle
+
+    def get_dispatched_routing(self):
+        """Return (dispatched_indices, dispatched_probs, tokens_per_expert).
+
+        For AllGather, tokens_per_expert is computed on demand via bincount
+        since every rank holds all experts and the global token counts are
+        already complete. ``paddle.bincount`` defaults to int64; cast to
+        int32 to match the dtype contract expected by the downstream
+        SonicMoE metadata kernel (``deepep_topk_to_sonic_metadata``).
+        """
+        indices = self._global_topk_indices
+        flat_indices = indices.reshape([-1])
+        valid_indices = paddle.masked_select(
+            flat_indices,
+            flat_indices >= 0,
+        )
+        tokens_per_expert = paddle.bincount(
+            valid_indices,
+            minlength=self.num_experts,
+        ).cast("int32")
+        return (
+            indices,
+            self._global_topk_weights,
+            tokens_per_expert,
+        )
+
+    def dispatch_postprocess(
+        self,
+        global_input_tokens: paddle.Tensor,
+    ):
+        """Return the cached ``(global_tokens, tokens_per_expert)`` tuple.
+
+        Mirrors the dispatcher protocol; ``tokens_per_expert`` is ``None``
+        on this path because the fused SonicMoE kernels recompute it from
+        ``_global_topk_indices``.
+        """
+        return global_input_tokens, self.tokens_per_expert
+
+    def combine_preprocess(self, hidden_states: paddle.Tensor):
+        """No-op pass-through (no unpermute on the fused path)."""
+        return hidden_states
+
+    def token_combine(
+        self,
+        hidden_states: paddle.Tensor,
+        combine_overlap_handle: dict | None = None,
+        async_finish: bool = False,
+        fp8_combine_grad_handle: dict | None = None,
+    ):
+        """ReduceScatter the expert outputs back to the local token shard.
+
+        When ``combine_overlap_handle`` is None this is a no-op; the actual
+        ReduceScatter is deferred to :meth:`combine_postprocess`. When it
+        is provided, the ReduceScatter is fused with a user-supplied
+        subgraph (typically the shared-expert MLP) via
+        :class:`_AllGatherCombineAsync` and the combined output is cached
+        for ``combine_postprocess`` to return as-is. The handle dict is
+        mutated in place: ``fn_out`` receives the subgraph outputs.
+
+        Args:
+            combine_overlap_handle: dict with keys ``fn`` (callable) and
+                ``fn_args`` (tuple). On return, ``fn_out`` is populated.
+            fp8_combine_grad_handle: accepted for caller-signature parity but
+                unused on the allgather path. The combine collectives stay
+                bf16 in both directions; ``_DownProjection.backward`` quantizes
+                ``dout`` itself. Since the backward AllGather is a lossless row
+                concat (no reduction), self-quant-after-AllGather is numerically
+                identical to quant-before — so this path already matches
+                deepep+sonic precision without any extra fp8 collective.
+        """
+        del fp8_combine_grad_handle
+
+        if combine_overlap_handle is None:
+            self._overlap_combined = None
+            return hidden_states
+        if not isinstance(combine_overlap_handle, dict):
+            raise TypeError(
+                "combine_overlap_handle must be a dict, got "
+                f"{type(combine_overlap_handle).__name__}"
+            )
+        if (
+            "fn" not in combine_overlap_handle
+            or "fn_args" not in combine_overlap_handle
+        ):
+            raise ValueError(
+                "combine_overlap_handle must contain 'fn' and 'fn_args' keys"
+            )
+        if not isinstance(combine_overlap_handle["fn_args"], tuple):
+            raise TypeError(
+                "combine_overlap_handle['fn_args'] must be a tuple, got "
+                f"{type(combine_overlap_handle['fn_args']).__name__}"
+            )
+        from paddle import framework as _framework
+
+        combined_x, *fn_out = _AllGatherCombineAsync.apply(
+            hidden_states,
+            self.moe_group,
+            *(combine_overlap_handle["fn_args"]),
+            fn=combine_overlap_handle["fn"],
+            is_first_fwd=not _framework._dygraph_tracer()._has_grad,
+        )
+        combine_overlap_handle["fn_out"] = tuple(fn_out)
+        self._overlap_combined = combined_x
+        return combined_x
+
+    def combine_postprocess(self, hidden_states: paddle.Tensor):
+        """ReduceScatter the partial-sum expert outputs to the local shard.
+
+        The fused ``_DownProjection`` already scattered back to
+        ``[global_T, h]`` with topk weights applied, but the result is a
+        partial sum across the EP-sharded intermediate dim. This step sums
+        across EP ranks and slices to the per-rank token segment.
+
+        If :meth:`token_combine` already performed the ReduceScatter (the
+        overlap path), the cached output is returned and the cache cleared.
+        """
+        if getattr(self, "_overlap_combined", None) is not None:
+            # ReduceScatter was already performed (fused with shared experts) in
+            # ``token_combine``; pass the cached output through.
+            out = self._overlap_combined
+            self._overlap_combined = None
+            return out
+        return ReduceScatterGroupOp.apply(hidden_states, self.moe_group)
