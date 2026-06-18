@@ -1347,8 +1347,7 @@ class _PreAllGatherFP8Result(paddle.autograd.PyLayer):
         # bf16 dx for its activation input). Tell Paddle not to coerce the
         # incoming grad to the fp8 output dtype, and not to materialize a zero
         # fp8 grad buffer if the edge is unused.
-        if hasattr(ctx, "set_grad_in_dtype_consistent"):
-            ctx.set_grad_in_dtype_consistent(False)
+        ctx.set_grad_in_dtype_consistent(False)
         ctx.set_materialize_grads(False)
         return x_fp8_global, scale_global
 
