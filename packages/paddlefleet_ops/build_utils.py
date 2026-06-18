@@ -29,9 +29,7 @@ import backends
 from packaging.version import Version
 
 logger = logging.getLogger(__name__)
-print(
-    f"Running build_utils with Python {sys.version} on platform {platform.system()} {platform.machine()}"
-)
+
 # packages/paddlefleet_ops/
 PKG_ROOT = Path(__file__).parent.resolve()
 # workspace root (packages/paddlefleet_ops/ → packages/ → workspace root)
