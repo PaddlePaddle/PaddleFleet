@@ -731,6 +731,7 @@ class MoELayer(nn.Layer):
             dispatched_hidden_states, fp8_dispatched_handle = self.dispatch(
                 hidden_states, probs, routing_map, topk_weights, topk_indices
             )
+
         if should_log_balance and global_moe_balance_training_logs_enabled():
             log_moe_balance(
                 self.layer_number,
@@ -980,6 +981,7 @@ class MoELayer(nn.Layer):
         """
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             hidden_states = GatherOp.apply(hidden_states)
+
         orig_shape = hidden_states.shape
         residuals = hidden_states
 

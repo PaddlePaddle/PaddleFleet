@@ -508,6 +508,7 @@ class MlpNode:
         self.tokens_per_expert = None
         self.padding_token_per_experts = None
         self.router_topk = None
+        self.unzip_node.reset_state()
         self.release_mem()
 
     def release_mem(self):
@@ -1105,7 +1106,6 @@ class MlpNode:
             ),
         )
 
-        # 如果能够分配连续的 n2 和 o3，则可以不切 zip/unzip
         num_unzipped_tokens = self.token_offsets[-1]
         hidden_size = zipped_out.shape[1]
         zip_unzip_fusion = (
@@ -1118,6 +1118,7 @@ class MlpNode:
             )
             > 0
         )
+
         if zip_unzip_fusion:
             expert_unzipped_out = paddle.empty(
                 [num_unzipped_tokens, zipped_out.shape[1]], zipped_out.dtype
@@ -1315,7 +1316,6 @@ class MlpNode:
                 subbatch_rows,
                 zip_unzip_fusion,
             )
-
         return output
 
     # ==================== backward methods ====================
@@ -1370,7 +1370,6 @@ class MlpNode:
         zip_unzip_fusion = (
             find_max_concurrent_subbatch_size(zip_unzip_features, upper=1) > 0
         )
-
         # 1. zip_grad and unzip (recompute)
         unzipped_grad = self.zip_node.backward(
             hidden_states_out_grad,
@@ -1612,6 +1611,8 @@ class MlpNode:
                 self.dispatched_indices,
             )
 
+        self.reset_state()
+
         if self.moe_subbatch_diag:
             logger.info(
                 "[AutoSubbatch BWD] backend=%s, path=%s, total_tokens=%d, "
@@ -1827,8 +1828,10 @@ class MlpNode:
         ):
             # Per-expert backward path (non-fusion)
             bwd_path = "per_expert"
+
             self._ensure_weight_grad()
             self._slice_weight_grad()
+
             output = paddle.empty(
                 [0, hidden_states_out_grad_shape[-1]], dtype=paddle.float32
             )
@@ -2025,6 +2028,9 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         """
         (cached_tensors,) = ctx.saved_tensor()
         ctx.node.set_cached_tensors(cached_tensors)
+
+        del cached_tensors
+        ctx.container = None
         hidden_states_grad, dispatched_probs_grad = ctx.node.backward(
             output_grad
         )
