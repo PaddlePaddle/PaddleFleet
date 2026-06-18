@@ -1213,8 +1213,12 @@ class _RouterAllGather(paddle.autograd.PyLayer):
                     f"{global_shape})."
                 )
             grad = grad.reshape(global_shape)
-        chunks = paddle.split(grad, num_or_sections=group.nranks, axis=0)
-        out = chunks[group.rank].contiguous()
+        # Slice out only this rank's segment instead of splitting into all
+        # nranks chunks and discarding the rest (scatter — no cross-rank
+        # reduction). Avoids constructing nranks-1 unused views.
+        seg = local_shape[0]
+        start = group.rank * seg
+        out = grad[start : start + seg].contiguous()
         if list(out.shape) != local_shape:
             out = out.reshape(local_shape)
         return out
