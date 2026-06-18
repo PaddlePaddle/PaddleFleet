@@ -215,7 +215,7 @@ class GroupedMLPExpert(FleetLayer):
             )
             # Use config.init_method / config.output_layer_init_method
             # which are functions that take a tensor and initialize it using sharedbuffer.
-            if self.training:
+            if self.config.perform_initialization:
                 self.config.init_method(self.weight1)
                 self.config.output_layer_init_method(self.weight2)
         self.weight1.is_distributed = self.expert_parallel
