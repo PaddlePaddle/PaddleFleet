@@ -561,6 +561,8 @@ class DeepEPCombineAsync(PyLayer):
         *fn_args,
         fn,
         is_first_fwd=False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ):
         """Forward pass of fused combine."""
         combined_x = fused_combine_forward_func(
@@ -575,6 +577,8 @@ class DeepEPCombineAsync(PyLayer):
 
         ctx.handle = states["handle"]
         ctx.group = group
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.combine_grad_handle = combine_grad_handle
 
         wait_for_deepep(group.id)
 
@@ -583,8 +587,18 @@ class DeepEPCombineAsync(PyLayer):
     @staticmethod
     def backward(ctx, grad_output, *fn_out_grads):
         """Backward pass of fused combine."""
+        grad_for_comm = grad_output
+        if ctx.fp8_dispatch:
+            assert quantize_activation_blockscaled_fast is not None, (
+                "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
+            )
+            grad_output = grad_output.contiguous()
+            grad_for_comm = quantize_activation_blockscaled_fast(
+                grad_output, scale_dtype=paddle.int32
+            )
+
         grad_x = fused_combine_backward_func(
-            grad_output,
+            grad_for_comm,
             ctx.group,
             ctx.handle,
             async_finish=True,
@@ -593,6 +607,15 @@ class DeepEPCombineAsync(PyLayer):
         fn_args_grads = ctx.bwf(*fn_out_grads)
 
         wait_for_deepep(ctx.group.id)
+
+        if ctx.fp8_dispatch:
+            assert ctx.combine_grad_handle is not None, (
+                "For fp8_dispatch, combine_grad_handle must be provided in combine backward."
+            )
+            grad_x, grad_scale = grad_x
+            ctx.combine_grad_handle["data"] = grad_x
+            ctx.combine_grad_handle["scale"] = grad_scale
+
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
@@ -608,6 +631,8 @@ class DeepEPCombineAsyncFunctor(PyLayer):
         states,
         *fn_args,
         fn,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ):
         """Forward pass of fused combine with overlap, get cached output directly."""
         combined_x = hold_tensors["res_output"]
@@ -617,14 +642,26 @@ class DeepEPCombineAsyncFunctor(PyLayer):
 
         ctx.handle = states["handle"]
         ctx.group = group
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.combine_grad_handle = combine_grad_handle
 
         return (combined_x,) + fn_out  # noqa: RUF005
 
     @staticmethod
     def backward(ctx, grad_output, *fn_out_grads):
         """Backward pass of fused combine with overlap."""
+        grad_for_comm = grad_output
+        if ctx.fp8_dispatch:
+            assert quantize_activation_blockscaled_fast is not None, (
+                "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
+            )
+            grad_output = grad_output.contiguous()
+            grad_for_comm = quantize_activation_blockscaled_fast(
+                grad_output, scale_dtype=paddle.int32
+            )
+
         grad_x = fused_combine_backward_func(
-            grad_output,
+            grad_for_comm,
             ctx.group,
             ctx.handle,
             async_finish=True,
@@ -633,6 +670,15 @@ class DeepEPCombineAsyncFunctor(PyLayer):
         fn_args_grads = ctx.bwf(*fn_out_grads)
 
         wait_for_deepep(ctx.group.id)
+
+        if ctx.fp8_dispatch:
+            assert ctx.combine_grad_handle is not None, (
+                "For fp8_dispatch, combine_grad_handle must be provided in combine backward."
+            )
+            grad_x, grad_scale = grad_x
+            ctx.combine_grad_handle["data"] = grad_x
+            ctx.combine_grad_handle["scale"] = grad_scale
+
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
@@ -820,6 +866,8 @@ if HAVE_DEEP_EP:
                     *(combine_overlap_handle["fn_args"]),
                     fn=combine_overlap_handle["fn"],
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
+                    fp8_dispatch=fp8_dispatch,
+                    combine_grad_handle=combine_grad_handle,
                 )
                 combine_overlap_handle["fn_out"] = fn_out
                 return combined_x
