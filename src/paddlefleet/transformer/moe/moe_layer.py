@@ -418,12 +418,6 @@ class MoELayer(nn.Layer):
                     hybridep_buffer_configs=getattr(
                         config, "hybridep_buffer_configs", None
                     ),
-                    moe_expert_capacity_factor=(
-                        config.moe_expert_capacity_factor
-                    ),
-                    moe_pad_expert_input_to_capacity=(
-                        config.moe_pad_expert_input_to_capacity
-                    ),
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"

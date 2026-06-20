@@ -15,7 +15,6 @@
 # limitations under the License.
 from __future__ import annotations
 
-import math
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -28,6 +27,7 @@ if TYPE_CHECKING:
 
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
+    HYBRIDEP_TOKEN_ALIGNMENT,
     DeepEPCombineAsyncRefinedRecompute,
     fused_combine,
     fused_dispatch,
@@ -186,8 +186,6 @@ class _HybridEPManager(_DispatchManager):
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
         hybridep_buffer_configs: dict | None = None,
-        moe_expert_capacity_factor: float | None = None,
-        moe_pad_expert_input_to_capacity: bool = False,
     ):
         if not HAVE_HYBRID_EP:
             raise ImportError("HybridEP runtime is not available.")
@@ -205,18 +203,41 @@ class _HybridEPManager(_DispatchManager):
         self.tokens_per_expert = None
         self.padded_tokens_per_expert = None
         self.num_permuted_tokens = None
-        self.pad_multiple = None
-        self.capacity = None
-        self.capacity_factor = moe_expert_capacity_factor
-        self.drop_and_pad = moe_pad_expert_input_to_capacity
-        if self.drop_and_pad:
-            assert self.capacity_factor is not None, (
-                "moe_expert_capacity_factor must be set when "
-                "moe_pad_expert_input_to_capacity is enabled."
-            )
         self.handle = None
         self._active_buffer = None
         self.hybridep_buffer_configs = hybridep_buffer_configs or {}
+        self._num_unpadded_tokens = None
+
+    def _get_max_num_tokens_per_rank(self, num_local_tokens: int, place) -> int:
+        max_num_tokens = num_local_tokens
+        if self.group.nranks > 1:
+            max_num_tokens_tensor = paddle.to_tensor(
+                [num_local_tokens], dtype="int64", place=place
+            )
+            paddle.distributed.all_reduce(
+                max_num_tokens_tensor,
+                op=paddle.distributed.ReduceOp.MAX,
+                group=self.group,
+            )
+            max_num_tokens = int(max_num_tokens_tensor.item())
+        return (
+            (max_num_tokens + HYBRIDEP_TOKEN_ALIGNMENT - 1)
+            // HYBRIDEP_TOKEN_ALIGNMENT
+            * HYBRIDEP_TOKEN_ALIGNMENT
+        )
+
+    def _pad_tokens_to_rank_max(
+        self, tensor: paddle.Tensor | None, max_num_tokens: int
+    ) -> paddle.Tensor | None:
+        if tensor is None or tensor.shape[0] == max_num_tokens:
+            return tensor
+        assert tensor.shape[0] < max_num_tokens, (
+            f"HybridEP token padding expects local tokens <= EP max, got "
+            f"{tensor.shape[0]} > {max_num_tokens}."
+        )
+        pad_shape = [max_num_tokens - tensor.shape[0], *tensor.shape[1:]]
+        padding = paddle.zeros(pad_shape, dtype=tensor.dtype)
+        return paddle.concat([tensor, padding], axis=0)
 
     def _get_buffer(
         self,
@@ -236,24 +257,15 @@ class _HybridEPManager(_DispatchManager):
         )
         return self._active_buffer
 
-    def _get_capacity(self, num_tokens: int) -> int:
-        return math.ceil((num_tokens / self.num_experts) * self.capacity_factor)
-
-    def _setup_static_num_permuted_tokens(
+    def _get_num_permuted_tokens_upper_bound(
         self, num_local_tokens: int
-    ) -> int | None:
-        self.capacity = None
-        if self.drop_and_pad:
-            num_out_tokens = num_local_tokens * self.router_topk
-            self.capacity = self._get_capacity(num_out_tokens)
-            self.tokens_per_expert = paddle.full(
-                [self.num_local_experts],
-                self.capacity * self.group.nranks,
-                dtype="int64",
-            )
-            return self.capacity * self.group.nranks * self.num_local_experts
-
-        return None
+    ) -> int:
+        total_routed_tokens = (
+            num_local_tokens * self.group.nranks * self.router_topk
+        )
+        if FP8_ALIGN > 1:
+            total_routed_tokens += self.num_local_experts * (FP8_ALIGN - 1)
+        return total_routed_tokens
 
     def _indices_to_dense_metadata(
         self,
@@ -363,15 +375,23 @@ class _HybridEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         use_fp8: bool = False,
     ):
+        num_unpadded_tokens = hidden_states.shape[0]
+        max_num_tokens = self._get_max_num_tokens_per_rank(
+            num_unpadded_tokens, hidden_states.place
+        )
+        self._num_unpadded_tokens = num_unpadded_tokens
         routing_map, probs = self._get_dispatch_metadata(
             token_indices, token_weights
         )
-        buffer = self._get_buffer(hidden_states)
-        self.pad_multiple = FP8_ALIGN if use_fp8 else None
-        self.num_permuted_tokens = self._setup_static_num_permuted_tokens(
-            hidden_states.shape[0]
+        hidden_states = self._pad_tokens_to_rank_max(
+            hidden_states, max_num_tokens
         )
-        non_blocking = self.num_permuted_tokens is not None
+        routing_map = self._pad_tokens_to_rank_max(routing_map, max_num_tokens)
+        probs = self._pad_tokens_to_rank_max(probs, max_num_tokens)
+        buffer = self._get_buffer(hidden_states, max_num_tokens)
+        num_permuted_tokens = self._get_num_permuted_tokens_upper_bound(
+            max_num_tokens
+        )
         scaling_factor = None
         if use_fp8:
             hidden_states, scaling_factor = (
@@ -397,13 +417,17 @@ class _HybridEPManager(_DispatchManager):
             num_of_experts_per_rank=self.num_local_experts,
             use_fp8=use_fp8,
             scaling_factor=scaling_factor,
-            pad_multiple=self.pad_multiple,
-            num_permuted_tokens=self.num_permuted_tokens,
-            non_blocking=non_blocking,
+            pad_multiple=FP8_ALIGN if use_fp8 else None,
+            num_permuted_tokens=num_permuted_tokens,
+            non_blocking=True,
         )
         self.padded_tokens_per_expert = tokens_per_expert
-        if self.num_permuted_tokens is None:
-            self._set_num_permuted_tokens(tokens_per_expert)
+        num_permuted_tokens = self._set_num_permuted_tokens(tokens_per_expert)
+        hidden_states = hidden_states[:num_permuted_tokens]
+        if dispatched_probs is not None:
+            dispatched_probs = dispatched_probs[:num_permuted_tokens]
+        if scale is not None:
+            scale = scale[:num_permuted_tokens]
         (
             _sparse_to_dense_map,
             _rdma_to_attn_map,
@@ -412,12 +436,11 @@ class _HybridEPManager(_DispatchManager):
             local_expert_routing_map,
             *_,
         ) = self.handle
-        if not self.drop_and_pad:
-            num_dispatched_tokens = int(num_dispatched_tokens_tensor.item())
-            self.tokens_per_expert = self._extract_tokens_per_expert(
-                num_dispatched_tokens,
-                local_expert_routing_map,
-            )
+        num_dispatched_tokens = int(num_dispatched_tokens_tensor.item())
+        self.tokens_per_expert = self._extract_tokens_per_expert(
+            num_dispatched_tokens,
+            local_expert_routing_map,
+        )
         return hidden_states, dispatched_probs, scale
 
     def dispatch(
@@ -452,8 +475,13 @@ class _HybridEPManager(_DispatchManager):
         )
         self.dispatched_probs = None
         self.handle = None
-        if not self.drop_and_pad:
-            self.num_permuted_tokens = None
+        self.num_permuted_tokens = None
+        if (
+            self._num_unpadded_tokens is not None
+            and hidden_states.shape[0] != self._num_unpadded_tokens
+        ):
+            hidden_states = hidden_states[: self._num_unpadded_tokens]
+        self._num_unpadded_tokens = None
         return hidden_states
 
     def get_dispatched_metadata(self) -> paddle.Tensor:
@@ -775,8 +803,6 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         moe_ep_barrier: bool = True,
         dispatcher_type: str | None = None,
         hybridep_buffer_configs: dict | None = None,
-        moe_expert_capacity_factor: float | None = None,
-        moe_pad_expert_input_to_capacity: bool = False,
     ):
         super().__init__(ep_group)
 
@@ -796,12 +822,6 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         }
         if manager_cls is _HybridEPManager:
             manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
-            manager_kwargs["moe_expert_capacity_factor"] = (
-                moe_expert_capacity_factor
-            )
-            manager_kwargs["moe_pad_expert_input_to_capacity"] = (
-                moe_pad_expert_input_to_capacity
-            )
         self._comm_manager = manager_cls(**manager_kwargs)
 
     def dispatch_preprocess(
