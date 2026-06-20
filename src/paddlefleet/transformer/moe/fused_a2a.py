@@ -47,9 +47,6 @@ else:
 _buffer = None
 _hybrid_ep_buffer = None
 
-# HybridEP dispatch/combine kernels use 64-token chunks for public APIs.
-HYBRIDEP_TOKEN_ALIGNMENT = 64
-
 
 def barrier_ep(ep_group):
     """barrier_ep"""

@@ -23,7 +23,6 @@ from paddlefleet.transformer.moe.fp8_utils import (
     ExpertsGroupGemmContiguousNode,
 )
 from paddlefleet.transformer.moe.fused_a2a import (
-    HYBRIDEP_TOKEN_ALIGNMENT,
     HybridEPCombine,
     HybridEPDispatch,
     _replay_hybrid_ep_dispatch_backward,
@@ -92,6 +91,15 @@ def _new_hybrid_manager(**overrides):
         "num_local_experts": overrides.pop("num_local_experts", 2),
         "hybridep_buffer_configs": overrides.pop(
             "hybridep_buffer_configs", None
+        ),
+        "moe_expert_capacity_factor": overrides.pop(
+            "moe_expert_capacity_factor", None
+        ),
+        "moe_pad_expert_input_to_capacity": overrides.pop(
+            "moe_pad_expert_input_to_capacity", False
+        ),
+        "moe_expert_rank_capacity_factor": overrides.pop(
+            "moe_expert_rank_capacity_factor", None
         ),
     }
     manager = _HybridEPManager(**init_kwargs)
@@ -340,10 +348,7 @@ class TestHybridEPMetadata(unittest.TestCase):
 
     def test_runtime_count_and_layout_helpers(self):
         manager = _new_hybrid_manager(router_topk=2, num_local_experts=3)
-        self.assertEqual(
-            manager._get_num_permuted_tokens_upper_bound(5),
-            10 * manager.group.nranks + 3 * (FP8_ALIGN - 1),
-        )
+        self.assertIsNone(manager._setup_static_num_permuted_tokens(5))
 
         local_expert_routing_map = paddle.to_tensor(
             [
@@ -492,38 +497,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             )
         )
 
-    def test_rank_max_tokens_use_ep_max_and_chunk_alignment(self):
-        manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=2))
-
-        def fake_all_reduce(tensor, op=None, group=None):
-            self.assertEqual(int(tensor.item()), 3)
-            self.assertEqual(op, paddle.distributed.ReduceOp.MAX)
-            self.assertIs(group, manager.group)
-            tensor.set_value(paddle.to_tensor([65], dtype="int64"))
-
-        with patch(
-            "paddle.distributed.all_reduce", side_effect=fake_all_reduce
-        ):
-            max_tokens = manager._get_max_num_tokens_per_rank(
-                3, paddle.CPUPlace()
-            )
-
-        self.assertEqual(max_tokens, HYBRIDEP_TOKEN_ALIGNMENT * 2)
-
-    def test_pad_tokens_to_rank_max_handles_noop_none_and_invalid(self):
-        manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=1))
-
-        self.assertIsNone(manager._pad_tokens_to_rank_max(None, 4))
-
-        tensor = paddle.ones([4, 2], dtype="float32")
-        self.assertIs(manager._pad_tokens_to_rank_max(tensor, 4), tensor)
-
-        with self.assertRaisesRegex(AssertionError, "local tokens <= EP max"):
-            manager._pad_tokens_to_rank_max(
-                paddle.ones([5, 2], dtype="float32"), 4
-            )
-
-    def test_dispatch_with_permute_uses_hybrid_ep_runtime_contract(self):
+    def test_dispatch_with_permute_uses_dynamic_dropless_contract(self):
         routing_map = paddle.to_tensor(
             [[True, False], [False, True]], dtype="bool"
         )
@@ -562,49 +536,38 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         )
 
         dispatch_kwargs = buffer.dispatch_calls[-1]
-        self.assertEqual(
-            dispatch_kwargs["hidden"].shape, [HYBRIDEP_TOKEN_ALIGNMENT, 4]
-        )
-        self.assertEqual(
-            dispatch_kwargs["routing_map"].shape,
-            [HYBRIDEP_TOKEN_ALIGNMENT, 2],
-        )
-        self.assertEqual(
-            dispatch_kwargs["routing_map"][:2].numpy().tolist(),
-            routing_map.numpy().tolist(),
-        )
-        self.assertEqual(
-            dispatch_kwargs["routing_map"][2:].astype("int64").sum().item(), 0
-        )
+        self.assertEqual(dispatch_kwargs["hidden"].shape, [2, 4])
+        self.assertEqual(dispatch_kwargs["routing_map"].shape, [2, 2])
         self.assertFalse(dispatch_kwargs["use_fp8"])
         self.assertIsNone(dispatch_kwargs["pad_multiple"])
-        self.assertTrue(dispatch_kwargs["non_blocking"])
+        self.assertIsNone(dispatch_kwargs["num_permuted_tokens"])
+        self.assertFalse(dispatch_kwargs["non_blocking"])
         self.assertIs(manager.padded_tokens_per_expert, padded_counts)
         self.assertEqual(manager.num_permuted_tokens, 2)
         self.assertEqual(manager.tokens_per_expert.numpy().tolist(), [1, 1])
 
-    def test_dispatch_pads_rank_tokens_to_chunk_multiple(self):
+    def test_rank_capacity_sets_static_num_permuted_tokens(self):
         routing_map = paddle.to_tensor(
             [[True, False], [False, True], [True, False]], dtype="bool"
         )
-        routing_probs = paddle.to_tensor(
-            [[1.0, 0.0], [0.0, 1.0], [0.5, 0.0]], dtype="float32"
-        )
         manager = _new_hybrid_manager(
             group=_HybridEPGroup(nranks=1),
-            router_topk=1,
+            router_topk=2,
             num_experts=2,
             num_local_experts=2,
+            moe_expert_rank_capacity_factor=1.5,
             routing_map=routing_map,
-            routing_probs=routing_probs,
+            routing_probs=paddle.to_tensor(
+                [[1.0, 0.0], [0.0, 1.0], [0.5, 0.0]], dtype="float32"
+            ),
         )
         buffer = _RecordingHybridEPBuffer(
             dispatch_results=[
                 (
-                    paddle.zeros([3, 4], dtype="float32"),
-                    paddle.ones([3], dtype="float32"),
+                    paddle.zeros([9, 4], dtype="float32"),
+                    paddle.ones([9], dtype="float32"),
                     None,
-                    paddle.to_tensor([2, 1], dtype="int64"),
+                    paddle.to_tensor([5, 4], dtype="int64"),
                     _make_hybrid_ep_handle(
                         num_dispatched_tokens=3,
                         local_expert_routing_map=routing_map,
@@ -622,84 +585,11 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         )
 
         dispatch_kwargs = buffer.dispatch_calls[-1]
-        self.assertEqual(
-            dispatch_kwargs["hidden"].shape, [HYBRIDEP_TOKEN_ALIGNMENT, 4]
-        )
-        self.assertEqual(
-            dispatch_kwargs["routing_map"].shape,
-            [HYBRIDEP_TOKEN_ALIGNMENT, 2],
-        )
-        self.assertEqual(
-            dispatch_kwargs["probs"].shape, [HYBRIDEP_TOKEN_ALIGNMENT, 2]
-        )
-        self.assertEqual(
-            dispatch_kwargs["hidden"][:3].numpy().tolist(),
-            [[1.0] * 4] * 3,
-        )
-        self.assertEqual(
-            dispatch_kwargs["hidden"][3:].astype("int64").sum().item(), 0
-        )
-        self.assertEqual(manager._num_unpadded_tokens, 3)
-        self.assertEqual(manager.num_permuted_tokens, 3)
-
-    def test_dispatch_trims_padded_runtime_outputs_to_active_rows(self):
-        routing_map = paddle.to_tensor(
-            [[True, False], [False, True], [True, False]], dtype="bool"
-        )
-        routing_probs = paddle.to_tensor(
-            [[1.0, 0.0], [0.0, 1.0], [0.5, 0.0]], dtype="float32"
-        )
-        manager = _new_hybrid_manager(
-            group=_HybridEPGroup(nranks=1),
-            router_topk=1,
-            num_experts=2,
-            num_local_experts=2,
-            routing_map=routing_map,
-            routing_probs=routing_probs,
-        )
-        dispatched = paddle.arange(
-            HYBRIDEP_TOKEN_ALIGNMENT * 4, dtype="float32"
-        ).reshape([HYBRIDEP_TOKEN_ALIGNMENT, 4])
-        dispatched_probs = paddle.arange(
-            HYBRIDEP_TOKEN_ALIGNMENT, dtype="float32"
-        )
-        scale = paddle.arange(
-            HYBRIDEP_TOKEN_ALIGNMENT, dtype="float32"
-        ).reshape([HYBRIDEP_TOKEN_ALIGNMENT, 1])
-        buffer = _RecordingHybridEPBuffer(
-            dispatch_results=[
-                (
-                    dispatched,
-                    dispatched_probs,
-                    scale,
-                    paddle.to_tensor([2, 1], dtype="int64"),
-                    _make_hybrid_ep_handle(
-                        num_dispatched_tokens=3,
-                        local_expert_routing_map=routing_map,
-                    ),
-                )
-            ]
-        )
-        _bind_buffer(manager, buffer)
-
-        hidden_states, probs, scale_handle = (
-            manager._dispatch_with_permute_impl(
-                paddle.ones([3, 4], dtype="float32"),
-                paddle.to_tensor([[0], [1], [0]], dtype="int64"),
-                paddle.ones([3, 1], dtype="float32"),
-                use_fp8=False,
-            )
-        )
-
-        self.assertEqual(hidden_states.shape, [3, 4])
-        self.assertEqual(
-            hidden_states.numpy().tolist(), dispatched[:3].numpy().tolist()
-        )
-        self.assertEqual(probs.shape, [3])
-        self.assertEqual(probs.numpy().tolist(), [0.0, 1.0, 2.0])
-        self.assertEqual(scale_handle.shape, [3, 1])
-        self.assertEqual(scale_handle.numpy().tolist(), [[0.0], [1.0], [2.0]])
-        self.assertEqual(manager.num_permuted_tokens, 3)
+        self.assertEqual(dispatch_kwargs["hidden"].shape, [3, 4])
+        self.assertEqual(dispatch_kwargs["routing_map"].shape, [3, 2])
+        self.assertEqual(dispatch_kwargs["num_permuted_tokens"], 9)
+        self.assertTrue(dispatch_kwargs["non_blocking"])
+        self.assertEqual(manager.num_permuted_tokens, 9)
         self.assertEqual(manager.tokens_per_expert.numpy().tolist(), [2, 1])
 
     def test_fp8_dispatch_quantizes_and_aligns_expert_inputs(self):
@@ -742,9 +632,11 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         self.assertEqual(dispatch_kwargs["hidden"].dtype, paddle.float8_e4m3fn)
         self.assertTrue(dispatch_kwargs["use_fp8"])
         self.assertEqual(dispatch_kwargs["pad_multiple"], FP8_ALIGN)
+        self.assertIsNone(dispatch_kwargs["num_permuted_tokens"])
+        self.assertFalse(dispatch_kwargs["non_blocking"])
         self.assertEqual(
             dispatch_kwargs["scaling_factor"].shape,
-            [HYBRIDEP_TOKEN_ALIGNMENT, 1],
+            [2, 1],
         )
 
     def test_public_dispatch_uses_router_metadata_and_records_runtime_state(
@@ -849,7 +741,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         buffer = _RecordingHybridEPBuffer(
             combine_results=[
                 (
-                    paddle.ones([HYBRIDEP_TOKEN_ALIGNMENT, 4], dtype="float32"),
+                    paddle.ones([2, 4], dtype="float32"),
                     None,
                 )
             ]
@@ -862,7 +754,6 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             [1, 1], dtype="int64"
         )
         manager.num_permuted_tokens = 2
-        manager._num_unpadded_tokens = 2
 
         with self.assertRaisesRegex(NotImplementedError, "combine overlap"):
             manager.combine(
@@ -879,7 +770,6 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         self.assertIsNone(manager.handle)
         self.assertIsNone(manager.dispatched_probs)
         self.assertIsNone(manager.num_permuted_tokens)
-        self.assertIsNone(manager._num_unpadded_tokens)
         self.assertEqual(buffer.combine_calls[-1]["hidden"].shape, [2, 4])
         self.assertIsNone(buffer.combine_calls[-1].get("pad_multiple"))
 
