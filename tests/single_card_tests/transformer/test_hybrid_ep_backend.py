@@ -98,9 +98,6 @@ def _new_hybrid_manager(**overrides):
         "moe_pad_expert_input_to_capacity": overrides.pop(
             "moe_pad_expert_input_to_capacity", False
         ),
-        "moe_expert_rank_capacity_factor": overrides.pop(
-            "moe_expert_rank_capacity_factor", None
-        ),
     }
     manager = _HybridEPManager(**init_kwargs)
     for key, value in overrides.items():
@@ -546,7 +543,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         self.assertEqual(manager.num_permuted_tokens, 2)
         self.assertEqual(manager.tokens_per_expert.numpy().tolist(), [1, 1])
 
-    def test_rank_capacity_sets_static_num_permuted_tokens(self):
+    def test_drop_and_pad_sets_static_num_permuted_tokens(self):
         routing_map = paddle.to_tensor(
             [[True, False], [False, True], [True, False]], dtype="bool"
         )
@@ -555,7 +552,8 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             router_topk=2,
             num_experts=2,
             num_local_experts=2,
-            moe_expert_rank_capacity_factor=1.5,
+            moe_expert_capacity_factor=1.0,
+            moe_pad_expert_input_to_capacity=True,
             routing_map=routing_map,
             routing_probs=paddle.to_tensor(
                 [[1.0, 0.0], [0.0, 1.0], [0.5, 0.0]], dtype="float32"
@@ -564,10 +562,10 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         buffer = _RecordingHybridEPBuffer(
             dispatch_results=[
                 (
-                    paddle.zeros([9, 4], dtype="float32"),
-                    paddle.ones([9], dtype="float32"),
+                    paddle.zeros([6, 4], dtype="float32"),
+                    paddle.ones([6], dtype="float32"),
                     None,
-                    paddle.to_tensor([5, 4], dtype="int64"),
+                    paddle.to_tensor([3, 3], dtype="int64"),
                     _make_hybrid_ep_handle(
                         num_dispatched_tokens=3,
                         local_expert_routing_map=routing_map,
@@ -587,10 +585,10 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         dispatch_kwargs = buffer.dispatch_calls[-1]
         self.assertEqual(dispatch_kwargs["hidden"].shape, [3, 4])
         self.assertEqual(dispatch_kwargs["routing_map"].shape, [3, 2])
-        self.assertEqual(dispatch_kwargs["num_permuted_tokens"], 9)
+        self.assertEqual(dispatch_kwargs["num_permuted_tokens"], 6)
         self.assertTrue(dispatch_kwargs["non_blocking"])
-        self.assertEqual(manager.num_permuted_tokens, 9)
-        self.assertEqual(manager.tokens_per_expert.numpy().tolist(), [2, 1])
+        self.assertEqual(manager.num_permuted_tokens, 6)
+        self.assertEqual(manager.tokens_per_expert.numpy().tolist(), [3, 3])
 
     def test_fp8_dispatch_quantizes_and_aligns_expert_inputs(self):
         manager = _new_hybrid_manager(

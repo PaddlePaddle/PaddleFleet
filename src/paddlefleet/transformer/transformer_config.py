@@ -475,10 +475,6 @@ class TransformerConfig(ModelParallelConfig):
     the expert capacity length, effective only after the moe_expert_capacity_factor is set. The
     default setting is False."""
 
-    moe_expert_rank_capacity_factor: float | None = None
-    """moe_expert_rank_capacity_factor (float): Static HybridEP expert-rank
-    capacity factor. None means HybridEP sizes permuted buffers dynamically."""
-
     moe_token_drop_policy: str = "probs"
     """The policy to drop tokens. Can be either "probs" or "position". If "probs", the tokens with
     the lowest probabilities will be dropped. If "position", tokens at the end of each batch will

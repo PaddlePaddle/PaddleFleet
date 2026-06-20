@@ -188,7 +188,6 @@ class _HybridEPManager(_DispatchManager):
         hybridep_buffer_configs: dict | None = None,
         moe_expert_capacity_factor: float | None = None,
         moe_pad_expert_input_to_capacity: bool = False,
-        moe_expert_rank_capacity_factor: float | None = None,
     ):
         if not HAVE_HYBRID_EP:
             raise ImportError("HybridEP runtime is not available.")
@@ -215,7 +214,6 @@ class _HybridEPManager(_DispatchManager):
                 "moe_expert_capacity_factor must be set when "
                 "moe_pad_expert_input_to_capacity is enabled."
             )
-        self.moe_expert_rank_capacity_factor = moe_expert_rank_capacity_factor
         self.handle = None
         self._active_buffer = None
         self.hybridep_buffer_configs = hybridep_buffer_configs or {}
@@ -238,11 +236,6 @@ class _HybridEPManager(_DispatchManager):
         )
         return self._active_buffer
 
-    def _round_up_to_pad_multiple(self, num_tokens: int) -> int:
-        if self.pad_multiple is None or self.pad_multiple <= 1:
-            return num_tokens
-        return num_tokens + (-num_tokens % self.pad_multiple)
-
     def _get_capacity(self, num_tokens: int) -> int:
         return math.ceil((num_tokens / self.num_experts) * self.capacity_factor)
 
@@ -250,14 +243,6 @@ class _HybridEPManager(_DispatchManager):
         self, num_local_tokens: int
     ) -> int | None:
         self.capacity = None
-        if self.moe_expert_rank_capacity_factor is not None:
-            budget = int(
-                num_local_tokens
-                * self.router_topk
-                * self.moe_expert_rank_capacity_factor
-            )
-            return self._round_up_to_pad_multiple(budget)
-
         if self.drop_and_pad:
             num_out_tokens = num_local_tokens * self.router_topk
             self.capacity = self._get_capacity(num_out_tokens)
@@ -427,11 +412,12 @@ class _HybridEPManager(_DispatchManager):
             local_expert_routing_map,
             *_,
         ) = self.handle
-        num_dispatched_tokens = int(num_dispatched_tokens_tensor.item())
-        self.tokens_per_expert = self._extract_tokens_per_expert(
-            num_dispatched_tokens,
-            local_expert_routing_map,
-        )
+        if not self.drop_and_pad:
+            num_dispatched_tokens = int(num_dispatched_tokens_tensor.item())
+            self.tokens_per_expert = self._extract_tokens_per_expert(
+                num_dispatched_tokens,
+                local_expert_routing_map,
+            )
         return hidden_states, dispatched_probs, scale
 
     def dispatch(
@@ -791,7 +777,6 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hybridep_buffer_configs: dict | None = None,
         moe_expert_capacity_factor: float | None = None,
         moe_pad_expert_input_to_capacity: bool = False,
-        moe_expert_rank_capacity_factor: float | None = None,
     ):
         super().__init__(ep_group)
 
@@ -816,9 +801,6 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             )
             manager_kwargs["moe_pad_expert_input_to_capacity"] = (
                 moe_pad_expert_input_to_capacity
-            )
-            manager_kwargs["moe_expert_rank_capacity_factor"] = (
-                moe_expert_rank_capacity_factor
             )
         self._comm_manager = manager_cls(**manager_kwargs)
 

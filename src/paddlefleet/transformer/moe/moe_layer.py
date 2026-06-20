@@ -424,9 +424,6 @@ class MoELayer(nn.Layer):
                     moe_pad_expert_input_to_capacity=(
                         config.moe_pad_expert_input_to_capacity
                     ),
-                    moe_expert_rank_capacity_factor=getattr(
-                        config, "moe_expert_rank_capacity_factor", None
-                    ),
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"
