@@ -1212,29 +1212,52 @@ class AllToAllTokenDispatcher(nn.Layer):
 
 
 class _RouterAllGather(paddle.autograd.PyLayer):
-    """AllGather for router-local tensors (allgather dispatcher only).
+    """AllGather for router routing weights (allgather dispatcher only).
 
-    Forward: same as ``AllGatherGroupOp`` — concatenates the local
-    ``[seq_local, ...]`` tensor across the EP group along axis 0 to
-    ``[seq_global, ...]``.
+    Forward: concatenates the local ``[seq_local, K]`` routing-weight tensor
+    across the EP group along axis 0 to ``[seq_global, K]``.
 
-    Backward: **scatter (not reduce-scatter)**. Each token has exactly one
-    origin rank — its router lives there and only there. Only the slice owned
-    by the current rank is a valid gradient for *this* rank's router; the rest
-    belongs to other ranks' routers and must not be summed in.
-    ``AllGatherGroupOp`` was designed for hidden_states (unique-per-rank
-    pre-AllGather, hence reduce-scatter on backward); reusing it for
-    router-local metadata is a semantics mismatch.
+    Backward: **reduce-scatter** (sum across the EP group, then take this
+    rank's token segment).
+
+    Why reduce-scatter and not plain scatter:
+    in the allgather dispatcher every expert is sharded along its
+    *intermediate* dim, so **every** EP rank holds a shard of *every* expert
+    and recomputes a partial expert output for the *entire* global token list
+    using the same all-gathered routing weight ``w_t``. The combined output is
+
+        out_t = w_t * sum_i(down_proj_shard_i(t))          (sum over EP ranks i)
+
+    so the gradient that token ``t``'s router must receive is
+
+        d_loss/d_w_t = grad_out_t · sum_i(down_proj_shard_i(t))
+                     = sum_i ( grad_out_t · down_proj_shard_i(t) )
+                     = sum_i ds_i(t)
+
+    Each rank ``i`` only computes its own term ``ds_i(t)`` locally (via
+    SonicMoE's ``_DownProjection`` over its intermediate shard); the autograd
+    engine therefore delivers, on each rank, a ``[T_global, K]`` gradient
+    holding *that rank's* partial ``ds_i``. The router for token ``t`` lives on
+    a single origin rank, but its correct gradient is the **sum over all
+    ranks** of those partials — i.e. reduce (sum) then scatter to the origin
+    segment. This is exactly the standard backward of an all-gather whose
+    output is independently consumed on every rank.
+
+    A plain scatter (the previous implementation) kept only the origin rank's
+    own shard term ``ds_origin(t)`` and dropped ``ds_{j != origin}(t)``,
+    delivering ~1/nranks of the true router gradient (half of it at EP=2). That
+    under-trained the router and made the allgather path converge measurably
+    worse than the deepep+sonic path, which does not shard experts along the
+    intermediate dim and so gives its router the full single-rank gradient.
+    Reduce-scatter makes the two numerically equivalent: ``sum_i ds_i(t)``
+    equals deepep's single ``grad_out_t · full_down_value(t)``.
 
     Gradient shape: this layer's output (``_global_topk_weights``, shape
-    ``[T_global, K]``) is consumed downstream *only* through
-    ``_differentiable_router_scores``, which gathers it via
-    ``dispatched_probs.reshape(-1)[gather_idx]``. SonicMoE's ``_DownProjection``
-    emits a 1-D ``ds`` over the gathered/padded layout, but that flows back
-    through ``_GatherRouterScores`` (scatter into a flat ``[T_global*K]``
-    buffer) and the ``reshape(-1)`` op, whose autograd restores the original
-    2-D ``[T_global, K]`` shape. So the gradient arriving here matches the
-    forward output shape exactly; no flattening reaches this edge.
+    ``[T_global, K]``) is consumed downstream only through
+    ``_differentiable_router_scores`` -> ``_GatherRouterScores`` -> a
+    ``reshape(-1)``, whose autograd restores the original 2-D ``[T_global, K]``
+    layout, so the gradient arriving here matches the forward output shape; no
+    flattening reaches this edge.
     """
 
     @staticmethod
@@ -1261,8 +1284,10 @@ class _RouterAllGather(paddle.autograd.PyLayer):
             return grad
         # The incoming grad matches the forward output shape
         # ([T_global, *trailing]); see class docstring for why no flattening
-        # reaches this edge. Split along axis 0 and take this rank's segment
-        # (scatter — no cross-rank reduction).
+        # reaches this edge. Reduce-scatter (sum across EP, then take this
+        # rank's segment) — every rank contributed a partial router-weight
+        # gradient for the global token list, so the per-token gradient is the
+        # cross-rank sum, not just this rank's own slice.
         global_shape = [local_shape[0] * group.nranks, *local_shape[1:]]
         if list(grad.shape) != global_shape:
             # Defensive: a downstream kernel emitted an unexpected layout.
@@ -1278,12 +1303,7 @@ class _RouterAllGather(paddle.autograd.PyLayer):
                     f"{global_shape})."
                 )
             grad = grad.reshape(global_shape)
-        # Slice out only this rank's segment instead of splitting into all
-        # nranks chunks and discarding the rest (scatter — no cross-rank
-        # reduction). Avoids constructing nranks-1 unused views.
-        seg = local_shape[0]
-        start = group.rank * seg
-        out = grad[start : start + seg].contiguous()
+        out = reduce_scatter_group(grad.contiguous(), group=group)
         if list(out.shape) != local_shape:
             out = out.reshape(local_shape)
         return out
