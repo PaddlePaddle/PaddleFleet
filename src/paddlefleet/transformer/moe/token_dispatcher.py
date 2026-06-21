@@ -1439,6 +1439,53 @@ def _all_gather_async(input, group):
     return output, task
 
 
+def _all_gather_grad_fp8_async(grad, group):
+    """fp8 counterpart of :func:`_all_gather_async` for the combine backward.
+
+    Quantizes the **local** combine gradient to fp8 e4m3 + int32 1x128 block
+    scale on the calc stream, then issues two async AllGathers (uint8 data +
+    int32 scale, axis 0 row-concat) on the comm stream. Because the combine
+    backward collective is a *lossless row concat* (AllGather, no reduction)
+    and the 1x128 block scale lives entirely within a single token's hidden
+    vector, quantize-before-AllGather is **bit-identical** to the bf16-then-
+    self-quantize path used previously — it just halves the on-wire bytes
+    (1B vs 2B) and matches deepep+sonic's ``DeepEPCombine.backward``.
+
+    Returns ``(data_e4m3_global, scale_global, task_x, task_s)`` where
+    ``data_e4m3_global`` is the gathered fp8 tensor viewed back to
+    ``float8_e4m3fn`` (shape ``[global_T, H]``) and ``scale_global`` the
+    gathered int32 block scales (shape ``[global_T, H//128]``).
+    """
+    assert quantize_activation_blockscaled_fast is not None, (
+        "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
+    )
+    grad = grad.contiguous()
+    x_fp8, scale = quantize_activation_blockscaled_fast(
+        grad, scale_dtype=paddle.int32
+    )
+    T_local, H = x_fp8.shape
+    nranks = group.nranks
+    T_global = T_local * nranks
+    H128 = scale.shape[1]
+    data_global_u8 = paddle.empty([T_global, H], dtype="uint8")
+    task_x = paddle.distributed.stream.all_gather(
+        data_global_u8,
+        x_fp8.view("uint8"),
+        group=group,
+        sync_op=False,
+        use_calc_stream=False,
+    )
+    scale_global = paddle.empty([T_global, H128], dtype=scale.dtype)
+    task_s = paddle.distributed.stream.all_gather(
+        scale_global,
+        scale.contiguous(),
+        group=group,
+        sync_op=False,
+        use_calc_stream=False,
+    )
+    return data_global_u8.view("float8_e4m3fn"), scale_global, task_x, task_s
+
+
 class _AllGatherCombineAsync(paddle.autograd.PyLayer):
     """ReduceScatter combine fused with a user-supplied subgraph (e.g. shared experts).
 
@@ -1459,10 +1506,18 @@ class _AllGatherCombineAsync(paddle.autograd.PyLayer):
     compute has no data dependency on the in-flight combine collective — the
     same precondition that makes ``DeepEPCombineAsync`` correct. Async only
     changes the execution stream/timing; the ReduceScatter/AllGather semantics
-    (and thus numerics) are identical to the synchronous path, and combine
-    stays bf16 in both directions to match deepep — ``_DownProjection.backward``
-    self-quantizes ``dout`` to fp8, which (since AllGather is a lossless row
-    concat) is numerically identical to quantizing before the collective.
+    (and thus numerics) are identical to the synchronous path.
+
+    Combine forward stays bf16 in both paths. Combine **backward** is fp8 when
+    ``fp8_combine_grad_handle`` is supplied (``fp8_dispatch and
+    using_sonic_moe``): the local gradient is quantized to fp8 e4m3 + int32
+    block scale *before* the AllGather (1B/elem vs 2B), the gathered fp8
+    data+scale are written into the handle and consumed directly by
+    ``_DownProjection.backward`` (skipping its internal re-quantization).
+    Because the combine-backward AllGather is a lossless row concat and the
+    1x128 scale lives within a single token's hidden vector, this is
+    bit-identical to the bf16-then-self-quantize path while matching
+    deepep+sonic's ``DeepEPCombine.backward`` bandwidth.
     """
 
     @staticmethod
@@ -1473,12 +1528,14 @@ class _AllGatherCombineAsync(paddle.autograd.PyLayer):
         *fn_args,
         fn,
         is_first_fwd=False,
+        fp8_combine_grad_handle=None,
     ):
         if fn is None:
             raise ValueError(
                 "_AllGatherCombineAsync requires a non-None fn for overlap."
             )
         ctx.group = group
+        ctx.fp8_combine_grad_handle = fp8_combine_grad_handle
 
         if group is None or group.nranks == 1:
             combined_x = x.clone()
@@ -1500,10 +1557,27 @@ class _AllGatherCombineAsync(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, grad_output, *fn_out_grads):
         group = ctx.group
+        handle = ctx.fp8_combine_grad_handle
         if group is None or group.nranks == 1:
             grad_x = grad_output.clone()
             fn_args_grads = ctx.bwf(*fn_out_grads)
             return (grad_x,) + fn_args_grads  # noqa: RUF005
+
+        if handle is not None:
+            # fp8 combine backward: quantize the local grad to fp8 e4m3 +
+            # int32 scale, AllGather both on the comm stream (async) while the
+            # shared-expert backward runs on the calc stream, then wait. The
+            # gathered fp8 data+scale are handed to ``_DownProjection.backward``
+            # via the handle; the returned ``grad_x`` is the fp8 data edge.
+            data_e4m3, scale_global, task_x, task_s = _all_gather_grad_fp8_async(
+                grad_output, group
+            )
+            fn_args_grads = ctx.bwf(*fn_out_grads)
+            task_x.wait()
+            task_s.wait()
+            handle["data"] = data_e4m3
+            handle["scale"] = scale_global
+            return (data_e4m3,) + fn_args_grads  # noqa: RUF005
 
         # Dual of forward: AllGather the gradient on the comm stream (async)
         # while the shared-expert backward runs on the calc stream, then wait.
@@ -1947,16 +2021,19 @@ class AllGatherTokenDispatcher(nn.Layer):
         Args:
             combine_overlap_handle: dict with keys ``fn`` (callable) and
                 ``fn_args`` (tuple). On return, ``fn_out`` is populated.
-            fp8_combine_grad_handle: accepted for caller-signature parity but
-                unused on the allgather path. The combine collectives stay
-                bf16 in both directions; ``_DownProjection.backward`` quantizes
-                ``dout`` itself. Since the backward AllGather is a lossless row
-                concat (no reduction), self-quant-after-AllGather is numerically
-                identical to quant-before — so this path already matches
-                deepep+sonic precision without any extra fp8 collective.
+            fp8_combine_grad_handle: when non-None (``fp8_dispatch and
+                using_sonic_moe``), the combine **backward** quantizes the
+                gradient to fp8 e4m3 + int32 block scale *before* the AllGather
+                (1B/elem vs bf16's 2B) and writes the gathered fp8 data+scale
+                into this dict (keys ``data``/``scale``) for
+                ``_DownProjection.backward`` to consume directly — matching
+                deepep+sonic's ``DeepEPCombine.backward`` bandwidth. Because the
+                backward AllGather is a lossless row concat and the 1x128 scale
+                lives within a single token's hidden vector, this is bit-identical
+                to quant-after-AllGather. Forward stays bf16. Only used on the
+                overlap path; the non-overlap ``combine_postprocess`` path leaves
+                the handle empty so down-proj falls back to bf16 self-quant.
         """
-        del fp8_combine_grad_handle
-
         if combine_overlap_handle is None:
             self._overlap_combined = None
             return hidden_states
@@ -1985,6 +2062,7 @@ class AllGatherTokenDispatcher(nn.Layer):
             *(combine_overlap_handle["fn_args"]),
             fn=combine_overlap_handle["fn"],
             is_first_fwd=not _framework._dygraph_tracer()._has_grad,
+            fp8_combine_grad_handle=fp8_combine_grad_handle,
         )
         combine_overlap_handle["fn_out"] = tuple(fn_out)
         self._overlap_combined = combined_x
