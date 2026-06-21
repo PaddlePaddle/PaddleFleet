@@ -1745,13 +1745,37 @@ class AllGatherTokenDispatcher(nn.Layer):
         # int32 covers the range with room to spare (num_experts << 2^31) while
         # halving the AllGather payload vs int64. The downstream SonicMoE
         # metadata kernel (deepep_topk_to_sonic_metadata) casts to int32 anyway.
-        self._global_topk_indices = AllGatherGroupOp.apply(
-            topk_indices.detach().cast("int32"), self.moe_group
-        )
-        # Padding tokens have topk_indices == -1 (set by TopKRouter).
-        # Keep the sentinel in indices so SonicMoE metadata can treat those
-        # slots as masked; only zero the corresponding routing weights below.
-        self._padding_mask = self._global_topk_indices < 0
+        #
+        # The indices are integer routing IDs with no gradient (``.detach()``),
+        # so there is no need for the autograd-aware ``AllGatherGroupOp``
+        # PyLayer — which additionally issues a full-group
+        # ``paddle.distributed.barrier`` before *every* AllGather. NCCL's
+        # collective is already ordered on the comm stream, so that barrier is
+        # pure latency on the dispatch critical path.
+        #
+        # Issue the indices AllGather **async on the comm stream** so it runs
+        # concurrently with the router-weights AllGather below (the weights
+        # path also does a ``.cast`` on the calc stream first). Both gathers
+        # are independent; we only ``.wait()`` on the indices result right
+        # before its first consumer (the padding mask). This overlaps two
+        # small-but-serialized collectives that previously ran back-to-back.
+        topk_indices_i32 = topk_indices.detach().cast("int32").contiguous()
+        if self.moe_group is None or self.moe_group.nranks == 1:
+            self._global_topk_indices = topk_indices_i32.clone()
+            _idx_task = None
+        else:
+            _idx_out_shape = list(topk_indices_i32.shape)
+            _idx_out_shape[0] *= self.moe_group.nranks
+            self._global_topk_indices = paddle.empty(
+                shape=_idx_out_shape, dtype=topk_indices_i32.dtype
+            )
+            _idx_task = paddle.distributed.stream.all_gather(
+                self._global_topk_indices,
+                topk_indices_i32,
+                group=self.moe_group,
+                sync_op=False,
+                use_calc_stream=False,
+            )
         # Router-local AllGather: every token has exactly one origin rank,
         # so the topk_weights gradient flowing back from sonic-moe's
         # _DownProjection (shape [seq_global, K]) must be *scattered* (slice
@@ -1761,9 +1785,22 @@ class AllGatherTokenDispatcher(nn.Layer):
         # gradients on this rank — matching the alltoall/deepep contract
         # where router weights are also trained by the main loss via the
         # unpermute(probs=...) multiplication.
+        #
+        # Issue this *after* the async indices AllGather above so the two
+        # collectives are both in flight together: _RouterAllGather runs on
+        # the calc stream while the indices gather runs on the comm stream.
         self._global_topk_weights = _RouterAllGather.apply(
             topk_weights.cast(probs.dtype), self.moe_group
         )
+        # Now consume the async indices gather — wait only here, right before
+        # its first reader (the padding mask). By this point the weights
+        # AllGather has already been launched, so the wait overlaps the two.
+        if _idx_task is not None:
+            _idx_task.wait()
+        # Padding tokens have topk_indices == -1 (set by TopKRouter).
+        # Keep the sentinel in indices so SonicMoE metadata can treat those
+        # slots as masked; only zero the corresponding routing weights below.
+        self._padding_mask = self._global_topk_indices < 0
         # Zero out weights for padding tokens (indices were clipped above).
         # Apply the mask unconditionally: a ``.any()`` guard would force a
         # GPU->CPU sync every step just to decide whether to run the where.
