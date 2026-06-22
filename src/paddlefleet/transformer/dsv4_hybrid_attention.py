@@ -298,6 +298,7 @@ class DSv4HybridAttention(Attention):
             attention_mask,
             x=hidden_states,
             qr=q_compressed,
+            input_ids=kwargs.get("input_ids", None),
         )
         # core_attn_out: [b, sq, np * v_head_dim]
 
