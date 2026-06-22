@@ -172,6 +172,7 @@ class MoELayer(nn.Layer):
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.use_ue8m0 = config.use_ue8m0
+        self.use_pow2_scale = getattr(config, "use_pow2_scale", True)
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
         self.fp8_dispatch = bool(config.fp8) and not self.using_sonic_moe
@@ -645,6 +646,7 @@ class MoELayer(nn.Layer):
                 hidden_states,
                 self.fp8_dispatch,
                 async_finish=async_finish,
+                use_pow2_scale=self.use_pow2_scale,
                 use_ue8m0=self.use_ue8m0,
             )
         )
@@ -849,6 +851,7 @@ class MoELayer(nn.Layer):
                     token_weights,
                     self.fp8_dispatch,
                     async_finish=async_finish,
+                    use_pow2_scale=self.use_pow2_scale,
                     use_ue8m0=self.use_ue8m0,
                 )
             )

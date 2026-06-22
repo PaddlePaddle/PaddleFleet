@@ -401,6 +401,7 @@ class DeepEPDispatch(PyLayer):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
         moe_ep_barrier: bool = True,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ):
         """Forward pass of fused dispatch."""
@@ -411,6 +412,7 @@ class DeepEPDispatch(PyLayer):
                 input_transpose=False,
                 output_scale_transpose=True,
                 return_transpose_only=False,
+                using_pow2_scale=use_pow2_scale,
                 using_ue8m0_scale=use_ue8m0,
             )
             scale = _normalize_fp8_scale_for_deepep(
@@ -664,6 +666,7 @@ if HAVE_DEEP_EP:
         async_finish=False,
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
+        use_pow2_scale: bool = True,
         use_ue8m0: bool = False,
     ):
         """Perform fused dispatch operation if deep_ep is available.
@@ -691,6 +694,7 @@ if HAVE_DEEP_EP:
             async_finish,
             allocate_on_comm_stream,
             moe_ep_barrier,
+            use_pow2_scale,
             use_ue8m0,
         )
 
@@ -791,16 +795,29 @@ class HybridEPDispatch(PyLayer):
 
     @staticmethod
     def forward(
-        ctx, x, token_indices, token_probs, manager, fp8_dispatch=False
+        ctx,
+        x,
+        token_indices,
+        token_probs,
+        manager,
+        fp8_dispatch=False,
+        use_pow2_scale=True,
+        use_ue8m0=False,
     ):
         recv_x, recv_token_probs, scale = manager._dispatch_with_permute_impl(
-            x, token_indices, token_probs, use_fp8=fp8_dispatch
+            x,
+            token_indices,
+            token_probs,
+            use_fp8=fp8_dispatch,
+            use_pow2_scale=use_pow2_scale,
+            use_ue8m0=use_ue8m0,
         )
         ctx.buffer = manager._active_buffer
         ctx.handle = manager.handle
         ctx.token_indices = token_indices
         ctx.hidden_dtype = x.dtype
         ctx.use_fp8_dispatch = fp8_dispatch
+        ctx.use_ue8m0 = use_ue8m0
         ctx.set_grad_in_dtype_consistent(False)
         return recv_x, recv_token_probs, scale
 
@@ -894,6 +911,8 @@ def hybrid_ep_dispatch(
     token_probs,
     manager,
     fp8_dispatch: bool = False,
+    use_pow2_scale: bool = True,
+    use_ue8m0: bool = False,
 ):
     """Perform HybridEP dispatch_with_permute with explicit Paddle autograd."""
     return HybridEPDispatch.apply(
@@ -902,6 +921,8 @@ def hybrid_ep_dispatch(
         token_probs,
         manager,
         fp8_dispatch,
+        use_pow2_scale,
+        use_ue8m0,
     )
 
 

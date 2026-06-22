@@ -42,7 +42,8 @@ class _FP8Gemm(paddle.autograd.Function):
         weight,
         inp_quant_func,
         weight_quant_func,
-        use_pow2_scale=False,
+        use_pow2_scale=True,
+        using_ue8m0_scale=False,
     ):
         """
         Forward pass for FP8 GEMM.
@@ -73,6 +74,7 @@ class _FP8Gemm(paddle.autograd.Function):
             inp_t_fp8, inp_t_scale, weight, weight_fp8, weight_scale
         )
         ctx.use_pow2_scale = use_pow2_scale
+        ctx.using_ue8m0_scale = using_ue8m0_scale
         out = paddle.empty(
             [inp_fp8.shape[0], weight_fp8.shape[0]], dtype=paddle.bfloat16
         )
@@ -120,6 +122,7 @@ class _FP8Gemm(paddle.autograd.Function):
                 quant_method="1x128",
                 input_transpose=True,
                 using_pow2_scale=ctx.use_pow2_scale,
+                using_ue8m0_scale=ctx.using_ue8m0_scale,
             )
         )
 
@@ -220,11 +223,13 @@ class FP8Linear(ColumnParallelLinear):
         self.use_pow2_scale = (
             paddle.device.cuda.get_device_capability()[0] == 10
         )
+        self.use_ue8m0 = config.use_ue8m0
         self.inp_quant_func, self.weight_quant_func = get_quant_func(
             config.fp8_recipe,
             input_trans=True,
             out_scale_trans=False,
             pow2_scale=self.use_pow2_scale,
+            use_ue8m0=self.use_ue8m0,
         )
 
     def forward(self, inp):
@@ -234,6 +239,7 @@ class FP8Linear(ColumnParallelLinear):
             self.inp_quant_func,
             self.weight_quant_func,
             self.use_pow2_scale,
+            using_ue8m0_scale=self.use_ue8m0,
         )
         if self.bias is not None:
             out = out + self.bias
