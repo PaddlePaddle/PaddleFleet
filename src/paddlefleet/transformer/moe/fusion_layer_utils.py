@@ -22,7 +22,9 @@ import paddlefleet_ops
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
 from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
+from .moe_utils import get_auto_sb_history
 from .vmm_utils import (
+    allocator_free_block_info,
     auto_subbatch_allocator_backend,
     find_max_concurrent_subbatch_size,
     find_max_sequence_subbatch_size,
@@ -1108,16 +1110,26 @@ class MlpNode:
 
         num_unzipped_tokens = self.token_offsets[-1]
         hidden_size = zipped_out.shape[1]
-        zip_unzip_fusion = (
-            find_max_concurrent_subbatch_size(
-                [
-                    num_unzipped_tokens * zipped_out.shape[1] * 2,
-                    num_unzipped_tokens * zipped_out.shape[1],
-                ],
-                upper=1,
+
+        # 基于 warmup 历史峰值预测剩余 forward 是否需要降级
+        _free_blocks_now = allocator_free_block_info()
+        _allocator_total_free = sum(s for s, _ in _free_blocks_now)
+        _history = get_auto_sb_history()
+        _history.record_forward(_allocator_total_free)
+        _should_degrade = _history.should_degrade(_allocator_total_free)
+        if _should_degrade:
+            zip_unzip_fusion = False
+        else:
+            zip_unzip_fusion = (
+                find_max_concurrent_subbatch_size(
+                    [
+                        num_unzipped_tokens * zipped_out.shape[1] * 2,
+                        num_unzipped_tokens * zipped_out.shape[1],
+                    ],
+                    upper=1,
+                )
+                > 0
             )
-            > 0
-        )
 
         if zip_unzip_fusion:
             expert_unzipped_out = paddle.empty(
@@ -1307,14 +1319,30 @@ class MlpNode:
         output.stop_gradient = False
 
         if self.moe_subbatch_diag:
+            _predicted_need = _history.predicted_need_for_remaining()
+            _in_warmup = _history.in_warmup()
             logger.info(
                 "[AutoSubbatch FWD] backend=%s, path=%s, total_tokens=%d, "
-                "subbatch_rows=%d, zip_unzip_fusion=%s",
+                "subbatch_rows=%d, zip_unzip_fusion=%s, "
+                "history_step=%d, history_forward_count=%d, history_backward_count=%d, "
+                "history_prev_steps=%d, history_prev_max_delta_mb=%.2f, history_max_delta_mb=%.2f, "
+                "history_in_warmup=%s, allocator_free_mb=%.2f, "
+                "predicted_need_mb=%.2f, should_degrade=%s",
                 auto_subbatch_allocator_backend(),
                 fwd_path,
                 num_unzipped_tokens,
                 subbatch_rows,
                 zip_unzip_fusion,
+                _history.step_idx,
+                _history.forward_count,
+                _history.backward_count,
+                _history.prev_total_steps,
+                _history.prev_max_delta / 1024 / 1024,
+                _history.max_delta / 1024 / 1024,
+                _in_warmup,
+                _allocator_total_free / 1024 / 1024,
+                _predicted_need / 1024 / 1024,
+                _should_degrade,
             )
         return output
 
@@ -1613,15 +1641,25 @@ class MlpNode:
 
         self.reset_state()
 
+        _history = get_auto_sb_history()
+        _iteration_finished = _history.record_backward()
+
         if self.moe_subbatch_diag:
             logger.info(
                 "[AutoSubbatch BWD] backend=%s, path=%s, total_tokens=%d, "
-                "subbatch_rows=%d, zip_unzip_fusion=%s",
+                "subbatch_rows=%d, zip_unzip_fusion=%s, "
+                "history_step=%d, history_forward_count=%d, history_backward_count=%d, "
+                "history_prev_steps=%d, history_iteration_finished=%s",
                 auto_subbatch_allocator_backend(),
                 bwd_path,
                 num_unzipped_tokens,
                 subbatch_rows,
                 zip_unzip_fusion,
+                _history.step_idx,
+                _history.forward_count,
+                _history.backward_count,
+                _history.prev_total_steps,
+                _iteration_finished,
             )
 
         return hs_fp8_dispatched_grad, dispatched_probs_grad
