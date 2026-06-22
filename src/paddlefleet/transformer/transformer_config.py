@@ -911,6 +911,16 @@ class TransformerConfig(ModelParallelConfig):
     magic_init: bool = False
     """Use the magic initialization method."""
 
+    ####################
+    # Ernie Trainer Configs
+    ####################
+
+    moe_logging: bool = False
+    """Whether to enable MoE logging."""
+
+    deepep_buffer_configs: dict | None = None
+    """DeepEP buffer configuration."""
+
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
         # DSA field mapping
