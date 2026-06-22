@@ -399,6 +399,7 @@ class TestDeepEPCombineAsyncFunctor(unittest.TestCase):
         mock_ctx.group.id = 0
         mock_ctx.handle = MagicMock()
         mock_ctx.bwf = MagicMock(return_value=(paddle.to_tensor([0.1]),))
+        mock_ctx.fp8_dispatch = False
 
         grad_output = paddle.to_tensor([1.0, 1.0])
         fn_out_grad = paddle.to_tensor([0.5])
