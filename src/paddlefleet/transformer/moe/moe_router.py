@@ -1158,7 +1158,7 @@ class TopKRouter(StandardMoERouter):
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
         gates_ori = gates.clone()
-        if self.scoring_func == "sigmoid":
+        if self.scoring_func in {"sigmoid", "sqrtsoftplus"}:
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
