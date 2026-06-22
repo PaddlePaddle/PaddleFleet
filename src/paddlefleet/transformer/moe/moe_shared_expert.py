@@ -182,6 +182,16 @@ class SharedExpertFP8PyLayer(paddle.autograd.PyLayer):
             )
 
         # Step C: dW2 = o2_s^T @ grad_output
+        # Select gradient buffer: prefer main_grad, fallback to .grad
+        if hasattr(w2, "main_grad"):
+            if w2.main_grad is None:
+                w2.main_grad = paddle.zeros(w2.shape, dtype=paddle.float32)
+            w2_grad_buf = w2.main_grad
+        else:
+            if w2.grad is None:
+                w2.grad = paddle.zeros(w2.shape, dtype=paddle.float32)
+            w2_grad_buf = w2.grad
+
         if ctx.fp8_wgrad:
             o2_t_fp8, o2_t_scale = (
                 paddle.incubate.nn.functional.fp8_quant_blockwise(
@@ -201,30 +211,34 @@ class SharedExpertFP8PyLayer(paddle.autograd.PyLayer):
                     using_ue8m0_scale=False,
                 )
             )
-            if hasattr(w2, "main_grad"):
-                if w2.main_grad is None:
-                    w2.main_grad = paddle.zeros(w2.shape, dtype=paddle.float32)
-                kitchen_gemm(
-                    o2_t_fp8,
-                    o2_t_scale,
-                    go_t_fp8,
-                    go_t_scale,
-                    True,
-                    True,
-                    w2.main_grad,
-                    paddle.float32,
-                )
+            kitchen_gemm(
+                o2_t_fp8,
+                o2_t_scale,
+                go_t_fp8,
+                go_t_scale,
+                True,
+                True,
+                w2_grad_buf,
+                paddle.float32,
+            )
         else:
-            if hasattr(w2, "main_grad"):
-                if w2.main_grad is None:
-                    w2.main_grad = paddle.zeros(w2.shape, dtype=paddle.float32)
-                paddle._C_ops.fused_linear_param_grad_add(
-                    o2_s, grad_output, w2.main_grad, None, True, False
-                )
+            paddle._C_ops.fused_linear_param_grad_add(
+                o2_s, grad_output, w2_grad_buf, None, True, False
+            )
         if hasattr(w2, "_apply_backward_hook") and not w2.stop_gradient:
             w2._apply_backward_hook()
 
         # Step D: dW1 = hidden_states^T @ do1
+        # Select gradient buffer: prefer main_grad, fallback to .grad
+        if hasattr(w1, "main_grad"):
+            if w1.main_grad is None:
+                w1.main_grad = paddle.zeros(w1.shape, dtype=paddle.float32)
+            w1_grad_buf = w1.main_grad
+        else:
+            if w1.grad is None:
+                w1.grad = paddle.zeros(w1.shape, dtype=paddle.float32)
+            w1_grad_buf = w1.grad
+
         if ctx.fp8_wgrad:
             hs_t_fp8, hs_t_scale = (
                 paddle.incubate.nn.functional.fp8_quant_blockwise(
@@ -244,26 +258,20 @@ class SharedExpertFP8PyLayer(paddle.autograd.PyLayer):
                     using_ue8m0_scale=False,
                 )
             )
-            if hasattr(w1, "main_grad"):
-                if w1.main_grad is None:
-                    w1.main_grad = paddle.zeros(w1.shape, dtype=paddle.float32)
-                kitchen_gemm(
-                    hs_t_fp8,
-                    hs_t_scale,
-                    do1_t_fp8,
-                    do1_t_scale,
-                    True,
-                    True,
-                    w1.main_grad,
-                    paddle.float32,
-                )
+            kitchen_gemm(
+                hs_t_fp8,
+                hs_t_scale,
+                do1_t_fp8,
+                do1_t_scale,
+                True,
+                True,
+                w1_grad_buf,
+                paddle.float32,
+            )
         else:
-            if hasattr(w1, "main_grad"):
-                if w1.main_grad is None:
-                    w1.main_grad = paddle.zeros(w1.shape, dtype=paddle.float32)
-                paddle._C_ops.fused_linear_param_grad_add(
-                    hidden_states, do1, w1.main_grad, None, True, False
-                )
+            paddle._C_ops.fused_linear_param_grad_add(
+                hidden_states, do1, w1_grad_buf, None, True, False
+            )
         if hasattr(w1, "_apply_backward_hook") and not w1.stop_gradient:
             w1._apply_backward_hook()
 
@@ -386,6 +394,11 @@ class StandardMLPSharedExpert(MLP):
         if paddlefleet_deep_gemm is None:
             raise RuntimeError(
                 "deep_gemm is not available for FP8 shared expert forward"
+            )
+        if getattr(self.config, "use_bias", False):
+            raise ValueError(
+                "Bias is not supported in FP8 shared expert yet, "
+                "please set 'use_bias' to False."
             )
 
         orig_shape = hidden_states.shape

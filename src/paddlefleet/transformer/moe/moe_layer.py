@@ -300,14 +300,14 @@ class MoELayer(nn.Layer):
                 self.fp8_dispatch = False
 
         self._shared_expert_fp8 = config.shared_expert_fp8 and self.fp8
-        assert not (
-            self._shared_expert_fp8 and self.moe_shared_expert_overlap
-        ), (
-            "shared_expert_fp8 and moe_shared_expert_overlap cannot be enabled simultaneously."
-        )
-        assert not (
-            self._shared_expert_fp8 and config.tensor_model_parallel_size > 1
-        ), "shared_expert_fp8 does not support tensor_model_parallel_size > 1."
+        if self._shared_expert_fp8 and self.moe_shared_expert_overlap:
+            raise ValueError(
+                "shared_expert_fp8 and moe_shared_expert_overlap cannot be enabled simultaneously."
+            )
+        if self._shared_expert_fp8 and config.tensor_model_parallel_size > 1:
+            raise ValueError(
+                "shared_expert_fp8 does not support tensor_model_parallel_size > 1."
+            )
 
         if self.fp8:
             if paddle.version.cuda() == "12.6":
