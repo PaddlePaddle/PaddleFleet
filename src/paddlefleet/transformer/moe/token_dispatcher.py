@@ -1235,6 +1235,15 @@ class _RouterAllGather(paddle.autograd.PyLayer):
         output_shape = list(input.shape)
         output_shape[0] = output_shape[0] * group.nranks
         output = paddle.empty(shape=output_shape, dtype=input.dtype)
+        # NOTE on stream placement (measured, see allgather perf optimization):
+        # The topk_weights AllGather intentionally runs on the CALC stream
+        # (synchronous) rather than the comm stream.  The indices AllGather runs
+        # async on the comm stream; issuing BOTH on the comm stream would
+        # serialize the small weights gather behind the much larger fused
+        # fp8-data AllGather already queued there, increasing dispatch latency
+        # (measured +~4ms/step).  Keeping weights on calc lets it overlap with
+        # the in-flight comm-stream gathers.  Backward (reduce-scatter) is on
+        # the comm stream and unchanged.
         paddle.distributed.stream.all_gather(
             output, input, group=group, use_calc_stream=True
         )
@@ -1291,9 +1300,10 @@ class _PreAllGatherResult(paddle.autograd.PyLayer):
 class _PreAllGatherFP8Result(paddle.autograd.PyLayer):
     """FP8 variant of _PreAllGatherResult.
 
-    Forward waits for two async AllGather tasks (fp8 data + block scale) and
-    returns ``(x_fp8_global, scale_global)``.  The fp8 tensor is consumed
-    directly by SonicMoE's _UpProjection via prequant_activation_payload.
+    Forward waits for the single fused async AllGather task (fp8 data ++ block
+    scale packed per token) and returns ``(x_fp8_global, scale_global)`` after
+    splitting.  The fp8 tensor is consumed directly by SonicMoE's _UpProjection
+    via prequant_activation_payload.
 
     _UpProjection.backward produces a bf16 dx for the activation input, but
     the forward output here is fp8.  set_grad_in_dtype_consistent(False) and
@@ -1304,11 +1314,12 @@ class _PreAllGatherFP8Result(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, hidden_states, handle):
-        handle["task_x"].wait()
-        handle["task_s"].wait()
+        handle["task"].wait()
         ctx.group = handle["group"]
-        x_fp8_global = handle["x_fp8_global_uint8"].view("float8_e4m3fn")
-        scale_global = handle["scale_global"]
+        x_fp8_global, scale_global = _split_fused_fp8_gather(
+            handle["fused_global"], handle["H"], handle["H128"],
+            handle["scale_dtype"],
+        )
         ctx.set_grad_in_dtype_consistent(False)
         ctx.set_materialize_grads(False)
         return x_fp8_global, scale_global
@@ -1365,14 +1376,23 @@ def _all_gather_async(input, group):
 
 
 def _all_gather_grad_fp8_async(grad, group):
-    """Quantize local grad to fp8 e4m3 + int32 1x128 block scale, then async
-    AllGather both on the comm stream.  Returns
-    ``(data_e4m3_global, scale_global, task_x, task_s)``.
+    """Quantize local grad to fp8 e4m3 + int32 1x128 block scale, then a SINGLE
+    async AllGather of the fused (fp8-data-as-uint8 ++ scale-as-uint8) per-token
+    byte row on the comm stream.  Returns
+    ``(fused_global, H, H128, scale_dtype, task)``.
+
+    Fusing data and scale into one AllGather (vs two back-to-back collectives)
+    is bit-identical: AllGather concatenates rows along axis 0 and every rank
+    carries an identical ``T_local``, so packing the two payloads along axis 1
+    before the gather yields the same per-rank bytes as gathering them
+    separately.  It removes one NCCL kernel launch (and its peer-wait fixed
+    cost) per combine backward.
 
     Used by the combine backward to halve on-wire bytes vs bf16 AllGather.
-    Because AllGather is a lossless row concat and the 1x128 scale lives
-    within a single token's hidden vector, this is bit-identical to
-    bf16-AllGather-then-quantize.
+    Because AllGather is a lossless row concat and the 1x128 scale lives within
+    a single token's hidden vector, this is bit-identical to
+    bf16-AllGather-then-quantize.  The caller waits ``task`` and then calls
+    :func:`_split_fused_fp8_gather` to recover ``(data_e4m3_global, scale_global)``.
     """
     assert quantize_activation_blockscaled_fast is not None, (
         "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
@@ -1385,23 +1405,39 @@ def _all_gather_grad_fp8_async(grad, group):
     nranks = group.nranks
     T_global = T_local * nranks
     H128 = scale.shape[1]
-    data_global_u8 = paddle.empty([T_global, H], dtype="uint8")
-    task_x = paddle.distributed.stream.all_gather(
-        data_global_u8,
-        x_fp8.view("uint8"),
+    scale_dtype = scale.dtype
+    # Pack fp8 data (uint8) and scale bytes into one contiguous per-token row,
+    # then AllGather once instead of twice.
+    fused_local = paddle.concat(
+        [x_fp8.view("uint8"), scale.view("uint8")], axis=1
+    ).contiguous()  # [T_local, H + 4*H128]
+    fused_global = paddle.empty(
+        [T_global, fused_local.shape[1]], dtype="uint8"
+    )
+    task = paddle.distributed.stream.all_gather(
+        fused_global,
+        fused_local,
         group=group,
         sync_op=False,
         use_calc_stream=False,
     )
-    scale_global = paddle.empty([T_global, H128], dtype=scale.dtype)
-    task_s = paddle.distributed.stream.all_gather(
-        scale_global,
-        scale.contiguous(),
-        group=group,
-        sync_op=False,
-        use_calc_stream=False,
+    return fused_global, H, H128, scale_dtype, task
+
+
+def _split_fused_fp8_gather(fused_global, H, H128, scale_dtype):
+    """Recover ``(data_e4m3_global, scale_global)`` from a fused gather buffer.
+
+    Inverse of the packing in :func:`_all_gather_grad_fp8_async` /
+    :meth:`AllGatherTokenDispatcher.pre_allgather`. Must be called only after the
+    gather task has completed.
+    """
+    T_global = fused_global.shape[0]
+    data_global_u8 = fused_global[:, :H].contiguous()
+    scale_global = fused_global[:, H:].contiguous().view(scale_dtype)
+    return (
+        data_global_u8.view("float8_e4m3fn"),
+        scale_global.reshape([T_global, H128]),
     )
-    return data_global_u8.view("float8_e4m3fn"), scale_global, task_x, task_s
 
 
 class _AllGatherCombineAsync(paddle.autograd.PyLayer):
@@ -1460,12 +1496,14 @@ class _AllGatherCombineAsync(paddle.autograd.PyLayer):
             return (grad_x,) + fn_args_grads  # noqa: RUF005
 
         if handle is not None:
-            data_e4m3, scale_global, task_x, task_s = _all_gather_grad_fp8_async(
+            fused_global, _H, _H128, _sdt, task = _all_gather_grad_fp8_async(
                 grad_output, group
             )
             fn_args_grads = ctx.bwf(*fn_out_grads)
-            task_x.wait()
-            task_s.wait()
+            task.wait()
+            data_e4m3, scale_global = _split_fused_fp8_gather(
+                fused_global, _H, _H128, _sdt
+            )
             handle["data"] = data_e4m3
             handle["scale"] = scale_global
             return (data_e4m3,) + fn_args_grads  # noqa: RUF005
@@ -1475,6 +1513,34 @@ class _AllGatherCombineAsync(paddle.autograd.PyLayer):
         task.wait()
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
+
+@paddle.no_grad()
+def _tokens_per_expert_histogram(indices, num_experts):
+    """Count tokens per expert WITHOUT any GPU->CPU synchronization.
+
+    ``indices`` is the [..., K] routing tensor that may contain ``-1`` for
+    padding tokens.  The result is an int32 ``[num_experts]`` histogram.
+
+    This replaces ``masked_select`` + ``bincount``: ``masked_select`` produces a
+    *variable-length* output (its size is data-dependent), which forces Paddle
+    to copy the element count back to the CPU, stalling the host.  ``bincount``
+    likewise must resolve ``max(input)+1`` on the CPU to size its output.  Both
+    serialize the pipeline.
+
+    Instead we build a fixed-size one-hot histogram: padding (-1) is sent to a
+    sink column ``== num_experts`` so it is dropped, and every other value is in
+    ``[0, num_experts)``.  All shapes are known a priori, so no host sync occurs.
+    Numerically identical to ``bincount(masked_select(indices, indices>=0),
+    minlength=num_experts)``.
+    """
+    flat = indices.reshape([-1]).cast("int64")
+    sink = paddle.full_like(flat, num_experts)
+    clamped = paddle.where(flat >= 0, flat, sink)
+    onehot = paddle.nn.functional.one_hot(
+        clamped, num_classes=num_experts + 1
+    )
+    counts = onehot.cast("int32").sum(axis=0)
+    return counts[:num_experts]
 
 
 class AllGatherTokenDispatcher(nn.Layer):
@@ -1532,11 +1598,7 @@ class AllGatherTokenDispatcher(nn.Layer):
         # Drain leftover handle from a possibly-aborted previous forward.
         if self._pre_ag_handle is not None:
             try:
-                if "task" in self._pre_ag_handle:
-                    self._pre_ag_handle["task"].wait()
-                else:
-                    self._pre_ag_handle["task_x"].wait()
-                    self._pre_ag_handle["task_s"].wait()
+                self._pre_ag_handle["task"].wait()
             except (RuntimeError, OSError) as _e:
                 logger.warning(
                     "pre_allgather: leftover async task wait failed (%s), "
@@ -1562,27 +1624,29 @@ class AllGatherTokenDispatcher(nn.Layer):
             T_local, H = x_fp8.shape
             T_global = T_local * self.moe_group.nranks
             H128 = scale.shape[1]
-            x_fp8_global_uint8 = paddle.empty([T_global, H], dtype="uint8")
-            task_x = paddle.distributed.stream.all_gather(
-                x_fp8_global_uint8,
-                x_fp8.view("uint8"),
-                group=self.moe_group,
-                sync_op=False,
-                use_calc_stream=False,
+            scale_dtype = scale.dtype
+            # Pack fp8 data (uint8) and scale bytes into one contiguous per-token
+            # row, then AllGather once instead of twice. Bit-identical to two
+            # separate gathers (AllGather is a lossless row concat).
+            fused_local = paddle.concat(
+                [x_fp8.view("uint8"), scale.view("uint8")], axis=1
+            ).contiguous()  # [T_local, H + 4*H128]
+            fused_global = paddle.empty(
+                [T_global, fused_local.shape[1]], dtype="uint8"
             )
-            scale_global = paddle.empty([T_global, H128], dtype=scale.dtype)
-            task_s = paddle.distributed.stream.all_gather(
-                scale_global,
-                scale,
+            task = paddle.distributed.stream.all_gather(
+                fused_global,
+                fused_local,
                 group=self.moe_group,
                 sync_op=False,
                 use_calc_stream=False,
             )
             self._pre_ag_handle = {
-                "x_fp8_global_uint8": x_fp8_global_uint8,
-                "scale_global": scale_global,
-                "task_x": task_x,
-                "task_s": task_s,
+                "fused_global": fused_global,
+                "H": H,
+                "H128": H128,
+                "scale_dtype": scale_dtype,
+                "task": task,
                 "group": self.moe_group,
                 "fp8": True,
             }
@@ -1729,19 +1793,17 @@ class AllGatherTokenDispatcher(nn.Layer):
 
     def get_dispatched_routing(self):
         """Return (global_indices, global_weights, tokens_per_expert).
-        tokens_per_expert is computed on demand via bincount."""
-        indices = self._global_topk_indices
-        flat_indices = indices.reshape([-1])
-        valid_indices = paddle.masked_select(
-            flat_indices,
-            flat_indices >= 0,
+
+        tokens_per_expert is computed on demand via a sync-free one-hot
+        histogram (see :func:`_tokens_per_expert_histogram`).  Unlike
+        ``masked_select`` + ``bincount`` this never forces a GPU->CPU sync, so
+        it does not stall the pipeline on every forward / recompute.
+        """
+        tokens_per_expert = _tokens_per_expert_histogram(
+            self._global_topk_indices, self.num_experts
         )
-        tokens_per_expert = paddle.bincount(
-            valid_indices,
-            minlength=self.num_experts,
-        ).cast("int32")
         return (
-            indices,
+            self._global_topk_indices,
             self._global_topk_weights,
             tokens_per_expert,
         )
