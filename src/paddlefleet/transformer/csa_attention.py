@@ -769,6 +769,7 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         loss_coeff: float,
         indexer_backend: str = "tilelang",
         num_rows_override: float | None = None,
+        loss_mask: Tensor | None = None,
     ) -> Tensor:
         ctx.save_for_backward(
             index_q.detach(),
@@ -780,11 +781,11 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         )
         ctx.loss_coeff = float(loss_coeff)
         ctx.indexer_backend = str(indexer_backend)
-        if ctx.indexer_backend == "tilelang":
-            if num_rows_override is not None:
-                ctx.num_rows = num_rows_override
-            else:
-                ctx.num_rows = float(target.shape[0] * target.shape[1])
+        ctx.loss_mask = loss_mask
+        if num_rows_override is not None:
+            ctx.num_rows = num_rows_override
+        else:
+            ctx.num_rows = float(target.shape[0] * target.shape[1])
         return output
 
     @staticmethod
@@ -814,14 +815,24 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
                     float(scale), dtype=paddle.float32
                 )
 
+            # Apply loss_mask to mask out padding positions in backward
+            bwd_target = target
+            bwd_topk_probs = topk_probs
+            if ctx.loss_mask is not None:
+                lm = ctx.loss_mask.reshape(
+                    [target.shape[0], target.shape[1], 1]
+                ).astype(target.dtype)
+                bwd_target = target * lm
+                bwd_topk_probs = topk_probs * lm
+
             grad_q, grad_weights, grad_k = csa_indexer_bwd(
                 index_q,
                 weights,
                 index_k_comp,
-                target,
-                topk_probs,
+                bwd_target,
+                bwd_topk_probs,
                 topk_indices,
-                loss_coeff=ctx.loss_coeff,
+                loss_coeff=(ctx.loss_coeff / max(ctx.num_rows, 1.0)),
                 grad_loss=grad_loss_arg,
             )
         elif ctx.indexer_backend == "tilelang":
@@ -830,6 +841,12 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
             grad_index_scores = (topk_probs - target) * (
                 ctx.loss_coeff / max(ctx.num_rows, 1.0)
             )
+            # Apply loss_mask to zero out gradients for padding positions
+            if ctx.loss_mask is not None:
+                lm = ctx.loss_mask.reshape(
+                    [grad_index_scores.shape[0], grad_index_scores.shape[1], 1]
+                ).astype(grad_index_scores.dtype)
+                grad_index_scores = grad_index_scores * lm
             if scale is not None:
                 grad_index_scores = grad_index_scores * scale
 
@@ -852,15 +869,10 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         if grad_k.dtype != index_k_comp.dtype:
             grad_k = grad_k.cast(index_k_comp.dtype)
 
-        return (
-            grad_output,
-            grad_q,
-            grad_weights,
-            grad_k,
-            None,
-            None,
-            None,
+        grads = (grad_output, grad_q, grad_weights, grad_k) + (None,) * (
+            4 if ctx.loss_mask is not None else 3
         )
+        return grads
 
 
 # ---------------------------------------------------------------------------
@@ -1591,6 +1603,7 @@ class CompressedSparseAttention(FleetLayer):
                 float(indexer_loss_coeff),
                 indexer_backend,
                 global_valid_count if loss_mask is not None else None,
+                loss_mask,
             )
             if indexer_loss_coeff > 0 and paddle.is_grad_enabled():
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
@@ -2078,6 +2091,7 @@ class CompressedSparseAttention(FleetLayer):
                         else float(indexer_loss_coeff) / self.cp_size,
                         getattr(self.config, "csa_indexer_backend", "tilelang"),
                         global_valid_count if loss_mask is not None else None,
+                        loss_mask,
                     )
                     if indexer_loss_coeff > 0:
                         DSAIndexerLossLoggingHelper.save_loss_to_tracker(
