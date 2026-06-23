@@ -248,18 +248,21 @@ class TransformerBlock(FleetLayer):
 
         with rng_context:
             # Forward pass.
+            dict_args = {
+                "hidden_states": hidden_states,
+                "attention_mask": attention_mask,
+                "context": context,
+                "context_mask": context_mask,
+                "rotary_pos_emb": rotary_pos_emb,
+                "rotary_pos_cos": rotary_pos_cos,
+                "rotary_pos_sin": rotary_pos_sin,
+                "attention_bias": attention_bias,
+                "packed_seq_params": packed_seq_params,
+            }
             for l_no, layer in enumerate(self.layers):
-                hidden_states, context = layer(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    context=context,
-                    context_mask=context_mask,
-                    rotary_pos_emb=rotary_pos_emb,
-                    rotary_pos_cos=rotary_pos_cos,
-                    rotary_pos_sin=rotary_pos_sin,
-                    attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                )
+                dict_args = layer(dict_args)
+                hidden_states = dict_args["hidden_states"]
+                context = dict_args.get("context", None)
 
         # Final layer norm.
         if self.norm is not None:

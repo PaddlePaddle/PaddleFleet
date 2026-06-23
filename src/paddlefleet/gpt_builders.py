@@ -99,6 +99,7 @@ def gpt_builder(config, **kwargs):
         position_embedding_type=config.position_embedding_type,
         rotary_percent=config.rotary_percent,
         rotary_base=config.rope_theta,
+        swa_rotary_base=config.swa_rope_theta,
         rope_scaling=config.rope_scaling,
         parallel_output=config.parallel_output,
     )

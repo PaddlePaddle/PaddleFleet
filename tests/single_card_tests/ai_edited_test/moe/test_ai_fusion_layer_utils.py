@@ -164,7 +164,7 @@ class TestFusionLayerUtils(unittest.TestCase):
                 2,
                 use_fp8_mlp=False,
                 moe_deep_gemm=False,
-                moe_grouped_gemm=False,
+                moe_expert_fusion=False,
                 is_first_fwd=True,
             )
             self.assertIsNotNone(out)
@@ -189,7 +189,6 @@ class TestFusionLayerUtils(unittest.TestCase):
                 moe_expert_fusion=True,
                 use_fp8_mlp=False,
                 moe_deep_gemm=False,
-                moe_grouped_gemm=False,
             )
             node.release_mem()
             self.assertIsNone(node.experts_group_gemm_node)
@@ -211,7 +210,6 @@ class TestFusionLayerUtils(unittest.TestCase):
                 moe_expert_fusion=True,
                 use_fp8_mlp=False,
                 moe_deep_gemm=False,
-                moe_grouped_gemm=False,
             )
 
     def test_mlp_node_non_fusion_init(self):
@@ -231,7 +229,6 @@ class TestFusionLayerUtils(unittest.TestCase):
                 moe_expert_fusion=False,
                 use_fp8_mlp=False,
                 moe_deep_gemm=False,
-                moe_grouped_gemm=False,
             )
             self.assertIsNotNone(node)
 
@@ -251,7 +248,6 @@ class TestFusionLayerUtils(unittest.TestCase):
                 dequant_input=True,
                 use_fp8_mlp=False,
                 moe_deep_gemm=False,
-                moe_grouped_gemm=False,
             )
 
 

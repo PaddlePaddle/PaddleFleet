@@ -58,7 +58,7 @@ class MockGPTConfig:
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     share_embeddings_and_output_weights: bool = False
-    moe_grouped_gemm: bool = False
+    moe_expert_fusion: bool = False
     parallel_output: bool = True
 
 

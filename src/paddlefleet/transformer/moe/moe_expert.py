@@ -33,12 +33,15 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
+from .fusion_layer_utils import run_sonic_moe
 from .moe_utils import (
     k_grouped_bf16_gemm_tn_contiguous_aligned,
 )
 
 try:
-    from paddlefleet.ops import deep_gemm as paddlefleet_deep_gemm
+    from paddlefleet_ops import deep_gemm as paddlefleet_deep_gemm
+    from paddlefleet_ops.sonicmoe.functional import clear_all_fp8_weight_caches
+    from paddlefleet_ops.sonicmoe.quack_utils import quantize_native_fp8_weights
 except (ImportError, RuntimeError):
     pass
 
@@ -143,7 +146,6 @@ class GroupedMLPExpert(FleetLayer):
         self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
-        self.using_sonic_moe = self.config.using_sonic_moe
         assert not config.use_bias, (
             "Bias not supported in Grouped GEMM yet, please set 'use_bias' to False."
         )
@@ -184,32 +186,17 @@ class GroupedMLPExpert(FleetLayer):
 
         fc2_input_size = self.config.moe_intermediate_size
 
-        initializer = paddle.nn.initializer.Uniform(-0.001, 0.001)
-        # default_initializer=paddle.nn.initializer.Normal(mean=0.0, std=0.01),
-
         dtype = "bfloat16"
-        if self.using_sonic_moe:
-            w1_shape = [
-                self.num_local_experts,
-                fc1_output_size,
-                self.config.hidden_size,
-            ]
-            w2_shape = [
-                self.num_local_experts,
-                self.config.hidden_size,
-                fc2_input_size,
-            ]
-        else:
-            w1_shape = [
-                self.num_local_experts,
-                self.config.hidden_size,
-                fc1_output_size,
-            ]
-            w2_shape = [
-                self.num_local_experts,
-                fc2_input_size,
-                self.config.hidden_size,
-            ]
+        w1_shape = [
+            self.num_local_experts,
+            self.config.hidden_size,
+            fc1_output_size,
+        ]
+        w2_shape = [
+            self.num_local_experts,
+            fc2_input_size,
+            self.config.hidden_size,
+        ]
 
         rng_ctx = (
             get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name())
@@ -221,13 +208,18 @@ class GroupedMLPExpert(FleetLayer):
             self.weight1 = paddle.create_parameter(
                 shape=w1_shape,
                 dtype=dtype,
-                default_initializer=initializer,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             self.weight2 = paddle.create_parameter(
                 shape=w2_shape,
                 dtype=dtype,
-                default_initializer=initializer,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
             )
+            # Use config.init_method / config.output_layer_init_method
+            # which are functions that take a tensor and initialize it using sharedbuffer.
+            if self.config.perform_initialization:
+                self.config.init_method(self.weight1)
+                self.config.output_layer_init_method(self.weight2)
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
@@ -322,13 +314,183 @@ class GroupedMLPExpert(FleetLayer):
                 axis=0,
                 group=self.ep_group,
             )
+            sharded_dict[full_key1].grouped_gemm_param = True
             sharded_dict[full_key2] = shard_weight(
                 key=full_key2,
                 weight=state_dict["weight2"],
                 axis=0,
                 group=self.ep_group,
             )
+            sharded_dict[full_key2].grouped_gemm_param = True
         return sharded_dict
+
+
+class SonicMoEExpert(GroupedMLPExpert):
+    _GROUPED_LAYOUT = "grouped"
+    _SONIC_LAYOUT = "sonic"
+
+    @staticmethod
+    def _is_tensor_initialized(tensor):
+        return (
+            not hasattr(tensor, "_is_initialized") or tensor._is_initialized()
+        )
+
+    @staticmethod
+    def _grouped_w1_to_sonic(weight):
+        target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
+        gate, up = paddle.chunk(weight, 2, axis=-1)
+        gate = gate.transpose([0, 2, 1])
+        up = up.transpose([0, 2, 1])
+        return paddle.stack([gate, up], axis=2).reshape(target_shape)
+
+    @staticmethod
+    def _sonic_w1_to_grouped(weight):
+        target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
+        weight = weight.reshape([weight.shape[0], -1, 2, weight.shape[2]])
+        gate = weight[:, :, 0, :].transpose([0, 2, 1])
+        up = weight[:, :, 1, :].transpose([0, 2, 1])
+        return paddle.concat([gate, up], axis=-1)
+
+    @staticmethod
+    def _transpose_w2_layout(weight):
+        # if not SonicMoEExpert._is_tensor_initialized(weight):
+        #     return weight
+        return weight.transpose([0, 2, 1])
+
+    @staticmethod
+    def _assign_tensor(tensor, value):
+        if tensor is value:
+            return
+        if not value.is_contiguous():
+            value = value.contiguous()
+        if list(tensor.shape) != list(value.shape):
+            tensor.reshape_(list(value.shape))
+        # tensor[...] = value
+        paddle.assign(value, output=tensor)
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        topk: int,
+        config: TransformerConfig,
+        pg_collection: ProcessGroupCollection | None = None,
+    ):
+        assert config.gated_linear_unit is True, (
+            "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
+        )
+        super().__init__(
+            num_local_experts=num_local_experts,
+            config=config,
+            moe_deep_gemm=False,
+            pg_collection=pg_collection,
+        )
+        self.hidden_size = self.config.hidden_size
+        self.K = topk
+        self._weights_layout = self._GROUPED_LAYOUT
+
+    def _convert_grad_layout(self, param, converter):
+        main_grad = getattr(param, "main_grad", None)
+        if main_grad is not None:
+            self._assign_tensor(main_grad, converter(main_grad))
+        if param.grad is not None and (
+            main_grad is None or param.grad.data_ptr() != main_grad.data_ptr()
+        ):
+            self._assign_tensor(param.grad, converter(param.grad))
+
+    def _convert_layout(
+        self, target_layout, weight1_converter, weight2_converter
+    ):
+        if self._weights_layout == target_layout:
+            return
+        with paddle.no_grad():
+            for param, converter in (
+                (self.weight1, weight1_converter),
+                (self.weight2, weight2_converter),
+            ):
+                if not SonicMoEExpert._is_tensor_initialized(param):
+                    shape = param.shape
+                    param.get_tensor()._set_dims([shape[0], shape[2], shape[1]])
+                else:
+                    self._assign_tensor(param, converter(param))
+                self._convert_grad_layout(param, converter)
+        self._weights_layout = target_layout
+
+    def convert_weights_to_sonic_layout(self):
+        self._convert_layout(
+            self._SONIC_LAYOUT,
+            self._grouped_w1_to_sonic,
+            self._transpose_w2_layout,
+        )
+
+    def convert_weights_to_grouped_layout(self):
+        self._convert_layout(
+            self._GROUPED_LAYOUT,
+            self._sonic_w1_to_grouped,
+            self._transpose_w2_layout,
+        )
+
+    def flush_to_grouped_layout(self):
+        self.convert_weights_to_grouped_layout()
+
+    def step(self):
+        self.flush_to_grouped_layout()
+
+    @paddle.no_grad()
+    def quant_weight(self):
+        self.convert_weights_to_sonic_layout()
+
+        payload = quantize_native_fp8_weights(
+            self.weight1.permute([1, 2, 0]),
+            self.weight2.permute([1, 2, 0]),
+        )
+        assert payload["format"] == "1x32", (
+            f"quant strategy {payload.get('format')} is not supported."
+        )
+        w1_fp8, w1_scale, w1t_fp8, w1t_scale = payload["w1"]
+        w2_fp8, w2_scale, w2t_fp8, w2t_scale = payload["w2"]
+        self.weight1.fp8 = (w1_fp8.mT, w1_scale)
+        self.weight1.transposed_fp8 = (w1t_fp8, w1t_scale)
+        self.weight2.fp8 = (w2_fp8, w2_scale)
+        self.weight2.transposed_fp8 = (w2t_fp8, w2t_scale)
+
+    def clear_fp8_weights(self):
+        clear_all_fp8_weight_caches()
+        for weight in (self.weight1, self.weight2):
+            weight.fp8 = None
+            weight.transposed_fp8 = None
+
+    def forward(
+        self,
+        hidden_states,
+        topk_indices,
+        topk_scores,
+        use_fp8=False,
+        tokens_per_expert=None,
+        fp8_scale=None,
+        fp8_combine_grad_handle=None,
+    ):
+        self.convert_weights_to_sonic_layout()
+        hidden_states = run_sonic_moe(
+            hidden_states,
+            topk_indices,
+            topk_scores,
+            self.K,
+            self.num_local_experts,
+            self.weight1,
+            self.weight2,
+            use_fp8,
+            tokens_per_expert=tokens_per_expert,
+            fp8_scale=fp8_scale,
+            fp8_combine_grad_handle=fp8_combine_grad_handle,
+        )
+        return hidden_states
+
+    def sharded_state_dict(
+        self,
+        structured_name_prefix: str = "",
+    ):
+        self.convert_weights_to_grouped_layout()
+        return super().sharded_state_dict(structured_name_prefix)
 
 
 class StandardMLPExpert(MLP):

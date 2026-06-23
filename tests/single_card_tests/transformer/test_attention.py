@@ -475,5 +475,11 @@ class TestGatedSelfAttention(unittest.TestCase):
         )
 
 
+class TestMLAUseVarlenSelfAttention(TestMLASelfAttention):
+    def setUp(self):
+        super().setUp()
+        self.config.flashmask_use_varlen = True
+
+
 if __name__ == "__main__":
     unittest.main()

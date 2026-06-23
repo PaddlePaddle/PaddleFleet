@@ -15,10 +15,9 @@
 import unittest
 
 import paddle
+from paddlefleet_ops.sonicmoe import KernelBackendMoE, MoE, enable_quack_gemm
+from paddlefleet_ops.sonicmoe.enums import ActivationType
 from parameterized import parameterized
-
-from paddlefleet.ops.sonicmoe import KernelBackendMoE, MoE, enable_quack_gemm
-from paddlefleet.ops.sonicmoe.enums import ActivationType
 
 from .commons_test import TestCommons
 

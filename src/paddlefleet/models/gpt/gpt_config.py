@@ -35,7 +35,7 @@ class GPTConfig(TransformerConfig):
 
     tie_word_embeddings: bool = False
 
-    moe_grouped_gemm: bool = False
+    moe_expert_fusion: bool = False
 
     parallel_output: bool = True
 

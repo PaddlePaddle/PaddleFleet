@@ -168,6 +168,7 @@ class TestPP(unittest.TestCase):
         ):
             return
         config = GPTConfig(
+            moe_expert_fusion=False,
             vocab_size=self.vocab_size,
             max_sequence_length=self.seq_len,
             num_hidden_layers=11,

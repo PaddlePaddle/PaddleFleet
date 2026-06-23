@@ -25,14 +25,55 @@
 git clone git@github.com:<YOUR_USER_NAME>/PaddleFleet.git  # 将你的 repo clone 到本地
 cd PaddleFleet/  # cd 到该目录
 git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git  # 将原分支绑定在 upstream
-uv sync -v  # 本地构建环境
-uv build --wheel  # 构建 wheel 包
 ```
 
-> [!TIP]
-> 如果你需要频繁在本地开发自定义算子，可以参考如下方式进行编译安装，这样可以触发增量编译，速度更快🚀：
->
-> ```bash
-> uv sync --no-install-project
-> uv pip install -e . -v --no-build-isolation
-> ```
+### 编包与开发安装
+
+PaddleFleet 现在使用 uv workspace 方式管理项目，请在 PaddleFleet 仓库根目录执行以下命令。
+
+这里涉及两种常见使用方式：
+
+- **编包**：将当前代码构建成 `.whl` 安装包，适合发布、部署，或在其他环境中安装验证。
+- **开发模式（editable）**：将源码目录以可编辑方式安装到当前 Python 环境中，适合本地开发调试。Python 代码修改后通常无需重新安装；如果修改了 C++ 自定义算子，则需要重新编译或重新安装对应子包。
+
+#### 编包
+
+```bash
+# 只编根包 paddlefleet，产出纯 Python wheel 包
+uv build --wheel -vv
+
+# 只编子包 paddlefleet_ops，产出 C++ wheel 包
+# 需要先在当前环境中准备好 paddlepaddle-gpu 等依赖包
+uv build --package paddlefleet-ops --wheel -vv --no-build-isolation
+```
+
+#### 开发模式安装
+
+##### 安装根包 `paddlefleet`
+
+```bash
+uv pip install -e . -vv
+```
+
+##### 安装 C++ 包 `paddlefleet_ops`
+
+如果不需要自己开发自定义算子，可以执行以下脚本自动安装匹配当前代码的 `paddlefleet_ops`：
+
+```bash
+bash scripts/install_ops_wheel.sh
+```
+
+如果需要开发自定义算子，可以使用 editable 方式安装。
+
+###### 系统环境
+
+```bash
+uv pip install -e packages/paddlefleet_ops -vv --no-build-isolation --system
+```
+
+###### 虚拟环境
+
+```bash
+# 需要先安装 paddlepaddle-gpu
+uv pip install -e packages/paddlefleet_ops -vv --no-build-isolation
+```

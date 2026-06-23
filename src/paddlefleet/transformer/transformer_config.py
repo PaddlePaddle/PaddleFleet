@@ -18,13 +18,18 @@
 from __future__ import annotations
 
 import functools
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
 
 from ..model_parallel_config import ModelParallelConfig
-from ..utils import init_method_normal, scaled_init_method_normal
+from ..utils import (
+    get_magic_init_method,
+    init_method_normal,
+    scaled_init_method_normal,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,6 +45,9 @@ class TransformerConfig(ModelParallelConfig):
 
     num_hidden_layers: int = 1
     """Number of transformer layers in a transformer block."""
+
+    pad_token_id: int = 0
+    """Token ID used for padding."""
 
     num_nextn_predict_layers: int = 0
     """Number of Multi-Token Prediction (MTP) Layers."""
@@ -67,6 +75,11 @@ class TransformerConfig(ModelParallelConfig):
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
+
+    enable_mtp_magic_send: bool = False
+    """When True, use magic send mechanism for MTP: broadcast input_ids to last PP stage
+    and re-embed there, instead of pre-computing shifted embeddings at first stage
+    and concatenating them through the pipeline."""
 
     experimental_dataflow: bool = False
     """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
@@ -158,6 +171,9 @@ class TransformerConfig(ModelParallelConfig):
     _attn_implementation: str = "default"
     """Attention implementation to use."""
 
+    flashmask_use_varlen: bool = False
+    """If True, convert flashmask to varlen in attention."""
+
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
@@ -172,6 +188,9 @@ class TransformerConfig(ModelParallelConfig):
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
     MLP layer)."""
 
+    moe_routed_expert_use_bias: bool | None = None
+    """Override whether routed MoE expert MLP layers include bias terms. If None, use use_bias."""
+
     attention_bias: bool = False
     """Include a bias term in QKV projections."""
 
@@ -183,6 +202,56 @@ class TransformerConfig(ModelParallelConfig):
     rotary_interleaved: bool = False
     """True is rotate pairs of even and odd dimensions (RoFormer style), False is rotate pairs of
     first half and second half (LLaMa style). Default to False."""
+
+    use_vha_attention: bool = False
+    """If True, enables VHA premix/postmix extensions in standard self-attention."""
+
+    vha_shared_kv: bool = False
+    """If True, enables Shared KV to reduce KVCache"""
+
+    vha_postmix_rank: int | None = None
+    """Rank of the VHA postmix low-rank head mixing matrices."""
+
+    vha_q_lora_rank: int | None = None
+    """Rank of the VHA Q low-rank projection. When set, Q projects to this rank per head before premix expansion."""
+
+    swa_vha_q_lora_rank: int | None = None
+    """VHA Q low-rank projection rank for SWA layers. Defaults to swa_head_dim in __post_init__."""
+
+    swa_vha_postmix_rank: int | None = None
+    """VHA postmix rank for SWA layers. Defaults to swa_num_attention_heads // 4."""
+
+    attention_value_scale: float | None = None
+    """Scale factor applied to the value tensor before attention computation. If None, no scaling
+    is applied. Used in architectures like MiMo that scale V for training stability."""
+
+    add_full_attention_sink_bias: bool = False
+    """Whether to add a learnable attention sink bias for full (non-SWA) attention layers.
+    When True, softmax_type is promoted to 'learnable' for full attention layers."""
+
+    add_swa_attention_sink_bias: bool = True
+    """Whether to add a learnable attention sink bias for sliding window attention (SWA) layers.
+    When True, softmax_type is promoted to 'learnable' for SWA layers."""
+
+    swa_head_dim: int | None = None
+    """Dimension of query/key heads for sliding window attention layers. Defaults to head_dim."""
+
+    swa_v_head_dim: int | None = None
+    """Dimension of value heads for sliding window attention layers. Defaults to v_head_dim."""
+
+    swa_num_attention_heads: int | None = None
+    """Number of attention heads for sliding window attention layers. Defaults to num_attention_heads."""
+
+    swa_num_key_value_heads: int | None = None
+    """Number of key/value heads (GQA groups) for sliding window attention layers. Defaults to num_key_value_heads."""
+
+    swa_rope_theta: float | None = None
+    """The base period of the RoPE embeddings for sliding window attention layers. Defaults to rope_theta."""
+
+    head_wise_swa_ratio: float = 0.0
+    """Ratio of KV heads that use sliding window attention within an SWA layer.
+    0.0 means all heads use SWA; values between 0 and 1 create a mix where
+    the first (1 - ratio) * num_heads are full attention and the rest are SWA."""
 
     multi_latent_attention: bool = False
     """Whether to use multi-latent attention."""
@@ -223,19 +292,29 @@ class TransformerConfig(ModelParallelConfig):
     """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
     used when gated_linear_unit is True"""
 
-    apply_residual_connection_post_layernorm: bool = False
-    """If True, uses the original BERT residue connection ordering."""
-
-    activation_func_clamp_value: float = None
-    """Clamp the output of the linear_fc1 in the activation function. Only used when activation_func
-    is quick_gelu."""
-
-    glu_linear_offset: float = 0.0
-    """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
-    used when gated_linear_unit is True"""
-
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
+
+    multimax_modules: list[str] | None = None
+    """Submodules to apply learnable SegLU-style modulation to before softmax.
+
+    Mirrors the Megatron ``recompute_modules`` style: a list of submodule
+    names. ``None`` (default) disables the feature globally. Currently
+    supported list entries:
+
+    - ``"lm_head"``: apply SegLU(x, ranges, ts) on the LM-head logits before
+      the language-modeling softmax/cross-entropy. Adds two [4]-shape
+      learnable parameters (multimax_ranges, multimax_ts) to the LM head.
+      These are excluded from weight decay via the "multimax" substring
+      filter in the trainer's no-decay rule.
+    - ``"attention"``: apply on attention scores before softmax. Reserved;
+      not implemented yet (emits a warning if listed).
+
+    YAML/JSON behaviour:
+    - unset key, ``multimax_modules: null``, or empty list ``multimax_modules: []``
+      all map to Python ``None`` (feature disabled).
+    - ``multimax_modules: [lm_head]`` enables the LM-head branch.
+    """
 
     gated_attention: bool = False
     """If True, enables gated attention where a learnable sigmoid gate is applied to the
@@ -284,6 +363,9 @@ class TransformerConfig(ModelParallelConfig):
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
 
+    qk_norm_fusion: bool = False
+    """If True, use Triton fused RMSNorm kernel for QK norm."""
+
     qk_norm_type: str = "per_head"
     """Type of qk normalization:
     - "per_head": normalize each attention head independently (default for most models)
@@ -302,6 +384,9 @@ class TransformerConfig(ModelParallelConfig):
 
     apply_rope_fusion: bool = False
     """If True, use fused RoPE kernel."""
+
+    sigmoid_gate_fusion: bool = False
+    """If True, use Triton fused sigmoid gate kernel."""
 
     ####################
     # activation recomputation
@@ -352,7 +437,9 @@ class TransformerConfig(ModelParallelConfig):
     """Number of experts to route to for each token."""
 
     scoring_func: str = "softmax"
-    """Score function for MoE routing. Can be "softmax" or "sigmoid"."""
+    """Score function for MoE routing. Options: "softmax", "sigmoid", "tanh",
+    "relu", "gelu", "leaky_relu", "sftplus" (softplus, non-negative unbounded),
+    "sqrtsoftplus" (sqrt(softplus), non-negative unbounded)."""
 
     moe_intermediate_size: int | None = None
     """MoE Feed-Forward Network hidden size"""
@@ -362,7 +449,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather','alltoall' and 'deepep'."""
+    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -427,7 +514,7 @@ class TransformerConfig(ModelParallelConfig):
     moe_dequant_input: bool = False
     """Whether to dequantize input."""
 
-    moe_expert_fusion: bool = True
+    moe_expert_fusion: bool = False
     """Whether to fuse experts."""
 
     moe_subbatch_token_num_before_dispatch: int | None = None
@@ -444,14 +531,21 @@ class TransformerConfig(ModelParallelConfig):
     """When True, print auto_subbatch diagnostic info (path, subbatch_rows, zip_unzip_fusion)
     after each forward/backward pass. Useful for debugging memory behavior."""
 
-    moe_grouped_gemm: bool = False
-    """Whether to use grouped gemm."""
-
     router_z_loss_coef: float = None
     """Scaling coefficient for z-loss. Default is None."""
 
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
+
+    moe_n_hash_layers: int = 0
+    """Number of leading transformer layers that use hash-based MoE routing.
+    Layers with layer_number < moe_n_hash_layers (0-indexed) use a pre-computed
+    tid2eid lookup table for expert selection instead of learned top-k routing.
+    Score weights are still computed from the gate logits. 0 disables hash routing."""
+
+    actual_vocab_size: int | None = None
+    """Padded actual vocabulary size. Required when moe_n_hash_layers > 0 for the
+    tid2eid lookup buffer in hash-based MoE routing."""
 
     moe_router_fusion: bool = False
     """Whether to fuse MoE router."""
@@ -462,19 +556,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_shared_expert_overlap: bool = False
     """Enable overlapping between shared expert computations and a2a combinet"""
 
-    moe_deep_gemm: bool = False
+    moe_deep_gemm: bool = True
     """Whether to use DeepGEMM for the bf16 grouped-gemm MoE path. This option only takes effect when
-    ``moe_grouped_gemm=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""
+    ``moe_expert_fusion=True`` and fp8 is disabled, it is ignored when fp8 is enabled."""
 
     moe_ep_barrier: bool = True
     """Whether to use barrier for expert parallelism."""
 
-    use_latent_moe: bool = False
-    """Whether to use latent MoE. When enabled, adds projection layers
-    to compress hidden states before routing and decompress after."""
-
     moe_latent_size: int | None = None
-    """The latent dimension size for latent MoE. Only used when use_latent_moe is True."""
+    """The latent dimension size for latent MoE. Positive values enable latent MoE."""
 
     ##################
     # Context Parallel
@@ -483,6 +573,12 @@ class TransformerConfig(ModelParallelConfig):
     """Inter-gpu communication type for context parallelism. Not support now.
     str: all layers share same communication type.
     List[str]: each layer has its separate communication type.
+    """
+
+    cp_balance_mode: str = "dualchunk_allgather"
+    """Context parallel scatter/gather layout mode.
+    "dualchunk_allgather": balanced front+rear chunk splitting (default).
+    "contiguous_allgather": simple rank-order contiguous slicing.
     """
 
     ####################
@@ -499,6 +595,15 @@ class TransformerConfig(ModelParallelConfig):
 
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
+
+    dw_p2p_overlap: bool = False
+    """Whether to overlap p2p communication and matmul kernel in pp parallel on Blackwell."""
+
+    use_ue8m0: bool = False
+    """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
+
+    use_fp8_qat: bool = False
+    """Whether to enable FP8 Quantization-Aware Training (QAT)."""
 
     ####################
     # initialization
@@ -554,6 +659,28 @@ class TransformerConfig(ModelParallelConfig):
     """ Indicates whether this is a hybrid model. """
 
     ####################
+    # Hyper-Connection (mHC) Configuration
+    ####################
+    enable_hyper_connections: bool = False
+    """Enable mHC (Manifold-Constrained Hyper-Connections) residual connections."""
+
+    num_residual_streams: int = 4
+    """Number of residual streams (n in mHC paper)."""
+
+    mhc_sinkhorn_iterations: int = 20
+    """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
+
+    mhc_init_gating_factor: float = 0.01
+    """Initial value of Gating Factor (alpha in paper)."""
+
+    use_fused_mhc: bool = False
+    """Use fused triton kernels for mHC operations (sinkhorn, h_aggregate, h_post_bda, proj_rms).
+    Requires cuTile to be available."""
+
+    high_precision_mhc: bool = True
+    """Use high precision (float32) for mHC forward and backward computation."""
+
+    ####################
     # miscellaneous
     ####################
     clone_scatter_output_in_embedding: bool = True
@@ -584,7 +711,7 @@ class TransformerConfig(ModelParallelConfig):
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
 
-    v_head_dim: int = 128
+    v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
     rope_type: str = "yarn"
@@ -616,6 +743,15 @@ class TransformerConfig(ModelParallelConfig):
 
     loss_subbatch_sequence_length: int = -1
     """Sequence length of subbatch for loss computation."""
+
+    fused_linear_ce_loss_chunk: int = 0
+    """Enable fused linear + cross-entropy loss when > 0.
+
+    When set to a positive integer N, LM head skips materializing the full
+    [B, S, V] logits tensor and instead passes (hidden_states, weight, bias)
+    to LanguageLoss, which dispatches to LigerFusedLinearCrossEntropyFunction
+    with num_chunks=N. Only compatible with tensor_model_parallel_size == 1
+    (or parallel_output disabled)."""
 
     # cache_mla_latents: bool = False
 
@@ -681,8 +817,112 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_loss_coeff: float = 0.01
     """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
 
+    ####################
+    # CSA / DSv4 Hybrid Attention
+    ####################
+
+    experimental_attention_variant: str | None = None
+    """Which experimental attention variant to use.
+    Supported values: None (disabled), 'dsa', 'dsv4_hybrid'.
+    When 'dsv4_hybrid', enables DeepSeekV4 Hybrid Attention with Compressed Sparse Attention.
+    """
+
+    csa_window_size: int = 128
+    """Sliding window size for Compressed Sparse Attention (CSA).
+    Each query attends to the last csa_window_size tokens via a sliding window.
+    """
+
+    csa_compress_ratios: list | None = None
+    """Per-layer compression ratios for CSA. Length must equal num_hidden_layers.
+    Each value must be one of {0, 4, 128}:
+      - 0: window-only attention (no compression)
+      - 4: overlapping compression with learned CSAIndexer
+      - 128: non-overlapping compression, attend to all compressed positions
+    """
+
+    csa_compress_rotary_base: float = 40000.0
+    """Rotary base for compressed KV positions in CSA.
+    Used instead of the standard rotary_base when compress_ratio > 1 for a layer.
+    """
+
+    csa_dense_mode: bool = False
+    """If True, skip CSAIndexer for ratio==4 layers and attend to all compressed positions.
+    Useful for debugging or ablation studies.
+    """
+
+    csa_tilelang_backend: str | None = None
+    """Optional CSA TileLang backend.
+
+    None keeps the default Paddle implementation. 'attention_paddle_compat'
+    enables the TileLang indexer and sparse attention paths by default while
+    preserving Paddle-compatible tensor layouts and algorithm semantics.
+    """
+
+    csa_tilelang_enable_indexer: bool | None = None
+    """Optional override for the CSA TileLang indexer path.
+
+    None follows csa_tilelang_backend. True requires
+    csa_tilelang_backend='attention_paddle_compat'. False disables only the
+    CSA indexer TileLang path.
+    """
+
+    csa_indexer_backend: str = "tilelang"
+    """CSA indexer backward backend.
+
+    One of {"tilelang", "cudnn"}. Default "tilelang" preserves the legacy
+    path.
+    """
+
+    csa_sparse_attn_backend: str = "tilelang"
+    """CSA sparse attention backend. Single switch selecting one of three
+    implementations of the final sparse MQA attention.
+
+    One of {"unfused", "tilelang", "cudnn"}:
+      * "unfused": pure-Paddle einsum forward + Paddle autograd backward
+        (non-fused reference path).
+      * "tilelang" (default): TileLang sparse MQA kernel forward + backward.
+      * "cudnn": FlashMLA sparse forward kernel + cuDNN DSA backward
+        kernel.
+    """
+
+    use_fast_hadamard: bool = False
+    """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
+
+    o_groups: int = 8
+    """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
+    Set to 0 to use a single linear output projection instead.
+    """
+
+    o_lora_rank: int = 1024
+    """Low-rank dimension per group for the grouped output projection in DSv4 Hybrid."""
+
+    qk_pos_emb_head_dim: int | None = None
+    """Dimension of positional embedding portion in each QK head for DSv4 Hybrid.
+    When set, the total head dim is split as: v_head_dim = qk_nope_dim + qk_pos_emb_head_dim.
+    The positional embedding (RoPE) is applied only to the last qk_pos_emb_head_dim dims.
+    """
+
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
+
+    moe_topk_fusion: bool = False
+    """If True, use Triton fused MoE TopK kernel for expert selection."""
+
+    routing_map_fusion: bool = False
+    """If True, use Triton fused routing map kernel for MoE routing."""
+
+    magic_init: bool = False
+    """Use the magic initialization method."""
+
+    ####################
+    # Ernie Trainer Configs
+    ####################
+
+    moe_logging: bool = False
+    """Whether to enable MoE logging."""
+
+    deepep_buffer_configs: dict | None = None
+    """DeepEP buffer configuration."""
 
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
@@ -693,6 +933,19 @@ class TransformerConfig(ModelParallelConfig):
         "indexer_loss_coeff": "dsa_indexer_loss_coeff",
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
+        "indexer_rope_interleave": "dsa_indexer_rotary_interleaved",
+        # CSA / DSv4 Hybrid field mapping
+        "csa_window_size": "csa_window_size",
+        "csa_compress_ratios": "csa_compress_ratios",
+        "csa_compress_rotary_base": "csa_compress_rotary_base",
+        "csa_dense_mode": "csa_dense_mode",
+        "csa_tilelang_backend": "csa_tilelang_backend",
+        "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
+        "csa_indexer_backend": "csa_indexer_backend",
+        "csa_sparse_attn_backend": "csa_sparse_attn_backend",
+        "o_groups": "o_groups",
+        "o_lora_rank": "o_lora_rank",
+        "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
     }
 
     @classmethod
@@ -746,14 +999,52 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.enable_mtp_magic_send:
+            assert self.num_nextn_predict_layers == 1, (
+                "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
+            )
+            assert self.pipeline_model_parallel_size > 1, (
+                "enable_mtp_magic_send requires pipeline_model_parallel_size > 1"
+            )
+            if (
+                self.virtual_pipeline_model_parallel_size is not None
+                and self.virtual_pipeline_model_parallel_size > 1
+            ):
+                assert self.overlap_p2p_comm, (
+                    "enable_mtp_magic_send with vpp requires overlap_p2p_comm=True"
+                )
+                assert self.variable_seq_lengths, (
+                    "enable_mtp_magic_send with vpp requires variable_seq_lengths=True"
+                )
+
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
 
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
 
+        if self.v_head_dim is None:
+            self.v_head_dim = self.head_dim
+
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
+
+        if self.swa_head_dim is None:
+            self.swa_head_dim = self.head_dim
+        if self.swa_v_head_dim is None:
+            self.swa_v_head_dim = self.v_head_dim
+        if self.swa_num_attention_heads is None:
+            self.swa_num_attention_heads = self.num_attention_heads
+        if self.swa_num_key_value_heads is None:
+            self.swa_num_key_value_heads = self.num_key_value_heads
+        if self.swa_rope_theta is None:
+            self.swa_rope_theta = self.rope_theta
+
+        if self.vha_q_lora_rank is None:
+            self.vha_q_lora_rank = self.head_dim
+
+        if self.swa_vha_q_lora_rank is None:
+            self.swa_vha_q_lora_rank = self.swa_head_dim
 
         if self.num_key_value_heads % self.tensor_model_parallel_size != 0:
             raise ValueError(
@@ -785,7 +1076,15 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if self.init_method is None:
+        if self.magic_init:
+            if self.hidden_size == 0:
+                raise ValueError(
+                    "hidden_size must be non-zero when magic_init is True."
+                )
+            sigma = math.sqrt(0.3333 / self.hidden_size)
+            self.init_method = get_magic_init_method(sigma)
+            self.init_method_std = sigma
+        elif self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
 
         if (
@@ -842,7 +1141,9 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.output_layer_init_method is None:
+        if self.magic_init:
+            self.output_layer_init_method = self.init_method
+        elif self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
                 self.init_method_std,
                 self.num_hidden_layers,
@@ -854,7 +1155,10 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.embedding_init_method is None:
+        if self.magic_init:
+            self.embedding_init_method = self.init_method
+            self.embedding_init_method_std = self.init_method_std
+        elif self.embedding_init_method is None:
             if self.init_method is None or (
                 self.embedding_init_method_std != self.init_method_std
             ):
@@ -870,11 +1174,211 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
+        # DSv4 Hybrid Attention validation
+        if self.experimental_attention_variant == "dsv4_hybrid":
+            if self.csa_compress_ratios is None:
+                raise ValueError(
+                    "experimental_attention_variant='dsv4_hybrid' requires "
+                    "csa_compress_ratios to be set."
+                )
+            if (
+                len(self.csa_compress_ratios)
+                != self.num_hidden_layers + self.num_nextn_predict_layers
+            ):
+                raise ValueError(
+                    f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
+                    f"must equal num_hidden_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
+                )
+            valid_ratios = {0, 4, 128}
+            for i, r in enumerate(self.csa_compress_ratios):
+                if r not in valid_ratios:
+                    raise ValueError(
+                        f"csa_compress_ratios[{i}]={r} is invalid. "
+                        f"Must be one of {valid_ratios}."
+                    )
+
+            valid_tilelang_backends = {None, "attention_paddle_compat"}
+            if self.csa_tilelang_backend not in valid_tilelang_backends:
+                raise ValueError(
+                    f"csa_tilelang_backend={self.csa_tilelang_backend!r} is invalid. "
+                    f"Must be one of {valid_tilelang_backends}."
+                )
+            if (
+                self.csa_tilelang_backend is None
+                and self.csa_tilelang_enable_indexer
+            ):
+                raise ValueError(
+                    "csa_tilelang_enable_indexer=True requires csa_tilelang_backend='attention_paddle_compat'."
+                )
+            if (
+                getattr(self, "csa_tilelang_enable_sparse_attn", None)
+                is not None
+            ):
+                raise ValueError(
+                    "csa_tilelang_enable_sparse_attn has been removed. Use "
+                    "csa_sparse_attn_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead (unfused=non-fused Paddle, tilelang=TileLang "
+                    "fwd/bwd, cudnn=FlashMLA fwd + cuDNN bwd)."
+                )
+            if self.csa_indexer_backend not in {"tilelang", "cudnn"}:
+                raise ValueError(
+                    f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
+                    "Must be one of {'tilelang', 'cudnn'}."
+                )
+            if self.csa_sparse_attn_backend not in {
+                "unfused",
+                "tilelang",
+                "cudnn",
+            }:
+                raise ValueError(
+                    f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
+                    "Must be one of {'unfused', 'tilelang', 'cudnn'}."
+                )
+
+        # Hash-based MoE routing consistency checks.
+        if self.moe_n_hash_layers > 0:
+            if self.actual_vocab_size is None:
+                raise ValueError(
+                    "actual_vocab_size must be set when moe_n_hash_layers > 0; "
+                    "it is required to allocate the tid2eid lookup buffer."
+                )
+            if self.actual_vocab_size <= 0:
+                raise ValueError(
+                    f"actual_vocab_size must be positive, got "
+                    f"{self.actual_vocab_size}."
+                )
+            if self.moe_n_hash_layers > self.num_hidden_layers:
+                raise ValueError(
+                    f"moe_n_hash_layers ({self.moe_n_hash_layers}) cannot exceed "
+                    f"num_hidden_layers ({self.num_hidden_layers})."
+                )
+            if self.scoring_func not in ("softmax", "sigmoid", "sqrtsoftplus"):
+                raise ValueError(
+                    f"Hash routing requires scoring_func in "
+                    f"{{'softmax', 'sigmoid', 'sqrtsoftplus'}}, got "
+                    f"{self.scoring_func!r}."
+                )
+            if (
+                self.num_experts_per_tok is None
+                or self.num_experts_per_tok <= 0
+            ):
+                raise ValueError(
+                    "num_experts_per_tok (top-k) must be a positive integer "
+                    "when moe_n_hash_layers > 0."
+                )
+            if (
+                self.n_routed_experts is None
+                or self.n_routed_experts < self.num_experts_per_tok
+            ):
+                raise ValueError(
+                    f"n_routed_experts ({self.n_routed_experts}) must be >= "
+                    f"num_experts_per_tok ({self.num_experts_per_tok}) "
+                    f"when moe_n_hash_layers > 0."
+                )
+
+        if self.window_attn_skip_freq is not None:
+            if (
+                isinstance(self.window_attn_skip_freq, int)
+                and self.window_attn_skip_freq <= 0
+            ):
+                raise ValueError(
+                    f"window_attn_skip_freq must be a positive integer when "
+                    f"specified as int, but got {self.window_attn_skip_freq}."
+                )
+
         if (
-            self.multi_latent_attention
-            and self.apply_rope_fusion
-            and self.rope_type != "yarn"
+            self.num_nextn_predict_layers > 0
+            and self.window_attn_skip_freq is not None
         ):
+            if not isinstance(self.window_attn_skip_freq, list):
+                raise TypeError(
+                    f"window_attn_skip_freq must be a list of length "
+                    f"num_hidden_layers + num_nextn_predict_layers "
+                    f"({self.num_hidden_layers} + {self.num_nextn_predict_layers} = "
+                    f"{self.num_hidden_layers + self.num_nextn_predict_layers}) "
+                    f"when num_nextn_predict_layers > 0, "
+                    f"but got {type(self.window_attn_skip_freq).__name__} instead."
+                )
+            if (
+                len(self.window_attn_skip_freq)
+                != self.num_hidden_layers + self.num_nextn_predict_layers
+            ):
+                raise ValueError(
+                    f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
+                    f"must equal num_hidden_layers + num_nextn_predict_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
+                )
+
+        if (
+            self.num_nextn_predict_layers == 0
+            and self.window_attn_skip_freq is not None
+        ):
+            if (
+                isinstance(self.window_attn_skip_freq, list)
+                and len(self.window_attn_skip_freq) != self.num_hidden_layers
+            ):
+                raise ValueError(
+                    f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
+                    f"must equal num_hidden_layers ({self.num_hidden_layers})."
+                )
+
+        if not (0.0 <= self.head_wise_swa_ratio <= 1.0):
             raise ValueError(
-                "apply_rope_fusion for MLA only works with YARN RoPE."
+                f"head_wise_swa_ratio must be between 0.0 and 1.0, "
+                f"but got {self.head_wise_swa_ratio}."
             )
+
+        # Multimax validation + grep-friendly confirmation banner.
+        # Operators can verify the setting reached the model with:
+        #   grep MULTIMAX <train.log>
+        import warnings as _warnings
+
+        _multimax = getattr(self, "multimax_modules", None)
+        # YAML entry path returns OmegaConf containers (ListConfig), not
+        # builtin list. Normalize to a plain Python list before any
+        # isinstance(_multimax, list) check; otherwise the recommended
+        # `multimax_modules: [lm_head]` form is rejected.
+        try:
+            from omegaconf import (
+                ListConfig as _ListConfig,
+                OmegaConf as _OmegaConf,
+            )
+
+            if isinstance(_multimax, _ListConfig):
+                _multimax = _OmegaConf.to_container(_multimax, resolve=True)
+                self.multimax_modules = _multimax
+        except ImportError:
+            pass
+        # Allow yaml/json to leave the field unset, set to ``null``, pass an
+        # empty string, or pass an empty list -- all map to the canonical
+        # disabled sentinel ``None``.
+        if _multimax in ("", []):
+            _multimax = None
+            self.multimax_modules = None
+        # Back-compat: a plain string is treated as a single-element list
+        # so older configs (multimax_modules: lm_head) keep working.
+        if isinstance(_multimax, str):
+            _multimax = [_multimax]
+            self.multimax_modules = _multimax
+        if _multimax is not None:
+            if not isinstance(_multimax, list) or not all(
+                isinstance(x, str) for x in _multimax
+            ):
+                raise ValueError(
+                    f"multimax_modules must be None or a list[str], "
+                    f"got {_multimax!r}."
+                )
+            _valid = {"lm_head", "attention"}
+            _bad = [x for x in _multimax if x not in _valid]
+            if _bad:
+                raise ValueError(
+                    f"multimax_modules entries must each be one of "
+                    f"{sorted(_valid)}, got invalid entries {_bad!r} "
+                    f"in {_multimax!r}."
+                )
+            if "attention" in _multimax:
+                _warnings.warn(
+                    f"[MULTIMAX-CONFIG] multimax_modules={_multimax}: "
+                    "'attention' branch is not implemented yet; only the "
+                    "lm_head modulation will take effect."
+                )
+            _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")

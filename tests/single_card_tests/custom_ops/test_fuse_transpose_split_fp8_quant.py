@@ -16,8 +16,7 @@ import unittest
 
 import numpy as np
 import paddle
-
-from paddlefleet.ops import fuse_transpose_split_fp8_quant
+from paddlefleet_ops import fuse_transpose_split_fp8_quant
 
 
 def dequant_ref(

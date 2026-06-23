@@ -1,4 +1,4 @@
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,369 +23,365 @@ sys.path.insert(
     ),
 )
 
-
 import unittest
 from unittest.mock import MagicMock, patch
 
 
-class TestSendRecvMeta(unittest.TestCase):
-    """Tests for SendRecvMeta class in p2p_communication.py."""
+class TestP2pBatchedP2pOps(unittest.TestCase):
+    """Tests for _batched_p2p_ops in p2p_communication."""
 
-    def test_init(self):
+    def _make_mock_hcg(self):
+        mock_hcg = MagicMock()
+        mock_hcg.get_pipe_parallel_group.return_value = MagicMock()
+        mock_hcg.get_model_parallel_world_size.return_value = 1
+        mock_hcg.get_model_parallel_rank.return_value = 0
+        mock_hcg.get_model_parallel_group.return_value = MagicMock()
+        mock_hcg._get_p2p_next_rank.return_value = 3
+        mock_hcg._get_p2p_prev_rank.return_value = 1
+        return mock_hcg
+
+    def test_all_none_tensors(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            _batched_p2p_ops,
+        )
+
+        mock_hcg = self._make_mock_hcg()
+        # No tensors to send/recv should not raise
+        with patch(
+            "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+        ):
+            _batched_p2p_ops(None, None, None, None, mock_hcg)
+
+    def test_send_prev_only(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            _batched_p2p_ops,
+        )
+
+        mock_hcg = self._make_mock_hcg()
+        import paddle
+
+        tensor = paddle.randn([2, 3])
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.batch_send_recv_on_calc_stream"
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+            ),
+            patch.dict(os.environ, {"FLAGS_p2p_device_synchronize": "0"}),
+        ):
+            _batched_p2p_ops(tensor, None, None, None, mock_hcg)
+
+    def test_recv_prev_only(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            _batched_p2p_ops,
+        )
+
+        mock_hcg = self._make_mock_hcg()
+        import paddle
+
+        tensor = paddle.randn([2, 3])
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.batch_send_recv_on_calc_stream"
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+            ),
+            patch.dict(os.environ, {"FLAGS_p2p_device_synchronize": "0"}),
+        ):
+            _batched_p2p_ops(None, tensor, None, None, mock_hcg)
+
+    def test_send_next_only(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            _batched_p2p_ops,
+        )
+
+        mock_hcg = self._make_mock_hcg()
+        import paddle
+
+        tensor = paddle.randn([2, 3])
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.batch_send_recv_on_calc_stream"
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+            ),
+            patch.dict(os.environ, {"FLAGS_p2p_device_synchronize": "0"}),
+        ):
+            _batched_p2p_ops(None, None, tensor, None, mock_hcg)
+
+    def test_recv_next_only(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            _batched_p2p_ops,
+        )
+
+        mock_hcg = self._make_mock_hcg()
+        import paddle
+
+        tensor = paddle.randn([2, 3])
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.batch_send_recv_on_calc_stream"
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+            ),
+            patch.dict(os.environ, {"FLAGS_p2p_device_synchronize": "0"}),
+        ):
+            _batched_p2p_ops(None, None, None, tensor, mock_hcg)
+
+
+class TestP2pP2pOps(unittest.TestCase):
+    """Tests for _p2p_ops in p2p_communication."""
+
+    def _make_mock_hcg(self, stage_id=0):
+        mock_hcg = MagicMock()
+        mock_hcg.get_pipe_parallel_group.return_value = MagicMock()
+        mock_hcg.get_stage_id.return_value = stage_id
+        mock_hcg._get_p2p_next_rank.return_value = 3
+        mock_hcg._get_p2p_prev_rank.return_value = 1
+        return mock_hcg
+
+    def test_even_stage_send_recv(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            _p2p_ops,
+        )
+
+        mock_hcg = self._make_mock_hcg(stage_id=0)
+        import paddle
+
+        tensor = paddle.randn([2, 3])
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._hcg",
+                mock_hcg,
+            ),
+            patch("paddle.device.get_device", return_value="cuda:0"),
+            patch("paddle.distributed.isend", return_value=MagicMock()),
+            patch("paddle.distributed.irecv", return_value=MagicMock()),
+            patch.dict(os.environ, {"FLAGS_pp_check_naninf": "0"}),
+        ):
+            reqs = _p2p_ops(tensor, None, tensor, None, mock_hcg)
+            self.assertGreater(len(reqs), 0)
+
+    def test_odd_stage_send_recv(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            _p2p_ops,
+        )
+
+        mock_hcg = self._make_mock_hcg(stage_id=1)
+        import paddle
+
+        tensor = paddle.randn([2, 3])
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._hcg",
+                mock_hcg,
+            ),
+            patch("paddle.device.get_device", return_value="cuda:0"),
+            patch("paddle.distributed.isend", return_value=MagicMock()),
+            patch("paddle.distributed.irecv", return_value=MagicMock()),
+            patch.dict(os.environ, {"FLAGS_pp_check_naninf": "0"}),
+        ):
+            reqs = _p2p_ops(tensor, None, tensor, None, mock_hcg)
+            self.assertGreater(len(reqs), 0)
+
+    def test_all_none(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            _p2p_ops,
+        )
+
+        mock_hcg = self._make_mock_hcg()
+        reqs = _p2p_ops(None, None, None, None, mock_hcg)
+        self.assertEqual(len(reqs), 0)
+
+
+class TestP2pHelper(unittest.TestCase):
+    """Additional tests for _p2p_helper in p2p_communication."""
+
+    def test_p2p_helper_recv_prev_single(self):
         from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
             SendRecvMeta,
+            _p2p_helper,
         )
 
         meta = SendRecvMeta()
-        self.assertIsNone(meta.send_shape_message)
-        self.assertIsNone(meta.recv_shape_message)
-        self.assertFalse(meta.has_send_meta)
-        self.assertFalse(meta.has_recv_meta)
-
-    def test_init_or_erase_meta(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
-        meta.send_shape_message = [2, 3]
-        meta.has_send_meta = True
-        meta.init_or_erase_meta()
-        self.assertIsNone(meta.send_shape_message)
-        self.assertFalse(meta.has_send_meta)
-
-    def test_repr(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
+        meta.recv_shape_message = [2, 3]
+        meta.recv_dtype_message = 1
+        meta.recv_stop_gradient = False
+        meta.recv_key_message = None
         meta.send_shape_message = [2, 3]
         meta.send_dtype_message = 1
-        repr_str = repr(meta)
-        self.assertIn("send_shape_message", repr_str)
-
-    def test_set_send_message_single_tensor(self):
-        import paddle
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
-        t = paddle.randn([2, 3])
-        meta.set_send_message(t)
-        self.assertEqual(meta.send_shape_message, [2, 3])
-
-    def test_set_send_message_tuple(self):
-        import paddle
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
-        t1 = paddle.randn([2, 3])
-        t1.stop_gradient = False
-        t2 = paddle.randn([2, 3])
-        t2.stop_gradient = False
-        meta.set_send_message((t1, t2))
-        self.assertEqual(len(meta.send_shape_message), 2)
-
-    def test_check_send_message_match(self):
-        import paddle
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
-        t = paddle.randn([2, 3])
-        meta.set_send_message(t)
-        # Should not raise
-        meta.check_send_message(t)
-
-    def test_check_send_message_mismatch(self):
-        import paddle
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
-        t1 = paddle.randn([2, 3])
-        t2 = paddle.randn([4, 5])
-        meta.set_send_message(t1)
-        with self.assertRaises(AssertionError):
-            meta.check_send_message(t2)
-
-    def test_check_send_message_none(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
-        # Should not raise when messages are None
-        meta.check_send_message(MagicMock())
-
-
-class TestIsvalidSendRecvPartial(unittest.TestCase):
-    """Tests for _is_valid_send_recv_partial function."""
-
-    def test_disabled(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            _is_valid_send_recv_partial,
-        )
-
-        with patch(
-            "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
-            False,
-        ):
-            self.assertFalse(_is_valid_send_recv_partial(MagicMock(), 4))
-
-    def test_valid(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            _is_valid_send_recv_partial,
-        )
-
-        mock_tensor = MagicMock()
-        mock_tensor.shape = [8]
-        with (
-            patch(
-                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
-                True,
-            ),
-            patch("numpy.prod", return_value=8),
-        ):
-            self.assertTrue(_is_valid_send_recv_partial(mock_tensor, 4))
-
-    def test_invalid_mp_degree_one(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            _is_valid_send_recv_partial,
-        )
-
-        mock_tensor = MagicMock()
-        mock_tensor.shape = [8]
-        with (
-            patch(
-                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
-                True,
-            ),
-            patch("numpy.prod", return_value=8),
-        ):
-            self.assertFalse(_is_valid_send_recv_partial(mock_tensor, 1))
-
-    def test_invalid_not_divisible(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            _is_valid_send_recv_partial,
-        )
-
-        mock_tensor = MagicMock()
-        mock_tensor.shape = [7]
-        with (
-            patch(
-                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._enable_partial_send_recv",
-                True,
-            ),
-            patch("numpy.prod", return_value=7),
-        ):
-            self.assertFalse(_is_valid_send_recv_partial(mock_tensor, 4))
-
-
-class TestP2PonCalcStream(unittest.TestCase):
-    """Tests for P2PonCalcStream class."""
-
-    def test_init_send(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            P2PonCalcStream,
-            _send_on_calc_stream,
-        )
-
-        mock_tensor = MagicMock()
-        mock_group = MagicMock()
-        op = P2PonCalcStream(
-            _send_on_calc_stream, mock_tensor, 1, mock_group, 2, 0
-        )
-        self.assertEqual(op.tensor, mock_tensor)
-        self.assertEqual(op.peer, 1)
-
-    def test_init_recv(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            P2PonCalcStream,
-            _recv_on_calc_stream,
-        )
-
-        mock_tensor = MagicMock()
-        mock_group = MagicMock()
-        op = P2PonCalcStream(
-            _recv_on_calc_stream, mock_tensor, 0, mock_group, 2, 1
-        )
-        self.assertEqual(op.rank_id, 1)
-
-    def test_init_invalid_op(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            P2PonCalcStream,
-        )
-
-        mock_tensor = MagicMock()
-        mock_group = MagicMock()
-        with self.assertRaises(RuntimeError):
-            P2PonCalcStream(lambda x: x, mock_tensor, 1, mock_group)
-
-
-class TestInitializeP2PGroups(unittest.TestCase):
-    """Tests for initialize_p2p_groups function."""
-
-    def test_basic_init(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            initialize_p2p_groups,
-        )
+        meta.send_key_message = None
 
         mock_hcg = MagicMock()
-        initialize_p2p_groups(
-            mock_hcg, enable_partial_send_recv=True, enable_timer=False
-        )
-
-    def test_init_with_timer(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            initialize_p2p_groups,
-        )
-
-        mock_hcg = MagicMock()
-        mock_timer = MagicMock()
-        with patch(
-            "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.timer"
-        ) as mock_timer_mod:
-            mock_timer_mod.get_timers.return_value = mock_timer
-            initialize_p2p_groups(mock_hcg, enable_timer=True)
-
-
-class TestBatchP2pTupleOrTensor(unittest.TestCase):
-    """Tests for _batch_p2p_tuple_or_tensor function."""
-
-    def test_single_tensor(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            _batch_p2p_tuple_or_tensor,
-            _send_on_calc_stream,
-        )
-
-        mock_tensor = MagicMock()
-        mock_group = MagicMock()
-        ops = _batch_p2p_tuple_or_tensor(
-            mock_tensor, _send_on_calc_stream, 1, mock_group
-        )
-        self.assertEqual(len(ops), 1)
-
-    def test_tuple_tensor(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            _batch_p2p_tuple_or_tensor,
-            _send_on_calc_stream,
-        )
-
-        t1 = MagicMock()
-        t2 = MagicMock()
-        mock_group = MagicMock()
-        ops = _batch_p2p_tuple_or_tensor(
-            (t1, t2), _send_on_calc_stream, 1, mock_group
-        )
-        self.assertEqual(len(ops), 2)
-
-
-class TestSendRecvMetaRecvMeta(unittest.TestCase):
-    """Tests for SendRecvMeta recv_meta and send_meta with mocking."""
-
-    def test_recv_meta_reverse(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
-        mock_group = MagicMock()
-        mock_hcg = MagicMock()
-        mock_hcg._get_p2p_next_rank.return_value = 5
-
-        with (  # noqa: SIM117
-            patch(
-                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._hcg",
-                mock_hcg,
-            ),
-            patch("paddle.distributed.recv"),
-            patch("paddle.distributed.broadcast"),
-        ):
-            # Setup mock data
-            with patch("paddle.empty") as mock_empty:
-                # Return empty tensors for recv
-                numel_tensor = MagicMock()
-                numel_tensor.item.return_value = 10
-                data_tensor = MagicMock()
-                data_tensor.numpy.return_value.tolist.return_value = [
-                    1,
-                    2,
-                    2,
-                    3,
-                    1,
-                    0,
-                    0,
-                ]
-
-                mock_empty.side_effect = [numel_tensor, data_tensor]
-                try:
-                    meta.recv_meta(mock_group, reverse=True)
-                except Exception:
-                    pass  # Mock setup is complex, just test the path
-
-    def test_send_meta_reverse(self):
-        import paddle
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            SendRecvMeta,
-        )
-
-        meta = SendRecvMeta()
-        mock_group = MagicMock()
-        mock_hcg = MagicMock()
-        mock_hcg._get_p2p_prev_rank.return_value = 3
-        t = paddle.randn([2, 3])
+        mock_hcg.get_model_parallel_group.return_value = MagicMock()
+        mock_hcg.get_model_parallel_world_size.return_value = 1
+        mock_hcg.get_model_parallel_rank.return_value = 0
 
         with (
             patch(
                 "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._hcg",
                 mock_hcg,
             ),
-            patch("paddle.distributed.send"),
-            patch("paddle.to_tensor") as mock_to_tensor,
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._batched_p2p_ops",
+                return_value=None,
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+            ),
         ):
-            mock_to_tensor.return_value = MagicMock()
-            meta.send_meta(t, mock_group, reverse=True)
-
-
-class TestAllgatherPartial(unittest.TestCase):
-    """Tests for allgather_partial function."""
-
-    def test_invalid_partial(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            allgather_partial,
-        )
-
-        mock_tensor = MagicMock()
-        with patch(
-            "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._is_valid_send_recv_partial",
-            return_value=False,
-        ):
-            result = allgather_partial(mock_tensor, nranks=4, rank_id=0)
-            self.assertEqual(result, mock_tensor)
-
-    def test_not_member(self):
-        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-            allgather_partial,
-        )
-
-        mock_group = MagicMock()
-        mock_group.is_member.return_value = False
-        mock_tensor = MagicMock()
-        with patch(
-            "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._is_valid_send_recv_partial",
-            return_value=True,
-        ):
-            result = allgather_partial(
-                mock_tensor, nranks=4, rank_id=0, group=mock_group
+            recv_prev, recv_next, reqs = _p2p_helper(
+                tensor_send_next=None,
+                tensor_send_prev=None,
+                recv_prev=True,
+                recv_next=False,
+                send_recv_meta=meta,
+                batch_p2p_comm=True,
             )
-            self.assertIsNone(result)
+            self.assertIsNotNone(recv_prev)
+            self.assertIsNone(recv_next)
+
+    def test_p2p_helper_recv_next_single(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
+            _p2p_helper,
+        )
+
+        meta = SendRecvMeta()
+        meta.recv_shape_message = [2, 3]
+        meta.recv_dtype_message = 1
+        meta.recv_stop_gradient = False
+        meta.recv_key_message = None
+        meta.send_shape_message = [2, 3]
+        meta.send_dtype_message = 1
+        meta.send_key_message = None
+
+        mock_hcg = MagicMock()
+        mock_hcg.get_model_parallel_group.return_value = MagicMock()
+        mock_hcg.get_model_parallel_world_size.return_value = 1
+        mock_hcg.get_model_parallel_rank.return_value = 0
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._hcg",
+                mock_hcg,
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._batched_p2p_ops",
+                return_value=None,
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+            ),
+        ):
+            recv_prev, recv_next, reqs = _p2p_helper(
+                tensor_send_next=None,
+                tensor_send_prev=None,
+                recv_prev=False,
+                recv_next=True,
+                send_recv_meta=meta,
+                batch_p2p_comm=True,
+            )
+            self.assertIsNone(recv_prev)
+            self.assertIsNotNone(recv_next)
+
+    def test_p2p_helper_recv_prev_tuple(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
+            _p2p_helper,
+        )
+
+        meta = SendRecvMeta()
+        meta.recv_shape_message = ([2, 3], [4, 5])
+        meta.recv_dtype_message = (1, 1)
+        meta.recv_stop_gradient = (False, False)
+        meta.recv_key_message = (None, None)
+        meta.send_shape_message = [2, 3]
+        meta.send_dtype_message = 1
+        meta.send_key_message = None
+
+        mock_hcg = MagicMock()
+        mock_hcg.get_model_parallel_group.return_value = MagicMock()
+        mock_hcg.get_model_parallel_world_size.return_value = 1
+        mock_hcg.get_model_parallel_rank.return_value = 0
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._hcg",
+                mock_hcg,
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._batched_p2p_ops",
+                return_value=None,
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+            ),
+        ):
+            recv_prev, recv_next, reqs = _p2p_helper(
+                tensor_send_next=None,
+                tensor_send_prev=None,
+                recv_prev=True,
+                recv_next=False,
+                send_recv_meta=meta,
+                batch_p2p_comm=True,
+            )
+            self.assertIsNotNone(recv_prev)
+            self.assertIsInstance(recv_prev, tuple)
+
+    def test_p2p_helper_no_recv(self):
+        from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
+            SendRecvMeta,
+            _p2p_helper,
+        )
+
+        meta = SendRecvMeta()
+        meta.recv_shape_message = [2, 3]
+        meta.recv_dtype_message = 1
+        meta.recv_stop_gradient = False
+        meta.recv_key_message = None
+        meta.send_shape_message = [2, 3]
+        meta.send_dtype_message = 1
+        meta.send_key_message = None
+
+        mock_hcg = MagicMock()
+        mock_hcg.get_model_parallel_group.return_value = MagicMock()
+        mock_hcg.get_model_parallel_world_size.return_value = 1
+        mock_hcg.get_model_parallel_rank.return_value = 0
+
+        with (
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._hcg",
+                mock_hcg,
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication._batched_p2p_ops",
+                return_value=None,
+            ),
+            patch(
+                "paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication.allgather_partial"
+            ),
+        ):
+            recv_prev, recv_next, reqs = _p2p_helper(
+                tensor_send_next=None,
+                tensor_send_prev=None,
+                recv_prev=False,
+                recv_next=False,
+                send_recv_meta=meta,
+                batch_p2p_comm=True,
+            )
+            self.assertIsNone(recv_prev)
+            self.assertIsNone(recv_next)
 
 
 if __name__ == "__main__":

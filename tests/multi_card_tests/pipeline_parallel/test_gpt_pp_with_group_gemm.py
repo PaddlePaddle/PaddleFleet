@@ -194,7 +194,7 @@ class TestPP(unittest.TestCase):
             bias_activation_fusion=True,
             norm_topk_prob=False,
         )
-        config.moe_grouped_gemm = True
+        config.moe_expert_fusion = True
         config.moe_deep_gemm = True
 
         overlap_loss, overlap_gpt_model = run_pp(

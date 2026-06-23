@@ -18,17 +18,12 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Protocol
 
-from paddlefleet.parallel_state import (
-    get_context_parallel_group,
-    get_context_parallel_world_size,
-)
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
 )
 from paddlefleet.transformer.dot_product_attention import (
-    CPDotProductAttention,
     DotProductAttention,
 )
 from paddlefleet.transformer.mlp import MLPSublayersSpec
@@ -129,13 +124,7 @@ class LocalSpecProvider(BackendSpecProvider):
 
     def core_attention(self) -> type:
         """Which layer to use for attention"""
-        if (
-            get_context_parallel_group() is not None
-            and get_context_parallel_world_size() > 1
-        ):
-            return CPDotProductAttention
-        else:
-            return DotProductAttention
+        return DotProductAttention
 
     def grouped_mlp_layers(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool

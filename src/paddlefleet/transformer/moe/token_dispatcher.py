@@ -25,14 +25,83 @@ if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
 
 
-from .fused_a2a import fused_combine, fused_dispatch
+from .fp8_utils import FP8_ALIGN
+from .fused_a2a import (
+    DeepEPCombineAsyncRefinedRecompute,
+    fused_combine,
+    fused_dispatch,
+    get_hybrid_ep_buffer,
+    hybrid_ep_combine,
+    hybrid_ep_dispatch,
+)
 from .moe_utils import (
     AllGatherGroupOp,
     _AllToAll,
     permute,
     sort_chunks_by_idxs,
     unpermute,
+    use_accuracy_compatible_kernel,
 )
+
+HAVE_HYBRID_EP = False
+HYBRID_EP_LOAD_CACHED_KERNELS = True
+
+
+def _sort_chunks_like_tokens(
+    input: paddle.Tensor,
+    split_sizes: list[int],
+    sorted_idxs: list[int],
+) -> paddle.Tensor:
+    chunks = paddle.split(input, split_sizes, axis=0)
+    return paddle.concat([chunks[i] for i in sorted_idxs], axis=0)
+
+
+try:
+    from paddlefleet_ops import is_hybrid_ep_available
+
+    HAVE_HYBRID_EP = is_hybrid_ep_available()
+except ImportError:
+    HAVE_HYBRID_EP = False
+
+
+def is_hybrid_ep_backend_selected(
+    dispatcher_type: str | None = None,
+) -> bool:
+    selected_dispatcher = dispatcher_type or "deepep"
+    if selected_dispatcher not in (
+        "allgather",
+        "alltoall",
+        "deepep",
+        "hybridep",
+    ):
+        raise ValueError(
+            "moe_token_dispatcher_type must be one of: allgather, alltoall, deepep, hybridep"
+        )
+    if selected_dispatcher != "hybridep":
+        return False
+    if not HAVE_HYBRID_EP:
+        raise ImportError(
+            "moe_token_dispatcher_type=hybridep but HybridEP runtime is unavailable."
+        )
+    return True
+
+
+def _try_setup_router_topk_metadata(
+    manager,
+    num_tokens: int,
+    topk_weights: paddle.Tensor | None,
+    topk_indices: paddle.Tensor | None,
+) -> bool:
+    if topk_weights is None or topk_indices is None:
+        return False
+    manager.token_probs = topk_weights.reshape(
+        [num_tokens, manager.router_topk]
+    )
+    manager.token_indices = topk_indices.reshape(
+        [num_tokens, manager.router_topk]
+    )
+    manager.token_indices.stop_gradient = True
+    return True
 
 
 class _DispatchManager(ABC):
@@ -100,7 +169,285 @@ class _DispatchManager(ABC):
         pass
 
 
-class _DeepepManager(_DispatchManager):
+class _HybridEPManager(_DispatchManager):
+    """
+    HybridEP path using dispatch_with_permute/combine_with_unpermute only.
+
+    The manager owns per-layer handles and count metadata. The communication
+    buffer is shared at fused_a2a module scope, matching DeepEP and Megatron.
+    """
+
+    def __init__(
+        self,
+        group: Group,
+        router_topk: int,
+        num_experts: int | None = None,
+        num_local_experts: int | None = None,
+        moe_ep_barrier: bool = True,
+        hybridep_buffer_configs: dict | None = None,
+    ):
+        if not HAVE_HYBRID_EP:
+            raise ImportError("HybridEP runtime is not available.")
+
+        self.group = group
+        self.router_topk = router_topk
+        self.num_experts = num_experts
+        self.num_local_experts = num_local_experts
+        self.routing_map = None
+        self.routing_probs = None
+        self.token_indices = None
+        self.token_probs = None
+        self.dispatched_indices = None
+        self.dispatched_probs = None
+        self.tokens_per_expert = None
+        self.padded_tokens_per_expert = None
+        self.handle = None
+        self._active_buffer = None
+        self.hybridep_buffer_configs = hybridep_buffer_configs or {}
+
+    def _get_buffer(
+        self,
+        hidden_states: paddle.Tensor,
+        max_num_of_tokens_per_rank: int | None = None,
+    ):
+        hidden_dim = hidden_states.shape[-1]
+        if max_num_of_tokens_per_rank is None:
+            max_num_of_tokens_per_rank = hidden_states.shape[0]
+        self._active_buffer = get_hybrid_ep_buffer(
+            group=self.group,
+            hidden_dim=hidden_dim,
+            max_num_of_tokens_per_rank=max_num_of_tokens_per_rank,
+            num_local_experts=self.num_local_experts,
+            load_cached_kernels=HYBRID_EP_LOAD_CACHED_KERNELS,
+            **self.hybridep_buffer_configs,
+        )
+        return self._active_buffer
+
+    def _get_num_permuted_tokens_upper_bound(
+        self, num_local_tokens: int
+    ) -> int:
+        total_routed_tokens = (
+            num_local_tokens * self.group.nranks * self.router_topk
+        )
+        if FP8_ALIGN > 1:
+            total_routed_tokens += self.num_local_experts * (FP8_ALIGN - 1)
+        return total_routed_tokens
+
+    def _indices_to_dense_metadata(
+        self,
+        token_indices: paddle.Tensor,
+        token_weights: paddle.Tensor | None,
+    ) -> tuple[paddle.Tensor, paddle.Tensor | None]:
+        safe_indices = paddle.where(
+            token_indices >= 0,
+            token_indices,
+            paddle.zeros_like(token_indices),
+        ).astype("int64")
+        one_hot = paddle.nn.functional.one_hot(
+            safe_indices, num_classes=self.num_experts
+        )
+        valid_mask = (token_indices >= 0).astype(one_hot.dtype).unsqueeze(-1)
+        one_hot = one_hot * valid_mask
+        routing_map = paddle.sum(one_hot, axis=1).astype("bool")
+
+        probs = None
+        if token_weights is not None:
+            probs = paddle.sum(
+                one_hot.astype(token_weights.dtype)
+                * token_weights.unsqueeze(-1),
+                axis=1,
+            )
+            if probs.dtype != paddle.float32:
+                probs = probs.astype("float32")
+        return routing_map, probs
+
+    def _get_dispatch_metadata(
+        self,
+        token_indices: paddle.Tensor | None,
+        token_weights: paddle.Tensor | None,
+    ) -> tuple[paddle.Tensor, paddle.Tensor | None]:
+        if self.routing_map is not None:
+            return self.routing_map, self.routing_probs
+        assert token_indices is not None, (
+            "HybridEP dispatch requires routing metadata."
+        )
+        return self._indices_to_dense_metadata(token_indices, token_weights)
+
+    def setup_metadata(
+        self,
+        routing_map: paddle.Tensor,
+        probs: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
+    ):
+        num_tokens = routing_map.shape[0]
+        self.routing_map = routing_map.reshape(
+            [num_tokens, self.num_experts]
+        ).astype("bool")
+        self.routing_probs = probs.reshape([num_tokens, self.num_experts])
+        if self.routing_probs.dtype != paddle.float32:
+            self.routing_probs = self.routing_probs.astype("float32")
+        if _try_setup_router_topk_metadata(
+            self, num_tokens, topk_weights, topk_indices
+        ):
+            return
+        self.token_probs, self.token_indices = paddle.topk(
+            self.routing_probs, self.router_topk, axis=-1
+        )
+
+    def _extract_tokens_per_expert(
+        self,
+        num_dispatched_tokens: int,
+        local_expert_routing_map: paddle.Tensor,
+    ):
+        return (
+            local_expert_routing_map[:num_dispatched_tokens]
+            .astype("int64")
+            .sum(axis=0)
+        )
+
+    def dispatch_overlap(
+        self,
+        hidden_states: paddle.Tensor,
+        token_indices: paddle.Tensor,
+        token_weights: paddle.Tensor,
+        fp8_dispatch: bool = False,
+        async_finish: bool = False,
+        use_ue8m0: bool = False,
+    ) -> paddle.Tensor:
+        del async_finish
+        self.token_indices = token_indices
+        self.token_probs = token_weights
+        hidden_states, self.dispatched_probs, scale = hybrid_ep_dispatch(
+            hidden_states,
+            token_indices,
+            token_weights,
+            self,
+            fp8_dispatch,
+        )
+        self.dispatched_indices = None
+        return hidden_states, None if scale is None else {"scale": scale}
+
+    def _dispatch_with_permute_impl(
+        self,
+        hidden_states: paddle.Tensor,
+        token_indices: paddle.Tensor,
+        token_weights: paddle.Tensor,
+        use_fp8: bool = False,
+    ):
+        buffer = self._get_buffer(hidden_states)
+        routing_map, probs = self._get_dispatch_metadata(
+            token_indices, token_weights
+        )
+        num_permuted_tokens = self._get_num_permuted_tokens_upper_bound(
+            hidden_states.shape[0]
+        )
+        scaling_factor = None
+        if use_fp8:
+            hidden_states, scaling_factor = (
+                paddle.incubate.nn.functional.fp8_quant_blockwise(
+                    hidden_states,
+                    quant_method="1x128",
+                    input_transpose=False,
+                    output_scale_transpose=True,
+                    return_transpose_only=False,
+                )
+            )
+            scaling_factor = scaling_factor.T.contiguous()
+        (
+            hidden_states,
+            dispatched_probs,
+            scale,
+            tokens_per_expert,
+            self.handle,
+        ) = buffer.dispatch_with_permute(
+            hidden=hidden_states,
+            routing_map=routing_map,
+            probs=probs,
+            num_of_experts_per_rank=self.num_local_experts,
+            use_fp8=use_fp8,
+            scaling_factor=scaling_factor,
+            pad_multiple=FP8_ALIGN if use_fp8 else None,
+            num_permuted_tokens=num_permuted_tokens,
+            non_blocking=True,
+        )
+        self.padded_tokens_per_expert = tokens_per_expert
+        (
+            _sparse_to_dense_map,
+            _rdma_to_attn_map,
+            _attn_to_rdma_map,
+            num_dispatched_tokens_tensor,
+            local_expert_routing_map,
+            *_,
+        ) = self.handle
+        num_dispatched_tokens = int(num_dispatched_tokens_tensor.item())
+        self.tokens_per_expert = self._extract_tokens_per_expert(
+            num_dispatched_tokens,
+            local_expert_routing_map,
+        )
+        return hidden_states, dispatched_probs, scale
+
+    def dispatch(
+        self,
+        hidden_states: paddle.Tensor,
+        fp8_dispatch: bool = False,
+        async_finish: bool = False,
+        use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
+    ) -> paddle.Tensor:
+        return self.dispatch_overlap(
+            hidden_states,
+            self.token_indices,
+            self.token_probs,
+            fp8_dispatch=fp8_dispatch,
+            async_finish=async_finish,
+        )
+
+    def combine(
+        self,
+        hidden_states: paddle.Tensor,
+        combine_overlap_handle: dict | None = None,
+        async_finish: bool = False,
+        use_rr_deepep_combine: bool = False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
+    ) -> paddle.Tensor:
+        del async_finish, use_rr_deepep_combine
+        if combine_overlap_handle is not None:
+            raise NotImplementedError(
+                "HybridEP backend does not support combine overlap in PaddleFleet."
+            )
+        hidden_states = hybrid_ep_combine(hidden_states, self)
+        self.dispatched_probs = None
+        self.handle = None
+        return hidden_states
+
+    def get_dispatched_metadata(self) -> paddle.Tensor:
+        if self.dispatched_indices is None or self.dispatched_probs is None:
+            raise NotImplementedError(
+                "HybridEP backend does not expose fused-node dispatch metadata for the current mode."
+            )
+        return self.dispatched_indices, self.dispatched_probs
+
+    def get_number_of_tokens_per_expert(self) -> paddle.Tensor:
+        return self.tokens_per_expert
+
+    def get_permuted_hidden_states_by_experts(
+        self, hidden_states: paddle.Tensor
+    ) -> paddle.Tensor:
+        return hidden_states
+
+    def get_restored_hidden_states_by_experts(
+        self, hidden_states: paddle.Tensor
+    ) -> paddle.Tensor:
+        if self.dispatched_probs is None:
+            return hidden_states
+        return hidden_states * self.dispatched_probs.astype(
+            hidden_states.dtype
+        ).unsqueeze(-1)
+
+
+class _DeepEPManager(_DispatchManager):
     """
     A manager class to handle fused all-to-all communication processes for MoE models using
     DeepEP backend. See https://github.com/deepseek-ai/deepep for more details.
@@ -146,6 +493,7 @@ class _DeepepManager(_DispatchManager):
             raise ImportError(
                 "DeepEP is not supported in your paddlepaddle whl package."
             )
+        self._rr_fusedcombined = None
 
     def setup_metadata(
         self,
@@ -156,15 +504,9 @@ class _DeepepManager(_DispatchManager):
     ):
         num_tokens = routing_map.shape[0]
 
-        if topk_weights is not None and topk_indices is not None:
-            # Reuse router's topk results, skip recomputing topk.
-            self.token_probs = topk_weights.reshape(
-                [num_tokens, self.router_topk]
-            )
-            self.token_indices = topk_indices.reshape(
-                [num_tokens, self.router_topk]
-            )
-            self.token_indices.stop_gradient = True
+        if _try_setup_router_topk_metadata(
+            self, num_tokens, topk_weights, topk_indices
+        ):
             return
 
         routing_map = routing_map.reshape([num_tokens, self.num_experts])
@@ -181,6 +523,7 @@ class _DeepepManager(_DispatchManager):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -190,6 +533,7 @@ class _DeepepManager(_DispatchManager):
             self.group,
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
+            use_ue8m0=use_ue8m0,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -203,6 +547,8 @@ class _DeepepManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -213,6 +559,8 @@ class _DeepepManager(_DispatchManager):
             fp8_dispatch=fp8_dispatch,
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
+            use_ue8m0=use_ue8m0,
+            using_sonic_moe=using_sonic_moe,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -266,18 +614,42 @@ class _DeepepManager(_DispatchManager):
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
+        use_rr_deepep_combine: bool = False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ) -> paddle.Tensor:
+        if combine_overlap_handle is not None and use_rr_deepep_combine:
+            if self._rr_fusedcombined is None:
+                self._rr_fusedcombined = DeepEPCombineAsyncRefinedRecompute()
+            elif not isinstance(
+                self._rr_fusedcombined, DeepEPCombineAsyncRefinedRecompute
+            ):
+                raise RuntimeError(
+                    f"_rr_fusedcombined type mismatch: expected DeepEPCombineAsyncRefinedRecompute, "
+                    f"got {type(self._rr_fusedcombined).__name__}."
+                )
+        if fp8_dispatch is True:
+            assert combine_grad_handle is not None, (
+                "fp8_dispatch=True, but combine_grad_handle is None."
+            )
         hidden_states = fused_combine(
             hidden_states,
             self.group,
             self.handle,
-            None,
-            combine_overlap_handle,
-            async_finish,
+            _rr_fusedcombined=self._rr_fusedcombined,
+            combine_overlap_handle=combine_overlap_handle,
+            async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
+            use_rr_deepep_combine=use_rr_deepep_combine,
+            fp8_dispatch=fp8_dispatch,
+            combine_grad_handle=combine_grad_handle,
         )
-        # Release the handle after combine operation
+        # Release the handle and token_indices after combine operation
         self.handle = None
+        self.token_indices = None
+        self.token_probs = None
+        self.dispatched_probs = None
+        self.dispatched_indices = None
         return hidden_states
 
     def get_permuted_hidden_states_by_experts(
@@ -381,18 +753,28 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         n_routed_experts: int,
         ep_group: Group,
         moe_ep_barrier: bool = True,
+        dispatcher_type: str | None = None,
+        hybridep_buffer_configs: dict | None = None,
     ):
         super().__init__(ep_group)
 
         self.num_local_experts = num_local_experts
         assert self.ep_size > 1, "Flex token dispatcher requires EP > 1"
-        self._comm_manager = _DeepepManager(
-            group=self.ep_group,
-            router_topk=num_experts_per_tok,
-            num_experts=n_routed_experts,
-            num_local_experts=self.num_local_experts,
-            moe_ep_barrier=moe_ep_barrier,
+        manager_cls = (
+            _HybridEPManager
+            if is_hybrid_ep_backend_selected(dispatcher_type)
+            else _DeepEPManager
         )
+        manager_kwargs = {
+            "group": self.ep_group,
+            "router_topk": num_experts_per_tok,
+            "num_experts": n_routed_experts,
+            "num_local_experts": self.num_local_experts,
+            "moe_ep_barrier": moe_ep_barrier,
+        }
+        if manager_cls is _HybridEPManager:
+            manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
+        self._comm_manager = manager_cls(**manager_kwargs)
 
     def dispatch_preprocess(
         self,
@@ -417,6 +799,8 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
     ):
         self.hidden_shape = hidden_states.shape
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
+        self._comm_manager.routing_map = None
+        self._comm_manager.routing_probs = None
         self._comm_manager.token_probs = token_probs
         self._comm_manager.token_indices = token_indices
         return hidden_states
@@ -428,6 +812,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         token_weights: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
     ):
         return self._comm_manager.dispatch_overlap(
             hidden_states,
@@ -435,6 +820,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             token_weights,
             fp8_dispatch,
             async_finish,
+            use_ue8m0=use_ue8m0,
         )
 
     def token_dispatch(
@@ -442,9 +828,15 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         hidden_states: paddle.Tensor,
         fp8_dispatch: bool,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         return self._comm_manager.dispatch(
-            hidden_states, fp8_dispatch, async_finish
+            hidden_states,
+            fp8_dispatch,
+            async_finish,
+            use_ue8m0=use_ue8m0,
+            using_sonic_moe=using_sonic_moe,
         )
 
     def dispatch_postprocess(
@@ -607,6 +999,19 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
         ) = permute(reshaped_input, self.routing_map)
+        if use_accuracy_compatible_kernel():
+            num_routed_tokens = int(tokens_per_expert.sum().item())
+            routing_map = self.routing_map.cast(paddle.bool).T.contiguous()
+            flat_sorted = paddle.argsort(
+                routing_map.reshape([-1]).cast("int32"),
+                descending=True,
+                stable=True,
+            )[:num_routed_tokens]
+            self.permuted_local_probs = paddle.index_select(
+                self.probs.T.contiguous().reshape([-1]),
+                flat_sorted,
+                axis=0,
+            )
         self.permutated_local_input_tokens_shape = (
             permutated_local_input_tokens.shape
         )
@@ -618,6 +1023,8 @@ class AllToAllTokenDispatcher(nn.Layer):
         permutated_local_input_tokens: paddle.Tensor,
         fp8_dispatch: bool = False,
         async_finish: bool = False,
+        use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
         global_input_tokens = _AllToAll.apply(
@@ -627,6 +1034,17 @@ class AllToAllTokenDispatcher(nn.Layer):
             in_split_sizes=self.input_split_sizes,
             group=self.moe_group,
         )
+        if use_accuracy_compatible_kernel():
+            # Match Megatron's all-to-all backward numerics by routing probs through a
+            # 2D [tokens, 1] tensor, like hidden-state dispatch.
+            global_input_probs_2d = _AllToAll.apply(
+                [self.output_shape_tokens[0], 1],
+                self.permuted_local_probs.unsqueeze(-1),
+                out_split_sizes=self.output_splits,
+                in_split_sizes=self.input_split_sizes,
+                group=self.moe_group,
+            )
+            self.global_input_probs = global_input_probs_2d.squeeze(-1)
 
         return global_input_tokens, None
 
@@ -645,11 +1063,21 @@ class AllToAllTokenDispatcher(nn.Layer):
         ).T.ravel()
 
         if self.num_local_experts > 1 and not self.is_empty_tokens:
+            split_sizes_list = (
+                self.num_global_tokens_per_local_expert.ravel().tolist()
+            )
+            sorted_idxs_list = self.sort_input_by_local_experts.tolist()
             global_input_tokens, _ = sort_chunks_by_idxs(
                 global_input_tokens,
                 self.num_global_tokens_per_local_expert.ravel(),
                 self.sort_input_by_local_experts,
             )
+            if use_accuracy_compatible_kernel():
+                self.global_input_probs = _sort_chunks_like_tokens(
+                    self.global_input_probs,
+                    split_sizes_list,
+                    sorted_idxs_list,
+                )
         sorted_tokens = global_input_tokens
         self.tokens_per_expert_post_gather = self.tokens_per_expert
         return sorted_tokens, self.tokens_per_expert_post_gather
@@ -683,7 +1111,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.reshaped_input_shape,
-            probs=self.probs,
+            probs=(None if use_accuracy_compatible_kernel() else self.probs),
             routing_map=self.routing_map,
         )
 

@@ -28,8 +28,10 @@ from unittest.mock import patch
 
 import paddle
 
+from paddlefleet.tensor_parallel.layers import Linear
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
+    DSAIndexerSublayersSpec,
     FusedDSAIndexerLoss,
     Indexer,
     _unfused_dsa_attention,
@@ -197,12 +199,22 @@ class TestUnfusedDSAAttention(unittest.TestCase):
         self.assertGreater(float(diff), 0.0)
 
 
+def _make_indexer_sublayers_spec():
+    return DSAIndexerSublayersSpec(
+        linear_wq_b=Linear,
+        linear_wk=Linear,
+        k_norm=paddle.nn.LayerNorm,
+        linear_weights_proj=Linear,
+    )
+
+
 class TestIndexer(unittest.TestCase):
     """Test Indexer class."""
 
     def test_construction(self):
         config = _make_config()
-        indexer = Indexer(config, layer_number=1)
+        spec = _make_indexer_sublayers_spec()
+        indexer = Indexer(config, sublayers_spec=spec, layer_number=1)
         self.assertEqual(indexer.n_heads, 1)
         self.assertEqual(indexer.head_dim, 16)
         self.assertEqual(indexer.index_topk, 4)
@@ -213,14 +225,16 @@ class TestIndexer(unittest.TestCase):
 
     def test_nope_head_dim(self):
         config = _make_config(dsa_index_head_dim=16, qk_rope_head_dim=8)
-        indexer = Indexer(config, layer_number=1)
+        spec = _make_indexer_sublayers_spec()
+        indexer = Indexer(config, sublayers_spec=spec, layer_number=1)
         self.assertEqual(indexer.nope_head_dim, 8)
 
     @patch("paddlefleet.transformer.dsa_attention._apply_rotary_pos_emb_bshd")
     def test_apply_rope(self, mock_rope):
         mock_rope.return_value = paddle.randn([2, 4, 8])
         config = _make_config()
-        indexer = Indexer(config, layer_number=1)
+        spec = _make_indexer_sublayers_spec()
+        indexer = Indexer(config, sublayers_spec=spec, layer_number=1)
         x = paddle.randn([2, 4, 16])
         freqs = paddle.randn([1, 4, 1, 8])
         result = indexer._apply_rope(x, freqs, 1.0)
@@ -231,11 +245,11 @@ class TestIndexer(unittest.TestCase):
     def test_forward_before_topk_shape(self, mock_rotate):
         mock_rotate.side_effect = lambda x: x
         config = _make_config()
-        indexer = Indexer(config, layer_number=1)
+        spec = _make_indexer_sublayers_spec()
+        indexer = Indexer(config, sublayers_spec=spec, layer_number=1)
         hidden = paddle.randn([2, 4, 64], dtype="float32")
         q_latent = paddle.randn([2, 4, 16], dtype="float32")
-        freqs = None
-        q, k, weights = indexer.forward_before_topk(hidden, q_latent, freqs)
+        q, k, weights = indexer.forward_before_topk(hidden, q_latent)
         self.assertEqual(q.shape, [2, 4, 1, 16])
         self.assertEqual(k.shape, [2, 4, 16])
         self.assertEqual(weights.shape, [2, 4, 1])

@@ -19,36 +19,55 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from functools import partial
 from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
-from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
+from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+    AllGatherOp,
+    mark_as_sequence_parallel_parameter,
+)
+
+from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
+    GatherOpLegacy,
+)
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddle._C_ops import matmul_grad
+from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+    WeightGradStore,
+)
+from paddle.distributed.fleet.utils.sequence_parallel_utils import ScatterOp
 
-from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
-from paddlefleet.parallel_state import get_context_parallel_world_size
+from paddlefleet.context_parallel_utils import (
+    ContextParallelAllGatherOp,
+    ContextParallelGatherOp,
+    ContextParallelScatterOp,
+)
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+    get_tensor_model_parallel_group,
+)
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
 # MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
-# Lazy-loaded EC FusedMoETopk Triton kernel for bit-exact alignment
-_FusedMoETopk = None
+# Lazy-loaded MoETopkFusion Triton kernel for bit-exact alignment
+_MoETopkFusion = None
 
 
-def _get_fused_moe_topk():
-    global _FusedMoETopk
-    if _FusedMoETopk is None:
-        from ernie_core.ops.triton_ops.fused_moe_topk import FusedMoETopk
+def _get_moe_topk_fusion():
+    global _MoETopkFusion
+    if _MoETopkFusion is None:
+        from paddlefleet.triton_ops.moe_topk_fusion import MoETopkFusion
 
-        _FusedMoETopk = FusedMoETopk
-    return _FusedMoETopk
+        _MoETopkFusion = MoETopkFusion
+    return _MoETopkFusion
 
 
 _moe_router_logger = logging.getLogger(__name__)
@@ -76,34 +95,101 @@ def _log_moe_md5(tensor, name, layer_idx=None):
 
 
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
+    """
+    FusedGateDetachMatmul
+    """
+
     @staticmethod
-    def forward(ctx, x, w):
+    def forward(ctx, x, w, dw_p2p_overlap=False):
+        """
+        forward
+        """
+        ctx.dw_p2p_overlap = dw_p2p_overlap
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
+        w = w.T
         return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
     @staticmethod
     def backward(ctx, y_grad):
+        """
+        backward
+        """
         x, w = ctx.saved_tensor()
         assert ctx.dtype == y_grad.dtype, "dtype not match"
-        x_g, w_g = matmul_grad(
-            x.cast(ctx.dtype),
-            w.cast(ctx.dtype),
-            y_grad,
-            False,
-            False,
-        )
 
-        x_grad = x_g.cast(x.dtype) if not x.stop_gradient else None
-        w_grad = w_g.cast(w.dtype) if not w.stop_gradient else None
-        return x_grad, w_grad
+        w_stop_grad = w.stop_gradient
+        x_stop_grad = x.stop_gradient
+
+        def _compute_weight_grad(x_cast, y_grad, weight):
+            with paddle.amp.auto_cast(False):
+                w_grad = paddle.matmul(
+                    x_cast, y_grad, transpose_x=True
+                ).T  # 始终先算梯度
+
+            if hasattr(weight, "main_grad"):
+                if weight.main_grad is None:
+                    weight.main_grad = paddle.zeros(
+                        weight.shape, dtype=paddle.float32
+                    )
+                assert w_grad.dtype == weight.main_grad.dtype, (
+                    f"w_grad dtype {w_grad.dtype} != main_grad dtype {weight.main_grad.dtype}"
+                )
+                weight.main_grad.add_(w_grad)
+            else:
+                raise AssertionError("fp8 overlap need main_grad attribute")
+
+            if hasattr(weight, "_apply_backward_hook"):
+                weight._apply_backward_hook()
+
+        if ctx.dw_p2p_overlap:
+            x_cast = x.cast(ctx.dtype)
+            w_cast = w.cast(ctx.dtype)
+
+            x_g = paddle.matmul(y_grad, w_cast.T, transpose_y=True)
+            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+
+            if w_stop_grad:
+                return x_grad, None
+            else:
+                WeightGradStore.enabled = True
+                WeightGradStore.put(
+                    partial(
+                        _compute_weight_grad,
+                        x_cast.detach(),
+                        y_grad.detach(),
+                        w,
+                    )
+                )
+                WeightGradStore.enabled = False
+                return x_grad, None
+        else:
+            w = w.T
+            x_g, w_g = matmul_grad(
+                x.cast(ctx.dtype),
+                w.cast(ctx.dtype),
+                y_grad,
+                False,
+                False,
+            )
+
+            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+            w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+            if w_grad is not None:
+                w_grad = w_grad.T
+
+            return x_grad, w_grad
 
 
 def gate_detach_matmul(
-    x, weight, use_fuse, moe_router_force_load_balancing=False
+    x,
+    weight,
+    use_fuse,
+    moe_router_force_load_balancing=False,
+    dw_p2p_overlap=False,
 ):
     if use_fuse:
-        score = FusedGateDetachMatmul.apply(x, weight)
+        score = FusedGateDetachMatmul.apply(x, weight, dw_p2p_overlap)
     else:
         x = x.cast(paddle.float32)
         score = F.linear(x, weight)
@@ -111,6 +197,26 @@ def gate_detach_matmul(
     if moe_router_force_load_balancing:
         score = apply_random_logits(score)
     return score
+
+
+def _apply_routing_map_fusion(
+    gates, top_idx, input_ids_none_zero_mask, input_ids=None, pad_token_id=0
+):
+    from paddlefleet.triton_ops import routing_map_fusion_forward
+
+    if input_ids_none_zero_mask is not None and input_ids is not None:
+        fused_input_ids = input_ids.reshape([-1])
+    else:
+        fused_input_ids = None
+    fused_mask, top_idx, exp_counts = routing_map_fusion_forward(
+        gates,
+        top_idx,
+        input_ids=fused_input_ids,
+        is_pure_text_line=None,
+        pad_token_id=pad_token_id,
+    )
+    mask = fused_mask.cast(gates.dtype)
+    return mask, top_idx, exp_counts
 
 
 class StandardMoERouter(nn.Layer):
@@ -153,12 +259,19 @@ class StandardMoERouter(nn.Layer):
                 f"seq_aux is True but routing_type is {self.routing_type}. Please check."
             )
 
-        # According to the shape of gate weights in model checkpoint
+        # Initialize gate weight with Normal distribution aligned with Megatron.
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
             dtype="float32",
-            default_initializer=paddle.nn.initializer.Uniform(),
+            default_initializer=paddle.nn.initializer.Constant(0.0),
         )
+        config.init_method(self.weight)
+
+        if (
+            self.sequence_parallel
+            and self.config.expert_model_parallel_size > 1
+        ):
+            mark_as_sequence_parallel_parameter(self.weight)
 
         if self.routed_scaling_factor_learnable:
             self.routed_scaling_factor_param = self.create_parameter(
@@ -168,18 +281,36 @@ class StandardMoERouter(nn.Layer):
                     self.routed_scaling_factor
                 ),
             )
+            if (
+                self.sequence_parallel
+                and self.config.expert_model_parallel_size > 1
+            ):
+                mark_as_sequence_parallel_parameter(
+                    self.routed_scaling_factor_param
+                )
 
         if self.topk_method == "noaux_tc":
-            self.register_buffer(
-                "e_score_correction_bias",
-                paddle.zeros((self.num_experts,), dtype=paddle.float32),
-            )
+            if not self.config.gpt_model_use_experimental_version:
+                self.register_buffer(
+                    "e_score_correction_bias",
+                    paddle.zeros((self.num_experts,), dtype=paddle.float32),
+                )
+            else:
+                self.register_buffer(
+                    "e_score_correction_bias",
+                    paddle.zeros((1, self.num_experts), dtype=paddle.float32),
+                )
             self._cast_to_low_precision = False
             self.expert_usage = paddle.zeros(
                 shape=[self.num_experts],
                 dtype=paddle.int64,
             )  # Used in MoECorrectionBiasAdjustCallback
             self.expert_usage.stop_gradient = True
+
+        # Hash-routing state. Activated lazily via set_layer_number() so that the
+        # router knows its layer index.
+        self.is_hash_layer = False
+        self.tid2eid = None
 
     def gate_score_func(
         self, logits: paddle.Tensor, logits_type_promotion: bool = True
@@ -201,6 +332,10 @@ class StandardMoERouter(nn.Layer):
                 scores = F.gelu(logits)
             elif scoring_func == "leaky_relu":
                 scores = F.leaky_relu(logits)
+            elif scoring_func == "sftplus":
+                scores = F.softplus(logits)
+            elif scoring_func == "sqrtsoftplus":
+                scores = paddle.sqrt(F.softplus(logits) + 1e-20)
             else:
                 raise NotImplementedError(f"{scoring_func} is not implemented.")
         return scores
@@ -284,7 +419,9 @@ class StandardMoERouter(nn.Layer):
                     ]
                 )
                 # [B, S, E]
-                all_probs = ContextParallelAllGatherOp.apply(all_probs, axis=1)
+                all_probs = ContextParallelAllGatherOp.apply(
+                    all_probs, axis=1, mode=self.config.cp_balance_mode
+                )
                 local_seq_len = local_seq_len * self.context_parallel_size
             else:
                 # [B, S, E]
@@ -292,8 +429,25 @@ class StandardMoERouter(nn.Layer):
                     [-1, local_seq_len, self.num_experts]
                 )
             batch_size = all_probs.shape[0]
-            # [B, S, E]
-            routing_map = routing_map.reshape([batch_size, seq_len, -1])
+            # [B, S, E]: align with EC by GatherOp + split on routing_map
+            if self.sequence_parallel and self.tensor_model_parallel_size > 1:
+                tp_group = get_tensor_model_parallel_group()
+                routing_map_gathered = GatherOpLegacy.apply(
+                    routing_map, 0, tp_group
+                ).reshape(
+                    [
+                        -1,
+                        seq_len * self.tensor_model_parallel_size,
+                        routing_map.shape[-1],
+                    ]
+                )
+                routing_map = paddle.split(
+                    routing_map_gathered,
+                    num_or_sections=self.tensor_model_parallel_size,
+                    axis=1,
+                )[tp_group.rank]
+            else:
+                routing_map = routing_map.reshape([batch_size, seq_len, -1])
             max_seq_len = local_seq_len
         else:
             # [B, S, E]
@@ -309,11 +463,41 @@ class StandardMoERouter(nn.Layer):
         # fixed max_seq_len. PF's input_ids plays the role of EC's origin_input_ids.
         # [B, 1]
         if input_ids is not None:
+            if (
+                self.config.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
+                b, s = input_ids.shape
+                input_ids = AllGatherOp.apply(input_ids.reshape([-1])).reshape(
+                    [b, -1]
+                )
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                # In EB data flow, we need to gather input_ids here to get right denom.
+                input_ids = ContextParallelGatherOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
             _ids = input_ids
             if _ids.ndim == 1:
                 _ids = _ids.unsqueeze(axis=0)
-            origin_valid_mask = (_ids != 0).astype(paddle.float32)
-            token_count_per_line = origin_valid_mask.sum(axis=-1, keepdim=True)
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            origin_valid_mask = (_ids != pad_token_id).astype(paddle.float32)
+            if getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
+                token_count_per_line = (
+                    origin_valid_mask.sum(axis=-1, keepdim=True)
+                    + self.config.num_nextn_predict_layers
+                )
+            else:
+                token_count_per_line = origin_valid_mask.sum(
+                    axis=-1, keepdim=True
+                )
             is_invalid_line_float = (token_count_per_line == 0).astype(
                 paddle.float32
             )
@@ -350,17 +534,63 @@ class StandardMoERouter(nn.Layer):
             )
         return seq_aux_loss
 
-    def _cal_z_loss(self, logits) -> paddle.Tensor:
+    def _cal_z_loss(self, logits, input_ids=None) -> paddle.Tensor:
         """
         Calculate the z loss.
 
         Args:
             logits (paddle.Tensor): Model output. The shape is [batch_size, num_experts].
+            input_ids (paddle.Tensor, optional): Input token ids used to compute loss mask.
 
         Returns:
             paddle.Tensor: The z loss value.
         """
-        l_zloss = paddle.logsumexp(logits, axis=1).square().mean()
+        if input_ids is not None:
+            origin_input_ids = input_ids
+            if (
+                self.config.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
+                b, s = input_ids.shape
+                origin_input_ids = AllGatherOp.apply(
+                    origin_input_ids.reshape([-1])
+                ).reshape([b, -1])
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                # In EB data flow, we need to gather input_ids here to get right denom.
+                origin_input_ids = ContextParallelGatherOp.apply(
+                    origin_input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
+
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            origin_loss_mask = (origin_input_ids != pad_token_id).astype(
+                paddle.float32
+            )
+            loss_mask = (input_ids != pad_token_id).astype(paddle.float32)
+            loss_mask = loss_mask.reshape([-1])
+            if getattr(
+                self.config, "gpt_model_use_experimental_version", False
+            ):
+                # Align to EC, which also consider mtp token
+                denom = (
+                    origin_loss_mask.sum()
+                    + origin_loss_mask.shape[0]
+                    * self.config.num_nextn_predict_layers
+                )
+            else:
+                denom = origin_loss_mask.sum()
+
+            l_zloss = (
+                logits.logsumexp(1).square() * loss_mask
+            ).sum() / paddle.clip(denom, min=1e-6)
+        else:
+            l_zloss = paddle.logsumexp(logits, axis=1).square().mean()
+
         return l_zloss
 
     def _priority(
@@ -556,9 +786,15 @@ class StandardMoERouter(nn.Layer):
         assert self.e_score_correction_bias is not None, (
             "e_score_correction_bias is None"
         )
-        scores_for_choice = scores.reshape(
-            [bsz_seq_len, -1]
-        ) + self.e_score_correction_bias.detach().unsqueeze(0)
+        if not self.config.gpt_model_use_experimental_version:
+            scores_for_choice = scores.reshape(
+                [bsz_seq_len, -1]
+            ) + self.e_score_correction_bias.detach().unsqueeze(0)
+        else:
+            scores_for_choice = (
+                scores.reshape([bsz_seq_len, -1])
+                + self.e_score_correction_bias.detach()
+            )
         if n_group == 1:
             topk_weight, topk_idx = paddle.topk(
                 scores_for_choice, k=k, axis=-1, sorted=True
@@ -589,6 +825,71 @@ class StandardMoERouter(nn.Layer):
 
         return topk_weight, topk_idx
 
+    def _hash_routing(
+        self,
+        logits: paddle.Tensor,
+        flat_ids: paddle.Tensor,
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
+        """Hash-based routing: expert indices come from the tid2eid lookup table.
+
+        Scores are still computed from the gating logits for weight computation,
+        but expert selection is determined by the pre-computed hash table.
+
+        Aligned with the upstream hash-routing reference implementation
+        (``TopKRouter._hash_routing``).
+
+        Args:
+            logits (paddle.Tensor): Gating logits, shape [num_tokens, num_experts].
+            flat_ids (paddle.Tensor): Token IDs flattened to match the row order
+                of ``logits``. Shape [num_tokens], dtype int64.
+
+        Returns:
+            top_gate (paddle.Tensor): Per-token weights for the selected experts,
+                shape [num_tokens, topk]. Already normalized for non-softmax
+                score functions.
+            top_idx (paddle.Tensor): Selected expert indices, shape
+                [num_tokens, topk], dtype int64.
+        """
+        if self.tid2eid is None:
+            raise ValueError(
+                "tid2eid buffer is not registered; hash routing is not initialized."
+            )
+        score_function = self.scoring_func
+        orig_dtype = logits.dtype
+        logits_fp32 = logits.cast("float32")
+        if score_function == "softmax":
+            scores = F.softmax(logits_fp32, axis=-1).cast(orig_dtype)
+        elif score_function == "sigmoid":
+            scores = F.sigmoid(logits_fp32).cast(orig_dtype)
+        elif score_function == "sqrtsoftplus":
+            scores = paddle.sqrt(F.softplus(logits_fp32) + 1e-20).cast(
+                orig_dtype
+            )
+        else:
+            raise ValueError(
+                f"Unsupported scoring_func in hash routing: {score_function!r}"
+            )
+
+        top_idx = self.tid2eid[flat_ids].cast(paddle.int64)  # [N, topk]
+        top_gate = paddle.take_along_axis(scores, top_idx, axis=1)  # [N, topk]
+        if score_function != "softmax":
+            top_gate = top_gate / (top_gate.sum(axis=-1, keepdim=True) + 1e-20)
+
+        # Apply routed_scaling_factor to the gathered top_gate.
+        # Mirrors the non-hash path (see forward(): routed_scaling_factor[_learnable]
+        # is multiplied onto top_gate after normalization).
+        if self.routed_scaling_factor_learnable:
+            safe_topk_indices = paddle.clip(top_idx, min=0)
+            gathered_scales = F.embedding(
+                safe_topk_indices,
+                self.routed_scaling_factor_param.unsqueeze(1),
+            ).squeeze(-1)
+            top_gate = top_gate * gathered_scales
+        elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
+            top_gate = top_gate * self.routed_scaling_factor
+
+        return top_gate, top_idx
+
     def _call_topk_method(
         self, topk_method, gates, k, n_group=None, topk_group=None
     ):
@@ -612,8 +913,77 @@ class StandardMoERouter(nn.Layer):
             raise NotImplementedError(f"Invalid topk_method: {topk_method}")
         return top_gate, top_idx
 
-    def set_layer_number(self, layer_number):
+    def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self.layer_number = layer_number
+        self._setup_hash_layer(layer_number, is_mtp_layer)
+
+    def _setup_hash_layer(self, layer_number, is_mtp_layer: bool = False):
+        """Activate hash routing for this layer if it falls in the hash range.
+
+        Activation condition (0-indexed layer_number):
+            is_hash_layer = (
+                not is_mtp_layer
+                and moe_n_hash_layers > 0
+                and layer_number < moe_n_hash_layers
+            )
+        i.e. the first ``moe_n_hash_layers`` MoE layers use hash routing.
+
+        Side effects on hash layers:
+        - Registers the ``tid2eid`` buffer (round-robin placeholder; production
+          deployments are expected to load a pretrained tid2eid from checkpoint).
+        - Validates ``scoring_func`` and ``actual_vocab_size``.
+        - Disables expert-bias state (e_score_correction_bias / expert_usage)
+          on hash layers.
+        """
+        n_hash = getattr(self.config, "moe_n_hash_layers", 0)
+        self.is_hash_layer = (
+            not is_mtp_layer
+            and n_hash > 0
+            and layer_number is not None
+            and layer_number < n_hash
+        )
+        if not self.is_hash_layer:
+            return
+
+        if self.scoring_func not in ("softmax", "sigmoid", "sqrtsoftplus"):
+            raise ValueError(
+                f"Hash routing requires scoring_func in "
+                f"{{'softmax', 'sigmoid', 'sqrtsoftplus'}}, got "
+                f"{self.scoring_func!r}."
+            )
+        vocab_size = getattr(self.config, "actual_vocab_size", None)
+        if vocab_size is None:
+            raise ValueError(
+                "actual_vocab_size must be set when moe_n_hash_layers > 0; "
+                "it is required to allocate the tid2eid lookup buffer."
+            )
+
+        # Production deployments load a pretrained tid2eid table from the
+        # inference checkpoint; no public initialization recipe is documented.
+        # Round-robin is used here only as a placeholder so the layer is
+        # runnable from scratch.
+        ids = paddle.arange(vocab_size, dtype=paddle.int64)
+        tid2eid = paddle.stack(
+            [
+                (ids + k) % self.num_experts
+                for k in range(self.num_experts_per_tok)
+            ],
+            axis=1,
+        )
+        # Replace the placeholder attribute with a registered buffer.
+        if hasattr(self, "tid2eid"):
+            del self.tid2eid
+        self.register_buffer("tid2eid", tid2eid)
+
+        # Hash layers do not participate in expert-bias correction: drop the
+        # buffers allocated under ``topk_method == 'noaux_tc'`` in __init__.
+        # ``del self.<name>`` goes through ``paddle.nn.Layer.__delattr__``,
+        # which removes the entry from both ``_buffers`` and
+        # ``_non_persistable_buffer_names_set`` for registered buffers.
+        if hasattr(self, "e_score_correction_bias"):
+            del self.e_score_correction_bias
+        if hasattr(self, "expert_usage"):
+            del self.expert_usage
 
 
 class TopKRouter(StandardMoERouter):
@@ -621,8 +991,10 @@ class TopKRouter(StandardMoERouter):
         super().__init__(*args, **kwargs)
         self._layer_number = None
 
-    def set_layer_number(self, layer_number):
+    def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self._layer_number = layer_number
+        self.layer_number = layer_number
+        self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
     def forward(self, input, input_ids=None):
         if len(input.shape) == 3:
@@ -631,8 +1003,30 @@ class TopKRouter(StandardMoERouter):
             else:
                 seq_len, batch_size, d_model = input.shape
             input = input.reshape([-1, d_model])
+            if (
+                get_context_parallel_world_size() > 1
+                and self.config.experimental_dataflow
+            ):
+                # In EB dataflow, shape of input_ids [b, s],
+                # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
+                # so we need to scatter input_ids here to avid the assertion below
+                input_ids = ContextParallelScatterOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
             if input_ids is not None:
-                input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
+                pad_token_id = getattr(self.config, "pad_token_id", 0)
+                if pad_token_id is None:
+                    pad_token_id = 0
+                if self.sequence_parallel:
+                    input_ids_none_zero_mask = (
+                        (input_ids != pad_token_id)
+                        .transpose([1, 0])
+                        .reshape([-1, 1])
+                    )
+                else:
+                    input_ids_none_zero_mask = (
+                        input_ids != pad_token_id
+                    ).reshape([-1, 1])
                 batch_size_, seq_len_ = input_ids.shape
                 assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
                     f"input_ids shape mismatch with input: "
@@ -642,19 +1036,113 @@ class TopKRouter(StandardMoERouter):
             else:
                 input_ids_none_zero_mask = None
         elif len(input.shape) == 2:
+            if not self.config.gpt_model_use_experimental_version:
+                raise ValueError(
+                    "input must be a 3D tensor when "
+                    "gpt_model_use_experimental_version=True."
+                )
+            cp_size = (
+                max(get_context_parallel_world_size(), 1)
+                if getattr(self.config, "experimental_dataflow", False)
+                else 1
+            )
+            tp_size = (
+                self.tensor_model_parallel_size if self.sequence_parallel else 1
+            )
+            seq_len = self.config.max_sequence_length // (cp_size * tp_size)
+            batch_size = input.shape[0] // seq_len
+            if (
+                max(get_context_parallel_world_size(), 1) > 1
+                and self.config.experimental_dataflow
+                and input_ids is not None
+            ):
+                # In EB dataflow, shape of input_ids [b, s],
+                # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
+                # so we need to scatter input_ids here to avid the assertion below
+                input_ids = ContextParallelScatterOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
+            if (
+                input_ids is not None
+                and self.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # SP: input_ids [b, s/cp] -> [b, s/(cp*tp)]
+                b, s = input_ids.shape
+                input_ids = ScatterOp.apply(input_ids.reshape([-1])).reshape(
+                    [b, -1]
+                )
+            if input_ids is not None:
+                pad_token_id = getattr(self.config, "pad_token_id", 0)
+                if pad_token_id is None:
+                    pad_token_id = 0
+                input_ids_none_zero_mask = (input_ids != pad_token_id).reshape(
+                    [-1, 1]
+                )
+                batch_size_, seq_len_ = input_ids.shape
+                assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
+                    f"input_ids shape mismatch with input: "
+                    f"input_ids=[{batch_size_}, {seq_len_}], "
+                    f"expected [batch_size={batch_size}, seq_len={seq_len}]"
+                )
+            else:
+                input_ids_none_zero_mask = None
+
+        # Hash routing requires input_ids; verify early.
+        if self.is_hash_layer and input_ids is None:
             raise ValueError(
-                "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
+                "Hash routing (moe_n_hash_layers > 0) requires input_ids. "
+                "Make sure input_ids is passed through the model forward "
+                "to the MoE layer."
             )
 
         with paddle.amp.auto_cast(False):
             logits = gate_detach_matmul(
                 input,
-                self.weight.T,
+                self.weight,
                 True,
                 self.config.moe_router_force_load_balancing,
+                getattr(self.config, "dw_p2p_overlap", False),
             )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
+
+        # ---- Hash routing branch ----
+        if self.is_hash_layer:
+            if self.sequence_parallel:
+                flat_ids = (
+                    input_ids.transpose([1, 0]).reshape([-1]).cast(paddle.int64)
+                )
+            else:
+                flat_ids = input_ids.reshape([-1]).cast(paddle.int64)
+
+            top_gate, top_idx = self._hash_routing(logits, flat_ids)
+
+            # Build full [num_tokens, num_experts] probs and routing mask.
+            probs = paddle.zeros_like(logits).put_along_axis(
+                top_idx, top_gate.cast(logits.dtype), axis=1
+            )
+            mask = (probs > 0).cast(logits.dtype)
+
+            # Apply padding (input_ids == 0):
+            # routing_map = routing_map & ~padding_mask.
+            # input_ids_none_zero_mask shape: [N, 1], broadcast over expert/topk dim.
+            if input_ids_none_zero_mask is not None:
+                valid_mask = input_ids_none_zero_mask.cast(mask.dtype)
+                mask = mask * valid_mask
+                probs = probs * valid_mask
+                top_gate = top_gate * valid_mask
+                top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+
+            _log_moe_md5(
+                top_idx.cast(paddle.float32),
+                "hash_topk_indices",
+                self._layer_number,
+            )
+            # No aux/z loss, no expert-bias updates on hash layers.
+            return (None, top_gate, top_idx, probs, mask, None, None, None)
+        # ---- end hash routing ----
+
         gates = self.gate_score_func(logits)
 
         if input_ids_none_zero_mask is not None:
@@ -670,7 +1158,7 @@ class TopKRouter(StandardMoERouter):
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
         gates_ori = gates.clone()
-        if self.scoring_func == "sigmoid":
+        if self.scoring_func in {"sigmoid", "sqrtsoftplus"}:
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
@@ -683,16 +1171,19 @@ class TopKRouter(StandardMoERouter):
                     gates_ori.sum(-1, keepdim=True), min=1e-12
                 )
 
-        if getattr(self.config, "gpt_model_use_experimental_version", False):
-            # Use EC's FusedMoETopk Triton kernel for bit-exact alignment.
+        if getattr(self.config, "moe_topk_fusion", False):
+            # Use MoETopkFusion Triton kernel for bit-exact alignment.
             # This ensures the topk selection + normalization uses the exact same
-            # GPU kernel as ErnieCore, avoiding FP32 rounding differences between
+            # GPU kernel, avoiding FP32 rounding differences between
             # Triton's scalar loop and Paddle's tensor ops.
-            FusedMoETopk = _get_fused_moe_topk()
+            MoETopkFusion = _get_moe_topk_fusion()
             use_node_limit = self.n_group > 1
-            probs_for_choice = (
-                gates + self.e_score_correction_bias.detach().unsqueeze(0)
-            )
+            if not self.config.gpt_model_use_experimental_version:
+                probs_for_choice = (
+                    gates + self.e_score_correction_bias.detach().unsqueeze(0)
+                )
+            else:
+                probs_for_choice = gates + self.e_score_correction_bias.detach()
             if _LOG_LAYER_MD5 and self._layer_number == 0:
                 _log_moe_md5(
                     self.e_score_correction_bias,
@@ -702,7 +1193,7 @@ class TopKRouter(StandardMoERouter):
                 _log_moe_md5(
                     probs_for_choice, "probs_for_choice", self._layer_number
                 )
-            top_gate, top_idx = FusedMoETopk.apply(
+            top_gate, top_idx = MoETopkFusion.apply(
                 gates,  # gate_probs (original sigmoid scores)
                 probs_for_choice,  # probs_for_choice (with correction bias)
                 self.num_experts_per_tok,
@@ -743,27 +1234,42 @@ class TopKRouter(StandardMoERouter):
 
         # z-loss
         if self.config.router_z_loss_coef:
-            l_zloss = self._cal_z_loss(logits) * self.config.router_z_loss_coef
+            l_zloss = (
+                self._cal_z_loss(logits, input_ids)
+                * self.config.router_z_loss_coef
+            )
         else:
             l_zloss = None
 
-        mask = paddle.zeros_like(gates).put_along_axis(
-            top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
-        )
-        if input_ids_none_zero_mask is not None:
-            valid_mask = input_ids_none_zero_mask
-            mask = mask * valid_mask.cast(mask.dtype)
-            # -1 means neither participates in routing nor expert calculation
-            top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+        if getattr(self.config, "routing_map_fusion", False):
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            mask, top_idx, exp_counts = _apply_routing_map_fusion(
+                gates,
+                top_idx,
+                input_ids_none_zero_mask,
+                input_ids,
+                pad_token_id=pad_token_id,
+            )
+        else:
+            with paddle.amp.auto_cast(enable=False):
+                mask = paddle.zeros_like(gates).put_along_axis_(
+                    top_idx, paddle.to_tensor(1.0, dtype=gates.dtype), axis=1
+                )
+            if input_ids_none_zero_mask is not None:
+                valid_mask = input_ids_none_zero_mask
+                mask = mask * valid_mask.cast(mask.dtype)
+                # -1 means neither participates in routing nor expert calculation
+                top_idx = top_idx.masked_fill(~valid_mask.cast(paddle.bool), -1)
+            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
 
         # norm
         if self.norm_topk_prob:
-            if not getattr(
-                self.config, "gpt_model_use_experimental_version", False
-            ):
+            if not getattr(self.config, "moe_topk_fusion", False):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-            # When gpt_model_use_experimental_version is True, top_gate is already normalized by FusedMoETopk
+            # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
 
         if self.routed_scaling_factor_learnable:
             safe_topk_indices = paddle.clip(top_idx, min=0)
@@ -776,7 +1282,7 @@ class TopKRouter(StandardMoERouter):
             top_gate = top_gate * self.routed_scaling_factor
 
         # Reconstruct probs (combine weights in [S, E] sparse layout) from final top_gate.
-        probs = paddle.zeros_like(gates).put_along_axis(
+        probs = paddle.zeros_like(gates, dtype=top_gate.dtype).put_along_axis_(
             top_idx, top_gate, axis=1
         )
 
@@ -784,7 +1290,6 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
 
         if self.topk_method == "noaux_tc":
-            exp_counts = paddle.sum(mask.cast(paddle.int64), axis=0)
             with paddle.no_grad():
                 self.expert_usage += exp_counts
 
@@ -799,6 +1304,7 @@ class TopKRouter(StandardMoERouter):
                     batch_size,
                     input_ids=input_ids,
                 )
+
             else:
                 l_aux = self._cal_aux_loss(gates, mask)
         else:

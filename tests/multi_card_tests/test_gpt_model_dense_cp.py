@@ -16,6 +16,7 @@
 import functools
 import os
 import random
+import sys
 
 import numpy as np
 import paddle
@@ -26,6 +27,9 @@ import paddlefleet
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.training.initialize import initialize_fleet
+
+REPO_FLAG = os.getenv("repo_flag")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
 def _set_random_seed(
@@ -107,14 +111,16 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
 
     gpt_model = gpt_builder(config, num_stages=1)
 
+    paddle.manual_seed(seed)
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
     ).cuda()
     input_ids = data[:, :-1]
     labels = data[:, 1:]
     position_ids = (
-        paddle.to_tensor(input_ids, dtype=paddle.int64)
-        .repeat((batch_size, 1))
+        paddle.arange(seq_len, dtype=paddle.int64)
+        .unsqueeze(0)
+        .expand([batch_size, -1])
         .cuda()
     )
 
@@ -135,13 +141,16 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
         loss.backward()
 
     print(f"actual loss: {loss.item()}")
-    loss_baseline = 7.227203369140625
+    loss_baseline = 7.212946
     np.testing.assert_allclose(
         np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
     )
 
 
 if __name__ == "__main__":
+    if SKIP_TESTS:
+        print(f"Skipping tests: repo_flag={REPO_FLAG} (not 'paddlefleet')")
+        sys.exit(0)
     seed = 46
     batch_size = 1
     seq_len = 128

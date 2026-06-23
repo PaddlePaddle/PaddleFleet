@@ -134,9 +134,12 @@ class GPTSublayersSpec:
 
     embedding: LayerSpec | None = None
     head_empty_layers: list[LayerSpec] | None = None
+    mhc_expand: LayerSpec | None = None
     transformer_layers: list[LayerSpec] | None = None
+    mhc_contract: LayerSpec | None = None
     tail_empty_layers: list[LayerSpec] | None = None
     mtp: list[LayerSpec] | None = None
+    mtp_embedding: LayerSpec | None = None
     layer_norm: LayerSpec | None = None
     lm_head: LayerSpec | None = None
     mtp_lm_head: LayerDesc | None = None
@@ -203,6 +206,7 @@ class GPTModel(PipelineLayer):
             if getattr(param, "is_weight_only_mtp", False)
         ]
 
+    # ========================================
     def offload_weight_only_params(self):
         """Offload all weight-only MTP parameters to CPU pinned memory."""
         for param in self._get_weight_only_params():
@@ -234,6 +238,18 @@ class GPTModel(PipelineLayer):
                 ),
                 name_prefix,
             )
+        elif self.config.enable_mtp_magic_send:
+            # MTP magic send: share embedding weight between GPTEmbedding (first stage)
+            # and MTPEmbeddingLayer (last stage) via SharedLayerDesc broadcast mechanism.
+            self.add_sequential_layer(
+                layers,
+                SharedLayerDesc(
+                    "mtp_embed",
+                    spec.embedding,
+                    shared_weight_attr="embedding_weight",
+                ),
+                name_prefix,
+            )
         else:
             self.add_sequential_layer(
                 layers, LayerDesc(spec.embedding), name_prefix
@@ -244,6 +260,12 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
             )
             i += 1
+
+        if spec.mhc_expand is not None:
+            self.add_sequential_layer(
+                layers, LayerDesc(spec.mhc_expand), f"{name_prefix}.mhc_expand"
+            )
+
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers,
@@ -251,6 +273,13 @@ class GPTModel(PipelineLayer):
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
+
+        if spec.mhc_contract is not None:
+            self.add_sequential_layer(
+                layers,
+                LayerDesc(spec.mhc_contract),
+                f"{name_prefix}.mhc_contract",
+            )
 
         # Always place layer_norm after transformer_layers and before tail_empty_layers/MTP,
         # so that the model structure is consistent regardless of whether MTP is enabled.
@@ -263,6 +292,18 @@ class GPTModel(PipelineLayer):
             )
 
         if spec.mtp:
+            # MTP magic send: MTPEmbeddingLayer shares weight with GPTEmbedding
+            # via SharedLayerDesc("mtp_embed") broadcast mechanism.
+            if spec.mtp_embedding:
+                self.add_sequential_layer(
+                    layers,
+                    SharedLayerDesc(
+                        "mtp_embed",
+                        spec.mtp_embedding,
+                        shared_weight_attr="embedding_weight",
+                    ),
+                    f"{name_prefix}.mtp_embedding",
+                )
             for mtp_spec in spec.mtp:
                 self.add_sequential_layer(
                     layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
@@ -290,6 +331,13 @@ class GPTModel(PipelineLayer):
             )
             i += 1
 
+        if (
+            self.config.gpt_model_use_experimental_version
+            and self.config.num_nextn_predict_layers >= 1
+        ):
+            self.add_sequential_layer(
+                layers, LayerDesc(spec.layer_norm), name_prefix
+            )
         if tie_word_embeddings or spec.mtp_lm_head:
             self.add_sequential_layer(
                 layers,

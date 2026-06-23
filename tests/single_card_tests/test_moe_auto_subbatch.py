@@ -120,6 +120,7 @@ class FakeMOELayer(nn.Layer):
         # MoELayer.fp8_quant_weight 检查 self.moe_use_fusion_node and self.fp8
         self.moe_use_fusion_node = True
         self.fp8 = True
+        self.use_ue8m0 = False
         MoELayer.fp8_quant_weight(
             self, batch_mode=batch_mode, quant_transpose=quant_transpose
         )
@@ -208,7 +209,7 @@ class TestAutoSubbatch(unittest.TestCase):
     ):
         params = {
             "use_fp8_mlp": True,
-            "moe_grouped_gemm": True,
+            "moe_deep_gemm": False,
             "recompute_moe_gate_up": True,
             "dequant_input": True,
             "moe_expert_fusion": is_ref,
@@ -279,7 +280,6 @@ class TestAutoSubbatch(unittest.TestCase):
             "moe_expert_fusion": True,
             "recompute_moe_premute": False,
             "recompute_moe_gate_up": False,
-            "moe_grouped_gemm": True,
         }
 
         logging.info("case1 (group, plenty)")
@@ -305,7 +305,6 @@ class TestAutoSubbatch(unittest.TestCase):
             "moe_expert_fusion": True,
             "recompute_moe_premute": False,
             "recompute_moe_gate_up": True,
-            "moe_grouped_gemm": True,
             # "recompute_unzipped": True,
         }
         # --- group_gemm + selective_recompute (recompute_moe_gate_up)---
@@ -334,7 +333,6 @@ class TestAutoSubbatch(unittest.TestCase):
             "moe_expert_fusion": True,
             "recompute_moe_premute": False,
             "recompute_moe_gate_up": False,
-            "moe_grouped_gemm": True,
         }
         # case9: 显存充裕 → 走 3a group_gemm
         logging.info(
@@ -365,7 +363,6 @@ class TestAutoSubbatch(unittest.TestCase):
             "moe_expert_fusion": False,
             "recompute_moe_premute": False,
             "recompute_moe_gate_up": False,
-            "moe_grouped_gemm": False,
         }
         # case13: 显存充裕 → 走 3a group_gemm
         logging.info("case13 (split, plenty)")
@@ -391,7 +388,6 @@ class TestAutoSubbatch(unittest.TestCase):
             "moe_expert_fusion": False,
             "recompute_moe_premute": False,
             "recompute_moe_gate_up": True,
-            "moe_grouped_gemm": False,
             "moe_subbatch_token_num_after_dispatch": 512,
         }
         # case13: 显存充裕 → 走 3a group_gemm
@@ -418,7 +414,6 @@ class TestAutoSubbatch(unittest.TestCase):
             "moe_expert_fusion": True,
             "recompute_moe_premute": False,
             "recompute_moe_gate_up": False,
-            "moe_grouped_gemm": True,
         }
         self.moe_layer.fp8_quant_weight(batch_mode=True, quant_transpose=False)
         logging.info("case17 (group, plenty) pre_quant")
@@ -441,7 +436,6 @@ class TestAutoSubbatch(unittest.TestCase):
             "moe_expert_fusion": False,
             "recompute_moe_premute": True,
             "recompute_moe_gate_up": True,
-            "moe_grouped_gemm": False,
             "moe_subbatch_token_num_after_dispatch": 512,
         }
         # case21: 显存充裕 → 走 3a group_gemm

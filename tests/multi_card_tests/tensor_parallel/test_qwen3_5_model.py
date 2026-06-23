@@ -277,6 +277,7 @@ def _make_language_config(
             moe_shared_expert_gate=False,
             moe_layer_freq=1,  # every layer is MoE
             moe_token_dispatcher_type="alltoall",
+            moe_expert_fusion=False,
         )
 
     config = GPTConfig(**base_kwargs)

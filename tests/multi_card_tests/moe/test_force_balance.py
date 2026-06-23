@@ -82,7 +82,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             n_shared_experts=0,
             hidden_act=F.silu,
             moe_router_force_load_balancing=True,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             bias_activation_fusion=True,
         )
 
