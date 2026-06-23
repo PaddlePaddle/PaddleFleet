@@ -1266,9 +1266,7 @@ class TopKRouter(StandardMoERouter):
 
         # norm
         if self.norm_topk_prob:
-            if not getattr(
-                self.config, "gpt_model_use_experimental_version", False
-            ):
+            if not getattr(self.config, "moe_topk_fusion", False):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
