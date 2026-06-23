@@ -42,6 +42,7 @@ from .moe_utils import (
     AllGatherGroupOp,
     ReduceScatterGroupOp,
     _AllToAll,
+    all_gather_group,
     manual_backward,
     permute,
     reduce_scatter_group,
@@ -1362,6 +1363,33 @@ def _all_gather_async(input, group):
     return output, task
 
 
+def _quantize_and_pack_fp8(x):
+    """Quantize ``x`` to fp8 e4m3 + int32 1x128 block scale and pack into a
+    single uint8 row ``[T_local, H + 4*H128]`` (fp8 data ++ scale bytes).
+
+    Returns ``(fused_local, H, H128, scale_dtype)``. The caller is responsible
+    for AllGather (sync or async) and for unpacking via
+    :func:`_split_fused_fp8_gather`. Bit-identical to two separate gather of
+    data and scale: AllGather is a lossless row concat and the 1x128 scale
+    lives within a single token's hidden vector, so packing along axis 1
+    before the gather yields the same per-rank bytes as gathering separately.
+    """
+    assert quantize_activation_blockscaled_fast is not None, (
+        "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
+    )
+    x = x.contiguous()
+    x_fp8, scale = quantize_activation_blockscaled_fast(
+        x, scale_dtype=paddle.int32
+    )
+    _, H = x_fp8.shape
+    H128 = scale.shape[1]
+    scale_dtype = scale.dtype
+    fused_local = paddle.concat(
+        [x_fp8.view("uint8"), scale.view("uint8")], axis=1
+    ).contiguous()
+    return fused_local, H, H128, scale_dtype
+
+
 def _all_gather_grad_fp8_async(grad, group):
     """Quantize local grad to fp8 e4m3 + int32 1x128 block scale, then a SINGLE
     async AllGather of the fused (fp8-data-as-uint8 ++ scale-as-uint8) per-token
@@ -1381,23 +1409,8 @@ def _all_gather_grad_fp8_async(grad, group):
     bf16-AllGather-then-quantize.  The caller waits ``task`` and then calls
     :func:`_split_fused_fp8_gather` to recover ``(data_e4m3_global, scale_global)``.
     """
-    assert quantize_activation_blockscaled_fast is not None, (
-        "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
-    )
-    grad = grad.contiguous()
-    x_fp8, scale = quantize_activation_blockscaled_fast(
-        grad, scale_dtype=paddle.int32
-    )
-    T_local, H = x_fp8.shape
-    nranks = group.nranks
-    T_global = T_local * nranks
-    H128 = scale.shape[1]
-    scale_dtype = scale.dtype
-    # Pack fp8 data (uint8) and scale bytes into one contiguous per-token row,
-    # then AllGather once instead of twice.
-    fused_local = paddle.concat(
-        [x_fp8.view("uint8"), scale.view("uint8")], axis=1
-    ).contiguous()  # [T_local, H + 4*H128]
+    fused_local, H, H128, scale_dtype = _quantize_and_pack_fp8(grad)
+    T_global = fused_local.shape[0] * group.nranks
     fused_global = paddle.empty([T_global, fused_local.shape[1]], dtype="uint8")
     task = paddle.distributed.stream.all_gather(
         fused_global,
@@ -1499,6 +1512,49 @@ class _AllGatherCombineAsync(paddle.autograd.PyLayer):
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
+class _AllGatherCombineNoOverlap(paddle.autograd.PyLayer):
+    """ReduceScatter combine without overlap subgraph (sync on calc stream).
+
+    Mirrors ``_AllGatherCombineAsync``'s fp8/bf16 grad collection but skips the
+    shared-expert overlap. All collectives use the same sync calc-stream
+    wrappers (``reduce_scatter_group`` / ``all_gather_group``) as
+    :class:`ReduceScatterGroupOp` and the ``_PreAllGather*Result`` backward
+    paths, so they FIFO-order naturally after the expert MLP forward and
+    ``_DownProjection.backward`` without cross-stream event synchronization.
+    Needed because the no-overlap path must still populate
+    ``fp8_combine_grad_handle`` in backward for ``_DownProjection.backward``
+    to consume; previously the no-overlap branch returned ``hidden_states``
+    directly and dropped the handle.
+    """
+
+    @staticmethod
+    def forward(ctx, x, group, fp8_combine_grad_handle=None):
+        ctx.group = group
+        ctx.fp8_combine_grad_handle = fp8_combine_grad_handle
+        if group is None:
+            return x.clone()
+        return reduce_scatter_group(x, group=group)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        group = ctx.group
+        handle = ctx.fp8_combine_grad_handle
+        if group is None:
+            return grad_output.clone()
+        if handle is not None:
+            fused_local, H, H128, scale_dtype = _quantize_and_pack_fp8(
+                grad_output
+            )
+            fused_global = all_gather_group(fused_local, group=group)
+            data_e4m3, scale_global = _split_fused_fp8_gather(
+                fused_global, H, H128, scale_dtype
+            )
+            handle["data"] = data_e4m3
+            handle["scale"] = scale_global
+            return data_e4m3
+        return all_gather_group(grad_output, group=group)
+
+
 @paddle.no_grad()
 def _tokens_per_expert_histogram(indices, num_experts):
     """Count tokens per expert WITHOUT any GPU->CPU synchronization.
@@ -1597,23 +1653,10 @@ class AllGatherTokenDispatcher(nn.Layer):
         reshaped_input = hidden_states.reshape([-1, d_model]).contiguous()
 
         if self.fp8_dispatch:
-            assert quantize_activation_blockscaled_fast is not None, (
-                "Cannot find quantize_activation_blockscaled_fast, "
-                "please update sonicmoe."
+            fused_local, H, H128, scale_dtype = _quantize_and_pack_fp8(
+                reshaped_input
             )
-            x_fp8, scale = quantize_activation_blockscaled_fast(
-                reshaped_input, scale_dtype=paddle.int32
-            )
-            T_local, H = x_fp8.shape
-            T_global = T_local * self.moe_group.nranks
-            H128 = scale.shape[1]
-            scale_dtype = scale.dtype
-            # Pack fp8 data (uint8) and scale bytes into one contiguous per-token
-            # row, then AllGather once instead of twice. Bit-identical to two
-            # separate gathers (AllGather is a lossless row concat).
-            fused_local = paddle.concat(
-                [x_fp8.view("uint8"), scale.view("uint8")], axis=1
-            ).contiguous()  # [T_local, H + 4*H128]
+            T_global = fused_local.shape[0] * self.moe_group.nranks
             fused_global = paddle.empty(
                 [T_global, fused_local.shape[1]], dtype="uint8"
             )
@@ -1821,8 +1864,14 @@ class AllGatherTokenDispatcher(nn.Layer):
         data+scale are written into the handle for _DownProjection.backward.
         """
         if combine_overlap_handle is None:
-            self._overlap_combined = None
-            return hidden_states
+            # Still wrap in a PyLayer so backward can collect fp8 grad into
+            # the handle (previously dropped, causing _DownProjection.backward
+            # to read a stale/empty handle when shared-expert overlap is off).
+            combined_x = _AllGatherCombineNoOverlap.apply(
+                hidden_states, self.moe_group, fp8_combine_grad_handle
+            )
+            self._overlap_combined = combined_x
+            return combined_x
         if not isinstance(combine_overlap_handle, dict):
             raise TypeError(
                 "combine_overlap_handle must be a dict, got "
