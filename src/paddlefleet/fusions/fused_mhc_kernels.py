@@ -2975,6 +2975,10 @@ class FusedHPostBDA(paddle.autograd.PyLayer):
         else:
             ctx.save_for_backward(h_res, original_residual, h_post, x)
             ctx.has_bias = False
+        ctx.x_stop_gradient = x.stop_gradient
+        ctx.bias_stop_gradient = (
+            bias.stop_gradient if bias is not None else True
+        )
         return output
 
     @staticmethod
