@@ -2273,12 +2273,9 @@ def run_sonic_moe(
             paddle.int32
         )
 
-    # Cast topk_indices to int32 ONCE and reuse for both the metadata kernel
-    # and the differentiable router scores. ``paddle.cast`` is NOT a no-op for a
-    # matching dtype (it allocates + copies), so the two separate casts below
-    # previously launched two redundant copy kernels. With a dtype guard, the
-    # allgather path (which already feeds int32 indices) pays zero copies, and
-    # the deepep path (int64 indices) pays one instead of two.
+    # paddle.cast is not a no-op for matching dtype (it allocates + copies),
+    # so cast once with a guard instead of twice below. Allgather feeds int32
+    # (zero copies); deepep feeds int64 (one copy instead of two).
     topk_indices_i32 = (
         topk_indices
         if topk_indices.dtype == paddle.int32

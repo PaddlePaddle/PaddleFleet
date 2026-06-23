@@ -449,13 +449,7 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'.
-
-    - 'allgather': every expert is sharded along ``moe_intermediate_size``
-      into ``EP`` partitions and every rank holds one shard of every expert.
-      Inputs are AllGathered across the EP group before expert compute and
-      partial outputs are ReduceScattered back. Requires ``EP > 1``,
-      ``moe_grouped_gemm=True`` and ``moe_intermediate_size % EP == 0``."""
+    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_allgather_gate_overlap: bool = False
     """Whether to issue the AllGather before the gate so it overlaps with gate

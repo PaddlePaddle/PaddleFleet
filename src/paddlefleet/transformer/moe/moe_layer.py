@@ -351,10 +351,8 @@ class MoELayer(nn.Layer):
                 self.moe_token_dispatcher_type == "allgather"
                 and self.expert_model_parallel_size > 1
             ):
-                # AllGather (EP>1): every rank holds a shard of every expert
-                # along the intermediate dim; SonicMoEExpert must allocate
-                # weights for all experts (not num_local_experts) with the
-                # per-EP-rank shard size.
+                # AllGather EP>1: every rank holds all experts, sharded
+                # along intermediate dim (I // EP per rank).
                 self.grouped_gemm_experts = SonicMoEExpert(
                     self.num_experts,
                     self.num_experts_per_tok,
@@ -740,15 +738,11 @@ class MoELayer(nn.Layer):
         return self.unpermute(expert_outs)
 
     def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
-        """Issue the async AllGather before gate so it overlaps with gate compute.
+        """Pre-issue async AllGather on comm stream to overlap with gate MLP.
 
-        Enabled for the 'allgather' dispatcher when EP > 1 and
-        ``moe_allgather_gate_overlap=True``: AllGather runs on the comm stream
-        while gate MLP runs on the calc stream; the result is consumed inside
-        ``dispatch_preprocess`` via ``_PreAllGatherResult`` (or
-        ``_PreAllGatherFP8Result`` when ``fp8_dispatch=True``). For latent MoE,
-        ``fc1_latent_proj`` is hoisted here so the AllGather targets the
-        latent-space tensor; gate still runs on the original hidden_states.
+        allgather + EP>1 + moe_allgather_gate_overlap only. Result consumed
+        in dispatch_preprocess. For latent MoE, fc1_latent_proj is hoisted
+        here so AllGather targets latent-space tensor.
         """
         if (
             self.moe_token_dispatcher_type == "allgather"

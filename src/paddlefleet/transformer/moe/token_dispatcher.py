@@ -1824,10 +1824,9 @@ class AllGatherTokenDispatcher(nn.Layer):
     def get_dispatched_routing(self):
         """Return (global_indices, global_weights, tokens_per_expert).
 
-        tokens_per_expert is computed on demand via a sync-free one-hot
-        histogram (see :func:`_tokens_per_expert_histogram`).  Unlike
-        ``masked_select`` + ``bincount`` this never forces a GPU->CPU sync, so
-        it does not stall the pipeline on every forward / recompute.
+        tokens_per_expert uses a sync-free scatter histogram
+        (:func:`_tokens_per_expert_histogram`) — no GPU->CPU sync, no
+        full one-hot materialization.
         """
         tokens_per_expert = _tokens_per_expert_histogram(
             self._global_topk_indices, self.num_experts
@@ -1868,9 +1867,8 @@ class AllGatherTokenDispatcher(nn.Layer):
         data+scale are written into the handle for _DownProjection.backward.
         """
         if combine_overlap_handle is None:
-            # Still wrap in a PyLayer so backward can collect fp8 grad into
-            # the handle (previously dropped, causing _DownProjection.backward
-            # to read a stale/empty handle when shared-expert overlap is off).
+            # Must wrap in a PyLayer so backward populates
+            # fp8_combine_grad_handle for _DownProjection.backward.
             combined_x = _AllGatherCombineNoOverlap.apply(
                 hidden_states, self.moe_group, fp8_combine_grad_handle
             )
@@ -1908,10 +1906,10 @@ class AllGatherTokenDispatcher(nn.Layer):
         return combined_x
 
     def combine_postprocess(self, hidden_states: paddle.Tensor):
-        """ReduceScatter expert outputs to the local token shard.
+        """Return cached ReduceScatter result from token_combine.
 
-        If token_combine already did the ReduceScatter (overlap path), return
-        the cached result.  Otherwise perform ReduceScatter here.
+        token_combine sets _overlap_combined on both paths (overlap and
+        no-overlap), so the fallback ReduceScatterGroupOp is defensive only.
         """
         if getattr(self, "_overlap_combined", None) is not None:
             out = self._overlap_combined

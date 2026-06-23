@@ -300,27 +300,14 @@ class GroupedMLPExpert(FleetLayer):
         self,
         structured_name_prefix: str = "",
     ):
-        # Two distinct EP weight layouts coexist:
-        #
-        # * Standard: every rank owns a disjoint subset of experts at full
-        #   intermediate width. ``weight1`` is ``[E_local, H, 2*I_full]``
-        #   and ``weight2`` is ``[E_local, I_full, H]``. Sharding axis=0
-        #   stitches the per-rank slabs along the expert dim into the
-        #   global tensor.
-        #
-        # * AllGather token dispatcher: every rank owns *every* expert
-        #   with the intermediate dim sharded across EP. ``weight1`` is
-        #   ``[E, H, 2*I_local]`` and ``weight2`` is ``[E, I_local, H]``.
-        #   Sharding must therefore happen along the intermediate dim,
-        #   not the expert dim. ``weight1``'s last dim is the gated
-        #   ``[gate_r(I_local) ; up_r(I_local)]`` concat — naively
-        #   AllGathering it would interleave gate/up chunks per rank
-        #   (``[gate_r0; up_r0; gate_r1; up_r1; ...]``) rather than
-        #   producing the canonical ``[gate_full; up_full]`` order. We
-        #   reshape to expose the gate/up split as its own axis before
-        #   sharding so flex_checkpoint reassembles the global tensor as
-        #   ``[E, H, 2, I_full]``; loaders can reshape that to
-        #   ``[E, H, 2*I_full]`` losslessly.
+        # Two EP weight layouts:
+        #   standard — rank owns disjoint experts at full intermediate width;
+        #              shard along expert dim (axis=0).
+        #   allgather — rank owns all experts with intermediate dim sharded
+        #              across EP; shard along intermediate dim.
+        # weight1's last dim is [gate; up] concat — reshape to [E, H, 2, I_local]
+        # before sharding axis=3 so AllGather reassembles [gate_full; up_full]
+        # (not interleaved per rank).
         is_intermediate_sharded = (
             self.intermediate_size_per_partition
             != self.config.moe_intermediate_size
