@@ -818,7 +818,7 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
             # Apply loss_mask to mask out padding positions in backward
             bwd_target = target
             bwd_topk_probs = topk_probs
-            if ctx.loss_mask is not None:
+            if getattr(ctx, "loss_mask", None) is not None:
                 lm = ctx.loss_mask.reshape(
                     [target.shape[0], target.shape[1], 1]
                 ).astype(target.dtype)
@@ -832,17 +832,19 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
                 bwd_target,
                 bwd_topk_probs,
                 topk_indices,
-                loss_coeff=(ctx.loss_coeff / max(ctx.num_rows, 1.0)),
+                loss_coeff=(
+                    ctx.loss_coeff / max(getattr(ctx, "num_rows", 1.0), 1.0)
+                ),
                 grad_loss=grad_loss_arg,
             )
         elif ctx.indexer_backend == "tilelang":
             from paddlefleet.tilelang_ops import csa_indexer_bwd
 
             grad_index_scores = (topk_probs - target) * (
-                ctx.loss_coeff / max(ctx.num_rows, 1.0)
+                ctx.loss_coeff / max(getattr(ctx, "num_rows", 1.0), 1.0)
             )
             # Apply loss_mask to zero out gradients for padding positions
-            if ctx.loss_mask is not None:
+            if getattr(ctx, "loss_mask", None) is not None:
                 lm = ctx.loss_mask.reshape(
                     [grad_index_scores.shape[0], grad_index_scores.shape[1], 1]
                 ).astype(grad_index_scores.dtype)
@@ -870,7 +872,7 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
             grad_k = grad_k.cast(index_k_comp.dtype)
 
         grads = (grad_output, grad_q, grad_weights, grad_k) + (None,) * (
-            4 if ctx.loss_mask is not None else 3
+            4 if getattr(ctx, "loss_mask", None) is not None else 3
         )
         return grads
 
