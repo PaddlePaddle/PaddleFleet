@@ -1183,7 +1183,9 @@ class DSAIndexerLossLoggingHelper:
 
         # DP avg
         dp_group = parallel_state.get_data_parallel_group(
-            check_initialized=False
+            check_initialized=False,
+            with_context_parallel=parallel_state.get_context_parallel_world_size()
+            > 1,
         )
         if dp_group is not None and dp_group.nranks > 1:
             paddle.distributed.all_reduce(values, group=dp_group)
