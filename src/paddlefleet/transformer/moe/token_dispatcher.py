@@ -42,7 +42,6 @@ from .moe_utils import (
     AllGatherGroupOp,
     ReduceScatterGroupOp,
     _AllToAll,
-    all_gather_group,
     manual_backward,
     permute,
     reduce_scatter_group,
@@ -929,19 +928,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             hidden_states
         )
 
-    def token_combine(
-        self,
-        hidden_states: paddle.Tensor,
-        combine_overlap_handle: dict | None = None,
-        async_finish=False,
-        fp8_combine_grad_handle: dict | None = None,
-    ):
-        del fp8_combine_grad_handle
-        if combine_overlap_handle is not None:
-            raise ValueError(
-                "MoEFlexTokenDispatcher (alltoall) does not support "
-                "combine_overlap_handle"
-            )
+    def token_combine(self, hidden_states: paddle.Tensor, async_finish=False):
         return self._comm_manager.combine(
             hidden_states, async_finish=async_finish
         )
@@ -1188,9 +1175,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
-        fp8_combine_grad_handle: dict | None = None,
     ):
-        del combine_overlap_handle, async_finish, fp8_combine_grad_handle
         permutated_local_input_tokens = _AllToAll.apply(
             self.permutated_local_input_tokens_shape,
             hidden_states,
@@ -1317,7 +1302,9 @@ class _PreAllGatherFP8Result(paddle.autograd.PyLayer):
         handle["task"].wait()
         ctx.group = handle["group"]
         x_fp8_global, scale_global = _split_fused_fp8_gather(
-            handle["fused_global"], handle["H"], handle["H128"],
+            handle["fused_global"],
+            handle["H"],
+            handle["H128"],
             handle["scale_dtype"],
         )
         ctx.set_grad_in_dtype_consistent(False)
@@ -1411,9 +1398,7 @@ def _all_gather_grad_fp8_async(grad, group):
     fused_local = paddle.concat(
         [x_fp8.view("uint8"), scale.view("uint8")], axis=1
     ).contiguous()  # [T_local, H + 4*H128]
-    fused_global = paddle.empty(
-        [T_global, fused_local.shape[1]], dtype="uint8"
-    )
+    fused_global = paddle.empty([T_global, fused_local.shape[1]], dtype="uint8")
     task = paddle.distributed.stream.all_gather(
         fused_global,
         fused_local,
@@ -1536,9 +1521,7 @@ def _tokens_per_expert_histogram(indices, num_experts):
     flat = indices.reshape([-1]).cast("int64")
     sink = paddle.full_like(flat, num_experts)
     clamped = paddle.where(flat >= 0, flat, sink)
-    onehot = paddle.nn.functional.one_hot(
-        clamped, num_classes=num_experts + 1
-    )
+    onehot = paddle.nn.functional.one_hot(clamped, num_classes=num_experts + 1)
     counts = onehot.cast("int32").sum(axis=0)
     return counts[:num_experts]
 

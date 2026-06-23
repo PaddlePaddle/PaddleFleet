@@ -703,19 +703,30 @@ class MoELayer(nn.Layer):
     ):
         """Combine expert outputs back to the local token shard.
 
-        Delegates to the underlying ``token_dispatcher``: ``token_combine``
-        either issues a (possibly fused) ReduceScatter, then
-        ``combine_postprocess`` finalizes it. When
-        ``combine_overlap_handle`` is provided the ReduceScatter overlaps
-        with a user-supplied subgraph (typically the shared-expert MLP).
+        For the 'allgather' dispatcher: ``token_combine`` issues a (possibly
+        fused) ReduceScatter, then ``combine_postprocess`` finalizes it. When
+        ``combine_overlap_handle`` is provided the ReduceScatter overlaps with
+        a user-supplied subgraph (typically the shared-expert MLP).
+
+        For other dispatchers (deepep / hybridep / alltoall): delegates to
+        ``_comm_manager.combine`` directly, which already returns the restored
+        tensor (no separate combine_postprocess step).
         """
-        hidden_states = self.token_dispatcher.token_combine(
+        if self.moe_token_dispatcher_type == "allgather":
+            hidden_states = self.token_dispatcher.token_combine(
+                hidden_states,
+                combine_overlap_handle=combine_overlap_handle,
+                async_finish=async_finish,
+                fp8_combine_grad_handle=fp8_combine_grad_handle,
+            )
+            return self.token_dispatcher.combine_postprocess(hidden_states)
+        return self.token_dispatcher._comm_manager.combine(
             hidden_states,
-            combine_overlap_handle=combine_overlap_handle,
-            async_finish=async_finish,
-            fp8_combine_grad_handle=fp8_combine_grad_handle,
+            combine_overlap_handle,
+            use_rr_deepep_combine=self.use_rr_deepep_combine,
+            fp8_dispatch=self.fp8_dispatch and self.using_sonic_moe,
+            combine_grad_handle=fp8_combine_grad_handle,
         )
-        return self.token_dispatcher.combine_postprocess(hidden_states)
 
     def routed_experts_compute(
         self,
@@ -812,7 +823,6 @@ class MoELayer(nn.Layer):
         routing_map: paddle.Tensor,
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
-        combine_overlap_handle: dict | None = None,
     ):
         # Latent MoE: project hidden_states to latent space before dispatch
         if self.use_latent_moe:
@@ -833,9 +843,7 @@ class MoELayer(nn.Layer):
         with profile("fusion_mlp"):
             hidden_states = self.routed_experts_compute(hidden_states)
         with profile("combine"):
-            hidden_states = self.combine(
-                hidden_states, combine_overlap_handle=combine_overlap_handle
-            )
+            hidden_states = self.combine(hidden_states)
 
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
@@ -919,20 +927,11 @@ class MoELayer(nn.Layer):
                 )
 
         with profile("combine"):
-            if self.moe_token_dispatcher_type == "allgather":
-                hidden_states = self.combine(
-                    hidden_states,
-                    combine_overlap_handle=combine_overlap_handle,
-                    fp8_combine_grad_handle=fp8_combine_grad_handle,
-                )
-            else:
-                hidden_states = self.token_dispatcher._comm_manager.combine(
-                    hidden_states,
-                    combine_overlap_handle,
-                    use_rr_deepep_combine=self.use_rr_deepep_combine,
-                    fp8_dispatch=self.fp8_dispatch and self.using_sonic_moe,
-                    combine_grad_handle=fp8_combine_grad_handle,
-                )
+            hidden_states = self.combine(
+                hidden_states,
+                combine_overlap_handle=combine_overlap_handle,
+                fp8_combine_grad_handle=fp8_combine_grad_handle,
+            )
 
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
