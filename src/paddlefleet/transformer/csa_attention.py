@@ -825,6 +825,19 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
                 bwd_target = target * lm
                 bwd_topk_probs = topk_probs * lm
 
+            # cuDNN kernel internally divides by (B * S_q). When loss_mask is
+            # provided, we want 1/global_valid_count instead. Compensate by
+            # scaling loss_coeff so the kernel's internal division yields the
+            # correct normalization.
+            cudnn_loss_coeff = ctx.loss_coeff
+            if getattr(ctx, "loss_mask", None) is not None:
+                B_Sq = float(target.shape[0] * target.shape[1])
+                cudnn_loss_coeff = (
+                    ctx.loss_coeff
+                    * B_Sq
+                    / max(getattr(ctx, "num_rows", 1.0), 1.0)
+                )
+
             grad_q, grad_weights, grad_k = csa_indexer_bwd(
                 index_q,
                 weights,
@@ -832,9 +845,7 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
                 bwd_target,
                 bwd_topk_probs,
                 topk_indices,
-                loss_coeff=(
-                    ctx.loss_coeff / max(getattr(ctx, "num_rows", 1.0), 1.0)
-                ),
+                loss_coeff=cudnn_loss_coeff,
                 grad_loss=grad_loss_arg,
             )
         elif ctx.indexer_backend == "tilelang":
