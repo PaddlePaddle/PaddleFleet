@@ -885,6 +885,9 @@ class TransformerConfig(ModelParallelConfig):
         kernel.
     """
 
+    use_fast_hadamard: bool = False
+    """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
+
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
     Set to 0 to use a single linear output projection instead.

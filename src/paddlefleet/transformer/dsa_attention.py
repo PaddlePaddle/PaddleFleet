@@ -50,6 +50,13 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
+try:
+    from paddlefleet_ops.fast_hadamard_transform import (
+        hadamard_transform as _fast_hadamard_transform,
+    )
+except (ImportError, RuntimeError):
+    _fast_hadamard_transform = None
+
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -105,7 +112,7 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     return (x.reshape(original_shape) * scale).cast(output_dtype)
 
 
-def rotate_activation(x: Tensor) -> Tensor:
+def rotate_activation(x: Tensor, use_fast_hadamard: bool = False) -> Tensor:
     """Apply Hadamard rotation activation.
 
     Reference:
@@ -121,7 +128,14 @@ def rotate_activation(x: Tensor) -> Tensor:
         f"rotate_activation only support bf16 input, but got {x.dtype}"
     )
     hidden_size = x.shape[-1]
-    return hadamard_transform(x, scale=hidden_size**-0.5)
+    scale = hidden_size**-0.5
+
+    if use_fast_hadamard:
+        if _fast_hadamard_transform is None:
+            raise RuntimeError("fast_hadamard_transform is not available")
+        return _fast_hadamard_transform(x, scale)
+
+    return hadamard_transform(x, scale)
 
 
 # ---------------------------------------------------------------------------
