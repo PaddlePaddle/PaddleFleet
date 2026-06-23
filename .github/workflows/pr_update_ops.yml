@@ -488,6 +488,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           set -e
           export UV_PYTHON=${{ matrix.python_version }}
+          export PIP_BREAK_SYSTEM_PACKAGES=1
           source /root/proxy
           git reset --hard ${{ github.sha }}
           uv cache clean paddlepaddle-gpu
