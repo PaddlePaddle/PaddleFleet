@@ -6,8 +6,7 @@ on:
       - "release/**"
       - "develop"
     tags:
-      - "v*"
-
+      - 'v*'
 permissions: read-all
 
 env:
@@ -68,7 +67,7 @@ jobs:
       - name: Upload PR ops whl to paddle
         run: |
           set -x
-          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           pip install bce-python-sdk==0.8.74
@@ -80,16 +79,18 @@ jobs:
           pr_number=$(echo $response | jq -r '.[0].url' | awk -F'/' '{print $NF}')
           pr_last_commit=$(echo $response | jq -r '.[0].head.sha')
           mkdir fleet-312 && cd fleet-312
-          wget -q https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet.tar.gz
+          wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${pr_number}/${pr_last_commit}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory .
           cd dist
           if [[ ${{ github.ref_name }} == "develop" ]]; then
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
             python ../../bos/BosClient.py paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+            WHEEL_FILE=paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
           else
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl
             python ../../bos/BosClient.py paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl paddle-whl/nightly/cu129/paddlefleet-ops
+            WHEEL_FILE=paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
 
@@ -166,7 +167,7 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
           set -e
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -218,12 +219,13 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
-          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
           PY_VERSION="${{ matrix.python_version }}"
           PY_VERSION_SHORT="${PY_VERSION//./}"
+          ls paddlefleet_ops-*.whl | head -n1 > paddlefleet_ops-paddle-release-${{ matrix.cuda.bos_CUDA }}-py${PY_VERSION_SHORT}-linux_x86_64.whl.name
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
           else
@@ -249,6 +251,15 @@ jobs:
           fi
           curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
+
+      - name: Upload wheel name artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: whl-name-paddle-release-${{ matrix.cuda.bos_CUDA }}-py${{ matrix.python_version }}-linux_x86_64
+          path: dist/paddlefleet_ops-paddle-release-*.whl.name
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Cleanup
         if: ${{ always() }}
@@ -321,7 +332,7 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
           set -e
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -371,7 +382,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
-          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
@@ -402,7 +413,8 @@ jobs:
       matrix:
         python_version: ["3.12"]
         cuda:
-          - {CUDA_VERSION: CUDA13.0, bos_CUDA: cu130}
+          - {CUDA_VERSION: CUDA13.0, bos_CUDA: cu130, IMAGE_TAG: cuda130-dev-arm-py312}
+          - {CUDA_VERSION: CUDA13.2, bos_CUDA: cu132, IMAGE_TAG: cuda132-dev-arm-py312}
     env:
       TASK: PaddleFleet-nightly-arm-${{ matrix.cuda.CUDA_VERSION }}
       PIP_CACHE_DIR: /home/.cache/pip
@@ -416,7 +428,7 @@ jobs:
     steps:
       - name: Check docker image and run container
         run: |
-          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda130-dev-arm-py312"
+          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:${{ matrix.cuda.IMAGE_TAG }}"
           docker pull $docker_image
           container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
@@ -456,7 +468,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -476,31 +488,36 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           set -e
           export UV_PYTHON=${{ matrix.python_version }}
+          export PIP_BREAK_SYSTEM_PACKAGES=1
           source /root/proxy
           git reset --hard ${{ github.sha }}
           uv cache clean paddlepaddle-gpu
+          uv build --wheel -v
+          python -m pip install --break-system-packages dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           git submodule update --init --recursive
+          git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
             TAG_NAME="${{ github.ref_name }}"
             VERSION="${TAG_NAME#v}"
             export PADDLEFLEET_VERSION=$VERSION
           fi
           export IS_NVIDIA=True
-          /usr/bin/python -m pip install --break-system-packages packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3"
-          /usr/bin/python -m pip install --break-system-packages "nvidia-nvshmem-cu13>=3.3.9,<3.5"
+          python -m pip install --break-system-packages packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3"
+          python -m pip install --break-system-packages "nvidia-nvshmem-cu13>=3.3.9,<3.5"
           # HybridEP links against NVML by soname; install dev stubs for libnvidia-ml.so.1.
           apt-get update && apt-get install -y --no-install-recommends libnvidia-ml-dev
           rm -rf /var/lib/apt/lists/*
-          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v --python /usr/bin/python
+          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
           '
 
       - name: Upload wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
+          ls paddlefleet_ops-*.whl | head -n1 > paddlefleet_ops-arm-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet-ops
           else
@@ -508,6 +525,7 @@ jobs:
             export AK=paddle
             export SK=paddle
             python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
+            python ../bos/BosClient.py paddlefleet_ops-arm-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_aarch64.whl
@@ -522,3 +540,53 @@ jobs:
           set +e
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
+
+  upload-to-paddletest:
+    name: Upload ops wheel to paddletest (${{ matrix.flavor.label }}, ${{ matrix.flavor.bos_CUDA }}, py${{ matrix.flavor.python_version }})
+    needs: [publish-ops-wheel, publish-ops-wheel-paddle-dev, publish-ops-wheel-arm]
+    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    runs-on: paddle-bot
+    env:
+      PR_ID: "0"
+      COMMIT_ID: ${{ github.sha }}
+      BRANCH: ${{ github.ref_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor:
+          # paddle-release: x86 wheels published to paddle-whl/nightly/${cuda}/paddlefleet-ops
+          - {label: paddle-release, bos_CUDA: cu129, python_version: "3.10", artifact_name: "whl-name-paddle-release-cu129-py3.10-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu129-py310-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu129, python_version: "3.11", artifact_name: "whl-name-paddle-release-cu129-py3.11-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu129-py311-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu129, python_version: "3.12", artifact_name: "whl-name-paddle-release-cu129-py3.12-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu129-py312-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu129, python_version: "3.13", artifact_name: "whl-name-paddle-release-cu129-py3.13-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu129-py313-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu130, python_version: "3.10", artifact_name: "whl-name-paddle-release-cu130-py3.10-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu130-py310-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu130, python_version: "3.11", artifact_name: "whl-name-paddle-release-cu130-py3.11-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu130-py311-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu130, python_version: "3.12", artifact_name: "whl-name-paddle-release-cu130-py3.12-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu130-py312-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu130, python_version: "3.13", artifact_name: "whl-name-paddle-release-cu130-py3.13-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu130-py313-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu132, python_version: "3.10", artifact_name: "whl-name-paddle-release-cu132-py3.10-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu132-py310-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu132, python_version: "3.11", artifact_name: "whl-name-paddle-release-cu132-py3.11-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu132-py311-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu132, python_version: "3.12", artifact_name: "whl-name-paddle-release-cu132-py3.12-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu132-py312-linux_x86_64.whl.name"}
+          - {label: paddle-release, bos_CUDA: cu132, python_version: "3.13", artifact_name: "whl-name-paddle-release-cu132-py3.13-linux_x86_64", name_key: "paddlefleet_ops-paddle-release-cu132-py313-linux_x86_64.whl.name"}
+          # arm: linux_aarch64 wheels published to paddle-whl/nightly/${cuda}/paddlefleet-ops
+          - {label: arm, bos_CUDA: cu130, python_version: "3.12", artifact_name: "whl-name-arm-cu130-py3.12-linux_aarch64", name_key: "paddlefleet_ops-arm-cu130-linux_aarch64.whl.name"}
+    steps:
+      - name: Download wheel name artifact
+        if: github.ref_type != 'tag' && matrix.flavor.label != 'arm'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.flavor.artifact_name }}
+
+      - name: Download arm wheel name from bos
+        if: github.ref_type != 'tag' && matrix.flavor.label == 'arm'
+        run: |
+          wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.flavor.name_key }} --no-check-certificate
+
+      - name: Upload wheel to paddletest
+        if: github.ref_type != 'tag'
+        run: |
+          set -e
+          python -m pip install requests
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          WHEEL_FILE=$(cat "${{ matrix.flavor.name_key }}")
+          echo "Notify paddletest for ${WHEEL_FILE} (${{ matrix.flavor.bos_CUDA }})"
+          python notify_paddle_link.py ${{ matrix.flavor.bos_CUDA }} ${WHEEL_FILE} paddlefleet-ops

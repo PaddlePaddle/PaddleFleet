@@ -41,6 +41,8 @@ packages/paddlefleet_ops/src/paddlefleet_ops/flash_mla
 packages/paddlefleet_ops/src/paddlefleet_ops/sonicmoe
 packages/paddlefleet_ops/src/paddlefleet_ops/quack
 packages/paddlefleet_ops/src/paddlefleet_ops/cudnn
+packages/paddlefleet_ops/src/paddlefleet_ops/fast_hadamard_transform
+packages/paddlefleet_ops/src/paddlefleet_ops/fast_hadamard_transform_cuda
 
 # Generated version files
 # Both version.py files are auto-generated at build time by build_backend.py.

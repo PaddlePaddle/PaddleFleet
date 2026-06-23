@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 # Populated by DistDataLoader.__next__() after broadcast,
 # consumed by MTPEmbeddingLayer.forward() via popleft().
 input_ids_for_mtp = deque()
+from paddlefleet.context_parallel_utils import (
+    mark_context_parallel_parameter_disable_scale_grad,
+)
 
 
 class MTPEmbeddingLayer(FleetLayer):
@@ -63,6 +66,10 @@ class MTPEmbeddingLayer(FleetLayer):
             reduce_scatter_embeddings=False,  # MTP does not need SP scatter
             config=no_init_config,
         )
+        if self.config.context_parallel_size > 1:
+            mark_context_parallel_parameter_disable_scale_grad(
+                self.embed_tokens
+            )
 
     @property
     def embedding_weight(self):
@@ -95,7 +102,10 @@ class MTPEmbeddingLayer(FleetLayer):
             self.config.expert_model_parallel_size > 1
             and self.config.tensor_model_parallel_size < 2
         ):
-            text_padding_indices = input_ids == 0
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            text_padding_indices = input_ids == pad_token_id
             input_embeds = fill_feature(input_embeds, text_padding_indices, 0)
 
         dict_args["mtp_input_embeds"] = input_embeds

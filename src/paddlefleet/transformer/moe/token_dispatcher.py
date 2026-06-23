@@ -393,6 +393,7 @@ class _HybridEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ) -> paddle.Tensor:
         return self.dispatch_overlap(
             hidden_states,
@@ -408,6 +409,8 @@ class _HybridEPManager(_DispatchManager):
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
         use_rr_deepep_combine: bool = False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ) -> paddle.Tensor:
         del async_finish, use_rr_deepep_combine
         if combine_overlap_handle is not None:
@@ -545,6 +548,7 @@ class _DeepEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -556,6 +560,7 @@ class _DeepEPManager(_DispatchManager):
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
             use_ue8m0=use_ue8m0,
+            using_sonic_moe=using_sonic_moe,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -610,6 +615,8 @@ class _DeepEPManager(_DispatchManager):
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
         use_rr_deepep_combine: bool = False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ) -> paddle.Tensor:
         if combine_overlap_handle is not None and use_rr_deepep_combine:
             if self._rr_fusedcombined is None:
@@ -621,6 +628,10 @@ class _DeepEPManager(_DispatchManager):
                     f"_rr_fusedcombined type mismatch: expected DeepEPCombineAsyncRefinedRecompute, "
                     f"got {type(self._rr_fusedcombined).__name__}."
                 )
+        if fp8_dispatch is True:
+            assert combine_grad_handle is not None, (
+                "fp8_dispatch=True, but combine_grad_handle is None."
+            )
         hidden_states = fused_combine(
             hidden_states,
             self.group,
@@ -630,9 +641,15 @@ class _DeepEPManager(_DispatchManager):
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
             use_rr_deepep_combine=use_rr_deepep_combine,
+            fp8_dispatch=fp8_dispatch,
+            combine_grad_handle=combine_grad_handle,
         )
-        # Release the handle after combine operation
+        # Release the handle and token_indices after combine operation
         self.handle = None
+        self.token_indices = None
+        self.token_probs = None
+        self.dispatched_probs = None
+        self.dispatched_indices = None
         return hidden_states
 
     def get_permuted_hidden_states_by_experts(
@@ -812,9 +829,14 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         fp8_dispatch: bool,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         return self._comm_manager.dispatch(
-            hidden_states, fp8_dispatch, async_finish, use_ue8m0=use_ue8m0
+            hidden_states,
+            fp8_dispatch,
+            async_finish,
+            use_ue8m0=use_ue8m0,
+            using_sonic_moe=using_sonic_moe,
         )
 
     def dispatch_postprocess(
@@ -1002,6 +1024,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
         global_input_tokens = _AllToAll.apply(
