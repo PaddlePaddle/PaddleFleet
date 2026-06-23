@@ -25,15 +25,24 @@ from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.distributed.fleet.layers.mpu import mp_ops
 from paddle.distributed.fleet.meta_parallel import ScheduleNode
+
+# === save_tensor 插桩结束 ===
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import (
+    _pf_grad_info,
+    _pf_tensor_info,
+    is_bit_exact as _is_bit_exact,
+)
 from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
 )
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
+    get_expert_model_parallel_group,
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -330,6 +339,14 @@ class LanguageLoss(FleetLayer):
         else:
             loss = self.loss_func(logits.cast("float32"), labels)
 
+        # === 插桩: CP16 loss_per_token ===
+        _pf_tensor_info("cp16_loss_per_token", loss, prefix="PF LanguageLoss")
+        if not loss.stop_gradient:
+            loss.register_hook(
+                _pf_grad_info("cp16_loss_per_token", prefix="GRAD PF")
+            )
+        # === 插桩结束 ===
+
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(
                 loss, axis=1, mode=self.config.cp_balance_mode
@@ -412,10 +429,27 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                loss = paddle.sum(
-                    loss.cast(paddle.float32).reshape([-1]) * lossmask
-                )
-                loss = loss / lossmask.sum()
+                _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
+                if _is_bit_exact():
+                    loss_sum = (
+                        _flat.cast(paddle.float64).sum().cast(paddle.float32)
+                    )
+                    _count = lossmask.sum()
+                    # === ALIGN: 模拟 MG 的 dense DP all_reduce (SUM, fp32 累加) ===
+                    # MG: dense DP = EP_size (TP=PP=1), 每个 rank 有相同 loss_sum/count
+                    # reporting_loss = SUM allreduce -> fp32 累加 EP_size 次
+                    import paddle.distributed as _pdist
+
+                    _ep_size = _pdist.get_world_size(
+                        group=get_expert_model_parallel_group()
+                    )
+                    _acc_sum = paddle.zeros([1], dtype=paddle.float32)
+                    for _ in range(_ep_size):
+                        _acc_sum = _acc_sum + loss_sum
+                    loss = _acc_sum[0] / (_count * _ep_size)
+                else:
+                    loss_sum = paddle.sum(_flat)
+                    loss = loss_sum / lossmask.sum()
 
         return loss
 

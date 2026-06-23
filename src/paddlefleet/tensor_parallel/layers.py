@@ -30,6 +30,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
 
+from ..align_dump_utils import is_bit_exact as _is_bit_exact
 from ..parallel_state import (
     get_global_memory_buffer,
     get_tensor_model_parallel_rank,
@@ -304,6 +305,15 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         else:
             # F.embedding currently has a non-deterministic backward function
             output_parallel = F.embedding(masked_input, self.weight)
+        # === embed_probe 插桩 (中央化, GLM_ALIGN_LOG=0 时 no-op) ===
+        from paddlefleet.align_dump_utils import (
+            pf_dump_embed_io as _pf_dump_embed_io,
+        )
+
+        _pf_dump_embed_io(
+            self.weight, masked_input, output_parallel, weight_param=self.weight
+        )
+        # === embed_probe 插桩结束 ===
         # Mask the output embedding.
         if get_pg_size(self.tp_group) > 1:
             output_parallel[input_mask, :] = 0.0
@@ -504,9 +514,23 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             total_input = input
 
         if bias is not None:
-            output = paddle.nn.functional.linear(total_input, weight, bias)
+            if _is_bit_exact():
+                # 用 transpose_y=True 让 cuBLAS 走 transB=T 路径，和 MG 对齐
+                weight_t = (
+                    weight.T.contiguous()
+                )  # [out, in] contiguous, 和MG weight布局一致
+                output = paddle.matmul(total_input, weight_t, transpose_y=True)
+                output = output + bias
+            else:
+                output = paddle.nn.functional.linear(total_input, weight, bias)
         else:
-            output = paddle.matmul(total_input, weight)
+            if _is_bit_exact():
+                # === 当前使用 stash 逐位对齐实现 (与 MG cuBLAS transB=T 同 kernel 路径) ===
+                weight_t = weight.T.contiguous()  # [out, in] contiguous
+                output = paddle.matmul(total_input, weight_t, transpose_y=True)
+            else:
+                # === PR968 F.linear 默认路径 ===
+                output = paddle.nn.functional.linear(total_input, weight)
         return output
 
     @staticmethod

@@ -21,6 +21,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NoReturn
 
+# === save_tensor 插桩 ===
+from paddlefleet.align_dump_utils import (
+    _pf_grad_info,
+    _pf_tensor_info,
+)
+
+# === save_tensor 插桩结束 ===
+
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
 
 if TYPE_CHECKING:
@@ -524,6 +532,36 @@ class Attention(FleetLayer, ABC):
             query, key, value = qkv_output
             gate = None
 
+        # === 插桩: CP7 query/key/value ===
+        _pf_tensor_info(
+            "cp7_query", query, self.layer_number, prefix="PF Attention"
+        )
+        _pf_tensor_info(
+            "cp7_key", key, self.layer_number, prefix="PF Attention"
+        )
+        _pf_tensor_info(
+            "cp7_value", value, self.layer_number, prefix="PF Attention"
+        )
+        if not query.stop_gradient:
+            query.register_hook(
+                _pf_grad_info(
+                    "cp7_query", layer_num=self.layer_number, prefix="GRAD PF"
+                )
+            )
+        if not key.stop_gradient:
+            key.register_hook(
+                _pf_grad_info(
+                    "cp7_key", layer_num=self.layer_number, prefix="GRAD PF"
+                )
+            )
+        if not value.stop_gradient:
+            value.register_hook(
+                _pf_grad_info(
+                    "cp7_value", layer_num=self.layer_number, prefix="GRAD PF"
+                )
+            )
+        # === 插桩结束 ===
+
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
@@ -660,6 +698,31 @@ class Attention(FleetLayer, ABC):
         # core attention computation
         # ==================================
 
+        # === 插桩: CP7b after_rope Q/K ===
+        _pf_tensor_info(
+            "cp7b_after_rope_q", query, self.layer_number, prefix="PF Attention"
+        )
+        _pf_tensor_info(
+            "cp7b_after_rope_k", key, self.layer_number, prefix="PF Attention"
+        )
+        if not query.stop_gradient:
+            query.register_hook(
+                _pf_grad_info(
+                    "cp7b_after_rope_q",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        if not key.stop_gradient:
+            key.register_hook(
+                _pf_grad_info(
+                    "cp7b_after_rope_k",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === 插桩结束 ===
+
         # NOTE: For sequence parallel, the input is [seq, b, h],
         # transpose back to [b, seq, h] for attention computation
         # TODO: supports [seq, b, h] input in attention computation
@@ -773,6 +836,32 @@ class Attention(FleetLayer, ABC):
 
         if gate_recompute is not None:
             gate_recompute.discard_output_and_register_recompute(output)
+
+        # === 插桩: CP8 core_attention, CP9 o_proj ===
+        _pf_tensor_info(
+            "cp8_core_attention",
+            core_attn_out,
+            self.layer_number,
+            prefix="PF Attention",
+        )
+        _pf_tensor_info(
+            "cp9_o_proj", output, self.layer_number, prefix="PF Attention"
+        )
+        if not core_attn_out.stop_gradient:
+            core_attn_out.register_hook(
+                _pf_grad_info(
+                    "cp8_core_attention",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        if not output.stop_gradient:
+            output.register_hook(
+                _pf_grad_info(
+                    "cp9_o_proj", layer_num=self.layer_number, prefix="GRAD PF"
+                )
+            )
+        # === 插桩结束 ===
 
         if self.config.gpt_model_use_experimental_version and _LOG_LAYER_MD5:
             _out = output
@@ -923,7 +1012,44 @@ class SelfAttention(Attention):
         When gated_attention is enabled, also returns a gate tensor for output gating.
         """
         # Attention heads [b, sq, h] --> [b, sq, ng * group_dim]
+        # === 插桩: CP5 详细输入 log ===
+        _pf_tensor_info(
+            "cp5_input_hidden",
+            hidden_states,
+            self.layer_number,
+            prefix="PF Attention",
+        )
+        _w = self.qkv_proj.weight
+        # Paddle weight shape=[input, output], transpose to [output, input] for md5 comparison with MG
+        import paddle
+
+        _w_t = _w.T
+        _pf_tensor_info(
+            "cp5_qkv_weight_T", _w_t, self.layer_number, prefix="PF Attention"
+        )
+        if hasattr(self.qkv_proj, "bias") and self.qkv_proj.bias is not None:
+            _pf_tensor_info(
+                "cp5_qkv_bias",
+                self.qkv_proj.bias,
+                self.layer_number,
+                prefix="PF Attention",
+            )
+        # === 插桩结束 ===
         mixed_qkv, _ = self.qkv_proj(hidden_states)
+
+        # === 插桩: CP5 mixed_qkv ===
+        _pf_tensor_info(
+            "cp5_mixed_qkv", mixed_qkv, self.layer_number, prefix="PF Attention"
+        )
+        if not mixed_qkv.stop_gradient:
+            mixed_qkv.register_hook(
+                _pf_grad_info(
+                    "cp5_mixed_qkv",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === 插桩结束 ===
 
         if self.config.gpt_model_use_experimental_version:
             if self.gated_attention:
@@ -1015,6 +1141,42 @@ class SelfAttention(Attention):
             else:
                 query, key, value = parts
                 gate = None
+
+        # === 插桩: CP6 qkv_split ===
+        _pf_tensor_info(
+            "cp6_qkv_split_q", query, self.layer_number, prefix="PF Attention"
+        )
+        _pf_tensor_info(
+            "cp6_qkv_split_k", key, self.layer_number, prefix="PF Attention"
+        )
+        _pf_tensor_info(
+            "cp6_qkv_split_v", value, self.layer_number, prefix="PF Attention"
+        )
+        if not query.stop_gradient:
+            query.register_hook(
+                _pf_grad_info(
+                    "cp6_qkv_split_q",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        if not key.stop_gradient:
+            key.register_hook(
+                _pf_grad_info(
+                    "cp6_qkv_split_k",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        if not value.stop_gradient:
+            value.register_hook(
+                _pf_grad_info(
+                    "cp6_qkv_split_v",
+                    layer_num=self.layer_number,
+                    prefix="GRAD PF",
+                )
+            )
+        # === 插桩结束 ===
 
         if self.v_scale is not None:
             value = value * self.v_scale

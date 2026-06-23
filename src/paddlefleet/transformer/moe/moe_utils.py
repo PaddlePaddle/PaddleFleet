@@ -32,6 +32,7 @@ except ImportError:
 import paddle.distributed as dist
 from paddle.autograd.py_layer import PyLayer
 
+from paddlefleet.align_dump_utils import is_bit_exact as _is_bit_exact
 from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
@@ -82,6 +83,136 @@ def _unpermute_fp32_accum(
     return output_tokens.cast(permuted_tokens.dtype)
 
 
+class _UnpermuteGatherSumAlignedPyLayer(PyLayer):
+    """Forward + Backward for MG-aligned deterministic unpermute.
+
+    Forward:  gather(reverse_indices) + sum(axis=1)  — UNIQUE indices, byte-exact MG.
+    Backward: broadcast grad_out [N, H] → [N*topk, H] → place into [N_total, H]
+              via the inverse permutation of reverse_indices_flat. Because
+              reverse_indices_flat is a UNIQUE permutation of [0..N*topk),
+              the inverse is built with paddle.scatter(overwrite=True) which
+              is deterministic, and the actual placement uses pure
+              index_select (no scatter_add) — byte-exact regardless of
+              autograd's default scatter_grad.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        permuted_tokens,
+        reverse_indices_flat,
+        num_total_tokens,
+        num_tokens,
+        topk,
+        hidden,
+    ):
+        ctx.input_dtype = permuted_tokens.dtype
+        ctx.num_total_tokens = num_total_tokens
+        ctx.num_tokens = num_tokens
+        ctx.topk = topk
+        ctx.hidden = hidden
+        ctx.save_for_backward(reverse_indices_flat)
+        gathered = permuted_tokens.index_select(
+            axis=0, index=reverse_indices_flat
+        )
+        gathered = gathered.reshape([num_tokens, topk, hidden])
+        # paddle/torch bf16 sum 内部走 fp32 累加
+        output_tokens = gathered.sum(axis=1)
+        return output_tokens.cast(ctx.input_dtype)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (reverse_indices_flat,) = ctx.saved_tensor()
+        # Broadcast in fp32: [N, H] → [N, topk, H] → [N*topk, H]
+        grad_expand = (
+            grad_out.cast("float32")
+            .unsqueeze(1)
+            .expand([ctx.num_tokens, ctx.topk, ctx.hidden])
+            .reshape([ctx.num_tokens * ctx.topk, ctx.hidden])
+        )
+        # Build inverse permutation of reverse_indices_flat (UNIQUE).
+        # reverse_indices_flat[i] = j means: forward output position i comes
+        # from permuted_tokens position j. So in backward we need to place
+        # grad_expand[i] into grad_permuted[j] — i.e. set
+        #     inverse_perm[j] = i   for all i in [0, num_tokens*topk)
+        # then  grad_permuted = grad_expand[inverse_perm].
+        N_total = ctx.num_total_tokens
+        inverse_perm = paddle.zeros([N_total], dtype="int64")
+        src_idx = paddle.arange(ctx.num_tokens * ctx.topk, dtype="int64")
+        inverse_perm = paddle.scatter(
+            inverse_perm,
+            reverse_indices_flat,
+            src_idx,
+            overwrite=True,  # UNIQUE indices → deterministic
+        )
+        grad_permuted = grad_expand.index_select(axis=0, index=inverse_perm)
+        return grad_permuted.cast(ctx.input_dtype)
+
+
+def _unpermute_gather_sum_aligned(
+    permuted_tokens: paddle.Tensor,
+    sorted_indices: paddle.Tensor,
+    restore_shape,
+    routing_map: paddle.Tensor,
+) -> paddle.Tensor:
+    """对齐 Megatron baseline 的 deterministic unpermute (gather + sum(dim=1)) 实现。
+
+    与 ``Megatron-LM/megatron/core/transformer/moe/moe_utils.py::unpermute`` 在
+    ``MOE_DETERMINISTIC_UNPERMUTE=1`` 路径下的算法 1:1 对齐：
+
+      1. 由 routing_map 构造每个 expert 接收的 token 数 (tokens_per_expert) + cumsum offsets
+      2. position_in_expert = routing_map.T.long().cumsum(dim=-1) - 1
+      3. global_position_per_token = (position_in_expert + expert_offsets[:-1]).T
+      4. reverse_indices = (global_position * routing_map_bool)[routing_map_bool].reshape(num_tokens, topk)
+      5. gathered = permuted_tokens.index_select(0, reverse_indices.reshape(-1)).reshape(num_tokens, topk, hidden)
+      6. output = gathered.sum(dim=1)   # paddle/torch sum on bf16 输入会以 fp32 内部累加再 cast 回 bf16
+
+    累加 dtype 与累加序均与 MG baseline 一致；从而 routed_output 在两端 byte-exact。
+
+    实际算子由 ``_UnpermuteGatherSumAlignedPyLayer`` 承载，这样 backward 也走显式
+    fp32 broadcast + UNIQUE-index 路径，避免 paddle autograd 自动重建出的
+    nondeterministic scatter_add 反向。
+    """
+    num_tokens, hidden = restore_shape[0], restore_shape[-1]
+    num_experts = routing_map.shape[1]
+    num_total_tokens = permuted_tokens.shape[0]
+
+    # reverse_indices 全 int 计算，stop_gradient=True，不进 PyLayer 的反向图
+    routing_map_bool = routing_map.cast(paddle.bool)
+    routing_map_T = routing_map_bool.T.contiguous()  # [num_experts, num_tokens]
+
+    tokens_per_expert = routing_map_T.cast("int64").sum(
+        axis=-1
+    )  # [num_experts]
+    expert_offsets = paddle.zeros([num_experts + 1], dtype="int64")
+    expert_offsets[1:] = paddle.cumsum(tokens_per_expert, axis=0)
+
+    position_in_expert_T = (
+        routing_map_T.cast("int64").cumsum(axis=-1) - 1
+    )  # [num_experts, num_tokens]
+    global_position = position_in_expert_T + expert_offsets[:-1].unsqueeze(
+        1
+    )  # [num_experts, num_tokens]
+    global_position_per_token = global_position.T  # [num_tokens, num_experts]
+
+    # 假设每个 token 选择 K 个 experts (top-K)
+    topk = int(routing_map_bool.cast("int64").sum(axis=-1)[0].item())
+    valid_positions = global_position_per_token * routing_map_bool.cast("int64")
+    reverse_indices_flat = paddle.masked_select(
+        valid_positions, routing_map_bool
+    ).reshape([num_tokens * topk])
+    reverse_indices_flat.stop_gradient = True
+
+    return _UnpermuteGatherSumAlignedPyLayer.apply(
+        permuted_tokens,
+        reverse_indices_flat,
+        num_total_tokens,
+        num_tokens,
+        topk,
+        hidden,
+    )
+
+
 class ApplyPermutedProbs(PyLayer):
     """tokens * probs with fp32-accumulated probs gradient."""
 
@@ -108,6 +239,47 @@ def barrier_ep(ep_group):
     paddle.distributed.barrier(ep_group)
 
 
+class _PermuteAlignedPyLayer(PyLayer):
+    """Forward + Backward for MG-aligned permute (gather only).
+
+    Forward:  tokens.index_select(0, sorted_indices)  with DUPLICATE indices
+              (each token appears topk times across experts).
+    Backward: ≡ unpermute (gather + sum across topk).
+              Uses reverse_indices_flat to lay grad_permuted into [N, topk, H]
+              then sum(axis=1) — pure index_select + sum, no scatter_add,
+              fp32 internal accumulation. Byte-exact and deterministic.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        tokens,
+        sorted_indices,
+        reverse_indices_flat,
+        num_tokens,
+        topk,
+        hidden,
+    ):
+        ctx.input_dtype = tokens.dtype
+        ctx.num_tokens = num_tokens
+        ctx.topk = topk
+        ctx.hidden = hidden
+        ctx.save_for_backward(reverse_indices_flat)
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+        return permuted_input
+
+    @staticmethod
+    def backward(ctx, grad_permuted):
+        (reverse_indices_flat,) = ctx.saved_tensor()
+        # gather → [N*topk, H] in fp32 → reshape [N, topk, H] → sum(axis=1)
+        gathered = grad_permuted.cast("float32").index_select(
+            axis=0, index=reverse_indices_flat
+        )
+        gathered = gathered.reshape([ctx.num_tokens, ctx.topk, ctx.hidden])
+        grad_tokens = gathered.sum(axis=1)
+        return grad_tokens.cast(ctx.input_dtype)
+
+
 def permute(
     tokens,
     routing_map,
@@ -132,16 +304,46 @@ def permute(
     num_experts = routing_map.shape[1]
 
     # mask [num_tokens, num_experts] -> [num_experts, num_tokens]
-    routing_map = routing_map.cast(paddle.bool).T.contiguous()
+    routing_map_bool_T = routing_map.cast(paddle.bool).T.contiguous()
 
     # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
     token_indices = (
         paddle.arange(num_tokens).unsqueeze(0).expand([num_experts, -1])
     )
-    sorted_indices = token_indices.masked_select(routing_map)
+    sorted_indices = token_indices.masked_select(routing_map_bool_T)
+    sorted_indices.stop_gradient = True
 
-    # use the mapping to permute the tokens
-    permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+    # === MG对齐: 用 PyLayer 包 forward + 显式 deterministic backward ===
+    # 仅在 GLM_ALIGN_BIT_EXACT=1 时启用，避免影响其他训练；对齐路径要求每行 topk 恒定。
+    if _is_bit_exact():
+        rm_int = routing_map_bool_T.cast("int64")
+        tokens_per_expert = rm_int.sum(axis=-1)
+        expert_offsets = paddle.zeros([num_experts + 1], dtype="int64")
+        expert_offsets[1:] = paddle.cumsum(tokens_per_expert, axis=0)
+        position_in_expert_T = rm_int.cumsum(axis=-1) - 1
+        global_position = (
+            position_in_expert_T + expert_offsets[:-1].unsqueeze(1)
+        ).T
+
+        rm_bool_token = routing_map.cast(paddle.bool)
+        topk_val = int(rm_bool_token.cast("int64").sum(axis=-1)[0].item())
+        valid_positions = global_position * rm_bool_token.cast("int64")
+        reverse_indices_flat = paddle.masked_select(
+            valid_positions, rm_bool_token
+        ).reshape([num_tokens * topk_val])
+        reverse_indices_flat.stop_gradient = True
+
+        permuted_input = _PermuteAlignedPyLayer.apply(
+            tokens,
+            sorted_indices,
+            reverse_indices_flat,
+            num_tokens,
+            topk_val,
+            hidden,
+        )
+    else:
+        # use the mapping to permute the tokens (autograd auto-rebuild)
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
 
     return permuted_input, sorted_indices
 
@@ -186,6 +388,13 @@ def unpermute(
             )
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
+
+    # 对齐模式：走与 Megatron baseline 完全一致的 gather + sum(dim=1) 算法
+    # 通过 env GLM_ALIGN_BIT_EXACT=1 启用；对齐成功后用以让 routed_output 与 MG byte-exact 一致
+    if _is_bit_exact() and routing_map is not None:
+        return _unpermute_gather_sum_aligned(
+            permuted_tokens, sorted_indices, restore_shape, routing_map
+        )
 
     if use_accuracy_compatible_kernel():
         output_tokens = _unpermute_fp32_accum(
