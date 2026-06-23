@@ -269,6 +269,7 @@ class HyperConnectionModule(nn.Layer):
                 fused_h_aggregate,
                 fused_h_post_bda,
                 fused_proj_rms,
+                fused_proj_rms_compute_h,
                 fused_sinkhorn,
             )
 
@@ -276,11 +277,13 @@ class HyperConnectionModule(nn.Layer):
             self._h_aggregate_op = fused_h_aggregate
             self._h_post_bda_op = fused_h_post_bda
             self._proj_rms_op = fused_proj_rms
+            self._proj_rms_compute_h_op = fused_proj_rms_compute_h
         else:
             self._sinkhorn_op = native_sinkhorn
             self._h_aggregate_op = native_h_aggregate
             self._h_post_bda_op = native_h_post_bda
             self._proj_rms_op = native_proj_rms
+            self._proj_rms_compute_h_op = None
 
         self._init_weights()
 
@@ -384,8 +387,34 @@ class HyperConnectionModule(nn.Layer):
             h_res: [..., n, n] - residual mixing matrix (doubly stochastic)
         """
         leading_shape = x.shape[:-1]
-        proj, r = self._projection_and_get_norm(x)
-        h_pre, h_post, h_res = self._compute_h(proj, r)
+
+        if (
+            not _use_accuracy_compatible_kernel()
+            and self._proj_rms_compute_h_op is not None
+        ):
+            # Fused path: proj_rms + compute_h in one kernel launch
+            ori_dtype = x.dtype
+            nC = x.shape[-1]
+            x_2d = x.reshape([-1, nC])
+            weight = self.mapping_proj.weight.astype(ori_dtype)
+            h_pre, h_post, h_res, r = self._proj_rms_compute_h_op(
+                x_2d,
+                weight,
+                self.alpha_pre,
+                self.alpha_post,
+                self.alpha_res,
+                self.bias,
+                self.n,
+                self.norm_eps,
+                self.compute_h_eps,
+            )
+            h_pre = h_pre.reshape([*leading_shape, self.n])
+            h_post = h_post.reshape([*leading_shape, self.n])
+            h_res = h_res.reshape([*leading_shape, self.n * self.n])
+        else:
+            proj, r = self._projection_and_get_norm(x)
+            h_pre, h_post, h_res = self._compute_h(proj, r)
+
         h_res = self._sinkhorn_op(
             h_res.reshape([*leading_shape, self.n, self.n]),
             self.sinkhorn_iterations,

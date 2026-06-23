@@ -26,7 +26,10 @@ import numpy as np
 import paddle
 from paddle import Tensor
 
-from paddlefleet.fusions.fused_mhc_kernels import is_cutile_available
+from paddlefleet.fusions.fused_mhc_kernels import (
+    is_cutile_available,
+    is_triton_available,
+)
 from paddlefleet.transformer.hyper_connection import (
     native_h_aggregate,
     native_h_post_bda,
@@ -68,6 +71,13 @@ def _requires_cutile(test_func):
     return unittest.skipUnless(
         is_cutile_available(), "cuTile (cuda.tile) not installed"
     )(test_func)
+
+
+def _requires_triton(test_func):
+    """Decorator to skip tests when Triton is not available."""
+    return unittest.skipUnless(is_triton_available(), "Triton not installed")(
+        test_func
+    )
 
 
 def _rand(*shape, dtype=DTYPE, requires_grad=False):
@@ -122,11 +132,11 @@ def _assert_not_all_zero(t: Tensor, msg: str = ""):
 
 def _ref_sinkhorn(logits: Tensor, num_iters: int, eps: float = 1e-6) -> Tensor:
     """Pure Paddle differentiable sinkhorn (no custom backward)."""
-    row_max = logits.max(axis=-1, keepdim=True)
-    M = paddle.exp(logits - row_max)
-    for _ in range(num_iters):
-        M = M / M.sum(axis=-1, keepdim=True).clip(min=eps)
-        M = M / M.sum(axis=-2, keepdim=True).clip(min=eps)
+    M = paddle.nn.functional.softmax(logits, axis=-1) + eps
+    M = M / (M.sum(axis=-2, keepdim=True) + eps)
+    for _ in range(num_iters - 1):
+        M = M / (M.sum(axis=-1, keepdim=True) + eps)
+        M = M / (M.sum(axis=-2, keepdim=True) + eps)
     return M
 
 
@@ -719,7 +729,7 @@ class TestEndToEndNative(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid()
+            h_pre = h[..., :n].sigmoid() + 1e-6
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = native_sinkhorn(
@@ -752,7 +762,7 @@ class TestEndToEndNative(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid()
+            h_pre = h[..., :n].sigmoid() + 1e-6
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = _ref_sinkhorn(
@@ -820,7 +830,7 @@ class TestEndToEndFused(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid()
+            h_pre = h[..., :n].sigmoid() + 1e-6
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = fused_sinkhorn(
@@ -853,7 +863,7 @@ class TestEndToEndFused(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid()
+            h_pre = h[..., :n].sigmoid() + 1e-6
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = _ref_sinkhorn(
@@ -897,6 +907,177 @@ class TestEndToEndFused(unittest.TestCase):
 
 
 # ============================================================================
+# Proj RMS Compute H Tests (NEW fused kernel)
+# ============================================================================
+
+
+def _ref_proj_rms_compute_h(
+    x,
+    weight,
+    alpha_pre,
+    alpha_post,
+    alpha_res,
+    bias,
+    n,
+    eps=1e-6,
+    compute_h_eps=1e-6,
+):
+    """Pure Paddle differentiable reference for proj_rms_compute_h."""
+    # weight is [K, N], so matmul directly
+    proj = paddle.matmul(x, weight)
+    r = x.norm(axis=-1, keepdim=True) / math.sqrt(x.shape[-1])
+    N = weight.shape[1]
+    alpha = paddle.concat(
+        [
+            alpha_pre.expand([n]),
+            alpha_post.expand([n]),
+            alpha_res.expand([N - 2 * n]),
+        ],
+        axis=-1,
+    )
+    h = proj * alpha.unsqueeze(0) / (r + eps) + bias.unsqueeze(0)
+    h_pre = h[..., :n].sigmoid() + compute_h_eps
+    h_post = h[..., n : 2 * n].sigmoid() * 2
+    h_res = h[..., 2 * n :]
+    return h_pre, h_post, h_res, r
+
+
+class TestFusedProjRmsComputeH(unittest.TestCase):
+    """Tests for the cuTile fused_proj_rms_compute_h kernel."""
+
+    def setUp(self):
+        paddle.set_device("gpu")
+
+    @_requires_cutile
+    def test_fwd_bwd_8192_4_16384(self):
+        self._run_fwd_bwd(8192, 4, 16384)
+
+    @_requires_cutile
+    def test_fwd_bwd_4096_4_8192(self):
+        self._run_fwd_bwd(4096, 4, 8192)
+
+    def _run_fwd_bwd(self, M, n, K, eps=1e-6, compute_h_eps=1e-6):
+        from paddlefleet.fusions.fused_mhc_kernels import (
+            fused_proj_rms_compute_h,
+        )
+
+        N = n * n + 2 * n
+        x_data = _rand(M, K)
+        w_data = _rand(K, N)
+        alpha_pre_data = _rand(1)
+        alpha_post_data = _rand(1)
+        alpha_res_data = _rand(1)
+        bias_data = _rand(N)
+
+        grad_h_pre = _rand(M, n)
+        grad_h_post = _rand(M, n)
+        grad_h_res = _rand(M, N - 2 * n)
+        grad_r = _rand(M, 1)
+
+        is_large = M * K > 2**20
+        tf32_fwd_atol = LARGE_TF32_FWD_ATOL if is_large else TF32_FWD_ATOL
+        tf32_fwd_rtol = LARGE_TF32_FWD_RTOL if is_large else TF32_FWD_RTOL
+        tf32_bwd_atol = LARGE_TF32_BWD_ATOL if is_large else TF32_BWD_ATOL
+        tf32_bwd_rtol = LARGE_TF32_BWD_RTOL if is_large else TF32_BWD_RTOL
+        fwd_atol = LARGE_FWD_ATOL if is_large else FWD_ATOL
+        fwd_rtol = LARGE_FWD_RTOL if is_large else FWD_RTOL
+        cosine_thresh = (
+            LARGE_COSINE_SIM_THRESH if is_large else COSINE_SIM_THRESH
+        )
+
+        # -- fused (cuTile) path --
+        xf = x_data.clone()
+        xf.stop_gradient = False
+        wf = w_data.clone()
+        wf.stop_gradient = False
+        apf = alpha_pre_data.clone()
+        apf.stop_gradient = False
+        aof = alpha_post_data.clone()
+        aof.stop_gradient = False
+        arf = alpha_res_data.clone()
+        arf.stop_gradient = False
+        bf = bias_data.clone()
+        bf.stop_gradient = False
+        hp_f, hpo_f, hr_f, r_f = fused_proj_rms_compute_h(
+            xf, wf, apf, aof, arf, bf, n, eps, compute_h_eps
+        )
+        loss_f = (
+            (hp_f * grad_h_pre + hpo_f * grad_h_post).sum()
+            + (hr_f * grad_h_res).sum()
+            + (r_f * grad_r).sum()
+        )
+        loss_f.backward()
+
+        # -- pure reference --
+        xr = x_data.clone()
+        xr.stop_gradient = False
+        wr = w_data.clone()
+        wr.stop_gradient = False
+        apr = alpha_pre_data.clone()
+        apr.stop_gradient = False
+        aor = alpha_post_data.clone()
+        aor.stop_gradient = False
+        arr = alpha_res_data.clone()
+        arr.stop_gradient = False
+        br = bias_data.clone()
+        br.stop_gradient = False
+        hp_r, hpo_r, hr_r, r_r = _ref_proj_rms_compute_h(
+            xr, wr, apr, aor, arr, br, n, eps, compute_h_eps
+        )
+        loss_r = (
+            (hp_r * grad_h_pre + hpo_r * grad_h_post).sum()
+            + (hr_r * grad_h_res).sum()
+            + (r_r * grad_r).sum()
+        )
+        loss_r.backward()
+
+        _assert_close(
+            hp_f,
+            hp_r,
+            tf32_fwd_atol,
+            tf32_fwd_rtol,
+            "fused proj_rms_compute_h h_pre fwd",
+        )
+        _assert_close(
+            hpo_f,
+            hpo_r,
+            tf32_fwd_atol,
+            tf32_fwd_rtol,
+            "fused proj_rms_compute_h h_post fwd",
+        )
+        _assert_close(
+            hr_f,
+            hr_r,
+            tf32_fwd_atol,
+            tf32_fwd_rtol,
+            "fused proj_rms_compute_h h_res fwd",
+        )
+        _assert_close(
+            r_f, r_r, fwd_atol, fwd_rtol, "fused proj_rms_compute_h r fwd"
+        )
+        _assert_close(
+            xf.grad,
+            xr.grad,
+            tf32_bwd_atol,
+            tf32_bwd_rtol,
+            "fused proj_rms_compute_h bwd x",
+        )
+        _assert_close(
+            wf.grad,
+            wr.grad,
+            tf32_bwd_atol,
+            tf32_bwd_rtol,
+            "fused proj_rms_compute_h bwd weight",
+        )
+        _assert_cosine_similar(
+            xf.grad,
+            xr.grad,
+            cosine_thresh,
+            "fused proj_rms_compute_h grad_x cosine",
+        )
+
+
+# ============================================================================
 # Error handling
 # ============================================================================
 
@@ -932,6 +1113,324 @@ class TestFusedMHCErrorHandling(unittest.TestCase):
             )
         with self.assertRaises(RuntimeError):
             fused_proj_rms(paddle.randn([32, 128]), paddle.randn([128, 16]))
+
+
+# ============================================================================
+# Triton kernel tests (compare Triton vs native and vs cuTile)
+# ============================================================================
+
+
+class TestTritonSinkhorn(unittest.TestCase):
+    """Tests for Triton fused Sinkhorn kernel."""
+
+    def setUp(self):
+        paddle.set_device("gpu")
+
+    @_requires_triton
+    def test_fwd_bwd_vs_native_8192_1_4_iters5(self):
+        self._run_fwd_bwd_vs_native(8192, 1, 4, 5)
+
+    @_requires_triton
+    def test_fwd_bwd_vs_native_large_262144_1_4_iters5(self):
+        self._run_fwd_bwd_vs_native(262144, 1, 4, 5)
+
+    @_requires_triton
+    @_requires_cutile
+    def test_fwd_bwd_triton_vs_cutile_8192_1_4_iters5(self):
+        self._run_triton_vs_cutile(8192, 1, 4, 5)
+
+    def _run_triton_vs_cutile(self, s, b, n, iters, eps=1e-6):
+        import paddlefleet.fusions.fused_mhc_kernels as _mod
+
+        triton_sinkhorn = _mod._get_triton_impl("sinkhorn")
+        cutile_apply = _mod._cutile_sinkhorn_apply
+        self.assertIsNotNone(triton_sinkhorn)
+
+        data = _rand(s, b, n, n)
+        grad_out = _rand(s, b, n, n)
+
+        # -- triton --
+        inp_t = data.clone()
+        inp_t.stop_gradient = False
+        out_t = triton_sinkhorn(inp_t, iters, eps)
+        paddle.autograd.backward([out_t], [grad_out])
+        grad_t = inp_t.grad.clone()
+
+        # -- cutile --
+        inp_c = data.clone()
+        inp_c.stop_gradient = False
+        out_c = cutile_apply(inp_c, iters, eps)
+        paddle.autograd.backward([out_c], [grad_out])
+        grad_c = inp_c.grad.clone()
+
+        _assert_close(
+            out_t, out_c, FWD_ATOL, FWD_RTOL, "triton vs cutile sinkhorn fwd"
+        )
+        _assert_close(
+            grad_t, grad_c, BWD_ATOL, BWD_RTOL, "triton vs cutile sinkhorn bwd"
+        )
+        _assert_cosine_similar(
+            grad_t,
+            grad_c,
+            COSINE_SIM_THRESH,
+            "triton vs cutile sinkhorn grad cosine",
+        )
+
+    def _run_fwd_bwd_vs_native(self, s, b, n, iters, eps=1e-6):
+        import paddlefleet.fusions.fused_mhc_kernels as _mod
+
+        triton_sinkhorn = _mod._get_triton_impl("sinkhorn")
+        self.assertIsNotNone(triton_sinkhorn)
+
+        data = _rand(s, b, n, n)
+        grad_out = _rand(s, b, n, n)
+
+        is_large = s * b * n * n > 2**20
+        fwd_atol = LARGE_FWD_ATOL if is_large else FWD_ATOL
+        fwd_rtol = LARGE_FWD_RTOL if is_large else FWD_RTOL
+        bwd_atol = LARGE_BWD_ATOL if is_large else BWD_ATOL
+        bwd_rtol = LARGE_BWD_RTOL if is_large else BWD_RTOL
+        cosine_thresh = (
+            LARGE_COSINE_SIM_THRESH if is_large else COSINE_SIM_THRESH
+        )
+
+        # -- triton --
+        inp_t = data.clone()
+        inp_t.stop_gradient = False
+        out_t = triton_sinkhorn(inp_t, iters, eps)
+        paddle.autograd.backward([out_t], [grad_out])
+        grad_t = inp_t.grad.clone()
+
+        # -- native --
+        inp_n = data.clone()
+        inp_n.stop_gradient = False
+        out_n = native_sinkhorn(inp_n, iters, eps)
+        paddle.autograd.backward([out_n], [grad_out])
+        grad_n = inp_n.grad.clone()
+
+        _assert_close(
+            out_t, out_n, fwd_atol, fwd_rtol, "triton sinkhorn fwd vs native"
+        )
+        _assert_close(
+            grad_t, grad_n, bwd_atol, bwd_rtol, "triton sinkhorn bwd vs native"
+        )
+        _assert_cosine_similar(
+            grad_t,
+            grad_n,
+            cosine_thresh,
+            "triton sinkhorn grad cosine vs native",
+        )
+        _assert_not_all_zero(grad_t, "triton sinkhorn grad")
+
+
+class TestTritonHAggregate(unittest.TestCase):
+    """Tests for Triton h_aggregate forward kernel."""
+
+    def setUp(self):
+        paddle.set_device("gpu")
+
+    @_requires_triton
+    def test_fwd_vs_native_8192_1_4_4096(self):
+        self._run_fwd_vs_native(8192, 1, 4, 4096)
+
+    @_requires_triton
+    def test_fwd_vs_native_large_65536_1_4_8192(self):
+        self._run_fwd_vs_native(65536, 1, 4, 8192)
+
+    @_requires_triton
+    @_requires_cutile
+    def test_fwd_triton_vs_cutile_8192_1_4_4096(self):
+        self._run_triton_vs_cutile(8192, 1, 4, 4096)
+
+    def _run_fwd_vs_native(self, s, b, n, C):
+        import paddlefleet.fusions.fused_mhc_kernels as _mod
+
+        triton_fwd = _mod._get_triton_impl("h_aggregate_fwd")
+        self.assertIsNotNone(triton_fwd)
+
+        x_data = _rand(s, b, n, C)
+        h_data = _rand(s, b, n)
+
+        is_large = s * b * n * C > 2**20
+        fwd_atol = LARGE_FWD_ATOL if is_large else FWD_ATOL
+        fwd_rtol = LARGE_FWD_RTOL if is_large else FWD_RTOL
+        cosine_thresh = (
+            LARGE_COSINE_SIM_THRESH if is_large else COSINE_SIM_THRESH
+        )
+
+        out_t = triton_fwd(x_data, h_data)
+        out_n = native_h_aggregate(x_data, h_data)
+
+        _assert_close(
+            out_t, out_n, fwd_atol, fwd_rtol, "triton h_aggregate fwd vs native"
+        )
+        _assert_cosine_similar(
+            out_t,
+            out_n,
+            cosine_thresh,
+            "triton h_aggregate fwd cosine vs native",
+        )
+        _assert_not_all_zero(out_t, "triton h_aggregate output")
+
+    def _run_triton_vs_cutile(self, s, b, n, C):
+        import paddlefleet.fusions.fused_mhc_kernels as _mod
+
+        triton_fwd = _mod._get_triton_impl("h_aggregate_fwd")
+        self.assertIsNotNone(triton_fwd)
+
+        x_data = _rand(s, b, n, C)
+        h_data = _rand(s, b, n)
+
+        out_t = triton_fwd(x_data, h_data)
+        out_c = _mod._cutile_h_aggregate_fwd(x_data, h_data)
+
+        _assert_close(
+            out_t, out_c, FWD_ATOL, FWD_RTOL, "triton vs cutile h_aggregate fwd"
+        )
+        _assert_cosine_similar(
+            out_t,
+            out_c,
+            COSINE_SIM_THRESH,
+            "triton vs cutile h_aggregate fwd cosine",
+        )
+
+
+class TestTritonHPostBDA(unittest.TestCase):
+    """Tests for Triton h_post_bda forward and backward kernels."""
+
+    def setUp(self):
+        paddle.set_device("gpu")
+
+    @_requires_triton
+    def test_fwd_bwd_vs_native_no_bias_8192_1_4_4096(self):
+        self._run_fwd_bwd_vs_native(8192, 1, 4, 4096, with_bias=False)
+
+    @_requires_triton
+    def test_fwd_bwd_vs_native_with_bias_8192_1_4_4096(self):
+        self._run_fwd_bwd_vs_native(8192, 1, 4, 4096, with_bias=True)
+
+    @_requires_triton
+    @_requires_cutile
+    def test_fwd_triton_vs_cutile_with_bias_8192_1_4_1280(self):
+        self._run_triton_vs_cutile(8192, 1, 4, 1280, with_bias=True)
+
+    def _run_fwd_bwd_vs_native(self, s, b, n, C, with_bias):
+        from paddlefleet.fusions.fused_mhc_kernels import _get_triton_impl
+
+        triton_fwd = _get_triton_impl("h_post_bda_fwd")
+        triton_bwd = _get_triton_impl("h_post_bda_bwd")
+        self.assertIsNotNone(triton_fwd)
+        self.assertIsNotNone(triton_bwd)
+
+        hr_data = _rand(s, b, n, n)
+        orig_data = _rand(s, b, n, C)
+        hp_data = _rand(s, b, n)
+        x_data = _rand(s, b, C)
+        bias_data = _rand(C) if with_bias else None
+        grad_out = _rand(s, b, n, C)
+
+        is_large = s * b * n * C > 2**20
+        fwd_atol = LARGE_FWD_ATOL if is_large else FWD_ATOL
+        fwd_rtol = LARGE_FWD_RTOL if is_large else FWD_RTOL
+        bwd_atol = LARGE_BWD_ATOL if is_large else BWD_ATOL
+        bwd_rtol = LARGE_BWD_RTOL if is_large else BWD_RTOL
+        cosine_thresh = (
+            LARGE_COSINE_SIM_THRESH if is_large else COSINE_SIM_THRESH
+        )
+
+        # -- triton fwd --
+        out_t = triton_fwd(hr_data, orig_data, hp_data, x_data, bias_data)
+
+        # -- native reference fwd --
+        out_n = _ref_h_post_bda(hr_data, orig_data, hp_data, x_data, bias_data)
+
+        _assert_close(
+            out_t, out_n, fwd_atol, fwd_rtol, "triton h_post_bda fwd vs native"
+        )
+        _assert_cosine_similar(
+            out_t,
+            out_n,
+            cosine_thresh,
+            "triton h_post_bda fwd cosine vs native",
+        )
+
+        # -- triton bwd --
+        grads_t = triton_bwd(
+            grad_out, hr_data, orig_data, hp_data, x_data, bias_data
+        )
+
+        # -- native bwd via autograd --
+        def _make_inputs():
+            hr = hr_data.clone()
+            hr.stop_gradient = False
+            orig = orig_data.clone()
+            orig.stop_gradient = False
+            hp = hp_data.clone()
+            hp.stop_gradient = False
+            x = x_data.clone()
+            x.stop_gradient = False
+            bi = bias_data.clone() if with_bias else None
+            if bi is not None:
+                bi.stop_gradient = False
+            return hr, orig, hp, x, bi
+
+        hr_r, orig_r, hp_r, x_r, bi_r = _make_inputs()
+        out_r = _ref_h_post_bda(hr_r, orig_r, hp_r, x_r, bi_r)
+        paddle.autograd.backward([out_r], [grad_out])
+
+        # grads_t order: (grad_h_res, grad_orig_res, grad_h_post, grad_x, [grad_bias])
+        ref_grads = [hr_r.grad, orig_r.grad, hp_r.grad, x_r.grad]
+        names = ["h_res", "orig_res", "h_post", "x"]
+        for i, (name, gr) in enumerate(zip(names, ref_grads)):
+            _assert_close(
+                grads_t[i],
+                gr,
+                bwd_atol,
+                bwd_rtol,
+                f"triton h_post_bda bwd {name}",
+            )
+            _assert_cosine_similar(
+                grads_t[i],
+                gr,
+                cosine_thresh,
+                f"triton h_post_bda bwd {name} cosine",
+            )
+
+        if with_bias and len(grads_t) > 4 and grads_t[4] is not None:
+            _assert_close(
+                grads_t[4],
+                bi_r.grad,
+                bwd_atol,
+                bwd_rtol,
+                "triton h_post_bda bwd bias",
+            )
+
+    def _run_triton_vs_cutile(self, s, b, n, C, with_bias):
+        import paddlefleet.fusions.fused_mhc_kernels as _mod
+
+        triton_fwd = _mod._get_triton_impl("h_post_bda_fwd")
+        self.assertIsNotNone(triton_fwd)
+
+        hr_data = _rand(s, b, n, n)
+        orig_data = _rand(s, b, n, C)
+        hp_data = _rand(s, b, n)
+        x_data = _rand(s, b, C)
+        bias_data = _rand(C) if with_bias else None
+
+        out_t = triton_fwd(hr_data, orig_data, hp_data, x_data, bias_data)
+        out_c = _mod._cutile_h_post_bda_fwd(
+            hr_data, orig_data, hp_data, x_data, bias_data
+        )
+
+        _assert_close(
+            out_t, out_c, FWD_ATOL, FWD_RTOL, "triton vs cutile h_post_bda fwd"
+        )
+        _assert_cosine_similar(
+            out_t,
+            out_c,
+            COSINE_SIM_THRESH,
+            "triton vs cutile h_post_bda fwd cosine",
+        )
 
 
 if __name__ == "__main__":
