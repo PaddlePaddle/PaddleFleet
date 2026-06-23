@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 import logging
 import math
 from typing import TYPE_CHECKING
@@ -522,6 +523,12 @@ class DotProductAttention(FleetLayer):
                     self.scale_mask_softmax.input_in_fp16 = False
                     self.scale_mask_softmax.input_in_bf16 = False
                     self.scale_mask_softmax.input_in_float16 = False
+
+        # PaddleFormers collate emits float32 lower-triangle masks where 1.0 means attend and 0.0
+        # means mask. PaddleFleet mask_func expects bool masks where True means
+        # masked-out, so convert to strict upper-triangle semantics.
+        if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false") and use_eager and attention_mask is not None and attention_mask.dtype == paddle.float32:
+            attention_mask = (attention_mask < 0.5).cast("bool")
 
         # attention scores and attention mask [b, np, sq, sk]
         attention_probs: Tensor = self.scale_mask_softmax(
