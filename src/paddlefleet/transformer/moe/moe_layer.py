@@ -654,6 +654,9 @@ class MoELayer(nn.Layer):
                     moe_expert_fusion=self.moe_expert_fusion,
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
+                    use_accuracy_compatible=getattr(
+                        self.config, "use_accuracy_compatible", False
+                    ),
                 )
 
         with profile("combine"):
@@ -755,6 +758,9 @@ class MoELayer(nn.Layer):
                 use_auto_subbatch=self.use_auto_subbatch,
                 moe_expert_fusion=self.moe_expert_fusion,
                 moe_subbatch_diag=self.moe_subbatch_diag,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
             )
             if is_first_fwd:
                 hidden_states.stop_gradient = False

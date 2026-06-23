@@ -195,6 +195,9 @@ class MultiLatentAttention(Attention):
                 rotary_percent=self.config.rotary_percent,
                 rotary_base=self.config.rope_theta,
                 cp_group=self.pg_collection.cp,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
@@ -208,6 +211,9 @@ class MultiLatentAttention(Attention):
                 mscale=self.config.mscale,
                 mscale_all_dim=self.config.mscale_all_dim,
                 # cp_group=self.pg_collection.cp,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
             )
         else:
             raise ValueError(

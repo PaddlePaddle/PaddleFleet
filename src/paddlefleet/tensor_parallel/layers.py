@@ -467,6 +467,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
+        use_accuracy_compatible=False,
     ):
         """Forward."""
         if gradient_accumulation_fusion and hasattr(weight, "main_grad"):
@@ -501,7 +502,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         if bias is not None:
             output = paddle.nn.functional.linear(total_input, weight, bias)
         else:
-            if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false"):
+            if use_accuracy_compatible:
                 output = paddle.nn.functional.linear(total_input, weight)
             else:
                 output = paddle.matmul(total_input, weight)
@@ -651,6 +652,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     wgrad_deferral_limit: int | None = 0,
     async_grad_allreduce: bool | None = None,
     tp_group: paddle.core.ProcessGroup | None = None,
+    use_accuracy_compatible: bool = False,
 ) -> paddle.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -736,6 +738,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
+        use_accuracy_compatible,
     ]
 
     if not linear_with_grad_accumulation_and_async_allreduce.warned:
@@ -979,6 +982,9 @@ class Linear(paddle.nn.Layer):
                 else None
             ),
             tp_group=None,
+            use_accuracy_compatible=getattr(
+                self.config, "use_accuracy_compatible", False
+            ),
         )
 
         output_bias = (
@@ -1308,6 +1314,9 @@ class ColumnParallelLinear(paddle.nn.Layer):
                 else None
             ),
             tp_group=self.tp_group,
+            use_accuracy_compatible=getattr(
+                self.config, "use_accuracy_compatible", False
+            ),
         )
 
         gather_output = self.gather_output
@@ -1562,6 +1571,9 @@ class RowParallelLinear(paddle.nn.Layer):
             sequence_parallel=False,
             tp_group=None,
             grad_output_buffer=None,
+            use_accuracy_compatible=getattr(
+                self.config, "use_accuracy_compatible", False
+            ),
         )
 
         # All-reduce across all the partitions.

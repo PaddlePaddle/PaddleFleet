@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import os
 import logging
 import math
 from typing import TYPE_CHECKING
@@ -46,11 +45,12 @@ from paddlefleet.transformer.utils import (
 )
 from paddlefleet.utils import divide
 
+
 class _EagerQKScoresFn(paddle.autograd.PyLayer):
     """Compute QK scores with baddbmm forward and explicit matmul backward."""
 
     @staticmethod
-    def forward(ctx, query, key_t, scale):  # noqa: N805
+    def forward(ctx, query, key_t, scale):
         matmul_input_buffer = paddle.empty(
             (query.shape[0], query.shape[1], key_t.shape[2]),
             dtype=query.dtype,
@@ -67,12 +67,13 @@ class _EagerQKScoresFn(paddle.autograd.PyLayer):
         return scores
 
     @staticmethod
-    def backward(ctx, d_scores):  # noqa: N805
+    def backward(ctx, d_scores):
         query, key_t = ctx.saved_tensor()
         scale = ctx.scale
         d_query = paddle.matmul(d_scores, key_t, transpose_y=True) * scale
         d_key_t = paddle.matmul(query, d_scores, transpose_x=True) * scale
         return d_query, d_key_t
+
 
 class DotProductAttention(FleetLayer):
     """
@@ -478,8 +479,10 @@ class DotProductAttention(FleetLayer):
             output_size[0] * output_size[1], -1, output_size[3]
         )
 
-        if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false") and use_eager:
-            matmul_result = _EagerQKScoresFn.apply(query, key, self.softmax_scale)
+        if self.config.use_accuracy_compatible or use_eager:
+            matmul_result = _EagerQKScoresFn.apply(
+                query, key, self.softmax_scale
+            )
         else:
             # preallocating input tensor: [b * np, sq, sk]
             matmul_input_buffer = paddle.empty(
@@ -505,7 +508,7 @@ class DotProductAttention(FleetLayer):
         # Attention probs and dropout
         # ===========================
 
-        if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false") and use_eager:
+        if self.config.use_accuracy_compatible or use_eager:
             if hasattr(self.scale_mask_softmax, "softmax_in_fp32"):
                 self.scale_mask_softmax.softmax_in_fp32 = True
             if hasattr(self.config, "attention_softmax_in_fp32"):
@@ -527,7 +530,11 @@ class DotProductAttention(FleetLayer):
         # PaddleFormers collate emits float32 lower-triangle masks where 1.0 means attend and 0.0
         # means mask. PaddleFleet mask_func expects bool masks where True means
         # masked-out, so convert to strict upper-triangle semantics.
-        if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false") and use_eager and attention_mask is not None and attention_mask.dtype == paddle.float32:
+        if (
+            (self.config.use_accuracy_compatible or use_eager)
+            and attention_mask is not None
+            and attention_mask.dtype == paddle.float32
+        ):
             attention_mask = (attention_mask < 0.5).cast("bool")
 
         # attention scores and attention mask [b, np, sq, sk]

@@ -15,7 +15,6 @@
 # limitations under the License.
 """FP8 Utils"""
 
-import os
 import numpy
 import paddle
 import paddle.nn.functional as F
@@ -308,6 +307,7 @@ class ExpertsGroupGemmContiguousNode:
         use_fp8_mlp=True,
         moe_deep_gemm=True,
         moe_grouped_gemm=False,
+        use_accuracy_compatible=False,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -349,6 +349,7 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_deep_gemm = moe_deep_gemm
         self.moe_grouped_gemm = moe_grouped_gemm
         self.is_split_group_gemm = not moe_grouped_gemm
+        self.use_accuracy_compatible = use_accuracy_compatible
 
     def cached_tensors(self):
         """
@@ -694,7 +695,7 @@ class ExpertsGroupGemmContiguousNode:
                         start_idx:end_idx
                     ].contiguous()
                     expert_w2_i = expert_w2[i].T.contiguous()
-                    if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false"):
+                    if self.use_accuracy_compatible:
                         do2_s_list.append(
                             paddle.matmul(unzipped_grad_i, expert_w2_i)
                         )
@@ -839,7 +840,7 @@ class ExpertsGroupGemmContiguousNode:
                     end_idx = start_idx + token_num
                     do1_i = do1[start_idx:end_idx].contiguous()
                     expert_w1_i = expert_w1[i].T.contiguous()
-                    if os.getenv("FLAGS_use_accuracy_compatible_kernel", "false"):
+                    if self.use_accuracy_compatible:
                         dx_list.append(paddle.matmul(do1_i, expert_w1_i))
                     else:
                         dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
