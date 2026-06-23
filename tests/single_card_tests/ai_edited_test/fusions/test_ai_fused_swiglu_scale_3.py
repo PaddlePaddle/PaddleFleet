@@ -22,9 +22,6 @@ for _ in range(10):
     if os.path.isdir(os.path.join(_repo_root, "src", "paddlefleet")):
         break
 
-sys.path.insert(0, _repo_root)
-sys.path.insert(0, os.path.join(_repo_root, "src"))
-
 # Flush any pre-cached paddlefleet modules so the src/ version wins.
 for _mod in list(sys.modules.keys()):
     if _mod == "paddlefleet" or _mod.startswith("paddlefleet."):

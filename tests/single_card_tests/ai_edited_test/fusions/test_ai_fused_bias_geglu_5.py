@@ -11,19 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
-
 # Tests for src/paddlefleet/fusions/fused_bias_geglu.py
 # Additional tests for geglu, bias_geglu, geglu_back, bias_geglu_back,
 # BiasGeGLUFunction, GeGLUFunction, bias_geglu_impl

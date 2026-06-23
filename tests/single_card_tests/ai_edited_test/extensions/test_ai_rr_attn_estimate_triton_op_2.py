@@ -11,23 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 
 # Tests for src/paddlefleet/_extensions/flashmask/rr_attn_estimate_triton_op.py
 # Dedicated tests for triton kernel wrappers: check_dense_contains_partial_stride,
 # gemm_fuse_softmax_causal, gemm_fuse_softmax_non_causal
-
 import types
 import unittest
 

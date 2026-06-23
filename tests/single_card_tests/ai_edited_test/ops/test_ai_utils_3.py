@@ -16,15 +16,6 @@ import os
 import sys
 import types
 
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 # Find the utils.py source file directly
 _project_root = os.path.dirname(
     os.path.dirname(
