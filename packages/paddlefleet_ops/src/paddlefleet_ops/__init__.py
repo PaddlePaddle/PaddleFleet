@@ -105,10 +105,11 @@ else:
     FAST_HADAMARD_TRANSFORM_HINT = (
         "fast_hadamard_transform is not supported on XPU backend."
     )
-    FLASH_MASK_HINT = (
-        "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet_ops.flash_mask` when flag branch enabled.\n"
-        "For users: use a GPU with compute capability >= 10.0 (Blackwell) to enable."
-    )
+
+FLASH_MASK_HINT = (
+    "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet_ops.flash_mask` when flag branch enabled.\n"
+    "For users: use a GPU with compute capability >= 10.0 (Blackwell) to enable."
+)
 
 
 def _build_notice(
@@ -176,7 +177,6 @@ _CUDNN_FRONTEND_AVAILABLE = False
 _FAST_HADAMARD_TRANSFORM_AVAILABLE = False
 
 if paddle.is_compiled_with_cuda():
-    _FAST_HADAMARD_TRANSFORM_AVAILABLE = True
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
@@ -193,6 +193,7 @@ if paddle.is_compiled_with_cuda():
         _SONIC_MOE_AVAILABLE = True
     if sys.version_info >= (3, 12):
         _CUDNN_FRONTEND_AVAILABLE = True
+    _FAST_HADAMARD_TRANSFORM_AVAILABLE = True
 
 if paddle.is_compiled_with_xpu():
     _DEEP_EP_AVAILABLE = True

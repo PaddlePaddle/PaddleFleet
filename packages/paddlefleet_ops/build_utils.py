@@ -428,6 +428,8 @@ def get_libs():
                     (cuda_major, cuda_minor) <= (12, 8)
                 ),
             },
+        ),
+        EcosystemLibrary(
             name="fast-hadamard-transform",
             source_rel_path="third_party/fast-hadamard-transform",
             artifacts=[
