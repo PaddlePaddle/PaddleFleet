@@ -1577,8 +1577,12 @@ def _tokens_per_expert_histogram(indices, num_experts):
     flat = indices.reshape([-1]).cast("int64")
     sink = paddle.full_like(flat, num_experts)
     clamped = paddle.where(flat >= 0, flat, sink)
-    onehot = paddle.nn.functional.one_hot(clamped, num_classes=num_experts + 1)
-    counts = onehot.cast("int32").sum(axis=0)
+    # scatter(overwrite=False) accumulates updates[i] into counts[clamped[i]]
+    # via atomic add — fixed-shape [num_experts + 1] output, no host sync,
+    # and O(T*K + E) temp memory instead of O(T*K*E) from a full one-hot.
+    counts = paddle.zeros([num_experts + 1], dtype="int32")
+    ones = paddle.ones([flat.shape[0]], dtype="int32")
+    counts = paddle.scatter(counts, clamped, ones, overwrite=False)
     return counts[:num_experts]
 
 
