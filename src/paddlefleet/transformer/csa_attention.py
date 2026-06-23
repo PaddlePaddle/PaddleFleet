@@ -940,6 +940,7 @@ class Compressor(nn.Layer):
         )
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
+        self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
 
     def _overlap_transform(
         self,
@@ -1121,7 +1122,9 @@ class Compressor(nn.Layer):
                 )
 
             if self.rotate:
-                kv = rotate_activation(kv)
+                kv = rotate_activation(
+                    kv, use_fast_hadamard=self.use_fast_hadamard
+                )
                 if self.use_fp8_qat:
                     kv = fp8_simulate_qat(kv, 128)
             else:
@@ -1178,7 +1181,7 @@ class Compressor(nn.Layer):
             )
 
         if self.rotate:
-            kv = rotate_activation(kv)
+            kv = rotate_activation(kv, use_fast_hadamard=self.use_fast_hadamard)
             if self.use_fp8_qat:
                 kv = fp8_simulate_qat(kv, 128)
         else:
@@ -1271,6 +1274,7 @@ class CSAIndexer(nn.Layer):
         )
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
+        self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
 
     def forward_before_topk(
         self,
@@ -1306,7 +1310,7 @@ class CSAIndexer(nn.Layer):
                 doc_lens=doc_lens,
                 position_offset=position_offset,
             )
-        q = rotate_activation(q)
+        q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
 
         # k QAT:
         if self.use_fp8_qat:
