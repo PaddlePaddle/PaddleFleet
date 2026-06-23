@@ -569,6 +569,7 @@ def _compute_dsa_indexer_loss(
     tp_group,
     causal_mask_override: Tensor | None = None,
     loss_mask: Tensor | None = None,
+    global_valid_count: float | None = None,
 ) -> Tensor:
     """Compute KL divergence loss between index_scores and true attention_scores.
 
@@ -680,7 +681,7 @@ def _compute_dsa_indexer_loss(
     if loss_mask is not None:
         # loss_mask: [b, sq] — mask out padding positions
         lm = loss_mask.reshape(kl_per_pos.shape).astype(kl_per_pos.dtype)
-        kl_div = (kl_per_pos * lm).sum() / paddle.clip(lm.sum(), min=1.0)
+        kl_div = (kl_per_pos * lm).sum() / global_valid_count
     else:
         kl_div = kl_per_pos.mean()
     indexer_loss = kl_div * loss_coeff
@@ -953,6 +954,7 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         sparse_loss: bool = True,
         tp_group=None,
         loss_mask: Tensor | None = None,
+        global_valid_count: float | None = None,
     ) -> Tensor:
         """Fused forward: compute index_scores, topk, and KL loss.
 
@@ -1017,6 +1019,7 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
                 tp_group,
                 causal_mask_override=mask,
                 loss_mask=loss_mask,
+                global_valid_count=global_valid_count,
             )
 
         ctx.save_for_backward(q, weights, k, query, key, topk_indices)

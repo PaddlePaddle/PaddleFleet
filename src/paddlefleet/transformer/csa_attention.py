@@ -671,6 +671,7 @@ def _compute_tilelang_csa_indexer_loss_forward(
     seq_offset: int = 0,
     indexer_backend: str = "tilelang",
     loss_mask: Tensor | None = None,
+    global_valid_count: float | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     from paddlefleet.tilelang_ops import (
         csa_attn_target_reducesum,
@@ -741,11 +742,7 @@ def _compute_tilelang_csa_indexer_loss_forward(
     kl_per_pos = kl_per_elem.sum(axis=-1)
     if loss_mask is not None:
         lm = loss_mask.reshape(kl_per_pos.shape).astype(kl_per_pos.dtype)
-        loss = (
-            (kl_per_pos * lm).sum()
-            / paddle.clip(lm.sum(), min=1.0)
-            * float(loss_coeff)
-        )
+        loss = (kl_per_pos * lm).sum() / global_valid_count * float(loss_coeff)
     else:
         loss = kl_per_pos.mean() * float(loss_coeff)
     return loss, topk_indices, topk_probs, target
@@ -1484,6 +1481,7 @@ class CompressedSparseAttention(FleetLayer):
         offset: int,
         startend_row_indices: Tensor | None = None,
         loss_mask: Tensor | None = None,
+        global_valid_count: float | None = None,
     ) -> tuple[Tensor, Tensor | None, tuple | None]:
         """Build indexer-selected compressed KV indices and loss state."""
         b, sq, np_heads, _ = query.shape
@@ -1579,6 +1577,7 @@ class CompressedSparseAttention(FleetLayer):
                 if use_cudnn_indexer
                 else "tilelang",
                 loss_mask=loss_mask,
+                global_valid_count=global_valid_count,
             )
             tilelang_indexer_loss_state = (
                 q_indexer_bf,
@@ -1589,9 +1588,7 @@ class CompressedSparseAttention(FleetLayer):
                 target,
                 float(indexer_loss_coeff),
                 indexer_backend,
-                max(float(loss_mask.sum()), 1.0)
-                if loss_mask is not None
-                else None,
+                global_valid_count if loss_mask is not None else None,
             )
             if indexer_loss_coeff > 0 and paddle.is_grad_enabled():
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
@@ -1641,6 +1638,7 @@ class CompressedSparseAttention(FleetLayer):
                 getattr(self.config, "dsa_indexer_use_sparse_loss", True),
                 self.tp_group,
                 loss_mask,
+                global_valid_count,
             )
             topk_indices_compressed = FusedDSAIndexerLoss._last_topk_indices
 
@@ -1757,14 +1755,35 @@ class CompressedSparseAttention(FleetLayer):
             assert pad_token_id is not None, (
                 "pad_token_id must be set in config when input_ids is provided"
             )
-            loss_mask = (input_ids != pad_token_id).astype(paddle.float32)
-            loss_mask = loss_mask.reshape([b, sq])
+            loss_mask_global = (input_ids != pad_token_id).astype(
+                paddle.float32
+            )
+            if self.cp_enabled:
+                # input_ids is global [b, sq_global]; scatter to local chunk
+                loss_mask_global = loss_mask_global.reshape(
+                    [b, self.cp_size * sq]
+                )
+                global_valid_count = max(float(loss_mask_global.sum()), 1.0)
+                position_offset = self.cp_rank * sq
+                loss_mask = loss_mask_global[
+                    :, position_offset : position_offset + sq
+                ]
+            else:
+                loss_mask = loss_mask_global.reshape([b, sq])
+                global_valid_count = max(float(loss_mask.sum()), 1.0)
         else:
             loss_mask = None
+            global_valid_count = None
 
         if self.cp_enabled:
             return self._forward_cp(
-                query, key, x, qr, startend_row_indices, loss_mask=loss_mask
+                query,
+                key,
+                x,
+                qr,
+                startend_row_indices,
+                loss_mask=loss_mask,
+                global_valid_count=global_valid_count,
             )
 
         if startend_row_indices is not None and self.compress_ratio > 1:
@@ -1829,6 +1848,7 @@ class CompressedSparseAttention(FleetLayer):
                     offset,
                     startend_row_indices,
                     loss_mask=loss_mask,
+                    global_valid_count=global_valid_count,
                 )
             else:
                 # ratio=128: attend to all compressed positions
@@ -1878,6 +1898,7 @@ class CompressedSparseAttention(FleetLayer):
         qr: Tensor,
         startend_row_indices: Tensor | None = None,
         loss_mask: Tensor | None = None,
+        global_valid_count: float | None = None,
     ) -> Tensor:
         """CP-aware forward: local compress + all-gather, sparse attention.
 
@@ -2041,6 +2062,7 @@ class CompressedSparseAttention(FleetLayer):
                         self.tp_group,
                         seq_offset=position_offset,
                         loss_mask=loss_mask,
+                        global_valid_count=global_valid_count,
                     )
                     tilelang_indexer_loss_state = (
                         q_indexer_bf,
@@ -2053,9 +2075,7 @@ class CompressedSparseAttention(FleetLayer):
                         if loss_mask is not None
                         else float(indexer_loss_coeff) / self.cp_size,
                         getattr(self.config, "csa_indexer_backend", "tilelang"),
-                        max(float(loss_mask.sum()), 1.0)
-                        if loss_mask is not None
-                        else None,
+                        global_valid_count if loss_mask is not None else None,
                     )
                     if indexer_loss_coeff > 0:
                         DSAIndexerLossLoggingHelper.save_loss_to_tracker(
@@ -2123,6 +2143,7 @@ class CompressedSparseAttention(FleetLayer):
                         ),
                         self.tp_group,
                         loss_mask,
+                        global_valid_count,
                     )
                     topk_indices_compressed = (
                         FusedDSAIndexerLoss._last_topk_indices

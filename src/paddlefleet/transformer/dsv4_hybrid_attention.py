@@ -290,6 +290,7 @@ class DSv4HybridAttention(Attention):
         )
 
         # Core attention (CompressedSparseAttention)
+        input_ids = kwargs.get("input_ids", None)
         core_attn_out = self.core_attention(
             query,
             key,
