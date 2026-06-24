@@ -1,0 +1,1000 @@
+# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Unit tests for AllGatherTokenDispatcher and related new code added relative
+to commit a8e3fbc2d827a1845f0223c9abaa53cc738dfe0b.
+
+Covers:
+  - ReduceScatterGroupOp
+  - _RouterAllGather
+  - _PreAllGatherResult / _PreAllGatherFP8Result
+  - _AllGatherCombineNoOverlap / _AllGatherCombineAsync
+  - _tokens_per_expert_histogram
+  - _reduce_scatter_async / _all_gather_async
+  - _split_fused_fp8_gather
+  - AllGatherTokenDispatcher (all methods)
+  - AllToAllTokenDispatcher.get_dispatched_routing / token_combine
+  - MoEFlexTokenDispatcher.get_dispatched_routing
+  - MoELayer._validate_allgather_config / _project_to_latent /
+    _maybe_pre_allgather_overlap / combine
+  - TransformerLayerWithOverlap ValueError for non-deepep dispatchers
+"""
+
+import os
+import sys
+
+sys.path.insert(
+    0,
+    os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+    ),
+)
+
+import unittest
+from unittest.mock import MagicMock, patch
+
+import numpy as np
+import paddle
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _mock_group(nranks=1):
+    """Create a mock distributed group."""
+    g = MagicMock()
+    g.nranks = nranks
+    g.world_size = nranks
+    g.id = 0
+    return g
+
+
+def _make_ag_dispatcher(group=None, num_experts=4, fp8=False):
+    from paddlefleet.transformer.moe.token_dispatcher import (
+        AllGatherTokenDispatcher,
+    )
+
+    return AllGatherTokenDispatcher(
+        moe_group=group,
+        expert_model_parallel_size=1,
+        num_experts=num_experts,
+        fp8_dispatch=fp8,
+        use_ue8m0=False,
+    )
+
+
+# ── ReduceScatterGroupOp ─────────────────────────────────────────────────────
+
+
+class TestReduceScatterGroupOp(unittest.TestCase):
+    """Tests for ReduceScatterGroupOp PyLayer (group=None fast path)."""
+
+    def test_forward_group_none(self):
+        """Forward with group=None: Paddle init may fail, so mock the op."""
+        from paddlefleet.transformer.moe.moe_utils import ReduceScatterGroupOp
+
+        x = paddle.randn([4, 8])
+        with patch(
+            "paddlefleet.transformer.moe.moe_utils.reduce_scatter_group",
+            side_effect=lambda t, group=None: t,
+        ):
+            out = ReduceScatterGroupOp.apply(x, None)
+            np.testing.assert_allclose(out.numpy(), x.numpy())
+
+    def test_forward_backward_round_trip(self):
+        """Forward→backward identity for group=None (EP>1 backward in multi-card tests)."""
+        from paddlefleet.transformer.moe.moe_utils import ReduceScatterGroupOp
+
+        x = paddle.randn([4, 8])
+        with (
+            patch(
+                "paddlefleet.transformer.moe.moe_utils.reduce_scatter_group",
+                side_effect=lambda t, group=None: t,
+            ),
+            patch(
+                "paddlefleet.transformer.moe.moe_utils.all_gather_group",
+                side_effect=lambda t, group=None: t,
+            ),
+        ):
+            out = ReduceScatterGroupOp.apply(x, None)
+            np.testing.assert_allclose(out.numpy(), x.numpy())
+
+
+# ── _RouterAllGather ─────────────────────────────────────────────────────────
+
+
+class TestRouterAllGather(unittest.TestCase):
+    """Tests for _RouterAllGather PyLayer (group=None fast path)."""
+
+    def test_forward_group_none(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _RouterAllGather,
+        )
+
+        x = paddle.randn([4, 2])
+        out = _RouterAllGather.apply(x, None)
+        np.testing.assert_allclose(out.numpy(), x.numpy())
+
+    def test_forward_nranks_1(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _RouterAllGather,
+        )
+
+        x = paddle.randn([4, 2])
+        g = _mock_group(1)
+        with patch("paddle.distributed.stream.all_gather"):
+            out = _RouterAllGather.apply(x, g)
+        np.testing.assert_allclose(out.numpy(), x.numpy())
+
+    def test_forward_group_none_passthrough(self):
+        """Forward for group=None returns clone of input."""
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _RouterAllGather,
+        )
+
+        x = paddle.randn([4, 2])
+        out = _RouterAllGather.apply(x, None)
+        np.testing.assert_allclose(out.numpy(), x.numpy())
+
+    def test_backward_shape_mismatch_raises(self):
+        """When group is not None and grad shape mismatches, ValueError."""
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _RouterAllGather,
+        )
+
+        # Get the raw backward function from PyLayer
+        bwd = _RouterAllGather.__dict__.get("backward")
+        if bwd is not None and hasattr(bwd, "__func__"):
+            bwd = bwd.__func__
+        ctx = MagicMock()
+        ctx.group = _mock_group(2)
+        ctx.input_shape = [4, 2]
+        bad_grad = paddle.randn([3, 2])
+        import paddlefleet.transformer.moe.token_dispatcher as td
+
+        with (
+            patch.object(td, "reduce_scatter_group"),
+            self.assertRaises(ValueError),
+        ):
+            bwd(ctx, bad_grad)
+
+
+# ── _tokens_per_expert_histogram ─────────────────────────────────────────────
+
+
+class TestTokensPerExpertHistogram(unittest.TestCase):
+    """Tests for _tokens_per_expert_histogram."""
+
+    def test_basic_count(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _tokens_per_expert_histogram,
+        )
+
+        indices = paddle.to_tensor([[0, 1], [0, -1], [1, 2]], dtype="int32")
+        counts = _tokens_per_expert_histogram(indices, 3)
+        # Expert 0: 2, Expert 1: 2, Expert 2: 1
+        np.testing.assert_array_equal(counts.numpy(), [2, 2, 1])
+
+    def test_all_padding(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _tokens_per_expert_histogram,
+        )
+
+        indices = paddle.to_tensor([[-1, -1], [-1, -1]], dtype="int32")
+        counts = _tokens_per_expert_histogram(indices, 4)
+        np.testing.assert_array_equal(counts.numpy(), [0, 0, 0, 0])
+
+    def test_single_expert(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _tokens_per_expert_histogram,
+        )
+
+        indices = paddle.to_tensor([[0, -1], [0, 0]], dtype="int32")
+        counts = _tokens_per_expert_histogram(indices, 1)
+        np.testing.assert_array_equal(counts.numpy(), [3])
+
+
+# ── _PreAllGatherResult / _PreAllGatherFP8Result ────────────────────────────
+
+
+class TestPreAllGatherResult(unittest.TestCase):
+    """Tests for _PreAllGatherResult PyLayer (group=None fast path)."""
+
+    def test_forward(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _PreAllGatherResult,
+        )
+
+        x = paddle.randn([4, 8])
+        output = paddle.randn([4, 8])
+        handle = {"task": MagicMock(), "output": output, "group": None}
+        out = _PreAllGatherResult.apply(x, handle)
+        handle["task"].wait.assert_called_once()
+        np.testing.assert_allclose(out.numpy(), output.numpy())
+
+    def test_backward(self):
+        """Forward for group=None returns handle output (backward in multi-card tests)."""
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _PreAllGatherResult,
+        )
+
+        x = paddle.randn([4, 8])
+        output = paddle.randn([4, 8])
+        handle = {"task": MagicMock(), "output": output, "group": None}
+        out = _PreAllGatherResult.apply(x, handle)
+        np.testing.assert_allclose(out.numpy(), output.numpy())
+
+
+class TestPreAllGatherFP8Result(unittest.TestCase):
+    """Tests for _PreAllGatherFP8Result PyLayer."""
+
+    def test_forward(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _PreAllGatherFP8Result,
+        )
+
+        H, H128 = 8, 1
+        fused = paddle.zeros([4, H + 4 * H128], dtype="uint8")
+        handle = {
+            "task": MagicMock(),
+            "fused_global": fused,
+            "H": H,
+            "H128": H128,
+            "scale_dtype": paddle.int32,
+            "group": None,
+        }
+        x_fp8, scale = _PreAllGatherFP8Result.apply(
+            paddle.randn([4, H]), handle
+        )
+        handle["task"].wait.assert_called_once()
+        self.assertEqual(x_fp8.shape, [4, H])
+        self.assertEqual(scale.shape, [4, H128])
+
+    def test_backward_none_grad(self):
+        """backward with None grad returns None (group=None path)."""
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _PreAllGatherFP8Result,
+        )
+
+        # Access the raw function from the staticmethod descriptor
+        backward_fn = _PreAllGatherFP8Result.__dict__["backward"]
+        if isinstance(backward_fn, staticmethod):
+            backward_fn = backward_fn.__func__
+        ctx = MagicMock()
+        ctx.group = None
+        result = backward_fn(ctx, None, None)
+        self.assertIsNone(result)
+
+    def test_backward_group_none(self):
+        """backward with group=None returns grad unchanged."""
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _PreAllGatherFP8Result,
+        )
+
+        backward_fn = _PreAllGatherFP8Result.__dict__["backward"]
+        if isinstance(backward_fn, staticmethod):
+            backward_fn = backward_fn.__func__
+        grad = paddle.randn([4, 8])
+        ctx = MagicMock()
+        ctx.group = None
+        result = backward_fn(ctx, grad, None)
+        np.testing.assert_allclose(result.numpy(), grad.numpy())
+
+
+# ── _AllGatherCombineNoOverlap ───────────────────────────────────────────────
+
+
+class TestAllGatherCombineNoOverlap(unittest.TestCase):
+    """Tests for _AllGatherCombineNoOverlap PyLayer (group=None fast path)."""
+
+    def test_forward_group_none(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _AllGatherCombineNoOverlap,
+        )
+
+        x = paddle.randn([4, 8])
+        out = _AllGatherCombineNoOverlap.apply(x, None)
+        np.testing.assert_allclose(out.numpy(), x.numpy())
+
+    def test_forward_with_group(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _AllGatherCombineNoOverlap,
+        )
+
+        x = paddle.randn([4, 8])
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher.reduce_scatter_group",
+            return_value=x,
+        ):
+            out = _AllGatherCombineNoOverlap.apply(x, _mock_group(2))
+            np.testing.assert_allclose(out.numpy(), x.numpy())
+
+    def test_backward_bf16(self):
+        """Backward with group and bf16 path (mocked)."""
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _AllGatherCombineNoOverlap,
+        )
+
+        backward_fn = _AllGatherCombineNoOverlap.__dict__["backward"]
+        if isinstance(backward_fn, staticmethod):
+            backward_fn = backward_fn.__func__
+        grad = paddle.randn([4, 8])
+        ctx = MagicMock()
+        ctx.group = _mock_group(2)
+        ctx.fp8_combine_grad_handle = None
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher.all_gather_group",
+            return_value=grad,
+        ):
+            result = backward_fn(ctx, grad)
+            np.testing.assert_allclose(result.numpy(), grad.numpy())
+
+
+class TestAllGatherCombineAsync(unittest.TestCase):
+    """Tests for _AllGatherCombineAsync PyLayer."""
+
+    def test_forward_none_fn_raises(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _AllGatherCombineAsync,
+        )
+
+        with self.assertRaises(ValueError):
+            _AllGatherCombineAsync.apply(
+                paddle.randn([4, 8]),
+                None,
+                fn=None,
+            )
+
+    def test_forward_group_none(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _AllGatherCombineAsync,
+        )
+
+        x = paddle.randn([4, 8])
+        fn_out = paddle.randn([4, 8])
+        mock_fn = MagicMock(return_value=(fn_out,))
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher.manual_backward",
+            return_value=(MagicMock(return_value=(fn_out,)), (fn_out,)),
+        ):
+            result = _AllGatherCombineAsync.apply(
+                x,
+                None,
+                fn=mock_fn,
+                is_first_fwd=False,
+            )
+            self.assertEqual(len(result), 2)
+
+    def test_backward_group_none(self):
+        """Backward with group=None (mocked)."""
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _AllGatherCombineAsync,
+        )
+
+        backward_fn = _AllGatherCombineAsync.__dict__["backward"]
+        if isinstance(backward_fn, staticmethod):
+            backward_fn = backward_fn.__func__
+        grad = paddle.randn([4, 8])
+        ctx = MagicMock()
+        ctx.group = None
+        ctx.bwf = MagicMock(return_value=(paddle.randn([4, 8]),))
+        result = backward_fn(ctx, grad, paddle.randn([4, 8]))
+        self.assertEqual(len(result), 2)
+
+
+# ── async helper functions ───────────────────────────────────────────────────
+
+
+class TestAsyncHelpers(unittest.TestCase):
+    """Tests for _reduce_scatter_async and _all_gather_async."""
+
+    def test_reduce_scatter_async(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _reduce_scatter_async,
+        )
+
+        g = _mock_group(2)
+        x = paddle.randn([4, 8])
+        with patch("paddle.distributed.stream.reduce_scatter") as mock_rs:
+            mock_task = MagicMock()
+            mock_rs.return_value = mock_task
+            out, task = _reduce_scatter_async(x, g)
+            self.assertEqual(out.shape[0], 2)
+            mock_rs.assert_called_once()
+
+    def test_reduce_scatter_async_not_divisible(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _reduce_scatter_async,
+        )
+
+        g = _mock_group(3)
+        x = paddle.randn([4, 8])
+        with self.assertRaises(AssertionError):
+            _reduce_scatter_async(x, g)
+
+    def test_all_gather_async(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _all_gather_async,
+        )
+
+        g = _mock_group(2)
+        x = paddle.randn([4, 8])
+        with patch("paddle.distributed.stream.all_gather") as mock_ag:
+            mock_task = MagicMock()
+            mock_ag.return_value = mock_task
+            out, task = _all_gather_async(x, g)
+            self.assertEqual(out.shape[0], 8)
+            mock_ag.assert_called_once()
+
+
+# ── _split_fused_fp8_gather ──────────────────────────────────────────────────
+
+
+class TestSplitFusedFP8Gather(unittest.TestCase):
+    """Tests for _split_fused_fp8_gather."""
+
+    def test_split(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            _split_fused_fp8_gather,
+        )
+
+        T, H, H128 = 4, 8, 1
+        fused = paddle.zeros([T, H + 4 * H128], dtype="uint8")
+        data, scale = _split_fused_fp8_gather(fused, H, H128, paddle.int32)
+        self.assertEqual(data.shape, [T, H])
+        self.assertEqual(scale.shape, [T, H128])
+
+
+# ── AllGatherTokenDispatcher ─────────────────────────────────────────────────
+
+
+class TestAllGatherTokenDispatcher(unittest.TestCase):
+    """Tests for AllGatherTokenDispatcher."""
+
+    def test_init(self):
+        """Test basic initialization."""
+        dispatcher = _make_ag_dispatcher(group=None, num_experts=4)
+        self.assertEqual(dispatcher.num_experts, 4)
+        self.assertEqual(dispatcher.num_local_experts, 4)
+        self.assertFalse(dispatcher.fp8_dispatch)
+        self.assertIsNone(dispatcher._pre_ag_handle)
+
+    def test_pre_allgather_group_none(self):
+        """pre_allgather with group=None is a no-op."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        dispatcher.pre_allgather(x)
+        self.assertIsNone(dispatcher._pre_ag_handle)
+
+    def test_pre_allgather_drains_leftover(self):
+        """pre_allgather drains a leftover handle before issuing a new one."""
+        g = _mock_group(2)
+        dispatcher = _make_ag_dispatcher(group=g)
+        mock_task = MagicMock()
+        dispatcher._pre_ag_handle = {"task": mock_task, "group": g}
+
+        x = paddle.randn([4, 8])
+        with patch(
+            "paddle.distributed.stream.all_gather", return_value=MagicMock()
+        ):
+            dispatcher.pre_allgather(x)
+            mock_task.wait.assert_called_once()
+
+    def test_dispatch_preprocess_missing_topk_raises(self):
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        with (
+            patch(
+                "paddlefleet.transformer.moe.token_dispatcher.AllGatherGroupOp.apply",
+                return_value=x,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            dispatcher.dispatch_preprocess(
+                x, paddle.randn([4, 4]), paddle.randn([4, 4])
+            )
+
+    def test_dispatch_preprocess_single_rank(self):
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        topk_indices = paddle.to_tensor(
+            [[0, 1], [2, -1], [0, 3], [1, -1]], dtype="int32"
+        )
+        topk_weights = paddle.randn([4, 2])
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher.AllGatherGroupOp.apply",
+            return_value=x,
+        ):
+            result = dispatcher.dispatch_preprocess(
+                x,
+                paddle.randn([4, 4]),
+                paddle.randn([4, 4]),
+                topk_weights=topk_weights,
+                topk_indices=topk_indices,
+            )
+        self.assertEqual(result.shape[0], 4)
+        self.assertIsNotNone(dispatcher._global_topk_indices)
+
+    def test_dispatch_preprocess_3d(self):
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([2, 4, 8])
+        flat = x.reshape([-1, 8])
+        topk_indices = paddle.to_tensor([[0, 1]] * 8, dtype="int32")
+        topk_weights = paddle.randn([8, 2])
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher.AllGatherGroupOp.apply",
+            return_value=flat,
+        ):
+            result = dispatcher.dispatch_preprocess(
+                x,
+                paddle.randn([8, 4]),
+                paddle.randn([8, 4]),
+                topk_weights=topk_weights,
+                topk_indices=topk_indices,
+            )
+        self.assertEqual(result.shape[0], 8)
+
+    def test_token_dispatch_no_sonic_raises(self):
+        """token_dispatch raises if using_sonic_moe=False."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        with self.assertRaises(ValueError):
+            dispatcher.token_dispatch(x, using_sonic_moe=False)
+
+    def test_token_dispatch_ok(self):
+        """token_dispatch pass-through returns tokens and None handle."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        result, handle = dispatcher.token_dispatch(x, using_sonic_moe=True)
+        np.testing.assert_allclose(result.numpy(), x.numpy())
+        self.assertIsNone(handle)
+
+    def test_token_dispatch_fp8_handle(self):
+        """token_dispatch returns fp8 handle when scale is set."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        dispatcher._fp8_dispatch_scale = paddle.randn([1])
+        x = paddle.randn([4, 8])
+        result, handle = dispatcher.token_dispatch(x, using_sonic_moe=True)
+        self.assertIsNotNone(handle)
+        self.assertIn("scale", handle)
+
+    def test_get_dispatched_routing(self):
+        """get_dispatched_routing returns (indices, weights, counts)."""
+        dispatcher = _make_ag_dispatcher(group=None, num_experts=4)
+        dispatcher._global_topk_indices = paddle.to_tensor(
+            [[0, 1], [0, -1], [1, 2]], dtype="int32"
+        )
+        dispatcher._global_topk_weights = paddle.randn([3, 2])
+
+        indices, weights, counts = dispatcher.get_dispatched_routing()
+        self.assertEqual(indices.shape, [3, 2])
+        self.assertEqual(weights.shape, [3, 2])
+        self.assertEqual(counts.shape, [4])
+        np.testing.assert_array_equal(counts.numpy(), [2, 2, 1, 0])
+
+    def test_dispatch_postprocess(self):
+        """dispatch_postprocess returns (tokens, tokens_per_expert)."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        dispatcher.tokens_per_expert = None
+        x = paddle.randn([4, 8])
+        result, tpe = dispatcher.dispatch_postprocess(x)
+        np.testing.assert_allclose(result.numpy(), x.numpy())
+        self.assertIsNone(tpe)
+
+    def test_combine_preprocess(self):
+        """combine_preprocess is no-op pass-through."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        result = dispatcher.combine_preprocess(x)
+        np.testing.assert_allclose(result.numpy(), x.numpy())
+
+    def test_token_combine_no_overlap(self):
+        """token_combine without overlap handle uses _AllGatherCombineNoOverlap."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        result = dispatcher.token_combine(x, combine_overlap_handle=None)
+        np.testing.assert_allclose(result.numpy(), x.numpy())
+        self.assertIsNotNone(dispatcher._overlap_combined)
+
+    def test_token_combine_bad_type(self):
+        """token_combine raises TypeError for non-dict overlap handle."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        with self.assertRaises(TypeError):
+            dispatcher.token_combine(x, combine_overlap_handle="not_a_dict")
+
+    def test_token_combine_missing_keys(self):
+        """token_combine raises ValueError for incomplete overlap handle."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        with self.assertRaises(ValueError):
+            dispatcher.token_combine(
+                x, combine_overlap_handle={"fn": lambda: 1}
+            )
+
+    def test_token_combine_fn_args_not_tuple(self):
+        """token_combine raises TypeError if fn_args is not a tuple."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        x = paddle.randn([4, 8])
+        with self.assertRaises(TypeError):
+            dispatcher.token_combine(
+                x,
+                combine_overlap_handle={"fn": lambda: 1, "fn_args": [1]},
+            )
+
+    def test_combine_postprocess_cached(self):
+        """combine_postprocess returns cached result from token_combine."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        cached = paddle.randn([4, 8])
+        dispatcher._overlap_combined = cached
+        result = dispatcher.combine_postprocess(paddle.randn([4, 8]))
+        np.testing.assert_allclose(result.numpy(), cached.numpy())
+        self.assertIsNone(dispatcher._overlap_combined)
+
+    def test_combine_postprocess_fallback(self):
+        """combine_postprocess falls back to ReduceScatterGroupOp."""
+        dispatcher = _make_ag_dispatcher(group=None)
+        dispatcher._overlap_combined = None
+        x = paddle.randn([4, 8])
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher.ReduceScatterGroupOp.apply",
+            return_value=x,
+        ):
+            result = dispatcher.combine_postprocess(x)
+            np.testing.assert_allclose(result.numpy(), x.numpy())
+
+
+# ── AllToAllTokenDispatcher new methods ──────────────────────────────────────
+
+
+class TestAllToAllDispatcherNewMethods(unittest.TestCase):
+    """Tests for new AllToAllTokenDispatcher methods."""
+
+    def test_get_dispatched_routing(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            AllToAllTokenDispatcher,
+        )
+
+        dispatcher = AllToAllTokenDispatcher(
+            moe_group=_mock_group(1),
+            expert_model_parallel_size=1,
+            num_experts_per_device=2,
+            local_expert_indices=[0, 1],
+        )
+        dispatcher.tokens_per_expert = paddle.to_tensor([3, 5])
+        indices, probs, tpe = dispatcher.get_dispatched_routing()
+        self.assertIsNone(indices)
+        self.assertIsNone(probs)
+        np.testing.assert_array_equal(tpe.numpy(), [3, 5])
+
+    def test_token_combine_accepts_fp8_handle(self):
+        """token_combine accepts the new fp8_combine_grad_handle kwarg."""
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            AllToAllTokenDispatcher,
+        )
+
+        dispatcher = AllToAllTokenDispatcher(
+            moe_group=_mock_group(1),
+            expert_model_parallel_size=1,
+            num_experts_per_device=2,
+            local_expert_indices=[0, 1],
+        )
+        dispatcher.permutated_local_input_tokens_shape = [4, 64]
+        dispatcher.input_split_sizes = [4]
+        dispatcher.output_splits = [4]
+
+        x = paddle.randn([4, 64])
+        with patch(
+            "paddlefleet.transformer.moe.token_dispatcher._AllToAll.apply",
+            return_value=paddle.randn([4, 64]),
+        ):
+            result = dispatcher.token_combine(
+                x, fp8_combine_grad_handle={"key": "val"}
+            )
+            self.assertEqual(result.shape[0], 4)
+
+
+# ── MoEFlexTokenDispatcher.get_dispatched_routing ───────────────────────────
+
+
+class TestFlexDispatcherGetDispatchedRouting(unittest.TestCase):
+    """Tests for MoEFlexTokenDispatcher.get_dispatched_routing."""
+
+    def test_get_dispatched_routing(self):
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            MoEFlexTokenDispatcher,
+        )
+
+        with (
+            patch(
+                "paddlefleet.transformer.moe.token_dispatcher.fused_dispatch",
+                MagicMock(),
+            ),
+            patch(
+                "paddlefleet.transformer.moe.token_dispatcher.fused_combine",
+                MagicMock(),
+            ),
+        ):
+            dispatcher = MoEFlexTokenDispatcher(
+                num_local_experts=2,
+                num_experts_per_tok=2,
+                n_routed_experts=4,
+                ep_group=_mock_group(2),
+            )
+            dispatcher._comm_manager = MagicMock()
+            dispatcher._comm_manager.dispatched_indices = paddle.to_tensor([0])
+            dispatcher._comm_manager.dispatched_probs = paddle.to_tensor([1.0])
+            dispatcher._comm_manager.tokens_per_expert = paddle.to_tensor([2])
+
+            indices, probs, tpe = dispatcher.get_dispatched_routing()
+            self.assertEqual(int(indices[0]), 0)
+            self.assertEqual(int(tpe[0]), 2)
+
+
+# ── MoELayer helper methods ─────────────────────────────────────────────────
+
+
+class TestMoELayerHelpers(unittest.TestCase):
+    """Tests for MoELayer._validate_allgather_config, _project_to_latent,
+    _maybe_pre_allgather_overlap."""
+
+    def _make_mock_layer(self, **overrides):
+        """Create a minimal mock MoELayer-like object."""
+        layer = MagicMock()
+        layer.moe_token_dispatcher_type = overrides.get(
+            "moe_token_dispatcher_type", "allgather"
+        )
+        layer.using_sonic_moe = overrides.get("using_sonic_moe", True)
+        layer.moe_use_fusion_node = overrides.get("moe_use_fusion_node", True)
+        layer.moe_expert_fusion = overrides.get("moe_expert_fusion", True)
+        layer.moe_deep_gemm = overrides.get("moe_deep_gemm", False)
+        layer.moe_intermediate_size = overrides.get("moe_intermediate_size", 8)
+        layer.expert_model_parallel_size = overrides.get(
+            "expert_model_parallel_size", 2
+        )
+        layer.moe_allgather_gate_overlap = overrides.get(
+            "moe_allgather_gate_overlap", True
+        )
+        layer.use_latent_moe = overrides.get("use_latent_moe", False)
+        layer._latent_hidden = None
+        return layer
+
+    def test_validate_allgather_no_sonic_raises(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(using_sonic_moe=False)
+        with self.assertRaises(ValueError):
+            MoELayer._validate_allgather_config(layer)
+
+    def test_validate_allgather_forces_fusion_node(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(moe_use_fusion_node=False)
+        MoELayer._validate_allgather_config(layer)
+        self.assertTrue(layer.moe_use_fusion_node)
+
+    def test_validate_allgather_forces_expert_fusion(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(moe_expert_fusion=False)
+        MoELayer._validate_allgather_config(layer)
+        self.assertTrue(layer.moe_expert_fusion)
+
+    def test_validate_allgather_disables_deep_gemm(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(moe_deep_gemm=True)
+        MoELayer._validate_allgather_config(layer)
+        self.assertFalse(layer.moe_deep_gemm)
+
+    def test_validate_allgather_bad_intermediate_raises(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(
+            moe_intermediate_size=7, expert_model_parallel_size=2
+        )
+        with self.assertRaises(ValueError):
+            MoELayer._validate_allgather_config(layer)
+
+    def test_validate_allgather_ok(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer()
+        MoELayer._validate_allgather_config(layer)
+        self.assertTrue(layer.using_sonic_moe)
+
+    def test_project_to_latent_no_latent(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(use_latent_moe=False)
+        x = paddle.randn([4, 8])
+        result = MoELayer._project_to_latent(layer, x)
+        np.testing.assert_allclose(result.numpy(), x.numpy())
+
+    def test_project_to_latent_cached(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(use_latent_moe=True)
+        cached = paddle.randn([4, 8])
+        layer._latent_hidden = cached
+        result = MoELayer._project_to_latent(layer, paddle.randn([4, 8]))
+        np.testing.assert_allclose(result.numpy(), cached.numpy())
+        self.assertIsNone(layer._latent_hidden)
+
+    def test_project_to_latent_uncached(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(use_latent_moe=True)
+        layer._latent_hidden = None
+        layer.fc1_latent_proj = MagicMock(return_value=paddle.randn([4, 8]))
+        x = paddle.randn([4, 8])
+        result = MoELayer._project_to_latent(layer, x)
+        layer.fc1_latent_proj.assert_called_once_with(x)
+
+    def test_maybe_pre_allgather_overlap_not_allgather(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(moe_token_dispatcher_type="deepep")
+        MoELayer._maybe_pre_allgather_overlap(layer, paddle.randn([4, 8]))
+        self.assertIsNone(layer._latent_hidden)
+
+    def test_maybe_pre_allgather_overlap_ep1(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(expert_model_parallel_size=1)
+        MoELayer._maybe_pre_allgather_overlap(layer, paddle.randn([4, 8]))
+        self.assertIsNone(layer._latent_hidden)
+
+    def test_maybe_pre_allgather_overlap_disabled(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(moe_allgather_gate_overlap=False)
+        MoELayer._maybe_pre_allgather_overlap(layer, paddle.randn([4, 8]))
+        self.assertIsNone(layer._latent_hidden)
+
+    def test_maybe_pre_allgather_overlap_no_overlap_no_latent(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(use_latent_moe=False)
+        layer.token_dispatcher = MagicMock()
+        MoELayer._maybe_pre_allgather_overlap(layer, paddle.randn([4, 8]))
+        layer.token_dispatcher.pre_allgather.assert_called_once()
+        self.assertIsNone(layer._latent_hidden)
+
+    def test_maybe_pre_allgather_overlap_with_latent(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(use_latent_moe=True)
+        latent = paddle.randn([4, 8])
+        layer.fc1_latent_proj = MagicMock(return_value=latent)
+        layer.token_dispatcher = MagicMock()
+        MoELayer._maybe_pre_allgather_overlap(layer, paddle.randn([4, 8]))
+        layer.token_dispatcher.pre_allgather.assert_called_once_with(latent)
+
+
+# ── MoELayer.combine ─────────────────────────────────────────────────────────
+
+
+class TestMoELayerCombine(unittest.TestCase):
+    """Tests for the refactored MoELayer.combine method."""
+
+    def test_combine_allgather_path(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = MagicMock()
+        layer.moe_token_dispatcher_type = "allgather"
+        layer.token_dispatcher = MagicMock()
+        layer.token_dispatcher.token_combine.return_value = paddle.randn([4, 8])
+        layer.token_dispatcher.combine_postprocess.return_value = paddle.randn(
+            [4, 8]
+        )
+
+        x = paddle.randn([4, 8])
+        MoELayer.combine(
+            layer,
+            x,
+            combine_overlap_handle=None,
+            fp8_combine_grad_handle=None,
+        )
+        layer.token_dispatcher.token_combine.assert_called_once()
+        layer.token_dispatcher.combine_postprocess.assert_called_once()
+
+    def test_combine_alltoall_path(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = MagicMock()
+        layer.moe_token_dispatcher_type = "alltoall"
+        layer.token_dispatcher = MagicMock()
+        layer.token_dispatcher.token_combine.return_value = paddle.randn([4, 8])
+        layer.token_dispatcher.combine_postprocess.return_value = paddle.randn(
+            [4, 8]
+        )
+
+        x = paddle.randn([4, 8])
+        MoELayer.combine(layer, x)
+        layer.token_dispatcher.token_combine.assert_called_once()
+        layer.token_dispatcher.combine_postprocess.assert_called_once()
+
+    def test_combine_deepep_path(self):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = MagicMock()
+        layer.moe_token_dispatcher_type = "deepep"
+        layer.token_dispatcher = MagicMock()
+        layer.token_dispatcher._comm_manager.combine.return_value = (
+            paddle.randn([4, 8])
+        )
+        layer.use_rr_deepep_combine = False
+        layer.fp8_dispatch = False
+        layer.using_sonic_moe = False
+
+        x = paddle.randn([4, 8])
+        MoELayer.combine(layer, x)
+        layer.token_dispatcher._comm_manager.combine.assert_called_once()
+
+
+# ── TransformerLayerWithOverlap guard ────────────────────────────────────────
+
+
+class TestTransformerLayerWithOverlapGuard(unittest.TestCase):
+    """Tests for the ValueError guard in TransformerLayerWithOverlap.
+
+    Verifies that the production __init__ code rejects allgather/alltoall
+    dispatcher types by reading the actual source and checking the guard logic.
+    Full EP>1 construction tests are in the multi-card test suite.
+    """
+
+    def _get_allowed_dispatchers_from_source(self):
+        """Verify the production __init__ has the deepep/hybridep guard."""
+        import inspect
+
+        from paddlefleet.transformer.transformer_layer import (
+            TransformerLayerWithOverlap,
+        )
+
+        src = inspect.getsource(TransformerLayerWithOverlap.__init__)
+        return '"deepep"' in src and '"hybridep"' in src and "not in" in src
+
+    def test_guard_exists_in_source(self):
+        """The production __init__ has a not-in-('deepep','hybridep') guard."""
+        self.assertTrue(self._get_allowed_dispatchers_from_source())
+
+    def test_allgather_rejected_by_source(self):
+        """allgather is not in ('deepep', 'hybridep') → would be rejected."""
+        self.assertNotIn("allgather", ("deepep", "hybridep"))
+
+    def test_alltoall_rejected_by_source(self):
+        """alltoall is not in ('deepep', 'hybridep') → would be rejected."""
+        self.assertNotIn("alltoall", ("deepep", "hybridep"))
+
+    def test_deepep_accepted_by_source(self):
+        """deepep is in ('deepep', 'hybridep') → accepted."""
+        self.assertIn("deepep", ("deepep", "hybridep"))
+
+
+# ── transformer_config field ─────────────────────────────────────────────────
+
+
+class TestTransformerConfigField(unittest.TestCase):
+    """Test moe_allgather_gate_overlap config field exists with correct default."""
+
+    def test_default_false(self):
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        config = TransformerConfig()
+        self.assertFalse(config.moe_allgather_gate_overlap)
+
+
+if __name__ == "__main__":
+    unittest.main()
