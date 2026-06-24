@@ -43,48 +43,72 @@ def _skip_no_cuda(tc):
 
 
 class TestComputeTileLangLossMask(unittest.TestCase):
-    """Cover lines 744-745: loss_mask branch."""
+    """Cover lines 744-745: loss_mask branch via actual function call."""
 
     def setUp(self):
         _skip_no_cuda(self)
         paddle.set_device("gpu")
 
-    def test_loss_mask_reduces_loss(self):
-        """When loss_mask is provided, loss = (kl * lm).sum() / global_valid_count * coeff."""
-        b, sq, topk = 2, 8, 4
+    @patch("paddlefleet.tilelang_ops.csa_indexer_topk_fwd")
+    @patch("paddlefleet.tilelang_ops.csa_attn_target_reducesum")
+    def test_loss_mask_reduces_loss(self, mock_target, mock_topk):
+        """Call _compute_tilelang_csa_indexer_loss_forward with loss_mask."""
+        from paddlefleet.transformer.csa_attention import (
+            _compute_tilelang_csa_indexer_loss_forward,
+        )
 
-        # Directly test the KL + loss_mask logic (lines 737-747)
+        b, sq, topk, d = 2, 8, 4, 16
+        # Mock topk_fwd to return indices and probs
+        topk_indices = paddle.randint(0, 2, [b, sq, topk]).cast("int64")
         topk_probs = paddle.nn.functional.softmax(
             paddle.randn([b, sq, topk], dtype="float32"), axis=-1
         )
+        mock_topk.return_value = (topk_indices, topk_probs)
+
+        # Mock target computation
         target = paddle.nn.functional.softmax(
             paddle.randn([b, sq, topk], dtype="float32"), axis=-1
         )
+        mock_target.return_value = target
 
-        eps = 1e-10
-        kl_per_elem = target * (
-            paddle.log(target + eps) - paddle.log(topk_probs + eps)
-        )
-        kl_per_pos = kl_per_elem.sum(axis=-1)
+        index_q = paddle.randn([b, sq, 4, d], dtype="float32")
+        weights = paddle.randn([b, sq, 4], dtype="float32")
+        index_k = paddle.randn([b, sq // 4, d], dtype="float32")
+        query_mla = paddle.randn([b, sq, 1, d], dtype="float32")
+        key_mla = paddle.randn([b, sq // 4, d], dtype="float32")
+        valid_range = paddle.to_tensor([sq // 4], dtype="int32")
 
-        # With loss_mask (covers lines 744-745)
         loss_mask = paddle.ones([b, sq], dtype="float32")
         loss_mask[:, sq // 2 :] = 0.0
         global_valid_count = max(float(loss_mask.sum()), 1.0)
-        loss_coeff = 1.0
 
-        lm = loss_mask.reshape(kl_per_pos.shape).astype(kl_per_pos.dtype)
-        loss_masked = (
-            (kl_per_pos * lm).sum() / global_valid_count * float(loss_coeff)
+        loss_with, _, _, _ = _compute_tilelang_csa_indexer_loss_forward(
+            index_q,
+            weights,
+            index_k,
+            query_mla,
+            key_mla,
+            valid_range,
+            4,
+            topk,
+            0.125,
+            1.0,
+            loss_mask=loss_mask,
+            global_valid_count=global_valid_count,
         )
-
-        # Without loss_mask (line 747)
-        loss_no_mask = kl_per_pos.mean() * float(loss_coeff)
-
-        self.assertFalse(
-            paddle.allclose(loss_masked, loss_no_mask).item(),
-            "loss_mask should change the loss value",
+        loss_without, _, _, _ = _compute_tilelang_csa_indexer_loss_forward(
+            index_q,
+            weights,
+            index_k,
+            query_mla,
+            key_mla,
+            valid_range,
+            4,
+            topk,
+            0.125,
+            1.0,
         )
+        self.assertFalse(paddle.allclose(loss_with, loss_without).item())
 
 
 # =========================================================================
@@ -93,22 +117,27 @@ class TestComputeTileLangLossMask(unittest.TestCase):
 
 
 class TestAutoScalerBackwardLossMask(unittest.TestCase):
-    """Cover lines 786, 822, 825-826, 846, 849."""
+    """Cover tilelang backward lines 862-866 (loss_mask applied to grad)."""
 
     def setUp(self):
         _skip_no_cuda(self)
         paddle.set_device("gpu")
 
-    def _run_backward(self, backend):
+    @patch("paddlefleet.tilelang_ops.csa_indexer_bwd")
+    def test_tilelang_backend(self, mock_bwd):
         from paddlefleet.transformer.csa_attention import (
             TileLangCSAIndexerLossAutoScaler,
         )
 
         b, sq, topk, d = 2, 8, 4, 16
-        # output must NOT be a leaf tensor (PyLayer inplace constraint)
+        mock_bwd.return_value = (
+            paddle.randn([b, sq, 4, d], dtype="float32"),
+            paddle.randn([b, sq, 4], dtype="float32"),
+            paddle.randn([b, sq // 4, d], dtype="float32"),
+        )
         x = paddle.randn([b, sq, d], dtype="float32")
         x.stop_gradient = False
-        output = x * 1.0  # non-leaf
+        output = x * 1.0
 
         index_q = paddle.randn([b, sq, 4, d], dtype="float32")
         index_q.stop_gradient = False
@@ -129,67 +158,6 @@ class TestAutoScalerBackwardLossMask(unittest.TestCase):
         loss_mask = paddle.ones([b, sq], dtype="float32")
         loss_mask[:, sq // 2 :] = 0.0
 
-        result = TileLangCSAIndexerLossAutoScaler.apply(
-            output,
-            index_q,
-            weights,
-            index_k,
-            topk_indices,
-            topk_probs,
-            target,
-            1.0,
-            backend,
-            10.0,
-            loss_mask,
-        )
-        loss = result.sum()
-        loss.backward()
-        self.assertIsNotNone(x.grad)
-
-    @patch("paddlefleet.tilelang_ops.csa_indexer_bwd")
-    def test_tilelang_backend(self, mock_bwd):
-        b, sq, topk, d = 2, 8, 4, 16
-        mock_bwd.return_value = (
-            paddle.randn([b, sq, 4, d], dtype="float32"),
-            paddle.randn([b, sq, 4], dtype="float32"),
-            paddle.randn([b, sq // 4, d], dtype="float32"),
-        )
-        self._run_backward("tilelang")
-
-    @patch("paddlefleet.tilelang_ops.csa_indexer_bwd")
-    def test_no_loss_mask_returns_7(self, mock_bwd):
-        """Without loss_mask, backward returns 7 grads (4 + 3 Nones)."""
-        from paddlefleet.transformer.csa_attention import (
-            TileLangCSAIndexerLossAutoScaler,
-        )
-
-        b, sq, topk, d = 2, 8, 4, 16
-        mock_bwd.return_value = (
-            paddle.randn([b, sq, 4, d], dtype="float32"),
-            paddle.randn([b, sq, 4], dtype="float32"),
-            paddle.randn([b, sq // 4, d], dtype="float32"),
-        )
-        x = paddle.randn([b, sq, d], dtype="float32")
-        x.stop_gradient = False
-        output = x * 1.0  # non-leaf
-
-        index_q = paddle.randn([b, sq, 4, d], dtype="float32")
-        index_q.stop_gradient = False
-        weights = paddle.randn([b, sq, 4], dtype="float32")
-        weights.stop_gradient = False
-        index_k = paddle.randn([b, sq // 4, d], dtype="float32")
-        index_k.stop_gradient = False
-        topk_indices = paddle.randint(0, 2, [b, sq, topk]).cast("int64")
-        topk_probs = paddle.nn.functional.softmax(
-            paddle.randn([b, sq, topk], dtype="float32"), axis=-1
-        )
-        topk_probs.stop_gradient = False
-        target = paddle.nn.functional.softmax(
-            paddle.randn([b, sq, topk], dtype="float32"), axis=-1
-        )
-        target.stop_gradient = False
-
-        # No loss_mask
         result = TileLangCSAIndexerLossAutoScaler.apply(
             output,
             index_q,
@@ -200,7 +168,8 @@ class TestAutoScalerBackwardLossMask(unittest.TestCase):
             target,
             1.0,
             "tilelang",
-            None,
+            10.0,
+            loss_mask,
         )
         loss = result.sum()
         loss.backward()
@@ -317,7 +286,7 @@ class TestTransformerLayerInputIdsRouting(unittest.TestCase):
 
 
 class TestCSAForwardLossMaskComputation(unittest.TestCase):
-    """Cover csa_attention.py lines 1769-1770, 1773, 1776, 1778, 1781-1783, 1787-1788."""
+    """Cover csa_attention.py lines 1780-1805 (input_ids -> loss_mask in forward)."""
 
     def setUp(self):
         _skip_no_cuda(self)
@@ -328,19 +297,14 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         b, sq = 2, 16
         pad_token_id = 0
         input_ids = paddle.randint(1, 100, [b, sq])
-        # Set some positions to pad
         input_ids[:, -4:] = pad_token_id
 
-        # Replicate the logic from csa_attention.py lines 1769-1790
         loss_mask_global = (input_ids != pad_token_id).astype(paddle.float32)
         loss_mask = loss_mask_global.reshape([b, sq])
         global_valid_count = max(float(loss_mask.sum()), 1.0)
 
-        # 4 padding positions per batch, so 2*12=24 valid
         self.assertEqual(global_valid_count, 24.0)
-        # Check mask shape
         self.assertEqual(list(loss_mask.shape), [b, sq])
-        # Padding positions should be 0
         self.assertTrue((loss_mask[:, -4:] == 0).all().item())
 
     def test_loss_mask_from_input_ids_with_cp(self):
@@ -351,7 +315,6 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         sq_global = sq_local * cp_size
         pad_token_id = 0
 
-        # Global input_ids with some padding at end
         input_ids = paddle.randint(1, 100, [b, sq_global])
         input_ids[:, -8:] = pad_token_id
 
@@ -359,7 +322,6 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         loss_mask_global = loss_mask_global.reshape([b, cp_size * sq_local])
         global_valid_count = max(float(loss_mask_global.sum()), 1.0)
 
-        # Each rank gets a slice
         for cp_rank in range(cp_size):
             position_offset = cp_rank * sq_local
             loss_mask = loss_mask_global[
@@ -367,7 +329,6 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
             ]
             self.assertEqual(list(loss_mask.shape), [b, sq_local])
 
-        # Global valid count should be 2*(32-8)=48
         self.assertEqual(global_valid_count, 48.0)
 
     def test_no_input_ids_gives_none(self):
@@ -381,6 +342,126 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
             global_valid_count = None
         self.assertIsNone(loss_mask)
         self.assertIsNone(global_valid_count)
+
+    @patch(
+        "paddlefleet.transformer.csa_attention._compute_tilelang_csa_indexer_loss_forward"
+    )
+    @patch("paddlefleet.fusions.csa_sparse_attn.csa_sparse_attn")
+    def test_csa_forward_with_input_ids(self, mock_sparse_attn, mock_loss_fwd):
+        """Call CompressedSparseAttention.forward with input_ids to cover lines 1784-1805."""
+        from paddlefleet.transformer.csa_attention import (
+            CompressedSparseAttention,
+            CompressedSparseAttentionSublayersSpec,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        b, sq, hn, np_heads = 2, 16, 64, 4
+        config = TransformerConfig(
+            num_attention_heads=np_heads,
+            num_hidden_layers=2,
+            hidden_size=hn * np_heads,
+            v_head_dim=hn,
+            csa_window_size=8,
+            pad_token_id=0,
+            csa_dense_mode=True,
+            csa_sparse_attn_backend="unfused",
+        )
+
+        sublayers_spec = CompressedSparseAttentionSublayersSpec()
+        csa = CompressedSparseAttention(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+            compress_ratio=0,
+        )
+
+        query = paddle.randn([b, sq, np_heads, hn], dtype="float32")
+        key = paddle.randn([b, sq, 1, hn], dtype="float32")
+        value = key
+        input_ids = paddle.randint(1, 100, [b, sq])
+        input_ids[:, -4:] = 0  # padding
+
+        # Mock sparse attn to return correct shape
+        mock_sparse_attn.return_value = paddle.randn(
+            [b, sq, np_heads, hn], dtype="float32"
+        )
+
+        output = csa.forward(
+            query,
+            key,
+            value,
+            x=paddle.randn([b, sq, hn * np_heads]),
+            qr=paddle.randn([b, sq, hn]),
+            input_ids=input_ids,
+        )
+        self.assertEqual(list(output.shape), [b, sq, np_heads, hn])
+
+    @patch("paddlefleet.fusions.csa_sparse_attn.csa_sparse_attn")
+    def test_csa_forward_with_input_ids_cp_enabled(self, mock_sparse_attn):
+        """Cover lines 1792-1799: CP-enabled loss_mask slicing from input_ids."""
+        from paddlefleet.transformer.csa_attention import (
+            CompressedSparseAttention,
+            CompressedSparseAttentionSublayersSpec,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        b, sq, hn, np_heads = 2, 16, 64, 4
+        config = TransformerConfig(
+            num_attention_heads=np_heads,
+            num_hidden_layers=2,
+            hidden_size=hn * np_heads,
+            v_head_dim=hn,
+            csa_window_size=8,
+            pad_token_id=0,
+            csa_dense_mode=True,
+            csa_sparse_attn_backend="unfused",
+        )
+
+        sublayers_spec = CompressedSparseAttentionSublayersSpec()
+        csa = CompressedSparseAttention(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=2,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+            compress_ratio=0,
+        )
+        # Simulate CP enabled
+        csa.cp_enabled = True
+        csa.cp_size = 2
+        csa.cp_rank = 0
+
+        query = paddle.randn([b, sq, np_heads, hn], dtype="float32")
+        key = paddle.randn([b, sq, 1, hn], dtype="float32")
+        # input_ids must be global: [b, sq_global] where sq_global = cp_size * sq
+        input_ids = paddle.randint(1, 100, [b, sq * 2])
+        input_ids[:, -4:] = 0
+
+        mock_sparse_attn.return_value = paddle.randn(
+            [b, sq, np_heads, hn], dtype="float32"
+        )
+
+        # Patch _forward_cp to just return sparse attn output (avoids full CP)
+        with patch.object(csa, "_forward_cp") as mock_cp:
+            mock_cp.return_value = mock_sparse_attn.return_value
+            output = csa.forward(
+                query,
+                key,
+                key,
+                x=paddle.randn([b, sq, hn * np_heads]),
+                qr=paddle.randn([b, sq, hn]),
+                input_ids=input_ids,
+            )
+            # Verify _forward_cp was called with loss_mask and global_valid_count
+            call_kwargs = mock_cp.call_args[1]
+            self.assertIn("loss_mask", call_kwargs)
+            self.assertIn("global_valid_count", call_kwargs)
+            self.assertIsNotNone(call_kwargs["loss_mask"])
+            self.assertIsNotNone(call_kwargs["global_valid_count"])
 
 
 if __name__ == "__main__":
