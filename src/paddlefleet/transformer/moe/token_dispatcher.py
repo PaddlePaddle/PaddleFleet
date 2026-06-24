@@ -1486,6 +1486,9 @@ class _AllGatherCombineAsync(paddle.autograd.PyLayer):
             )
         ctx.group = group
         ctx.fp8_combine_grad_handle = fp8_combine_grad_handle
+        if fp8_combine_grad_handle is not None:
+            ctx.set_grad_in_dtype_consistent(False)
+            ctx.set_materialize_grads(False)
 
         if group is None or group.nranks == 1:
             combined_x = x.clone()
@@ -1545,6 +1548,9 @@ class _AllGatherCombineNoOverlap(paddle.autograd.PyLayer):
     def forward(ctx, x, group, fp8_combine_grad_handle=None):
         ctx.group = group
         ctx.fp8_combine_grad_handle = fp8_combine_grad_handle
+        if fp8_combine_grad_handle is not None:
+            ctx.set_grad_in_dtype_consistent(False)
+            ctx.set_materialize_grads(False)
         if group is None:
             return x.clone()
         return reduce_scatter_group(x, group=group)
