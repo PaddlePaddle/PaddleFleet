@@ -1340,10 +1340,11 @@ def _reduce_scatter_async(input, group):
     Returns (output, task)."""
     input = input.contiguous()
     out_shape = list(input.shape)
-    assert out_shape[0] % group.nranks == 0, (
-        f"ReduceScatter input rows {out_shape[0]} not divisible by "
-        f"nranks {group.nranks}"
-    )
+    if out_shape[0] % group.nranks != 0:
+        raise ValueError(
+            f"ReduceScatter input rows {out_shape[0]} not divisible by "
+            f"nranks {group.nranks}"
+        )
     out_shape[0] //= group.nranks
     output = paddle.empty(shape=out_shape, dtype=input.dtype)
     task = paddle.distributed.stream.reduce_scatter(

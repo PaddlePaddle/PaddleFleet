@@ -431,7 +431,3 @@ class TestMoELayerCombineEP(_EPTestBase):
         MoELayer.combine(layer, paddle.randn([4, 8]))
         layer.token_dispatcher.token_combine.assert_called_once()
         layer.token_dispatcher.combine_postprocess.assert_called_once()
-
-
-if __name__ == "__main__":
-    unittest.main()

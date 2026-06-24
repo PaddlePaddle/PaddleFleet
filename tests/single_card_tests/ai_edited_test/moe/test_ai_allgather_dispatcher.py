@@ -408,7 +408,7 @@ class TestAsyncHelpers(unittest.TestCase):
 
         g = _mock_group(3)
         x = paddle.randn([4, 8])
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             _reduce_scatter_async(x, g)
 
     def test_all_gather_async(self):
@@ -982,7 +982,3 @@ class TestTransformerConfigField(unittest.TestCase):
 
         config = TransformerConfig()
         self.assertFalse(config.moe_allgather_gate_overlap)
-
-
-if __name__ == "__main__":
-    unittest.main()
