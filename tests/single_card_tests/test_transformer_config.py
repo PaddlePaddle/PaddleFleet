@@ -12,10 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
+import sys
+import types
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import paddle
 
+from paddlefleet.training.arguments import core_transformer_config_from_args
 from paddlefleet.training.initialize import initialize_fleet
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -332,6 +338,114 @@ class TestPadTokenId(unittest.TestCase):
     def test_override_value(self):
         config = TransformerConfig(num_hidden_layers=2, pad_token_id=151643)
         self.assertEqual(config.pad_token_id, 151643)
+
+
+class FakeDictConfig(dict):
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+
+class TestYamlArguments(unittest.TestCase):
+    def _load_yaml_arguments_with_fake_omegaconf(self):
+        class FakeOmegaConf:
+            @staticmethod
+            def create(value):
+                return FakeDictConfig(value)
+
+            @staticmethod
+            def to_container(value, resolve=True):
+                return dict(value)
+
+        fake_omegaconf = types.SimpleNamespace(
+            DictConfig=FakeDictConfig,
+            OmegaConf=FakeOmegaConf,
+        )
+
+        module_name = "paddlefleet.training.yaml_arguments"
+        module_path = (
+            Path(__file__).resolve().parents[2]
+            / "src"
+            / "paddlefleet"
+            / "training"
+            / "yaml_arguments.py"
+        )
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        yaml_arguments = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"omegaconf": fake_omegaconf}):
+            spec.loader.exec_module(yaml_arguments)
+        return yaml_arguments
+
+    def test_deepep_buffer_configs_keeps_dict_value(self):
+        yaml_arguments = self._load_yaml_arguments_with_fake_omegaconf()
+        cfg = FakeDictConfig(
+            {
+                "model": FakeDictConfig(
+                    {
+                        "num_hidden_layers": 2,
+                        "deepep_buffer_configs": FakeDictConfig(
+                            {
+                                "num_sms": 24,
+                                "dispatch_config": [60, 256],
+                                "combine_config": [20, 256],
+                            }
+                        ),
+                    }
+                )
+            }
+        )
+
+        result = yaml_arguments._flatten_configs(cfg)
+
+        self.assertEqual(result.num_hidden_layers, 2)
+        self.assertEqual(
+            result.deepep_buffer_configs,
+            {
+                "num_sms": 24,
+                "dispatch_config": [60, 256],
+                "combine_config": [20, 256],
+            },
+        )
+        self.assertFalse(hasattr(result, "num_sms"))
+
+    def test_regular_nested_config_still_flattens(self):
+        yaml_arguments = self._load_yaml_arguments_with_fake_omegaconf()
+        cfg = FakeDictConfig(
+            {
+                "model": FakeDictConfig({"num_hidden_layers": 2}),
+                "training": FakeDictConfig({"micro_batch_size": 4}),
+            }
+        )
+
+        result = yaml_arguments._flatten_configs(cfg)
+
+        self.assertEqual(result.num_hidden_layers, 2)
+        self.assertEqual(result.micro_batch_size, 4)
+        self.assertFalse(hasattr(result, "model"))
+        self.assertFalse(hasattr(result, "training"))
+
+    def test_core_config_receives_deepep_buffer_configs(self):
+        yaml_arguments = self._load_yaml_arguments_with_fake_omegaconf()
+        args = yaml_arguments._flatten_configs(
+            FakeDictConfig(
+                {
+                    "model": FakeDictConfig(
+                        {
+                            "num_hidden_layers": 2,
+                            "deepep_buffer_configs": FakeDictConfig(
+                                {"num_sms": 24}
+                            ),
+                        }
+                    )
+                }
+            )
+        )
+
+        config = core_transformer_config_from_args(args)
+
+        self.assertEqual(config.deepep_buffer_configs, {"num_sms": 24})
 
 
 if __name__ == "__main__":

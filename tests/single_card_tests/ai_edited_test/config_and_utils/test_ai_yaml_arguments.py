@@ -154,6 +154,34 @@ class TestFlattenConfigs(unittest.TestCase):
         self.assertTrue(result.bool_val)
         self.assertIsNone(result.none_val)
 
+    def test_deepep_buffer_configs_keeps_dict_value(self):
+        """Test _flatten_configs keeps deepep_buffer_configs as a dict field."""
+        from paddlefleet.training.yaml_arguments import _flatten_configs
+
+        cfg = OmegaConf.create(
+            {
+                "model": {
+                    "num_hidden_layers": 2,
+                    "deepep_buffer_configs": {
+                        "num_sms": 24,
+                        "dispatch_config": [60, 256],
+                        "combine_config": [20, 256],
+                    },
+                }
+            }
+        )
+        result = _flatten_configs(cfg)
+        self.assertEqual(result.num_hidden_layers, 2)
+        self.assertEqual(
+            result.deepep_buffer_configs,
+            {
+                "num_sms": 24,
+                "dispatch_config": [60, 256],
+                "combine_config": [20, 256],
+            },
+        )
+        self.assertFalse(hasattr(result, "num_sms"))
+
 
 @unittest.skipUnless(HAVE_OMEGACONF, "omegaconf not available in CI")
 class TestLoadYaml(unittest.TestCase):
