@@ -33,6 +33,11 @@ import math
 import paddle
 from paddle import Tensor
 
+from ..triton_ops.utils import is_torch_compat_available
+
+if is_torch_compat_available():
+    paddle.enable_compat(scope={"triton"})
+
 logger = logging.getLogger(__name__)
 LOG2E = math.log2(math.e)
 _INT32_MAX = 2**31 - 1
