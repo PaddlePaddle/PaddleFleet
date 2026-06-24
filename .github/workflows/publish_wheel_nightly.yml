@@ -35,7 +35,7 @@ jobs:
   publish-wheel:
     name: Publish wheel nightly
     needs: clone
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
       group: GZ_BD-CPU
     strategy:
@@ -175,7 +175,7 @@ jobs:
   publish-wheel-arm:
     name: Publish arm wheel nightly (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
     needs: clone
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
       group: npu-arm
     strategy:
@@ -299,7 +299,7 @@ jobs:
 
   upload-to-paddletest:
     needs: [publish-wheel, publish-wheel-arm]
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: paddle-bot
     env:
       PR_ID: ${{ github.event.pull_request.number || '0' }}

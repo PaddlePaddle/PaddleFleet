@@ -107,7 +107,7 @@ jobs:
   publish-ops-wheel:
     name: PR merge update ops (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
     needs: clone
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
       group: GZ_BD-CPU
     strategy:
@@ -272,7 +272,7 @@ jobs:
   publish-ops-wheel-paddle-dev:
     name: PR merge update ops on paddle-dev (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
     needs: clone
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
       group: GZ_BD-CPU
     strategy:
@@ -406,7 +406,7 @@ jobs:
   publish-ops-wheel-arm:
     name: PR merge update ops arm (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
     needs: clone
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on:
       group: npu-arm
     strategy:
@@ -545,7 +545,7 @@ jobs:
   upload-to-paddletest:
     name: Upload ops wheel to paddletest (${{ matrix.flavor.label }}, ${{ matrix.flavor.bos_CUDA }}, py${{ matrix.flavor.python_version }})
     needs: [publish-ops-wheel, publish-ops-wheel-paddle-dev, publish-ops-wheel-arm]
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: paddle-bot
     env:
       PR_ID: "0"
