@@ -906,7 +906,7 @@ class TransformerConfig(ModelParallelConfig):
     """Enable experimental version code paths for precision alignment."""
 
     use_accuracy_compatible: bool = False
-    """Whether to enable accuracy-compatible kernels for cross-framework numerical 
+    """Whether to enable accuracy-compatible kernels for cross-framework numerical
     alignment. Defaults to False."""
 
     moe_topk_fusion: bool = False

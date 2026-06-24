@@ -389,6 +389,7 @@ def linear_with_frozen_weight(
     grad_output_buffer: list[paddle.Tensor] | None = None,
     wgrad_deferral_limit: None = None,
     async_grad_allreduce: bool | None = None,
+    use_accuracy_compatible: bool = False,
 ) -> paddle.Tensor:
     """Linear layer execution with weight.requires_grad == False.
 

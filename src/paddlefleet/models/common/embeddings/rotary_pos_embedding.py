@@ -306,6 +306,7 @@ class MultimodalRotaryEmbedding(nn.Layer):
         rotary_base: int = 10000,
         rope_scaling: bool = False,
         cp_group: paddle.distributed.communication.group.Group | None = None,
+        use_accuracy_compatible: bool = False,
     ) -> None:
         super().__init__()
 
