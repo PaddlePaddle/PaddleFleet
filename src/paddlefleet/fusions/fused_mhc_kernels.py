@@ -499,6 +499,7 @@ if _TRITON_AVAILABLE:
         BLOCK_C: tl.constexpr,
         BLOCK_S: tl.constexpr,
     ):
+        """g_x = hp @ go, g_orig = hr @ go."""
         pid_s = tl.program_id(0)
         pid_c = tl.program_id(1)
         offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
@@ -578,6 +579,7 @@ if _TRITON_AVAILABLE:
         BLOCK_C: tl.constexpr,
         BLOCK_S: tl.constexpr,
     ):
+        """g_hp = sum_c go*(x+bias), g_hr = orig @ go.T."""
         pid_s = tl.program_id(0)
         offs_s = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
         mask_s = offs_s < sb
@@ -1434,6 +1436,12 @@ if _CUTILE_AVAILABLE:
         TILE_K: ConstInt,
         SPLIT_K: ConstInt,
     ):
+        """
+        Grid: (num_tiles_m, num_tiles_k).
+        Fused matmul + norm + r: proj, norm, r in one pass over K.
+        R is a retained signature placeholder; r is computed after split-K
+        reduction from NORM.
+        """
         tile_m_id = ct.bid(0)
         split_k_id = ct.bid(1)
         num_m_tiles = ct.cdiv(M, TILE_M)
@@ -1836,7 +1844,12 @@ if _CUTILE_AVAILABLE:
         TILE_SIZE_N: ConstInt,
         SPLIT_K: ConstInt,
     ):
-        """Reduce split-K partial proj/norm, compute r, apply compute_h activations."""
+        """Reduce split-K partial proj/norm, compute r, and apply compute_h activations.
+
+        Grid: (ceil(M / TILE_SIZE_M),).
+        TILE_SIZE_N = next_power_of_2(N) so one tile covers the full N dimension.
+        Alpha_{pre,post,res} are [1] tensors (scalar parameters).
+        """
         bid_m = ct.bid(0)
         num_bid_m = ct.cdiv(M, TILE_SIZE_M)
 
@@ -1948,7 +1961,15 @@ if _CUTILE_AVAILABLE:
         tile_n,
         split_k,
     ):
-        """Launch reduce split-K + compute_h kernel."""
+        """Launch reduce split-K + compute_h kernel.
+
+        Returns:
+            h_pre: [M, n] sigmoid-activated pre weights
+            h_post: [M, n] 2*sigmoid-activated post weights
+            h_res: [M, n*n] residual logits
+            r: [M, 1]  r = norm / sqrt(K)
+            proj_reduced: [M, N] reduced projection (for backward)
+        """
         stream = _get_cuda_stream()
         bias_2d = bias.detach().unsqueeze(0)
         h_pre_out = paddle.empty(shape=[M, n], dtype=proj_acc.dtype)
@@ -1999,7 +2020,18 @@ if _CUTILE_AVAILABLE:
         eps,
         compute_h_eps,
     ):
-        """Fused proj_rms + compute_h forward."""
+        """Fused proj_rms + compute_h forward.
+
+        Launches the existing _ct_proj_rms_fwd_kernel (split-K matmul + partial norm),
+        then _ct_reduce_compute_h_kernel (reduce + r + activations).
+
+        Returns:
+            h_pre: [M, n] activated pre weights
+            h_post: [M, n] activated post weights
+            h_res: [M, n*n] residual logits
+            r: [M, 1] r = norm / sqrt(K)
+            proj_reduced: [M, N] reduced projection (for backward)
+        """
         M, K = x.shape
         N = weight.shape[0]
         TILE_N = _next_power_of_2(N)
@@ -2080,7 +2112,10 @@ if _CUTILE_AVAILABLE:
         HAS_GRAD_H_RES: ConstInt,
         HAS_GRAD_R_EXT: ConstInt,
     ):
-        """Precompute grad_h, grad_proj, and grad_r_total."""
+        """Precompute grad_h, grad_proj, and grad_r_total for downstream backward kernels.
+
+        Grid: (ceil(M / TILE_SIZE_M),).
+        """
         tile_m_id = ct.bid(0)
         alpha_pre = ct.load(Alpha_pre, index=(0,), shape=(1,)).item()
         alpha_post = ct.load(Alpha_post, index=(0,), shape=(1,)).item()
@@ -2280,7 +2315,12 @@ if _CUTILE_AVAILABLE:
         TILE_SIZE_N: ConstInt,
         TILE_SIZE_K: ConstInt,
     ):
-        """Compute grad_x and grad_weight simultaneously."""
+        """Compute grad_x and grad_weight simultaneously.
+
+        Grid: (ceil(K / TILE_SIZE_K),).
+        Each block handles one K-tile and loops over all M-tiles.
+        Per M-tile: computes and stores grad_x, accumulates grad_weight.
+        """
         tile_k_id = ct.bid(0)
         NUM_M_TILES = ct.cdiv(M, TILE_SIZE_M)
         weight_tile = ct.load(
@@ -2360,7 +2400,13 @@ if _CUTILE_AVAILABLE:
         K: int,
         TILE_N_SIZE: ConstInt,
     ):
-        """Fused backward (small K path) with work-stealing."""
+        """Fused backward (small K path) with work-stealing.
+
+        Grid: (num_sms, 2).
+        bid(1)==0: grad_weight via work-stealing over K-tiles, loops M.
+        bid(1)==1: grad_x via work-stealing over (M×K) tiles.
+        Scalar gradients are computed by the separate partial/reduce kernels.
+        """
         zero_pad = ct.PaddingMode.ZERO
         TILE_DB_SIZE_M = 128
         TILE_DB_SIZE_K = 64
@@ -2470,7 +2516,10 @@ if _CUTILE_AVAILABLE:
         TILE_SIZE_M: ConstInt,
         TILE_SIZE_N: ConstInt,
     ):
-        """Compute per-M-tile scalar-gradient partials."""
+        """Compute per-M-tile scalar-gradient partials.
+
+        Grid: (ceil(M / TILE_SIZE_M),).  Each block processes one M-tile.
+        """
         bid_m = ct.bid(0)
         offsets = ct.arange(TILE_SIZE_N, dtype=ct.int32)
         one = ct.full((TILE_SIZE_N,), 1.0, dtype=ct.float32)
@@ -2549,7 +2598,7 @@ if _CUTILE_AVAILABLE:
         NUM_M_BLOCKS: int,
         TILE_SIZE_N: ConstInt,
     ):
-        """Reduce scalar-gradient partials."""
+        """Reduce scalar-gradient partials and write final dtype outputs."""
         acc_pre = ct.full((1, 1), 0.0, dtype=ct.float32)
         acc_post = ct.full((1, 1), 0.0, dtype=ct.float32)
         acc_res = ct.full((1, 1), 0.0, dtype=ct.float32)
@@ -2616,7 +2665,16 @@ if _CUTILE_AVAILABLE:
         eps,
         compute_h_eps,
     ):
-        """Fused compute_h + proj_rms backward."""
+        """Fused compute_h + proj_rms backward.
+
+        Returns:
+            grad_x: [M, K]
+            grad_weight: [N, K]
+            grad_alpha_pre: [1]
+            grad_alpha_post: [1]
+            grad_alpha_res: [1]
+            grad_bias: [N]
+        """
         M, K = x.shape
         N = weight.shape[0]
         TILE_N = _next_power_of_2(N)
