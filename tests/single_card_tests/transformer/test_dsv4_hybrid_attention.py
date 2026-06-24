@@ -37,7 +37,6 @@ from paddlefleet.transformer.csa_attention import (
     _apply_rope,
     _resolve_csa_indexer_attn_topk_effective,
     _resolve_csa_indexer_loss_topk_effective,
-    _resolve_csa_tilelang_switch,
     get_compress_topk_idxs,
     get_window_topk_idxs,
 )
@@ -73,8 +72,7 @@ def _make_config(
     apply_rope_fusion=False,
     multi_latent_attention=True,
     num_nextn_predict_layers=0,
-    csa_tilelang_backend=None,
-    csa_tilelang_enable_indexer=None,
+    csa_indexer_backend="unfused",
     csa_sparse_attn_backend="unfused",
 ):
     if csa_compress_ratios is None:
@@ -116,8 +114,7 @@ def _make_config(
         attention_softmax_in_fp32=True,
         masked_softmax_fusion=False,
         softmax_type="vanilla",
-        csa_tilelang_backend=csa_tilelang_backend,
-        csa_tilelang_enable_indexer=csa_tilelang_enable_indexer,
+        csa_indexer_backend=csa_indexer_backend,
         csa_sparse_attn_backend=csa_sparse_attn_backend,
     )
 
@@ -163,37 +160,15 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[2])
 
-    def test_csa_tilelang_backend_switches_and_overrides(self):
-        paddle_config = _make_config()
-        self.assertFalse(
-            _resolve_csa_tilelang_switch(
-                paddle_config, "csa_tilelang_enable_indexer"
-            )
-        )
-
-        tilelang_config = _make_config(
-            csa_tilelang_backend="attention_paddle_compat"
-        )
-        self.assertTrue(
-            _resolve_csa_tilelang_switch(
-                tilelang_config, "csa_tilelang_enable_indexer"
-            )
-        )
-
-        override_config = _make_config(
-            csa_tilelang_backend="attention_paddle_compat",
-            csa_tilelang_enable_indexer=False,
-        )
-        self.assertFalse(
-            _resolve_csa_tilelang_switch(
-                override_config, "csa_tilelang_enable_indexer"
-            )
-        )
+    def test_csa_indexer_backend_validation(self):
+        for backend in ("unfused", "tilelang", "cudnn"):
+            cfg = _make_config(csa_indexer_backend=backend)
+            self.assertEqual(cfg.csa_indexer_backend, backend)
 
         with self.assertRaisesRegex(
-            ValueError, "csa_tilelang_enable_indexer=True requires"
+            ValueError, "csa_indexer_backend='paddle' is invalid"
         ):
-            _make_config(csa_tilelang_enable_indexer=True)
+            _make_config(csa_indexer_backend="paddle")
 
     def test_csa_sparse_attn_backend_validation(self):
         for backend in ("unfused", "tilelang", "cudnn"):
@@ -205,13 +180,29 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         ):
             _make_config(csa_sparse_attn_backend="paddle")
 
-    def test_removed_enable_sparse_attn_switch_raises(self):
-        with self.assertRaisesRegex(
-            ValueError, "csa_tilelang_enable_sparse_attn has been removed"
-        ):
-            cfg = _make_config()
-            cfg.csa_tilelang_enable_sparse_attn = True
-            cfg.__post_init__()
+    def test_removed_tilelang_switches_raise(self):
+        removed_switches = (
+            (
+                "csa_tilelang_enable_sparse_attn",
+                "csa_tilelang_enable_sparse_attn has been removed",
+            ),
+            (
+                "csa_tilelang_enable_indexer",
+                "csa_tilelang_enable_indexer has been removed",
+            ),
+            (
+                "csa_tilelang_backend",
+                "csa_tilelang_backend has been removed",
+            ),
+        )
+        for attr, message in removed_switches:
+            with (
+                self.subTest(attr=attr),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                cfg = _make_config()
+                setattr(cfg, attr, True)
+                cfg.__post_init__()
 
     def test_phase2_loss_topk_does_not_expand_attention_topk(self):
         config = _make_config(
@@ -502,8 +493,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
                     dsa_index_n_heads=16,
                     csa_compress_ratios=[ratio],
                     num_layers=1,
-                    csa_tilelang_backend=None,
-                    csa_tilelang_enable_indexer=False,
+                    csa_indexer_backend="unfused",
                     csa_sparse_attn_backend="unfused",
                 )
                 fused_config = _make_config(
@@ -518,8 +508,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
                     dsa_index_n_heads=16,
                     csa_compress_ratios=[ratio],
                     num_layers=1,
-                    csa_tilelang_backend="attention_paddle_compat",
-                    csa_tilelang_enable_indexer=True,
+                    csa_indexer_backend="tilelang",
                     csa_sparse_attn_backend="tilelang",
                 )
                 doc_len_cases = [
