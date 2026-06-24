@@ -299,7 +299,7 @@ jobs:
 
   upload-to-paddletest:
     needs: [publish-wheel, publish-wheel-arm]
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
+    if: always() && github.repository == 'PaddlePaddle/PaddleFleet'
     runs-on: paddle-bot
     env:
       PR_ID: ${{ github.event.pull_request.number || '0' }}
