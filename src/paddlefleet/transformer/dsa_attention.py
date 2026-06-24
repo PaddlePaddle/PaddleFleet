@@ -503,9 +503,12 @@ def _compute_index_scores_fused(
         index_scores: [b, sq, sk]
     """
     # q @ k^T -> [b, sq, h, sk]
-    index_scores = paddle.einsum(
-        "bshd,btd->bsht", q.cast("float32"), k.cast("float32")
-    )
+
+    with paddle.amp.auto_cast(False):
+        # 对齐 recompute fwd和 fwd情况下的amp一致性
+        index_scores = paddle.einsum(
+            "bshd,btd->bsht", q.cast("float32"), k.cast("float32")
+        )
     # ReLU activation
     index_scores = F.relu(index_scores)
     # Weight each head: [b, sq, h, sk] * [b, sq, h, 1] -> [b, sq, h, sk]

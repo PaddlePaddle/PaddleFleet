@@ -837,8 +837,6 @@ class TestTransformerConfigCsaIndexerBackend(unittest.TestCase):
             experimental_attention_variant="dsv4_hybrid",
             csa_compress_ratios=[4],
             csa_indexer_backend="cudnn",
-            csa_tilelang_backend="attention_paddle_compat",
-            csa_tilelang_enable_indexer=True,
         )
         self.assertEqual(cfg.csa_indexer_backend, "cudnn")
 
@@ -849,8 +847,6 @@ class TestTransformerConfigCsaIndexerBackend(unittest.TestCase):
             experimental_attention_variant="dsv4_hybrid",
             csa_compress_ratios=[4],
             csa_indexer_backend="tilelang",
-            csa_tilelang_backend="attention_paddle_compat",
-            csa_tilelang_enable_indexer=True,
         )
         self.assertEqual(cfg.csa_indexer_backend, "tilelang")
 
@@ -862,8 +858,6 @@ class TestTransformerConfigCsaIndexerBackend(unittest.TestCase):
                 experimental_attention_variant="dsv4_hybrid",
                 csa_compress_ratios=[4],
                 csa_indexer_backend="invalid_backend",
-                csa_tilelang_backend="attention_paddle_compat",
-                csa_tilelang_enable_indexer=True,
             )
         self.assertIn("invalid_backend", str(cm.exception))
 

@@ -165,7 +165,7 @@ def _build_csa_config(
         dsa_index_topk=dsa_index_topk,
         dsa_indexer_loss_coeff=dsa_indexer_loss_coeff,
         dsa_indexer_use_sparse_loss=False,
-        csa_tilelang_enable_indexer=False,
+        csa_indexer_backend="unfused",
         csa_sparse_attn_backend="unfused",
         init_method=None,
         init_method_std=0.02,
@@ -481,7 +481,6 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.dsa_index_topk = 16
         config.dsa_indexer_loss_coeff = 0.0
         config.dsa_indexer_use_sparse_loss = False
-        config.csa_tilelang_enable_indexer = False
         config.csa_sparse_attn_backend = "unfused"
         config.init_method = None
         config.init_method_std = 0.02
@@ -493,7 +492,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.sequence_parallel = False
         config.tensor_model_parallel_size = 1
         config.cp_balance_mode = "contiguous_allgather"
-        config.csa_indexer_backend = "tilelang"
+        config.csa_indexer_backend = "unfused"
 
         sublayers = DSv4HybridSelfAttentionSublayersSpec(
             linear_q_down_proj=_TestLinear,
@@ -637,7 +636,6 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.dsa_index_topk = 16
         config.dsa_indexer_loss_coeff = 0.0
         config.dsa_indexer_use_sparse_loss = False
-        config.csa_tilelang_enable_indexer = False
         config.init_method = None
         config.init_method_std = 0.02
         config.output_layer_init_method = None
@@ -648,7 +646,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.sequence_parallel = False
         config.tensor_model_parallel_size = 1
         config.cp_balance_mode = "contiguous_allgather"
-        config.csa_indexer_backend = "tilelang"
+        config.csa_indexer_backend = "unfused"
         config.csa_sparse_attn_backend = "unfused"
 
         sublayers = DSv4HybridSelfAttentionSublayersSpec(
@@ -955,9 +953,7 @@ class TestTileLangCSALayerCP(unittest.TestCase):
             dsa_index_topk=dsa_index_topk,
             dsa_indexer_loss_coeff=loss_coeff,
             dsa_indexer_use_sparse_loss=use_sparse_loss,
-            csa_tilelang_enable_indexer=True,
             csa_sparse_attn_backend="unfused",
-            csa_tilelang_backend="attention_paddle_compat",
             csa_indexer_backend="tilelang",
             init_method=None,
             init_method_std=0.02,

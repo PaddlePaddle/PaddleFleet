@@ -1378,6 +1378,9 @@ class CSAIndexer(nn.Layer):
         """
         q, k, weights = self.forward_before_topk(x, qr, startend_row_indices)
         effective_topk = min(self.index_topk, k.shape[1])
+        weights = (
+            weights * self.softmax_scale
+        )  # 对齐 fwd 和 recompute fwd的一致性
         index_scores, topk_indices = fused_qk_topk_naive(
             q, k, weights, effective_topk, mask
         )
@@ -1694,8 +1697,8 @@ class CompressedSparseAttention(FleetLayer):
                     mask_for_loss,
                     getattr(self.config, "dsa_indexer_use_sparse_loss", True),
                     self.tp_group,
-                loss_mask,
-                global_valid_count,
+                    loss_mask,
+                    global_valid_count,
                 )
 
                 topk_indices_compressed = FusedDSAIndexerLoss._last_topk_indices
@@ -2014,13 +2017,6 @@ class CompressedSparseAttention(FleetLayer):
                 indexer_backend = getattr(
                     self.config, "csa_indexer_backend", "tilelang"
                 )
-                if (
-                    indexer_backend == "cudnn"
-                ):  # CP indexer currently has no cuDNN top-k/loss implementation.
-                    raise ValueError(
-                        "csa_indexer_backend='cudnn' is not supported in the "
-                        "context-parallel CSA indexer path."
-                    )
                 use_tilelang_indexer = indexer_backend == "tilelang"
                 use_tilelang_loss_path = (
                     use_tilelang_indexer
