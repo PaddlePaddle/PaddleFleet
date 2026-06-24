@@ -85,6 +85,9 @@ try:
 except:
     pass
 
+# Use deep_gemm on Blackwell (SM100) and above
+_USE_DEEP_GEMM = paddle.device.cuda.get_device_capability()[0] >= 10
+
 try:
     from paddle.incubate.nn.functional import fused_transpose_wlch_split_quant
 except ImportError:
@@ -291,12 +294,18 @@ def kitchen_gemm(
     out=None,
     rtn_dtype=paddle.bfloat16,
 ):
-    # if USE_DS_GEMM:
-    #     if out is None:
-    #         out = paddle.zeros([x_fp8.shape[0], w_fp8.shape[0]], rtn_dtype)
-    #     if numpy.prod(x_fp8.shape) != 0 and numpy.prod(w_fp8.shape) != 0:
-    #         deep_gemm.wgrad_gemm_fp8_fp8_fp32_nt((x_fp8, x_scale), (w_fp8, w_scale), out, num_sms=get_sm_num())
-    #     return out
+    if _USE_DEEP_GEMM:
+        if out is not None:
+            c = out
+        else:
+            c = paddle.empty([x_fp8.shape[0], w_fp8.shape[0]], rtn_dtype)
+        if numpy.prod(x_fp8.shape) != 0 and numpy.prod(w_fp8.shape) != 0:
+            recipe = (1, 1, 128) if (is_a_1d_scaled and is_b_1d_scaled) else None
+            deep_gemm.fp8_gemm_nt(
+                (x_fp8, x_scale), (w_fp8, w_scale), c,
+                c=out, recipe=recipe,
+            )
+        return c
 
     if out is not None:
         accumulate = True
@@ -1250,6 +1259,51 @@ class ExpertsGroupGemmContiguousNode:
         )
         return out, scale
 
+    def k_grouped_fp8_weight_grad(
+        self,
+        x_t_fp8,
+        x_t_scale,
+        dy_t_fp8,
+        dy_t_scale,
+        weights,
+    ):
+        if not (
+            self.moe_expert_fusion
+            and (not self.use_fp8_mlp or self.moe_deep_gemm)
+            and _USE_DEEP_GEMM
+            and hasattr(deep_gemm, "k_grouped_fp8_gemm_tn_contiguous")
+        ):
+            return False
+
+        x_fp8 = paddle.concat([x.T.contiguous() for x in x_t_fp8], axis=0)
+        dy_fp8 = paddle.concat([x.T.contiguous() for x in dy_t_fp8], axis=0)
+        x_scale = paddle.concat(x_t_scale, axis=0)
+        dy_scale = paddle.concat(dy_t_scale, axis=0)
+
+        if hasattr(weights, "main_grad"):
+            if weights.main_grad is None:
+                weights.main_grad = paddle.zeros(weights.shape, dtype=paddle.float32)
+            weight_grad = weights.main_grad
+        else:
+            if weights.grad is None:
+                weights.grad = paddle.zeros(weights.shape, dtype=paddle.float32)
+            weight_grad = weights.grad
+
+        deep_gemm.k_grouped_fp8_gemm_tn_contiguous(
+            (x_fp8, x_scale),
+            (dy_fp8, dy_scale),
+            weight_grad,
+            self.tokens_per_expert,
+            self.tokens_per_expert_tensor,
+            weight_grad,
+            recipe=(1, 1, 128),
+            compiled_dims="mn",
+        )
+
+        if hasattr(weights, "_apply_backward_hook") and not weights.stop_gradient:
+            weights._apply_backward_hook()
+        return True
+
     def bwd_down_weight(self, do3, o2, expert_w2):
         """
         dw2 = do2_t * do3
@@ -1262,18 +1316,25 @@ class ExpertsGroupGemmContiguousNode:
             do3, None, self.tokens_per_expert, True
         )
 
+        if self.k_grouped_fp8_weight_grad(
+            o2_t_fp8, o2_t_scale, do3_t_fp8, do3_t_scale, expert_w2
+        ):
+            return
+
         for i in range(len(expert_w2)):
             if hasattr(expert_w2[i], "main_grad"):
                 if expert_w2[i].main_grad is None:
                     expert_w2[i].main_grad = paddle.zeros(
                         shape=expert_w2[i].shape, dtype=paddle.float32
                     )
-                if self.use_ue8m0:
+                if _USE_DEEP_GEMM:
                     deep_gemm.fp8_gemm_nt(
                         (o2_t_fp8[i], o2_t_scale[i].T),
                         (do3_t_fp8[i], do3_t_scale[i].T),
                         expert_w2[i].main_grad,
                         expert_w2[i].main_grad,
+                        recipe=(1,1,128),
+                        compiled_dims="mn",
                     )
                 else:
                     kitchen_gemm(
@@ -1291,12 +1352,14 @@ class ExpertsGroupGemmContiguousNode:
                     expert_w2[i].grad = paddle.zeros(
                         shape=expert_w2[i].shape, dtype=paddle.float32
                     )
-                if self.use_ue8m0:
+                if _USE_DEEP_GEMM:
                     deep_gemm.fp8_gemm_nt(
                         (o2_t_fp8[i], o2_t_scale[i].T),
                         (do3_t_fp8[i], do3_t_scale[i].T),
                         expert_w2[i].grad,
                         expert_w2[i].grad,
+                        recipe=(1,1,128),
+                        compiled_dims="mn",
                     )
                 else:
                     kitchen_gemm(
@@ -1351,18 +1414,25 @@ class ExpertsGroupGemmContiguousNode:
             do1, None, self.tokens_per_expert, True
         )
 
+        if self.k_grouped_fp8_weight_grad(
+            input_x_t_fp8, input_x_t_scale, do1_t_fp8, do1_t_scale, expert_w1
+        ):
+            return
+
         for i in range(len(expert_w1)):
             if hasattr(expert_w1[i], "main_grad"):
                 if expert_w1[i].main_grad is None:
                     expert_w1[i].main_grad = paddle.zeros(
                         shape=expert_w1[i].shape, dtype=paddle.float32
                     )
-                if self.use_ue8m0:
+                if _USE_DEEP_GEMM:
                     deep_gemm.fp8_gemm_nt(
                         (input_x_t_fp8[i], input_x_t_scale[i].T),
                         (do1_t_fp8[i], do1_t_scale[i].T),
                         expert_w1[i].main_grad,
                         expert_w1[i].main_grad,
+                        recipe=(1,1,128),
+                        compiled_dims="mn",
                     )
                 else:
                     kitchen_gemm(
@@ -1380,12 +1450,14 @@ class ExpertsGroupGemmContiguousNode:
                     expert_w1[i].grad = paddle.zeros(
                         shape=expert_w1[i].shape, dtype=paddle.float32
                     )
-                if self.use_ue8m0:
+                if _USE_DEEP_GEMM:
                     deep_gemm.fp8_gemm_nt(
                         (input_x_t_fp8[i], input_x_t_scale[i].T),
                         (do1_t_fp8[i], do1_t_scale[i].T),
                         expert_w1[i].grad,
                         expert_w1[i].grad,
+                        recipe=(1,1,128),
+                        compiled_dims="mn",
                     )
                 else:
                     kitchen_gemm(

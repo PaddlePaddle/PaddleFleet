@@ -36,6 +36,14 @@ from paddlefleet.fp8.qat import fp8_simulate_qat
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
+
+try:
+    from paddlefleet_ops import deep_gemm
+
+    _DEEP_GEMM_AVAILABLE = hasattr(deep_gemm, "fp8_einsum")
+except (ImportError, RuntimeError):
+    deep_gemm = None
+    _DEEP_GEMM_AVAILABLE = False
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
@@ -53,6 +61,161 @@ if TYPE_CHECKING:
 def _q_rms_norm(q: Tensor, eps: float) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
     return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
+
+
+class GroupedOutputFP8(paddle.autograd.PyLayer):
+    _logged = False
+    _logged_bwd = False
+
+    @staticmethod
+    def forward(ctx, x: Tensor, weight: Tensor, num_groups: int, o_lora_rank: int, fp8_wgrad: bool = True):
+        assert _DEEP_GEMM_AVAILABLE, "GroupedOutputFP8 requires deep_gemm.fp8_einsum"
+        b, sq, _, d = x.shape
+        assert d % 128 == 0, "FP8 grouped output requires per-group hidden dim to be divisible by 128"
+        assert o_lora_rank % 128 == 0, "FP8 grouped output requires o_lora_rank to be divisible by 128"
+        if not GroupedOutputFP8._logged:
+            print(f"[fp8_grouped_output] forward: x={list(x.shape)} weight={list(weight.shape)} num_groups={num_groups} o_lora_rank={o_lora_rank} d={d} fp8_wgrad={fp8_wgrad}", flush=True)
+            GroupedOutputFP8._logged = True
+        weight_bf16 = weight.reshape([num_groups, o_lora_rank, d])
+        weight_for_gemm = weight_bf16.transpose([0, 2, 1]).contiguous()
+
+        x_2d = x.reshape([-1, d]).contiguous()
+        x_fp8, x_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+            x_2d,
+            output_scale_transpose=False,
+            quant_method="1x128",
+            input_transpose=False,
+            using_pow2_scale=True,
+        )[:2]
+        x_fp8 = x_fp8.reshape([b * sq, num_groups, d])
+        x_scale = x_scale.reshape([b * sq, num_groups, -1])
+
+        weight_fp8, weight_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+            weight_for_gemm.reshape([-1, weight_for_gemm.shape[-1]]),
+            output_scale_transpose=False,
+            quant_method="128x128",
+            input_transpose=False,
+            using_pow2_scale=True,
+        )[:2]
+        weight_fp8 = weight_fp8.reshape([num_groups, d, o_lora_rank])
+        weight_scale = weight_scale.reshape([num_groups, d // 128, o_lora_rank // 128])
+
+        out = paddle.empty([b * sq, num_groups, o_lora_rank], dtype=paddle.bfloat16)
+        deep_gemm.fp8_einsum(
+            "bhd,hdr->bhr",
+            (x_fp8, x_scale),
+            (weight_fp8, weight_scale),
+            out,
+            recipe=(1, 128, 128),
+        )
+
+        ctx.save_for_backward(x, weight_bf16)
+        ctx.num_groups = num_groups
+        ctx.o_lora_rank = o_lora_rank
+        ctx.fp8_wgrad = fp8_wgrad
+        return out.reshape([b, sq, num_groups * o_lora_rank])
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        x, weight = ctx.saved_tensor()
+        num_groups = ctx.num_groups
+        o_lora_rank = ctx.o_lora_rank
+        fp8_wgrad = ctx.fp8_wgrad
+        b, sq, _, d = x.shape
+        grad_output = grad_output.reshape([b, sq, num_groups, o_lora_rank])
+        print(f"[fp8_grouped_output] backward: grad_output={list(grad_output.shape)} x={list(x.shape)} fp8_wgrad={fp8_wgrad}", flush=True) if not GroupedOutputFP8._logged_bwd else None
+        GroupedOutputFP8._logged_bwd = True
+
+        # dgrad: always FP8
+        # grad_x = grad_output @ weight, "bhr,hdr->bhd"
+        # weight is [g, r, d], need [g, d, r] for "hdr" layout
+        grad_out_2d = grad_output.reshape([-1, o_lora_rank]).contiguous()
+        go_fp8, go_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+            grad_out_2d,
+            output_scale_transpose=False,
+            quant_method="1x128",
+            input_transpose=False,
+            using_pow2_scale=True,
+        )[:2]
+        go_fp8 = go_fp8.reshape([b * sq, num_groups, o_lora_rank])
+        go_scale = go_scale.reshape([b * sq, num_groups, -1])
+
+        w_for_dgrad = weight.transpose([0, 2, 1]).contiguous()  # [g, r, d] -> [g, d, r]
+        w_2d = w_for_dgrad.reshape([-1, o_lora_rank]).contiguous()  # [g*d, r]
+        w_fp8, w_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+            w_2d,
+            output_scale_transpose=False,
+            quant_method="128x128",
+            input_transpose=False,
+            using_pow2_scale=True,
+        )[:2]
+        w_fp8 = w_fp8.reshape([num_groups, d, o_lora_rank])
+        w_scale = w_scale.reshape([num_groups, d // 128, o_lora_rank // 128])
+
+        grad_x = paddle.empty([b * sq, num_groups, d], dtype=paddle.bfloat16)
+        deep_gemm.fp8_einsum(
+            "bhr,hdr->bhd",
+            (go_fp8, go_scale),
+            (w_fp8, w_scale),
+            grad_x,
+            recipe=(1, 128, 128),
+        )
+        grad_x = grad_x.reshape([b, sq, num_groups, d])
+
+        # wgrad
+        if fp8_wgrad:
+            # grad_weight = x^T @ grad_output, "bhd,bhr->hdr"
+            # DeepGEMM internally permutes A,B by {1,2,0} -> [h,d,b] @ [h,r,b]^T
+            # fp8_bmm with recipe=(1,1,128) expects A_scale: [h, d, ceil_div(b,128)]
+            # So we need to quant along the b dimension (last dim after permute)
+            # Approach: permute to [h,d,b], quant 2D [h*d, b] with 1x128, get scale [h*d, b//128]
+            x_wgrad = x.reshape([b * sq, num_groups, d]).transpose([1, 2, 0]).contiguous()  # [h, d, b*sq]
+            x_w_2d = x_wgrad.reshape([-1, b * sq]).contiguous()  # [h*d, b*sq]
+            x_fp8_w, x_scale_w = paddle.incubate.nn.functional.fp8_quant_blockwise(
+                x_w_2d,
+                output_scale_transpose=False,
+                quant_method="1x128",
+                input_transpose=False,
+                using_pow2_scale=True,
+            )[:2]
+            # scale: [h*d, ceil(b*sq/128)] -> reshape to [h, d, ceil(b*sq/128)]
+            x_fp8_w = x_fp8_w.reshape([num_groups, d, b * sq])
+            x_scale_w = x_scale_w.reshape([num_groups, d, -1])
+
+            go_wgrad = grad_output.reshape([b * sq, num_groups, o_lora_rank]).transpose([1, 2, 0]).contiguous()  # [h, r, b*sq]
+            go_w_2d = go_wgrad.reshape([-1, b * sq]).contiguous()  # [h*r, b*sq]
+            go_fp8_w, go_scale_w = paddle.incubate.nn.functional.fp8_quant_blockwise(
+                go_w_2d,
+                output_scale_transpose=False,
+                quant_method="1x128",
+                input_transpose=False,
+                using_pow2_scale=True,
+            )[:2]
+            go_fp8_w = go_fp8_w.reshape([num_groups, o_lora_rank, b * sq])
+            go_scale_w = go_scale_w.reshape([num_groups, o_lora_rank, -1])
+
+            # Now pass pre-permuted tensors. But fp8_einsum will permute {1,2,0} again!
+            # We need to pass in the ORIGINAL [b,h,d] layout so kernel can permute internally.
+            # Re-permute back: [h,d,b] -> [b,h,d]
+            x_fp8_w = x_fp8_w.transpose([2, 0, 1]).contiguous()  # [b*sq, h, d]
+            x_scale_w = x_scale_w.transpose([2, 0, 1]).contiguous()  # [ceil(b/128), h, d]
+            go_fp8_w = go_fp8_w.transpose([2, 0, 1]).contiguous()  # [b*sq, h, r]
+            go_scale_w = go_scale_w.transpose([2, 0, 1]).contiguous()  # [ceil(b/128), h, r]
+
+            grad_weight = paddle.empty([num_groups, d, o_lora_rank], dtype=paddle.bfloat16)
+            deep_gemm.fp8_einsum(
+                "bhd,bhr->hdr",
+                (x_fp8_w, x_scale_w),
+                (go_fp8_w, go_scale_w),
+                grad_weight,
+                recipe=(1, 1, 128),
+            )
+            grad_weight = grad_weight.transpose([0, 2, 1]).contiguous()  # [g, d, r] -> [g, r, d]
+        else:
+            # bf16 path
+            grad_weight = paddle.einsum("bsgd,bsgr->grd", x, grad_output)
+
+        return grad_x, grad_weight.reshape([num_groups * o_lora_rank, d])
 
 
 from paddlefleet.transformer.utils import (
@@ -243,6 +406,8 @@ class DSv4HybridAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
+        self.use_fp8_grouped_output = getattr(config, "fp8", False) and _DEEP_GEMM_AVAILABLE
+        self.fp8_wgrad = getattr(config, "fp8_wgrad", False)
 
     def forward(
         self,
@@ -363,13 +528,22 @@ class DSv4HybridAttention(Attention):
 
         # Grouped output projection
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
-        wo_a_weight = self.linear_o_group_proj.reshape(
-            [self.o_local_groups, self.config.o_lora_rank, -1]
-        )
-        core_attn_out = paddle.einsum(
-            "...gd,grd->...gr", core_attn_out, wo_a_weight
-        )
-        core_attn_out = core_attn_out.reshape([b, sq, -1])
+        if self.use_fp8_grouped_output:
+            core_attn_out = GroupedOutputFP8.apply(
+                core_attn_out,
+                self.linear_o_group_proj,
+                self.o_local_groups,
+                self.config.o_lora_rank,
+                self.fp8_wgrad,
+            )
+        else:
+            wo_a_weight = self.linear_o_group_proj.reshape(
+                [self.o_local_groups, self.config.o_lora_rank, -1]
+            )
+            core_attn_out = paddle.einsum(
+                "...gd,grd->...gr", core_attn_out, wo_a_weight
+            )
+            core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Output projection
         output, bias = self.o_proj(core_attn_out)

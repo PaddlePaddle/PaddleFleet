@@ -25,6 +25,7 @@ Components:
 
 from __future__ import annotations
 
+import copy
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -920,13 +921,17 @@ class Compressor(nn.Layer):
         self.qk_pos_emb_head_dim = config.qk_pos_emb_head_dim or 0
         self.rotary_pos_emb = rotary_pos_emb
 
+        non_fp8_config = copy.copy(config)
+        non_fp8_config.fp8 = None
+        non_fp8_config.fp8_wgrad = False
+
         proj_out_dim = self.coff * head_dim
 
         self.linear_wkv = build_spec_layer(
             sublayers_spec.linear_wkv,
             config.hidden_size,
             proj_out_dim,
-            config=config,
+            config=non_fp8_config,
             init_method=config.init_method,
             bias=False,
             skip_bias_add=False,
@@ -938,7 +943,7 @@ class Compressor(nn.Layer):
             sublayers_spec.linear_wgate,
             config.hidden_size,
             proj_out_dim,
-            config=config,
+            config=non_fp8_config,
             init_method=config.init_method,
             bias=False,
             skip_bias_add=False,
@@ -1263,6 +1268,10 @@ class CSAIndexer(nn.Layer):
 
         self.rotary_pos_emb = rotary_pos_emb
 
+        non_fp8_config = copy.copy(config)
+        non_fp8_config.fp8 = None
+        non_fp8_config.fp8_wgrad = False
+
         # Q projection: q_lora_rank -> n_heads * head_dim
         self.linear_wq_b = build_spec_layer(
             sublayers_spec.linear_wq_b,
@@ -1282,7 +1291,7 @@ class CSAIndexer(nn.Layer):
             sublayers_spec.linear_weights_proj,
             self.hidden_size,
             self.index_n_heads,
-            config=config,
+            config=non_fp8_config,
             init_method=config.init_method,
             bias=False,
             skip_bias_add=False,

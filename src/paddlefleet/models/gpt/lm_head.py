@@ -124,6 +124,7 @@ def SegLU(x, ranges, ts):
 class GPTLMHead(ColumnParallelLinear):
     def __init__(self, **kwargs):
         self.config = kwargs["config"]
+        self.config.fp8 = None
         self.skip_weight_param_allocation = kwargs[
             "skip_weight_param_allocation"
         ]

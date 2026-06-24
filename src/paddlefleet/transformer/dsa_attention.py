@@ -24,6 +24,7 @@ This module provides:
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -286,6 +287,10 @@ class DSAIndexer(paddle.nn.Layer):
         self.index_topk = config.dsa_index_topk
         self.softmax_scale = self.head_dim**-0.5
 
+        non_fp8_config = copy.copy(self.config)
+        non_fp8_config.fp8 = None
+        non_fp8_config.fp8_wgrad = False
+
         # wq_b: q_lora_rank -> n_heads * head_dim (duplicated)
         self.wq_b = build_spec_layer(
             sublayers_spec.linear_wq_b,
@@ -326,7 +331,7 @@ class DSAIndexer(paddle.nn.Layer):
             sublayers_spec.linear_weights_proj,
             config.hidden_size,
             self.n_heads,
-            config=self.config,
+            config=non_fp8_config,
             init_method=self.config.init_method,
             bias=False,
             skip_bias_add=False,
