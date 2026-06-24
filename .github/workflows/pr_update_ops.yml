@@ -550,8 +550,12 @@ jobs:
 
   upload-to-paddletest:
     name: Upload ops wheel to paddletest (${{ matrix.flavor.label }}, ${{ matrix.flavor.bos_CUDA }}, py${{ matrix.flavor.python_version }})
-    needs: [publish-ops-wheel, publish-ops-wheel-paddle-dev, publish-ops-wheel-arm]
-    if: always() && github.repository == 'PaddlePaddle/PaddleFleet' && github.ref_type == 'branch'
+    needs: [check-packages-changes, publish-ops-wheel, publish-ops-wheel-paddle-dev, publish-ops-wheel-arm]
+    if: >
+      always() &&
+      needs.check-packages-changes.outputs.packages_changed == 'true' &&
+      github.repository == 'PaddlePaddle/PaddleFleet' &&
+      github.ref_type == 'branch'
     runs-on: paddle-bot
     env:
       PR_ID: "0"
