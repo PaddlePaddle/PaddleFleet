@@ -110,7 +110,12 @@ class DynamicKVCache:
     expected by :class:`DotProductAttention`.
     """
 
-    def __init__(self, num_layers: int, swa_layers: list[bool] | None = None, window_size: int | None = None):
+    def __init__(
+        self,
+        num_layers: int,
+        swa_layers: list[bool] | None = None,
+        window_size: int | None = None,
+    ):
         self.k: list[paddle.Tensor | None] = [None] * num_layers
         self.v: list[paddle.Tensor | None] = [None] * num_layers
         self.swa_layers = swa_layers or [False] * num_layers
@@ -140,8 +145,8 @@ class DynamicKVCache:
             )
         # Truncate SWA layers to window_size
         if self.window_size and self.swa_layers[layer_idx]:
-            self.k[layer_idx] = self.k[layer_idx][:, -self.window_size:]
-            self.v[layer_idx] = self.v[layer_idx][:, -self.window_size:]
+            self.k[layer_idx] = self.k[layer_idx][:, -self.window_size :]
+            self.v[layer_idx] = self.v[layer_idx][:, -self.window_size :]
         return self.k[layer_idx], self.v[layer_idx]
 
     def reset(self) -> None:
