@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING
 
 import paddle
 
+from paddlefleet.transformer.utils import is_layer_window_attention
+
 if TYPE_CHECKING:
     from paddlefleet.models.gpt.gpt_model import GPTModel
 
@@ -108,9 +110,11 @@ class DynamicKVCache:
     expected by :class:`DotProductAttention`.
     """
 
-    def __init__(self, num_layers: int):
+    def __init__(self, num_layers: int, swa_layers: list[bool] | None = None, window_size: int | None = None):
         self.k: list[paddle.Tensor | None] = [None] * num_layers
         self.v: list[paddle.Tensor | None] = [None] * num_layers
+        self.swa_layers = swa_layers or [False] * num_layers
+        self.window_size = window_size
 
     def get_seq_len(self, layer_idx: int = 0) -> int:
         if self.k[layer_idx] is not None:
@@ -134,6 +138,10 @@ class DynamicKVCache:
             self.v[layer_idx] = paddle.concat(
                 [self.v[layer_idx], v_new], axis=1
             )
+        # Truncate SWA layers to window_size
+        if self.window_size and self.swa_layers[layer_idx]:
+            self.k[layer_idx] = self.k[layer_idx][:, -self.window_size:]
+            self.v[layer_idx] = self.v[layer_idx][:, -self.window_size:]
         return self.k[layer_idx], self.v[layer_idx]
 
     def reset(self) -> None:
@@ -195,7 +203,20 @@ class GreedyGenerator:
             + num_empty_layers_add_in_head
             + num_empty_layers_add_in_tail
         )
-        self.cache = DynamicKVCache(num_layers=total_layers)
+
+        # Determine which layers use SWA for KV cache truncation
+        sliding_window = getattr(cfg, "sliding_window", None)
+        window_attn_skip_freq = getattr(cfg, "window_attn_skip_freq", None)
+        swa_layers = [
+            is_layer_window_attention(sliding_window, window_attn_skip_freq, i)
+            for i in range(total_layers)
+        ]
+        window_size = sliding_window[0] if sliding_window else None
+        self.cache = DynamicKVCache(
+            num_layers=total_layers,
+            swa_layers=swa_layers,
+            window_size=window_size,
+        )
 
     @paddle.no_grad()
     def generate(

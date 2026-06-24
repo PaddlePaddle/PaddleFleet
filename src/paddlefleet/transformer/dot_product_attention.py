@@ -426,9 +426,10 @@ class DotProductAttention(FleetLayer):
             and attn_mask_startend_row_indices is None
             and not use_eager
         ):
-            assert self.is_swa is False, (
-                "SWA doesn't support scaled_dot_product_attention"
-            )
+            if self.training:
+                assert self.is_swa is False, (
+                    "SWA doesn't support scaled_dot_product_attention when training"
+                )
             # KV cache support for inference
             if use_cache and past_key_values is not None:
                 key, value = past_key_values.update(key, value, layer_idx)

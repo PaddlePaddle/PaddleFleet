@@ -147,6 +147,72 @@ class TestDynamicKVCache(unittest.TestCase):
         self.assertEqual(cache.get_seq_len(3), 3)
 
 
+class TestSWACacheInit(unittest.TestCase):
+    """Test SWA layer detection and DynamicKVCache initialization in GreedyGenerator."""
+
+    def _make_generator_with_cfg(self, num_hidden_layers=4, sliding_window=None,
+                                  window_attn_skip_freq=None,
+                                  num_empty_layers_add_in_head=0,
+                                  num_empty_layers_add_in_tail=0):
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import GreedyGenerator
+
+        model = MagicMock()
+        cfg = MagicMock()
+        cfg.num_hidden_layers = num_hidden_layers
+        cfg.sequence_parallel = False
+        cfg.apply_rope_fusion = False
+        cfg.recompute_granularity = None
+        cfg.sliding_window = sliding_window
+        cfg.window_attn_skip_freq = window_attn_skip_freq
+        cfg.num_empty_layers_add_in_head = num_empty_layers_add_in_head
+        cfg.num_empty_layers_add_in_tail = num_empty_layers_add_in_tail
+        model.config = cfg
+        return GreedyGenerator(model)
+
+    def test_no_sliding_window(self):
+        """No sliding_window: all swa_layers should be False."""
+        gen = self._make_generator_with_cfg(num_hidden_layers=4, sliding_window=None)
+        self.assertEqual(len(gen.cache.swa_layers), 4)
+        self.assertTrue(all(not x for x in gen.cache.swa_layers))
+        self.assertIsNone(gen.cache.window_size)
+
+    def test_sliding_window_no_skip_freq(self):
+        """sliding_window set, no skip_freq: all layers use SWA."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4, sliding_window=(512, 512), window_attn_skip_freq=None
+        )
+        self.assertTrue(all(gen.cache.swa_layers))
+        self.assertEqual(gen.cache.window_size, 512)
+
+    def test_sliding_window_with_int_skip_freq(self):
+        """skip_freq=2: every 2nd layer (0,2,...) skips SWA."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4, sliding_window=(256, 256), window_attn_skip_freq=2
+        )
+        # layer % 2 != 0 => SWA: layers 1,3 are True; 0,2 are False
+        self.assertEqual(gen.cache.swa_layers, [False, True, False, True])
+
+    def test_sliding_window_with_list_skip_freq(self):
+        """skip_freq as list: per-layer control."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4, sliding_window=(128, 128),
+            window_attn_skip_freq=[0, 1, 1, 0]
+        )
+        self.assertEqual(gen.cache.swa_layers, [False, True, True, False])
+
+    def test_empty_layers_increase_total(self):
+        """Empty layers in head/tail increase total cache layers."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=2, sliding_window=None,
+            num_empty_layers_add_in_head=1, num_empty_layers_add_in_tail=1
+        )
+        # total = 2 + 1 + 1 = 4
+        self.assertEqual(len(gen.cache.swa_layers), 4)
+        self.assertEqual(len(gen.cache.k), 4)
+
+
 class TestGreedyGeneratorEosStop(unittest.TestCase):
     """Test eos_token_id handling in GreedyGenerator.generate (mocked model)."""
 
