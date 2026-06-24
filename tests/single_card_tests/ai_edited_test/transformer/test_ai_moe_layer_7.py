@@ -122,6 +122,7 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
 
         layer = MoELayer.__new__(MoELayer)
         layer.config = config
+        layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         layer.pg_collection = pg
         layer.moe_group = pg.ep
         layer.expert_model_parallel_size = 4
@@ -144,6 +145,7 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
 
         layer = MoELayer.__new__(MoELayer)
         layer.config = config
+        layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         layer.pg_collection = pg
         layer.moe_group = pg.ep
         layer.expert_model_parallel_size = 2
@@ -158,6 +160,7 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
 
         layer = MoELayer.__new__(MoELayer)
         layer.config = config
+        layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         layer.pg_collection = pg
         layer.expert_model_parallel_size = 1
         layer.num_experts = 4

@@ -833,6 +833,11 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         stub.token_dispatcher._comm_manager.combine.return_value = paddle.randn(
             [bs_seq, expert_out_size]
         )
+        stub.token_dispatcher.get_dispatched_routing.return_value = (
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
         return stub, bs_seq
 
     def test_fusion_moe_forward_applies_fc1_fc2_when_latent(self):

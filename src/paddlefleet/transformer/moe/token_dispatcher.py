@@ -1162,6 +1162,16 @@ class AllToAllTokenDispatcher(nn.Layer):
         self.tokens_per_expert_post_gather = self.tokens_per_expert
         return sorted_tokens, self.tokens_per_expert_post_gather
 
+    def get_dispatched_routing(self):
+        """Return (dispatched_indices, dispatched_probs, tokens_per_expert).
+
+        AllToAll uses tokens_per_expert-based expert processing
+        (expert_forward), so dispatched_indices and dispatched_probs are None.
+        The corresponding branch in ``fusion_moe_forward`` selects
+        ``expert_forward`` instead of index-based fusion kernels.
+        """
+        return (None, None, self.tokens_per_expert)
+
     def combine_preprocess(self, hidden_states: paddle.Tensor):
         if self.num_local_experts > 1 and not self.is_empty_tokens:
             hidden_states, _ = sort_chunks_by_idxs(
@@ -1176,6 +1186,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         hidden_states: paddle.Tensor,
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
+        fp8_combine_grad_handle: dict | None = None,
     ):
         permutated_local_input_tokens = _AllToAll.apply(
             self.permutated_local_input_tokens_shape,

@@ -701,16 +701,15 @@ class MoELayer(nn.Layer):
     ):
         """Combine expert outputs back to the local token shard.
 
-        For the 'allgather' dispatcher: ``token_combine`` issues a (possibly
-        fused) ReduceScatter, then ``combine_postprocess`` finalizes it. When
-        ``combine_overlap_handle`` is provided the ReduceScatter overlaps with
-        a user-supplied subgraph (typically the shared-expert MLP).
+        For the 'allgather' and 'alltoall' dispatchers: ``token_combine``
+        issues the reverse communication, then ``combine_postprocess``
+        finalizes it.
 
-        For other dispatchers (deepep / hybridep / alltoall): delegates to
+        For other dispatchers (deepep / hybridep): delegates to
         ``_comm_manager.combine`` directly, which already returns the restored
         tensor (no separate combine_postprocess step).
         """
-        if self.moe_token_dispatcher_type == "allgather":
+        if self.moe_token_dispatcher_type in ("allgather", "alltoall"):
             hidden_states = self.token_dispatcher.token_combine(
                 hidden_states,
                 combine_overlap_handle=combine_overlap_handle,
@@ -832,7 +831,7 @@ class MoELayer(nn.Layer):
                 self.layer_number,
                 self.moe_group,
                 self.num_experts_per_tok,
-                self.token_dispatcher._comm_manager.tokens_per_expert,
+                self.token_dispatcher.get_dispatched_routing()[2],
             )
         with profile("fusion_mlp"):
             hidden_states = self.routed_experts_compute(hidden_states)
@@ -862,6 +861,16 @@ class MoELayer(nn.Layer):
                 hidden_states, probs, routing_map, topk_weights, topk_indices
             )
 
+        # AllToAll token_dispatch returns unsorted global tokens;
+        # dispatch_postprocess sorts them by local expert so that
+        # expert_forward / FusionMoePyLayer can split by tokens_per_expert.
+        if self.moe_token_dispatcher_type == "alltoall":
+            dispatched_hidden_states, _ = (
+                self.token_dispatcher.dispatch_postprocess(
+                    dispatched_hidden_states
+                )
+            )
+
         dispatched_indices, dispatched_probs, tokens_per_expert = (
             self.token_dispatcher.get_dispatched_routing()
         )
@@ -877,7 +886,14 @@ class MoELayer(nn.Layer):
         )
 
         with profile("fusion_mlp"):
-            if self._use_hybrid_ep_fusion():
+            if self.moe_token_dispatcher_type == "alltoall":
+                # AllToAll dispatcher processes experts via tokens_per_expert
+                # split (expert_forward) rather than index-based fusion kernels,
+                # because it does not produce dispatched_indices/dispatched_probs.
+                hidden_states = self.expert_forward(
+                    dispatched_hidden_states, tokens_per_expert
+                )
+            elif self._use_hybrid_ep_fusion():
                 hidden_states = self._run_hybrid_ep_fusion(
                     dispatched_hidden_states,
                     dispatched_probs,
@@ -919,6 +935,13 @@ class MoELayer(nn.Layer):
                     clamp_value=self.config.activation_func_clamp_value,
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
                 )
+
+        # AllToAll: combine_preprocess reorders expert outputs to match the
+        # reverse AllToAll split structure before token_combine.
+        if self.moe_token_dispatcher_type == "alltoall":
+            hidden_states = self.token_dispatcher.combine_preprocess(
+                hidden_states
+            )
 
         with profile("combine"):
             hidden_states = self.combine(
