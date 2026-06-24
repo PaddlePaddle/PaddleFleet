@@ -1386,9 +1386,11 @@ def _quantize_and_pack_fp8(x):
     lives within a single token's hidden vector, so packing along axis 1
     before the gather yields the same per-rank bytes as gathering separately.
     """
-    assert quantize_activation_blockscaled_fast is not None, (
-        "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
-    )
+    if quantize_activation_blockscaled_fast is None:
+        raise RuntimeError(
+            "Cannot find quantize_activation_blockscaled_fast, "
+            "please update sonicmoe."
+        )
     x = x.contiguous()
     x_fp8, scale = quantize_activation_blockscaled_fast(
         x, scale_dtype=paddle.int32
