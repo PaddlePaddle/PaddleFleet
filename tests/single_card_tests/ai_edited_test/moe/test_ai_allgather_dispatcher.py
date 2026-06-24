@@ -936,39 +936,50 @@ class TestMoELayerCombine(unittest.TestCase):
 
 
 class TestTransformerLayerWithOverlapGuard(unittest.TestCase):
-    """Tests for the ValueError guard in TransformerLayerWithOverlap.
+    """Tests for the ValueError guard in TransformerLayerWithOverlap."""
 
-    Verifies that the production __init__ code rejects allgather/alltoall
-    dispatcher types by reading the actual source and checking the guard logic.
-    Full EP>1 construction tests are in the multi-card test suite.
-    """
-
-    def _get_allowed_dispatchers_from_source(self):
-        """Verify the production __init__ has the deepep/hybridep guard."""
-        import inspect
-
+    def _build_layer_with_dispatcher(self, dispatcher_type):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
         from paddlefleet.transformer.transformer_layer import (
+            TransformerLayer,
             TransformerLayerWithOverlap,
         )
 
-        src = inspect.getsource(TransformerLayerWithOverlap.__init__)
-        return '"deepep"' in src and '"hybridep"' in src and "not in" in src
+        def fake_base_init(layer, *args, **kwargs):
+            paddle.nn.Layer.__init__(layer)
+            mlp = MoELayer.__new__(MoELayer)
+            mlp.gate = MagicMock(norm_topk_prob=False)
+            mlp.expert_model_parallel_size = 2
+            mlp.moe_token_dispatcher_type = dispatcher_type
+            layer.mlp = mlp
+            layer.recompute_mlp = False
+            layer.recompute_input_layernorm = False
+            layer.recompute_post_attention_layernorm = False
 
-    def test_guard_exists_in_source(self):
-        """The production __init__ has a not-in-('deepep','hybridep') guard."""
-        self.assertTrue(self._get_allowed_dispatchers_from_source())
+        with patch.object(TransformerLayer, "__init__", fake_base_init):
+            return TransformerLayerWithOverlap()
 
-    def test_allgather_rejected_by_source(self):
-        """allgather is not in ('deepep', 'hybridep') → would be rejected."""
-        self.assertNotIn("allgather", ("deepep", "hybridep"))
+    def test_allgather_rejected_by_init(self):
+        """Production __init__ rejects allgather with overlap scheduler."""
+        with self.assertRaisesRegex(
+            ValueError, "forward_backward_overlap_scheduler"
+        ):
+            self._build_layer_with_dispatcher("allgather")
 
-    def test_alltoall_rejected_by_source(self):
-        """alltoall is not in ('deepep', 'hybridep') → would be rejected."""
-        self.assertNotIn("alltoall", ("deepep", "hybridep"))
+    def test_alltoall_rejected_by_init(self):
+        """Production __init__ rejects alltoall with overlap scheduler."""
+        with self.assertRaisesRegex(
+            ValueError, "forward_backward_overlap_scheduler"
+        ):
+            self._build_layer_with_dispatcher("alltoall")
 
-    def test_deepep_accepted_by_source(self):
-        """deepep is in ('deepep', 'hybridep') → accepted."""
-        self.assertIn("deepep", ("deepep", "hybridep"))
+    def test_deepep_accepted_by_init(self):
+        """Production __init__ accepts deepep."""
+        self._build_layer_with_dispatcher("deepep")
+
+    def test_hybridep_accepted_by_init(self):
+        """Production __init__ accepts hybridep."""
+        self._build_layer_with_dispatcher("hybridep")
 
 
 # ── transformer_config field ─────────────────────────────────────────────────
