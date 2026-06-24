@@ -35,6 +35,7 @@ from paddle import Tensor
 
 logger = logging.getLogger(__name__)
 LOG2E = math.log2(math.e)
+_INT32_MAX = 2**31 - 1
 
 
 # ---------------------------------------------------------------------------
@@ -739,8 +740,6 @@ else:
 if _CUTILE_AVAILABLE:
     ConstInt = ct.Constant[int]
     PAD_ZERO = ct.PaddingMode.ZERO
-    LOG2E = 1.4426950408889634
-    _INT32_MAX = 2**31 - 1
 
     # -- Sinkhorn kernels ----------------------------------------------------
 
