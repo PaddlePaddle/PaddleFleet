@@ -84,7 +84,7 @@ class _EPTestBase(unittest.TestCase):
         paddle.seed(self.seed)
         paddle.manual_seed(self.seed)
         model_parallel_cuda_manual_seed(self.seed)
-        self.ep_group = self.__class__.pg_collection.expert_parallel
+        self.ep_group = self.__class__.pg_collection.ep
         self.ep_size = self.ep_group.nranks
         self.rank = dist.get_rank(self.ep_group)
         self.num_experts = 4
