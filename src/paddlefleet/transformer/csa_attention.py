@@ -1335,6 +1335,9 @@ class CSAIndexer(nn.Layer):
         """
         q, k, weights = self.forward_before_topk(x, qr, startend_row_indices)
         effective_topk = min(self.index_topk, k.shape[1])
+        weights = (
+            weights * self.softmax_scale
+        )  # 对齐 fwd 和 recompute fwd的一致性
         index_scores, topk_indices = fused_qk_topk_naive(
             q, k, weights, effective_topk, mask
         )
