@@ -1083,26 +1083,43 @@ class TestFusedProjRmsComputeH(unittest.TestCase):
 
 
 class TestFusedMHCErrorHandling(unittest.TestCase):
-    """Test error handling when cuTile is not available."""
+    """Test error handling when neither cuTile nor Triton is available."""
 
-    def test_no_cutile_raises(self):
-        """If cuTile unavailable, fused ops should raise RuntimeError."""
-        if is_cutile_available():
-            self.skipTest("cuTile is available, cannot test error path")
+    def test_no_backend_raises_sinkhorn(self):
+        """If both cuTile and Triton unavailable, fused_sinkhorn should raise."""
+        if is_cutile_available() or is_triton_available():
+            self.skipTest(
+                "cuTile or Triton is available, cannot test error path"
+            )
 
-        from paddlefleet.fusions.fused_mhc_kernels import (
-            fused_h_aggregate,
-            fused_h_post_bda,
-            fused_proj_rms,
-            fused_sinkhorn,
-        )
+        from paddlefleet.fusions.fused_mhc_kernels import fused_sinkhorn
 
         with self.assertRaises(RuntimeError):
             fused_sinkhorn(paddle.randn([2, 4, 4]), 5)
+
+    def test_no_backend_raises_h_aggregate(self):
+        """If both cuTile and Triton unavailable, fused_h_aggregate should raise."""
+        if is_cutile_available() or is_triton_available():
+            self.skipTest(
+                "cuTile or Triton is available, cannot test error path"
+            )
+
+        from paddlefleet.fusions.fused_mhc_kernels import fused_h_aggregate
+
         with self.assertRaises(RuntimeError):
             fused_h_aggregate(
                 paddle.randn([2, 2, 4, 64]), paddle.randn([2, 2, 4])
             )
+
+    def test_no_backend_raises_h_post_bda(self):
+        """If both cuTile and Triton unavailable, fused_h_post_bda should raise."""
+        if is_cutile_available() or is_triton_available():
+            self.skipTest(
+                "cuTile or Triton is available, cannot test error path"
+            )
+
+        from paddlefleet.fusions.fused_mhc_kernels import fused_h_post_bda
+
         with self.assertRaises(RuntimeError):
             fused_h_post_bda(
                 paddle.randn([2, 2, 4, 4]),
@@ -1111,6 +1128,14 @@ class TestFusedMHCErrorHandling(unittest.TestCase):
                 paddle.randn([2, 2, 64]),
                 None,
             )
+
+    def test_no_cutile_raises_proj_rms(self):
+        """fused_proj_rms requires cuTile (no Triton fallback)."""
+        if is_cutile_available():
+            self.skipTest("cuTile is available, cannot test error path")
+
+        from paddlefleet.fusions.fused_mhc_kernels import fused_proj_rms
+
         with self.assertRaises(RuntimeError):
             fused_proj_rms(paddle.randn([32, 128]), paddle.randn([128, 16]))
 
