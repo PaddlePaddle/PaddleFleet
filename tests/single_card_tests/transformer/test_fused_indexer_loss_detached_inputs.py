@@ -80,17 +80,17 @@ class TestFusedDSAIndexerLossDetachedInputs(unittest.TestCase):
         the same 6-tensor signature as the 6 returns from ``backward``.
         """
         q = paddle.randn(
-            [self.sq, self.b, self.h, self.d], dtype="float32"
+            [self.b, self.sq, self.h, self.d], dtype="float32"
         ).detach()
         weights = paddle.randn(
-            [self.sq, self.b, self.h], dtype="float32"
+            [self.b, self.sq, self.h], dtype="float32"
         ).detach()
-        k = paddle.randn([self.sk, self.b, self.d], dtype="float32").detach()
+        k = paddle.randn([self.b, self.sk, self.d], dtype="float32").detach()
         query = paddle.randn(
-            [self.sq, self.b, self.np, self.hn], dtype="float32"
+            [self.b, self.sq, self.np, self.hn], dtype="float32"
         ).detach()
         key = paddle.randn(
-            [self.sk, self.b, self.np, self.hn], dtype="float32"
+            [self.b, self.sk, self.np, self.hn], dtype="float32"
         ).detach()
 
         # Sanity: every tensor input must be stop_gradient=True for this test

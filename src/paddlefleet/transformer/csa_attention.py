@@ -1676,29 +1676,17 @@ class CompressedSparseAttention(FleetLayer):
                 indexer_loss_coeff = getattr(
                     self.config, "dsa_indexer_loss_coeff", 0.0
                 )
-                key_for_loss = (
-                    compressed_kv.transpose([1, 0, 2])
-                    .unsqueeze(2)
-                    .expand([-1, -1, np_heads, -1])
+                key_for_loss = compressed_kv.unsqueeze(2).expand(
+                    [-1, -1, np_heads, -1]
                 )
-
-                q_sf = q_indexer.transpose([1, 0, 2, 3])
-                k_sf = (
-                    k_indexer.transpose([1, 0, 2])
-                    if k_indexer.ndim == 3
-                    else k_indexer.transpose([1, 0, 2, 3])
-                )
-                weights_sf = (
-                    weights_indexer * self.indexer.softmax_scale
-                ).transpose([1, 0, 2])
-                query_sf = query.transpose([1, 0, 2, 3]).detach()
+                weights_for_loss = weights_indexer * self.indexer.softmax_scale
                 mask_for_loss = causal_mask.unsqueeze(1)
 
                 indexer_loss = FusedDSAIndexerLoss.apply(
-                    q_sf,
-                    weights_sf,
-                    k_sf,
-                    query_sf,
+                    q_indexer,
+                    weights_for_loss,
+                    k_indexer,
+                    query.detach(),
                     key_for_loss.detach(),
                     self.softmax_scale,
                     min(self.indexer.index_topk, n_compressed),
@@ -1709,6 +1697,7 @@ class CompressedSparseAttention(FleetLayer):
                 loss_mask,
                 global_valid_count,
                 )
+
                 topk_indices_compressed = FusedDSAIndexerLoss._last_topk_indices
 
                 if indexer_loss_coeff > 0:
@@ -2131,7 +2120,6 @@ class CompressedSparseAttention(FleetLayer):
                     # Paddle reference loss path
                     key_for_loss = (
                         compressed_kv_global.detach()
-                        .transpose([1, 0, 2])
                         .unsqueeze(2)
                         .expand([-1, -1, np_heads, -1])
                     )
@@ -2155,23 +2143,16 @@ class CompressedSparseAttention(FleetLayer):
                             :, position_offset : position_offset + sq, ...
                         ]
 
-                    q_sf = q_indexer_bf.transpose([1, 0, 2, 3])
-                    k_sf = (
-                        k_indexer_global.transpose([1, 0, 2])
-                        if k_indexer_global.ndim == 3
-                        else k_indexer_global.transpose([1, 0, 2, 3])
-                    )
-                    weights_sf = (
+                    weights_for_loss = (
                         weights_indexer_bf * self.indexer.softmax_scale
-                    ).transpose([1, 0, 2])
-                    query_sf = query.transpose([1, 0, 2, 3]).detach()
+                    )
                     mask_for_loss = causal_mask.unsqueeze(1)
 
                     indexer_loss = FusedDSAIndexerLoss.apply(
-                        q_sf,
-                        weights_sf,
-                        k_sf,
-                        query_sf,
+                        q_indexer_bf,
+                        weights_for_loss,
+                        k_indexer_global,
+                        query.detach(),
                         key_for_loss.detach(),
                         self.softmax_scale,
                         min(self.indexer.index_topk, n_compressed_global),
