@@ -120,14 +120,16 @@ class DynamicKVCache:
         self.v: list[paddle.Tensor | None] = [None] * num_layers
         self.swa_layers = swa_layers or [False] * num_layers
         self.window_size = window_size
+        # Track absolute sequence length independently of truncated cache
+        self._seq_len: list[int] = [0] * num_layers
 
     def get_seq_len(self, layer_idx: int = 0) -> int:
-        if self.k[layer_idx] is not None:
-            return self.k[layer_idx].shape[1]
-        # Fallback: find first non-empty layer
-        for k in self.k:
-            if k is not None:
-                return k.shape[1]
+        if self._seq_len[layer_idx] > 0:
+            return self._seq_len[layer_idx]
+        # Fallback: find first non-zero layer
+        for s in self._seq_len:
+            if s > 0:
+                return s
         return 0
 
     def update(
@@ -143,16 +145,21 @@ class DynamicKVCache:
             self.v[layer_idx] = paddle.concat(
                 [self.v[layer_idx], v_new], axis=1
             )
-        # Truncate SWA layers to window_size
+        # Update absolute sequence length before truncation
+        self._seq_len[layer_idx] = self._seq_len[layer_idx] + k_new.shape[1]
+        # Return full K/V for current attention computation
+        full_k, full_v = self.k[layer_idx], self.v[layer_idx]
+        # Truncate SWA layers in cache for subsequent decode steps
         if self.window_size and self.swa_layers[layer_idx]:
             self.k[layer_idx] = self.k[layer_idx][:, -self.window_size :]
             self.v[layer_idx] = self.v[layer_idx][:, -self.window_size :]
-        return self.k[layer_idx], self.v[layer_idx]
+        return full_k, full_v
 
     def reset(self) -> None:
         for i in range(len(self.k)):
             self.k[i] = None
             self.v[i] = None
+            self._seq_len[i] = 0
 
 
 # ---------------------------------------------------------------------------
@@ -212,10 +219,17 @@ class GreedyGenerator:
         # Determine which layers use SWA for KV cache truncation
         sliding_window = getattr(cfg, "sliding_window", None)
         window_attn_skip_freq = getattr(cfg, "window_attn_skip_freq", None)
-        swa_layers = [
-            is_layer_window_attention(sliding_window, window_attn_skip_freq, i)
-            for i in range(total_layers)
-        ]
+        swa_layers = []
+        for i in range(total_layers):
+            real_i = i - num_empty_layers_add_in_head
+            if real_i < 0 or real_i >= num_layers:
+                swa_layers.append(False)
+            else:
+                swa_layers.append(
+                    is_layer_window_attention(
+                        sliding_window, window_attn_skip_freq, real_i
+                    )
+                )
         window_size = sliding_window[0] if sliding_window else None
         self.cache = DynamicKVCache(
             num_layers=total_layers,
