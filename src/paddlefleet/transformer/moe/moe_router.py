@@ -1170,7 +1170,7 @@ class TopKRouter(StandardMoERouter):
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
         gates_ori = gates.clone()
-        if self.scoring_func != "softmax":
+        if self.config.router_aux_loss_coef and self.scoring_func != "softmax":
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
