@@ -244,7 +244,12 @@ def build_dsa_varlen_mask(
     if attn_mask_startend_row_indices is None:
         return None
 
-    mask = attn_mask_startend_row_indices.reshape([batch_size, sq]).cast("int64")
+    indices = attn_mask_startend_row_indices
+    if indices.ndim == 4 and indices.shape[1] == 1 and indices.shape[3] in [1, 2, 4]:
+        indices = indices[:, 0, :, 0]  # [B, S]
+    else:
+        raise ValueError("attn_mask_startend_row_indices should be [B, 1, S, 1/2/4]")
+    mask = indices.reshape([batch_size, sq]).cast("int64")
     doc_start = _get_doc_start(mask, sq).unsqueeze(2)  # [b, sq, 1]
     doc_end = mask.unsqueeze(2)  # [b, sq, 1]
     key_pos = paddle.arange(sk, dtype="int64").reshape([1, 1, sk])
@@ -1429,6 +1434,11 @@ class DSAttention(FleetLayer):
             paddle.full([sq, sk], float("-inf"), dtype="float32"),
             diagonal=1,
         )  # [sq, sk]
+        if attn_mask_startend_row_indices is None and packed_seq_params is not None:
+            raise NotImplementedError(
+                "DSA varlen mask from packed_seq_params.cu_seqlens is not yet supported. "
+                "Please pass attn_mask_startend_row_indices explicitly."
+            )
         varlen_mask = build_dsa_varlen_mask(
             attn_mask_startend_row_indices, b, sq, sk
         )
