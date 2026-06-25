@@ -841,6 +841,9 @@ class MoELayer(nn.Layer):
             is_first_fwd=is_first_fwd,
             dw_p2p_overlap=self.dw_p2p_overlap,
             clamp_value=self.config.activation_func_clamp_value,
+            use_accuracy_compatible=getattr(
+                self.config, "use_accuracy_compatible", False
+            ),
         )
 
     def dispatch_preprocess(self, args):

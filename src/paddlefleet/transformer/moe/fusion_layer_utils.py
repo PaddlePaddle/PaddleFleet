@@ -2149,6 +2149,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         is_first_fwd=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_accuracy_compatible=False,
     ):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
@@ -2160,6 +2161,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             moe_expert_fusion=moe_expert_fusion,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
+            use_accuracy_compatible=use_accuracy_compatible,
         )
         original_hidden_shape = tuple(hidden_states.shape)
         original_probs_shape = tuple(dispatched_probs.shape)
