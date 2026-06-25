@@ -259,10 +259,12 @@ class StandardMoERouter(nn.Layer):
                 f"seq_aux is True but routing_type is {self.routing_type}. Please check."
             )
 
-        if (
-            self.routing_type == "seq_aux_loss"
-            and self.scoring_func
-            not in ("softmax", "sigmoid", "relu", "sftplus", "sqrtsoftplus")
+        if self.routing_type == "seq_aux_loss" and self.scoring_func not in (
+            "softmax",
+            "sigmoid",
+            "relu",
+            "sftplus",
+            "sqrtsoftplus",
         ):
             raise ValueError(
                 "seq_aux_loss requires a non-negative MoE scoring_func, "
