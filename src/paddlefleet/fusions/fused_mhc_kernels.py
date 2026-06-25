@@ -86,7 +86,11 @@ if _CUTILE_AVAILABLE:
             index=(pid, 0, 0),
             tile=ct.reshape(M.astype(M_init_out.dtype), (TILE_SIZE, HC, HC)),
         )
-        for _ in range(NUM_ITERS):
+        row_sum = ct.sum(M, axis=2, keepdims=True)
+        M = M / row_sum + eps
+        col_sum = ct.sum(M, axis=1, keepdims=True)
+        M = M / (col_sum + eps)
+        for _ in range(NUM_ITERS - 1):
             row_sum = ct.sum(M, axis=2, keepdims=True)
             M = M / (row_sum + eps)
             col_sum = ct.sum(M, axis=1, keepdims=True)
@@ -121,7 +125,10 @@ if _CUTILE_AVAILABLE:
             ct.store(ws_M, index=(M_base + 2 * t, 0, 0), tile=M)
             row_sum = ct.sum(M, axis=2, keepdims=True)
             ct.store(ws_rs, index=(v_base + t, 0, 0), tile=row_sum)
-            M = M / (row_sum + eps)
+            if t == 0:
+                M = M / row_sum + eps
+            else:
+                M = M / (row_sum + eps)
             ct.store(ws_M, index=(M_base + 2 * t + 1, 0, 0), tile=M)
             col_sum = ct.sum(M, axis=1, keepdims=True)
             ct.store(ws_cs, index=(v_base + t, 0, 0), tile=col_sum)
@@ -146,8 +153,12 @@ if _CUTILE_AVAILABLE:
             row_s = ct.load(
                 ws_rs, index=(v_base + t, 0, 0), shape=(TILE_SIZE, HC, 1)
             )
-            grad = grad / (row_s + eps)
-            row_corr = ct.sum(grad * M, axis=2, keepdims=True)
+            if t == 0:
+                grad = grad / row_s
+                row_corr = ct.sum(grad * (M - eps), axis=2, keepdims=True)
+            else:
+                grad = grad / (row_s + eps)
+                row_corr = ct.sum(grad * M, axis=2, keepdims=True)
             grad = grad - row_corr
             M = ct.load(
                 ws_M, index=(M_base + 2 * t, 0, 0), shape=(TILE_SIZE, HC, HC)
