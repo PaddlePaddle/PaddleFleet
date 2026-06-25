@@ -492,29 +492,63 @@ class DSAIndexer(paddle.nn.Layer):
 def _compute_index_scores_fused(
     q: Tensor, weights: Tensor, k: Tensor
 ) -> Tensor:
-    """Compute index scores from Indexer outputs.
+    """Compute index scores from batch-first Indexer outputs.
 
     Args:
-        q:       [sq, b, h, d]  (Indexer query, after RoPE + Hadamard)
-        weights: [sq, b, h]     (per-head importance weights)
-        k:       [sk, b, d]     (Indexer key, after RoPE + Hadamard)
+        q:       [b, sq, h, d]  (Indexer query, after RoPE + Hadamard)
+        weights: [b, sq, h]     (per-head importance weights)
+        k:       [b, sk, d]     (Indexer key, after RoPE + Hadamard)
 
     Returns:
         index_scores: [b, sq, sk]
     """
-    # q @ k^T -> [sq, b, h, sk]
-    index_scores = paddle.einsum(
-        "sbhd,tbd->sbht", q.cast("float32"), k.cast("float32")
-    )
+    # q @ k^T -> [b, sq, h, sk]
+
+    with paddle.amp.auto_cast(False):
+        # 对齐 recompute fwd和 fwd情况下的amp一致性
+        index_scores = paddle.einsum(
+            "bshd,btd->bsht", q.cast("float32"), k.cast("float32")
+        )
     # ReLU activation
     index_scores = F.relu(index_scores)
-    # Weight each head: [sq, b, h, sk] * [sq, b, h, 1] -> [sq, b, h, sk]
+    # Weight each head: [b, sq, h, sk] * [b, sq, h, 1] -> [b, sq, h, sk]
     index_scores = index_scores * weights.unsqueeze(-1)
-    # Sum across heads: [sq, b, h, sk] -> [sq, b, sk]
+    # Sum across heads: [b, sq, h, sk] -> [b, sq, sk]
     index_scores = index_scores.sum(axis=2)
-    # Transpose to [b, sq, sk]
-    index_scores = index_scores.transpose([1, 0, 2])
     return index_scores
+
+
+def _compute_index_scores_and_topk(
+    q: Tensor,
+    k: Tensor,
+    weights: Tensor,
+    index_topk: int,
+    mask: Tensor | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Compute masked index scores and top-k indices in batch-first layout."""
+    index_scores = _compute_index_scores_fused(q, weights, k)
+
+    mask = _normalize_dsa_mask(mask)
+    if mask is not None:
+        index_scores = index_scores + mask
+
+    topk_k = min(index_topk, index_scores.shape[-1])
+    topk_values, topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)
+    topk_indices = paddle.clip(
+        topk_indices, min=0, max=index_scores.shape[-1] - 1
+    )
+    # Mark indices whose scores are -inf as invalid (-1). This happens when
+    # a document-aware mask blocks cross-document compressed positions.
+    # The tilelang kernel handles this internally, but the naive path needs
+    # explicit invalidation so downstream sparse attention ignores them.
+    invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
+    topk_indices = paddle.where(
+        invalid_topk,
+        paddle.full_like(topk_indices, -1),
+        topk_indices,
+    )
+
+    return index_scores, topk_indices
 
 
 def fused_qk_topk_naive(
@@ -540,36 +574,7 @@ def fused_qk_topk_naive(
         index_scores: [b, sq, sk]
         topk_indices: [b, sq, topk]
     """
-    q_fp32 = q.cast("float32")
-    k_fp32 = k.cast("float32")
-
-    # q @ k^T: [b, sq, n_heads, head_dim] x [b, sk, head_dim] -> [b, sq, n_heads, sk]
-    scores = paddle.einsum("bshd,btd->bsht", q_fp32, k_fp32)
-    # ReLU activation
-    scores = F.relu(scores)
-    # Weight each head and sum: [b, sq, n_heads, sk] * [b, sq, n_heads, 1] -> sum -> [b, sq, sk]
-    index_scores = (scores * weights.unsqueeze(-1)).sum(axis=2)
-
-    if mask is not None:
-        index_scores = index_scores + mask
-
-    topk_k = min(index_topk, index_scores.shape[-1])
-    topk_values, topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)
-    topk_indices = paddle.clip(
-        topk_indices, min=0, max=index_scores.shape[-1] - 1
-    )
-    # Mark indices whose scores are -inf as invalid (-1). This happens when
-    # a document-aware mask blocks cross-document compressed positions.
-    # The tilelang kernel handles this internally, but the naive path needs
-    # explicit invalidation so downstream sparse attention ignores them.
-    invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
-    topk_indices = paddle.where(
-        invalid_topk,
-        paddle.full_like(topk_indices, -1),
-        topk_indices,
-    )
-
-    return index_scores, topk_indices
+    return _compute_index_scores_and_topk(q, k, weights, index_topk, mask)
 
 
 def _compute_dsa_indexer_loss(
@@ -590,8 +595,8 @@ def _compute_dsa_indexer_loss(
     Args:
         index_scores: [b, sq, sk]
         topk_indices: [b, sq, topk]
-        query: [sq, b, np, hn]  (MLA query, DETACHED)
-        key:   [sk, b, np, hn]  (MLA key, DETACHED)
+        query: [b, sq, np, hn]  (MLA query, DETACHED)
+        key:   [b, sk, np, hn]  (MLA key, DETACHED)
         softmax_scale: Scale coefficient after q @ k^T
         loss_coeff: Coefficient for the indexer KL divergence loss
         sparse_loss: Whether to apply sparse index mask
@@ -603,13 +608,13 @@ def _compute_dsa_indexer_loss(
     Returns:
         indexer_loss: scalar
     """
-    sq, b, np, hn = query.shape
-    sk = key.shape[0]
+    b, sq, np, hn = query.shape
+    sk = key.shape[1]
 
-    # [sq, b, np, hn] -> [b, np, sq, hn] -> [b * np, sq, hn]
-    query_reshaped = query.transpose([1, 2, 0, 3]).reshape([b * np, sq, hn])
-    # [sk, b, np, hn] -> [b, np, hn, sk] -> [b * np, hn, sk]
-    key_reshaped = key.transpose([1, 2, 3, 0]).reshape([b * np, hn, sk])
+    # [b, sq, np, hn] -> [b, np, sq, hn] -> [b * np, sq, hn]
+    query_reshaped = query.transpose([0, 2, 1, 3]).reshape([b * np, sq, hn])
+    # [b, sk, np, hn] -> [b, np, hn, sk] -> [b * np, hn, sk]
+    key_reshaped = key.transpose([0, 2, 3, 1]).reshape([b * np, hn, sk])
     # Compute attention scores [b * np, sq, sk]
     attention_scores = (
         paddle.bmm(query_reshaped.cast("float32"), key_reshaped.cast("float32"))
@@ -719,28 +724,28 @@ def _bwd_fused_indexer_loss(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Manual backward for fused indexer loss.
 
-    All tensor layouts (sequence-first):
-        q:       [sq, b, h, d]
-        weights: [sq, b, h]
-        k:       [sk, b, d]
-        query:   [sq, b, np, hn]  (MLA query)
-        key:     [sk, b, np, hn]  (MLA key)
+    All tensor layouts (batch-first):
+        q:       [b, sq, h, d]
+        weights: [b, sq, h]
+        k:       [b, sk, d]
+        query:   [b, sq, np, hn]  (MLA query)
+        key:     [b, sk, np, hn]  (MLA key)
 
     Returns:
-        grad_q:       [sq, b, h, d]
-        grad_weights: [sq, b, h]
-        grad_k:       [sk, b, d]
+        grad_q:       [b, sq, h, d]
+        grad_weights: [b, sq, h]
+        grad_k:       [b, sk, d]
     """
     # Recompute index_scores from (q, weights, k)
     index_scores = _compute_index_scores_fused(q, weights, k)  # [b, sq, sk]
 
-    sq, b, np, hn = query.shape
-    sk = key.shape[0]
+    b, sq, np, hn = query.shape
+    sk = key.shape[1]
 
-    # [sq, b, np, hn] -> [b, np, sq, hn] -> [b * np, sq, hn]
-    query_reshaped = query.transpose([1, 2, 0, 3]).reshape([b * np, sq, hn])
-    # [sk, b, np, hn] -> [b, np, hn, sk] -> [b * np, hn, sk]
-    key_reshaped = key.transpose([1, 2, 3, 0]).reshape([b * np, hn, sk])
+    # [b, sq, np, hn] -> [b, np, sq, hn] -> [b * np, sq, hn]
+    query_reshaped = query.transpose([0, 2, 1, 3]).reshape([b * np, sq, hn])
+    # [b, sk, np, hn] -> [b, np, hn, sk] -> [b * np, hn, sk]
+    key_reshaped = key.transpose([0, 2, 3, 1]).reshape([b * np, hn, sk])
     # Compute attention scores [b * np, sq, sk]
     attention_scores = (
         paddle.bmm(query_reshaped.cast("float32"), key_reshaped.cast("float32"))
@@ -893,20 +898,16 @@ def _bwd_fused_indexer_loss(
     )
     del valid_mask
 
-    # Transpose from [b, sq, sk] to [sq, b, sk]
-    grad_index_scores = grad_index_scores_logits.transpose(
-        [1, 0, 2]
-    )  # [sq, b, sk]
-    del grad_index_scores_logits
-
     # Backward through sum over heads: expand gradient
-    grad_weighted_scores = grad_index_scores.unsqueeze(2)  # [sq, b, 1, sk]
-    del grad_index_scores
+    grad_weighted_scores = grad_index_scores_logits.unsqueeze(
+        2
+    )  # [b, sq, 1, sk]
+    del grad_index_scores_logits
 
     # Compute forward values needed for backward (recomputation)
     scores = paddle.einsum(
-        "sbhd,tbd->sbht", q.cast("float32"), k.cast("float32")
-    )  # [sq, b, h, sk]
+        "bshd,btd->bsht", q.cast("float32"), k.cast("float32")
+    )  # [b, sq, h, sk]
     relu_mask = scores > 0
     scores_after_relu = F.relu(scores)
     del scores
@@ -915,29 +916,29 @@ def _bwd_fused_indexer_loss(
     # dL/d_weights = grad * relu_scores (sum over sk)
     grad_weights = (grad_weighted_scores * scores_after_relu).sum(
         axis=-1
-    )  # [sq, b, h]
+    )  # [b, sq, h]
 
     # dL/d_relu_scores = grad * weights
     grad_scores_after_relu = grad_weighted_scores * weights.unsqueeze(
         -1
-    )  # [sq, b, h, sk]
+    )  # [b, sq, h, sk]
     del grad_weighted_scores, scores_after_relu
 
     # Backward through ReLU
     grad_scores = grad_scores_after_relu * relu_mask.cast(
         "float32"
-    )  # [sq, b, h, sk]
+    )  # [b, sq, h, sk]
     del grad_scores_after_relu, relu_mask
 
-    # Backward through einsum 'sbhd,tbd->sbht'
-    # ∂L/∂q = einsum('sbht,tbd->sbhd', grad_scores, k)
+    # Backward through einsum 'bshd,btd->bsht'
+    # ∂L/∂q = einsum('bsht,btd->bshd', grad_scores, k)
     grad_q = paddle.einsum(
-        "sbht,tbd->sbhd", grad_scores, k.cast("float32")
-    )  # [sq, b, h, d]
-    # ∂L/∂k = einsum('sbht,sbhd->tbd', grad_scores, q)
+        "bsht,btd->bshd", grad_scores, k.cast("float32")
+    )  # [b, sq, h, d]
+    # ∂L/∂k = einsum('bsht,bshd->btd', grad_scores, q)
     grad_k = paddle.einsum(
-        "sbht,sbhd->tbd", grad_scores, q.cast("float32")
-    )  # [sk, b, d]
+        "bsht,bshd->btd", grad_scores, q.cast("float32")
+    )  # [b, sk, d]
     del grad_scores
 
     return (
@@ -955,11 +956,11 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
     @staticmethod
     def forward(
         ctx,
-        q: Tensor,  # [sq, b, h, d]  — Indexer query output
-        weights: Tensor,  # [sq, b, h]     — Indexer per-head weights
-        k: Tensor,  # [sk, b, d]     — Indexer key output
-        query: Tensor,  # [sq, b, np, hn] — MLA query (DETACHED)
-        key: Tensor,  # [sk, b, np, hn] — MLA key (DETACHED)
+        q: Tensor,  # [b, sq, h, d]  — Indexer query output
+        weights: Tensor,  # [b, sq, h]     — Indexer per-head weights
+        k: Tensor,  # [b, sk, d]     — Indexer key output
+        query: Tensor,  # [b, sq, np, hn] — MLA query (DETACHED)
+        key: Tensor,  # [b, sk, np, hn] — MLA key (DETACHED)
         # Non-tensor params follow (stored on ctx, not in backward returns)
         softmax_scale: float = 1.0,
         topk: int = 64,
@@ -973,11 +974,11 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         """Fused forward: compute index_scores, topk, and KL loss.
 
         Args:
-            q:       Indexer query after RoPE+Hadamard [sq, b, h, d]
-            weights: Per-head importance weights [sq, b, h]
-            k:       Indexer key after RoPE+Hadamard [sk, b, d]
-            query:   MLA query (detached) [sq, b, np, hn]
-            key:     MLA key (detached) [sk, b, np, hn]
+            q:       Indexer query after RoPE+Hadamard [b, sq, h, d]
+            weights: Per-head importance weights [b, sq, h]
+            k:       Indexer key after RoPE+Hadamard [b, sk, d]
+            query:   MLA query (detached) [b, sq, np, hn]
+            key:     MLA key (detached) [b, sk, np, hn]
             softmax_scale: MLA attention softmax scale
             topk:    Number of top-k indices to select
             loss_coeff: Coefficient for KL loss
@@ -989,39 +990,15 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
             indexer_loss: scalar KL divergence loss
         """
         with paddle.amp.auto_cast(False):
-            # Step 1: Compute index_scores from (q, weights, k)
-            index_scores = _compute_index_scores_fused(
-                q, weights, k
-            )  # [b, sq, sk]
-
-            # Step 2: Apply mask and select topk
+            # Share the exact indexer forward with fused_qk_topk_naive so the
+            # normal forward and PyLayer recompute path cannot drift.
+            masked_scores, topk_indices = _compute_index_scores_and_topk(
+                q, k, weights, topk, mask
+            )
             mask = _normalize_dsa_mask(mask)
-            if mask is not None:
-                masked_scores = index_scores + mask
-            else:
-                masked_scores = index_scores
-            topk_k = min(topk, masked_scores.shape[-1])
-            topk_values, topk_indices = paddle.topk(
-                masked_scores, k=topk_k, axis=-1
-            )
-            # Clamp indices to valid range: paddle.topk may return garbage indices
-            # for -inf input values
-            topk_indices = paddle.clip(
-                topk_indices, min=0, max=masked_scores.shape[-1] - 1
-            )
-            # Mark indices whose scores are -inf as invalid (-1). This happens
-            # when a document-aware mask blocks cross-document compressed
-            # positions.
-            invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
-            topk_indices = paddle.where(
-                invalid_topk,
-                paddle.full_like(topk_indices, -1),
-                topk_indices,
-            )
 
             FusedDSAIndexerLoss._last_topk_indices = topk_indices.detach()
 
-            # Step 3: Compute KL loss (use masked_scores)
             indexer_loss = _compute_dsa_indexer_loss(
                 masked_scores,
                 topk_indices,
@@ -1432,23 +1409,12 @@ class DSAttention(FleetLayer):
             # RoPE is computed internally by the indexer
             q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(x, qr)
 
-            # Convert to seq-first for FusedDSAIndexerLoss
-            q_idx_sf = q_idx.transpose([1, 0, 2, 3])  # [b,s,h,d] -> [s,b,h,d]
-            k_idx_sf = k_idx.transpose([1, 0, 2])  # [b,s,d] -> [s,b,d]
-            weights_idx_sf = weights_idx.transpose(
-                [1, 0, 2]
-            )  # [b,s,h] -> [s,b,h]
-
-            # Convert query/key to seq-first for loss computation
-            query_sf = query.transpose([1, 0, 2, 3])
-            key_sf = key.transpose([1, 0, 2, 3])
-
             indexer_loss = FusedDSAIndexerLoss.apply(
-                q_idx_sf,
-                weights_idx_sf,
-                k_idx_sf,
-                query_sf.detach(),
-                key_sf.detach(),
+                q_idx,
+                weights_idx,
+                k_idx,
+                query.detach(),
+                key.detach(),
                 self.softmax_scale,
                 self.indexer.index_topk,
                 float(self.dsa_indexer_loss_coeff),

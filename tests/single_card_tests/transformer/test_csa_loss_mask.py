@@ -52,9 +52,9 @@ class TestComputeTileLangLossMask(unittest.TestCase):
     @patch("paddlefleet.tilelang_ops.csa_indexer_topk_fwd")
     @patch("paddlefleet.tilelang_ops.csa_attn_target_reducesum")
     def test_loss_mask_reduces_loss(self, mock_target, mock_topk):
-        """Call _compute_tilelang_csa_indexer_loss_forward with loss_mask."""
+        """Call _compute_fused_csa_indexer_loss_forward with loss_mask."""
         from paddlefleet.transformer.csa_attention import (
-            _compute_tilelang_csa_indexer_loss_forward,
+            _compute_fused_csa_indexer_loss_forward,
         )
 
         b, sq, topk, d = 2, 8, 4, 16
@@ -82,7 +82,7 @@ class TestComputeTileLangLossMask(unittest.TestCase):
         loss_mask[:, sq // 2 :] = 0.0
         global_valid_count = max(float(loss_mask.sum()), 1.0)
 
-        loss_with, _, _, _ = _compute_tilelang_csa_indexer_loss_forward(
+        loss_with, _, _, _ = _compute_fused_csa_indexer_loss_forward(
             index_q,
             weights,
             index_k,
@@ -96,7 +96,7 @@ class TestComputeTileLangLossMask(unittest.TestCase):
             loss_mask=loss_mask,
             global_valid_count=global_valid_count,
         )
-        loss_without, _, _, _ = _compute_tilelang_csa_indexer_loss_forward(
+        loss_without, _, _, _ = _compute_fused_csa_indexer_loss_forward(
             index_q,
             weights,
             index_k,
@@ -199,9 +199,9 @@ class TestDSAIndexerLossMask(unittest.TestCase):
             paddle.randn([b, sq, sk], dtype="float32"), axis=-1
         )
         topk_indices = paddle.randint(0, sk, [b, sq, 4]).cast("int64")
-        # query: [sq, b, np, hn], key: [sk, b, np, hn]
-        query = paddle.randn([sq, b, np_heads, hn], dtype="float32")
-        key = paddle.randn([sk, b, np_heads, hn], dtype="float32")
+        # query: [b, sq, np, hn], key: [b, sk, np, hn]
+        query = paddle.randn([b, sq, np_heads, hn], dtype="float32")
+        key = paddle.randn([b, sk, np_heads, hn], dtype="float32")
         softmax_scale = 0.125
         loss_coeff = 1.0
 
@@ -344,7 +344,7 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         self.assertIsNone(global_valid_count)
 
     @patch(
-        "paddlefleet.transformer.csa_attention._compute_tilelang_csa_indexer_loss_forward"
+        "paddlefleet.transformer.csa_attention._compute_fused_csa_indexer_loss_forward"
     )
     @patch("paddlefleet.fusions.csa_sparse_attn.csa_sparse_attn")
     def test_csa_forward_with_input_ids(self, mock_sparse_attn, mock_loss_fwd):
