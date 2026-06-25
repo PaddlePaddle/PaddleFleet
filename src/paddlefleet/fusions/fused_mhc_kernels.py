@@ -3130,6 +3130,7 @@ def fused_sinkhorn(
         f"fused_sinkhorn: N_batch={N_batch} exceeds int32 max ({_INT32_MAX})"
     )
 
+    input_logits = input_logits.contiguous()
     triton_impl = _get_triton_impl("sinkhorn")
     if triton_impl is not None:
         return triton_impl(input_logits, num_iterations, eps)

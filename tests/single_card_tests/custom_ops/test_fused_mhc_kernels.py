@@ -906,6 +906,149 @@ class TestEndToEndFused(unittest.TestCase):
         )
 
 
+class TestEndToEndFusedProjRmsComputeH(unittest.TestCase):
+    """Full mHC pipeline using fused_proj_rms_compute_h + sinkhorn + h_aggregate + h_post_bda."""
+
+    def setUp(self):
+        paddle.set_device("gpu")
+
+    @_requires_cutile
+    def test_full_pipeline_fwd_bwd(self):
+        from paddlefleet.fusions.fused_mhc_kernels import (
+            fused_h_aggregate,
+            fused_h_post_bda,
+            fused_proj_rms_compute_h,
+            fused_sinkhorn,
+        )
+
+        s, b, n, C = 8192, 1, 4, 4096
+        eps = 1e-6
+        compute_h_eps = 1e-6
+        sinkhorn_iters = 5
+        N = n * n + 2 * n
+
+        hs_data = _rand(s, b, n * C)
+        w_data = _rand(n * C, N)
+        alpha_pre_data = _rand(1)
+        alpha_post_data = _rand(1)
+        alpha_res_data = _rand(1)
+        bias_data = _rand(N)
+        layer_out_data = _rand(s, b, C)
+        layer_bias_data = _rand(C)
+
+        def _run_fused():
+            hs = hs_data.clone()
+            hs.stop_gradient = False
+            w = w_data.clone()
+            w.stop_gradient = False
+            ap = alpha_pre_data.clone()
+            ap.stop_gradient = False
+            ao = alpha_post_data.clone()
+            ao.stop_gradient = False
+            ar = alpha_res_data.clone()
+            ar.stop_gradient = False
+            bi = bias_data.clone()
+            bi.stop_gradient = False
+
+            x_2d = hs.reshape([s * b, n * C])
+            h_pre, h_post, h_res, r = fused_proj_rms_compute_h(
+                x_2d,
+                w,
+                ap,
+                ao,
+                ar,
+                bi,
+                n,
+                eps,
+                compute_h_eps,
+            )
+            h_pre = h_pre.reshape([s, b, n])
+            h_post = h_post.reshape([s, b, n])
+            h_res = h_res.reshape([s, b, n, n])
+
+            h_res = fused_sinkhorn(h_res, sinkhorn_iters, eps)
+            aggregated = fused_h_aggregate(hs.reshape([s, b, n, C]), h_pre)
+            output = fused_h_post_bda(
+                h_res,
+                hs.reshape([s, b, n, C]),
+                h_post,
+                layer_out_data,
+                layer_bias_data,
+            )
+
+            loss = output.sum() + aggregated.sum()
+            loss.backward()
+            return output.detach(), aggregated.detach(), hs.grad.clone()
+
+        def _run_ref():
+            hs = hs_data.clone()
+            hs.stop_gradient = False
+            w = w_data.clone()
+            w.stop_gradient = False
+            ap = alpha_pre_data.clone()
+            ap.stop_gradient = False
+            ao = alpha_post_data.clone()
+            ao.stop_gradient = False
+            ar = alpha_res_data.clone()
+            ar.stop_gradient = False
+            bi = bias_data.clone()
+            bi.stop_gradient = False
+
+            x_2d = hs.reshape([s * b, n * C])
+            h_pre, h_post, h_res, r = _ref_proj_rms_compute_h(
+                x_2d,
+                w,
+                ap,
+                ao,
+                ar,
+                bi,
+                n,
+                eps,
+                compute_h_eps,
+            )
+            h_pre = h_pre.reshape([s, b, n])
+            h_post = h_post.reshape([s, b, n])
+            h_res = h_res.reshape([s, b, n, n])
+
+            h_res = _ref_sinkhorn(h_res, sinkhorn_iters, eps)
+            aggregated = _ref_h_aggregate(hs.reshape([s, b, n, C]), h_pre)
+            output = _ref_h_post_bda(
+                h_res,
+                hs.reshape([s, b, n, C]),
+                h_post,
+                layer_out_data,
+                layer_bias_data,
+            )
+
+            loss = output.sum() + aggregated.sum()
+            loss.backward()
+            return output.detach(), aggregated.detach(), hs.grad.clone()
+
+        out_f, agg_f, grad_f = _run_fused()
+        out_r, agg_r, grad_r = _run_ref()
+
+        _assert_close(
+            agg_f,
+            agg_r,
+            E2E_FUSED_FWD_ATOL,
+            E2E_FUSED_FWD_RTOL,
+            "E2E fused_proj_rms_compute_h aggregated output",
+        )
+        _assert_close(
+            out_f,
+            out_r,
+            E2E_FUSED_FWD_ATOL,
+            E2E_FUSED_FWD_RTOL,
+            "E2E fused_proj_rms_compute_h h_post_bda output",
+        )
+        _assert_cosine_similar(
+            grad_f,
+            grad_r,
+            COSINE_SIM_THRESH,
+            "E2E fused_proj_rms_compute_h hidden_states grad",
+        )
+
+
 # ============================================================================
 # Proj RMS Compute H Tests (NEW fused kernel)
 # ============================================================================
@@ -1434,17 +1577,31 @@ class TestTritonHPostBDA(unittest.TestCase):
         import paddlefleet.fusions.fused_mhc_kernels as _mod
 
         triton_fwd = _mod._get_triton_impl("h_post_bda_fwd")
+        triton_bwd = _mod._get_triton_impl("h_post_bda_bwd")
         self.assertIsNotNone(triton_fwd)
+        self.assertIsNotNone(triton_bwd)
 
         hr_data = _rand(s, b, n, n)
         orig_data = _rand(s, b, n, C)
         hp_data = _rand(s, b, n)
         x_data = _rand(s, b, C)
         bias_data = _rand(C) if with_bias else None
+        grad_out = _rand(s, b, n, C)
 
-        out_t = triton_fwd(hr_data, orig_data, hp_data, x_data, bias_data)
+        # -- fwd comparison (use detach to avoid dlpack issues) --
+        out_t = triton_fwd(
+            hr_data.detach(),
+            orig_data.detach(),
+            hp_data.detach(),
+            x_data.detach(),
+            bias_data.detach() if bias_data is not None else None,
+        )
         out_c = _mod._cutile_h_post_bda_fwd(
-            hr_data, orig_data, hp_data, x_data, bias_data
+            hr_data.detach(),
+            orig_data.detach(),
+            hp_data.detach(),
+            x_data.detach(),
+            bias_data.detach() if bias_data is not None else None,
         )
 
         _assert_close(
@@ -1456,6 +1613,61 @@ class TestTritonHPostBDA(unittest.TestCase):
             COSINE_SIM_THRESH,
             "triton vs cutile h_post_bda fwd cosine",
         )
+
+        # -- bwd comparison --
+        grads_t = triton_bwd(
+            grad_out.detach(),
+            hr_data.detach(),
+            orig_data.detach(),
+            hp_data.detach(),
+            x_data.detach(),
+            bias_data.detach() if bias_data is not None else None,
+        )
+
+        # cutile bwd via autograd on pure-Paddle reference
+        def _make_inputs():
+            hr = hr_data.clone()
+            hr.stop_gradient = False
+            orig = orig_data.clone()
+            orig.stop_gradient = False
+            hp = hp_data.clone()
+            hp.stop_gradient = False
+            x = x_data.clone()
+            x.stop_gradient = False
+            bi = bias_data.clone() if with_bias else None
+            if bi is not None:
+                bi.stop_gradient = False
+            return hr, orig, hp, x, bi
+
+        hr_c, orig_c, hp_c, x_c, bi_c = _make_inputs()
+        out_c2 = _ref_h_post_bda(hr_c, orig_c, hp_c, x_c, bi_c)
+        paddle.autograd.backward([out_c2], [grad_out])
+
+        ref_grads = [hr_c.grad, orig_c.grad, hp_c.grad, x_c.grad]
+        names = ["h_res", "orig_res", "h_post", "x"]
+        for i, (name, gr) in enumerate(zip(names, ref_grads)):
+            _assert_close(
+                grads_t[i],
+                gr,
+                BWD_ATOL,
+                BWD_RTOL,
+                f"triton vs cutile h_post_bda bwd {name}",
+            )
+            _assert_cosine_similar(
+                grads_t[i],
+                gr,
+                COSINE_SIM_THRESH,
+                f"triton vs cutile h_post_bda bwd {name} cosine",
+            )
+
+        if with_bias and len(grads_t) > 4 and grads_t[4] is not None:
+            _assert_close(
+                grads_t[4],
+                bi_c.grad,
+                BWD_ATOL,
+                BWD_RTOL,
+                "triton vs cutile h_post_bda bwd bias",
+            )
 
 
 if __name__ == "__main__":
