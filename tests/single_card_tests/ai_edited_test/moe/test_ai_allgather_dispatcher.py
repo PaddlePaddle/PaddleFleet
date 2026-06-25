@@ -1469,6 +1469,15 @@ class TestGroupedMLPExpertShardedStateDict(unittest.TestCase):
         """Minimal duck-typed stand-in for GroupedMLPExpert."""
 
         def __init__(self, intermediate_size_per_partition, ep_group):
+            from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
+
+            # Bind _get_intermediate_sharded_state_dict without inheriting
+            # paddle.nn.Layer (which requires __init__ and _sub_layers).
+            self._get_intermediate_sharded_state_dict = (
+                GroupedMLPExpert._get_intermediate_sharded_state_dict.__get__(
+                    self
+                )
+            )
             config = MagicMock()
             config.hidden_size = 16
             config.moe_intermediate_size = 16
