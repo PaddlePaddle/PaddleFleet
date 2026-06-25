@@ -883,6 +883,26 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
         self.assertEqual(buffer.combine_calls[-1]["hidden"].shape, [2, 4])
         self.assertIsNone(buffer.combine_calls[-1].get("pad_multiple"))
 
+    def test_public_combine_keeps_matching_unpadded_shape(self):
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            router_topk=1,
+            num_experts=2,
+            num_local_experts=2,
+        )
+        combined = paddle.full([2, 4], 3.0, dtype="float32")
+        buffer = _RecordingHybridEPBuffer(combine_results=[(combined, None)])
+        manager._active_buffer = buffer
+        manager.handle = _make_hybrid_ep_handle(token_data_type="BF16")
+        manager.num_permuted_tokens = 2
+        manager._num_unpadded_tokens = 2
+
+        output = manager.combine(paddle.zeros([2, 4], dtype="float32"))
+
+        self.assertEqual(output.numpy().tolist(), [[3.0] * 4, [3.0] * 4])
+        self.assertEqual(buffer.combine_calls[-1]["hidden"].shape, [2, 4])
+        self.assertIsNone(manager._num_unpadded_tokens)
+
     def test_dispatched_metadata_is_unavailable_in_hybrid_fused_mode(self):
         manager = _new_hybrid_manager()
 
@@ -968,6 +988,45 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             buffer.combine_calls[-1]["probs"].dtype, paddle.float32
         )
 
+    def test_dispatch_pylayer_trims_padded_grad_without_dense_probs(self):
+        grad_x = paddle.concat(
+            [
+                paddle.full([2, 4], 5.0, dtype="float32"),
+                paddle.full([2, 4], 7.0, dtype="float32"),
+            ],
+            axis=0,
+        )
+        buffer = _RecordingHybridEPBuffer(combine_results=[(grad_x, None)])
+        handle = _make_hybrid_ep_handle(token_data_type="BF16")
+
+        class DispatchingManager:
+            def _dispatch_with_permute_impl(
+                self, x, token_indices, token_probs, use_fp8
+            ):
+                self._active_buffer = buffer
+                self.handle = handle
+                return x * 2, token_probs.reshape([-1]), None
+
+        manager = DispatchingManager()
+        x = paddle.zeros([2, 4], dtype="float32")
+        x.stop_gradient = False
+        token_indices = paddle.to_tensor([[0], [1]], dtype="int64")
+        token_probs = paddle.ones([2, 1], dtype="float32")
+
+        recv_x, recv_probs, _ = HybridEPDispatch.apply(
+            x,
+            token_indices,
+            token_probs,
+            manager,
+            False,
+        )
+        (recv_x.sum() + recv_probs.sum()).backward()
+
+        self.assertEqual(x.grad.numpy().tolist(), [[5.0] * 4, [5.0] * 4])
+        self.assertEqual(
+            buffer.combine_calls[-1]["probs"].dtype, paddle.float32
+        )
+
     def test_combine_pylayer_requires_active_permuted_rows(self):
         manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=1))
         manager.handle = _make_hybrid_ep_handle(token_data_type="BF16")
@@ -981,6 +1040,21 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
                 manager,
                 2,
             )
+
+    def test_combine_pylayer_accepts_explicit_active_permuted_rows(self):
+        manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=1))
+        manager.handle = _make_hybrid_ep_handle(token_data_type="BF16")
+        manager._active_buffer = _RecordingHybridEPBuffer(
+            combine_results=[(paddle.full([2, 4], 4.0, dtype="float32"), None)]
+        )
+
+        result = HybridEPCombine.apply(
+            paddle.zeros([2, 4], dtype="float32"),
+            manager,
+            2,
+        )
+
+        self.assertEqual(result.numpy().tolist(), [[4.0] * 4, [4.0] * 4])
 
     def test_combine_pylayer_replays_dispatch_in_backward(self):
         combined = paddle.ones([2, 4], dtype="float32")
