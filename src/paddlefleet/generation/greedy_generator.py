@@ -230,7 +230,11 @@ class GreedyGenerator:
                         sliding_window, window_attn_skip_freq, real_i
                     )
                 )
-        window_size = sliding_window[0] if sliding_window else None
+        window_size = (
+            sliding_window[0]
+            if sliding_window and sliding_window[0] > 0
+            else None
+        )
         self.cache = DynamicKVCache(
             num_layers=total_layers,
             swa_layers=swa_layers,

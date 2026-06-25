@@ -426,10 +426,12 @@ class DotProductAttention(FleetLayer):
             and attn_mask_startend_row_indices is None
             and not use_eager
         ):
-            if self.training:
+            if self.training or query.shape[1] > 1:
                 assert self.is_swa is False, (
-                    "SWA doesn't support scaled_dot_product_attention when training"
+                    "SWA prefill (q_len > 1) must not use SDPA — pass "
+                    "attn_mask_startend_row_indices to route through flashmask."
                 )
+
             # KV cache support for inference
             if use_cache and past_key_values is not None:
                 key, value = past_key_values.update(key, value, layer_idx)
