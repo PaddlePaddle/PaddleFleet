@@ -24,11 +24,12 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 try:
     import paddlefleet_ops
 
+    from paddlefleet.cudnn_ops.attn import csa_sparse_attn_fwd_cudnn
     from paddlefleet.tilelang_ops.attn import sparse_mqa
 
     _HAS_FLASH_MLA = (
         paddlefleet_ops.is_flash_mla_available()
-        and sparse_mqa._flash_mla_sparse_fwd is not None
+        and csa_sparse_attn_fwd_cudnn._flash_mla_sparse_fwd is not None
     )
 except (ImportError, RuntimeError, AttributeError):
     _HAS_FLASH_MLA = False
@@ -77,13 +78,14 @@ class TestSparseMQAFlashMLAForward(unittest.TestCase):
             q, kv, attn_sink, topk_idxs, sm_scale=self.softmax_scale
         )
 
-        flash_out, flash_lse = sparse_mqa.sparse_attn(
-            q,
-            kv,
-            attn_sink,
-            topk_idxs,
-            sm_scale=self.softmax_scale,
-            backend="cudnn",
+        flash_out, flash_lse, _ = (
+            csa_sparse_attn_fwd_cudnn.flash_mla_sparse_attn(
+                q,
+                kv,
+                attn_sink,
+                topk_idxs,
+                sm_scale=self.softmax_scale,
+            )
         )
 
         # flash_mla uses a different lse computation from tilelang
@@ -106,7 +108,7 @@ class TestSparseMQAFlashMLAForward(unittest.TestCase):
         q, kv, attn_sink, topk_idxs = self._make_inputs()
         topk_idxs = topk_idxs[:, :, :96]
 
-        out, lse, lse_indexer = sparse_mqa.flash_mla_sparse_attn(
+        out, lse, lse_indexer = csa_sparse_attn_fwd_cudnn.flash_mla_sparse_attn(
             q,
             kv,
             attn_sink,
@@ -130,23 +132,29 @@ class TestSparseMQAFlashMLAForward(unittest.TestCase):
 
     def test_fallback_path(self):
         old_flash_mla_sparse_fwd = getattr(
-            sparse_mqa, "_flash_mla_sparse_fwd", None
+            csa_sparse_attn_fwd_cudnn, "_flash_mla_sparse_fwd", None
         )
         try:
-            sparse_mqa._flash_mla_sparse_fwd = None
+            csa_sparse_attn_fwd_cudnn._flash_mla_sparse_fwd = None
             with self.assertRaisesRegex(
                 RuntimeError, "flash_mla is not available"
             ):
-                sparse_mqa.flash_mla_sparse_attn(None, None, None, None)
+                csa_sparse_attn_fwd_cudnn.flash_mla_sparse_attn(
+                    None, None, None, None
+                )
         finally:
-            sparse_mqa._flash_mla_sparse_fwd = old_flash_mla_sparse_fwd
+            csa_sparse_attn_fwd_cudnn._flash_mla_sparse_fwd = (
+                old_flash_mla_sparse_fwd
+            )
 
         with mock.patch.object(
-            sparse_mqa.paddle.cuda,
+            csa_sparse_attn_fwd_cudnn.paddle.cuda,
             "get_device_capability",
             return_value=(10, 0),
         ):
-            self.assertEqual(sparse_mqa._get_topk_alignment(), 64)
+            self.assertEqual(
+                csa_sparse_attn_fwd_cudnn._get_topk_alignment(), 64
+            )
 
         with self.assertRaisesRegex(
             ValueError, "csa_sparse_attn_backend='paddle' is invalid"

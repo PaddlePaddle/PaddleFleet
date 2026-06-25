@@ -866,14 +866,6 @@ class TransformerConfig(ModelParallelConfig):
     CSA indexer TileLang path.
     """
 
-    csa_tilelang_enable_sparse_attn: bool | None = None
-    """Optional override for the CSA TileLang sparse attention path.
-
-    None follows csa_tilelang_backend. True requires
-    csa_tilelang_backend='attention_paddle_compat'. False disables only the
-    final sparse MQA attention TileLang path.
-    """
-
     csa_indexer_backend: str = "tilelang"
     """CSA indexer backward backend.
 
@@ -882,12 +874,19 @@ class TransformerConfig(ModelParallelConfig):
     """
 
     csa_sparse_attn_backend: str = "tilelang"
-    """CSA sparse attention backend.
+    """CSA sparse attention backend. Single switch selecting one of three
+    implementations of the final sparse MQA attention.
 
-    One of {"tilelang", "cudnn"}. Default "tilelang" uses the TileLang
-    sparse MQA kernel. "cudnn" uses the FlashMLA sparse forward kernel and
-    cuDNN DSA backward kernel.
+    One of {"unfused", "tilelang", "cudnn"}:
+      * "unfused": pure-Paddle einsum forward + Paddle autograd backward
+        (non-fused reference path).
+      * "tilelang" (default): TileLang sparse MQA kernel forward + backward.
+      * "cudnn": FlashMLA sparse forward kernel + cuDNN DSA backward
+        kernel.
     """
+
+    use_fast_hadamard: bool = False
+    """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
 
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
@@ -915,6 +914,16 @@ class TransformerConfig(ModelParallelConfig):
     magic_init: bool = False
     """Use the magic initialization method."""
 
+    ####################
+    # Ernie Trainer Configs
+    ####################
+
+    moe_logging: bool = False
+    """Whether to enable MoE logging."""
+
+    deepep_buffer_configs: dict | None = None
+    """DeepEP buffer configuration."""
+
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
         # DSA field mapping
@@ -932,7 +941,6 @@ class TransformerConfig(ModelParallelConfig):
         "csa_dense_mode": "csa_dense_mode",
         "csa_tilelang_backend": "csa_tilelang_backend",
         "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
-        "csa_tilelang_enable_sparse_attn": "csa_tilelang_enable_sparse_attn",
         "csa_indexer_backend": "csa_indexer_backend",
         "csa_sparse_attn_backend": "csa_sparse_attn_backend",
         "o_groups": "o_groups",
@@ -1203,21 +1211,28 @@ class TransformerConfig(ModelParallelConfig):
                     "csa_tilelang_enable_indexer=True requires csa_tilelang_backend='attention_paddle_compat'."
                 )
             if (
-                self.csa_tilelang_backend is None
-                and self.csa_tilelang_enable_sparse_attn
+                getattr(self, "csa_tilelang_enable_sparse_attn", None)
+                is not None
             ):
                 raise ValueError(
-                    "csa_tilelang_enable_sparse_attn=True requires csa_tilelang_backend='attention_paddle_compat'."
+                    "csa_tilelang_enable_sparse_attn has been removed. Use "
+                    "csa_sparse_attn_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead (unfused=non-fused Paddle, tilelang=TileLang "
+                    "fwd/bwd, cudnn=FlashMLA fwd + cuDNN bwd)."
                 )
             if self.csa_indexer_backend not in {"tilelang", "cudnn"}:
                 raise ValueError(
                     f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
                     "Must be one of {'tilelang', 'cudnn'}."
                 )
-            if self.csa_sparse_attn_backend not in {"tilelang", "cudnn"}:
+            if self.csa_sparse_attn_backend not in {
+                "unfused",
+                "tilelang",
+                "cudnn",
+            }:
                 raise ValueError(
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
-                    "Must be one of {'tilelang', 'cudnn'}."
+                    "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
 
         # Hash-based MoE routing consistency checks.

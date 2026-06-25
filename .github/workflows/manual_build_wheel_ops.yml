@@ -140,7 +140,7 @@ jobs:
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
+          wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -186,7 +186,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
-          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
@@ -278,7 +278,7 @@ jobs:
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
+          wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -323,7 +323,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
-          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
@@ -418,7 +418,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
+          wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/manual/${PR_ID}/${{ inputs.commit }}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -463,7 +463,7 @@ jobs:
         if: steps.check-skip.outputs.no_build != 'true'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          wget -q --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+          wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
           cd dist
