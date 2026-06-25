@@ -235,6 +235,16 @@ class GreedyGenerator:
             if sliding_window and sliding_window[0] > 0
             else None
         )
+        # head_wise_swa_ratio > 0 means some heads in SWA layers use full
+        # attention; per-layer KV truncation would break those heads.
+        head_wise_swa_ratio = getattr(cfg, "head_wise_swa_ratio", 0.0)
+        if head_wise_swa_ratio > 0 and head_wise_swa_ratio < 1.0:
+            logger.warning(
+                "head_wise_swa_ratio=%s: disabling KV cache truncation to "
+                "preserve full-attention heads in SWA layers.",
+                head_wise_swa_ratio,
+            )
+            window_size = None
         self.cache = DynamicKVCache(
             num_layers=total_layers,
             swa_layers=swa_layers,
@@ -284,7 +294,7 @@ class GreedyGenerator:
             # SWA is applied inside DotProductAttention via
             # startend_row_indices_add_sliding_window.
             prefill_startend = paddle.full(
-                [1, 1, prompt_len, 1], prompt_len, dtype="int32"
+                [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
             )
             logits = self.model(
                 {
