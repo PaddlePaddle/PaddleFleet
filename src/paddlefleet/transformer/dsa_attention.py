@@ -213,6 +213,47 @@ def _normalize_dsa_mask(mask: Tensor | None) -> Tensor | None:
     return mask
 
 
+def _get_doc_start(
+    attn_mask_startend_row_indices: Tensor, seqlen: int
+) -> Tensor:
+    """Derive per-position document start from packed-sequence end boundaries."""
+    mask = attn_mask_startend_row_indices
+    squeeze_batch = mask.ndim == 1
+    if squeeze_batch:
+        mask = mask.unsqueeze(0)
+
+    changed = paddle.zeros_like(mask, dtype="int64")
+    changed[:, 0] = 1
+    changed[:, 1:] = (mask[:, 1:] != mask[:, :-1]).cast("int64")
+
+    positions = paddle.arange(seqlen, dtype="int64").unsqueeze(0).expand_as(mask)
+    doc_start = paddle.cummax(changed * positions, axis=1).values
+
+    if squeeze_batch:
+        doc_start = doc_start.squeeze(0)
+    return doc_start
+
+
+def build_dsa_varlen_mask(
+    attn_mask_startend_row_indices: Tensor | None,
+    batch_size: int,
+    sq: int,
+    sk: int,
+) -> Tensor | None:
+    """Build [b, sq, sk] mask that prevents top-k crossing packed doc boundaries."""
+    if attn_mask_startend_row_indices is None:
+        return None
+
+    mask = attn_mask_startend_row_indices.reshape([batch_size, sq]).cast("int64")
+    doc_start = _get_doc_start(mask, sq).unsqueeze(2)  # [b, sq, 1]
+    doc_end = mask.unsqueeze(2)  # [b, sq, 1]
+    key_pos = paddle.arange(sk, dtype="int64").reshape([1, 1, sk])
+    invalid = (key_pos < doc_start) | (key_pos >= doc_end)
+    return paddle.zeros([batch_size, sq, sk], dtype="float32").masked_fill(
+        invalid, float("-inf")
+    )
+
+
 # ---------------------------------------------------------------------------
 # DSA Indexer Sublayers Spec
 # ---------------------------------------------------------------------------
@@ -463,6 +504,8 @@ class DSAIndexer(paddle.nn.Layer):
         index_scores = (weights.unsqueeze(-1) * F.relu(scores)).sum(axis=2)
 
         if mask is not None:
+            # Squeeze redundant dims (4D [b,1,sq,sk] -> 3D/2D) to align with
+            # index_scores [b, sq, sk] before applying the mask.
             index_scores = index_scores + _normalize_dsa_mask(mask)
 
         topk_k = min(self.index_topk, index_scores.shape[-1])
@@ -1386,12 +1429,15 @@ class DSAttention(FleetLayer):
             paddle.full([sq, sk], float("-inf"), dtype="float32"),
             diagonal=1,
         )  # [sq, sk]
+        varlen_mask = build_dsa_varlen_mask(
+            attn_mask_startend_row_indices, b, sq, sk
+        )
 
         if attn_mask_type is not None and attn_mask_type == AttnMaskType.causal:
             # Use causal mask only
-            indexer_float_mask = causal_mask.unsqueeze(0).unsqueeze(
-                0
-            )  # [1, 1, sq, sk]
+            indexer_float_mask = causal_mask.unsqueeze(0).expand(
+                [b, sq, sk]
+            )
         elif attention_mask is not None:
             mask = attention_mask.squeeze(1)
             indexer_float_mask = paddle.zeros_like(
@@ -1399,9 +1445,14 @@ class DSAttention(FleetLayer):
             ).masked_fill(mask.cast("bool"), float("-inf"))
 
         else:
-            indexer_float_mask = causal_mask.unsqueeze(0).unsqueeze(
-                0
-            )  # [1, 1, sq, sk]
+            indexer_float_mask = causal_mask.unsqueeze(0).expand(
+                [b, sq, sk]
+            )
+
+        if varlen_mask is not None:
+            indexer_float_mask = indexer_float_mask + varlen_mask
+
+        indexer_float_mask = indexer_float_mask.unsqueeze(1)
 
         # Training with indexer loss
         if self.training and self.dsa_indexer_loss_coeff is not None:
@@ -1448,8 +1499,10 @@ class DSAttention(FleetLayer):
         index_mask = paddle.put_along_axis(
             index_mask, topk_indices, zeros, axis=-1
         )
-        # Merge causal + index
+        # Merge causal + packed-doc boundary + index
         index_mask = index_mask + causal_mask.unsqueeze(0)
+        if varlen_mask is not None:
+            index_mask = index_mask + varlen_mask
         combined_mask = index_mask.unsqueeze(1)  # [b, 1, sq, sk]
 
         if attention_mask is not None:
