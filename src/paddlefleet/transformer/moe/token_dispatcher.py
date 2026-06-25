@@ -1404,8 +1404,8 @@ def _quantize_and_pack_fp8(x):
     return fused_local, H, H128, scale_dtype
 
 
-def _all_gather_grad_fp8_async(grad, group):
-    """Quantize local grad to fp8 e4m3 + int32 1x128 block scale, then a SINGLE
+def _fused_fp8_all_gather_async(x, group):
+    """Quantize local tensor to fp8 e4m3 + int32 1x128 block scale, then a SINGLE
     async AllGather of the fused (fp8-data-as-uint8 ++ scale-as-uint8) per-token
     byte row on the comm stream.  Returns
     ``(fused_global, H, H128, scale_dtype, task)``.
@@ -1415,15 +1415,18 @@ def _all_gather_grad_fp8_async(grad, group):
     carries an identical ``T_local``, so packing the two payloads along axis 1
     before the gather yields the same per-rank bytes as gathering them
     separately.  It removes one NCCL kernel launch (and its peer-wait fixed
-    cost) per combine backward.
+    cost) per collective.
 
-    Used by the combine backward to halve on-wire bytes vs bf16 AllGather.
     Because AllGather is a lossless row concat and the 1x128 scale lives within
     a single token's hidden vector, this is bit-identical to
-    bf16-AllGather-then-quantize.  The caller waits ``task`` and then calls
-    :func:`_split_fused_fp8_gather` to recover ``(data_e4m3_global, scale_global)``.
+    bf16-AllGather-then-quantize (halving on-wire bytes vs bf16).  The caller
+    waits ``task`` and then calls :func:`_split_fused_fp8_gather` to recover
+    ``(data_e4m3_global, scale_global)``.
+
+    Used both by the combine backward (``_AllGatherCombineAsync.backward``) and
+    by ``AllGatherTokenDispatcher.pre_allgather`` for the forward activation.
     """
-    fused_local, H, H128, scale_dtype = _quantize_and_pack_fp8(grad)
+    fused_local, H, H128, scale_dtype = _quantize_and_pack_fp8(x)
     T_global = fused_local.shape[0] * group.nranks
     fused_global = paddle.empty([T_global, fused_local.shape[1]], dtype="uint8")
     task = paddle.distributed.stream.all_gather(
@@ -1439,7 +1442,7 @@ def _all_gather_grad_fp8_async(grad, group):
 def _split_fused_fp8_gather(fused_global, H, H128, scale_dtype):
     """Recover ``(data_e4m3_global, scale_global)`` from a fused gather buffer.
 
-    Inverse of the packing in :func:`_all_gather_grad_fp8_async` /
+    Inverse of the packing in :func:`_fused_fp8_all_gather_async` /
     :meth:`AllGatherTokenDispatcher.pre_allgather`. Must be called only after the
     gather task has completed.
     """
@@ -1511,7 +1514,7 @@ class _AllGatherCombineAsync(paddle.autograd.PyLayer):
             return (grad_x,) + fn_args_grads  # noqa: RUF005
 
         if handle is not None:
-            fused_global, _H, _H128, _sdt, task = _all_gather_grad_fp8_async(
+            fused_global, _H, _H128, _sdt, task = _fused_fp8_all_gather_async(
                 grad_output, group
             )
             fn_args_grads = ctx.bwf(*fn_out_grads)
@@ -1652,7 +1655,8 @@ class AllGatherTokenDispatcher(nn.Layer):
         consumed by dispatch_preprocess.
 
         bf16 path: single async AllGather.
-        fp8 path: quantize locally, then two async AllGathers (fp8 data + scale).
+        fp8 path: quantize + a single fused async AllGather of (data ++ scale)
+            via ``_fused_fp8_all_gather_async``.
         """
         if self.moe_group is None or self.moe_group.nranks == 1:
             self._pre_ag_handle = None
@@ -1677,20 +1681,13 @@ class AllGatherTokenDispatcher(nn.Layer):
         reshaped_input = hidden_states.reshape([-1, d_model]).contiguous()
 
         if self.fp8_dispatch:
-            fused_local, H, H128, scale_dtype = _quantize_and_pack_fp8(
-                reshaped_input
-            )
-            T_global = fused_local.shape[0] * self.moe_group.nranks
-            fused_global = paddle.empty(
-                [T_global, fused_local.shape[1]], dtype="uint8"
-            )
-            task = paddle.distributed.stream.all_gather(
+            (
                 fused_global,
-                fused_local,
-                group=self.moe_group,
-                sync_op=False,
-                use_calc_stream=False,
-            )
+                H,
+                H128,
+                scale_dtype,
+                task,
+            ) = _fused_fp8_all_gather_async(reshaped_input, self.moe_group)
             self._pre_ag_handle = {
                 "fused_global": fused_global,
                 "H": H,
@@ -1741,6 +1738,14 @@ class AllGatherTokenDispatcher(nn.Layer):
         6. Return global hidden_states (unpermuted — SonicMoE handles gather).
 
         Caches _global_topk_indices, _global_topk_weights for downstream use.
+
+        Note:
+            If ``_pre_ag_handle`` is None on entry (gate-overlap did not fire,
+            e.g. ``moe_allgather_gate_overlap=False`` or a direct call that
+            bypasses ``_maybe_pre_allgather_overlap``) and ``fp8_dispatch`` is
+            True, this method issues the fp8 AllGather inline via
+            ``pre_allgather`` and immediately waits on it.  This is correct but
+            forfeits the gate-compute overlap that the pre-issued path provides.
         """
         if len(hidden_states.shape) == 3:
             _, _, d_model = hidden_states.shape

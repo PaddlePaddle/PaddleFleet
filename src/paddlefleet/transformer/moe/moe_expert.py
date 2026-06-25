@@ -316,65 +316,9 @@ class GroupedMLPExpert(FleetLayer):
         state_dict = self.state_dict(structured_name_prefix="")
 
         if is_intermediate_sharded:
-            if self.ep_group is None:
-                raise ValueError(
-                    "intermediate-sharded layout requires an EP group; "
-                    f"got ep_group=None. Check moe_token_dispatcher_type "
-                    f"({self.config.moe_token_dispatcher_type!r}) and EP "
-                    f"initialisation."
-                )
-            if not self.config.gated_linear_unit:
-                raise ValueError(
-                    "intermediate-sharded layout currently assumes a gated "
-                    "linear unit (weight1 last dim = 2 * intermediate); "
-                    "non-gated MLP support is not implemented."
-                )
-            ep_size = self.ep_group.nranks
-            if (
-                self.intermediate_size_per_partition * ep_size
-                != self.config.moe_intermediate_size
-            ):
-                raise ValueError(
-                    "intermediate-sharded layout inconsistency: "
-                    f"intermediate_size_per_partition="
-                    f"{self.intermediate_size_per_partition} * ep_size="
-                    f"{ep_size} != moe_intermediate_size="
-                    f"{self.config.moe_intermediate_size}"
-                )
-            E = state_dict["weight1"].shape[0]
-            H = state_dict["weight1"].shape[1]
-            I_local = self.intermediate_size_per_partition
-            expected_last = 2 * I_local
-            if state_dict["weight1"].shape[-1] != expected_last:
-                raise ValueError(
-                    f"weight1 last dim {state_dict['weight1'].shape[-1]} "
-                    f"!= 2 * intermediate_size_per_partition "
-                    f"({expected_last}); cannot reshape to [E, H, 2, "
-                    f"I_local]"
-                )
-            w1 = state_dict["weight1"].reshape([E, H, 2, I_local])
-            w1.name = self.weight1.name
-            w2 = state_dict["weight2"]  # [E, I_local, H]
-            w2.name = self.weight2.name
-
-            sharded_dict = {}
-            full_key1 = f"{structured_name_prefix}weight1"
-            full_key2 = f"{structured_name_prefix}weight2"
-            sharded_dict[full_key1] = shard_weight(
-                key=full_key1,
-                weight=w1,
-                axis=3,  # I_local — intermediate dim per rank
-                group=self.ep_group,
+            return self._get_intermediate_sharded_state_dict(
+                state_dict, structured_name_prefix
             )
-            sharded_dict[full_key1].grouped_gemm_param = True
-            sharded_dict[full_key2] = shard_weight(
-                key=full_key2,
-                weight=w2,
-                axis=1,  # I_local — intermediate dim per rank
-                group=self.ep_group,
-            )
-            sharded_dict[full_key2].grouped_gemm_param = True
-            return sharded_dict
 
         model_type = getattr(self.config, "model_type", "none")
         if "qwen3_vl" not in model_type and "qwen3_5" not in model_type:
@@ -407,6 +351,78 @@ class GroupedMLPExpert(FleetLayer):
                 group=self.ep_group,
             )
             sharded_dict[full_key2].grouped_gemm_param = True
+        return sharded_dict
+
+    def _get_intermediate_sharded_state_dict(
+        self, state_dict, structured_name_prefix: str
+    ):
+        """Build the sharded state dict for the intermediate-sharded (allgather)
+        EP layout.
+
+        Every rank holds all experts but only its ``I/EP`` shard of each
+        expert's intermediate dim.  ``weight1`` (``[E, H, 2, I_full]``) is
+        reshaped to ``[E, H, 2, I_local]`` and sharded on ``axis=3`` so AllGather
+        reassembles ``[gate_full; up_full]`` rather than interleaving per rank;
+        ``weight2`` (``[E, I_full, H]``) is sharded on ``axis=1``.
+        """
+        if self.ep_group is None:
+            raise ValueError(
+                "intermediate-sharded layout requires an EP group; "
+                f"got ep_group=None. Check moe_token_dispatcher_type "
+                f"({self.config.moe_token_dispatcher_type!r}) and EP "
+                f"initialisation."
+            )
+        if not self.config.gated_linear_unit:
+            raise ValueError(
+                "intermediate-sharded layout currently assumes a gated "
+                "linear unit (weight1 last dim = 2 * intermediate); "
+                "non-gated MLP support is not implemented."
+            )
+        ep_size = self.ep_group.nranks
+        if (
+            self.intermediate_size_per_partition * ep_size
+            != self.config.moe_intermediate_size
+        ):
+            raise ValueError(
+                "intermediate-sharded layout inconsistency: "
+                f"intermediate_size_per_partition="
+                f"{self.intermediate_size_per_partition} * ep_size="
+                f"{ep_size} != moe_intermediate_size="
+                f"{self.config.moe_intermediate_size}"
+            )
+        E = state_dict["weight1"].shape[0]
+        H = state_dict["weight1"].shape[1]
+        I_local = self.intermediate_size_per_partition
+        expected_last = 2 * I_local
+        if state_dict["weight1"].shape[-1] != expected_last:
+            raise ValueError(
+                f"weight1 last dim {state_dict['weight1'].shape[-1]} "
+                f"!= 2 * intermediate_size_per_partition "
+                f"({expected_last}); cannot reshape to [E, H, 2, "
+                f"I_local]"
+            )
+        w1 = state_dict["weight1"].reshape([E, H, 2, I_local])
+        w1.name = self.weight1.name
+        w2 = state_dict["weight2"]  # [E, I_local, H]
+        w2.name = self.weight2.name
+
+        sharded_dict = {}
+        full_key1 = f"{structured_name_prefix}weight1"
+        full_key2 = f"{structured_name_prefix}weight2"
+        sharded_dict[full_key1] = shard_weight(
+            key=full_key1,
+            weight=w1,
+            axis=3,  # I_local — intermediate dim per rank
+            group=self.ep_group,
+        )
+        sharded_dict[full_key1].grouped_gemm_param = True
+        sharded_dict[full_key2] = shard_weight(
+            key=full_key2,
+            weight=w2,
+            axis=1,  # I_local — intermediate dim per rank
+            group=self.ep_group,
+        )
+        sharded_dict[full_key2].grouped_gemm_param = True
         return sharded_dict
 
 

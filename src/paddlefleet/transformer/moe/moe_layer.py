@@ -228,6 +228,11 @@ class MoELayer(nn.Layer):
             self.config.output_layer_init_method(self.fc2_latent_proj.weight)
             # Update expert config to use latent size
             routed_expert_config.hidden_size = self.config.moe_latent_size
+        # Cached latent-space projection from _maybe_pre_allgather_overlap;
+        # consumed (and cleared) by _project_to_latent. Initialised here so the
+        # attribute always exists regardless of which forward entry path is
+        # taken (custom_forward vs fusion_moe_forward) and whether overlap fired.
+        self._latent_hidden = None
         self.moe_group = pg_collection.ep
         self.expert_model_parallel_size = (
             utils.get_pg_size(self.moe_group)
@@ -762,7 +767,9 @@ class MoELayer(nn.Layer):
 
         AllGather + ReduceScatter EP pattern: every expert is sharded along its
         intermediate dim across the EP group.  Requires SonicMoE fused kernels;
-        fp8 is handled by ``run_sonic_moe`` internally.
+        fp8 dispatch quantization is handled by ``AllGatherTokenDispatcher``
+        (see ``_quantize_and_pack_fp8``) and fp8 expert compute by
+        ``run_sonic_moe``.
         """
         if not self.using_sonic_moe:
             raise ValueError(
