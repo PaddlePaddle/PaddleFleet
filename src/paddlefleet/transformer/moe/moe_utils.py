@@ -60,6 +60,78 @@ def use_accuracy_compatible_kernel() -> bool:
     return _USE_ACCURACY_COMPATIBLE_KERNEL
 
 
+class AutoSBHistoryTracker:
+    """只统计 warmup 阶段连续 MoE auto-subbatch forward 起点的显存下降。"""
+
+    def __init__(self):
+        self.step_idx = 0
+        self.forward_count = 0
+        self.backward_count = 0
+        self._last_forward_free = None
+        self.max_delta = 0
+        self.prev_total_steps = 0
+        self.prev_max_delta = 0
+
+    def in_warmup(self) -> bool:
+        return self.backward_count == 0
+
+    def record_forward(self, available_free: int):
+        if self.in_warmup():
+            if self._last_forward_free is not None:
+                self.max_delta = max(
+                    self.max_delta,
+                    self._last_forward_free - available_free,
+                    0,
+                )
+            self._last_forward_free = available_free
+            self.step_idx += 1
+        self.forward_count += 1
+
+    def record_backward(self) -> bool:
+        self.backward_count += 1
+        if self.forward_count > 0 and self.backward_count == self.forward_count:
+            self._new_iteration()
+            return True
+        return False
+
+    def _new_iteration(self):
+        if self.step_idx > 0:
+            self.prev_total_steps = self.step_idx
+            self.prev_max_delta = max(self.prev_max_delta, self.max_delta)
+        self.step_idx = 0
+        self.forward_count = 0
+        self.backward_count = 0
+        self._last_forward_free = None
+        self.max_delta = 0
+
+    def should_degrade(self, available_free: int) -> bool:
+        predicted_need = self.predicted_need_for_remaining()
+        return (
+            self.in_warmup()
+            and predicted_need > 0
+            and available_free < predicted_need
+        )
+
+    def predicted_need_for_remaining(self) -> int:
+        """预测当前 warmup 从当前 forward 起还需要的显存。返回 0 表示无法预测（冷启动）。"""
+        if self.prev_total_steps == 0 or self.prev_max_delta == 0:
+            return 0
+        remaining = self.prev_total_steps - self.step_idx + 1
+        if remaining <= 0:
+            return 0
+        predicted = self.prev_max_delta * remaining
+        # 安全系数 1.2x + 128MB 余量
+        predicted = int(predicted * 1.2) + 128 * 1024 * 1024
+        return predicted
+
+
+_AutoSBHistory = AutoSBHistoryTracker()
+
+
+def get_auto_sb_history():
+    return _AutoSBHistory
+
+
 def _unpermute_scatter(
     permuted_tokens: paddle.Tensor, sorted_indices: paddle.Tensor, restore_shape
 ) -> paddle.Tensor:

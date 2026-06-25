@@ -406,6 +406,21 @@ class TestMoERouter(unittest.TestCase):
         "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
         return_value=1,
     )
+    def test_seq_aux_loss_rejects_negative_scoring_func(self, mock_cp):
+        """Test seq_aux_loss rejects scoring functions that may go negative."""
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        config = _make_router_config(
+            moe_router_load_balancing_type="seq_aux_loss",
+            scoring_func="tanh",
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            StandardMoERouter(config)
+
+    @patch(
+        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+        return_value=1,
+    )
     def test_gate_detach_matmul_no_fuse(self, mock_cp):
         """Test gate_detach_matmul without fusion."""
         from paddlefleet.transformer.moe.moe_router import gate_detach_matmul

@@ -337,18 +337,18 @@ class TestComputeIndexScoresFused(unittest.TestCase):
     def test_output_shape(self):
         sq, b, h, d = 8, 2, 4, 32
         sk = 8
-        q = paddle.randn([sq, b, h, d])
-        weights = paddle.randn([sq, b, h])
-        k = paddle.randn([sk, b, d])
+        q = paddle.randn([b, sq, h, d])
+        weights = paddle.randn([b, sq, h])
+        k = paddle.randn([b, sk, d])
         out = _compute_index_scores_fused(q, weights, k)
         self.assertEqual(out.shape, [b, sq, sk])
 
     def test_nonnegative_after_relu(self):
         sq, b, h, d = 8, 2, 4, 32
-        q = paddle.randn([sq, b, h, d])
+        q = paddle.randn([b, sq, h, d])
         # Use positive weights so that relu * positive_weights >= 0
-        weights = paddle.abs(paddle.randn([sq, b, h])) + 0.1
-        k = paddle.randn([sq, b, d])
+        weights = paddle.abs(paddle.randn([b, sq, h])) + 0.1
+        k = paddle.randn([b, sq, d])
         out = _compute_index_scores_fused(q, weights, k)
         self.assertTrue((out >= -1e-6).all().item())
 
@@ -491,9 +491,9 @@ class TestComputeDSAIndexerLoss(unittest.TestCase):
                 0, self.sk, [self.b, self.sq, self.topk]
             ).cast("int64")
         query = paddle.randn(
-            [self.sq, self.b, self.np, self.hn], dtype="float32"
+            [self.b, self.sq, self.np, self.hn], dtype="float32"
         )
-        key = paddle.randn([self.sk, self.b, self.np, self.hn], dtype="float32")
+        key = paddle.randn([self.b, self.sk, self.np, self.hn], dtype="float32")
         return index_scores, topk_indices, query, key
 
     def test_loss_is_scalar(self):
@@ -563,16 +563,16 @@ class TestFusedDSAIndexerLoss(unittest.TestCase):
         self.softmax_scale = self.hn**-0.5
 
     def _make_inputs(self, with_mask=False):
-        q = paddle.randn([self.sq, self.b, self.h, self.d], dtype="float32")
+        q = paddle.randn([self.b, self.sq, self.h, self.d], dtype="float32")
         q.stop_gradient = False
-        weights = paddle.randn([self.sq, self.b, self.h], dtype="float32")
+        weights = paddle.randn([self.b, self.sq, self.h], dtype="float32")
         weights.stop_gradient = False
-        k = paddle.randn([self.sk, self.b, self.d], dtype="float32")
+        k = paddle.randn([self.b, self.sk, self.d], dtype="float32")
         k.stop_gradient = False
         query = paddle.randn(
-            [self.sq, self.b, self.np, self.hn], dtype="float32"
+            [self.b, self.sq, self.np, self.hn], dtype="float32"
         )
-        key = paddle.randn([self.sk, self.b, self.np, self.hn], dtype="float32")
+        key = paddle.randn([self.b, self.sk, self.np, self.hn], dtype="float32")
         if with_mask:
             causal = paddle.triu(
                 paddle.full([self.sq, self.sk], float("-inf"), dtype="float32"),
@@ -645,9 +645,9 @@ class TestFusedDSAIndexerLoss(unittest.TestCase):
         self.assertIsNotNone(q.grad)
         self.assertIsNotNone(weights.grad)
         self.assertIsNotNone(k.grad)
-        self.assertEqual(list(q.grad.shape), [self.sq, self.b, self.h, self.d])
-        self.assertEqual(list(weights.grad.shape), [self.sq, self.b, self.h])
-        self.assertEqual(list(k.grad.shape), [self.sk, self.b, self.d])
+        self.assertEqual(list(q.grad.shape), [self.b, self.sq, self.h, self.d])
+        self.assertEqual(list(weights.grad.shape), [self.b, self.sq, self.h])
+        self.assertEqual(list(k.grad.shape), [self.b, self.sk, self.d])
         self.assertTrue(paddle.isfinite(q.grad).all().item())
         self.assertTrue(paddle.isfinite(weights.grad).all().item())
         self.assertTrue(paddle.isfinite(k.grad).all().item())
@@ -986,6 +986,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
         self, mock_ps
     ):
         """Empty tracker should initialize zeros and join PP all_reduce."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         pp_group = MagicMock()
         pp_group.nranks = 2
         mock_ps.get_pipeline_model_parallel_group.return_value = pp_group
@@ -1001,6 +1002,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_empty_tracker_uses_registered_num_layers(self, mock_ps):
         """Empty tracker should infer registered layer count for PP reduce."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         pp_group = MagicMock()
         pp_group.nranks = 2
         mock_ps.get_pipeline_model_parallel_group.return_value = pp_group
@@ -1017,6 +1019,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_no_distributed_groups(self, mock_ps):
         """Reduce with no distributed groups should keep values unchanged."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         mock_ps.get_pipeline_model_parallel_group.return_value = None
         mock_ps.get_data_parallel_group.return_value = None
 
@@ -1036,6 +1039,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_with_pp_group(self, mock_ps):
         """Reduce with PP group should call all_reduce."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         pp_group = MagicMock()
         pp_group.nranks = 2
         mock_ps.get_pipeline_model_parallel_group.return_value = pp_group
@@ -1052,6 +1056,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_with_dp_group(self, mock_ps):
         """Reduce with DP group should call all_reduce and divide by nranks."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         mock_ps.get_pipeline_model_parallel_group.return_value = None
         dp_group = MagicMock()
         dp_group.nranks = 4
@@ -1070,6 +1075,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_with_reduce_group(self, mock_ps):
         """Reduce with TP reduce_group should call all_reduce."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         mock_ps.get_pipeline_model_parallel_group.return_value = None
         mock_ps.get_data_parallel_group.return_value = None
 
@@ -1089,6 +1095,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_with_avg_group(self, mock_ps):
         """Reduce with avg_group should call all_reduce and divide by nranks."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         mock_ps.get_pipeline_model_parallel_group.return_value = None
         mock_ps.get_data_parallel_group.return_value = None
 
@@ -1108,6 +1115,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_pp_group_single_rank_skipped(self, mock_ps):
         """PP group with nranks=1 should not trigger all_reduce."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         pp_group = MagicMock()
         pp_group.nranks = 1
         mock_ps.get_pipeline_model_parallel_group.return_value = pp_group
@@ -1124,6 +1132,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_dp_group_single_rank_skipped(self, mock_ps):
         """DP group with nranks=1 should not trigger all_reduce."""
+        mock_ps.get_context_parallel_world_size.return_value = 1
         mock_ps.get_pipeline_model_parallel_group.return_value = None
         dp_group = MagicMock()
         dp_group.nranks = 1
@@ -1428,18 +1437,17 @@ class TestComputeIndexScoresFusedAdditional(unittest.TestCase):
     def test_matches_unfused(self):
         """Fused scores should match unfused Indexer.compute_index_scores logic."""
         sq, b, h, d = 4, 2, 2, 16
-        q = paddle.randn([sq, b, h, d], dtype="float32")
-        weights = paddle.randn([sq, b, h], dtype="float32")
-        k = paddle.randn([sq, b, d], dtype="float32")
+        q = paddle.randn([b, sq, h, d], dtype="float32")
+        weights = paddle.randn([b, sq, h], dtype="float32")
+        k = paddle.randn([b, sq, d], dtype="float32")
 
         fused_scores = _compute_index_scores_fused(q, weights, k)  # [b, sq, sk]
 
         # Manual unfused computation
-        scores = paddle.einsum("sbhd,tbd->sbht", q, k)
+        scores = paddle.einsum("bshd,btd->bsht", q, k)
         relu_scores = paddle.nn.functional.relu(scores)
         weighted = relu_scores * weights.unsqueeze(-1)
-        summed = weighted.sum(axis=2)  # [sq, b, sk]
-        unfused_scores = summed.transpose([1, 0, 2])  # [b, sq, sk]
+        unfused_scores = weighted.sum(axis=2)  # [b, sq, sk]
 
         self.assertTrue(
             paddle.allclose(fused_scores, unfused_scores, atol=1e-5),
@@ -1456,8 +1464,8 @@ class TestComputeDSAIndexerLossWithMask(unittest.TestCase):
         topk = 2
         index_scores = paddle.randn([b, sq, sk], dtype="float32")
         topk_indices = paddle.randint(0, sk, [b, sq, topk]).cast("int64")
-        query = paddle.randn([sq, b, np, hn], dtype="float32")
-        key = paddle.randn([sk, b, np, hn], dtype="float32")
+        query = paddle.randn([b, sq, np, hn], dtype="float32")
+        key = paddle.randn([b, sk, np, hn], dtype="float32")
 
         loss = _compute_dsa_indexer_loss(
             index_scores,
@@ -1485,11 +1493,11 @@ class TestBwdFusedIndexerLoss(unittest.TestCase):
         sq, b, h, d = 4, 2, 2, 16
         np, hn = 4, 32
         topk = 2
-        q = paddle.randn([sq, b, h, d], dtype="float32")
-        weights = paddle.randn([sq, b, h], dtype="float32")
-        k = paddle.randn([sq, b, d], dtype="float32")
-        query = paddle.randn([sq, b, np, hn], dtype="float32")
-        key = paddle.randn([sq, b, np, hn], dtype="float32")
+        q = paddle.randn([b, sq, h, d], dtype="float32")
+        weights = paddle.randn([b, sq, h], dtype="float32")
+        k = paddle.randn([b, sq, d], dtype="float32")
+        query = paddle.randn([b, sq, np, hn], dtype="float32")
+        key = paddle.randn([b, sq, np, hn], dtype="float32")
         topk_indices = paddle.randint(0, sq, [b, sq, topk]).cast("int64")
         grad_loss = paddle.to_tensor(1.0, dtype="float32")
 
@@ -1506,20 +1514,20 @@ class TestBwdFusedIndexerLoss(unittest.TestCase):
             grad_loss=grad_loss,
             tp_group=None,
         )
-        self.assertEqual(list(grad_q.shape), [sq, b, h, d])
-        self.assertEqual(list(grad_weights.shape), [sq, b, h])
-        self.assertEqual(list(grad_k.shape), [sq, b, d])
+        self.assertEqual(list(grad_q.shape), [b, sq, h, d])
+        self.assertEqual(list(grad_weights.shape), [b, sq, h])
+        self.assertEqual(list(grad_k.shape), [b, sq, d])
 
     def test_backward_finite(self):
         """All gradients from manual backward should be finite."""
         sq, b, h, d = 4, 2, 2, 16
         np, hn = 4, 32
         topk = 2
-        q = paddle.randn([sq, b, h, d], dtype="float32")
-        weights = paddle.randn([sq, b, h], dtype="float32")
-        k = paddle.randn([sq, b, d], dtype="float32")
-        query = paddle.randn([sq, b, np, hn], dtype="float32")
-        key = paddle.randn([sq, b, np, hn], dtype="float32")
+        q = paddle.randn([b, sq, h, d], dtype="float32")
+        weights = paddle.randn([b, sq, h], dtype="float32")
+        k = paddle.randn([b, sq, d], dtype="float32")
+        query = paddle.randn([b, sq, np, hn], dtype="float32")
+        key = paddle.randn([b, sq, np, hn], dtype="float32")
         topk_indices = _make_causal_topk_indices(b, sq, sq, topk)
         grad_loss = paddle.to_tensor(1.0, dtype="float32")
 
@@ -1545,11 +1553,11 @@ class TestBwdFusedIndexerLoss(unittest.TestCase):
         sq, b, h, d = 4, 2, 2, 16
         np, hn = 4, 32
         topk = 2
-        q = paddle.randn([sq, b, h, d], dtype="float32")
-        weights = paddle.randn([sq, b, h], dtype="float32")
-        k = paddle.randn([sq, b, d], dtype="float32")
-        query = paddle.randn([sq, b, np, hn], dtype="float32")
-        key = paddle.randn([sq, b, np, hn], dtype="float32")
+        q = paddle.randn([b, sq, h, d], dtype="float32")
+        weights = paddle.randn([b, sq, h], dtype="float32")
+        k = paddle.randn([b, sq, d], dtype="float32")
+        query = paddle.randn([b, sq, np, hn], dtype="float32")
+        key = paddle.randn([b, sq, np, hn], dtype="float32")
         topk_indices = _make_causal_topk_indices(b, sq, sq, topk)
         grad_loss = paddle.to_tensor(1.0, dtype="float32")
 
@@ -1583,16 +1591,16 @@ class TestFusedDSAIndexerLossNoMask(unittest.TestCase):
         self.softmax_scale = self.hn**-0.5
 
     def test_forward_no_mask(self):
-        q = paddle.randn([self.sq, self.b, self.h, self.d], dtype="float32")
+        q = paddle.randn([self.b, self.sq, self.h, self.d], dtype="float32")
         q.stop_gradient = False
-        weights = paddle.randn([self.sq, self.b, self.h], dtype="float32")
+        weights = paddle.randn([self.b, self.sq, self.h], dtype="float32")
         weights.stop_gradient = False
-        k = paddle.randn([self.sk, self.b, self.d], dtype="float32")
+        k = paddle.randn([self.b, self.sk, self.d], dtype="float32")
         k.stop_gradient = False
         query = paddle.randn(
-            [self.sq, self.b, self.np, self.hn], dtype="float32"
+            [self.b, self.sq, self.np, self.hn], dtype="float32"
         )
-        key = paddle.randn([self.sk, self.b, self.np, self.hn], dtype="float32")
+        key = paddle.randn([self.b, self.sk, self.np, self.hn], dtype="float32")
 
         loss = FusedDSAIndexerLoss.apply(
             q,
@@ -1623,16 +1631,16 @@ class TestFusedDSAIndexerLossSparseLoss(unittest.TestCase):
         self.softmax_scale = self.hn**-0.5
 
     def test_forward_sparse_loss(self):
-        q = paddle.randn([self.sq, self.b, self.h, self.d], dtype="float32")
+        q = paddle.randn([self.b, self.sq, self.h, self.d], dtype="float32")
         q.stop_gradient = False
-        weights = paddle.randn([self.sq, self.b, self.h], dtype="float32")
+        weights = paddle.randn([self.b, self.sq, self.h], dtype="float32")
         weights.stop_gradient = False
-        k = paddle.randn([self.sk, self.b, self.d], dtype="float32")
+        k = paddle.randn([self.b, self.sk, self.d], dtype="float32")
         k.stop_gradient = False
         query = paddle.randn(
-            [self.sq, self.b, self.np, self.hn], dtype="float32"
+            [self.b, self.sq, self.np, self.hn], dtype="float32"
         )
-        key = paddle.randn([self.sk, self.b, self.np, self.hn], dtype="float32")
+        key = paddle.randn([self.b, self.sk, self.np, self.hn], dtype="float32")
         causal = paddle.triu(
             paddle.full([self.sq, self.sk], float("-inf"), dtype="float32"),
             diagonal=1,
@@ -1656,16 +1664,16 @@ class TestFusedDSAIndexerLossSparseLoss(unittest.TestCase):
         self.assertTrue(paddle.isfinite(loss).item())
 
     def test_backward_sparse_loss(self):
-        q = paddle.randn([self.sq, self.b, self.h, self.d], dtype="float32")
+        q = paddle.randn([self.b, self.sq, self.h, self.d], dtype="float32")
         q.stop_gradient = False
-        weights = paddle.randn([self.sq, self.b, self.h], dtype="float32")
+        weights = paddle.randn([self.b, self.sq, self.h], dtype="float32")
         weights.stop_gradient = False
-        k = paddle.randn([self.sk, self.b, self.d], dtype="float32")
+        k = paddle.randn([self.b, self.sk, self.d], dtype="float32")
         k.stop_gradient = False
         query = paddle.randn(
-            [self.sq, self.b, self.np, self.hn], dtype="float32"
+            [self.b, self.sq, self.np, self.hn], dtype="float32"
         )
-        key = paddle.randn([self.sk, self.b, self.np, self.hn], dtype="float32")
+        key = paddle.randn([self.b, self.sk, self.np, self.hn], dtype="float32")
         causal = paddle.triu(
             paddle.full([self.sq, self.sk], float("-inf"), dtype="float32"),
             diagonal=1,

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
+    HYBRIDEP_TOKEN_ALIGNMENT,
     DeepEPCombineAsyncRefinedRecompute,
     fused_combine,
     fused_dispatch,
@@ -174,7 +175,7 @@ class _HybridEPManager(_DispatchManager):
     HybridEP path using dispatch_with_permute/combine_with_unpermute only.
 
     The manager owns per-layer handles and count metadata. The communication
-    buffer is shared at fused_a2a module scope, matching DeepEP and Megatron.
+    buffer is shared at fused_a2a module scope.
     """
 
     def __init__(
@@ -201,9 +202,42 @@ class _HybridEPManager(_DispatchManager):
         self.dispatched_probs = None
         self.tokens_per_expert = None
         self.padded_tokens_per_expert = None
+        self.num_permuted_tokens = None
         self.handle = None
         self._active_buffer = None
         self.hybridep_buffer_configs = hybridep_buffer_configs or {}
+        self._num_unpadded_tokens = None
+
+    def _get_max_num_tokens_per_rank(self, num_local_tokens: int, place) -> int:
+        max_num_tokens = num_local_tokens
+        if self.group.nranks > 1:
+            max_num_tokens_tensor = paddle.to_tensor(
+                [num_local_tokens], dtype="int64", place=place
+            )
+            paddle.distributed.all_reduce(
+                max_num_tokens_tensor,
+                op=paddle.distributed.ReduceOp.MAX,
+                group=self.group,
+            )
+            max_num_tokens = int(max_num_tokens_tensor.item())
+        return (
+            (max_num_tokens + HYBRIDEP_TOKEN_ALIGNMENT - 1)
+            // HYBRIDEP_TOKEN_ALIGNMENT
+            * HYBRIDEP_TOKEN_ALIGNMENT
+        )
+
+    def _pad_tokens_to_rank_max(
+        self, tensor: paddle.Tensor | None, max_num_tokens: int
+    ) -> paddle.Tensor | None:
+        if tensor is None or tensor.shape[0] == max_num_tokens:
+            return tensor
+        assert tensor.shape[0] < max_num_tokens, (
+            f"HybridEP token padding expects local tokens <= EP max, got "
+            f"{tensor.shape[0]} > {max_num_tokens}."
+        )
+        pad_shape = [max_num_tokens - tensor.shape[0], *tensor.shape[1:]]
+        padding = paddle.zeros(pad_shape, dtype=tensor.dtype)
+        return paddle.concat([tensor, padding], axis=0)
 
     def _get_buffer(
         self,
@@ -306,6 +340,12 @@ class _HybridEPManager(_DispatchManager):
             .sum(axis=0)
         )
 
+    def _set_num_permuted_tokens(self, tokens_per_expert: paddle.Tensor) -> int:
+        self.num_permuted_tokens = int(
+            paddle.sum(tokens_per_expert.astype("int64")).item()
+        )
+        return self.num_permuted_tokens
+
     def dispatch_overlap(
         self,
         hidden_states: paddle.Tensor,
@@ -335,12 +375,22 @@ class _HybridEPManager(_DispatchManager):
         token_weights: paddle.Tensor,
         use_fp8: bool = False,
     ):
-        buffer = self._get_buffer(hidden_states)
+        num_unpadded_tokens = hidden_states.shape[0]
+        max_num_tokens = self._get_max_num_tokens_per_rank(
+            num_unpadded_tokens, hidden_states.place
+        )
+        self._num_unpadded_tokens = num_unpadded_tokens
         routing_map, probs = self._get_dispatch_metadata(
             token_indices, token_weights
         )
+        hidden_states = self._pad_tokens_to_rank_max(
+            hidden_states, max_num_tokens
+        )
+        routing_map = self._pad_tokens_to_rank_max(routing_map, max_num_tokens)
+        probs = self._pad_tokens_to_rank_max(probs, max_num_tokens)
+        buffer = self._get_buffer(hidden_states, max_num_tokens)
         num_permuted_tokens = self._get_num_permuted_tokens_upper_bound(
-            hidden_states.shape[0]
+            max_num_tokens
         )
         scaling_factor = None
         if use_fp8:
@@ -372,6 +422,12 @@ class _HybridEPManager(_DispatchManager):
             non_blocking=True,
         )
         self.padded_tokens_per_expert = tokens_per_expert
+        num_permuted_tokens = self._set_num_permuted_tokens(tokens_per_expert)
+        hidden_states = hidden_states[:num_permuted_tokens]
+        if dispatched_probs is not None:
+            dispatched_probs = dispatched_probs[:num_permuted_tokens]
+        if scale is not None:
+            scale = scale[:num_permuted_tokens]
         (
             _sparse_to_dense_map,
             _rdma_to_attn_map,
@@ -393,6 +449,7 @@ class _HybridEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ) -> paddle.Tensor:
         return self.dispatch_overlap(
             hidden_states,
@@ -408,15 +465,26 @@ class _HybridEPManager(_DispatchManager):
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
         use_rr_deepep_combine: bool = False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ) -> paddle.Tensor:
         del async_finish, use_rr_deepep_combine
         if combine_overlap_handle is not None:
             raise NotImplementedError(
                 "HybridEP backend does not support combine overlap in PaddleFleet."
             )
-        hidden_states = hybrid_ep_combine(hidden_states, self)
+        hidden_states = hybrid_ep_combine(
+            hidden_states, self, self.num_permuted_tokens
+        )
         self.dispatched_probs = None
         self.handle = None
+        self.num_permuted_tokens = None
+        if (
+            self._num_unpadded_tokens is not None
+            and hidden_states.shape[0] != self._num_unpadded_tokens
+        ):
+            hidden_states = hidden_states[: self._num_unpadded_tokens]
+        self._num_unpadded_tokens = None
         return hidden_states
 
     def get_dispatched_metadata(self) -> paddle.Tensor:
@@ -545,6 +613,7 @@ class _DeepEPManager(_DispatchManager):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ) -> paddle.Tensor:
         hidden_states, dispatched_probs, states, scale = fused_dispatch(
             hidden_states,
@@ -556,6 +625,7 @@ class _DeepEPManager(_DispatchManager):
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
             use_ue8m0=use_ue8m0,
+            using_sonic_moe=using_sonic_moe,
         )
         self.handle = states["handle"]
         self.tokens_per_expert = states["tokens_per_expert"]
@@ -610,6 +680,8 @@ class _DeepEPManager(_DispatchManager):
         combine_overlap_handle: dict | None = None,
         async_finish: bool = False,
         use_rr_deepep_combine: bool = False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ) -> paddle.Tensor:
         if combine_overlap_handle is not None and use_rr_deepep_combine:
             if self._rr_fusedcombined is None:
@@ -621,6 +693,10 @@ class _DeepEPManager(_DispatchManager):
                     f"_rr_fusedcombined type mismatch: expected DeepEPCombineAsyncRefinedRecompute, "
                     f"got {type(self._rr_fusedcombined).__name__}."
                 )
+        if fp8_dispatch is True:
+            assert combine_grad_handle is not None, (
+                "fp8_dispatch=True, but combine_grad_handle is None."
+            )
         hidden_states = fused_combine(
             hidden_states,
             self.group,
@@ -630,9 +706,15 @@ class _DeepEPManager(_DispatchManager):
             async_finish=async_finish,
             moe_ep_barrier=self.moe_ep_barrier,
             use_rr_deepep_combine=use_rr_deepep_combine,
+            fp8_dispatch=fp8_dispatch,
+            combine_grad_handle=combine_grad_handle,
         )
-        # Release the handle after combine operation
+        # Release the handle and token_indices after combine operation
         self.handle = None
+        self.token_indices = None
+        self.token_probs = None
+        self.dispatched_probs = None
+        self.dispatched_indices = None
         return hidden_states
 
     def get_permuted_hidden_states_by_experts(
@@ -812,9 +894,14 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         fp8_dispatch: bool,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         return self._comm_manager.dispatch(
-            hidden_states, fp8_dispatch, async_finish, use_ue8m0=use_ue8m0
+            hidden_states,
+            fp8_dispatch,
+            async_finish,
+            use_ue8m0=use_ue8m0,
+            using_sonic_moe=using_sonic_moe,
         )
 
     def dispatch_postprocess(
@@ -1002,6 +1089,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         fp8_dispatch: bool = False,
         async_finish: bool = False,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         # Second All-to-All: Exchange expert tokens across ranks. `gathered_tokens` are the tokens that will be processed by current rank
         global_input_tokens = _AllToAll.apply(

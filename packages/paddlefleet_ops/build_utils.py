@@ -202,6 +202,7 @@ def check_submodule_updated():
             "sonic-moe",
             "flash-attention",
             "FlashMLA",
+            "fast-hadamard-transform",
         ]
         if not all(
             (PKG_ROOT / "third_party" / third_party / ".git").exists()
@@ -427,6 +428,18 @@ def get_libs():
                     (cuda_major, cuda_minor) <= (12, 8)
                 ),
             },
+        ),
+        EcosystemLibrary(
+            name="fast-hadamard-transform",
+            source_rel_path="third_party/fast-hadamard-transform",
+            artifacts=[
+                Artifact("fast_hadamard_transform", "fast_hadamard_transform"),
+                Artifact(
+                    "fast_hadamard_transform_cuda",
+                    "fast_hadamard_transform_cuda",
+                ),
+            ],
+            include_dirs=["csrc"],
         ),
     ]
     if (cuda_major, cuda_minor) >= (12, 9):

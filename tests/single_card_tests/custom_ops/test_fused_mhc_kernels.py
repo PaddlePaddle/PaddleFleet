@@ -60,6 +60,8 @@ LARGE_TF32_FWD_ATOL, LARGE_TF32_FWD_RTOL = 5e-3, 5e-3
 LARGE_TF32_BWD_ATOL, LARGE_TF32_BWD_RTOL = 1e-2, 1e-2
 LARGE_COSINE_SIM_THRESH = 0.998
 
+_MHC_COMPUTE_H_EPS = 1e-6
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -729,7 +731,7 @@ class TestEndToEndNative(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid() + 1e-6
+            h_pre = h[..., :n].sigmoid() + _MHC_COMPUTE_H_EPS
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = native_sinkhorn(
@@ -762,7 +764,7 @@ class TestEndToEndNative(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid() + 1e-6
+            h_pre = h[..., :n].sigmoid() + _MHC_COMPUTE_H_EPS
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = _ref_sinkhorn(
@@ -830,7 +832,7 @@ class TestEndToEndFused(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid() + 1e-6
+            h_pre = h[..., :n].sigmoid() + _MHC_COMPUTE_H_EPS
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = fused_sinkhorn(
@@ -863,7 +865,7 @@ class TestEndToEndFused(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid() + 1e-6
+            h_pre = h[..., :n].sigmoid() + _MHC_COMPUTE_H_EPS
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = _ref_sinkhorn(
