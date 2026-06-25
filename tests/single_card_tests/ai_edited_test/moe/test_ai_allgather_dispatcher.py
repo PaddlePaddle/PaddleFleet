@@ -1205,7 +1205,7 @@ class TestAllGatherCombineAsyncBackwardPaths(unittest.TestCase):
         with (
             patch.object(
                 td,
-                "_all_gather_grad_fp8_async",
+                "_fused_fp8_all_gather_async",
                 return_value=(fused_global, H, H128, paddle.int32, mock_task),
             ),
             patch.object(
@@ -1562,7 +1562,7 @@ class TestGroupedMLPExpertShardedStateDict(unittest.TestCase):
 # Lines 1207: _RouterAllGather.backward out.reshape
 # Lines 1228-1229: _PreAllGatherResult.backward (ReduceScatterGroupOp)
 # Lines 1324-1339: _quantize_and_pack_fp8
-# Lines 1361-1371: _all_gather_grad_fp8_async
+# Lines 1361-1371: _fused_fp8_all_gather_async
 # Lines 1425-1426,1433-1435,1437: _AllGatherCombineAsync.forward nranks>1 path
 # Lines 1487-1488: _AllGatherCombineNoOverlap set_grad flags
 # Lines 1615,1618-1619,1622,1629,1638: pre_allgather fp8 path
@@ -1681,12 +1681,12 @@ class TestQuantizeAndPackFP8(unittest.TestCase):
 
 
 class TestAllGatherGradFP8Async(unittest.TestCase):
-    """_all_gather_grad_fp8_async: lines 1361-1371."""
+    """_fused_fp8_all_gather_async: lines 1361-1371."""
 
     def test_quantize_and_launches_async_gather(self):
         import paddlefleet.transformer.moe.token_dispatcher as td
         from paddlefleet.transformer.moe.token_dispatcher import (
-            _all_gather_grad_fp8_async,
+            _fused_fp8_all_gather_async,
         )
 
         T, H, H128 = 4, 8, 1
@@ -1707,7 +1707,7 @@ class TestAllGatherGradFP8Async(unittest.TestCase):
                 return_value=mock_task,
             ),
         ):
-            fused_global, rH, rH128, rdt, task = _all_gather_grad_fp8_async(
+            fused_global, rH, rH128, rdt, task = _fused_fp8_all_gather_async(
                 paddle.randn([T, H]), g
             )
         self.assertEqual(fused_global.shape[0], T * g.nranks)
