@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for dsa_attention_new.py TileLang branch (TileLangDSAFusedFunction, TileLangDSAIndexerLoss).
+"""Unit tests for dsa_attention.py TileLang branch (TileLangDSAFusedFunction, TileLangDSAIndexerLoss).
 
 Includes precision alignment tests against paddle small-op reference from dsa_attention.py.
 """
@@ -247,19 +247,14 @@ class TestTileLangDSAFusedFunction(unittest.TestCase):
     def setUp(self):
         paddle.set_device("gpu")
         try:
-            from paddlefleet.transformer.dsa_attention_new import (
-                HAS_TILELANG,
+            from paddlefleet.transformer.dsa_attention import (
                 TileLangDSAFusedFunction,
             )
+            from paddlefleet.tilelang_ops import dsa_indexer_topk_reducesum_interface
 
-            if not HAS_TILELANG:
-                self.skipTest("tilelang not available")
             self.TileLangDSAFusedFunction = TileLangDSAFusedFunction
         except ImportError:
-            self.skipTest("dsa_attention_new not importable")
-
-    def _run_forward(
-        self,
+            self.skipTest("tilelang not available")
         batch=1,
         seqlen=64,
         heads=16,
@@ -417,16 +412,13 @@ class TestTileLangDSAIndexerLoss(unittest.TestCase):
     def setUp(self):
         paddle.set_device("gpu")
         try:
-            from paddlefleet.transformer.dsa_attention_new import (
-                HAS_TILELANG,
+            from paddlefleet.transformer.dsa_attention import (
                 TileLangDSAIndexerLoss,
             )
 
-            if not HAS_TILELANG:
-                self.skipTest("tilelang not available")
             self.TileLangDSAIndexerLoss = TileLangDSAIndexerLoss
         except ImportError:
-            self.skipTest("dsa_attention_new not importable")
+            self.skipTest("tilelang not available")
 
     def test_loss_forward_returns_scalar(self):
         """Forward should return (loss_scalar, topk_indices)."""
@@ -586,16 +578,13 @@ class TestTileLangDSAFusedWithLoss(unittest.TestCase):
     def setUp(self):
         paddle.set_device("gpu")
         try:
-            from paddlefleet.transformer.dsa_attention_new import (
-                HAS_TILELANG,
+            from paddlefleet.transformer.dsa_attention import (
                 TileLangDSAFusedFunction,
             )
 
-            if not HAS_TILELANG:
-                self.skipTest("tilelang not available")
             self.TileLangDSAFusedFunction = TileLangDSAFusedFunction
         except ImportError:
-            self.skipTest("dsa_attention_new not importable")
+            self.skipTest("tilelang not available")
 
     def test_backward_with_loss_coeff(self):
         """With loss_coeff > 0, indexer grads should be non-zero."""
@@ -711,14 +700,11 @@ class TestTileLangVsPaddleRefPrecision(unittest.TestCase):
                 dsa_sparse_mla_fwd_interface,
                 dsa_sparse_mla_topk_reducesum_interface,
             )
-            from paddlefleet.transformer.dsa_attention_new import (
-                HAS_TILELANG,
+            from paddlefleet.transformer.dsa_attention import (
                 TileLangDSAFusedFunction,
                 TileLangDSAIndexerLoss,
             )
 
-            if not HAS_TILELANG:
-                self.skipTest("tilelang not available")
             self.TileLangDSAFusedFunction = TileLangDSAFusedFunction
             self.TileLangDSAIndexerLoss = TileLangDSAIndexerLoss
             self.dsa_indexer_topk_reducesum_interface = (

@@ -1130,6 +1130,14 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
 # ---------------------------------------------------------------------------
 
 
+def _pad_topk_for_tilelang(topk: int) -> int:
+    """Pad topk to the next power-of-2 that is >= 32 (tilelang kernel constraint)."""
+    topk = max(topk, 32)
+    # next power of 2
+    topk = 1 << (topk - 1).bit_length()
+    return topk
+
+
 def _resolve_dsa_offsets(packed_seq_params, startend_row_indices, b, sq):
     """Build THD offsets for TileLang varlen kernels."""
     if (
@@ -1832,8 +1840,12 @@ class DSAttention(FleetLayer):
                     packed_seq_params, attn_mask_startend_row_indices, b, sq
                 )
                 sparse_loss = bool(self.dsa_indexer_use_sparse_loss)
-                attn_topk = min(int(self.indexer.index_topk), sq)
-                loss_topk = attn_topk if sparse_loss else sq
+                attn_topk = _pad_topk_for_tilelang(
+                    min(int(self.indexer.index_topk), sq)
+                )
+                loss_topk = (
+                    attn_topk if sparse_loss else _pad_topk_for_tilelang(sq)
+                )
 
                 query_thd = dsa_bshd_to_thd(q_absorbed)
                 key_thd = dsa_bshd_to_thd(
@@ -1873,25 +1885,13 @@ class DSAttention(FleetLayer):
                 # Fallback: original FusedDSAIndexerLoss
                 # Non-tilelang path needs softmax_scale in weights (tilelang applies it internally)
                 weights_idx = weights_idx * self.indexer.softmax_scale
-                # Convert to seq-first for FusedDSAIndexerLoss
-                q_idx_sf = q_idx.transpose(
-                    [1, 0, 2, 3]
-                )  # [b,s,h,d] -> [s,b,h,d]
-                k_idx_sf = k_idx.transpose([1, 0, 2])  # [b,s,d] -> [s,b,d]
-                weights_idx_sf = weights_idx.transpose(
-                    [1, 0, 2]
-                )  # [b,s,h] -> [s,b,h]
-
-                # Convert query/key to seq-first for loss computation
-                query_sf = query.transpose([1, 0, 2, 3])
-                key_sf = key.transpose([1, 0, 2, 3])
 
                 indexer_loss = FusedDSAIndexerLoss.apply(
-                    q_idx_sf,
-                    weights_idx_sf,
-                    k_idx_sf,
-                    query_sf.detach(),
-                    key_sf.detach(),
+                    q_idx,
+                    weights_idx,
+                    k_idx,
+                    query.detach(),
+                    key.detach(),
                     self.softmax_scale,
                     self.indexer.index_topk,
                     float(self.dsa_indexer_loss_coeff),
@@ -1924,7 +1924,9 @@ class DSAttention(FleetLayer):
                 offsets = _resolve_dsa_offsets(
                     packed_seq_params, attn_mask_startend_row_indices, b, sq
                 )
-                attn_topk = min(int(self.indexer.index_topk), sq)
+                attn_topk = _pad_topk_for_tilelang(
+                    min(int(self.indexer.index_topk), sq)
+                )
 
                 query_thd = dsa_bshd_to_thd(q_absorbed)
                 key_thd = dsa_bshd_to_thd(
