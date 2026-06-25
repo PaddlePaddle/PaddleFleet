@@ -274,12 +274,21 @@ class GreedyGenerator:
                 .unsqueeze(0)
                 .expand([bsz, prompt_len])
             )
+            # Build startend_row_indices for flashmask causal attention.
+            # causal=True, K=1: LTS[i] = document end boundary (exclusive).
+            # full(prompt_len) = standard causal (no cross-doc masking).
+            # SWA is applied inside DotProductAttention via
+            # startend_row_indices_add_sliding_window.
+            prefill_startend = paddle.full(
+                [1, 1, prompt_len, 1], prompt_len, dtype="int32"
+            )
             logits = self.model(
                 {
                     "input_ids": input_ids,
                     "position_ids": position_ids,
                     "past_key_values": self.cache,
                     "use_cache": True,
+                    "attn_mask_startend_row_indices": prefill_startend,
                 }
             )
             # Apply repetition penalty to prefill output
