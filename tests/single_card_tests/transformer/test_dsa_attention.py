@@ -37,10 +37,12 @@ from paddlefleet.transformer.dsa_attention import (
     DSAttention,
     DSAttentionSublayersSpec,
     FusedDSAIndexerLoss,
+    fused_qk_topk_naive,
     _bwd_fused_indexer_loss,
     _compute_dsa_indexer_loss,
     _compute_index_scores_fused,
     _unfused_dsa_attention,
+    build_dsa_varlen_mask,
     hadamard_transform,
     rotate_activation,
 )
@@ -1429,6 +1431,53 @@ class TestIndexerComputeScoresWithMask(unittest.TestCase):
             (later_token_indices <= pos).all().item(),
             f"topk indices at position {pos} exceed causal bound",
         )
+
+
+class TestDSAVarlenMask(unittest.TestCase):
+    """Test packed-sequence document boundary mask for DSA top-k."""
+
+    def test_varlen_mask_blocks_cross_doc_positions(self):
+        b, s = 1, 6
+        startend = paddle.to_tensor(
+            [[[[3], [3], [3], [6], [6], [6]]]], dtype="int64"
+        )
+
+        varlen_mask = build_dsa_varlen_mask(startend, b, s, s)
+        varlen_np = varlen_mask.numpy()
+
+        self.assertTrue((varlen_np[0, :3, :3] == 0).all())
+        self.assertTrue((varlen_np[0, :3, 3:] == float("-inf")).all())
+        self.assertTrue((varlen_np[0, 3:, :3] == float("-inf")).all())
+        self.assertTrue((varlen_np[0, 3:, 3:] == 0).all())
+
+    def test_varlen_mask_keeps_combined_mask_blocked_after_topk(self):
+        b, s, h, d = 1, 6, 1, 4
+        q = paddle.ones([b, s, h, d], dtype="float32")
+        k = paddle.arange(s * d, dtype="float32").reshape([b, s, d])
+        weights = paddle.ones([b, s, h], dtype="float32")
+        startend = paddle.to_tensor(
+            [[[[3], [3], [3], [6], [6], [6]]]], dtype="int64"
+        )
+        causal = paddle.triu(
+            paddle.full([s, s], float("-inf"), dtype="float32"),
+            diagonal=1,
+        )
+        varlen_mask = build_dsa_varlen_mask(startend, b, s, s)
+        mask = (causal.unsqueeze(0) + varlen_mask).unsqueeze(1)
+
+        _, topk_indices = fused_qk_topk_naive(q, k, weights, 2, mask=mask)
+        index_mask = paddle.full([b, s, s], float("-inf"), dtype="float32")
+        index_mask = paddle.put_along_axis(
+            index_mask,
+            topk_indices,
+            paddle.zeros_like(topk_indices, dtype="float32"),
+            axis=-1,
+        )
+        combined_mask = index_mask + causal.unsqueeze(0) + varlen_mask
+        combined_np = combined_mask.numpy()
+
+        self.assertTrue((combined_np[0, :3, 3:] == float("-inf")).all())
+        self.assertTrue((combined_np[0, 3:, :3] == float("-inf")).all())
 
 
 class TestComputeIndexScoresFusedAdditional(unittest.TestCase):

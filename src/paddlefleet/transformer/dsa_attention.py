@@ -226,7 +226,9 @@ def _get_doc_start(
     changed[:, 0] = 1
     changed[:, 1:] = (mask[:, 1:] != mask[:, :-1]).cast("int64")
 
-    positions = paddle.arange(seqlen, dtype="int64").unsqueeze(0).expand_as(mask)
+    positions = (
+        paddle.arange(seqlen, dtype="int64").unsqueeze(0).expand_as(mask)
+    )
     doc_start = paddle.cummax(changed * positions, axis=1).values
 
     if squeeze_batch:
@@ -244,7 +246,9 @@ def build_dsa_varlen_mask(
     if attn_mask_startend_row_indices is None:
         return None
 
-    mask = attn_mask_startend_row_indices.reshape([batch_size, sq]).cast("int64")
+    mask = attn_mask_startend_row_indices.reshape([batch_size, sq]).cast(
+        "int64"
+    )
     doc_start = _get_doc_start(mask, sq).unsqueeze(2)  # [b, sq, 1]
     doc_end = mask.unsqueeze(2)  # [b, sq, 1]
     key_pos = paddle.arange(sk, dtype="int64").reshape([1, 1, sk])
@@ -485,7 +489,10 @@ class DSAIndexer(paddle.nn.Layer):
         k = rotate_activation(k)
 
         weights, _ = self.weights_proj(hidden_states)
-        weights = weights * (self.n_heads**-0.5) * self.softmax_scale
+        # Only apply n_heads scaling here; softmax_scale (head_dim**-0.5) is NOT included
+        # because tilelang kernel applies sm_scale internally. Non-tilelang paths must
+        # multiply softmax_scale explicitly before use.
+        weights = weights * (self.n_heads**-0.5)
 
         return q, k, weights
 
@@ -1118,6 +1125,352 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         DSAIndexerLossAutoScaler._main_loss_backward_scale = scale
 
 
+# ---------------------------------------------------------------------------
+# TileLang DSA Indexer Loss (optional, requires HAS_TILELANG)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_dsa_offsets(packed_seq_params, startend_row_indices, b, sq):
+    """Build THD offsets for TileLang varlen kernels."""
+    if (
+        packed_seq_params is not None
+        and getattr(packed_seq_params, "qkv_format", None) == "thd"
+    ):
+        return (
+            getattr(packed_seq_params, "cu_seqlens_q_padded", None)
+            or packed_seq_params.cu_seqlens_q
+        ).cast("int32")
+    if startend_row_indices is not None:
+        bs, _, seqlen, _ = startend_row_indices.shape
+        ends = startend_row_indices[:, 0, :, 0].cast("int64")
+        changed = paddle.zeros_like(ends, dtype="bool")
+        changed[:, 0] = True
+        changed[:, 1:] = ends[:, 1:] != ends[:, :-1]
+        parts = []
+        for i in range(bs):
+            parts.append(
+                paddle.nonzero(changed[i]).flatten().cast("int32") + i * seqlen
+            )
+        parts.append(paddle.to_tensor([bs * seqlen], dtype="int32"))
+        return paddle.concat(parts)
+    return (paddle.arange(0, b + 1, dtype="int32") * sq).cast("int32")
+
+
+def _make_dsa_fused_mla_key(kv_compressed, k_pos_emb):
+    """Concat kv_compressed and k_pos_emb into fused MLA key with kv_group dim."""
+    if k_pos_emb.ndim == kv_compressed.ndim + 1:
+        k_pos_emb = k_pos_emb.squeeze(-2)
+    return paddle.concat(
+        [kv_compressed.unsqueeze(-2), k_pos_emb.unsqueeze(-2)], axis=-1
+    )
+
+
+class TileLangDSAFusedFunction(paddle.autograd.PyLayer):
+    """Fused DSA: indexer topk + sparse MLA fwd in forward, sparse MLA bwd + indexer bwd in backward.
+
+    Matches dsa_fused_paddle.py FusedDSAFunction logic:
+      Forward: indexer_topk_reducesum → sparse_mla_fwd (single call for both output and lse)
+      Backward: sparse_mla_bwd → sparse_mla_topk_reducesum → indexer_bwd
+    """
+
+    _last_topk_indices: Tensor | None = None
+
+    @staticmethod
+    def forward(
+        ctx,
+        query_thd: Tensor,  # MLA query [S, heads, dim+tail_dim]
+        key_thd: Tensor,  # MLA key [S, kv_group, dim+tail_dim]
+        index_q_thd: Tensor,  # indexer query [S, index_h, index_d]
+        index_k_thd: Tensor,  # indexer key [S, index_d]
+        weights_thd: Tensor,  # indexer weights [S, index_h]
+        offsets: Tensor,  # [b+1] int32
+        attention_topk: int,
+        loss_topk: int,
+        v_channels: int,
+        sm_scale: float,
+        loss_coeff: float,
+        use_full_loss: bool = False,
+    ) -> Tensor:
+        """Run fused indexer + sparse MLA forward. Returns output [S, heads, v_channels]."""
+        from paddlefleet.tilelang_ops import (
+            dsa_indexer_topk_reducesum_interface,
+            dsa_prepare_varlen_metadata,
+            dsa_sparse_mla_fwd_interface,
+        )
+
+        offsets, token_indices = dsa_prepare_varlen_metadata(offsets)
+
+        # 1. Indexer topk (legacy path): compute attention_topk first
+        needs_loss = loss_coeff != 0.0
+        attn_topk_indices, index_score = dsa_indexer_topk_reducesum_interface(
+            index_q_thd,
+            weights_thd,
+            index_k_thd,
+            attention_topk,
+            offsets,
+            token_indices,
+            use_full_loss=False,
+        )
+        loss_topk_indices = attn_topk_indices
+        # If full loss needed under legacy mode, run separate full-loss indexer
+        # TODO(xiehaoyang): Call index fwd once and adjust based on the result to reduce compute overhead.
+        if use_full_loss and needs_loss:
+            loss_topk_indices, index_score = (
+                dsa_indexer_topk_reducesum_interface(
+                    index_q_thd,
+                    weights_thd,
+                    index_k_thd,
+                    loss_topk,
+                    offsets,
+                    token_indices,
+                    use_full_loss=True,
+                )
+            )
+
+        # 2. Sparse MLA forward (single call — output + lse)
+        o, lse = dsa_sparse_mla_fwd_interface(
+            query_thd,
+            key_thd,
+            attn_topk_indices.unsqueeze(1),
+            offsets,
+            token_indices,
+            sm_scale=sm_scale,
+            d_v=v_channels,
+        )
+
+        # Save for backward
+        ctx.save_for_backward(
+            query_thd,
+            key_thd,
+            index_q_thd,
+            index_k_thd,
+            weights_thd,
+            attn_topk_indices,
+            loss_topk_indices,
+            index_score,
+            o,
+            lse,
+            offsets,
+            token_indices,
+        )
+        ctx.v_channels = v_channels
+        ctx.sm_scale = sm_scale
+        ctx.loss_coeff = loss_coeff
+        ctx.use_full_loss = use_full_loss
+
+        TileLangDSAFusedFunction._last_topk_indices = attn_topk_indices.detach()
+        return o
+
+    @staticmethod
+    def backward(ctx, do: Tensor):
+        """Compute sparse MLA + indexer gradients in one pass."""
+        from paddlefleet.tilelang_ops import (
+            dsa_indexer_bwd_interface,
+            dsa_sparse_mla_bwd_interface,
+            dsa_sparse_mla_topk_reducesum_interface,
+        )
+
+        (
+            query,
+            key,
+            index_q,
+            index_k,
+            weights,
+            attn_topk_indices,
+            loss_topk_indices,
+            index_score,
+            o,
+            lse,
+            offsets,
+            token_indices,
+        ) = ctx.saved_tensor()
+
+        # do comes in as same shape as forward output [S, heads, v_channels]
+        # but if it was reshaped outside, convert back to THD
+        if do.ndim == 4:
+            # [b, sq, heads, v_channels] -> [S, heads, v_channels]
+            do = do.reshape([-1, do.shape[-2], do.shape[-1]])
+
+        # 1. Sparse MLA backward → dq, dkv
+        dq, dkv = dsa_sparse_mla_bwd_interface(
+            query,
+            key,
+            o,
+            do,
+            attn_topk_indices.unsqueeze(1),
+            lse,
+            offsets,
+            token_indices,
+            sm_scale=ctx.sm_scale,
+            d_v=ctx.v_channels,
+        )
+
+        # 2. Indexer backward (if loss_coeff > 0)
+        if ctx.loss_coeff == 0.0:
+            dindex_q = paddle.zeros_like(index_q)
+            dweights = paddle.zeros_like(weights)
+            dindex_k = paddle.zeros_like(index_k)
+        else:
+            # Compute attn_score for indexer loss gradient
+            attn_score = dsa_sparse_mla_topk_reducesum_interface(
+                query,
+                key,
+                loss_topk_indices.unsqueeze(1),
+                lse,
+                offsets,
+                token_indices,
+                dim_v=ctx.v_channels,
+                sm_scale=ctx.sm_scale,
+            ).squeeze(1)
+
+            dindex_q, dweights, dindex_k = dsa_indexer_bwd_interface(
+                index_q,
+                weights,
+                index_k,
+                attn_score,
+                index_score,
+                loss_topk_indices,
+                offsets,
+                token_indices,
+            )
+            dindex_q = dindex_q * ctx.loss_coeff
+            dweights = dweights * ctx.loss_coeff
+            dindex_k = dindex_k * ctx.loss_coeff
+
+        # Return gradients: query, key, index_q, index_k, weights, offsets
+        return dq, dkv, dindex_q, dindex_k, dweights, None
+
+
+class TileLangDSAIndexerLoss(paddle.autograd.PyLayer):
+    """TileLang DSA indexer KL loss only (no attention output). Kept for compatibility."""
+
+    _last_topk_indices: Tensor | None = None
+
+    @staticmethod
+    def forward(
+        ctx,
+        index_q_thd,
+        weights_thd,
+        index_k_thd,
+        query_thd,
+        key_thd,
+        offsets,
+        attention_topk,
+        loss_topk,
+        v_channels,
+        softmax_scale,
+        loss_coeff,
+        use_full_loss=False,
+    ):
+        from paddlefleet.tilelang_ops import (
+            dsa_indexer_topk_reducesum_interface,
+            dsa_prepare_varlen_metadata,
+            dsa_sparse_mla_fwd_interface,
+            dsa_sparse_mla_topk_reducesum_interface,
+        )
+
+        offsets, token_indices = dsa_prepare_varlen_metadata(offsets)
+
+        if use_full_loss and loss_coeff != 0.0:
+            loss_topk_indices, index_score = (
+                dsa_indexer_topk_reducesum_interface(
+                    index_q_thd,
+                    weights_thd,
+                    index_k_thd,
+                    loss_topk,
+                    offsets,
+                    token_indices,
+                    use_full_loss=True,
+                )
+            )
+            attn_topk_indices = loss_topk_indices[
+                :, :attention_topk
+            ].contiguous()
+        else:
+            attn_topk_indices, index_score = (
+                dsa_indexer_topk_reducesum_interface(
+                    index_q_thd,
+                    weights_thd,
+                    index_k_thd,
+                    attention_topk,
+                    offsets,
+                    token_indices,
+                    use_full_loss=False,
+                )
+            )
+            loss_topk_indices = attn_topk_indices
+
+        _, lse = dsa_sparse_mla_fwd_interface(
+            query_thd,
+            key_thd,
+            attn_topk_indices.unsqueeze(1),
+            offsets,
+            token_indices,
+            sm_scale=softmax_scale,
+            d_v=v_channels,
+        )
+        attn_score = dsa_sparse_mla_topk_reducesum_interface(
+            query_thd,
+            key_thd,
+            loss_topk_indices.unsqueeze(1),
+            lse,
+            offsets,
+            token_indices,
+            dim_v=v_channels,
+            sm_scale=softmax_scale,
+        ).squeeze(1)
+
+        kl = attn_score * (
+            paddle.log(attn_score + 1e-10) - paddle.log(index_score + 1e-10)
+        )
+        loss = kl.sum(axis=-1).mean() * float(loss_coeff)
+
+        ctx.save_for_backward(
+            index_q_thd.detach(),
+            weights_thd.detach(),
+            index_k_thd.detach(),
+            attn_score.detach(),
+            index_score.detach(),
+            loss_topk_indices.detach(),
+            offsets.detach(),
+            token_indices.detach(),
+        )
+        ctx.loss_coeff = float(loss_coeff)
+        TileLangDSAIndexerLoss._last_topk_indices = attn_topk_indices.detach()
+        return loss, attn_topk_indices.detach()
+
+    @staticmethod
+    def backward(ctx, grad_loss, grad_topk_indices=None):
+        from paddlefleet.tilelang_ops import dsa_indexer_bwd_interface
+
+        (
+            index_q,
+            weights,
+            index_k,
+            attn_score,
+            index_score,
+            loss_topk_idx,
+            offsets,
+            token_indices,
+        ) = ctx.saved_tensor()
+        dq, dw, dk = dsa_indexer_bwd_interface(
+            index_q,
+            weights,
+            index_k,
+            attn_score,
+            index_score,
+            loss_topk_idx,
+            offsets,
+            token_indices,
+        )
+        s = (
+            ctx.loss_coeff * grad_loss
+            if grad_loss is not None
+            else ctx.loss_coeff
+        )
+        return dq * s, dw * s, dk * s, None, None, None
+
+
 class DSAIndexerLossLoggingHelper:
     """Helper class for logging sparse attention indexer losses across layers and ranks."""
 
@@ -1348,6 +1701,12 @@ class DSAttention(FleetLayer):
             config, "dsa_indexer_use_sparse_loss", False
         )
 
+        # TileLang indexer switch (config-driven, matching CSA style)
+        self._use_tilelang = bool(getattr(config, "dsa_tilelang_enable", False))
+        self._v_channels = getattr(config, "kv_lora_rank", None) or getattr(
+            config, "v_head_dim", None
+        )
+
     def forward(
         self,
         query: Tensor,
@@ -1435,9 +1794,7 @@ class DSAttention(FleetLayer):
 
         if attn_mask_type is not None and attn_mask_type == AttnMaskType.causal:
             # Use causal mask only
-            indexer_float_mask = causal_mask.unsqueeze(0).expand(
-                [b, sq, sk]
-            )
+            indexer_float_mask = causal_mask.unsqueeze(0).expand([b, sq, sk])
         elif attention_mask is not None:
             mask = attention_mask.squeeze(1)
             indexer_float_mask = paddle.zeros_like(
@@ -1445,9 +1802,7 @@ class DSAttention(FleetLayer):
             ).masked_fill(mask.cast("bool"), float("-inf"))
 
         else:
-            indexer_float_mask = causal_mask.unsqueeze(0).expand(
-                [b, sq, sk]
-            )
+            indexer_float_mask = causal_mask.unsqueeze(0).expand([b, sq, sk])
 
         if varlen_mask is not None:
             indexer_float_mask = indexer_float_mask + varlen_mask
@@ -1460,26 +1815,146 @@ class DSAttention(FleetLayer):
             # RoPE is computed internally by the indexer
             q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(x, qr)
 
-            indexer_loss = FusedDSAIndexerLoss.apply(
-                q_idx,
-                weights_idx,
-                k_idx,
-                query.detach(),
-                key.detach(),
-                self.softmax_scale,
-                self.indexer.index_topk,
-                float(self.dsa_indexer_loss_coeff),
-                indexer_float_mask,
-                bool(self.dsa_indexer_use_sparse_loss),
-                self.pg_collection.tp
-                if self.pg_collection.tp is not None
-                and self.pg_collection.tp.nranks > 1
-                else None,
-            )
-            topk_indices = FusedDSAIndexerLoss._last_topk_indices
+            # TileLang fused indexer + sparse MLA branch
+            if (
+                self._use_tilelang
+                and q_absorbed is not None
+                and kv_compressed is not None
+                and k_pos_emb is not None
+                and self._v_channels is not None
+            ):
+                from paddlefleet.tilelang_ops.indexer.dsa_indexer import (
+                    dsa_bshd_to_thd,
+                    dsa_thd_to_bshd,
+                )
+
+                offsets = _resolve_dsa_offsets(
+                    packed_seq_params, attn_mask_startend_row_indices, b, sq
+                )
+                sparse_loss = bool(self.dsa_indexer_use_sparse_loss)
+                attn_topk = min(int(self.indexer.index_topk), sq)
+                loss_topk = attn_topk if sparse_loss else sq
+
+                query_thd = dsa_bshd_to_thd(q_absorbed)
+                key_thd = dsa_bshd_to_thd(
+                    _make_dsa_fused_mla_key(kv_compressed, k_pos_emb)
+                )
+
+                # Single fused PyLayer: indexer topk + sparse MLA fwd + bwd
+                o_thd = TileLangDSAFusedFunction.apply(
+                    query_thd,
+                    key_thd,
+                    dsa_bshd_to_thd(q_idx),
+                    dsa_bshd_to_thd(k_idx),
+                    dsa_bshd_to_thd(weights_idx),
+                    offsets,
+                    attn_topk,
+                    loss_topk,
+                    int(self._v_channels),
+                    float(self.softmax_scale),
+                    float(self.dsa_indexer_loss_coeff),
+                    not sparse_loss,
+                )
+                core_attn_out = dsa_thd_to_bshd(o_thd, b, sq)
+
+                # v_b_proj: [b, sq, heads, kv_lora_rank] -> [b, sq, heads, v_head_dim] -> [b, sq, hidden]
+                core_attn_out = paddle.einsum(
+                    "...hk,hkv->...hv", core_attn_out, v_b_proj_weight
+                )
+                core_attn_out = core_attn_out.flatten(start_axis=-2)
+
+                # Log indexer loss (computed from saved KL in forward)
+                # Recompute loss scalar for logging (lightweight — just reads cached score)
+                topk_indices_thd = TileLangDSAFusedFunction._last_topk_indices
+                topk_indices = dsa_thd_to_bshd(topk_indices_thd, b, sq)
+
+                return core_attn_out
+            else:
+                # Fallback: original FusedDSAIndexerLoss
+                # Non-tilelang path needs softmax_scale in weights (tilelang applies it internally)
+                weights_idx = weights_idx * self.indexer.softmax_scale
+                # Convert to seq-first for FusedDSAIndexerLoss
+                q_idx_sf = q_idx.transpose(
+                    [1, 0, 2, 3]
+                )  # [b,s,h,d] -> [s,b,h,d]
+                k_idx_sf = k_idx.transpose([1, 0, 2])  # [b,s,d] -> [s,b,d]
+                weights_idx_sf = weights_idx.transpose(
+                    [1, 0, 2]
+                )  # [b,s,h] -> [s,b,h]
+
+                # Convert query/key to seq-first for loss computation
+                query_sf = query.transpose([1, 0, 2, 3])
+                key_sf = key.transpose([1, 0, 2, 3])
+
+                indexer_loss = FusedDSAIndexerLoss.apply(
+                    q_idx_sf,
+                    weights_idx_sf,
+                    k_idx_sf,
+                    query_sf.detach(),
+                    key_sf.detach(),
+                    self.softmax_scale,
+                    self.indexer.index_topk,
+                    float(self.dsa_indexer_loss_coeff),
+                    indexer_float_mask,
+                    bool(self.dsa_indexer_use_sparse_loss),
+                    self.pg_collection.tp
+                    if self.pg_collection.tp is not None
+                    and self.pg_collection.tp.nranks > 1
+                    else None,
+                )
+                topk_indices = FusedDSAIndexerLoss._last_topk_indices
         else:
             # Inference or no loss
-            _, topk_indices = self.indexer.forward(x, qr, indexer_float_mask)
+            if (
+                self._use_tilelang
+                and q_absorbed is not None
+                and kv_compressed is not None
+                and k_pos_emb is not None
+                and self._v_channels is not None
+            ):
+                # Use tilelang fused path with loss_coeff=0 (no indexer loss)
+                from paddlefleet.tilelang_ops.indexer.dsa_indexer import (
+                    dsa_bshd_to_thd,
+                    dsa_thd_to_bshd,
+                )
+
+                q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(
+                    x, qr
+                )
+                offsets = _resolve_dsa_offsets(
+                    packed_seq_params, attn_mask_startend_row_indices, b, sq
+                )
+                attn_topk = min(int(self.indexer.index_topk), sq)
+
+                query_thd = dsa_bshd_to_thd(q_absorbed)
+                key_thd = dsa_bshd_to_thd(
+                    _make_dsa_fused_mla_key(kv_compressed, k_pos_emb)
+                )
+
+                o_thd = TileLangDSAFusedFunction.apply(
+                    query_thd,
+                    key_thd,
+                    dsa_bshd_to_thd(q_idx),
+                    dsa_bshd_to_thd(k_idx),
+                    dsa_bshd_to_thd(weights_idx),
+                    offsets,
+                    attn_topk,
+                    attn_topk,  # loss_topk = attn_topk (irrelevant since loss_coeff=0)
+                    int(self._v_channels),
+                    float(self.softmax_scale),
+                    0.0,  # loss_coeff = 0
+                    False,
+                )
+                core_attn_out = dsa_thd_to_bshd(o_thd, b, sq)
+                core_attn_out = paddle.einsum(
+                    "...hk,hkv->...hv", core_attn_out, v_b_proj_weight
+                )
+                core_attn_out = core_attn_out.flatten(start_axis=-2)
+                return core_attn_out
+            else:
+                _, topk_indices = self.indexer.forward(
+                    x, qr, indexer_float_mask
+                )
             indexer_loss = None
 
         # Build sparse mask
