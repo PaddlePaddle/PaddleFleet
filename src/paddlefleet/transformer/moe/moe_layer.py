@@ -861,16 +861,6 @@ class MoELayer(nn.Layer):
                 hidden_states, probs, routing_map, topk_weights, topk_indices
             )
 
-        # AllToAll token_dispatch returns unsorted global tokens;
-        # dispatch_postprocess sorts them by local expert so that
-        # expert_forward / FusionMoePyLayer can split by tokens_per_expert.
-        if self.moe_token_dispatcher_type == "alltoall":
-            dispatched_hidden_states, _ = (
-                self.token_dispatcher.dispatch_postprocess(
-                    dispatched_hidden_states
-                )
-            )
-
         dispatched_indices, dispatched_probs, tokens_per_expert = (
             self.token_dispatcher.get_dispatched_routing()
         )
@@ -886,14 +876,7 @@ class MoELayer(nn.Layer):
         )
 
         with profile("fusion_mlp"):
-            if self.moe_token_dispatcher_type == "alltoall":
-                # AllToAll dispatcher processes experts via tokens_per_expert
-                # split (expert_forward) rather than index-based fusion kernels,
-                # because it does not produce dispatched_indices/dispatched_probs.
-                hidden_states = self.expert_forward(
-                    dispatched_hidden_states, tokens_per_expert
-                )
-            elif self._use_hybrid_ep_fusion():
+            if self._use_hybrid_ep_fusion():
                 hidden_states = self._run_hybrid_ep_fusion(
                     dispatched_hidden_states,
                     dispatched_probs,
@@ -935,13 +918,6 @@ class MoELayer(nn.Layer):
                     clamp_value=self.config.activation_func_clamp_value,
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
                 )
-
-        # AllToAll: combine_preprocess reorders expert outputs to match the
-        # reverse AllToAll split structure before token_combine.
-        if self.moe_token_dispatcher_type == "alltoall":
-            hidden_states = self.token_dispatcher.combine_preprocess(
-                hidden_states
-            )
 
         with profile("combine"):
             hidden_states = self.combine(

@@ -1406,67 +1406,6 @@ class TestMoELayerInitAllgatherPaths(unittest.TestCase):
         self.assertEqual(layer.num_experts_per_device, 8)
 
 
-# ── moe_layer.py line 868/893/942: fusion_moe_forward alltoall branch ────────
-
-
-class TestMoELayerFusionAllToAllBranch(unittest.TestCase):
-    """Cover moe_layer.py lines 868, 893, 942 via combine path mocks."""
-
-    def test_fusion_moe_forward_alltoall_dispatch_postprocess(self):
-        """Line 868: alltoall calls dispatch_postprocess after dispatch."""
-
-        layer = MagicMock()
-        layer.moe_token_dispatcher_type = "alltoall"
-        x = paddle.randn([4, 8])
-        postprocess_out = paddle.randn([4, 8])
-        layer.token_dispatcher.dispatch_postprocess.return_value = (
-            postprocess_out,
-            None,
-        )
-        # Inline the condition from production line 867-872
-        if layer.moe_token_dispatcher_type == "alltoall":
-            dispatched_hidden_states, _ = (
-                layer.token_dispatcher.dispatch_postprocess(x)
-            )
-        layer.token_dispatcher.dispatch_postprocess.assert_called_once_with(x)
-        np.testing.assert_allclose(
-            dispatched_hidden_states.numpy(), postprocess_out.numpy()
-        )
-
-    def test_fusion_moe_forward_alltoall_expert_forward(self):
-        """Line 893: alltoall uses expert_forward instead of sonic_moe."""
-
-        layer = MagicMock()
-        layer.moe_token_dispatcher_type = "alltoall"
-        tokens_per_expert = paddle.to_tensor([2, 2])
-        dispatched = paddle.randn([4, 8])
-        expected = paddle.randn([4, 8])
-        layer.expert_forward.return_value = expected
-        # Inline production line 889-895
-        if layer.moe_token_dispatcher_type == "alltoall":
-            hidden_states = layer.expert_forward(dispatched, tokens_per_expert)
-        layer.expert_forward.assert_called_once_with(
-            dispatched, tokens_per_expert
-        )
-        np.testing.assert_allclose(hidden_states.numpy(), expected.numpy())
-
-    def test_fusion_moe_forward_alltoall_combine_preprocess(self):
-        """Line 942: alltoall calls combine_preprocess before combine."""
-
-        layer = MagicMock()
-        layer.moe_token_dispatcher_type = "alltoall"
-        x = paddle.randn([4, 8])
-        preprocess_out = paddle.randn([4, 8])
-        layer.token_dispatcher.combine_preprocess.return_value = preprocess_out
-        # Inline production line 941-944
-        if layer.moe_token_dispatcher_type == "alltoall":
-            hidden_states = layer.token_dispatcher.combine_preprocess(x)
-        layer.token_dispatcher.combine_preprocess.assert_called_once_with(x)
-        np.testing.assert_allclose(
-            hidden_states.numpy(), preprocess_out.numpy()
-        )
-
-
 # ── moe_utils.py line 812: ReduceScatterGroupOp.backward ────────────────────
 
 
