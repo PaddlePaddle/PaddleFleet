@@ -341,59 +341,83 @@ class TestGreedyGeneratorEosStop(unittest.TestCase):
 
 
 class TestGenerateUseCacheIsCausal(unittest.TestCase):
-    """Test that generate passes use_cache=True and decode uses q_len==1."""
+    """Test that DotProductAttention flashmask branch sets is_causal correctly with KV cache."""
 
-    def test_prefill_has_full_seq_decode_has_single_token(self):
-        """Prefill should pass full sequence; decode steps pass q_len==1."""
-        from unittest.mock import MagicMock
+    def _call_attention_forward(self, q_len):
+        """Call DotProductAttention.forward entering flashmask+KV cache path."""
+        from unittest.mock import MagicMock, patch
 
-        from paddlefleet.generation.greedy_generator import (
-            DynamicKVCache,
-            GreedyGenerator,
+        from paddlefleet.transformer.dot_product_attention import (
+            DotProductAttention,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+
+        config = MagicMock()
+        config.gpt_model_use_experimental_version = False
+        config.context_parallel_size = 1
+        config.head_dim = 64
+        config.num_attention_heads = 4
+        config.num_key_value_heads = 4
+        config.apply_query_key_layer_scaling = False
+        config.fp16 = False
+        config.bf16 = True
+        config.masked_softmax_fusion = False
+        config.attention_softmax_in_fp32 = True
+        config.attention_dropout = 0.0
+        config.sliding_window = None
+        config.window_attn_skip_freq = None
+        config.softmax_type = "vanilla"
+        config.perform_initialization = True
+        config.params_dtype = "bfloat16"
+        config.init_method = MagicMock()
+        config._attn_implementation = "flash"
+        config.flashmask_use_varlen = False
+        config.experimental_dataflow = False
+
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
         )
 
-        call_records = []
+        B, H, D = 1, 4, 64
+        query = paddle.randn([B, q_len, H, D]).cast("bfloat16")
+        key = paddle.randn([B, q_len, H, D]).cast("bfloat16")
+        value = paddle.randn([B, q_len, H, D]).cast("bfloat16")
+        startend = paddle.zeros([B, 1, q_len, 2], dtype="int32")
 
-        def fake_forward(inputs):
-            input_ids = inputs["input_ids"]
-            use_cache = inputs.get("use_cache", False)
-            call_records.append(
-                {"q_len": input_ids.shape[1], "use_cache": use_cache}
+        past_kv = MagicMock()
+        past_kv.update = MagicMock(return_value=(key, value))
+
+        with patch(
+            "paddlefleet.transformer.dot_product_attention.flashmask_attention"
+        ) as mock_fm:
+            mock_fm.return_value = paddle.randn([B, q_len, H, D]).cast(
+                "bfloat16"
             )
-            vocab_size = 50
-            logits = paddle.zeros(
-                [input_ids.shape[0], input_ids.shape[1], vocab_size],
-                dtype="float32",
+            attn.forward(
+                query=query,
+                key=key,
+                value=value,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend,
+                attn_mask_type=AttnMaskType.causal,
+                past_key_values=past_kv,
+                layer_idx=0,
+                use_cache=True,
             )
-            logits[:, -1, 5] = 10.0
-            return logits
+            past_kv.update.assert_called_once()
+            _, kwargs = mock_fm.call_args
+            return kwargs["causal"]
 
-        model = MagicMock()
-        model.side_effect = fake_forward
-        model.config = MagicMock()
-        model.config.num_hidden_layers = 1
-        model.config.sequence_parallel = False
-        model.config.apply_rope_fusion = False
-        model.config.recompute_granularity = None
-        model.config.num_empty_layers_add_in_head = 0
-        model.config.num_empty_layers_add_in_tail = 0
+    def test_decode_q_len_1_is_causal_false(self):
+        """Decode step (q_len==1) should set is_causal=False."""
+        self.assertFalse(self._call_attention_forward(q_len=1))
 
-        gen = object.__new__(GreedyGenerator)
-        gen.model = model
-        gen.cache = DynamicKVCache(num_layers=1)
-
-        input_ids = paddle.to_tensor([[1, 2, 3]], dtype="int64")
-        gen.generate(input_ids, max_new_tokens=3, eos_token_id=None)
-
-        # All calls should have use_cache=True
-        for rec in call_records:
-            self.assertTrue(rec["use_cache"])
-
-        # First call is prefill with full prompt length
-        self.assertEqual(call_records[0]["q_len"], 3)
-        # Subsequent decode calls have q_len==1 (triggers is_causal=False in attention)
-        for rec in call_records[1:]:
-            self.assertEqual(rec["q_len"], 1)
+    def test_prefill_q_len_gt_1_is_causal_true(self):
+        """Prefill step (q_len>1) should set is_causal=True."""
+        self.assertTrue(self._call_attention_forward(q_len=4))
 
 
 if __name__ == "__main__":
