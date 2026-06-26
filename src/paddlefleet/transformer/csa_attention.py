@@ -1779,6 +1779,8 @@ class CompressedSparseAttention(FleetLayer):
                 input_ids_global = ContextParallelGatherOp.apply(
                     input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
+            else:
+                input_ids_global = input_ids
 
             pad_token_id = getattr(self.config, "pad_token_id", 0)
             assert pad_token_id is not None, (
