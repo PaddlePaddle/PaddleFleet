@@ -172,6 +172,7 @@ class TestSWACacheInit(unittest.TestCase):
         cfg.window_attn_skip_freq = window_attn_skip_freq
         cfg.num_empty_layers_add_in_head = num_empty_layers_add_in_head
         cfg.num_empty_layers_add_in_tail = num_empty_layers_add_in_tail
+        cfg.head_wise_swa_ratio = 0.0  # Ensure this doesn't interfere
         model.config = cfg
         return GreedyGenerator(model)
 
@@ -224,6 +225,40 @@ class TestSWACacheInit(unittest.TestCase):
         # total = 2 + 1 + 1 = 4
         self.assertEqual(len(gen.cache.swa_layers), 4)
         self.assertEqual(len(gen.cache.k), 4)
+
+    def _make_generator_with_head_wise_swa(self, head_wise_swa_ratio):
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import GreedyGenerator
+
+        model = MagicMock()
+        cfg = MagicMock()
+        cfg.num_hidden_layers = 4
+        cfg.sequence_parallel = False
+        cfg.apply_rope_fusion = False
+        cfg.recompute_granularity = None
+        cfg.sliding_window = (512, 512)
+        cfg.window_attn_skip_freq = None
+        cfg.num_empty_layers_add_in_head = 0
+        cfg.num_empty_layers_add_in_tail = 0
+        cfg.head_wise_swa_ratio = head_wise_swa_ratio
+        model.config = cfg
+        return GreedyGenerator(model)
+
+    def test_head_wise_swa_ratio_disables_window_size(self):
+        """head_wise_swa_ratio in (0, 1) should set window_size to None."""
+        gen = self._make_generator_with_head_wise_swa(0.5)
+        self.assertIsNone(gen.cache.window_size)
+
+    def test_head_wise_swa_ratio_zero_preserves_window_size(self):
+        """head_wise_swa_ratio=0 should preserve window_size."""
+        gen = self._make_generator_with_head_wise_swa(0.0)
+        self.assertEqual(gen.cache.window_size, 512)
+
+    def test_head_wise_swa_ratio_one_preserves_window_size(self):
+        """head_wise_swa_ratio=1.0 (boundary) should preserve window_size."""
+        gen = self._make_generator_with_head_wise_swa(1.0)
+        self.assertEqual(gen.cache.window_size, 512)
 
 
 class TestGreedyGeneratorEosStop(unittest.TestCase):
@@ -303,6 +338,62 @@ class TestGreedyGeneratorEosStop(unittest.TestCase):
         out = gen.generate(input_ids, max_new_tokens=5, eos_token_id=None)
         generated = out[0, 2:].tolist()
         self.assertEqual(len(generated), 5)
+
+
+class TestGenerateUseCacheIsCausal(unittest.TestCase):
+    """Test that generate passes use_cache=True and decode uses q_len==1."""
+
+    def test_prefill_has_full_seq_decode_has_single_token(self):
+        """Prefill should pass full sequence; decode steps pass q_len==1."""
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        call_records = []
+
+        def fake_forward(inputs):
+            input_ids = inputs["input_ids"]
+            use_cache = inputs.get("use_cache", False)
+            call_records.append(
+                {"q_len": input_ids.shape[1], "use_cache": use_cache}
+            )
+            vocab_size = 50
+            logits = paddle.zeros(
+                [input_ids.shape[0], input_ids.shape[1], vocab_size],
+                dtype="float32",
+            )
+            logits[:, -1, 5] = 10.0
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+
+        input_ids = paddle.to_tensor([[1, 2, 3]], dtype="int64")
+        gen.generate(input_ids, max_new_tokens=3, eos_token_id=None)
+
+        # All calls should have use_cache=True
+        for rec in call_records:
+            self.assertTrue(rec["use_cache"])
+
+        # First call is prefill with full prompt length
+        self.assertEqual(call_records[0]["q_len"], 3)
+        # Subsequent decode calls have q_len==1 (triggers is_causal=False in attention)
+        for rec in call_records[1:]:
+            self.assertEqual(rec["q_len"], 1)
 
 
 if __name__ == "__main__":
