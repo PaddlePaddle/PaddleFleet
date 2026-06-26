@@ -452,6 +452,7 @@ class DotProductAttention(FleetLayer):
                 attn_mask_kv,
                 self.config.attention_dropout,
                 is_causal=is_causal,
+                scale=self.softmax_scale,
             )
 
             attn_output = paddle.reshape(
@@ -526,6 +527,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
+                softmax_scale=self.softmax_scale,
             )
 
             if need_value_padding:

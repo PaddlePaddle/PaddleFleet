@@ -283,6 +283,7 @@ class MlpNode:
         use_ue8m0=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        activation_type=None,
     ):
         """
         Constructor
@@ -290,6 +291,9 @@ class MlpNode:
         self.token_dispatcher = custom_map.token_dispatcher
         self.moe_expert_fusion = moe_expert_fusion
         self.experts = getattr(custom_map, "experts", None)
+        if activation_type is None:
+            activation_type = getattr(custom_map, "_activation_type", "swiglu")
+        self.activation_type = activation_type
 
         self.moe_rank = getattr(custom_map, "moe_rank", 0)
         self.tokens_per_expert = (
@@ -368,6 +372,7 @@ class MlpNode:
                     dw_p2p_overlap=dw_p2p_overlap,
                     moe_expert_fusion=moe_expert_fusion,
                     clamp_value=clamp_value,
+                    activation_type=activation_type,
                 )
                 for local_expert_id in range(self.num_experts_per_device)
             ]
@@ -384,6 +389,7 @@ class MlpNode:
                 dw_p2p_overlap=dw_p2p_overlap,
                 moe_expert_fusion=moe_expert_fusion,
                 clamp_value=clamp_value,
+                activation_type=activation_type,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -1957,6 +1963,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_ue8m0=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        activation_type=None,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -1966,10 +1973,14 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             dispatched_probs (tensor): 分派概率张量。
             dispatched_indices (tensor): 分派索引张量。
             num_experts_per_tok (int): topk。
+            activation_type (str, optional): Activation type, "swiglu" or "geglu".
+                Defaults to custom_map._activation_type if present, otherwise "swiglu".
 
         Returns:
             tensor: 前向传播的结果张量。
         """
+        if activation_type is None:
+            activation_type = getattr(custom_map, "_activation_type", "swiglu")
         ctx.node = MlpNode(
             custom_map,
             num_experts_per_tok,
@@ -1986,6 +1997,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_ue8m0=use_ue8m0,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
+            activation_type=activation_type,
         )
 
         if fp8_dispatched_handle is not None:
@@ -2123,6 +2135,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             moe_expert_fusion=moe_expert_fusion,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
+            activation_type=getattr(custom_map, "_activation_type", "swiglu"),
         )
         original_hidden_shape = tuple(hidden_states.shape)
         original_probs_shape = tuple(dispatched_probs.shape)

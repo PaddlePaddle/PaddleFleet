@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import os
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
+import paddle.nn.functional as F
 import paddlefleet_ops
 from paddle import framework, nn
 from paddle.autograd import PyLayer
@@ -1314,3 +1316,293 @@ class MoELayer(nn.Layer):
         # Hash routing activation (moe_n_hash_layers) is decided by the router
         # itself based on layer_number. See TopKRouter._setup_hash_layer.
         self.gate.set_layer_number(layer_number, is_mtp_layer=is_mtp_layer)
+
+
+class Gemma4TopKRouter(TopKRouter):
+    """Gemma4 MoE router with per-expert scale and input normalization.
+
+    Differences from standard TopKRouter:
+    1. Input normalization: scaleless RMSNorm + learned scale * (1/sqrt(d))
+    2. Softmax scoring
+    3. Post-topk normalization + per_expert_scale multiplication
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        pg_collection: ProcessGroupCollection | None = None,
+    ):
+        super().__init__(config, pg_collection)
+
+        num_experts = getattr(
+            config, "num_moe_experts", config.n_routed_experts
+        )
+        hidden_size = config.hidden_size
+        self.register_buffer(
+            "per_expert_scale", paddle.ones([num_experts], dtype="float32")
+        )
+        self.register_buffer(
+            "router_input_scale", paddle.ones([hidden_size], dtype="float32")
+        )
+        self._hidden_size = hidden_size
+        self._inv_sqrt_d = hidden_size**-0.5
+
+    def _normalize_input(self, hidden_states):
+        """Scaleless RMSNorm + learned scale."""
+        h = hidden_states.cast("float32")
+        rms = (h.pow(2).mean(-1, keepdim=True) + 1e-6).sqrt()
+        h = (h / rms).cast(hidden_states.dtype)
+        return h * self.router_input_scale * self._inv_sqrt_d
+
+    def forward(self, input, input_ids=None):
+        """Override forward with input normalization and per-expert scale."""
+        if len(input.shape) == 3:
+            if not self.sequence_parallel:
+                batch_size, seq_len, d_model = input.shape
+            else:
+                seq_len, batch_size, d_model = input.shape
+            input_2d = input.reshape([-1, d_model])
+        else:
+            input_2d = input
+
+        normalized = self._normalize_input(input_2d)
+
+        logits = F.linear(
+            normalized.cast("float32"), self.weight.cast("float32").T
+        )
+
+        scores = F.softmax(logits.cast("float32"), axis=-1)
+
+        top_k_weights, top_k_indices = paddle.topk(
+            scores, k=self.num_experts_per_tok
+        )
+
+        weight_sum = top_k_weights.sum(-1, keepdim=True).clip_(min=1e-6)
+        top_k_weights = top_k_weights / weight_sum
+        top_k_weights = top_k_weights * paddle.index_sample(
+            self.per_expert_scale.unsqueeze(0).expand(
+                [top_k_indices.shape[0], -1]
+            ),
+            top_k_indices,
+        )
+
+        probs = paddle.zeros_like(scores).put_along_axis_(
+            top_k_indices, top_k_weights.cast(scores.dtype), axis=1
+        )
+        mask = paddle.zeros_like(scores).put_along_axis_(
+            top_k_indices, paddle.to_tensor(1.0, dtype=scores.dtype), axis=1
+        )
+
+        return (
+            None,
+            top_k_weights,
+            top_k_indices,
+            probs,
+            mask,
+            None,
+            None,
+            None,
+        )
+
+
+class Gemma4MoELayer(MoELayer):
+    """Gemma4 MoE with parallel shared-MLP + routed-experts and separate norms.
+
+    Note: This layer has a fundamentally different forward topology (shared and
+    routed experts branch from different inputs, 3 extra norms, custom router,
+    GeGLU activation override) that cannot be parameterized into the base MoELayer.
+    It is kept as a standalone subclass and wired via attention_layer_type="gemma4"
+    through the standard get_gpt_layer_local_spec path.
+
+    Norms inside this layer (aligned with HF naming):
+      - post_shared_expert_layernorm (= HF post_feedforward_layernorm_1)
+      - pre_feedforward_layernorm_2 (= HF pre_feedforward_layernorm_2)
+      - post_moe_layernorm (= HF post_feedforward_layernorm_2)
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers: MoESublayers | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+    ):
+        if (
+            not hasattr(config, "n_shared_experts")
+            or config.n_shared_experts is None
+        ):
+            config.n_shared_experts = 1
+        super().__init__(config, sublayers, pg_collection)
+
+        self.gate = Gemma4TopKRouter(config=config, pg_collection=pg_collection)
+
+        shared_size = getattr(
+            config, "moe_shared_expert_intermediate_size", None
+        )
+        if shared_size and self.shared_experts is not None:
+            shared_expert_config = deepcopy(config)
+            shared_expert_config.intermediate_size = shared_size
+            self.shared_experts = StandardMLPSharedExpert(
+                config=shared_expert_config,
+                moe_intermediate_size=shared_size,
+                is_expert=False,
+                mlp_spec=self.moe_sublayers.mlp_spec,
+            )
+
+        self._activation_type = "geglu"
+
+        if (
+            hasattr(self, "grouped_gemm_experts")
+            and self.grouped_gemm_experts is not None
+        ):
+            gelu_tanh = functools.partial(F.gelu, approximate=True)
+
+            def _gemma4_glu(x):
+                x = paddle.chunk(x, 2, dim=-1)
+                return gelu_tanh(x[0]) * x[1]
+
+            self.grouped_gemm_experts.activation_func = _gemma4_glu
+            self.grouped_gemm_experts.config.hidden_act = gelu_tanh
+
+        from paddlefleet.transformer.paddle_norm import RMSNorm
+
+        self.post_shared_expert_layernorm = RMSNorm(config)
+        self.pre_feedforward_layernorm_2 = RMSNorm(config)
+        self.post_moe_layernorm = RMSNorm(config)
+
+        if (
+            hasattr(self, "grouped_gemm_experts")
+            and self.grouped_gemm_experts is not None
+        ):
+            import types
+
+            from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
+                build_sharded_state_dict,
+                shard_weight,
+            )
+
+            grouped = self.grouped_gemm_experts
+
+            def _gemma4_grouped_sharded_state_dict(
+                self_inner, structured_name_prefix=""
+            ):
+                state_dict = self_inner.state_dict(structured_name_prefix="")
+                sharded_dict = {}
+                full_key1 = f"{structured_name_prefix}weight1"
+                full_key2 = f"{structured_name_prefix}weight2"
+                if self_inner.ep_group is None:
+                    sharded_dict = build_sharded_state_dict(
+                        state_dict, None, structured_name_prefix
+                    )
+                else:
+                    sharded_dict[full_key1] = shard_weight(
+                        key=full_key1,
+                        weight=state_dict["weight1"],
+                        axis=0,
+                        group=self_inner.ep_group,
+                    )
+                    sharded_dict[full_key1].grouped_gemm_param = True
+                    sharded_dict[full_key2] = shard_weight(
+                        key=full_key2,
+                        weight=state_dict["weight2"],
+                        axis=0,
+                        group=self_inner.ep_group,
+                    )
+                    sharded_dict[full_key2].grouped_gemm_param = True
+                return sharded_dict
+
+            grouped.sharded_state_dict = types.MethodType(
+                _gemma4_grouped_sharded_state_dict, grouped
+            )
+
+    def forward(self, hidden_states, input_ids=None, residual=None):
+        """Forward with parallel shared-MLP + routed-experts."""
+        if residual is None:
+            residual = hidden_states
+
+        layer_idx = getattr(self, "layer_number", None)
+
+        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
+            hidden_states = GatherOp.apply(hidden_states)
+            residual = GatherOp.apply(residual)
+
+        # === Shared expert path ===
+        if self.shared_experts is not None:
+            shared_raw = self.shared_experts(hidden_states)[0]
+            shared_output = self.post_shared_expert_layernorm(shared_raw)
+        else:
+            shared_output = None
+
+        # === Routed experts path (from residual) ===
+        routed_input = residual
+        orig_shape = routed_input.shape
+
+        _log_moe_md5(routed_input, "moe_input", layer_idx)
+
+        (
+            capacity,
+            topk_weights,
+            topk_indices,
+            probs,
+            mask,
+            priorities,
+            aux_loss,
+            z_loss,
+        ) = self.gate(routed_input, input_ids=input_ids)
+
+        expert_input = self.pre_feedforward_layernorm_2(routed_input)
+
+        if self.expert_model_parallel_size > 1:
+            if self.moe_use_fusion_node:
+                output = self.fusion_moe_forward(
+                    expert_input,
+                    probs,
+                    mask,
+                    None,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
+                )
+            else:
+                output = self.custom_forward(
+                    expert_input,
+                    probs,
+                    mask,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
+                )
+        else:
+            if len(expert_input.shape) == 3:
+                reshaped_input = expert_input.reshape(
+                    [-1, expert_input.shape[-1]]
+                )
+            else:
+                reshaped_input = expert_input
+            if self.use_latent_moe:
+                reshaped_input = self.fc1_latent_proj(reshaped_input)
+            if self.moe_expert_fusion:
+                output = self._forward_single_card_grouped_gemm_moe(
+                    reshaped_input, mask, probs, topk_indices, topk_weights
+                )
+            else:
+                output = self._forward_single_card_moe(
+                    reshaped_input, topk_indices, topk_weights
+                )
+            if self.use_latent_moe:
+                output = self.fc2_latent_proj(output)
+
+        if self.training and self.router_aux_loss_coef and aux_loss is not None:
+            output = AddAuxiliaryLoss.apply(
+                output, aux_loss * float(self.router_aux_loss_coef)
+            )
+        if self.training and z_loss is not None:
+            output = AddAuxiliaryLoss.apply(output, z_loss)
+
+        output = output.reshape(orig_shape)
+        output = self.post_moe_layernorm(output)
+
+        if shared_output is not None:
+            output = shared_output + output
+
+        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
+            output = ScatterOp.apply(output)
+
+        return output, None

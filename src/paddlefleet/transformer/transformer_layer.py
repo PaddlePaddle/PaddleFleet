@@ -275,7 +275,9 @@ class TransformerLayer(nn.Layer):
         # The conditional below is to make the logic explicit
         # if sublayers_spec.mlp is not a LayerSpec,we dont have to handle passing additional kwargs
         if isinstance(sublayers_spec.mlp, LayerSpec):
-            if sublayers_spec.mlp.layer == MoELayer:
+            if isinstance(sublayers_spec.mlp.layer, type) and issubclass(
+                sublayers_spec.mlp.layer, MoELayer
+            ):
                 additional_mlp_kwargs["pg_collection"] = pg_collection
             elif sublayers_spec.mlp.layer == MLP:
                 assert hasattr(pg_collection, "tp"), (
@@ -1803,3 +1805,143 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
             rst = {**rst, **mtp_tmp_dict}
             output_grad = output_grad + tuple(mtp_tmp_grad)
         return rst, output_grad
+
+
+@dataclass
+class Gemma4TransformerLayerSublayersSpec(TransformerLayerSublayersSpec):
+    """Extended spec for Gemma4 norm structure.
+
+    Adds: post_self_attn_layernorm, pre_mlp_layernorm, post_mlp_layernorm.
+    MoELayer internally handles post_moe_layernorm, post_shared_expert_layernorm,
+    and pre_feedforward_layernorm_2.
+    """
+
+    post_self_attn_layernorm: LayerSpec | type = IdentityOp
+    pre_mlp_layernorm: LayerSpec | type = IdentityOp
+    post_mlp_layernorm: LayerSpec | type = IdentityOp
+
+
+class Gemma4TransformerLayer(TransformerLayer):
+    """Gemma4 transformer layer aligned with HF Gemma4TextDecoderLayer.
+
+    Note: This layer has a fundamentally different forward topology (5-norm +
+    layer_scalar) that cannot be parameterized into the base TransformerLayer.
+    It is kept as a standalone subclass and wired via attention_layer_type="gemma4"
+    through the standard get_gpt_layer_local_spec path.
+
+    Forward flow:
+        residual = x
+        x = input_layernorm(x)
+        x = self_attn(x)
+        x = post_self_attn_layernorm(x)
+        x = residual + x
+
+        residual = x
+        x = pre_mlp_layernorm(x)
+        x = moe(x, residual)
+        x = post_mlp_layernorm(x)
+        x = (residual + x) * layer_scalar
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers_spec: Gemma4TransformerLayerSublayersSpec,
+        layer_number: int = 1,
+        hidden_dropout_prob: float | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
+    ):
+        super().__init__(
+            config,
+            sublayers_spec,
+            layer_number,
+            hidden_dropout_prob,
+            pg_collection,
+            is_mtp_layer,
+        )
+
+        norm_input_parallel = (
+            self.config.sequence_parallel
+            and self.config.tensor_model_parallel_size > 1
+        )
+
+        self.post_self_attn_layernorm = build_spec_layer(
+            sublayers_spec.post_self_attn_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+            input_is_parallel=norm_input_parallel,
+        )
+        self.pre_mlp_layernorm = build_spec_layer(
+            sublayers_spec.pre_mlp_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+            input_is_parallel=norm_input_parallel,
+        )
+        self.post_mlp_layernorm = build_spec_layer(
+            sublayers_spec.post_mlp_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+            input_is_parallel=norm_input_parallel,
+        )
+
+        self.register_buffer("layer_scalar", paddle.ones([1], dtype="float32"))
+
+    def _forward_impl(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params=None,
+        input_ids: Tensor | None = None,
+        **kwargs,
+    ):
+        # === Attention block ===
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+
+        hidden_states, _ = self.self_attn(
+            hidden_states,
+            attention_mask=attention_mask,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            swa_rotary_pos_emb=swa_rotary_pos_emb,
+            swa_rotary_pos_cos=swa_rotary_pos_cos,
+            swa_rotary_pos_sin=swa_rotary_pos_sin,
+            position_ids=position_ids,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+        )
+        hidden_states = self.post_self_attn_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+
+        # === MLP/MoE block ===
+        residual = hidden_states
+        hidden_states = self.pre_mlp_layernorm(hidden_states)
+
+        if isinstance(self.mlp, MoELayer):
+            hidden_states, _ = self.mlp(
+                hidden_states, input_ids=input_ids, residual=residual
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
+
+        hidden_states = self.post_mlp_layernorm(hidden_states)
+        hidden_states = (residual + hidden_states) * self.layer_scalar
+
+        return hidden_states
