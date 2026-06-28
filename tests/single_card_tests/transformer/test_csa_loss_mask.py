@@ -463,6 +463,75 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
             self.assertIsNotNone(call_kwargs["loss_mask"])
             self.assertIsNotNone(call_kwargs["global_valid_count"])
 
+    @patch("paddlefleet.transformer.csa_attention.ContextParallelGatherOp")
+    @patch(
+        "paddlefleet.transformer.csa_attention.get_context_parallel_world_size",
+        return_value=2,
+    )
+    @patch("paddlefleet.fusions.csa_sparse_attn.csa_sparse_attn")
+    def test_csa_forward_with_input_ids_cp_gather(
+        self, mock_sparse_attn, mock_cp_world_size, mock_gather_op
+    ):
+        """Cover line 1779: ContextParallelGatherOp.apply when cp_world_size > 1."""
+        from paddlefleet.transformer.csa_attention import (
+            CompressedSparseAttention,
+            CompressedSparseAttentionSublayersSpec,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        b, sq, hn, np_heads = 2, 16, 64, 4
+        config = TransformerConfig(
+            num_attention_heads=np_heads,
+            num_hidden_layers=2,
+            hidden_size=hn * np_heads,
+            v_head_dim=hn,
+            csa_window_size=8,
+            pad_token_id=0,
+            csa_dense_mode=True,
+            csa_sparse_attn_backend="unfused",
+            experimental_dataflow=False,
+        )
+
+        sublayers_spec = CompressedSparseAttentionSublayersSpec()
+        csa = CompressedSparseAttention(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+            compress_ratio=0,
+        )
+        csa.cp_enabled = True
+        csa.cp_size = 2
+        csa.cp_rank = 0
+
+        query = paddle.randn([b, sq, np_heads, hn], dtype="float32")
+        key = paddle.randn([b, sq, 1, hn], dtype="float32")
+        input_ids = paddle.randint(1, 100, [b, sq])
+        input_ids[:, -4:] = 0
+
+        # Mock GatherOp to return global input_ids (simulating gather across CP)
+        input_ids_global = paddle.randint(1, 100, [b, sq * 2])
+        mock_gather_op.apply.return_value = input_ids_global
+
+        mock_sparse_attn.return_value = paddle.randn(
+            [b, sq, np_heads, hn], dtype="float32"
+        )
+
+        with patch.object(csa, "_forward_cp") as mock_cp:
+            mock_cp.return_value = mock_sparse_attn.return_value
+            csa.forward(
+                query,
+                key,
+                key,
+                x=paddle.randn([b, sq, hn * np_heads]),
+                qr=paddle.randn([b, sq, hn]),
+                input_ids=input_ids,
+            )
+
+        mock_gather_op.apply.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
