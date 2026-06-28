@@ -42,6 +42,8 @@ from paddlefleet.transformer import FleetLayer
 _ACCURACY_COMPATIBLE_KERNEL: bool = (
     os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 )
+from paddlefleet.context_parallel_utils import ContextParallelGatherOp
+from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -1767,11 +1769,22 @@ class CompressedSparseAttention(FleetLayer):
 
         # Compute loss_mask from input_ids (mask out padding tokens)
         if input_ids is not None:
+            if (
+                get_context_parallel_world_size() > 1
+                and not self.config.experimental_dataflow
+            ):
+                # In EB data flow, we need to gather input_ids here to get right denom.
+                input_ids_global = ContextParallelGatherOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
+            else:
+                input_ids_global = input_ids
+
             pad_token_id = getattr(self.config, "pad_token_id", 0)
             assert pad_token_id is not None, (
                 "pad_token_id must be set in config when input_ids is provided"
             )
-            loss_mask_global = (input_ids != pad_token_id).astype(
+            loss_mask_global = (input_ids_global != pad_token_id).astype(
                 paddle.float32
             )
             if self.cp_enabled:
