@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -44,6 +43,7 @@ from paddlefleet.refined_recompute import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.sink_impl import sink_attention
 from paddlefleet.transformer.utils import (
     attention_mask_func,
     startend_row_indices_add_sliding_window,
@@ -146,9 +146,7 @@ class DotProductAttention(FleetLayer):
 
         coeff = None
         if softmax_scale is None:
-            self.softmax_scale = 1.0 / math.sqrt(
-                self.hidden_size_per_attention_head
-            )
+            self.softmax_scale = self.hidden_size_per_attention_head ** (-0.5)
         else:
             self.softmax_scale = softmax_scale
 
@@ -194,8 +192,10 @@ class DotProductAttention(FleetLayer):
             self.softmax_offset = None
         elif softmax_type == "off-by-one":
             self.softmax_offset = paddle.zeros(
-                self.num_attention_heads_per_partition
+                [self.num_attention_heads_per_partition],
+                dtype=self.config.params_dtype,
             )
+            self.softmax_offset.stop_gradient = True
         elif softmax_type == "learnable":
             self.softmax_offset = self.create_parameter(
                 shape=[self.num_attention_heads_per_partition],
@@ -403,13 +403,24 @@ class DotProductAttention(FleetLayer):
                 )  # [1, 1, seq_len, 4]
 
             if use_rr_flash_attention:
+                assert self.softmax_offset is None, (
+                    "sink attention is not supported when using rr_attention"
+                )
                 flashmask_attention_func = self.rr_flashmask_attention_func
             elif self.config.flashmask_use_varlen:
+                assert self.softmax_offset is None, (
+                    "sink attention is not supported when using rr_attention"
+                )
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
                 )
             else:
                 flashmask_attention_func = flashmask_attention
+
+            if self.softmax_offset is not None:
+                flashmask_attention_func = partial(
+                    sink_attention, sink=self.softmax_offset
+                )
 
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
@@ -445,6 +456,10 @@ class DotProductAttention(FleetLayer):
                 is_causal = True
                 attn_mask_kv = attention_mask
 
+            assert self.softmax_offset is None, (
+                "sink attention is not supported when using sdpa"
+            )
+
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
@@ -468,25 +483,47 @@ class DotProductAttention(FleetLayer):
         ):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
+
             is_causal = attn_mask_type == AttnMaskType.causal
             if self.context_parallel_size > 1:
-                flashmask_attention_func = (
-                    self.rr_flashmask_attention_cp_func
-                    if use_rr_flash_attention
-                    else flashmask_attention_cp
-                )
+                if use_rr_flash_attention:
+                    assert self.softmax_offset is None, (
+                        "sink attention is not supported when using "
+                        "rr_attention with context parallel."
+                    )
+                    flashmask_attention_func = (
+                        self.rr_flashmask_attention_cp_func
+                    )
+                else:
+                    flashmask_attention_func = flashmask_attention_cp
                 is_causal = (
                     False  # only support non-causal for flashmask_attention_cp
                 )
                 assert attn_mask_startend_row_indices.shape[-1] == 2
             elif use_rr_flash_attention:
+                assert self.softmax_offset is None, (
+                    "sink attention is not supported when using rr_attention"
+                )
                 flashmask_attention_func = self.rr_flashmask_attention_func
             elif self.config.flashmask_use_varlen:
+                assert self.softmax_offset is None, (
+                    "sink attention is not supported when using rr_attention"
+                )
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
                 )
             else:
                 flashmask_attention_func = flashmask_attention
+
+            if self.softmax_offset is not None:
+                if self.context_parallel_size > 1:
+                    flashmask_attention_func = partial(
+                        flashmask_attention_func, sink=self.softmax_offset
+                    )
+                else:
+                    flashmask_attention_func = partial(
+                        sink_attention, sink=self.softmax_offset
+                    )
 
             # TODO(umiswing): move this padding to flash_mask_facade,
             # flash_mask_facade wrap the padding logic for fa/fm function call,
@@ -595,11 +632,7 @@ class DotProductAttention(FleetLayer):
 
         # Raw attention scores. [b * np, sq, sk]
         matmul_result = paddle.baddbmm(
-            matmul_input_buffer,
-            query,
-            key,
-            beta=0.0,
-            alpha=self.softmax_scale,
+            matmul_input_buffer, query, key, beta=0.0, alpha=self.softmax_scale
         )
 
         # change view to [b, np, sq, sk]

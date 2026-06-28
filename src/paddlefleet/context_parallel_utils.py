@@ -602,7 +602,14 @@ def preprocess_index_dual_chunks(
 
 
 def cp_flashmask_allgatherkv_balance_forward(
-    query, key, value, startend_row_indices, group, causal, is_training
+    query,
+    key,
+    value,
+    startend_row_indices,
+    group,
+    causal,
+    is_training,
+    sink=None,
 ):
     """
     Forward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -672,8 +679,12 @@ def cp_flashmask_allgatherkv_balance_forward(
             return_lse=True,
             startend_row_indices=startend_row_indices,
             pack_gqa=False,
+            learnable_sink=sink,
         )
     else:
+        assert sink is None, (
+            "Sink attention is only supported with FlashAttention V4."
+        )
         output, log_sum_exp = flashmask_attention(
             query,
             key_gathered,
@@ -699,6 +710,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     group,
     causal,
     fa_version: int,
+    sink=None,
 ):
     """
     Backward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -729,6 +741,9 @@ def cp_flashmask_allgatherkv_balance_backward(
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
     if fa_version == 2:
+        assert sink is None, (
+            "Sink attention is only supported with FlashAttention V4."
+        )
         # Create seed offset tensor (required for gradient computation)
         seed_offset = paddle.zeros(
             shape=[query.shape[1], query.shape[2]], dtype=paddle.int64
@@ -750,6 +765,9 @@ def cp_flashmask_allgatherkv_balance_backward(
             )
         )
     elif fa_version == 3:
+        assert sink is None, (
+            "Sink attention is only supported with FlashAttention V4."
+        )
         sig_params = inspect.signature(flashmask_attention).parameters
         if "group" in sig_params:
             query_grad, key_grad_gathered, value_grad_gathered = (
@@ -831,8 +849,23 @@ def cp_flashmask_allgatherkv_balance_backward(
         value_grad_gathered, axis=1, group=group
     )
 
+    # Compute sink gradient (per-rank local contribution; allreduced below).
+    if sink is not None and not sink.stop_gradient:
+        # Lazy import to avoid circular dependency between
+        # context_parallel_utils and transformer.sink_impl.
+        from paddlefleet.transformer.sink_impl import (
+            _sink_attention_grad_sink,
+        )
+
+        sink_grad_local = _sink_attention_grad_sink(
+            query, sink, output, log_sum_exp, output_grad
+        )
+        sink_grad = sink_grad_local
+    else:
+        sink_grad = None
+
     paddle.base.core.nvprof_nvtx_pop()
-    return query_grad, key_grad, value_grad
+    return query_grad, key_grad, value_grad, sink_grad
 
 
 def scatter_with_padding(input_tensor, num_pad, axis, group):
@@ -965,6 +998,7 @@ class FlashMaskContextParallel(PyLayer):
         query,
         key,
         value,
+        sink,
         startend_row_indices,
         fixed_seed_offset=None,
         dropout=0.0,
@@ -1019,17 +1053,31 @@ class FlashMaskContextParallel(PyLayer):
         # Perform forward pass
         output, log_sum_exp, startend_row_indices, fa_version = (
             cp_flashmask_allgatherkv_balance_forward(
-                query, key, value, startend_row_indices, group, causal, training
+                query,
+                key,
+                value,
+                startend_row_indices,
+                group,
+                causal,
+                training,
+                sink=sink,
             )
         )
 
         # Save tensors for backward pass
         ctx.save_for_backward(
-            query, key, value, output, log_sum_exp, startend_row_indices
+            query,
+            key,
+            value,
+            sink,
+            output,
+            log_sum_exp,
+            startend_row_indices,
         )
         ctx.group = group
         ctx.causal = causal
         ctx.fa_version = fa_version
+        ctx.has_sink = sink is not None
 
         return output
 
@@ -1044,15 +1092,21 @@ class FlashMaskContextParallel(PyLayer):
             tuple: Gradients for all input arguments
         """
         # Retrieve saved tensors
-        query, key, value, output, log_sum_exp, startend_row_indices = (
-            ctx.saved_tensor()
-        )
+        (
+            query,
+            key,
+            value,
+            sink,
+            output,
+            log_sum_exp,
+            startend_row_indices,
+        ) = ctx.saved_tensor()
         group = ctx.group
         causal = ctx.causal
         fa_version = ctx.fa_version
 
         # Compute gradients
-        query_grad, key_grad, value_grad = (
+        query_grad, key_grad, value_grad, sink_grad = (
             cp_flashmask_allgatherkv_balance_backward(
                 query,
                 key,
@@ -1064,9 +1118,12 @@ class FlashMaskContextParallel(PyLayer):
                 group,
                 causal,
                 fa_version,
+                sink=sink,
             )
         )
 
+        if ctx.has_sink:
+            return query_grad, key_grad, value_grad, sink_grad
         return query_grad, key_grad, value_grad
 
 
@@ -1075,6 +1132,7 @@ def flashmask_attention_cp(
     key,
     value,
     startend_row_indices,
+    sink=None,
     fixed_seed_offset=None,
     dropout=0.0,
     causal=False,
@@ -1118,6 +1176,7 @@ def flashmask_attention_cp(
         query,
         key,
         value,
+        sink,
         startend_row_indices,
         fixed_seed_offset,
         dropout,
