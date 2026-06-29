@@ -1462,13 +1462,13 @@ if _CUTILE_AVAILABLE:
             )
             b_tile = ct.load(
                 B,
-                index=(0, tile_k_id),
-                shape=(TILE_N, TILE_K),
+                index=(tile_k_id, 0),
+                shape=(TILE_K, TILE_N),
                 padding_mode=PAD_ZERO,
             )
             acc = ct.mma(
                 a_tile.astype(ct.tfloat32),
-                b_tile.transpose().astype(ct.tfloat32),
+                b_tile.astype(ct.tfloat32),
                 acc=acc,
             )
             sum_sq += ct.sum(a_tile * a_tile, axis=1, keepdims=True)
@@ -1526,8 +1526,8 @@ if _CUTILE_AVAILABLE:
             )
             b_tile = ct.load(
                 B,
-                index=(0, tile_k_id),
-                shape=(TILE_SIZE_N, TILE_SIZE_K),
+                index=(tile_k_id, 0),
+                shape=(TILE_SIZE_K, TILE_SIZE_N),
                 padding_mode=zero_pad,
             )
             dd_tile = ct.load(
@@ -1538,7 +1538,9 @@ if _CUTILE_AVAILABLE:
             )
             dd_tile = ct.astype(dd_tile, ct.tfloat32)
             accumulator_da = ct.mma(
-                dd_tile, b_tile.astype(ct.tfloat32), acc=accumulator_da
+                dd_tile,
+                b_tile.transpose().astype(ct.tfloat32),
+                acc=accumulator_da,
             )
             ct.store(
                 DA,
@@ -1552,8 +1554,8 @@ if _CUTILE_AVAILABLE:
             )
         ct.store(
             DB,
-            index=(0, tile_k_id),
-            tile=accumulator_db.transpose().astype(DB.dtype),
+            index=(tile_k_id, 0),
+            tile=accumulator_db.astype(DB.dtype),
         )
 
     @ct.kernel
@@ -1601,8 +1603,8 @@ if _CUTILE_AVAILABLE:
                     )
                 ct.store(
                     DB,
-                    index=(0, tile_id),
-                    tile=accumulator_db.transpose().astype(DB.dtype),
+                    index=(tile_id, 0),
+                    tile=accumulator_db.astype(DB.dtype),
                     allow_tma=False,
                 )
         TILE_DA_SIZE_M = 128
@@ -1639,8 +1641,8 @@ if _CUTILE_AVAILABLE:
                 )
                 b_tile = ct.load(
                     B,
-                    index=(0, b_tile_idx),
-                    shape=(TILE_N_SIZE, TILE_DA_SIZE_K),
+                    index=(b_tile_idx, 0),
+                    shape=(TILE_DA_SIZE_K, TILE_N_SIZE),
                     padding_mode=zero_pad,
                 )
                 dd_tile = ct.load(
@@ -1651,7 +1653,7 @@ if _CUTILE_AVAILABLE:
                 )
                 accumulator_da = ct.mma(
                     dd_tile.astype(ct.tfloat32),
-                    b_tile.astype(ct.tfloat32),
+                    b_tile.transpose().astype(ct.tfloat32),
                     acc=accumulator_da,
                 )
                 ct.store(
@@ -1689,7 +1691,7 @@ if _CUTILE_AVAILABLE:
         x: Tensor, weight: Tensor, eps: float = 1e-8
     ) -> tuple[Tensor, Tensor, Tensor]:
         M, K = x.shape
-        N = weight.shape[0]
+        N = weight.shape[1]
         TILE_N = _next_power_of_2(N)
         TILE_M, _, TILE_K, split_k = _default_proj_rms_fwd_config(M, K, TILE_N)
         num_tiles_m = math.ceil(M / TILE_M)
@@ -1743,7 +1745,7 @@ if _CUTILE_AVAILABLE:
         eps: float = 1e-8,
     ) -> tuple[Tensor, Tensor]:
         M, K = x.shape
-        N = weight.shape[0]
+        N = weight.shape[1]
         da = paddle.empty(shape=x.shape, dtype=x.dtype)
         db = paddle.empty(shape=weight.shape, dtype=weight.dtype)
         TILE_SIZE_N = _next_power_of_2(N)
@@ -2033,7 +2035,7 @@ if _CUTILE_AVAILABLE:
             proj_reduced: [M, N] reduced projection (for backward)
         """
         M, K = x.shape
-        N = weight.shape[0]
+        N = weight.shape[1]
         TILE_N = _next_power_of_2(N)
         stream = _get_cuda_stream()
         tm, tn, tk, split_k = _default_proj_rms_fwd_config(M, K, TILE_N)
@@ -2325,8 +2327,8 @@ if _CUTILE_AVAILABLE:
         NUM_M_TILES = ct.cdiv(M, TILE_SIZE_M)
         weight_tile = ct.load(
             WEIGHT,
-            index=(0, tile_k_id),
-            shape=(TILE_SIZE_N, TILE_SIZE_K),
+            index=(tile_k_id, 0),
+            shape=(TILE_SIZE_K, TILE_SIZE_N),
             padding_mode=PAD_ZERO,
         )
         acc_grad_weight = ct.full(
@@ -2366,7 +2368,7 @@ if _CUTILE_AVAILABLE:
             acc_grad_x = (grad_r_total * inv_rK) * ct.astype(x_tile, ct.float32)
             acc_grad_x = ct.mma(
                 grad_proj_tile.astype(ct.tfloat32),
-                weight_tile.astype(ct.tfloat32),
+                weight_tile.transpose().astype(ct.tfloat32),
                 acc=acc_grad_x,
             )
             ct.store(
@@ -2382,8 +2384,8 @@ if _CUTILE_AVAILABLE:
 
         ct.store(
             GRAD_WEIGHT,
-            index=(0, tile_k_id),
-            tile=acc_grad_weight.transpose().astype(GRAD_WEIGHT.dtype),
+            index=(tile_k_id, 0),
+            tile=acc_grad_weight.astype(GRAD_WEIGHT.dtype),
         )
 
     @ct.kernel
@@ -2438,8 +2440,8 @@ if _CUTILE_AVAILABLE:
                     )
                 ct.store(
                     GRAD_WEIGHT,
-                    index=(0, tile_id),
-                    tile=accumulator_db.transpose().astype(GRAD_WEIGHT.dtype),
+                    index=(tile_id, 0),
+                    tile=accumulator_db.astype(GRAD_WEIGHT.dtype),
                     allow_tma=False,
                 )
 
@@ -2485,13 +2487,13 @@ if _CUTILE_AVAILABLE:
                 )
                 weight_tile = ct.load(
                     WEIGHT,
-                    index=(0, b_tile_idx),
-                    shape=(TILE_N_SIZE, TILE_DA_SIZE_K),
+                    index=(b_tile_idx, 0),
+                    shape=(TILE_DA_SIZE_K, TILE_N_SIZE),
                     padding_mode=zero_pad,
                 )
                 accumulator_da = ct.mma(
                     grad_proj_tile.astype(ct.tfloat32),
-                    weight_tile.astype(ct.tfloat32),
+                    weight_tile.transpose().astype(ct.tfloat32),
                     acc=accumulator_da,
                 )
                 ct.store(
@@ -2676,7 +2678,7 @@ if _CUTILE_AVAILABLE:
             grad_bias: [N]
         """
         M, K = x.shape
-        N = weight.shape[0]
+        N = weight.shape[1]
         TILE_N = _next_power_of_2(N)
         assert TILE_N <= 256
         stream = _get_cuda_stream()
@@ -3086,7 +3088,7 @@ class FusedProjRms(paddle.autograd.PyLayer):
         ctx.save_for_backward(x_2d, weight, norm)
         ctx.eps = eps
         ctx.original_shape = original_shape
-        N = weight.shape[0]
+        N = weight.shape[1]
         batch_shape = list(original_shape[:-1])
         return proj.reshape([*batch_shape, N]), r.reshape([*batch_shape, 1])
 
@@ -3246,20 +3248,17 @@ def fused_proj_rms(
         eps: stability epsilon
 
     Returns:
-        proj: [..., N] = x @ weight^T
+        proj: [..., N] = x @ weight
         r: [..., 1] = 1 / (||x|| / sqrt(K) + eps)
     """
-    # [K, N] --> [N, K]
-    weight = weight.t()
     assert weight.ndim == 2, (
-        f"fused_proj_rms: weight must be 2D [N, K], got shape {list(weight.shape)}"
+        f"fused_proj_rms: weight must be 2D [K, N], got shape {list(weight.shape)}"
     )
     K = x.shape[-1]
-    N, K_w = weight.shape
+    K_w, N = weight.shape
     assert K == K_w, (
-        f"fused_proj_rms: x last dim (K={K}) must match weight dim1 (K={K_w}). "
-        f"x.shape={list(x.shape)}, weight.shape={list(weight.shape)}. "
-        f"If weight is [K, N], you need to transpose it: fused_proj_rms(x, weight.t())"
+        f"fused_proj_rms: x last dim (K={K}) must match weight dim0 (K={K_w}). "
+        f"x.shape={list(x.shape)}, weight.shape={list(weight.shape)}"
     )
     assert N <= 256, (
         f"fused_proj_rms: N={N} exceeds max supported tile size 256. "
@@ -3297,7 +3296,7 @@ def fused_proj_rms_compute_h(
     """Fused projection + RMS norm + compute_h (cuTile).
 
     Combines three steps in one kernel launch:
-        1. proj = x @ weight^T, r = 1 / (||x|| / sqrt(K) + eps)
+        1. proj = x @ weight, r = 1 / (||x|| / sqrt(K) + eps)
         2. h = r * proj * alpha + bias
         3. Split h into h_pre (sigmoid+eps), h_post (2*sigmoid), h_res
 
@@ -3359,7 +3358,7 @@ def fused_proj_rms_compute_h(
     if _CUTILE_AVAILABLE:
         return CutileProjRmsComputeH.apply(
             x,
-            weight.t(),
+            weight,
             alpha_pre,
             alpha_post,
             alpha_res,
