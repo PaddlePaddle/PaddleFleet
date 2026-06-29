@@ -235,6 +235,7 @@ class Gemma4SelfAttention(SelfAttention):
 
         # Global layers (head_dim=512) exceed flashmask kernel limit.
         # Convert startend_row_indices to dense mask for eager path.
+        # NOTE: eager path does not support CP or SP; assumes sq == sk.
         if not self.is_sliding and attn_mask_startend_row_indices is not None:
             attention_mask = startend_row_indices_to_dense_mask(
                 attn_mask_startend_row_indices,
