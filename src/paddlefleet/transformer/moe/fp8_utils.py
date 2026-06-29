@@ -962,23 +962,25 @@ class ExpertsGroupGemmContiguousNode:
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
         if self.activation_type == "geglu":
-            # GeGLU forward for o2_s (needed for backward weight computation)
+            # GeGLU forward recompute (needed for backward weight computation)
             gate, up = paddle.chunk(o1, 2, dim=-1)
             gate_act = F.gelu(gate, approximate=True)
             o2_s_no_scale = gate_act * up
             o2_s = (o2_s_no_scale * unzipped_probs).cast(o1.dtype)
 
-            # probs_grad: d(probs * o2_no_scale) / d(probs) = o2_no_scale
-            # dot with downstream grad -> (do2_s * o2_no_scale).sum(-1)
-            # moe_unpermute requires float32 probs, compute in float32 for precision
+            # probs_grad: d(loss)/d(probs) = do2_s * o2_no_scale, summed over hidden dim
             probs_grad = (
                 do2_s.cast(paddle.float32) * o2_s_no_scale.cast(paddle.float32)
             ).sum(-1, keepdim=True)
 
+            # Propagate gradient through probs scaling (aligned with Megatron):
+            # do2 = do2_s * probs  (chain rule through o2_s = o2_no_scale * probs)
+            do2 = do2_s * unzipped_probs
+
             # GeGLU backward through activation
-            # d_up = do2_s * gelu(gate)
-            d_up = do2_s * gate_act.cast(do2_s.dtype)
-            # d_gate = do2_s * up * gelu'(gate)
+            # d_up = do2 * gelu(gate)
+            d_up = do2 * gate_act.cast(do2.dtype)
+            # d_gate = do2 * up * gelu'(gate)  (tanh-approximate gelu derivative)
             import math
 
             kAlpha = math.sqrt(2.0 / math.pi)
@@ -988,8 +990,8 @@ class ExpertsGroupGemmContiguousNode:
             )
             tanh_inner = paddle.tanh(inner)
             d_gate = (
-                do2_s
-                * up.cast(do2_s.dtype)
+                do2
+                * up.cast(do2.dtype)
                 * (
                     0.5 * (1.0 + tanh_inner)
                     + 0.5
@@ -1000,7 +1002,7 @@ class ExpertsGroupGemmContiguousNode:
                         1.0
                         + 0.134145 * paddle.pow(gate.cast(paddle.float32), 2)
                     )
-                ).cast(do2_s.dtype)
+                ).cast(do2.dtype)
             )
             do1 = paddle.concat([d_gate, d_up], dim=-1).cast(o1.dtype)
         elif self.clamp_value is not None and self.clamp_value > 0:

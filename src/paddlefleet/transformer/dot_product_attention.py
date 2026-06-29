@@ -149,12 +149,15 @@ class DotProductAttention(FleetLayer):
             self.softmax_scale = 1.0 / math.sqrt(
                 self.hidden_size_per_attention_head
             )
+            self._has_custom_softmax_scale = False
         else:
             self.softmax_scale = softmax_scale
+            self._has_custom_softmax_scale = True
 
         if self.config.apply_query_key_layer_scaling:
             coeff = max(1, self.layer_number)
             self.softmax_scale /= coeff
+            self._has_custom_softmax_scale = True
 
         if self.is_swa:
             sliding_window = self.config.sliding_window
@@ -480,8 +483,16 @@ class DotProductAttention(FleetLayer):
                     False  # only support non-causal for flashmask_attention_cp
                 )
                 assert attn_mask_startend_row_indices.shape[-1] == 2
+                assert not self._has_custom_softmax_scale, (
+                    "flashmask_attention_cp does not support custom softmax_scale. "
+                    "Disable context_parallel or use default softmax_scale."
+                )
             elif use_rr_flash_attention:
                 flashmask_attention_func = self.rr_flashmask_attention_func
+                assert not self._has_custom_softmax_scale, (
+                    "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
+                    "Disable refined_recompute or use default softmax_scale."
+                )
             elif self.config.flashmask_use_varlen:
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
@@ -527,7 +538,11 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
-                softmax_scale=self.softmax_scale,
+                **(
+                    {"softmax_scale": self.softmax_scale}
+                    if self._has_custom_softmax_scale
+                    else {}
+                ),
             )
 
             if need_value_padding:

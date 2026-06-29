@@ -257,14 +257,17 @@ def get_gemma4_decoder_layers_spec(config: TransformerConfig) -> list:
     from paddlefleet.transformer.transformer_layer import Gemma4TransformerLayer
 
     config.specific_layer = Gemma4TransformerLayer
-    num_layers = getattr(config, "num_layers", 30)
+    num_layers = config.num_hidden_layers
+    num_head_empty_layers = (
+        getattr(config, "num_empty_layers_add_in_head", 0) or 0
+    )
     return [
         get_gpt_layer_local_spec(
             config=config,
             num_experts=None,
             use_qk_norm=True,
             normalization=getattr(config, "normalization", "RMSNorm"),
-            layer_number=i + 1,
+            layer_number=i + num_head_empty_layers,
             attention_layer_type="gemma4",
         )
         for i in range(num_layers)

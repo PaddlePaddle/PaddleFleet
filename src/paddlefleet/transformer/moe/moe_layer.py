@@ -968,27 +968,57 @@ class MoELayer(nn.Layer):
             output = ScatterOp.apply(output)
         return output
 
+    # ------------------------------------------------------------------
+    # Overridable hooks (Template Method pattern)
+    # Subclasses (e.g. Gemma4MoELayer) can override these to customize
+    # gate/expert input transformation and output post-processing without
+    # rewriting the full forward logic.
+    # ------------------------------------------------------------------
+
+    def _prepare_gate_input(self, hidden_states, residual):
+        """Return the tensor fed into the router. Default: hidden_states."""
+        return hidden_states
+
+    def _prepare_expert_input(self, hidden_states, residual):
+        """Return the tensor fed into routed experts. Default: hidden_states."""
+        return hidden_states
+
+    def _post_routed_output(self, output):
+        """Post-process routed expert output before combining with shared. Default: identity."""
+        return output
+
+    def _post_shared_output(self, shared_output):
+        """Post-process shared expert output before combining. Default: identity."""
+        return shared_output
+
     def forward(
         self,
         hidden_states: paddle.Tensor,
         input_ids: paddle.Tensor | None = None,
+        residual: paddle.Tensor | None = None,
     ) -> paddle.Tensor:
         """
         Args:
             hidden_states: Shape: [batch_size, seq_len, hidden_size]
             input_ids: Shape: [batch_size, seq_len], optional token ids from embedding input.
+            residual: Shape: [batch_size, seq_len, hidden_size], optional separate residual
+                      for routing/expert input (used by Gemma4 dual-branch topology).
 
         Returns:
             output: Shape: [batch_size, seq_len, hidden_size]
         """
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             hidden_states = GatherOp.apply(hidden_states)
+            if residual is not None:
+                residual = GatherOp.apply(residual)
 
         orig_shape = hidden_states.shape
         residuals = hidden_states
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
+
+        gate_input = self._prepare_gate_input(hidden_states, residual)
         (
             capacity,
             topk_weights,
@@ -999,7 +1029,7 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(
-            hidden_states,
+            gate_input,
             input_ids=input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
@@ -1024,10 +1054,12 @@ class MoELayer(nn.Layer):
             }
         else:
             combine_overlap_handle = None
+
+        expert_input = self._prepare_expert_input(hidden_states, residual)
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
-                    hidden_states,
+                    expert_input,
                     probs,
                     mask,
                     combine_overlap_handle,
@@ -1036,18 +1068,18 @@ class MoELayer(nn.Layer):
                 )
             else:
                 output = self.custom_forward(
-                    hidden_states,
+                    expert_input,
                     probs,
                     mask,
                     topk_weights=topk_weights,
                     topk_indices=topk_indices,
                 )
         else:
-            if len(hidden_states.shape) == 3:
-                batch_size, seq_len, d_model = hidden_states.shape
-                reshaped_input = hidden_states.reshape([-1, d_model])
+            if len(expert_input.shape) == 3:
+                batch_size, seq_len, d_model = expert_input.shape
+                reshaped_input = expert_input.reshape([-1, d_model])
             else:
-                reshaped_input = hidden_states
+                reshaped_input = expert_input
             # Latent MoE: project to latent space before single-card MoE
             if self.use_latent_moe:
                 reshaped_input = self.fc1_latent_proj(reshaped_input)
@@ -1073,11 +1105,14 @@ class MoELayer(nn.Layer):
             output = AddAuxiliaryLoss.apply(output, z_loss)
 
         output = output.reshape(orig_shape)
+        output = self._post_routed_output(output)
+
         if self.shared_experts is not None:
             if combine_overlap_handle is not None:
                 shared_output = combine_overlap_handle["fn_out"][0]
             else:
                 shared_output = self.shared_experts(residuals)[0]
+            shared_output = self._post_shared_output(shared_output)
             output = output + shared_output
 
         _log_moe_md5(output, "moe_final_output", layer_idx)
@@ -1365,15 +1400,18 @@ class Gemma4TopKRouter(TopKRouter):
 
 
 class Gemma4MoELayer(MoELayer):
-    """Gemma4 MoE with parallel shared-MLP + routed-experts and separate norms.
+    """Gemma4 MoE via base-class hooks (no forward override).
 
-    Note: This layer has a fundamentally different forward topology (shared and
-    routed experts branch from different inputs, 3 extra norms, custom router,
-    GeGLU activation override) that cannot be parameterized into the base MoELayer.
-    It is kept as a standalone subclass and wired via attention_layer_type="gemma4"
-    through the standard get_gpt_layer_local_spec path.
+    Customizations over base MoELayer:
+      - Gate: Gemma4TopKRouter (internal RMS norm + per_expert_scale)
+      - Activation: GeGLU (gelu_tanh(gate) * up)
+      - Dual-branch topology via hooks:
+        * _prepare_gate_input  → route on residual
+        * _prepare_expert_input → pre_feedforward_layernorm_2(residual)
+        * _post_routed_output  → post_moe_layernorm
+        * _post_shared_output  → post_shared_expert_layernorm
 
-    Norms inside this layer (aligned with HF naming):
+    Norms (aligned with HF naming):
       - post_shared_expert_layernorm (= HF post_feedforward_layernorm_1)
       - pre_feedforward_layernorm_2 (= HF pre_feedforward_layernorm_2)
       - post_moe_layernorm (= HF post_feedforward_layernorm_2)
@@ -1473,95 +1511,24 @@ class Gemma4MoELayer(MoELayer):
                 _gemma4_grouped_sharded_state_dict, grouped
             )
 
-    def forward(self, hidden_states, input_ids=None, residual=None):
-        """Forward with parallel shared-MLP + routed-experts."""
-        if residual is None:
-            residual = hidden_states
+    # ------------------------------------------------------------------
+    # Hook overrides: dual-branch topology (shared from hidden_states,
+    # routed from residual with extra norms)
+    # ------------------------------------------------------------------
 
-        layer_idx = getattr(self, "layer_number", None)
+    def _prepare_gate_input(self, hidden_states, residual):
+        """Route on residual (Gemma4TopKRouter applies internal normalization)."""
+        return residual if residual is not None else hidden_states
 
-        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
-            hidden_states = GatherOp.apply(hidden_states)
-            residual = GatherOp.apply(residual)
+    def _prepare_expert_input(self, hidden_states, residual):
+        """Apply pre_feedforward_layernorm_2 to residual before expert compute."""
+        src = residual if residual is not None else hidden_states
+        return self.pre_feedforward_layernorm_2(src)
 
-        # === Shared expert path ===
-        if self.shared_experts is not None:
-            shared_raw = self.shared_experts(hidden_states)[0]
-            shared_output = self.post_shared_expert_layernorm(shared_raw)
-        else:
-            shared_output = None
+    def _post_routed_output(self, output):
+        """Apply post_moe_layernorm after routed expert combine."""
+        return self.post_moe_layernorm(output)
 
-        # === Routed experts path (from residual) ===
-        routed_input = residual
-        orig_shape = routed_input.shape
-
-        _log_moe_md5(routed_input, "moe_input", layer_idx)
-
-        (
-            capacity,
-            topk_weights,
-            topk_indices,
-            probs,
-            mask,
-            priorities,
-            aux_loss,
-            z_loss,
-        ) = self.gate(routed_input, input_ids=input_ids)
-
-        expert_input = self.pre_feedforward_layernorm_2(routed_input)
-
-        if self.expert_model_parallel_size > 1:
-            if self.moe_use_fusion_node:
-                output = self.fusion_moe_forward(
-                    expert_input,
-                    probs,
-                    mask,
-                    None,
-                    topk_weights=topk_weights,
-                    topk_indices=topk_indices,
-                )
-            else:
-                output = self.custom_forward(
-                    expert_input,
-                    probs,
-                    mask,
-                    topk_weights=topk_weights,
-                    topk_indices=topk_indices,
-                )
-        else:
-            if len(expert_input.shape) == 3:
-                reshaped_input = expert_input.reshape(
-                    [-1, expert_input.shape[-1]]
-                )
-            else:
-                reshaped_input = expert_input
-            if self.use_latent_moe:
-                reshaped_input = self.fc1_latent_proj(reshaped_input)
-            if self.moe_expert_fusion:
-                output = self._forward_single_card_grouped_gemm_moe(
-                    reshaped_input, mask, probs, topk_indices, topk_weights
-                )
-            else:
-                output = self._forward_single_card_moe(
-                    reshaped_input, topk_indices, topk_weights
-                )
-            if self.use_latent_moe:
-                output = self.fc2_latent_proj(output)
-
-        if self.training and self.router_aux_loss_coef and aux_loss is not None:
-            output = AddAuxiliaryLoss.apply(
-                output, aux_loss * float(self.router_aux_loss_coef)
-            )
-        if self.training and z_loss is not None:
-            output = AddAuxiliaryLoss.apply(output, z_loss)
-
-        output = output.reshape(orig_shape)
-        output = self.post_moe_layernorm(output)
-
-        if shared_output is not None:
-            output = shared_output + output
-
-        if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
-            output = ScatterOp.apply(output)
-
-        return output, None
+    def _post_shared_output(self, shared_output):
+        """Apply post_shared_expert_layernorm to shared expert output."""
+        return self.post_shared_expert_layernorm(shared_output)
