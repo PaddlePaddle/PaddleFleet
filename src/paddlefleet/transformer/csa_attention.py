@@ -380,6 +380,42 @@ def _build_compressed_causal_mask(
     )
 
 
+def compact_kv_score_cutoff(
+    doc_starts: Tensor,
+    doc_lens_cutoff: Tensor,
+    doc_starts_cutoff: Tensor,
+    total_cutoff: int,
+    kv: Tensor,
+    score: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """
+    Compact `kv` and `score` by gathering valid rows into a dense buffer.
+
+    Equivalent to the following loop implementation:
+        kv_cutoff = paddle.zeros([b, total_cutoff, coff_head_dim], kv.dtype)
+        score_cutoff = paddle.full([b, total_cutoff, coff_head_dim], float("-inf"), score.dtype)
+        for s0, n, s1 in zip(doc_starts, doc_lens_cutoff, doc_starts_cutoff):
+            kv_cutoff[:, s1 : (s1 + n), :] = kv[:, s0 : (s0 + n), :]
+            score_cutoff[:, s1 : (s1 + n), :] = score[:, s0 : (s0 + n), :]
+    """
+    # seg_id[j] = which input segment the j-th output position came from
+    seg_id = paddle.repeat_interleave(
+        paddle.arange(len(doc_lens_cutoff), dtype="int64"),
+        doc_lens_cutoff.astype("int64"),
+    )
+    # within-segment offset
+    seg_offset = (
+        paddle.arange(total_cutoff, dtype="int64") - doc_starts_cutoff[seg_id]
+    )
+    # source position in the (b, sq, head_dim) tensor
+    src_idx = doc_starts[seg_id] + seg_offset
+
+    kv_cutoff = paddle.gather(kv, src_idx, axis=1)  # [B, S, H]
+    score_cutoff = paddle.gather(score, src_idx, axis=1)  # [B, S, H]
+
+    return kv_cutoff, score_cutoff
+
+
 # ---------------------------------------------------------------------------
 # RoPE helper for CSA
 # ---------------------------------------------------------------------------
@@ -1072,28 +1108,14 @@ class Compressor(nn.Layer):
             coff_head_dim = kv.shape[-1]
 
             # Pack only valid cutoff data contiguously (no padding)
-            kv_cutoff = paddle.zeros(
-                shape=[b, total_cutoff, coff_head_dim],
-                dtype=kv.dtype,
+            kv, score = compact_kv_score_cutoff(
+                doc_starts,
+                doc_lens_cutoff,
+                doc_starts_cutoff,
+                total_cutoff,
+                kv,
+                score,
             )
-            score_cutoff = paddle.full(
-                shape=[b, total_cutoff, coff_head_dim],
-                fill_value=float("-inf"),
-                dtype=score.dtype,
-            )
-            for i in range(len(doc_lens)):
-                doc_start = doc_starts[i]
-                doc_len_cutoff = doc_lens_cutoff[i]
-                doc_start_cutoff = doc_starts_cutoff[i]
-                kv_cutoff[
-                    :, doc_start_cutoff : (doc_start_cutoff + doc_len_cutoff), :
-                ] = kv[:, doc_start : (doc_start + doc_len_cutoff), :]
-                score_cutoff[
-                    :, doc_start_cutoff : (doc_start_cutoff + doc_len_cutoff), :
-                ] = score[:, doc_start : (doc_start + doc_len_cutoff), :]
-
-            kv = kv_cutoff
-            score = score_cutoff
 
             # Reshape: [b, actual_n_compressed, ratio, coff * head_dim]
             kv = kv.reshape([b, actual_n_compressed, ratio, -1])
@@ -1107,10 +1129,9 @@ class Compressor(nn.Layer):
             if self.overlap:
                 # Build is_first mask for document boundaries
                 is_first = paddle.zeros([actual_n_compressed], dtype="bool")
-                for i in range(len(doc_starts_cutoff)):
-                    idx = int(doc_starts_cutoff[i].item()) // ratio
-                    if idx < actual_n_compressed:
-                        is_first[idx] = True
+                is_first_indices = doc_starts_cutoff // ratio
+                is_first_indices_valid = is_first_indices < actual_n_compressed
+                is_first[is_first_indices[is_first_indices_valid]] = True
                 kv = self._overlap_transform(
                     kv, fill_value=0, is_first=is_first
                 )
