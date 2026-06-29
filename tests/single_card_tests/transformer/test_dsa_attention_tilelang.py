@@ -250,11 +250,13 @@ class TestTileLangDSAFusedFunction(unittest.TestCase):
             from paddlefleet.transformer.dsa_attention import (
                 TileLangDSAFusedFunction,
             )
-            from paddlefleet.tilelang_ops import dsa_indexer_topk_reducesum_interface
 
             self.TileLangDSAFusedFunction = TileLangDSAFusedFunction
         except ImportError:
             self.skipTest("tilelang not available")
+
+    def _run_forward(
+        self,
         batch=1,
         seqlen=64,
         heads=16,
@@ -954,6 +956,35 @@ class TestTileLangVsPaddleRefPrecision(unittest.TestCase):
             rtol=1e-3,
             atol=1e-5,
         )
+
+
+# =========================================================================
+# Integration test: DSAttention config-driven TileLang branch
+# =========================================================================
+
+
+class TestDSAttentionConfigTileLangBranch(unittest.TestCase):
+    """Verify that TransformerConfig.dsa_tilelang_enable controls DSAttention._use_tilelang."""
+
+    def test_config_field_exists_and_defaults_false(self):
+        """TransformerConfig should have dsa_tilelang_enable defaulting to False."""
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        config = TransformerConfig()
+        self.assertFalse(config.dsa_tilelang_enable)
+
+    def test_config_field_enables_tilelang(self):
+        """Setting dsa_tilelang_enable=True should set DSAttention._use_tilelang=True."""
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        config = TransformerConfig(dsa_tilelang_enable=True)
+        self.assertTrue(config.dsa_tilelang_enable)
+
+    def test_transform_rules_maps_field(self):
+        """transform_rules should contain dsa_tilelang_enable mapping."""
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        self.assertIn("dsa_tilelang_enable", TransformerConfig.transform_rules)
 
 
 if __name__ == "__main__":

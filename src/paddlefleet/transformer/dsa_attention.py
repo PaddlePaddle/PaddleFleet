@@ -1265,6 +1265,7 @@ class TileLangDSAFusedFunction(paddle.autograd.PyLayer):
         ctx.sm_scale = sm_scale
         ctx.loss_coeff = loss_coeff
         ctx.use_full_loss = use_full_loss
+        ctx.needs_lse_full = use_full_loss and loss_coeff != 0.0
 
         TileLangDSAFusedFunction._last_topk_indices = attn_topk_indices.detach()
         return o
@@ -1320,11 +1321,29 @@ class TileLangDSAFusedFunction(paddle.autograd.PyLayer):
             dindex_k = paddle.zeros_like(index_k)
         else:
             # Compute attn_score for indexer loss gradient
+            # When full-loss, recompute lse over loss_topk_indices to get correct normalizer
+            if ctx.needs_lse_full:
+                from paddlefleet.tilelang_ops import (
+                    dsa_sparse_mla_fwd_interface,
+                )
+
+                _, lse_full = dsa_sparse_mla_fwd_interface(
+                    query,
+                    key,
+                    loss_topk_indices.unsqueeze(1),
+                    offsets,
+                    token_indices,
+                    sm_scale=ctx.sm_scale,
+                    d_v=ctx.v_channels,
+                )
+            else:
+                lse_full = lse
+
             attn_score = dsa_sparse_mla_topk_reducesum_interface(
                 query,
                 key,
                 loss_topk_indices.unsqueeze(1),
-                lse,
+                lse_full,
                 offsets,
                 token_indices,
                 dim_v=ctx.v_channels,
@@ -1710,7 +1729,7 @@ class DSAttention(FleetLayer):
         )
 
         # TileLang indexer switch (config-driven, matching CSA style)
-        self._use_tilelang = bool(getattr(config, "dsa_tilelang_enable", False))
+        self._use_tilelang = bool(config.dsa_tilelang_enable)
         self._v_channels = getattr(config, "kv_lora_rank", None) or getattr(
             config, "v_head_dim", None
         )
