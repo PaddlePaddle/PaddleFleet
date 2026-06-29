@@ -239,12 +239,11 @@ class GreedyGenerator:
         # attention; per-layer KV truncation would break those heads.
         head_wise_swa_ratio = getattr(cfg, "head_wise_swa_ratio", 0.0)
         if head_wise_swa_ratio > 0 and head_wise_swa_ratio < 1.0:
-            logger.warning(
-                "head_wise_swa_ratio=%s: disabling KV cache truncation to "
-                "preserve full-attention heads in SWA layers.",
-                head_wise_swa_ratio,
+            raise ValueError(
+                f"head_wise_swa_ratio={head_wise_swa_ratio}: KV cache truncation "
+                "is unsupported because it would break full-attention heads in "
+                "SWA layers."
             )
-            window_size = None
         self.cache = DynamicKVCache(
             num_layers=total_layers,
             swa_layers=swa_layers,
