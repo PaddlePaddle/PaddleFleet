@@ -3169,6 +3169,9 @@ def fused_h_aggregate(x: Tensor, h_pre: Tensor) -> Tensor:
         f"fused_h_aggregate: C={C} exceeds int32 max ({_INT32_MAX})"
     )
 
+    x = x.contiguous()
+    h_pre = h_pre.contiguous()
+
     if _TRITON_AVAILABLE or _CUTILE_AVAILABLE:
         return FusedHAggregate.apply(x, h_pre)
     raise RuntimeError(
@@ -3220,6 +3223,11 @@ def fused_h_post_bda(
         f"fused_h_post_bda: C={C} exceeds int32 max ({_INT32_MAX})"
     )
 
+    h_res = h_res.contiguous()
+    original_residual = original_residual.contiguous()
+    h_post = h_post.contiguous()
+    x = x.contiguous()
+
     if _TRITON_AVAILABLE or _CUTILE_AVAILABLE:
         return FusedHPostBDA.apply(h_res, original_residual, h_post, x, bias)
     raise RuntimeError(
@@ -3264,6 +3272,9 @@ def fused_proj_rms(
     assert K <= _INT32_MAX, (
         f"fused_proj_rms: K={K} exceeds int32 max ({_INT32_MAX})"
     )
+
+    x = x.contiguous()
+    weight = weight.contiguous()
 
     if _CUTILE_AVAILABLE:
         return FusedProjRms.apply(x, weight, eps)
@@ -3341,6 +3352,9 @@ def fused_proj_rms_compute_h(
     assert M * N <= _INT32_MAX, (
         f"fused_proj_rms_compute_h: output address offset M*N={M * N} exceeds int32 max ({_INT32_MAX})"
     )
+
+    x = x.contiguous()
+    weight = weight.contiguous()
 
     if _CUTILE_AVAILABLE:
         return CutileProjRmsComputeH.apply(
