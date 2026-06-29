@@ -1319,12 +1319,12 @@ class MoELayer(nn.Layer):
 
 
 class Gemma4TopKRouter(TopKRouter):
-    """Gemma4 MoE router with per-expert scale and input normalization.
+    """Gemma4 MoE router aligned with ms-swift/HF Gemma4TextRouter.
 
-    Differences from standard TopKRouter:
+    Reuses TopKRouter for padding mask, SP/CP, aux/z loss handling.
+    Only adds:
     1. Input normalization: scaleless RMSNorm + learned scale * (1/sqrt(d))
-    2. Softmax scoring
-    3. Post-topk normalization + per_expert_scale multiplication
+    2. Config overrides: softmax scoring, norm_topk_prob, learnable per-expert scale
     """
 
     def __init__(
@@ -1332,19 +1332,23 @@ class Gemma4TopKRouter(TopKRouter):
         config: TransformerConfig,
         pg_collection: ProcessGroupCollection | None = None,
     ):
+        # Configure TopKRouter to match Gemma4 behavior
+        config.scoring_func = "softmax"
+        config.norm_topk_prob = True
+        config.topk_method = "greedy"
+        config.routed_scaling_factor_learnable = True
+        config.routed_scaling_factor = 1.0
+        config.router_aux_loss_coef = 0.0
+        config.router_z_loss_coef = 0.0
         super().__init__(config, pg_collection)
 
-        num_experts = getattr(
-            config, "num_moe_experts", config.n_routed_experts
-        )
+        # Gemma4-specific: input normalization scale (learnable, aligned with HF nn.Parameter)
         hidden_size = config.hidden_size
-        self.register_buffer(
-            "per_expert_scale", paddle.ones([num_experts], dtype="float32")
+        self.router_input_scale = paddle.create_parameter(
+            shape=[hidden_size],
+            dtype="float32",
+            default_initializer=paddle.nn.initializer.Constant(1.0),
         )
-        self.register_buffer(
-            "router_input_scale", paddle.ones([hidden_size], dtype="float32")
-        )
-        self._hidden_size = hidden_size
         self._inv_sqrt_d = hidden_size**-0.5
 
     def _normalize_input(self, hidden_states):
@@ -1355,54 +1359,9 @@ class Gemma4TopKRouter(TopKRouter):
         return h * self.router_input_scale * self._inv_sqrt_d
 
     def forward(self, input, input_ids=None):
-        """Override forward with input normalization and per-expert scale."""
-        if len(input.shape) == 3:
-            if not self.sequence_parallel:
-                batch_size, seq_len, d_model = input.shape
-            else:
-                seq_len, batch_size, d_model = input.shape
-            input_2d = input.reshape([-1, d_model])
-        else:
-            input_2d = input
-
-        normalized = self._normalize_input(input_2d)
-
-        logits = F.linear(
-            normalized.cast("float32"), self.weight.cast("float32").T
-        )
-
-        scores = F.softmax(logits.cast("float32"), axis=-1)
-
-        top_k_weights, top_k_indices = paddle.topk(
-            scores, k=self.num_experts_per_tok
-        )
-
-        weight_sum = top_k_weights.sum(-1, keepdim=True).clip_(min=1e-6)
-        top_k_weights = top_k_weights / weight_sum
-        top_k_weights = top_k_weights * paddle.index_sample(
-            self.per_expert_scale.unsqueeze(0).expand(
-                [top_k_indices.shape[0], -1]
-            ),
-            top_k_indices,
-        )
-
-        probs = paddle.zeros_like(scores).put_along_axis_(
-            top_k_indices, top_k_weights.cast(scores.dtype), axis=1
-        )
-        mask = paddle.zeros_like(scores).put_along_axis_(
-            top_k_indices, paddle.to_tensor(1.0, dtype=scores.dtype), axis=1
-        )
-
-        return (
-            None,
-            top_k_weights,
-            top_k_indices,
-            probs,
-            mask,
-            None,
-            None,
-            None,
-        )
+        """Normalize input, then delegate to TopKRouter for full routing logic."""
+        normalized_input = self._normalize_input(input)
+        return super().forward(normalized_input, input_ids=input_ids)
 
 
 class Gemma4MoELayer(MoELayer):
