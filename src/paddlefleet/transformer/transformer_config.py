@@ -348,6 +348,7 @@ class TransformerConfig(ModelParallelConfig):
     apply_query_key_layer_scaling is True."""
 
     high_precision_rope: bool = False
+    swa_high_precision_norm: bool = False
     ####################
     # fusion
     ####################
@@ -1229,6 +1230,18 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+
+        # swa_high_precision_norm is only supported for DSv4 models.
+        if (
+            self.swa_high_precision_norm
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
+            raise ValueError(
+                "swa_high_precision_norm=True is only supported when "
+                "experimental_attention_variant='dsv4_hybrid'. "
+                "High-precision norm mode is only adapted for DSv4 to align "
+                "training and inference numerical behavior."
+            )
 
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
