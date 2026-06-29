@@ -24,8 +24,8 @@ from paddle import Tensor
 
 try:
     paddle.enable_compat(scope={"tilelang"})
-    import tilelang
-    import tilelang.language as T
+    import tilelang  # noqa: F401
+    import tilelang.language as T  # noqa: F401
 
     HAS_TILELANG = True
 except ImportError:
@@ -69,36 +69,25 @@ def _cache_get_or_compile(cache_name: str, key, compile_fn):
 
 def dsa_prepare_token_indices(cu_seqlens: Tensor) -> Tensor:
     """Convert cumulative sequence lengths to per-token (batch_id, position) pairs."""
-    lens = cu_seqlens[1:] - cu_seqlens[:-1]
-    parts = []
-    for n in lens.numpy().tolist():
-        parts.append(paddle.arange(int(n), dtype="int32"))
-    pos_ids = paddle.concat(parts)
-    seq_ids = paddle.cumsum(paddle.cast(pos_ids == 0, "int32")) - 1
-    return paddle.stack([seq_ids.cast("int32"), pos_ids.cast("int32")], axis=1)
+    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).cast("int32")
+    seq_ids = paddle.repeat_interleave(
+        paddle.arange(lens.shape[0], dtype="int32"), lens
+    )
+    offsets_expanded = paddle.repeat_interleave(
+        cu_seqlens[:-1].cast("int32"), lens
+    )
+    pos_ids = paddle.arange(seq_ids.shape[0], dtype="int32") - offsets_expanded
+    return paddle.stack([seq_ids, pos_ids], axis=1)
 
 
 def dsa_prepare_valid_ranges(cu_seqlens: Tensor) -> Tensor:
     """Convert cumulative sequence lengths to per-token valid [start, end) ranges."""
-    ranges = []
-    cu_list = cu_seqlens.numpy().tolist()
-    for seq_idx in range(len(cu_list) - 1):
-        start = int(cu_list[seq_idx])
-        end = int(cu_list[seq_idx + 1])
-        length = end - start
-        if length > 0:
-            ranges.append(
-                paddle.stack(
-                    [
-                        paddle.full([length], start, dtype="int32"),
-                        paddle.full([length], end, dtype="int32"),
-                    ],
-                    axis=1,
-                )
-            )
-    if not ranges:
+    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).cast("int32")
+    if lens.shape[0] == 0 or int(lens.sum().item()) == 0:
         return paddle.empty([0, 2], dtype="int32")
-    return paddle.concat(ranges, axis=0)
+    starts = paddle.repeat_interleave(cu_seqlens[:-1].cast("int32"), lens)
+    ends = paddle.repeat_interleave(cu_seqlens[1:].cast("int32"), lens)
+    return paddle.stack([starts, ends], axis=1)
 
 
 def dsa_prepare_token_indices_from_valid_ranges(valid_ranges: Tensor) -> Tensor:
@@ -140,29 +129,29 @@ def dsa_prepare_varlen_metadata(cu_seqlens: Tensor) -> VarlenMetadata:
 def dsa_sbhd_to_thd(tensor: Tensor) -> Tensor:
     """Convert [seq, batch, ...] to packed THD [seq*batch, ...] format."""
     s, b, *rest = tensor.shape
-    return tensor.transpose([1, 0] + list(range(2, tensor.ndim))).reshape(
-        [b * s] + rest
+    return tensor.transpose([1, 0, *list(range(2, tensor.ndim))]).reshape(
+        [b * s, *rest]
     )
 
 
 def dsa_thd_to_sbhd(tensor: Tensor, s: int, b: int) -> Tensor:
     """Convert packed THD [seq*batch, ...] back to [seq, batch, ...] format."""
     rest = list(tensor.shape[1:])
-    return tensor.reshape([b, s] + rest).transpose(
-        [1, 0] + list(range(2, 2 + len(rest)))
+    return tensor.reshape([b, s, *rest]).transpose(
+        [1, 0, *list(range(2, 2 + len(rest)))]
     )
 
 
 def dsa_bshd_to_thd(tensor: Tensor) -> Tensor:
     """Convert [batch, seq, ...] to packed THD [batch*seq, ...] format."""
     b, s, *rest = tensor.shape
-    return tensor.reshape([b * s] + rest)
+    return tensor.reshape([b * s, *rest])
 
 
 def dsa_thd_to_bshd(tensor: Tensor, b: int, s: int) -> Tensor:
     """Convert packed THD [batch*seq, ...] back to [batch, seq, ...] format."""
     rest = list(tensor.shape[1:])
-    return tensor.reshape([b, s] + rest)
+    return tensor.reshape([b, s, *rest])
 
 
 # ===========================================================================

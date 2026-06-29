@@ -1139,28 +1139,22 @@ def _pad_topk_for_tilelang(topk: int) -> int:
 
 
 def _resolve_dsa_offsets(packed_seq_params, startend_row_indices, b, sq):
-    """Build THD offsets for TileLang varlen kernels."""
-    if (
-        packed_seq_params is not None
-        and getattr(packed_seq_params, "qkv_format", None) == "thd"
-    ):
-        return (
-            getattr(packed_seq_params, "cu_seqlens_q_padded", None)
-            or packed_seq_params.cu_seqlens_q
-        ).cast("int32")
+    """Build THD cu_seqlens offsets for TileLang varlen kernels."""
     if startend_row_indices is not None:
-        bs, _, seqlen, _ = startend_row_indices.shape
-        ends = startend_row_indices[:, 0, :, 0].cast("int64")
-        changed = paddle.zeros_like(ends, dtype="bool")
-        changed[:, 0] = True
-        changed[:, 1:] = ends[:, 1:] != ends[:, :-1]
-        parts = []
-        for i in range(bs):
-            parts.append(
-                paddle.nonzero(changed[i]).flatten().cast("int32") + i * seqlen
-            )
-        parts.append(paddle.to_tensor([bs * seqlen], dtype="int32"))
-        return paddle.concat(parts)
+        assert b == 1, (
+            f"TileLang DSA varlen only supports batch_size=1, got {b}"
+        )
+        mask = startend_row_indices.flatten().cast("int64")
+        positions = paddle.arange(sq, dtype="int64")
+
+        is_boundary = paddle.zeros([sq], dtype="bool")
+        is_boundary[0] = True
+        is_boundary[1:] = (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+
+        boundary_positions = paddle.nonzero(is_boundary).flatten().cast("int32")
+        return paddle.concat(
+            [boundary_positions, paddle.to_tensor([sq], dtype="int32")]
+        )
     return (paddle.arange(0, b + 1, dtype="int32") * sq).cast("int32")
 
 
@@ -1360,9 +1354,13 @@ class TileLangDSAFusedFunction(paddle.autograd.PyLayer):
                 offsets,
                 token_indices,
             )
-            dindex_q = dindex_q * ctx.loss_coeff
-            dweights = dweights * ctx.loss_coeff
-            dindex_k = dindex_k * ctx.loss_coeff
+            scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
+            if scale is None:
+                scale = paddle.ones([1], dtype=dindex_q.dtype)
+            coeff = ctx.loss_coeff * scale
+            dindex_q = dindex_q * coeff
+            dweights = dweights * coeff
+            dindex_k = dindex_k * coeff
 
         # Return gradients: query, key, index_q, index_k, weights, offsets
         return dq, dkv, dindex_q, dindex_k, dweights, None
@@ -1427,10 +1425,15 @@ class TileLangDSAIndexerLoss(paddle.autograd.PyLayer):
             )
             loss_topk_indices = attn_topk_indices
 
+        lse_indices = (
+            loss_topk_indices
+            if (use_full_loss and loss_coeff != 0.0)
+            else attn_topk_indices
+        )
         _, lse = dsa_sparse_mla_fwd_interface(
             query_thd,
             key_thd,
-            attn_topk_indices.unsqueeze(1),
+            lse_indices.unsqueeze(1),
             offsets,
             token_indices,
             sm_scale=softmax_scale,
