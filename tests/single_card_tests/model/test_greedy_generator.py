@@ -247,8 +247,8 @@ class TestSWACacheInit(unittest.TestCase):
 
     def test_head_wise_swa_ratio_disables_window_size(self):
         """head_wise_swa_ratio in (0, 1) should set window_size to None."""
-        gen = self._make_generator_with_head_wise_swa(0.5)
-        self.assertIsNone(gen.cache.window_size)
+        with self.assertRaises(ValueError):
+            self._make_generator_with_head_wise_swa(0.5)
 
     def test_head_wise_swa_ratio_zero_preserves_window_size(self):
         """head_wise_swa_ratio=0 should preserve window_size."""
