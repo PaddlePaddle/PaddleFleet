@@ -171,6 +171,11 @@ class GPTEmbedding(FleetLayer):
             attn_mask_startend_row_indices = dict_args.get(
                 "startend_row_indices", None
             )
+        attn_mask_startend_row_indices = (
+            attn_mask_startend_row_indices.to(device)
+            if attn_mask_startend_row_indices is not None
+            else None
+        )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
@@ -633,7 +638,7 @@ class GPTEmbedding(FleetLayer):
                 )
 
         preproc_output = {
-            "hidden_states": decoder_input,
+            "hidden_states": decoder_input.contiguous(),  # prepare for pp send
             "attention_mask": attention_mask,
             "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "rotary_pos_emb": rotary_pos_emb,
