@@ -1,4 +1,4 @@
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -166,6 +166,98 @@ class TestMTPSharedLastLayer(unittest.TestCase):
         assert not paddle.isnan(loss).any(), "Loss contains NaN"
         assert not paddle.isinf(loss).any(), "Loss contains Inf"
         print(f"Loss with mtp_shared_last_layer: {loss.item()}")
+
+    def test_config_incompatible_with_use_dense_mtp(self):
+        """mtp_shared_last_layer=True + use_dense_mtp=True should raise AssertionError."""
+        with self.assertRaises(AssertionError) as ctx:
+            GPTConfig(
+                num_hidden_layers=2,
+                hidden_size=512,
+                vocab_size=100,
+                max_sequence_length=64,
+                num_attention_heads=4,
+                intermediate_size=1024,
+                normalization="RMSNorm",
+                num_nextn_predict_layers=1,
+                mtp_shared_last_layer=True,
+                use_dense_mtp=True,
+            )
+        self.assertIn("mtp_shared_last_layer", str(ctx.exception))
+
+    def test_not_shared_when_disabled(self):
+        """With mtp_shared_last_layer=False, MTP and backbone should NOT share params."""
+        config = GPTConfig(
+            num_hidden_layers=2,
+            hidden_size=512,
+            vocab_size=100,
+            max_sequence_length=64,
+            num_attention_heads=4,
+            moe_expert_fusion=False,
+            intermediate_size=1024,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            n_routed_experts=8,
+            moe_intermediate_size=1024,
+            moe_token_dispatcher_type="alltoall",
+            n_shared_experts=1,
+            use_bias=False,
+            rotary_percent=1.0,
+            rotary_base=10000,
+            rope_scaling=1.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            tie_word_embeddings=True,
+            use_qk_norm=True,
+            num_nextn_predict_layers=1,
+            mtp_shared_last_layer=False,
+        )
+        model = gpt_builder(config, num_stages=1)
+        last_tl = self._find_last_transformer_layer(model)
+        mtp_layer = self._find_mtp_layer(model)
+        assert mtp_layer is not None
+
+        backbone_params = dict(last_tl.transformer_layer_weights)
+        mtp_params = dict(mtp_layer.transformer_layer_weights)
+        shared_count = sum(
+            1
+            for name in mtp_params
+            if name in backbone_params
+            and mtp_params[name].data_ptr() == backbone_params[name].data_ptr()
+        )
+        self.assertEqual(shared_count, 0)
+
+    def test_non_last_layer_not_shared(self):
+        """Non-last transformer layers should not share params with MTP."""
+        layers = []
+        for layer in self.model.run_function:
+            if isinstance(layer, TransformerLayer):
+                layers.append(layer)
+        assert len(layers) > 1
+        first_tl = layers[0]
+        mtp_layer = self._find_mtp_layer(self.model)
+
+        first_params = dict(first_tl.transformer_layer_weights)
+        mtp_params = dict(mtp_layer.transformer_layer_weights)
+        shared_count = sum(
+            1
+            for name in mtp_params
+            if name in first_params
+            and mtp_params[name].data_ptr() == first_params[name].data_ptr()
+        )
+        self.assertEqual(shared_count, 0)
+
+    def test_mtp_weights_delegate_to_inner_transformer(self):
+        """MTP.transformer_layer_weights should equal its inner transformer_layer.named_parameters."""
+        mtp_layer = self._find_mtp_layer(self.model)
+        assert mtp_layer is not None
+        mtp_weights = dict(mtp_layer.transformer_layer_weights)
+        inner_weights = dict(mtp_layer.transformer_layer.named_parameters())
+        self.assertEqual(set(mtp_weights.keys()), set(inner_weights.keys()))
 
 
 if __name__ == "__main__":
