@@ -93,11 +93,15 @@ class Gemma4SelfAttention(SelfAttention):
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
     ):
-        # Determine layer type
+        # Determine layer type: layer_number = i + num_empty_layers_add_in_head
+        # from layer_specs factory; logical index into layer_types is layer_number
+        # minus the empty-layer offset.
         layer_types = getattr(config, "layer_types", None)
+        num_empty = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+        logical_idx = layer_number - num_empty
         self.is_sliding = (
-            layer_types[layer_number - 1] == "sliding_attention"
-            if layer_types
+            layer_types[logical_idx] == "sliding_attention"
+            if layer_types and 0 <= logical_idx < len(layer_types)
             else True
         )
 

@@ -576,7 +576,7 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
         attn = Gemma4SelfAttention.__new__(Gemma4SelfAttention)
         # Call __init__ manually (SelfAttention.__init__ is mocked)
         Gemma4SelfAttention.__init__(
-            attn, config=config, sublayers_spec=sublayers_spec, layer_number=1
+            attn, config=config, sublayers_spec=sublayers_spec, layer_number=0
         )
         self.assertTrue(attn.is_sliding)
         self.assertFalse(attn._tied_kv)
@@ -604,7 +604,7 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
         sublayers_spec = MagicMock()
         attn = Gemma4SelfAttention.__new__(Gemma4SelfAttention)
         Gemma4SelfAttention.__init__(
-            attn, config=config, sublayers_spec=sublayers_spec, layer_number=2
+            attn, config=config, sublayers_spec=sublayers_spec, layer_number=1
         )
         self.assertFalse(attn.is_sliding)
         self.assertTrue(attn._tied_kv)
