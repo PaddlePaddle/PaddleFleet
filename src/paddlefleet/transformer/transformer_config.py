@@ -987,7 +987,10 @@ class TransformerConfig(ModelParallelConfig):
         super().__post_init__()
 
         if self.init_method_std is None:
-            self.init_method_std = math.sqrt(0.3333 / self.hidden_size)
+            if self.hidden_size == 0:
+                self.init_method_std = 0.02
+            else:
+                self.init_method_std = math.sqrt(0.3333 / self.hidden_size)
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
