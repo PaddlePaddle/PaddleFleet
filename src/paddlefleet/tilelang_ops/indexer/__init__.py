@@ -17,9 +17,17 @@ from .csa_indexer import (
     csa_indexer_bwd,
     csa_indexer_topk_fwd,
 )
+from .dsa_indexer import (
+    dsa_indexer_bwd_interface,
+    dsa_indexer_topk_reducesum_interface,
+    dsa_prepare_varlen_metadata,
+)
 
 __all__ = [
     "csa_attn_target_reducesum",
     "csa_indexer_bwd",
     "csa_indexer_topk_fwd",
+    "dsa_indexer_bwd_interface",
+    "dsa_indexer_topk_reducesum_interface",
+    "dsa_prepare_varlen_metadata",
 ]

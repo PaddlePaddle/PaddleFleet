@@ -817,6 +817,13 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_loss_coeff: float = 0.01
     """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
 
+    dsa_tilelang_enable: bool = False
+    """Enable TileLang fused DSA kernels (indexer topk + sparse MLA).
+
+    When True, DSAttention uses TileLangDSAFusedFunction for fused indexer+attention
+    instead of the unfused Paddle small-op reference path.
+    """
+
     ####################
     # CSA / DSv4 Hybrid Attention
     ####################
@@ -921,6 +928,7 @@ class TransformerConfig(ModelParallelConfig):
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
         "indexer_rope_interleave": "dsa_indexer_rotary_interleaved",
+        "dsa_tilelang_enable": "dsa_tilelang_enable",
         # CSA / DSv4 Hybrid field mapping
         "csa_window_size": "csa_window_size",
         "csa_compress_ratios": "csa_compress_ratios",

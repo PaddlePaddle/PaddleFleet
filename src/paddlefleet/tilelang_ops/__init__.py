@@ -21,6 +21,12 @@ __all__ = [
     "csa_indexer_bwd",
     "csa_indexer_topk_fwd",
     "csa_sparse_attn",
+    "dsa_indexer_bwd_interface",
+    "dsa_indexer_topk_reducesum_interface",
+    "dsa_prepare_varlen_metadata",
+    "dsa_sparse_mla_bwd_interface",
+    "dsa_sparse_mla_fwd_interface",
+    "dsa_sparse_mla_topk_reducesum_interface",
 ]
 
 
@@ -48,4 +54,40 @@ def __getattr__(name):
 
         globals()[name] = csa_sparse_attn
         return csa_sparse_attn
+    if name in {
+        "dsa_indexer_bwd_interface",
+        "dsa_indexer_topk_reducesum_interface",
+        "dsa_prepare_varlen_metadata",
+    }:
+        from .indexer.dsa_indexer import (
+            dsa_indexer_bwd_interface,
+            dsa_indexer_topk_reducesum_interface,
+            dsa_prepare_varlen_metadata,
+        )
+
+        exports = {
+            "dsa_indexer_bwd_interface": dsa_indexer_bwd_interface,
+            "dsa_indexer_topk_reducesum_interface": dsa_indexer_topk_reducesum_interface,
+            "dsa_prepare_varlen_metadata": dsa_prepare_varlen_metadata,
+        }
+        globals().update(exports)
+        return exports[name]
+    if name in {
+        "dsa_sparse_mla_bwd_interface",
+        "dsa_sparse_mla_fwd_interface",
+        "dsa_sparse_mla_topk_reducesum_interface",
+    }:
+        from .attn.sparse_mla import (
+            dsa_sparse_mla_bwd_interface,
+            dsa_sparse_mla_fwd_interface,
+            dsa_sparse_mla_topk_reducesum_interface,
+        )
+
+        exports = {
+            "dsa_sparse_mla_bwd_interface": dsa_sparse_mla_bwd_interface,
+            "dsa_sparse_mla_fwd_interface": dsa_sparse_mla_fwd_interface,
+            "dsa_sparse_mla_topk_reducesum_interface": dsa_sparse_mla_topk_reducesum_interface,
+        }
+        globals().update(exports)
+        return exports[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

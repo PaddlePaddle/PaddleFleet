@@ -488,12 +488,16 @@ class MultiLatentAttention(Attention):
         layer_idx = kwargs.get("layer_idx")
         use_cache = kwargs.get("use_cache", False)
 
+        needs_absorbed_q = getattr(self.config, "dsa_index_n_heads", None) is not None
         if (
-            hasattr(self.core_attention.config, "forward_meta")
-            and self.core_attention.config.forward_meta.max_len_tensor_cpu[2]
-            > 0
-        ):  # decode mode
-            # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
+            needs_absorbed_q
+            or (
+                hasattr(self.core_attention.config, "forward_meta")
+                and self.core_attention.config.forward_meta.max_len_tensor_cpu[2]
+                > 0
+            )
+        ):  # decode mode or fused DSA training path
+            # Compute absorbed query and V de-absorption weight for FD MLA decode/fused DSA kernel
             # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
             # wv_b: [heads, kv_lora_rank, v_head_dim]
             q_absorbed, wv_b = self._compute_absorbed_q(query)
