@@ -1068,162 +1068,58 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
                     ).item()
                 )
 
-    def test_attention_top_level_metadata_reuse_matches_recompute_bitwise(self):
-        test_cases = [
-            (0, 64, [17, 23, 11]),
-            (4, 64, [17, 23, 11]),
-            (128, 256, [129, 80, 40]),
-        ]
-        for ratio, seq_len, doc_lens in test_cases:
-            with self.subTest(ratio=ratio, doc_lens=doc_lens):
-                paddle.seed(_SEED)
-                config = _make_config(
-                    hidden_size=64,
-                    num_attention_heads=2,
-                    v_head_dim=32,
-                    q_lora_rank=32,
-                    o_groups=2,
-                    o_lora_rank=16,
-                    csa_window_size=32,
-                    dsa_indexer_loss_coeff=0.0,
-                    csa_compress_ratios=[ratio],
-                    num_layers=1,
-                    csa_indexer_backend="unfused",
-                    csa_sparse_attn_backend="unfused",
-                )
-                model_parallel_cuda_manual_seed(_SEED)
-                reuse_attn = _build_attention(config, layer_number=0)
-                model_parallel_cuda_manual_seed(_SEED)
-                recompute_attn = _build_attention(config, layer_number=0)
-                recompute_attn.set_state_dict(reuse_attn.state_dict())
-                reuse_attn.eval()
-                recompute_attn.eval()
+    def test_attention_top_level_reuses_docmask_metadata_once(self):
+        paddle.seed(_SEED)
+        config = _make_config(
+            hidden_size=64,
+            num_attention_heads=2,
+            v_head_dim=32,
+            q_lora_rank=32,
+            o_groups=2,
+            o_lora_rank=16,
+            csa_window_size=32,
+            dsa_indexer_loss_coeff=0.0,
+            csa_compress_ratios=[4],
+            num_layers=1,
+            csa_indexer_backend="unfused",
+            csa_sparse_attn_backend="unfused",
+        )
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(config, layer_number=0)
+        attn.eval()
+        hidden = paddle.randn([1, 64, config.hidden_size], dtype="bfloat16")
+        startend_row_indices = _make_startend_row_indices([17, 23, 11], 64)
 
-                hidden = paddle.randn(
-                    [1, seq_len, config.hidden_size], dtype="bfloat16"
-                )
-                startend_row_indices = _make_startend_row_indices(
-                    doc_lens, seq_len
-                )
+        with (
+            patch(
+                "paddlefleet.transformer.dsv4_hybrid_attention.get_or_build_csa_docmask_meta",
+                wraps=get_or_build_csa_docmask_meta,
+            ) as top_level_get_or_build,
+            patch(
+                "paddlefleet.transformer.csa_attention.CSADocMaskMetadata.build",
+                wraps=CSADocMaskMetadata.build,
+            ) as build_meta,
+            paddle.no_grad(),
+        ):
+            out_first, _ = attn(
+                hidden_states=hidden,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
+            out_second, _ = attn(
+                hidden_states=hidden.clone(),
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
 
-                with paddle.no_grad():
-                    with patch.dict(
-                        "os.environ",
-                        {"CSA_DISABLE_DOCMASK_META_REUSE": "0"},
-                    ):
-                        reuse_out, _ = reuse_attn(
-                            hidden_states=hidden,
-                            attention_mask=None,
-                            attn_mask_startend_row_indices=startend_row_indices,
-                        )
-                    with patch.dict(
-                        "os.environ",
-                        {"CSA_DISABLE_DOCMASK_META_REUSE": "1"},
-                    ):
-                        recompute_out, _ = recompute_attn(
-                            hidden_states=hidden.clone(),
-                            attention_mask=None,
-                            attn_mask_startend_row_indices=startend_row_indices,
-                        )
-
-                self.assertTrue(
-                    paddle.equal_all(
-                        reuse_out.cast("float32"),
-                        recompute_out.cast("float32"),
-                    ).item()
-                )
-
-    def test_attention_metadata_reuse_matches_recompute_backward_bitwise(self):
-        test_cases = [
-            (0, 64, [17, 23, 11]),
-            (4, 64, [17, 23, 11]),
-            (128, 256, [129, 80, 40]),
-        ]
-        for ratio, seq_len, doc_lens in test_cases:
-            with self.subTest(ratio=ratio, doc_lens=doc_lens):
-                paddle.seed(_SEED)
-                config = _make_config(
-                    hidden_size=64,
-                    num_attention_heads=2,
-                    v_head_dim=32,
-                    q_lora_rank=32,
-                    o_groups=2,
-                    o_lora_rank=16,
-                    csa_window_size=32,
-                    dsa_indexer_loss_coeff=0.0,
-                    csa_compress_ratios=[ratio],
-                    num_layers=1,
-                    csa_indexer_backend="unfused",
-                    csa_sparse_attn_backend="unfused",
-                )
-                model_parallel_cuda_manual_seed(_SEED)
-                reuse_attn = _build_attention(config, layer_number=0)
-                model_parallel_cuda_manual_seed(_SEED)
-                recompute_attn = _build_attention(config, layer_number=0)
-                recompute_attn.set_state_dict(reuse_attn.state_dict())
-                reuse_attn.train()
-                recompute_attn.train()
-
-                hidden = paddle.randn(
-                    [1, seq_len, config.hidden_size], dtype="bfloat16"
-                )
-                grad = paddle.randn(
-                    [1, seq_len, config.hidden_size], dtype="bfloat16"
-                )
-                startend_row_indices = _make_startend_row_indices(
-                    doc_lens, seq_len
-                )
-
-                reuse_hidden = hidden.clone()
-                recompute_hidden = hidden.clone()
-                reuse_hidden.stop_gradient = False
-                recompute_hidden.stop_gradient = False
-
-                with patch.dict(
-                    "os.environ", {"CSA_DISABLE_DOCMASK_META_REUSE": "0"}
-                ):
-                    reuse_out, _ = reuse_attn(
-                        hidden_states=reuse_hidden,
-                        attention_mask=None,
-                        attn_mask_startend_row_indices=startend_row_indices,
-                    )
-                    reuse_out.backward(grad)
-                with patch.dict(
-                    "os.environ", {"CSA_DISABLE_DOCMASK_META_REUSE": "1"}
-                ):
-                    recompute_out, _ = recompute_attn(
-                        hidden_states=recompute_hidden,
-                        attention_mask=None,
-                        attn_mask_startend_row_indices=startend_row_indices,
-                    )
-                    recompute_out.backward(grad)
-
-                self.assertTrue(
-                    paddle.equal_all(
-                        reuse_out.cast("float32"),
-                        recompute_out.cast("float32"),
-                    ).item()
-                )
-                self.assertTrue(
-                    paddle.equal_all(
-                        reuse_hidden.grad.cast("float32"),
-                        recompute_hidden.grad.cast("float32"),
-                    ).item()
-                )
-
-                reuse_params = dict(reuse_attn.named_parameters())
-                for name, recompute_param in recompute_attn.named_parameters():
-                    if recompute_param.grad is None:
-                        self.assertIsNone(reuse_params[name].grad, name)
-                        continue
-                    self.assertIsNotNone(reuse_params[name].grad, name)
-                    self.assertTrue(
-                        paddle.equal_all(
-                            reuse_params[name].grad.cast("float32"),
-                            recompute_param.grad.cast("float32"),
-                        ).item(),
-                        name,
-                    )
+        self.assertGreaterEqual(top_level_get_or_build.call_count, 2)
+        self.assertEqual(build_meta.call_count, 2)
+        self.assertTrue(
+            paddle.equal_all(
+                out_first.cast("float32"),
+                out_second.cast("float32"),
+            ).item()
+        )
 
     def test_top_level_builds_ratio_one_metadata_for_window_only_docmask(self):
         paddle.seed(_SEED)
@@ -1239,6 +1135,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             csa_indexer_backend="unfused",
             csa_sparse_attn_backend="unfused",
         )
+        model_parallel_cuda_manual_seed(_SEED)
         attn = _build_attention(config, layer_number=0)
         attn.eval()
         hidden = paddle.randn([1, 32, config.hidden_size], dtype="bfloat16")

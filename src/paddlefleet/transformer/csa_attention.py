@@ -72,21 +72,6 @@ from paddlefleet.transformer.cp_utils import (
 )
 
 
-def is_csa_docmask_meta_reuse_disabled() -> bool:
-    return os.getenv("CSA_DISABLE_DOCMASK_META_REUSE", "0") == "1"
-
-
-def _csa_docmask_as_int(value, name: str) -> int:
-    if isinstance(value, Tensor):
-        numel = value.numel()
-        if isinstance(numel, Tensor):
-            numel = numel.item()
-        if numel != 1:
-            raise ValueError(f"{name} must be scalar, got shape: {value.shape}")
-        return int(value.item())
-    return int(value)
-
-
 def _normalize_csa_docmask_args(
     ratio: int,
     batch_size: int,
@@ -95,11 +80,11 @@ def _normalize_csa_docmask_args(
     *,
     require_batch_one: bool = True,
 ) -> tuple[int, int, int, int]:
-    ratio = _csa_docmask_as_int(ratio, "ratio")
-    batch_size = _csa_docmask_as_int(batch_size, "batch_size")
-    seqlen = _csa_docmask_as_int(seqlen, "seqlen")
+    ratio = int(ratio)
+    batch_size = int(batch_size)
+    seqlen = int(seqlen)
     if n_compressed is not None:
-        n_compressed = _csa_docmask_as_int(n_compressed, "n_compressed")
+        n_compressed = int(n_compressed)
     if ratio <= 0:
         raise ValueError(f"ratio must be positive, got ratio: {ratio}")
     if seqlen <= 0:
@@ -285,15 +270,6 @@ def get_cutoff_doc_starts(cutoff_doc_lens: Tensor) -> Tensor:
     return starts
 
 
-def _get_actual_n_compressed_from_docmask(
-    ratio: int,
-    startend_row_indices: Tensor,
-) -> int:
-    doc_lens = get_doc_lens(startend_row_indices)
-    doc_lens_cutoff = get_cutoff_doc_lens(doc_lens, ratio)
-    return int(doc_lens_cutoff.sum().item()) // ratio
-
-
 @dataclass
 class CSADocMaskMetadata:
     """Reusable CSA metadata derived from ``startend_row_indices``."""
@@ -384,8 +360,9 @@ class CSADocMaskMetadata:
     ) -> bool:
         """Return True if this instance can be reused for the given inputs.
 
-        Reuse is limited to the same tensor object and matching shape/ratio.
-        Callers should build metadata once per forward and pass it explicitly.
+        Reuse is safe only for the same docmask tensor and identical metadata
+        layout parameters. Different ratios or compressed widths derive
+        different packed compressed columns from the same document boundaries.
         """
         ratio, batch_size, seqlen, n_compressed = _normalize_csa_docmask_args(
             ratio, batch_size, seqlen, n_compressed, require_batch_one=False
@@ -532,12 +509,8 @@ def get_or_build_csa_docmask_meta(
     ratio, batch_size, seqlen, n_compressed = _normalize_csa_docmask_args(
         ratio, batch_size, seqlen, n_compressed
     )
-    if (
-        docmask_meta is not None
-        and not is_csa_docmask_meta_reuse_disabled()
-        and docmask_meta.matches(
-            ratio, batch_size, seqlen, startend_row_indices, n_compressed
-        )
+    if docmask_meta is not None and docmask_meta.matches(
+        ratio, batch_size, seqlen, startend_row_indices, n_compressed
     ):
         return docmask_meta
     return CSADocMaskMetadata.build(
@@ -623,7 +596,6 @@ def get_window_topk_idxs(
 
     if not (
         docmask_meta is not None
-        and not is_csa_docmask_meta_reuse_disabled()
         and docmask_meta.batch_size == batch_size
         and docmask_meta.seqlen == seqlen
         and docmask_meta.startend_row_indices is startend_row_indices
@@ -1677,8 +1649,6 @@ class CSAIndexer(nn.Layer):
         compressor so that indexer K is computed over the full global sequence.
         """
         b, sq, _ = x.shape
-        if is_csa_docmask_meta_reuse_disabled():
-            docmask_meta = None
         doc_lens = docmask_meta.doc_lens if docmask_meta is not None else None
         if doc_lens is None and startend_row_indices is not None:
             doc_lens = get_doc_lens(startend_row_indices)
@@ -2197,12 +2167,7 @@ class CompressedSparseAttention(FleetLayer):
                 docmask_meta=docmask_meta,
             )
 
-        reuse_docmask_meta = not is_csa_docmask_meta_reuse_disabled()
-        if (
-            startend_row_indices is not None
-            and self.compress_ratio > 1
-            and reuse_docmask_meta
-        ):
+        if startend_row_indices is not None and self.compress_ratio > 1:
             docmask_meta = get_or_build_csa_docmask_meta(
                 ratio=self.compress_ratio,
                 batch_size=b,
@@ -2211,11 +2176,6 @@ class CompressedSparseAttention(FleetLayer):
                 docmask_meta=docmask_meta,
             )
             actual_n_compressed = docmask_meta.actual_n_compressed
-        elif startend_row_indices is not None and self.compress_ratio > 1:
-            docmask_meta = None
-            actual_n_compressed = _get_actual_n_compressed_from_docmask(
-                self.compress_ratio, startend_row_indices
-            )
         elif self.compress_ratio > 1:
             actual_n_compressed = sq // self.compress_ratio
         else:
@@ -2354,12 +2314,7 @@ class CompressedSparseAttention(FleetLayer):
         q_positions = paddle.arange(
             position_offset, position_offset + sq, dtype="int64"
         )
-        reuse_docmask_meta = not is_csa_docmask_meta_reuse_disabled()
-        if (
-            startend_row_indices is not None
-            and self.compress_ratio > 1
-            and reuse_docmask_meta
-        ):
+        if startend_row_indices is not None and self.compress_ratio > 1:
             docmask_meta = get_or_build_csa_docmask_meta(
                 ratio=self.compress_ratio,
                 batch_size=b,
@@ -2367,8 +2322,6 @@ class CompressedSparseAttention(FleetLayer):
                 startend_row_indices=startend_row_indices,
                 docmask_meta=docmask_meta,
             )
-        elif startend_row_indices is not None and self.compress_ratio > 1:
-            docmask_meta = None
 
         # Step 1: Window topk (CP-aware: uses global q_positions)
         if startend_row_indices is None:
@@ -2406,12 +2359,7 @@ class CompressedSparseAttention(FleetLayer):
 
         # Compute actual_n_compressed accounting for document boundaries
         if startend_row_indices is not None and self.compress_ratio > 1:
-            if docmask_meta is not None:
-                actual_n_compressed = docmask_meta.actual_n_compressed
-            else:
-                actual_n_compressed = _get_actual_n_compressed_from_docmask(
-                    self.compress_ratio, startend_row_indices
-                )
+            actual_n_compressed = docmask_meta.actual_n_compressed
         elif self.compress_ratio > 1:
             actual_n_compressed = n_compressed_global
         else:

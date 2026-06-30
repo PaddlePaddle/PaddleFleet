@@ -46,7 +46,6 @@ from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
     get_or_build_csa_docmask_meta,
-    is_csa_docmask_meta_reuse_disabled,
 )
 
 if TYPE_CHECKING:
@@ -310,10 +309,7 @@ class DSv4HybridAttention(Attention):
 
         docmask_meta = None
         ratio = int(getattr(self.core_attention, "compress_ratio", 0))
-        if (
-            startend_row_indices is not None
-            and not is_csa_docmask_meta_reuse_disabled()
-        ):
+        if startend_row_indices is not None:
             docmask_seqlen = sq * cp_size if cp_size > 1 else sq
             docmask_meta = get_or_build_csa_docmask_meta(
                 ratio=max(1, ratio),
@@ -322,8 +318,6 @@ class DSv4HybridAttention(Attention):
                 startend_row_indices=startend_row_indices,
                 docmask_meta=docmask_meta,
             )
-        else:
-            docmask_meta = None
 
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(
