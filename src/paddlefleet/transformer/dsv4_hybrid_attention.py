@@ -45,7 +45,6 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
-    get_or_build_csa_docmask_meta,
 )
 
 if TYPE_CHECKING:
@@ -311,12 +310,11 @@ class DSv4HybridAttention(Attention):
         ratio = int(getattr(self.core_attention, "compress_ratio", 0))
         if startend_row_indices is not None:
             docmask_seqlen = sq * cp_size if cp_size > 1 else sq
-            docmask_meta = get_or_build_csa_docmask_meta(
-                ratio=max(1, ratio),
-                batch_size=b,
-                seqlen=docmask_seqlen,
-                startend_row_indices=startend_row_indices,
-                docmask_meta=docmask_meta,
+            docmask_meta = CSADocMaskMetadata.build(
+                max(1, ratio),
+                b,
+                docmask_seqlen,
+                startend_row_indices,
             )
 
         query, key, value, q_compressed, kv_compressed = (

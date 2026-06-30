@@ -41,7 +41,6 @@ from paddlefleet.transformer.csa_attention import (
     _resolve_csa_indexer_attn_topk_effective,
     _resolve_csa_indexer_loss_topk_effective,
     get_compress_topk_idxs,
-    get_or_build_csa_docmask_meta,
     get_valid_range,
     get_window_topk_idxs,
 )
@@ -533,37 +532,6 @@ class TestCSADocMaskMetadata(unittest.TestCase):
     def test_metadata_rejects_inconsistent_shape(self):
         with self.assertRaisesRegex(ValueError, "startend_row_indices"):
             CSADocMaskMetadata.build(4, 1, 8, self._make_docmask())
-
-    def test_metadata_match_rejects_unregistered_same_shape_mask(self):
-        meta = CSADocMaskMetadata.build(4, 1, 16, self._make_docmask())
-        different_startend_row_indices = paddle.to_tensor(
-            [8] * 8 + [16] * 8, dtype="int32"
-        ).reshape([1, 1, 16, 1])
-
-        self.assertFalse(
-            meta.matches(
-                4,
-                1,
-                16,
-                different_startend_row_indices,
-            )
-        )
-
-    def test_get_or_build_reuses_only_matching_metadata(self):
-        startend_row_indices = self._make_docmask()
-        meta_ratio_4 = get_or_build_csa_docmask_meta(
-            4, 1, 16, startend_row_indices
-        )
-        reused = get_or_build_csa_docmask_meta(
-            4, 1, 16, startend_row_indices, docmask_meta=meta_ratio_4
-        )
-        meta_ratio_8 = get_or_build_csa_docmask_meta(
-            8, 1, 16, startend_row_indices, docmask_meta=meta_ratio_4
-        )
-
-        self.assertIs(reused, meta_ratio_4)
-        self.assertIsNot(meta_ratio_8, meta_ratio_4)
-        self.assertEqual(meta_ratio_8.ratio, 8)
 
 
 class TestDSv4HybridDocumentRoPE(unittest.TestCase):
@@ -1092,11 +1060,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dsv4_hybrid_attention.get_or_build_csa_docmask_meta",
-                wraps=get_or_build_csa_docmask_meta,
-            ) as top_level_get_or_build,
-            patch(
-                "paddlefleet.transformer.csa_attention.CSADocMaskMetadata.build",
+                "paddlefleet.transformer.dsv4_hybrid_attention.CSADocMaskMetadata.build",
                 wraps=CSADocMaskMetadata.build,
             ) as build_meta,
             paddle.no_grad(),
@@ -1112,7 +1076,6 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
                 attn_mask_startend_row_indices=startend_row_indices,
             )
 
-        self.assertGreaterEqual(top_level_get_or_build.call_count, 2)
         self.assertEqual(build_meta.call_count, 2)
         self.assertTrue(
             paddle.equal_all(
@@ -1143,8 +1106,8 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dsv4_hybrid_attention.get_or_build_csa_docmask_meta",
-                wraps=get_or_build_csa_docmask_meta,
+                "paddlefleet.transformer.dsv4_hybrid_attention.CSADocMaskMetadata.build",
+                wraps=CSADocMaskMetadata.build,
             ) as mocked,
             paddle.no_grad(),
         ):
@@ -1155,7 +1118,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             )
 
         self.assertGreaterEqual(mocked.call_count, 1)
-        self.assertEqual(mocked.call_args_list[0].kwargs["ratio"], 1)
+        self.assertEqual(mocked.call_args_list[0].args[0], 1)
 
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):
