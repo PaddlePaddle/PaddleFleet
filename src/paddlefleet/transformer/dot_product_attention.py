@@ -44,6 +44,7 @@ from paddlefleet.refined_recompute import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.sink_impl import sink_attention_forward
 from paddlefleet.transformer.utils import (
     attention_mask_func,
     startend_row_indices_add_sliding_window,
@@ -207,6 +208,54 @@ class DotProductAttention(FleetLayer):
             raise ValueError("Softmax type not supported")
         self.rr_flashmask_attention_func = rr_flashmask_attention()
         self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
+
+
+    def _sink_forward(
+        self,
+        query,
+        key,
+        value,
+        *,
+        attention_mask=None,
+        startend_row_indices=None,
+        causal: bool,
+    ):
+        """Shared sink dispatch for packed / SDPA / FlashMask paths."""
+        bsz, q_len = query.shape[0], query.shape[1]
+
+        q_head_dim = query.shape[-1]
+        v_head_dim = value.shape[-1]
+
+        need_value_padding = q_head_dim != v_head_dim
+        if need_value_padding:
+            # Pad value to match query head_dim
+            # value: [b, s, h, v_head_dim] -> [b, s, h, q_head_dim]
+            bsz, seq_len, num_heads, _ = value.shape
+            value_padding = paddle.zeros(
+                [bsz, seq_len, num_heads, q_head_dim - v_head_dim],
+                dtype=value.dtype,
+            )
+            value_padded = paddle.concat([value, value_padding], axis=-1)
+        else:
+            value_padded = value
+
+        out = sink_attention_forward(
+            query.astype(value.dtype),
+            key.astype(value.dtype),
+            value_padded.astype(value.dtype),
+            self.softmax_offset,
+            attention_mask=attention_mask,
+            startend_row_indices=startend_row_indices,
+            dropout_p=self.config.attention_dropout,
+            softmax_scale=self.softmax_scale,
+            causal=causal,
+        )
+
+        if need_value_padding:
+            out = out[..., :v_head_dim]
+
+        return out.reshape([bsz, q_len, -1])
+
 
     def _ec_compatible_flash_attention(
         self, query, key, value, attn_mask_startend_row_indices=None
@@ -402,6 +451,11 @@ class DotProductAttention(FleetLayer):
                     .unsqueeze(0)
                 )  # [1, 1, seq_len, 4]
 
+            # print("bqw_debug dot0, add_full_attention_sink_bias = ", self.config.add_full_attention_sink_bias)
+            # print("bqw_debug dot0, is_swa = ", self.is_swa)
+            # print("bqw_debug dot0, add_swa_attention_sink_bias = ", self.config.add_swa_attention_sink_bias)
+            # print("bqw_debug dot0, now not start sink")
+
             if use_rr_flash_attention:
                 flashmask_attention_func = self.rr_flashmask_attention_func
             elif self.config.flashmask_use_varlen:
@@ -429,6 +483,12 @@ class DotProductAttention(FleetLayer):
             assert self.is_swa is False, (
                 "SWA doesn't support scaled_dot_product_attention"
             )
+
+            # print("bqw_debug dot1, add_full_attention_sink_bias = ", self.config.add_full_attention_sink_bias)
+            # print("bqw_debug dot1, is_swa = ", self.is_swa)
+            # print("bqw_debug dot1, add_swa_attention_sink_bias = ", self.config.add_swa_attention_sink_bias)
+            # print("bqw_debug dot1, now not start sink")
+
             # KV cache support for inference
             if use_cache and past_key_values is not None:
                 key, value = past_key_values.update(key, value, layer_idx)
@@ -469,6 +529,11 @@ class DotProductAttention(FleetLayer):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             is_causal = attn_mask_type == AttnMaskType.causal
+            # print("bqw_debug dot2, add_full_attention_sink_bias = ", self.config.add_full_attention_sink_bias)
+            # print("bqw_debug dot2, is_swa = ", self.is_swa)
+            # print("bqw_debug dot2, add_swa_attention_sink_bias = ", self.config.add_swa_attention_sink_bias)
+            # print("bqw_debug dot2, now not start sink")
+
             if self.context_parallel_size > 1:
                 flashmask_attention_func = (
                     self.rr_flashmask_attention_cp_func
@@ -517,6 +582,17 @@ class DotProductAttention(FleetLayer):
                         self.head_wise_swa_ratio,
                         value.shape[2],
                     )
+                )
+
+            if self.softmax_offset is not None:
+                # print("bqw_debug dot2, now start sink")
+                # print("bqw_debug startend_row_indices", attn_mask_startend_row_indices)
+                return self._sink_forward(
+                    query,
+                    key,
+                    value,
+                    startend_row_indices=attn_mask_startend_row_indices,
+                    causal=(attn_mask_type == AttnMaskType.causal),
                 )
 
             attn_output = flashmask_attention_func(
