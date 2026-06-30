@@ -1425,7 +1425,7 @@ class TestTileLangCSAIndexerLossAutoScaler(unittest.TestCase):
 class TestCSAForwardTileLangFwdOnlyPath(unittest.TestCase):
     """Cover the TileLang fwd-only indexer path (csa_attention.py ~1209-1226).
 
-    When csa_tilelang_enable_indexer=True but training=False (or loss_coeff=0),
+    When training=False (or loss_coeff=0),
     the code enters the fwd-only branch that calls csa_indexer_topk_fwd under
     no_grad and uses its indices for sparse attention.
     """
@@ -1493,7 +1493,6 @@ class TestCSAForwardTileLangFwdOnlyPath(unittest.TestCase):
             dsa_index_topk=16,
             dsa_indexer_loss_coeff=0.0,
             dsa_indexer_use_sparse_loss=False,
-            csa_tilelang_enable_indexer=True,
             csa_sparse_attn_backend="unfused",
             csa_indexer_backend="tilelang",
             init_method=None,
@@ -1537,8 +1536,7 @@ class TestCSAForwardTileLangFwdOnlyPath(unittest.TestCase):
         csa_tl.eval()
 
         config_no_tl = types.SimpleNamespace(**vars(config))
-        config_no_tl.csa_tilelang_enable_indexer = False
-
+        config_no_tl.csa_indexer_backend = "unfused"
         paddle.seed(9999)
         csa_ref = CompressedSparseAttention(
             config=config_no_tl,

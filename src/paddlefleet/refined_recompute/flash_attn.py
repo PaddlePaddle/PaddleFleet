@@ -645,11 +645,18 @@ class RefinedRcomputeFlashMaskAttention:
         causal=True,
         return_softmax=False,
         training=True,
+        learnable_sink=None,
     ):
         """
         The main entry point for the forward pass.
         Dispatches to either the first or second forward pass based on autograd state.
         """
+        if learnable_sink is not None:
+            raise NotImplementedError(
+                "refined recompute attention does not support learnable_sink "
+                "(softmax sink); use flashmask_attention / "
+                "flashmask_attention_cp instead."
+            )
         if not framework._dygraph_tracer()._has_grad:
             # This is the initial, normal forward pass.
             attn_output = self._first_fwd(
@@ -858,7 +865,7 @@ class FlashMaskAttnCpFunctor(PyLayer):
         fa_version = ctx.fa_version
 
         # Compute gradients
-        query_grad, key_grad, value_grad = (
+        query_grad, key_grad, value_grad, _ = (
             cp_flashmask_allgatherkv_balance_backward(
                 q,
                 k,
@@ -867,6 +874,7 @@ class FlashMaskAttnCpFunctor(PyLayer):
                 result_attention,
                 softmax_lse,
                 grad,
+                None,
                 group,
                 causal,
                 fa_version,
@@ -904,11 +912,18 @@ class RefinedRcomputeFlashMaskCpAttention:
         causal=False,
         training=True,
         mode="allgather_kv",
+        learnable_sink=None,
     ):
         """
         The main entry point for the forward pass.
         Dispatches to either the first or second forward pass based on autograd state.
         """
+        if learnable_sink is not None:
+            raise NotImplementedError(
+                "refined recompute attention does not support learnable_sink "
+                "(softmax sink); use flashmask_attention / "
+                "flashmask_attention_cp instead."
+            )
         if not framework._dygraph_tracer()._has_grad:
             # This is the initial, normal forward pass.
             attn_output = self._first_fwd(
@@ -982,6 +997,7 @@ class RefinedRcomputeFlashMaskCpAttention:
                 key_states,
                 value_states,
                 startend_row_indices,
+                None,
                 group,
                 causal,
                 training,

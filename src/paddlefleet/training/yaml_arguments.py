@@ -15,6 +15,8 @@
 
 from omegaconf import DictConfig, OmegaConf
 
+_PRESERVED_DICT_CONFIG_KEYS = {"deepep_buffer_configs"}
+
 
 def _flatten_configs(cfg):
     result = {}
@@ -23,7 +25,10 @@ def _flatten_configs(cfg):
         if isinstance(node, DictConfig):
             for k, v in node.items():
                 if isinstance(v, DictConfig):
-                    recurse(v)
+                    if k in _PRESERVED_DICT_CONFIG_KEYS:
+                        result[k] = OmegaConf.to_container(v, resolve=True)
+                    else:
+                        recurse(v)
                 else:
                     result[k] = v
 

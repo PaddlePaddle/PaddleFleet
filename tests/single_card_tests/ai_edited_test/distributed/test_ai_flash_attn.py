@@ -81,6 +81,7 @@ class TestCpFlashmaskBackwardDispatch(unittest.TestCase):
                 out,
                 lse,
                 out_grad,
+                None,
                 group,
                 False,
                 config.fa_version,

@@ -174,7 +174,7 @@ class MoELayer(nn.Layer):
         self.use_ue8m0 = config.use_ue8m0
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
-        self.fp8_dispatch = bool(config.fp8) and not self.using_sonic_moe
+        self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
         self.moe_expert_fusion = config.moe_expert_fusion
         self.moe_subbatch_token_num_after_dispatch = (
@@ -646,6 +646,7 @@ class MoELayer(nn.Layer):
                 self.fp8_dispatch,
                 async_finish=async_finish,
                 use_ue8m0=self.use_ue8m0,
+                using_sonic_moe=self.using_sonic_moe,
             )
         )
         return hidden_states, fp8_dispatched_handle
@@ -743,6 +744,10 @@ class MoELayer(nn.Layer):
             self.token_dispatcher._comm_manager.dispatched_indices
         )
         dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
+        fp8_combine_grad_handle = (
+            {} if self.fp8_dispatch and self.using_sonic_moe else None
+        )
+        # fp8_combine_grad_handle = None
 
         with profile("fusion_mlp"):
             if self._use_hybrid_ep_fusion():
@@ -753,11 +758,17 @@ class MoELayer(nn.Layer):
                 )
             elif self.using_sonic_moe:
                 use_fp8 = self.fp8 is not None
+                fp8_scale = None
+                if fp8_dispatched_handle is not None:
+                    fp8_scale = fp8_dispatched_handle["scale"]
                 hidden_states = self.grouped_gemm_experts(
                     dispatched_hidden_states,
                     dispatched_indices,
                     dispatched_probs,
                     use_fp8,
+                    tokens_per_expert=self.token_dispatcher._comm_manager.tokens_per_expert,
+                    fp8_scale=fp8_scale,
+                    fp8_combine_grad_handle=fp8_combine_grad_handle,
                 )
             else:
                 hidden_states = FusionMoePyLayer.apply(
@@ -787,6 +798,8 @@ class MoELayer(nn.Layer):
                 hidden_states,
                 combine_overlap_handle,
                 use_rr_deepep_combine=self.use_rr_deepep_combine,
+                fp8_dispatch=self.fp8_dispatch and self.using_sonic_moe,
+                combine_grad_handle=fp8_combine_grad_handle,
             )
 
         # Latent MoE: project back from latent space to hidden_size
@@ -1196,6 +1209,11 @@ class MoELayer(nn.Layer):
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         if not (self.moe_use_fusion_node and self.fp8):
+            return
+        if hasattr(self, "grouped_gemm_experts") and isinstance(
+            self.grouped_gemm_experts, SonicMoEExpert
+        ):
+            self.grouped_gemm_experts.quant_weight()
             return
 
         def quantize_weights(

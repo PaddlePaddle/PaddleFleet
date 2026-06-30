@@ -22,7 +22,9 @@ import paddlefleet_ops
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
 from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
+from .moe_utils import get_auto_sb_history
 from .vmm_utils import (
+    allocator_free_block_info,
     auto_subbatch_allocator_backend,
     find_max_concurrent_subbatch_size,
     find_max_sequence_subbatch_size,
@@ -46,6 +48,38 @@ if paddlefleet_ops.is_sonic_moe_available():
     from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
 
 logger = logging.getLogger(__name__)
+
+
+def _copy_sonic_fp8_weight_attrs(src, dst):
+    for attr_name in ("fp8", "transposed_fp8"):
+        attr = getattr(src, attr_name, None)
+        if attr is None:
+            raise RuntimeError(
+                f"Sonic FP8 forward requires weight.{attr_name} attribute; "
+                "call quant_weight() before FP8 forward."
+            )
+        setattr(dst, attr_name, attr)
+
+
+class _SonicFP8WeightCarrier(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, weight):
+        carrier = paddle.empty([1], dtype=weight.dtype).as_strided(
+            [weight.shape[1], weight.shape[2], weight.shape[0]], [0, 0, 0]
+        )
+        carrier.stop_gradient = weight.stop_gradient
+        _copy_sonic_fp8_weight_attrs(weight, carrier)
+        return carrier
+
+    @staticmethod
+    def backward(ctx, grad):
+        if grad is None:
+            return None
+        return grad.transpose([2, 0, 1])
+
+
+def _make_sonic_fp8_weight_carrier(weight):
+    return _SonicFP8WeightCarrier.apply(weight)
 
 
 class UnZipNode:
@@ -1108,16 +1142,26 @@ class MlpNode:
 
         num_unzipped_tokens = self.token_offsets[-1]
         hidden_size = zipped_out.shape[1]
-        zip_unzip_fusion = (
-            find_max_concurrent_subbatch_size(
-                [
-                    num_unzipped_tokens * zipped_out.shape[1] * 2,
-                    num_unzipped_tokens * zipped_out.shape[1],
-                ],
-                upper=1,
+
+        # 基于 warmup 历史峰值预测剩余 forward 是否需要降级
+        _free_blocks_now = allocator_free_block_info()
+        _allocator_total_free = sum(s for s, _ in _free_blocks_now)
+        _history = get_auto_sb_history()
+        _history.record_forward(_allocator_total_free)
+        _should_degrade = _history.should_degrade(_allocator_total_free)
+        if _should_degrade:
+            zip_unzip_fusion = False
+        else:
+            zip_unzip_fusion = (
+                find_max_concurrent_subbatch_size(
+                    [
+                        num_unzipped_tokens * zipped_out.shape[1] * 2,
+                        num_unzipped_tokens * zipped_out.shape[1],
+                    ],
+                    upper=1,
+                )
+                > 0
             )
-            > 0
-        )
 
         if zip_unzip_fusion:
             expert_unzipped_out = paddle.empty(
@@ -1307,14 +1351,30 @@ class MlpNode:
         output.stop_gradient = False
 
         if self.moe_subbatch_diag:
+            _predicted_need = _history.predicted_need_for_remaining()
+            _in_warmup = _history.in_warmup()
             logger.info(
                 "[AutoSubbatch FWD] backend=%s, path=%s, total_tokens=%d, "
-                "subbatch_rows=%d, zip_unzip_fusion=%s",
+                "subbatch_rows=%d, zip_unzip_fusion=%s, "
+                "history_step=%d, history_forward_count=%d, history_backward_count=%d, "
+                "history_prev_steps=%d, history_prev_max_delta_mb=%.2f, history_max_delta_mb=%.2f, "
+                "history_in_warmup=%s, allocator_free_mb=%.2f, "
+                "predicted_need_mb=%.2f, should_degrade=%s",
                 auto_subbatch_allocator_backend(),
                 fwd_path,
                 num_unzipped_tokens,
                 subbatch_rows,
                 zip_unzip_fusion,
+                _history.step_idx,
+                _history.forward_count,
+                _history.backward_count,
+                _history.prev_total_steps,
+                _history.prev_max_delta / 1024 / 1024,
+                _history.max_delta / 1024 / 1024,
+                _in_warmup,
+                _allocator_total_free / 1024 / 1024,
+                _predicted_need / 1024 / 1024,
+                _should_degrade,
             )
         return output
 
@@ -1613,15 +1673,25 @@ class MlpNode:
 
         self.reset_state()
 
+        _history = get_auto_sb_history()
+        _iteration_finished = _history.record_backward()
+
         if self.moe_subbatch_diag:
             logger.info(
                 "[AutoSubbatch BWD] backend=%s, path=%s, total_tokens=%d, "
-                "subbatch_rows=%d, zip_unzip_fusion=%s",
+                "subbatch_rows=%d, zip_unzip_fusion=%s, "
+                "history_step=%d, history_forward_count=%d, history_backward_count=%d, "
+                "history_prev_steps=%d, history_iteration_finished=%s",
                 auto_subbatch_allocator_backend(),
                 bwd_path,
                 num_unzipped_tokens,
                 subbatch_rows,
                 zip_unzip_fusion,
+                _history.step_idx,
+                _history.forward_count,
+                _history.backward_count,
+                _history.prev_total_steps,
+                _iteration_finished,
             )
 
         return hs_fp8_dispatched_grad, dispatched_probs_grad
@@ -2048,14 +2118,17 @@ def _hybrid_ep_prepare_expert_counts(
         "HybridEP manager must populate padded_tokens_per_expert before "
         "HybridEPMoePyLayer runs."
     )
+    num_permuted_tokens = manager.num_permuted_tokens
+    assert num_permuted_tokens is not None, (
+        "HybridEP manager must populate num_permuted_tokens before "
+        "HybridEPMoePyLayer runs."
+    )
     padded_tokens_per_expert_tensor = padded_tokens_per_expert.astype("int64")
 
     if not use_fp8_mlp or not moe_expert_fusion:
         padded_tokens_per_expert_list = padded_tokens_per_expert_tensor.tolist()
-        return padded_tokens_per_expert_list, sum(padded_tokens_per_expert_list)
-    return padded_tokens_per_expert_tensor, paddle.sum(
-        padded_tokens_per_expert_tensor
-    )
+        return padded_tokens_per_expert_list, num_permuted_tokens
+    return padded_tokens_per_expert_tensor, num_permuted_tokens
 
 
 def _pad_front_rows(tensor, target_shape):
@@ -2178,16 +2251,27 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
 
 
 def run_sonic_moe(
-    hidden_states, topk_indices, topk_scores, K, E, w1, w2, fp8=False
+    hidden_states,
+    topk_indices,
+    topk_scores,
+    K,
+    E,
+    w1,
+    w2,
+    fp8=False,
+    tokens_per_expert=None,
+    fp8_scale=None,
+    fp8_combine_grad_handle=None,
 ):
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
 
-    valid = topk_indices >= 0
-    valid_experts = topk_indices[valid].cast(paddle.int32)
-    tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
-        paddle.int32
-    )
+    if tokens_per_expert is None:
+        valid = topk_indices >= 0
+        valid_experts = topk_indices[valid].cast(paddle.int32)
+        tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
+            paddle.int32
+        )
 
     (
         expert_frequency_offset,
@@ -2222,11 +2306,22 @@ def run_sonic_moe(
         score_src_idx=_score_src_idx,
     )
 
+    fp8_hidden_states = None
+    if fp8_scale is not None:
+        fp8_hidden_states = (hidden_states, fp8_scale)
+
+    if fp8:
+        w1_sonic = _make_sonic_fp8_weight_carrier(w1)
+        w2_sonic = _make_sonic_fp8_weight_carrier(w2)
+    else:
+        w1_sonic = w1.permute([1, 2, 0])
+        w2_sonic = w2.permute([1, 2, 0])
+
     with enable_fp8(fp8):
         _refresh_fp8_config()
         y1, z = _UpProjection.apply(
             hidden_states,
-            w1.permute([1, 2, 0]),
+            w1_sonic,
             None,
             expert_frequency_offset,
             total_expert_freq,
@@ -2240,11 +2335,12 @@ def run_sonic_moe(
             activation_type,
             is_inference_mode_enabled=False,
             use_low_precision_postact_buffer=False,
+            prequant_activation_payload=fp8_hidden_states,
         )
         hidden_states = _DownProjection.apply(
             y1,
             z,
-            w2.permute([1, 2, 0]),
+            w2_sonic,
             None,
             scores_for_down,
             s_scatter_idx,
@@ -2259,6 +2355,7 @@ def run_sonic_moe(
             True,  # is_varlen_k
             activation_type,
             None,
+            fp8_combine_grad_handle,
         )
 
     return hidden_states

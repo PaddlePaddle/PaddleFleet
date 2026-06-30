@@ -488,11 +488,7 @@ class MultiLatentAttention(Attention):
         layer_idx = kwargs.get("layer_idx")
         use_cache = kwargs.get("use_cache", False)
 
-        if (
-            hasattr(self.core_attention.config, "forward_meta")
-            # and self.core_attention.config.forward_meta.max_len_tensor_cpu[2]
-            # > 0
-        ):  # decode mode
+        if hasattr(self.core_attention.config, "forward_meta"):  # decode mode
             # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
             # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
             # wv_b: [heads, kv_lora_rank, v_head_dim]

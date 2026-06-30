@@ -259,6 +259,18 @@ class StandardMoERouter(nn.Layer):
                 f"seq_aux is True but routing_type is {self.routing_type}. Please check."
             )
 
+        if self.routing_type == "seq_aux_loss" and self.scoring_func not in (
+            "softmax",
+            "sigmoid",
+            "relu",
+            "sftplus",
+            "sqrtsoftplus",
+        ):
+            raise ValueError(
+                "seq_aux_loss requires a non-negative MoE scoring_func, "
+                f"but got {self.scoring_func!r}. "
+            )
+
         # Initialize gate weight with Normal distribution aligned with Megatron.
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
@@ -1158,7 +1170,7 @@ class TopKRouter(StandardMoERouter):
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
         gates_ori = gates.clone()
-        if self.scoring_func == "sigmoid":
+        if self.config.router_aux_loss_coef and self.scoring_func != "softmax":
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
@@ -1266,9 +1278,7 @@ class TopKRouter(StandardMoERouter):
 
         # norm
         if self.norm_topk_prob:
-            if not getattr(
-                self.config, "gpt_model_use_experimental_version", False
-            ):
+            if not getattr(self.config, "moe_topk_fusion", False):
                 denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
