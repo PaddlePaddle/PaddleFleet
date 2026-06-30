@@ -34,7 +34,10 @@ from paddlefleet_ops.flash_mask_facade import (
     flashmask_attention,
 )
 
-from paddlefleet.context_parallel_utils import flashmask_attention_cp
+from paddlefleet.context_parallel_utils import (
+    flashmask_attention_cp,
+    flashmask_attention_ulysses,
+)
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -96,6 +99,7 @@ class DotProductAttention(FleetLayer):
         self.attention_type = attention_type  # unused for now
         self.is_mtp_layer = is_mtp_layer
         self.is_swa = is_swa
+        self.cp_comm_type = cp_comm_type
 
         # k_channels and v_channels may differ from config.head_dim
         # Default to config.head_dim if not provided (standard attention)
@@ -340,11 +344,12 @@ class DotProductAttention(FleetLayer):
             assert not self.config.flashmask_use_varlen, (
                 "flashmask_use_varlen does not support context parallel now."
             )
-            attn_mask_startend_row_indices = (
-                self.expand_attn_mask_startend_row_indices_for_cp(
-                    attn_mask_startend_row_indices, key
+            if self.cp_comm_type != "a2a":
+                attn_mask_startend_row_indices = (
+                    self.expand_attn_mask_startend_row_indices_for_cp(
+                        attn_mask_startend_row_indices, key
+                    )
                 )
-            )
             assert (
                 (
                     query.dtype == paddle.bfloat16
@@ -470,15 +475,16 @@ class DotProductAttention(FleetLayer):
             # attn_mask_startend_row_indices is not None for flashmask
             is_causal = attn_mask_type == AttnMaskType.causal
             if self.context_parallel_size > 1:
-                flashmask_attention_func = (
-                    self.rr_flashmask_attention_cp_func
-                    if use_rr_flash_attention
-                    else flashmask_attention_cp
-                )
-                is_causal = (
-                    False  # only support non-causal for flashmask_attention_cp
-                )
-                assert attn_mask_startend_row_indices.shape[-1] == 2
+                if self.cp_comm_type == "a2a":
+                    flashmask_attention_func = flashmask_attention_ulysses
+                else:
+                    flashmask_attention_func = (
+                        self.rr_flashmask_attention_cp_func
+                        if use_rr_flash_attention
+                        else flashmask_attention_cp
+                    )
+                    is_causal = False  # only support non-causal for flashmask_attention_cp
+                    assert attn_mask_startend_row_indices.shape[-1] == 2
             elif use_rr_flash_attention:
                 flashmask_attention_func = self.rr_flashmask_attention_func
             elif self.config.flashmask_use_varlen:
