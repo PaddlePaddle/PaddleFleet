@@ -631,9 +631,10 @@ class TransformerConfig(ModelParallelConfig):
     will be set to paddlefleet.utils.scaled_init_method_normal(init_method_std) which is paddle nn
     init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_hidden_layers)."""
 
-    init_method_std: float = 0.02
+    init_method_std: float = None
     """Standard deviation of the zero mean normal for the default initialization method, not used if
-    init_method and output_layer_init_method are provided."""
+    init_method and output_layer_init_method are provided. If None, will be set to
+    math.sqrt(0.3333 / hidden_size)."""
 
     embedding_init_method: callable = None
     """
@@ -984,6 +985,12 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+
+        if self.init_method_std is None:
+            if self.hidden_size == 0:
+                self.init_method_std = 0.02
+            else:
+                self.init_method_std = math.sqrt(0.3333 / self.hidden_size)
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
