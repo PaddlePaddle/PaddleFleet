@@ -15,6 +15,7 @@
 import inspect
 
 import paddle
+import paddlefleet_ops.flash_mask_facade
 from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
@@ -1548,6 +1549,291 @@ class FlashMaskSwaP2P(PyLayer):
         return query_grad, key_grad, value_grad
 
 
+# ===========================================================================
+# Ulysses Context Parallel (All-to-All based sequence parallelism)
+#
+# DeepSpeed-Ulysses partitions the input sequence across P GPUs. Before
+# attention, an all-to-all redistributes Q/K/V so that each GPU holds the
+# *full sequence* but only h/P attention heads. After local attention, a
+# reverse all-to-all restores the original sequence-partitioned layout.
+# ===========================================================================
+
+
+def _ulysses_generate_layout_params(
+    scatter_idx, batch_dim_idx, seq_world_size, input
+):
+    """
+    Generate reshape/permute parameters for the all-to-all in Ulysses SP.
+
+    With batch_dim_idx=0 (tensor layout [batch, seq, heads, head_dim]):
+      - scatter_idx < 2 (scatter_idx=0 or 1, i.e. scatter along sequence dim):
+            Input  [b, full_seq, h/P, d] -> Output [b, full_seq/P, h, d]
+            Scatters sequence across ranks, gathers heads from all ranks.
+      - scatter_idx >= 2 (scatter_idx=2, i.e. scatter along heads dim):
+            Input  [b, seq/P, h, d]      -> Output [b, seq, h/P, d]
+            Scatters heads across ranks, gathers sequence from all ranks.
+    """
+    if batch_dim_idx == 0:
+        if scatter_idx < 2:
+            # Scatter sequence, gather heads
+            bs, global_seq_len, num_local_head, head_dim = input.shape
+            pre_all2all_inp_shape = [
+                bs,
+                seq_world_size,
+                global_seq_len // seq_world_size,
+                num_local_head,
+                head_dim,
+            ]
+            pre_all2all_permute_idx = (1, 0, 2, 3, 4)
+            post_all2all_permute_idx = (1, 2, 0, 3, 4)
+            post_all2all_res_shape = [
+                bs,
+                global_seq_len // seq_world_size,
+                seq_world_size * num_local_head,
+                head_dim,
+            ]
+        else:
+            # Scatter heads, gather sequence
+            bs, local_seq_len, num_total_head, head_dim = input.shape
+            assert num_total_head % seq_world_size == 0, (
+                f"Number of heads ({num_total_head}) must be divisible by the sequence parallel size ({seq_world_size})!"
+            )
+            pre_all2all_inp_shape = [
+                bs,
+                local_seq_len,
+                seq_world_size,
+                num_total_head // seq_world_size,
+                head_dim,
+            ]
+            pre_all2all_permute_idx = (2, 0, 1, 3, 4)
+            post_all2all_permute_idx = (1, 0, 2, 3, 4)
+            post_all2all_res_shape = [
+                bs,
+                seq_world_size * local_seq_len,
+                num_total_head // seq_world_size,
+                head_dim,
+            ]
+    else:
+        if scatter_idx < 2:
+            # batch_dim_idx=1: tensor layout [seq, batch, heads, head_dim]
+            global_seq_len, bs, num_local_head, head_dim = input.shape
+            pre_all2all_inp_shape = [
+                seq_world_size,
+                global_seq_len // seq_world_size,
+                bs,
+                num_local_head,
+                head_dim,
+            ]
+            pre_all2all_permute_idx = None
+            post_all2all_permute_idx = (1, 2, 0, 3, 4)
+            post_all2all_res_shape = [
+                global_seq_len // seq_world_size,
+                bs,
+                seq_world_size * num_local_head,
+                head_dim,
+            ]
+        else:
+            local_seq_len, bs, num_total_head, head_dim = input.shape
+            assert num_total_head % seq_world_size == 0, (
+                f"Number of heads ({num_total_head}) must be divisible by the sequence parallel size ({seq_world_size})!"
+            )
+            pre_all2all_inp_shape = [
+                local_seq_len,
+                bs,
+                seq_world_size,
+                num_total_head // seq_world_size,
+                head_dim,
+            ]
+            pre_all2all_permute_idx = (2, 0, 1, 3, 4)
+            post_all2all_permute_idx = None
+            post_all2all_res_shape = [
+                local_seq_len * seq_world_size,
+                bs,
+                num_total_head // seq_world_size,
+                head_dim,
+            ]
+
+    return (
+        pre_all2all_permute_idx,
+        pre_all2all_inp_shape,
+        post_all2all_permute_idx,
+        post_all2all_res_shape,
+    )
+
+
+def _ulysses_single_all_to_all(
+    input, scatter_idx, gather_idx, batch_dim_idx, group
+):
+    """
+    Perform a single all-to-all with reshape/permute for Ulysses SP.
+    """
+    seq_world_size = dist.get_world_size(group)
+    (
+        pre_all2all_permute_idx,
+        pre_all2all_inp_shape,
+        post_all2all_permute_idx,
+        post_all2all_res_shape,
+    ) = _ulysses_generate_layout_params(
+        scatter_idx, batch_dim_idx, seq_world_size, input
+    )
+
+    # Pre-process: reshape and permute
+    input_t = input.reshape(pre_all2all_inp_shape).contiguous()
+    if pre_all2all_permute_idx is not None:
+        input_t = input_t.permute(pre_all2all_permute_idx).contiguous()
+
+    # All-to-all communication
+    output = paddle.empty_like(input_t)
+    dist.alltoall(output, input_t, group=group)
+
+    # Post-process: permute and reshape
+    if post_all2all_permute_idx is not None:
+        output = output.permute(post_all2all_permute_idx).contiguous()
+    output = output.reshape(post_all2all_res_shape).contiguous()
+
+    return output
+
+
+class UlyssesAlltoAll(PyLayer):
+    """
+    Ulysses All-to-All for sequence parallelism.
+
+    Forward performs all-to-all with the given scatter/gather indices.
+    Backward performs the inverse all-to-all (swap scatter and gather indices).
+    """
+
+    @staticmethod
+    def forward(ctx, input, scatter_idx, gather_idx, batch_dim_idx, group):
+        ctx.scatter_idx = scatter_idx
+        ctx.gather_idx = gather_idx
+        ctx.batch_dim_idx = batch_dim_idx
+        ctx.group = group
+        return _ulysses_single_all_to_all(
+            input, scatter_idx, gather_idx, batch_dim_idx, group
+        )
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return _ulysses_single_all_to_all(
+            grad_output,
+            ctx.gather_idx,
+            ctx.scatter_idx,
+            ctx.batch_dim_idx,
+            ctx.group,
+        )
+
+
+def flashmask_attention_ulysses(
+    query,
+    key,
+    value,
+    startend_row_indices,
+    causal=False,
+    learnable_sink=None,
+    softmax_scale=None,
+):
+    """
+    FlashMask attention with Ulysses context parallelism.
+
+    Each CP rank initially holds a sequence partition [b, N/P, h, d]. The Ulysses
+    all-to-all redistributes Q/K/V so each rank holds the full sequence but only
+    h/P heads: [b, N, h/P, d]. Local flashmask attention is then computed per rank.
+    A reverse all-to-all restores the original sequence-partitioned layout.
+
+    Requires: num_heads % cp_size == 0, and q_heads == k_heads == v_heads (no GQA).
+
+    Args:
+        query: [batch, seq_len/P, num_heads, head_dim] - sequence-partitioned query
+        key:   [batch, seq_len/P, num_kv_heads, head_dim] - sequence-partitioned key
+        value: [batch, seq_len/P, num_kv_heads, head_dim] - sequence-partitioned value
+        startend_row_indices: [b, num_mask_heads, seq_len, cols] attention mask indices
+            num_mask_heads must be 1 (broadcast) or equal to num_kv_heads.
+        dropout: dropout probability
+        causal: whether to use causal attention
+        training: whether in training mode
+
+    Returns:
+        [batch, seq_len/P, num_heads, head_dim] - sequence-partitioned output
+    """
+    if learnable_sink is not None:
+        raise NotImplementedError(
+            "flashmask_attention_ulysses does not support learnable_sink "
+            "(softmax sink)"
+        )
+
+    if softmax_scale is not None:
+        raise NotImplementedError(
+            "flashmask_attention_ulysses does not support setting softmax_scale"
+        )
+    hcg = fleet.get_hybrid_communicate_group()
+    cp_group = hcg.get_context_parallel_group()
+    cp_size = cp_group.nranks
+    cp_rank = cp_group.rank
+
+    num_q_heads = query.shape[2]
+    num_k_heads = key.shape[2]
+    num_v_heads = value.shape[2]
+
+    assert num_q_heads == num_k_heads == num_v_heads, (
+        f"Ulysses a2a CP requires q_heads == k_heads == v_heads, "
+        f"got q={num_q_heads}, k={num_k_heads}, v={num_v_heads}"
+    )
+    assert num_q_heads % cp_size == 0, (
+        f"num_heads ({num_q_heads}) must be divisible by cp_size ({cp_size}) for Ulysses"
+    )
+
+    # Validate and slice startend_row_indices along head dimension
+    # startend_row_indices shape: [b, num_mask_heads, seq_len, cols]
+    num_mask_heads = startend_row_indices.shape[1]
+    assert num_mask_heads == 1 or num_mask_heads == num_k_heads, (
+        f"startend_row_indices head dim must be 1 or num_kv_heads ({num_k_heads}), "
+        f"got {num_mask_heads}"
+    )
+
+    # When mask has per-head indices, slice the heads belonging to this rank
+    if num_mask_heads != 1:
+        heads_per_rank = num_mask_heads // cp_size
+        head_start = cp_rank * heads_per_rank
+        head_end = head_start + heads_per_rank
+        startend_row_indices = startend_row_indices[
+            :, head_start:head_end, :, :
+        ]
+
+    # Before attention: scatter heads across ranks, gather full sequence from all ranks
+    # [b, N/P, h, d] -> [b, N, h/P, d]
+    query = UlyssesAlltoAll.apply(
+        query, scatter_idx=2, gather_idx=1, batch_dim_idx=0, group=cp_group
+    )
+    key = UlyssesAlltoAll.apply(
+        key, scatter_idx=2, gather_idx=1, batch_dim_idx=0, group=cp_group
+    )
+    value = UlyssesAlltoAll.apply(
+        value, scatter_idx=2, gather_idx=1, batch_dim_idx=0, group=cp_group
+    )
+
+    # Local flashmask attention on full sequence with h/P heads
+    attn_output = paddlefleet_ops.flash_mask_facade.flashmask_attention(
+        query,
+        key,
+        value,
+        startend_row_indices=startend_row_indices,
+        causal=causal,
+        softmax_scale=softmax_scale,
+    )
+
+    # After attention: scatter sequence across ranks, gather full heads from all ranks
+    # [b, N, h/P, d] -> [b, N/P, h, d]
+    attn_output = UlyssesAlltoAll.apply(
+        attn_output,
+        scatter_idx=1,
+        gather_idx=2,
+        batch_dim_idx=0,
+        group=cp_group,
+    )
+
+    return attn_output
+
+
 def flashmask_attention_cp(
     query,
     key,
@@ -1618,7 +1904,7 @@ def flashmask_attention_cp(
             mode,
             window_size,
         )
-    else:
+    elif mode == "dualchunk_allgather":
         output = FlashMaskContextParallel.apply(
             query,
             key,
@@ -1632,4 +1918,31 @@ def flashmask_attention_cp(
             softmax_scale,
             mode,
         )
+    elif mode == "contiguous_a2a":
+        if fixed_seed_offset is not None:
+            raise NotImplementedError(
+                "flashmask_attention_ulysses does not support setting fixed_seed_offset"
+            )
+
+        if dropout != 0.0:
+            raise NotImplementedError(
+                "flashmask_attention_ulysses does not support dropout"
+            )
+
+        if not training:
+            raise NotImplementedError(
+                "flashmask_attention_ulysses does not support setting training"
+            )
+
+        output = flashmask_attention_ulysses(
+            query=query,
+            key=key,
+            value=value,
+            startend_row_indices=startend_row_indices,
+            causal=causal,
+            learnable_sink=learnable_sink,
+            softmax_scale=softmax_scale,
+        )
+    else:
+        raise ValueError(f"invalid cp_balance_mode: {mode}")
     return output
