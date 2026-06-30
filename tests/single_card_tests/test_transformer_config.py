@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib
+import math
 import sys
 import types
 import unittest
@@ -325,6 +326,53 @@ class TestMagicInit(unittest.TestCase):
                 num_hidden_layers=12,
                 hidden_size=0,
                 magic_init=True,
+            )
+
+
+class TestTruncateNormInit(unittest.TestCase):
+    """Tests for the use_truncated_normal_init functionality in TransformerConfig."""
+
+    def test_truncate_norm_sigma_calculation(self):
+        hidden_size = 1024
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=hidden_size,
+            use_truncated_normal_init=True,
+        )
+
+        self.assertAlmostEqual(
+            config.init_method_std,
+            0.5 / math.sqrt(hidden_size),
+            places=6,
+        )
+
+    def test_truncate_norm_takes_precedence_over_magic_init(self):
+        hidden_size = 1024
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=hidden_size,
+            magic_init=True,
+            use_truncated_normal_init=True,
+        )
+
+        self.assertAlmostEqual(
+            config.init_method_std,
+            0.5 / math.sqrt(hidden_size),
+            places=6,
+        )
+        self.assertIs(config.init_method, config.output_layer_init_method)
+        self.assertIs(config.init_method, config.embedding_init_method)
+
+    def test_truncate_norm_raises_on_non_positive_factor(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "truncated_normal_init_factor must be positive when use_truncated_normal_init is True.",
+        ):
+            TransformerConfig(
+                num_hidden_layers=12,
+                hidden_size=1024,
+                use_truncated_normal_init=True,
+                truncated_normal_init_factor=0,
             )
 
 
