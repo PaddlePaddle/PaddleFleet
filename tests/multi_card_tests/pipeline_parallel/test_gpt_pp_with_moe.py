@@ -179,6 +179,7 @@ class TestPP(unittest.TestCase):
         self.batch_size = 12
         self.seq_len = 128
         self.vocab_size = 1024
+
     @unittest.skipIf(SKIP_TESTS, "repo_flag is not paddlefleet")
     def test_pp(self):
         if (
