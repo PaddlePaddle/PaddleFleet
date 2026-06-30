@@ -123,6 +123,36 @@ def build_document_rope_freqs(
     return freqs.reshape([1, -1, 1, freqs.shape[-1]]), mscale
 
 
+def _build_rope_freqs(
+    rotary_pos_emb: nn.Layer,
+    sq: int,
+    position_offset: int = 0,
+    docmask_meta: CSADocMaskMetadata | None = None,
+    startend_row_indices: Tensor | None = None,
+):
+    if docmask_meta is not None:
+        freqs, mscale = build_document_rope_freqs(
+            rotary_pos_emb,
+            sq,
+            position_offset=position_offset,
+            doc_lens=docmask_meta.doc_lens,
+        )
+    elif startend_row_indices is not None:
+        freqs, mscale = build_document_rope_freqs(
+            rotary_pos_emb,
+            sq,
+            startend_row_indices=startend_row_indices,
+            position_offset=position_offset,
+        )
+    else:
+        _rope_result = rotary_pos_emb(sq + position_offset, packed_seq=False)
+        if isinstance(_rope_result, tuple):
+            freqs, mscale = _rope_result
+        else:
+            freqs, mscale = _rope_result, 1.0
+    return freqs[:, position_offset : position_offset + sq, :], mscale
+
+
 # ---------------------------------------------------------------------------
 # Sublayers spec dataclass
 # ---------------------------------------------------------------------------
@@ -320,7 +350,6 @@ class DSv4HybridAttention(Attention):
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(
                 hidden_states=hidden_states,
-                startend_row_indices=startend_row_indices,
                 position_offset=position_offset,
                 docmask_meta=docmask_meta,
             )
@@ -332,7 +361,6 @@ class DSv4HybridAttention(Attention):
             query,
             key,
             value,
-            startend_row_indices,
             attention_mask,
             x=hidden_states,
             qr=q_compressed,
@@ -350,32 +378,14 @@ class DSv4HybridAttention(Attention):
             core_attn_out = core_attn_out.reshape(
                 [b, sq, self.num_attention_heads, self.v_head_dim]
             )
-            # Get RoPE frequencies for inverse
-            if docmask_meta is not None:
-                freqs, mscale = build_document_rope_freqs(
-                    self.rotary_pos_emb,
-                    sq,
-                    position_offset=position_offset,
-                    doc_lens=docmask_meta.doc_lens,
-                )
-            elif startend_row_indices is not None:
-                freqs, mscale = build_document_rope_freqs(
-                    self.rotary_pos_emb,
-                    sq,
-                    startend_row_indices=startend_row_indices,
-                    position_offset=position_offset,
-                )
-            else:
-                # Get RoPE frequencies for inverse; use global positions in CP mode
-                rope_len = sq + position_offset
-                _rope_result = self.rotary_pos_emb(rope_len, packed_seq=False)
-                if isinstance(_rope_result, tuple):
-                    freqs, mscale = _rope_result
-                else:
-                    freqs, mscale = _rope_result, 1.0
+            freqs, mscale = _build_rope_freqs(
+                self.rotary_pos_emb,
+                sq,
+                position_offset=position_offset,
+                docmask_meta=docmask_meta,
+            )
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
-            freqs = freqs[:, position_offset : position_offset + sq, :]
 
             if self.config.apply_rope_fusion:
                 from paddlefleet.triton_ops import fused_apply_mla_rope_inplace
@@ -573,33 +583,15 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         nope_dim = self.v_head_dim - pos_dim
 
         if pos_dim > 0:
-            # Get RoPE frequencies
-            if docmask_meta is not None:
-                freqs, mscale = build_document_rope_freqs(
-                    self.rotary_pos_emb,
-                    sq,
-                    position_offset=position_offset,
-                    doc_lens=docmask_meta.doc_lens,
-                )
-            elif startend_row_indices is not None:
-                freqs, mscale = build_document_rope_freqs(
-                    self.rotary_pos_emb,
-                    sq,
-                    startend_row_indices=startend_row_indices,
-                    position_offset=position_offset,
-                )
-            else:
-                # Get RoPE frequencies for global positions
-                rope_len = sq + position_offset
-                _rope_result = self.rotary_pos_emb(rope_len, packed_seq=False)
-                if isinstance(_rope_result, tuple):
-                    freqs, mscale = _rope_result
-                else:
-                    freqs, mscale = _rope_result, 1.0
+            freqs, mscale = _build_rope_freqs(
+                self.rotary_pos_emb,
+                sq,
+                position_offset=position_offset,
+                docmask_meta=docmask_meta,
+                startend_row_indices=startend_row_indices,
+            )
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
-            # Slice to local positions [position_offset : position_offset + sq]
-            freqs = freqs[:, position_offset : position_offset + sq, :]
 
             # Q RoPE: split nope/pe, apply RoPE to pe part
             if self.config.apply_rope_fusion:
