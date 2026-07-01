@@ -271,9 +271,9 @@ def get_attention_spec(
             },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
-                q_a_proj=backend.column_parallel_linear(),
+                q_a_proj=backend.linear(),
                 q_b_proj=backend.column_parallel_linear(),
-                kv_a_proj_with_mqa=backend.column_parallel_linear(),
+                kv_a_proj_with_mqa=backend.linear(),
                 kv_b_proj=backend.column_parallel_linear(),
                 core_attention=core_attention,
                 o_proj=backend.row_parallel_linear(),
