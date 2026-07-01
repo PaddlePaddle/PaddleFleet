@@ -134,7 +134,7 @@ class _TestRMSNorm(nn.Layer):
             default_initializer=nn.initializer.Constant(1.0),
         )
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         normed = x * paddle.rsqrt(x.square().mean(-1, keepdim=True) + self.eps)
         return normed * self.weight.cast(x.dtype)
 
