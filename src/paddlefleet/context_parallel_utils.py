@@ -153,16 +153,34 @@ def scatter_balance(input_tensor, group=None, axis=0):
 
 def all_gather_balance(input_tensor, group=None, axis=0):
     """
-    All-gather operation with balanced reconstruction.
-    This function performs all-gather to reconstruct the original tensor
-    from balanced scattered chunks.
+    Balanced all-gather operation using Triton reorder kernel.
+
+    Gathers tensors from all ranks via all_gather, then reorders the gathered data
+    using a Triton kernel (balanced_gather_reorder_kernel) to reconstruct the original
+    sequence order from the DualChunkSwap balanced layout. Each rank's local tensor
+    contains two chunks (one from the start, one from the end of the sequence), and
+    this function reassembles them into the full contiguous sequence.
+
+    This is the inverse of reduce_scatter_any_axis_balance and scatter_balance.
+
     Args:
-        input_tensor (paddle.Tensor): Input tensor chunk
-        group (paddle.distributed.Group, optional): Communication group
-        axis (int, optional): Axis along which to gather. Defaults to 0
+        input_tensor (paddle.Tensor): Local tensor chunk to gather. Each rank's
+            chunk size along `axis` must be even (split into two halves by the
+            balanced strategy).
+        group (paddle.distributed.Group, optional): Communication group. If None,
+            uses the model parallel group from fleet.
+        axis (int, optional): Axis along which to gather and reorder. Defaults to 0.
+
     Returns:
-        paddle.Tensor: Reconstructed full tensor
+        paddle.Tensor: Full gathered tensor with shape[axis] = input_shape[axis] * parallelism,
+            reordered to restore the original sequence order.
     """
+    import triton
+
+    from paddlefleet.triton_ops.balanced_reorder import (
+        balanced_gather_reorder_kernel,
+    )
+
     if group is None:
         hcg = fleet.get_hybrid_communicate_group()
         group = hcg.get_model_parallel_group()
@@ -171,60 +189,60 @@ def all_gather_balance(input_tensor, group=None, axis=0):
     if parallelism == 1:
         return input_tensor.clone()
 
-    # Split input into two halves (start and end chunks)
-    chunk_start, chunk_end = paddle.split(input_tensor, 2, axis=axis)
+    # Single all_gather (gathers along axis=0)
+    shape = list(input_tensor.shape)
+    gathered_shape = list(shape)
+    gathered_shape[0] = shape[0] * parallelism
+    gathered = paddle.empty(gathered_shape, dtype=input_tensor.dtype)
+    dist.stream.all_gather(
+        gathered, input_tensor.contiguous(), group=group, use_calc_stream=True
+    )
 
-    if axis == 0:
-        # Handle axis=0 case with optimized memory layout
-        output_shape_start = list(chunk_start.shape)
-        output_shape_start[axis] = output_shape_start[axis] * parallelism
+    # Compute strides for reorder kernel
+    axis_size = shape[axis]
+    chunk_size = axis_size // 2
+    N = parallelism
 
-        gathered_start = paddle.empty(
-            shape=output_shape_start, dtype=input_tensor.dtype
-        )
-        dist.stream.all_gather(
-            gathered_start, chunk_start, group=group, use_calc_stream=True
-        )
+    # outer_size: product of all dims left of axis in the *original* (per-rank) shape
+    outer_size = 1
+    for i in range(axis):
+        outer_size *= shape[i]
 
-        # Gather end chunks
-        gathered_end_list = [
-            paddle.empty(chunk_end.shape, dtype=input_tensor.dtype)
-            for _ in range(parallelism)
-        ]
-        dist.stream.all_gather(
-            gathered_end_list, chunk_end, group=group, use_calc_stream=True
-        )
+    # inner_size: product of all dims right of axis
+    inner_size = 1
+    for i in range(axis + 1, len(shape)):
+        inner_size *= shape[i]
 
-        # Reverse the end chunks to reconstruct original order
-        gathered_end_list.reverse()
+    # src is gathered along axis=0: shape = [N*S0, S1, ..., S_axis, ..., S_last]
+    # src_rank_stride = elements per rank = product of original shape
+    src_rank_stride = 1
+    for s in shape:
+        src_rank_stride *= s
 
-        result = paddle.concat([gathered_start, *gathered_end_list], axis=axis)
-        return result
-    else:
-        # Handle other axes
-        gathered_start_list = [
-            paddle.empty(chunk_start.shape, dtype=input_tensor.dtype)
-            for _ in range(parallelism)
-        ]
-        dist.stream.all_gather(
-            gathered_start_list, chunk_start, group=group, use_calc_stream=True
-        )
+    # src_outer_stride = elements to skip per outer index = S_axis * inner_size
+    src_outer_stride = axis_size * inner_size
 
-        gathered_end_list = [
-            paddle.empty(chunk_end.shape, dtype=input_tensor.dtype)
-            for _ in range(parallelism)
-        ]
-        dist.stream.all_gather(
-            gathered_end_list, chunk_end, group=group, use_calc_stream=True
-        )
+    out_shape = list(shape)
+    out_shape[axis] = 2 * N * chunk_size
+    output = paddle.empty(out_shape, dtype=input_tensor.dtype)
 
-        # Reverse the end chunks
-        gathered_end_list = gathered_end_list[::-1]
+    BLOCK_SIZE = 1024
+    num_blocks_per_chunk = triton.cdiv(chunk_size * inner_size, BLOCK_SIZE)
+    grid = (num_blocks_per_chunk * 2 * N, outer_size, 1)
 
-        result = paddle.concat(
-            gathered_start_list + gathered_end_list, axis=axis
-        )
-        return result
+    balanced_gather_reorder_kernel[grid](
+        gathered,
+        output,
+        N,
+        chunk_size,
+        inner_size,
+        src_rank_stride,
+        src_outer_stride,
+        num_blocks_per_chunk,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return output
 
 
 def reduce_scatter_any_axis(input_tensor, axis, group=None):
@@ -286,16 +304,32 @@ def reduce_scatter_any_axis(input_tensor, axis, group=None):
 
 def reduce_scatter_any_axis_balance(input_tensor, axis, group=None):
     """
-    Balanced reduce-scatter operation along any axis.
-    Similar to reduce_scatter_any_axis but uses balanced splitting strategy
-    by processing chunks from both ends of the tensor.
+    Balanced reduce-scatter operation along any axis using Triton reorder kernel.
+
+    Performs reduce-scatter with the DualChunkSwap balanced strategy: first reorders
+    the input tensor via a Triton kernel (balanced_scatter_reorder_kernel) to prepare
+    balanced chunks for each rank, then uses alltoall_single to exchange data, and
+    finally sums the received chunks to produce the reduced result.
+
+    This is the inverse of all_gather_balance and is used in backward passes of
+    context parallel attention (e.g., to reduce-scatter key/value gradients).
+
     Args:
-        input_tensor (paddle.Tensor): Input tensor to reduce and scatter
-        axis (int): Axis along which to perform reduce-scatter
-        group (paddle.distributed.Group, optional): Communication group
+        input_tensor (paddle.Tensor): Input tensor to reduce and scatter. The size
+            along `axis` must be divisible by (parallelism * 2).
+        axis (int): Axis along which to perform the balanced reduce-scatter.
+        group (paddle.distributed.Group, optional): Communication group. If None,
+            uses the context parallel group from fleet.
+
     Returns:
-        paddle.Tensor: Reduced and scattered tensor chunk with balanced distribution
+        paddle.Tensor: Reduced tensor with shape[axis] = input_shape[axis] / parallelism.
     """
+    import triton
+
+    from paddlefleet.triton_ops.balanced_reorder import (
+        balanced_scatter_reorder_kernel,
+    )
+
     if group is None:
         hcg = fleet.get_hybrid_communicate_group()
         group = hcg.get_context_parallel_group()
@@ -304,45 +338,62 @@ def reduce_scatter_any_axis_balance(input_tensor, axis, group=None):
     if parallelism == 1:
         return input_tensor.clone()
 
-    assert input_tensor.shape[axis] % (parallelism * 2) == 0, (
-        f"Input sequence length {input_tensor.shape[axis]} can't be ",
-        f"divided exactly by context parallelism * 2 {parallelism * 2}",
+    N = parallelism
+    shape = list(input_tensor.shape)
+
+    assert shape[axis] % (N * 2) == 0, (
+        f"Input sequence length {shape[axis]} can't be "
+        f"divided exactly by context parallelism * 2 {N * 2}"
     )
 
-    # Split input into two halves
-    input_start, input_end = paddle.split(input_tensor, 2, axis=axis)
+    chunk_size = shape[axis] // (2 * N)
 
-    # Split each half across ranks
-    chunks_start = paddle.split(input_start, parallelism, axis=axis)
-    chunks_end = paddle.split(input_end, parallelism, axis=axis)
+    outer_size = 1
+    for i in range(axis):
+        outer_size *= shape[i]
 
-    # Reverse end chunks for balanced distribution
-    chunks_end = chunks_end[::-1]
+    inner_size = 1
+    for i in range(axis + 1, len(shape)):
+        inner_size *= shape[i]
 
-    # Combine corresponding start and end chunks
-    combined_chunks = [
-        paddle.concat([start_chunk, end_chunk], axis=axis)
-        for start_chunk, end_chunk in zip(chunks_start, chunks_end)
-    ]
+    src_outer_stride = shape[axis] * inner_size
+    dst_outer_stride = 2 * chunk_size * inner_size
+    dst_rank_stride = outer_size * dst_outer_stride
 
-    # Perform alltoall communication
-    output_buffers = [
-        paddle.empty(combined_chunks[0].shape, dtype=input_tensor.dtype)
-        for _ in range(parallelism)
-    ]
+    per_rank_shape = list(shape)
+    per_rank_shape[axis] = 2 * chunk_size
+    # send_buf: [N, *per_rank_shape], contiguous, kernel writes into it
+    send_buf = paddle.empty([N, *per_rank_shape], dtype=input_tensor.dtype)
 
-    dist.stream.alltoall(
-        output_buffers, combined_chunks, group=group, use_calc_stream=True
+    BLOCK_SIZE = 1024
+    num_blocks_per_chunk = triton.cdiv(chunk_size * inner_size, BLOCK_SIZE)
+    grid = (num_blocks_per_chunk * 2 * N, outer_size, 1)
+
+    balanced_scatter_reorder_kernel[grid](
+        input_tensor,
+        send_buf,
+        N,
+        chunk_size,
+        inner_size,
+        src_outer_stride,
+        dst_rank_stride,
+        dst_outer_stride,
+        num_blocks_per_chunk,
+        BLOCK_SIZE=BLOCK_SIZE,
     )
 
-    # Sum the received chunks
-    result = paddle.stack(output_buffers, axis=0).sum(axis=0)
+    # alltoall_single: send_buf[r] -> rank r's recv_buf[my_rank]
+    recv_buf = paddle.empty_like(send_buf)
+    dist.stream.alltoall_single(
+        recv_buf.reshape([-1]),
+        send_buf.reshape([-1]),
+        group=group,
+        use_calc_stream=True,
+    )
+
+    # sum across N received chunks: same order as original stack+sum
+    result = recv_buf.reshape([N, *per_rank_shape]).sum(axis=0)
     return result
-
-
-# ===========================================================================
-# Contiguous CP primitives (rank r owns [r*chunk, (r+1)*chunk])
-# ===========================================================================
 
 
 def scatter_contiguous(input_tensor, group=None, axis=0):
