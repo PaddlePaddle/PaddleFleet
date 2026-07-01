@@ -40,7 +40,10 @@ from .moe_utils import (
 
 try:
     from paddlefleet_ops import deep_gemm as paddlefleet_deep_gemm
-    from paddlefleet_ops.sonicmoe.functional import clear_all_fp8_weight_caches
+    from paddlefleet_ops.sonicmoe.functional import (
+        _refresh_fp8_config,
+        clear_all_fp8_weight_caches,
+    )
     from paddlefleet_ops.sonicmoe.quack_utils import quantize_native_fp8_weights
 except (ImportError, RuntimeError):
     pass
@@ -511,6 +514,11 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.hidden_size = self.config.hidden_size
         self.K = topk
         self._weights_layout = self._GROUPED_LAYOUT
+        self.sonic_moe_config = _refresh_fp8_config()
+        self.sonic_moe_config.enabled = self.config.fp8 is not None
+        self.sonic_moe_config.fp8_wgrad = self.config.fp8_wgrad
+        self.sonic_moe_config.fuse_y1_quant = True
+        self.sonic_moe_config.fuse_y1_bf16_trunc = True
 
     def _convert_grad_layout(self, param, converter):
         main_grad = getattr(param, "main_grad", None)
@@ -583,6 +591,14 @@ class SonicMoEExpert(GroupedMLPExpert):
             weight.fp8 = None
             weight.transposed_fp8 = None
 
+    def need_quant_weight(self):
+        for w in [self.weight1, self.weight2]:
+            if not hasattr(w, "fp8") or w.fp8 is None:
+                return True
+            if not hasattr(w, "transposed_fp8") or w.transposed_fp8 is None:
+                return True
+        return False
+
     def forward(
         self,
         hidden_states,
@@ -594,6 +610,8 @@ class SonicMoEExpert(GroupedMLPExpert):
         fp8_combine_grad_handle=None,
     ):
         self.convert_weights_to_sonic_layout()
+        if self.sonic_moe_config.enabled is True and self.need_quant_weight():
+            self.quant_weight()
         hidden_states = run_sonic_moe(
             hidden_states,
             topk_indices,
@@ -606,6 +624,7 @@ class SonicMoEExpert(GroupedMLPExpert):
             tokens_per_expert=tokens_per_expert,
             fp8_scale=fp8_scale,
             fp8_combine_grad_handle=fp8_combine_grad_handle,
+            fp8_config=self.sonic_moe_config,
         )
         return hidden_states
 

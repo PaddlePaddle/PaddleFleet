@@ -42,7 +42,6 @@ if paddlefleet_ops.is_sonic_moe_available():
     )
     from paddlefleet_ops.sonicmoe.functional import (
         _DownProjection,
-        _refresh_fp8_config,
         _UpProjection,
     )
     from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
@@ -3187,6 +3186,7 @@ def run_sonic_moe(
     tokens_per_expert=None,
     fp8_scale=None,
     fp8_combine_grad_handle=None,
+    fp8_config=None,
 ):
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
@@ -3252,7 +3252,7 @@ def run_sonic_moe(
         w2_sonic = w2.permute([1, 2, 0])
 
     with enable_fp8(fp8):
-        _refresh_fp8_config()
+        # _refresh_fp8_config()
         y1, z = _UpProjection.apply(
             hidden_states,
             w1_sonic,
@@ -3270,6 +3270,7 @@ def run_sonic_moe(
             is_inference_mode_enabled=False,
             use_low_precision_postact_buffer=False,
             prequant_activation_payload=fp8_hidden_states,
+            fp8_config=fp8_config,
         )
         hidden_states = _DownProjection.apply(
             y1,
@@ -3290,6 +3291,7 @@ def run_sonic_moe(
             activation_type,
             None,
             fp8_combine_grad_handle,
+            fp8_config=fp8_config,
         )
 
     return hidden_states
