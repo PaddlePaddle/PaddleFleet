@@ -1191,7 +1191,7 @@ class TransformerConfig(ModelParallelConfig):
             mtp_num_layers = self.mtp_num_layers if self.mtp_num_layers > 0 else self.num_nextn_predict_layers
             if (
                 len(self.csa_compress_ratios)
-                != self.num_hidden_layers + self.mtp_num_layers
+                != self.num_hidden_layers + mtp_num_layers
             ):
                 raise ValueError(
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
