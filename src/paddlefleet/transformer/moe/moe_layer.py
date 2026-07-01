@@ -752,7 +752,7 @@ class MoELayer(nn.Layer):
             hidden_states,
             combine_overlap_handle,
             use_rr_deepep_combine=self.use_rr_deepep_combine,
-            fp8_dispatch=self.fp8_dispatch and self.using_sonic_moe,
+            fp8_dispatch=self.fp8_dispatch_bwd,
             combine_grad_handle=fp8_combine_grad_handle,
         )
 
@@ -978,10 +978,8 @@ class MoELayer(nn.Layer):
         with profile("combine"):
             hidden_states = self.combine(
                 hidden_states,
-                combine_overlap_handle,
-                use_rr_deepep_combine=self.use_rr_deepep_combine,
-                fp8_dispatch=self.fp8_dispatch_bwd,
-                combine_grad_handle=fp8_combine_grad_handle,
+                combine_overlap_handle=combine_overlap_handle,
+                fp8_combine_grad_handle=fp8_combine_grad_handle,
             )
 
         # Latent MoE: project back from latent space to hidden_size
