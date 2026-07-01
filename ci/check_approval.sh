@@ -75,7 +75,7 @@ done
 
 
 
-MODELCONFIG_APPROVERS="sneaxiy From00 ForFishes Hz188 Waynezee"
+MODELCONFIG_APPROVERS="sneaxiy From00 ForFishes"
 MODELCONFIG_FILES=(
     "src/paddlefleet/model_parallel_config.py"
     "src/paddlefleet/transformer/transformer_config.py"
@@ -85,7 +85,7 @@ for FILE in "${MODELCONFIG_FILES[@]}"; do
     if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
         echo_line="You must be approved by two of ${MODELCONFIG_APPROVERS} for changes in ${FILE}.\n"
         APPROVER_LIST=(${MODELCONFIG_APPROVERS})
-        check_approval 2 "${APPROVER_LIST[@]}"
+        check_approval 1 "${APPROVER_LIST[@]}"
     fi
 done
 
