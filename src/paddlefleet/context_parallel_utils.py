@@ -1120,6 +1120,7 @@ class FlashMaskContextParallel(PyLayer):
                 group,
                 causal,
                 training,
+                softmax_scale,
             )
         )
 
@@ -1251,6 +1252,7 @@ def flashmask_attention_cp(
         causal,
         training,
         learnable_sink,
+        softmax_scale,
         mode,
     )
     return output
