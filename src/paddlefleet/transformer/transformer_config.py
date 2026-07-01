@@ -1188,7 +1188,11 @@ class TransformerConfig(ModelParallelConfig):
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
-            mtp_num_layers = self.mtp_num_layers if self.mtp_num_layers > 0 else self.num_nextn_predict_layers
+            mtp_num_layers = (
+                self.mtp_num_layers
+                if self.mtp_num_layers > 0
+                else self.num_nextn_predict_layers
+            )
             if (
                 len(self.csa_compress_ratios)
                 != self.num_hidden_layers + mtp_num_layers
