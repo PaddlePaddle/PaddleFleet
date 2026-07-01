@@ -238,7 +238,7 @@ class FlashAttnFunctor(PyLayer):
         elif fa_version == 4:
             flashmask_info = None
             q, k, v, result_attention, softmax_lse, causal = ctx.saved_tensor()
-            q_grad, k_grad, v_grad = _flash_attn_bwd(
+            q_grad, k_grad, v_grad, _ = _flash_attn_bwd(
                 q.detach(),
                 k.detach(),
                 v.detach(),
@@ -597,7 +597,7 @@ class FlashMaskAttnFunctor(PyLayer):
                 )
             else:
                 flashmask_info = None
-            q_grad, k_grad, v_grad = _flash_attn_bwd(
+            q_grad, k_grad, v_grad, _ = _flash_attn_bwd(
                 q.detach(),
                 k.detach(),
                 v.detach(),
