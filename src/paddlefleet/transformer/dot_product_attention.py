@@ -538,6 +538,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
+                learnable_sink=self.softmax_offset,
             )
 
             if need_value_padding:

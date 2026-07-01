@@ -209,7 +209,7 @@ class TestFlashMaskContextParallelBackward(unittest.TestCase):
 
         with mock.patch(
             "paddlefleet.context_parallel_utils.cp_flashmask_allgatherkv_balance_backward",
-            return_value=(grad, grad, grad),
+            return_value=(grad, grad, grad, None),
         ) as mock_bwd:
             result = FlashMaskContextParallel.backward(mock_ctx, grad)
             mock_bwd.assert_called_once()
@@ -411,7 +411,7 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
             mock.patch.object(paddle, "get_flags", return_value=flags_det),
         ):
             out = cpu.cp_flashmask_allgatherkv_balance_forward(
-                query, key, value, indices, group, False, True
+                query, key, value, indices, None, group, False, True
             )
         return out[-1]  # fa_version
 

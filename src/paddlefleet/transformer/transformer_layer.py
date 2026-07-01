@@ -428,6 +428,10 @@ class TransformerLayer(nn.Layer):
             layer_number=self.layer_number,
         )
 
+    @property
+    def transformer_layer_weights(self):
+        return self.named_parameters()
+
     def forward(
         self,
         dict_args: dict,
