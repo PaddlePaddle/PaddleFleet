@@ -18,7 +18,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import paddle
 
@@ -362,6 +362,47 @@ class TestTruncateNormInit(unittest.TestCase):
         )
         self.assertIs(config.init_method, config.output_layer_init_method)
         self.assertIs(config.init_method, config.embedding_init_method)
+
+    def test_truncate_norm_init_method_restores_default_dtype(self):
+        from paddlefleet.utils import truncated_init_method_normal
+
+        original_dtype = paddle.get_default_dtype()
+        weight = paddle.empty([8, 8], dtype="float32")
+        init_method = truncated_init_method_normal(0.5, truncate_factor=2.0)
+
+        try:
+            paddle.set_default_dtype("float64")
+            init_method(weight)
+            self.assertEqual(paddle.get_default_dtype(), "float64")
+        finally:
+            paddle.set_default_dtype(original_dtype)
+
+    def test_truncate_norm_init_method_restores_default_dtype_on_error(self):
+        from paddlefleet.utils import truncated_init_method_normal
+
+        original_dtype = paddle.get_default_dtype()
+        init_method = truncated_init_method_normal(0.5, truncate_factor=2.0)
+        weight = Mock()
+
+        try:
+            paddle.set_default_dtype("float64")
+            with patch("paddle.nn.init.trunc_normal_", side_effect=RuntimeError):
+                with self.assertRaises(RuntimeError):
+                    init_method(weight)
+            self.assertEqual(paddle.get_default_dtype(), "float64")
+        finally:
+            paddle.set_default_dtype(original_dtype)
+
+    def test_truncate_norm_raises_on_zero_hidden_size(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "hidden_size must be non-zero when use_truncated_normal_init is True.",
+        ):
+            TransformerConfig(
+                num_hidden_layers=12,
+                hidden_size=0,
+                use_truncated_normal_init=True,
+            )
 
     def test_truncate_norm_raises_on_non_positive_factor(self):
         with self.assertRaisesRegex(
