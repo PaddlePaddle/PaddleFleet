@@ -506,13 +506,13 @@ class ContextParallelScatterOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return scatter_contiguous(input_tensor, group=group, axis=axis)
         return scatter_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return all_gather_contiguous(
                 grad_output, group=ctx.group, axis=ctx.axis
             )
@@ -540,13 +540,13 @@ class ContextParallelGatherOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return all_gather_contiguous(input_tensor, group=group, axis=axis)
         return all_gather_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return scatter_contiguous(
                 grad_output, group=ctx.group, axis=ctx.axis
             )
@@ -574,13 +574,13 @@ class ContextParallelAllGatherOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return all_gather_contiguous(input_tensor, group=group, axis=axis)
         return all_gather_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return reduce_scatter_contiguous(
                 grad_output, axis=ctx.axis, group=ctx.group
             )
@@ -1523,7 +1523,7 @@ def flashmask_attention_cp(
         ```
     """
 
-    if mode == "allgather_kv":
+    if mode == "dualchunk_allgather":
         output = FlashMaskContextParallel.apply(
             query,
             key,
@@ -1537,7 +1537,7 @@ def flashmask_attention_cp(
             softmax_scale,
             mode,
         )
-    elif mode == "a2a":
+    elif mode == "contiguous_a2a":
         if fixed_seed_offset is not None:
             raise NotImplementedError(
                 "flashmask_attention_ulysses does not support setting fixed_seed_offset"
@@ -1563,5 +1563,5 @@ def flashmask_attention_cp(
             softmax_scale=softmax_scale,
         )
     else:
-        raise ValueError(f"invalid cp_comm_type: {mode}")
+        raise ValueError(f"invalid cp_balance_mode: {mode}")
     return output

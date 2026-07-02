@@ -569,16 +569,17 @@ class TransformerConfig(ModelParallelConfig):
     ##################
     # Context Parallel
     ##################
-    cp_comm_type: str | list[str] = "allgather_kv"
-    """Inter-gpu communication type for context parallelism.
+    cp_comm_type: str | list[str] | None = None
+    """Inter-gpu communication type for context parallelism. Not support now.
     str: all layers share same communication type.
-    List[str]: each layer has its separate communication type. Not support now.
+    List[str]: each layer has its separate communication type.
     """
 
     cp_balance_mode: str = "dualchunk_allgather"
     """Context parallel scatter/gather layout mode.
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
+    "contiguous_a2a".
     """
 
     ####################
@@ -1383,35 +1384,12 @@ class TransformerConfig(ModelParallelConfig):
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
 
-        if self.cp_comm_type not in {"allgather_kv", "a2a"}:
-            raise ValueError(
-                f"cp_comm_type={self.cp_comm_type!r} is invalid. "
-                "Must be one of {'allgather_kv', 'a2a'}."
-            )
-
         if self.cp_balance_mode not in {
             "dualchunk_allgather",
             "contiguous_allgather",
+            "contiguous_a2a",
         }:
             raise ValueError(
                 f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
                 "Must be one of {'dualchunk_allgather', 'contiguous_allgather'}."
-            )
-
-        if (
-            self.cp_comm_type == "allgather_kv"
-            and self.cp_balance_mode != "dualchunk_allgather"
-        ):
-            raise ValueError(
-                f"cp_comm_type={self.cp_comm_type!r} does not support cp_balance_mode={self.cp_balance_mode!r}. "
-                "Use 'dualchunk_allgather' instead."
-            )
-
-        if (
-            self.cp_comm_type == "a2a"
-            and self.cp_balance_mode != "contiguous_allgather"
-        ):
-            raise ValueError(
-                f"cp_comm_type={self.cp_comm_type!r} does not support cp_balance_mode={self.cp_balance_mode!r}. "
-                "Use 'contiguous_allgather' instead."
             )

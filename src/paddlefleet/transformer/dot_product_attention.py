@@ -98,7 +98,6 @@ class DotProductAttention(FleetLayer):
         self.attention_type = attention_type  # unused for now
         self.is_mtp_layer = is_mtp_layer
         self.is_swa = is_swa
-        self.cp_comm_type = cp_comm_type
 
         # k_channels and v_channels may differ from config.head_dim
         # Default to config.head_dim if not provided (standard attention)
@@ -343,7 +342,7 @@ class DotProductAttention(FleetLayer):
             assert not self.config.flashmask_use_varlen, (
                 "flashmask_use_varlen does not support context parallel now."
             )
-            if self.cp_comm_type != "a2a":
+            if self.config.cp_balance_mode != "contiguous_a2a":
                 attn_mask_startend_row_indices = (
                     self.expand_attn_mask_startend_row_indices_for_cp(
                         attn_mask_startend_row_indices, key
@@ -480,15 +479,15 @@ class DotProductAttention(FleetLayer):
                     if use_rr_flash_attention
                     else flashmask_attention_cp
                 )
-                extra_kwargs["mode"] = self.cp_comm_type
-                if self.cp_comm_type == "a2a":
+                extra_kwargs["mode"] = self.config.cp_balance_mode
+                if self.config.cp_balance_mode == "contiguous_a2a":
                     if use_rr_flash_attention:
                         raise NotImplementedError(
-                            "cp_comm_type a2a does not support refined recompute"
+                            "cp_balance_mode contiguous_a2a does not support refined recompute"
                         )
                     if not self.config.multi_latent_attention:
                         raise NotImplementedError(
-                            "cp_comm_type a2a only supports mla now"
+                            "cp_balance_mode contiguous_a2a only supports mla now"
                         )
                 else:
                     is_causal = False  # only support non-causal for flashmask_attention_cp
