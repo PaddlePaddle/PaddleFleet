@@ -902,7 +902,7 @@ class TransformerConfig(ModelParallelConfig):
     routing_map_fusion: bool = False
     """If True, use Triton fused routing map kernel for MoE routing."""
 
-    magic_init: bool = False
+    magic_init: bool = True
     """Use the magic initialization method."""
 
     use_truncated_normal_init: bool = False
@@ -1076,7 +1076,7 @@ class TransformerConfig(ModelParallelConfig):
                 self.embedding_init_method = self.init_method
 
         # Force truncated normal initialization.
-        self.use_truncated_normal_init = True
+        self.use_truncated_normal_init = False
 
         if self.use_truncated_normal_init:
             if self.truncated_normal_init_factor <= 0:
