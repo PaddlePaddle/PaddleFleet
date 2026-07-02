@@ -478,7 +478,7 @@ class TestContextParallelOpsModes(unittest.TestCase):
             balanced.assert_not_called()
 
 
-class TestSwaP2PHelpers(unittest.TestCase):
+class TestFlashMaskSwaP2PHelpers(unittest.TestCase):
     def test_scatter_kv_places_local_and_received_windows(self):
         group = FakeGroup(rank=1, world_size=2)
         key = paddle.arange(4, dtype="float32").reshape([1, 4, 1, 1]) + 10
@@ -505,7 +505,7 @@ class TestSwaP2PHelpers(unittest.TestCase):
         value = paddle.zeros([1, 4, 1, 1], dtype="float32")
 
         key_grad, value_grad = cp_utils._send_window_grad_back(
-            key_grad_tensor, value_grad_tensor, key, value, group
+            key_grad_tensor, value_grad_tensor, key, value, group, 128
         )
 
         self.assertIs(key_grad, key_grad_tensor)
@@ -539,7 +539,7 @@ class TestSwaP2PHelpers(unittest.TestCase):
             ),
         ):
             key_grad, value_grad = cp_utils._send_window_grad_back(
-                key_grad_tensor, value_grad_tensor, key, value, group
+                key_grad_tensor, value_grad_tensor, key, value, group, 128
             )
 
         assert_tensor_equal(
@@ -571,7 +571,7 @@ class TestSwaP2PHelpers(unittest.TestCase):
             ),
         ):
             key_grad, value_grad = cp_utils._send_window_grad_back(
-                key_grad_tensor, value_grad_tensor, key, value, group
+                key_grad_tensor, value_grad_tensor, key, value, group, 128
             )
 
         expected_send = paddle.stack(
@@ -633,7 +633,7 @@ class TestSwaP2PHelpers(unittest.TestCase):
         self.assertEqual(captured["peer"], 1)
 
 
-class TestSwaP2PFlashMaskPath(unittest.TestCase):
+class TestFlashMaskSwaP2PPath(unittest.TestCase):
     def setUp(self):
         self.query = paddle.zeros([1, 128, 1, 1], dtype="float32")
         self.key = paddle.arange(128, dtype="float32").reshape([1, 128, 1, 1])
@@ -678,6 +678,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
                     causal=False,
                     is_training=True,
                     softmax_scale=0.5,
+                    window_size=64,
                 )
             )
 
@@ -694,8 +695,8 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
         self.assertIsNone(captured["learnable_sink"])
         self.assertFalse(captured["causal"])
         self.assertEqual(captured["softmax_scale"], 0.5)
-        self.assertEqual(list(recv_key.shape), [1, 128, 1, 1])
-        self.assertEqual(list(recv_value.shape), [1, 128, 1, 1])
+        self.assertEqual(list(recv_key.shape), [1, 64, 1, 1])
+        self.assertEqual(list(recv_value.shape), [1, 64, 1, 1])
 
     def test_p2p_backward_calls_flash_bwd_and_returns_local_grads(self):
         output = paddle.full([1, 128, 1, 1], 3.0, dtype="float32")
@@ -750,6 +751,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
                 self.group,
                 causal=False,
                 softmax_scale=0.5,
+                window_size=128,
             )
 
         assert_tensor_equal(self, qg, query_grad)
@@ -778,32 +780,46 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
         kg = self.key + 2
         vg = self.value + 3
 
+        captured = {}
+
+        def fake_forward(*args):
+            captured["forward_window_size"] = args[-1]
+            return output, lse, recv_key, recv_value, self.indices + 1
+
         with patch.object(
             cp_utils,
             "cp_flashmask_swa_p2p_forward",
-            lambda *args: (output, lse, recv_key, recv_value, self.indices + 1),
+            fake_forward,
         ):
-            result = cp_utils.SwaP2PFlashMask.forward(
+            result = cp_utils.FlashMaskSwaP2P.forward(
                 ctx,
                 self.query,
                 self.key,
                 self.value,
                 self.indices,
                 group=self.group,
+                window_size=64,
             )
 
         assert_tensor_equal(self, result, output)
         self.assertIs(ctx.group, self.group)
         self.assertFalse(ctx.causal)
+        self.assertEqual(ctx.window_size, 64)
+        self.assertEqual(captured["forward_window_size"], 64)
         assert_tensor_equal(self, ctx.saved[-1], self.indices + 1)
+
+        def fake_backward(*args):
+            captured["backward_window_size"] = args[-1]
+            return qg, kg, vg, None
 
         with patch.object(
             cp_utils,
             "cp_flashmask_swa_p2p_backward",
-            lambda *args: (qg, kg, vg, None),
+            fake_backward,
         ):
-            backward_result = cp_utils.SwaP2PFlashMask.backward(ctx, output)
+            backward_result = cp_utils.FlashMaskSwaP2P.backward(ctx, output)
 
+        self.assertEqual(captured["backward_window_size"], 64)
         self.assertEqual(len(backward_result), 3)
         assert_tensor_equal(self, backward_result[0], qg)
         assert_tensor_equal(self, backward_result[1], kg)
@@ -843,7 +859,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
                 "get_hybrid_communicate_group",
                 lambda: FakeHcg(self.group),
             ),
-            patch.object(cp_utils.SwaP2PFlashMask, "apply", fake_apply),
+            patch.object(cp_utils.FlashMaskSwaP2P, "apply", fake_apply),
         ):
             out = cp_utils.flashmask_attention_cp(
                 self.query,
@@ -855,6 +871,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
                 learnable_sink=learnable_sink,
                 softmax_scale=0.5,
                 mode="contiguous_swap2p",
+                window_size=64,
             )
 
         assert_tensor_equal(self, out, result)
@@ -867,6 +884,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
         self.assertEqual(captured["args"][9], 0.5)
         self.assertIs(captured["args"][10], self.group)
         self.assertEqual(captured["args"][11], "contiguous_swap2p")
+        self.assertEqual(captured["args"][12], 64)
 
 
 if __name__ == "__main__":

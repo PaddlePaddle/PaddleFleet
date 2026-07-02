@@ -1229,8 +1229,6 @@ class FlashMaskContextParallel(PyLayer):
 
 # ======================== P2P SWA CP fast path Layer ========================
 
-SWA_WIN_SIZE = 128
-
 
 def _wait_all(tasks):
     """Wait for all asynchronous communication tasks."""
@@ -1238,7 +1236,7 @@ def _wait_all(tasks):
         task.wait()
 
 
-def _exchange_prev_window(key, value, group, window_size=SWA_WIN_SIZE):
+def _exchange_prev_window(key, value, group, window_size=128):
     """Exchange each rank's tail KV window with the next CP rank."""
     rank = group.rank
     cp_size = group.world_size
@@ -1305,7 +1303,7 @@ def _scatter_kv_to_global_tensor(key, value, recv_key, recv_value, group):
 
 
 def _send_window_grad_back(
-    key_grad_tensor, value_grad_tensor, key, value, group
+    key_grad_tensor, value_grad_tensor, key, value, group, window_size
 ):
     """Return remote-window KV gradients to owner ranks and accumulate them."""
     rank = group.rank
@@ -1322,7 +1320,7 @@ def _send_window_grad_back(
     value_grad = value_grad_tensor[:, local_start:local_end, :, :].contiguous()
 
     recv_grad_window = paddle.empty(
-        [2, key.shape[0], SWA_WIN_SIZE, key.shape[2], key.shape[3]],
+        [2, key.shape[0], window_size, key.shape[2], key.shape[3]],
         dtype=key.dtype,
     )
     ops = []
@@ -1333,7 +1331,7 @@ def _send_window_grad_back(
 
     if rank > 0:
         recv_rank = group.ranks[rank - 1]
-        window_start = local_start - SWA_WIN_SIZE
+        window_start = local_start - window_size
         send_grad_window = paddle.stack(
             [
                 key_grad_tensor[:, window_start:local_start, :, :],
@@ -1347,8 +1345,8 @@ def _send_window_grad_back(
         _wait_all(dist.batch_isend_irecv(ops))
 
     if rank < cp_size - 1:
-        key_grad[:, -SWA_WIN_SIZE:, :, :].add_(recv_grad_window[0])
-        value_grad[:, -SWA_WIN_SIZE:, :, :].add_(recv_grad_window[1])
+        key_grad[:, -window_size:, :, :].add_(recv_grad_window[0])
+        value_grad[:, -window_size:, :, :].add_(recv_grad_window[1])
 
     return key_grad, value_grad
 
@@ -1363,6 +1361,7 @@ def cp_flashmask_swa_p2p_forward(
     causal,
     is_training,
     softmax_scale,
+    window_size,
 ):
     """Run forward SWA FlashMask CP with one-hop P2P KV exchange."""
     paddle.base.core.nvprof_nvtx_push("cp_flashmask_swa_p2p_forward")
@@ -1374,7 +1373,7 @@ def cp_flashmask_swa_p2p_forward(
         max_seqlen_q=query.shape[1],
     )
 
-    recv_key, recv_value = _exchange_prev_window(key, value, group)
+    recv_key, recv_value = _exchange_prev_window(key, value, group, window_size)
 
     key_tensor, value_tensor = _scatter_kv_to_global_tensor(
         key, value, recv_key, recv_value, group
@@ -1411,6 +1410,7 @@ def cp_flashmask_swa_p2p_backward(
     group,
     causal,
     softmax_scale,
+    window_size,
 ):
     """Run backward SWA FlashMask CP and return P2P KV gradients."""
     paddle.base.core.nvprof_nvtx_push("cp_flashmask_swa_p2p_backward")
@@ -1436,7 +1436,7 @@ def cp_flashmask_swa_p2p_backward(
     )
 
     key_grad, value_grad = _send_window_grad_back(
-        key_grad_tensor, value_grad_tensor, key, value, group
+        key_grad_tensor, value_grad_tensor, key, value, group, window_size
     )
 
     paddle.base.core.nvprof_nvtx_pop()
@@ -1444,8 +1444,8 @@ def cp_flashmask_swa_p2p_backward(
     return query_grad, key_grad, value_grad, grad_sink
 
 
-class SwaP2PFlashMask(PyLayer):
-    """PyLayer for SWA FlashMask context parallelism using one-hop P2P KV exchange."""
+class FlashMaskSwaP2P(PyLayer):
+    """PyLayer for FlashMask SWA context parallelism using one-hop P2P KV exchange."""
 
     @staticmethod
     def forward(
@@ -1462,6 +1462,7 @@ class SwaP2PFlashMask(PyLayer):
         softmax_scale=None,
         group=None,
         mode="contiguous_allgather",
+        window_size=None,
     ):
         """Forward pass for SWA P2P FlashMask attention."""
         if dropout > 0.0:
@@ -1470,6 +1471,11 @@ class SwaP2PFlashMask(PyLayer):
             )
         if fixed_seed_offset is not None:
             raise NotImplementedError("Fixed seed offset is not supported yet.")
+        window_size = 128 if window_size is None else window_size
+        if window_size <= 0:
+            raise ValueError(
+                f"SWA P2P window_size must be positive, got {window_size}"
+            )
 
         output, log_sum_exp, recv_key, recv_value, startend_row_indices = (
             cp_flashmask_swa_p2p_forward(
@@ -1482,6 +1488,7 @@ class SwaP2PFlashMask(PyLayer):
                 causal,
                 training,
                 softmax_scale,
+                window_size,
             )
         )
 
@@ -1502,6 +1509,7 @@ class SwaP2PFlashMask(PyLayer):
         )
         ctx.group = group
         ctx.causal = causal
+        ctx.window_size = window_size
         return output
 
     @staticmethod
@@ -1532,6 +1540,7 @@ class SwaP2PFlashMask(PyLayer):
                 ctx.group,
                 ctx.causal,
                 ctx.softmax_scale,
+                ctx.window_size,
             )
         )
         if ctx.sink_requires_grad:
@@ -1551,6 +1560,7 @@ def flashmask_attention_cp(
     learnable_sink=None,
     softmax_scale=None,
     mode="dualchunk_allgather",
+    window_size=None,
 ):
     """
     FlashMask attention with context parallelism - public API.
@@ -1593,7 +1603,7 @@ def flashmask_attention_cp(
             "P2P SWA fast path requires flashmask installed. Please check."
         )
 
-        return SwaP2PFlashMask.apply(
+        return FlashMaskSwaP2P.apply(
             query,
             key,
             value,
@@ -1606,6 +1616,7 @@ def flashmask_attention_cp(
             softmax_scale,
             cp_group,
             mode,
+            window_size,
         )
     else:
         output = FlashMaskContextParallel.apply(

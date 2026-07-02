@@ -526,6 +526,7 @@ class DotProductAttention(FleetLayer):
                 if self.config.cp_balance_mode == "contiguous_a2a":
                     if self.is_swa and use_mla:
                         extra_kwargs["mode"] = "contiguous_swap2p"
+                        extra_kwargs["window_size"] = self.sliding_window[0]
 
                 is_causal = (
                     False  # only support non-causal for flashmask_attention_cp
