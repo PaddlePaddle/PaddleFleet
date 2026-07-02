@@ -36,7 +36,6 @@ from paddlefleet_ops.flash_mask_facade import (
 
 from paddlefleet.context_parallel_utils import (
     flashmask_attention_cp,
-    flashmask_attention_ulysses,
 )
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
@@ -474,15 +473,24 @@ class DotProductAttention(FleetLayer):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
             is_causal = attn_mask_type == AttnMaskType.causal
+            extra_kwargs = {}
             if self.context_parallel_size > 1:
+                flashmask_attention_func = (
+                    self.rr_flashmask_attention_cp_func
+                    if use_rr_flash_attention
+                    else flashmask_attention_cp
+                )
+                extra_kwargs["mode"] = self.cp_comm_type
                 if self.cp_comm_type == "a2a":
-                    flashmask_attention_func = flashmask_attention_ulysses
+                    if use_rr_flash_attention:
+                        raise NotImplementedError(
+                            "cp_comm_type a2a does not support refined recompute"
+                        )
+                    if not self.config.multi_latent_attention:
+                        raise NotImplementedError(
+                            "cp_comm_type a2a only supports mla now"
+                        )
                 else:
-                    flashmask_attention_func = (
-                        self.rr_flashmask_attention_cp_func
-                        if use_rr_flash_attention
-                        else flashmask_attention_cp
-                    )
                     is_causal = False  # only support non-causal for flashmask_attention_cp
                     assert attn_mask_startend_row_indices.shape[-1] == 2
             elif use_rr_flash_attention:
@@ -533,6 +541,7 @@ class DotProductAttention(FleetLayer):
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
                 learnable_sink=self.softmax_offset,
+                **extra_kwargs,
             )
 
             if need_value_padding:

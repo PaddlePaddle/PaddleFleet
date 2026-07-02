@@ -1191,69 +1191,6 @@ class FlashMaskContextParallel(PyLayer):
         return query_grad, key_grad, value_grad
 
 
-def flashmask_attention_cp(
-    query,
-    key,
-    value,
-    startend_row_indices,
-    fixed_seed_offset=None,
-    dropout=0.0,
-    causal=False,
-    training=True,
-    learnable_sink=None,
-    softmax_scale=None,
-    mode="allgather_kv",
-):
-    """
-    FlashMask attention with context parallelism - public API.
-    This is the main entry point for using FlashMask attention with context parallelism.
-    It provides a convenient interface that wraps the FlashMaskContextParallel PyLayer.
-    Args:
-        query (paddle.Tensor): Query tensor with shape [batch, seq_len/n, num_heads, head_dim]
-        key (paddle.Tensor): Key tensor with shape [batch, seq_len/n, num_heads, head_dim]
-        value (paddle.Tensor): Value tensor with shape [batch, seq_len/n, num_heads, head_dim]
-        startend_row_indices (paddle.Tensor): Row indices for attention mask
-        fixed_seed_offset (paddle.Tensor, optional): Fixed seed offset for dropout
-        dropout (float, optional): Dropout probability. Defaults to 0.0
-        causal (bool, optional): Whether to use causal attention. Defaults to False
-        training (bool, optional): Whether in training mode. Defaults to True
-        mode (str, optional): Attention mode. Defaults to "allgather_kv"
-    Returns:
-        paddle.Tensor: Attention output with shape [batch, seq_len/n, num_heads, head_dim]
-    Example:
-        ```python
-        # Initialize tensors (assuming context parallelism is set up)
-        query = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
-        key = paddle.randn([2, 512, 8, 64])    # [batch, seq_len/n, heads, head_dim]
-        value = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
-        mask_indices = paddle.randint(0, 1024, [100, 2])
-        # Apply FlashMask attention with context parallelism
-        output = flashmask_attention_cp(
-            query=query,
-            key=key,
-            value=value,
-            startend_row_indices=mask_indices,
-            training=True
-        )
-        ```
-    """
-
-    output = FlashMaskContextParallel.apply(
-        query,
-        key,
-        value,
-        startend_row_indices,
-        fixed_seed_offset,
-        dropout,
-        causal,
-        training,
-        learnable_sink,
-        softmax_scale,
-        mode,
-    )
-    return output
-
-
 # ===========================================================================
 # Ulysses Context Parallel (All-to-All based sequence parallelism)
 #
@@ -1433,9 +1370,7 @@ def flashmask_attention_ulysses(
     key,
     value,
     startend_row_indices,
-    dropout=0.0,
     causal=False,
-    training=True,
     learnable_sink=None,
     softmax_scale=None,
 ):
@@ -1524,9 +1459,7 @@ def flashmask_attention_ulysses(
         key,
         value,
         startend_row_indices=startend_row_indices,
-        dropout=dropout,
         causal=causal,
-        training=training,
         softmax_scale=softmax_scale,
     )
 
@@ -1541,3 +1474,94 @@ def flashmask_attention_ulysses(
     )
 
     return attn_output
+
+
+def flashmask_attention_cp(
+    query,
+    key,
+    value,
+    startend_row_indices,
+    fixed_seed_offset=None,
+    dropout=0.0,
+    causal=False,
+    training=True,
+    learnable_sink=None,
+    softmax_scale=None,
+    mode="allgather_kv",
+):
+    """
+    FlashMask attention with context parallelism - public API.
+    This is the main entry point for using FlashMask attention with context parallelism.
+    It provides a convenient interface that wraps the FlashMaskContextParallel PyLayer.
+    Args:
+        query (paddle.Tensor): Query tensor with shape [batch, seq_len/n, num_heads, head_dim]
+        key (paddle.Tensor): Key tensor with shape [batch, seq_len/n, num_heads, head_dim]
+        value (paddle.Tensor): Value tensor with shape [batch, seq_len/n, num_heads, head_dim]
+        startend_row_indices (paddle.Tensor): Row indices for attention mask
+        fixed_seed_offset (paddle.Tensor, optional): Fixed seed offset for dropout
+        dropout (float, optional): Dropout probability. Defaults to 0.0
+        causal (bool, optional): Whether to use causal attention. Defaults to False
+        training (bool, optional): Whether in training mode. Defaults to True
+        mode (str, optional): Attention mode. Defaults to "allgather_kv"
+    Returns:
+        paddle.Tensor: Attention output with shape [batch, seq_len/n, num_heads, head_dim]
+    Example:
+        ```python
+        # Initialize tensors (assuming context parallelism is set up)
+        query = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
+        key = paddle.randn([2, 512, 8, 64])    # [batch, seq_len/n, heads, head_dim]
+        value = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
+        mask_indices = paddle.randint(0, 1024, [100, 2])
+        # Apply FlashMask attention with context parallelism
+        output = flashmask_attention_cp(
+            query=query,
+            key=key,
+            value=value,
+            startend_row_indices=mask_indices,
+            training=True
+        )
+        ```
+    """
+
+    if mode == "allgather_kv":
+        output = FlashMaskContextParallel.apply(
+            query,
+            key,
+            value,
+            startend_row_indices,
+            fixed_seed_offset,
+            dropout,
+            causal,
+            training,
+            learnable_sink,
+            softmax_scale,
+            mode,
+        )
+    elif mode == "a2a":
+        if fixed_seed_offset is not None:
+            raise NotImplementedError(
+                "flashmask_attention_ulysses does not support setting fixed_seed_offset"
+            )
+
+        if dropout != 0.0:
+            raise NotImplementedError(
+                "flashmask_attention_ulysses does not support dropout"
+            )
+
+        if not training:
+            raise NotImplementedError(
+                "flashmask_attention_ulysses does not support setting training"
+            )
+
+        output = flashmask_attention_ulysses(
+            query=query,
+            key=key,
+            value=value,
+            startend_row_indices=startend_row_indices,
+            causal=causal,
+            learnable_sink=None,
+            softmax_scale=None,
+        )
+    else:
+        raise ValueError(f"invalid cp_comm_type: {mode}")
+    return output
