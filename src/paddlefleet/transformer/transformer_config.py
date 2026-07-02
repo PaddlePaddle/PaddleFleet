@@ -1075,6 +1075,9 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
+        # Force truncated normal initialization.
+        self.use_truncated_normal_init = True
+
         if self.use_truncated_normal_init:
             if self.hidden_size == 0:
                 raise ValueError(
