@@ -1415,16 +1415,3 @@ class TransformerConfig(ModelParallelConfig):
                 f"cp_comm_type={self.cp_comm_type!r} does not support cp_balance_mode={self.cp_balance_mode!r}. "
                 "Use 'contiguous_allgather' instead."
             )
-
-        if (
-            self.multi_latent_attention
-            and self.window_attn_skip_freq is not None
-        ):
-            if (
-                self.context_parallel_size > 1
-                and self.cp_balance_mode != "contiguous_allgather"
-            ):
-                raise ValueError(
-                    f" cp_balance_mode={self.cp_balance_mode!r} is not supported when using multi_latent_attention and window_attn_skip_freq is not None. "
-                    "Use 'contiguous_allgather' instead."
-                )
