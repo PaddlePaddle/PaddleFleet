@@ -34,7 +34,10 @@ from paddlefleet_ops.flash_mask_facade import (
     flashmask_attention,
 )
 
-from paddlefleet.context_parallel_utils import flashmask_attention_cp
+from paddlefleet.context_parallel_utils import (
+    flashmask_attention_cp,
+    p2p_flashmask_attention,
+)
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -516,6 +519,11 @@ class DotProductAttention(FleetLayer):
                     if use_rr_flash_attention
                     else flashmask_attention_cp
                 )
+                use_mla = bool(
+                    getattr(self.config, "multi_latent_attention", False)
+                )
+                if self.is_swa and use_mla:
+                    flashmask_attention_func = p2p_flashmask_attention
                 is_causal = (
                     False  # only support non-causal for flashmask_attention_cp
                 )
