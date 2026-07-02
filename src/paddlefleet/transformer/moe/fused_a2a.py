@@ -450,7 +450,9 @@ class DeepEPDispatch(PyLayer):
                         using_ue8m0_scale=use_ue8m0,
                     )
                 )
-                scale = scale.T.contiguous()
+                scale = _normalize_fp8_scale_for_deepep(
+                    x_fp8, scale, use_ue8m0=use_ue8m0
+                )
             x = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
             x,
