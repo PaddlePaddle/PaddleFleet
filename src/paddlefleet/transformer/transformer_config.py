@@ -546,6 +546,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
 
+    moe_split_feature_routing: bool = False
+    """Enable multi-view (split-feature) MoE routing. When True, the router
+    scores each expert with the sum of two independent views: the existing
+    ``self.weight`` gate plus a new ``self.weight_1`` projection, i.e.
+    ``score_func(logits_0) + score_func(logits_1)`` instead of a single gate
+    projection. The expert FFN compute path is unchanged. Disabled by default;
+    has no effect on hash-routing layers (moe_n_hash_layers), which keep using
+    the original single gate."""
+
     moe_n_hash_layers: int = 0
     """Number of leading transformer layers that use hash-based MoE routing.
     Layers with layer_number < moe_n_hash_layers (0-indexed) use a pre-computed
