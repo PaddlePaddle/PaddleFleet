@@ -77,6 +77,9 @@ class TransformerConfig(ModelParallelConfig):
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
+    mtp_shared_last_layer: bool = False
+    """When True, MTP layers share the last backbone TransformerLayer parameters."""
+
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
 
@@ -352,6 +355,7 @@ class TransformerConfig(ModelParallelConfig):
     apply_query_key_layer_scaling is True."""
 
     high_precision_rope: bool = False
+    swa_high_precision_norm: bool = False
     ####################
     # fusion
     ####################
@@ -454,6 +458,11 @@ class TransformerConfig(ModelParallelConfig):
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
     Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
+
+    moe_allgather_gate_overlap: bool = False
+    """Whether to issue the AllGather before the gate so it overlaps with gate
+    compute. Only honoured when ``moe_token_dispatcher_type='allgather'`` and
+    ``expert_model_parallel_size > 1``; ignored otherwise."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -885,6 +894,10 @@ class TransformerConfig(ModelParallelConfig):
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
 
+    use_accuracy_compatible: bool = False
+    """Whether to enable accuracy-compatible kernels for cross-framework numerical
+    alignment. Defaults to False."""
+
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
 
@@ -981,6 +994,15 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.mtp_shared_last_layer:
+            # When MTP reuses the last backbone TransformerLayer's parameters,
+            # the MTP transformer block must have an identical structure to the
+            # backbone-last layer (same MoE / dense shape). Force-disable
+            # use_dense_mtp so the MTP layer matches whatever the backbone is.
+            assert not self.use_dense_mtp, (
+                "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
+            )
+
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
@@ -1183,13 +1205,18 @@ class TransformerConfig(ModelParallelConfig):
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
+            mtp_num_layers = (
+                self.mtp_num_layers
+                if self.mtp_num_layers > 0
+                else self.num_nextn_predict_layers
+            )
             if (
                 len(self.csa_compress_ratios)
-                != self.num_hidden_layers + self.num_nextn_predict_layers
+                != self.num_hidden_layers + mtp_num_layers
             ):
                 raise ValueError(
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
-                    f"must equal num_hidden_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
+                    f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
             valid_ratios = {0, 4, 128}
             for i, r in enumerate(self.csa_compress_ratios):
@@ -1246,6 +1273,18 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+
+        # swa_high_precision_norm is only supported for DSv4 models.
+        if (
+            self.swa_high_precision_norm
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
+            raise ValueError(
+                "swa_high_precision_norm=True is only supported when "
+                "experimental_attention_variant='dsv4_hybrid'. "
+                "High-precision norm mode is only adapted for DSv4 to align "
+                "training and inference numerical behavior."
+            )
 
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:

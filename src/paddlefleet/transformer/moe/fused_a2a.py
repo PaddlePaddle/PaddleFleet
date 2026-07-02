@@ -171,7 +171,12 @@ def get_buffer(group: Group, hidden_bytes: int):
         or _buffer.num_nvl_bytes < num_nvl_bytes
         or _buffer.num_rdma_bytes < num_rdma_bytes
     ):
-        _buffer = deep_ep.Buffer(group, num_nvl_bytes, num_rdma_bytes)
+        _buffer = deep_ep.Buffer(
+            group,
+            num_nvl_bytes,
+            num_rdma_bytes,
+            num_qps_per_rank=max(24, deep_ep.Buffer.num_sms),
+        )
     return _buffer
 
 

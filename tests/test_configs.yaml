@@ -43,6 +43,9 @@ tests:
   - test_case: [tests/multi_card_tests/moe/test_shared_expert_gated.py]
     products:
       - num_gpus: 4
+  - test_case: [tests/multi_card_tests/moe/test_allgather_dispatcher_ep.py]
+    products:
+      - num_gpus: 2
   # ai_edited_test: tensor_parallel (Pattern A/B, TP=4 sharding=2 -> 8 GPUs)
   - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_mappings.py]
     products:

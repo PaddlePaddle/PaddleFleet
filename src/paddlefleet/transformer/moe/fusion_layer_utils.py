@@ -317,6 +317,7 @@ class MlpNode:
         use_ue8m0=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_accuracy_compatible=False,
     ):
         """
         Constructor
@@ -402,6 +403,7 @@ class MlpNode:
                     dw_p2p_overlap=dw_p2p_overlap,
                     moe_expert_fusion=moe_expert_fusion,
                     clamp_value=clamp_value,
+                    use_accuracy_compatible=use_accuracy_compatible,
                 )
                 for local_expert_id in range(self.num_experts_per_device)
             ]
@@ -418,6 +420,7 @@ class MlpNode:
                 dw_p2p_overlap=dw_p2p_overlap,
                 moe_expert_fusion=moe_expert_fusion,
                 clamp_value=clamp_value,
+                use_accuracy_compatible=use_accuracy_compatible,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -2027,6 +2030,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_ue8m0=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_accuracy_compatible=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -2056,6 +2060,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_ue8m0=use_ue8m0,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
+            use_accuracy_compatible=use_accuracy_compatible,
         )
 
         if fp8_dispatched_handle is not None:
@@ -2185,6 +2190,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         is_first_fwd=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_accuracy_compatible=False,
     ):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
@@ -2196,6 +2202,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             moe_expert_fusion=moe_expert_fusion,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
+            use_accuracy_compatible=use_accuracy_compatible,
         )
         original_hidden_shape = tuple(hidden_states.shape)
         original_probs_shape = tuple(dispatched_probs.shape)
@@ -2273,6 +2280,15 @@ def run_sonic_moe(
             paddle.int32
         )
 
+    # paddle.cast is not a no-op for matching dtype (it allocates + copies),
+    # so cast once with a guard instead of twice below. Allgather feeds int32
+    # (zero copies); deepep feeds int64 (one copy instead of two).
+    topk_indices_i32 = (
+        topk_indices
+        if topk_indices.dtype == paddle.int32
+        else topk_indices.cast(paddle.int32)
+    )
+
     (
         expert_frequency_offset,
         x_gather_idx,
@@ -2285,7 +2301,7 @@ def run_sonic_moe(
         _N_recv,
         _score_src_idx,
     ) = deepep_topk_to_sonic_metadata(
-        topk_indices.cast(paddle.int32),
+        topk_indices_i32,
         topk_scores,
         tokens_per_expert,
         E,
@@ -2298,7 +2314,7 @@ def run_sonic_moe(
     total_expert_freq = TK_padded
     scores_for_down = _differentiable_router_scores(
         topk_scores,
-        topk_indices.cast(paddle.int32),
+        topk_indices_i32,
         num_activated_expert_per_token_offset,
         TK_padded - total_pad_rows,
         TK_padded,

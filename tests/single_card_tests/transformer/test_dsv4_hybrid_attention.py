@@ -1,5 +1,4 @@
 # Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
-# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from unittest.mock import patch
 
 import paddle
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
@@ -34,10 +34,14 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
+    CompressedSparseAttentionSublayersSpec,
+    CSADocMaskMetadata,
     _apply_rope,
+    _build_compressed_causal_mask,
     _resolve_csa_indexer_attn_topk_effective,
     _resolve_csa_indexer_loss_topk_effective,
     get_compress_topk_idxs,
+    get_valid_range,
     get_window_topk_idxs,
 )
 from paddlefleet.transformer.dsa_attention import (
@@ -51,6 +55,30 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 _SEED = 42
+
+
+class _FakeGroup:
+    def __init__(self, nranks=1):
+        self.nranks = nranks
+        self.ranks = list(range(nranks))
+        self.rank = 0
+
+
+class _FakePGCollection:
+    def __init__(self, tp_nranks=1, cp_nranks=1):
+        self.tp = _FakeGroup(tp_nranks)
+        self.cp = _FakeGroup(cp_nranks)
+
+
+def _make_startend_row_indices(doc_lens, seqlen):
+    values = []
+    doc_end = 0
+    for doc_len in doc_lens:
+        doc_end += doc_len
+        values.extend([doc_end] * doc_len)
+    if len(values) < seqlen:
+        values.extend([doc_end] * (seqlen - len(values)))
+    return paddle.to_tensor(values, dtype="int32").reshape([1, 1, seqlen, 1])
 
 
 def _make_config(
@@ -204,6 +232,37 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 setattr(cfg, attr, True)
                 cfg.__post_init__()
 
+    def test_csa_rejects_tensor_parallelism(self):
+        config = _make_config(num_layers=1, csa_compress_ratios=[4])
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "got tp=2",
+        ):
+            CompressedSparseAttention(
+                config=config,
+                sublayers_spec=CompressedSparseAttentionSublayersSpec(),
+                layer_number=0,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+                pg_collection=_FakePGCollection(tp_nranks=2),
+                compress_ratio=4,
+            )
+
+        config = _make_config(num_layers=1, csa_compress_ratios=[4])
+        config.tensor_model_parallel_size = 2
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "got tp=2",
+        ):
+            CompressedSparseAttention(
+                config=config,
+                sublayers_spec=CompressedSparseAttentionSublayersSpec(),
+                layer_number=0,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+                compress_ratio=4,
+            )
+
     def test_phase2_loss_topk_does_not_expand_attention_topk(self):
         config = _make_config(
             dsa_index_topk=2,
@@ -281,7 +340,240 @@ class TestCSAIndexHelpers(unittest.TestCase):
         self.assertEqual(topk_indices.numpy().tolist()[0][0][0], 0)
 
 
+class TestCSADocMaskMetadata(unittest.TestCase):
+    def _make_docmask(self):
+        return paddle.to_tensor(
+            [5, 5, 5, 5, 5, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12],
+            dtype="int32",
+        ).reshape([1, 1, 16, 1])
+
+    def test_metadata_matches_expected_docmask_outputs(self):
+        ratio = 4
+        batch_size = 1
+        seqlen = 16
+        startend_row_indices = self._make_docmask()
+        meta = CSADocMaskMetadata.build(
+            ratio, batch_size, seqlen, startend_row_indices
+        )
+
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta.actual_n_compressed, 2)
+        self.assertEqual(meta.doc_lens.numpy().tolist(), [5, 7])
+        self.assertEqual(meta.doc_starts.numpy().tolist(), [0, 5])
+        self.assertEqual(meta.doc_lens_cutoff.numpy().tolist(), [4, 4])
+        self.assertEqual(meta.doc_starts_cutoff.numpy().tolist(), [0, 4])
+        self.assertEqual(
+            meta.valid_range.numpy().tolist(),
+            [
+                [
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 1],
+                    [0, 1],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [1, 2],
+                    [1, 2],
+                    [1, 2],
+                    [1, 2],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                    [0, 0],
+                ]
+            ],
+        )
+        self.assertEqual(
+            meta.get_window_topk_idxs(3).numpy().tolist(),
+            [
+                [
+                    [0, -1, -1],
+                    [0, 1, -1],
+                    [0, 1, 2],
+                    [1, 2, 3],
+                    [2, 3, 4],
+                    [5, -1, -1],
+                    [5, 6, -1],
+                    [5, 6, 7],
+                    [6, 7, 8],
+                    [7, 8, 9],
+                    [8, 9, 10],
+                    [9, 10, 11],
+                    [-1, -1, -1],
+                    [-1, -1, -1],
+                    [-1, -1, -1],
+                    [-1, -1, -1],
+                ]
+            ],
+        )
+        self.assertEqual(
+            meta.get_compress_topk_idxs(offset=16).numpy().tolist(),
+            [
+                [
+                    [-1, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                    [16, -1, -1, -1],
+                    [16, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                    [-1, 17, -1, -1],
+                    [-1, 17, -1, -1],
+                    [-1, 17, -1, -1],
+                    [-1, 17, -1, -1],
+                    [-1, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                ]
+            ],
+        )
+        causal_mask = meta.get_compressed_causal_mask()
+        self.assertTrue(paddle.isinf(causal_mask[:, :3, :]).all().item())
+        self.assertEqual(
+            causal_mask[0, 3, :].numpy().tolist(),
+            [0.0, -float("inf"), -float("inf"), -float("inf")],
+        )
+        self.assertEqual(
+            causal_mask[0, 8, :].numpy().tolist(),
+            [-float("inf"), 0.0, -float("inf"), -float("inf")],
+        )
+        self.assertTrue(paddle.isinf(causal_mask[:, 12:, :]).all().item())
+        self.assertEqual(
+            meta.get_is_first_compressed_group().numpy().tolist(),
+            [True, True],
+        )
+
+    def test_metadata_handles_three_docs_ratio_128(self):
+        ratio = 128
+        seqlen = 384
+        startend_row_indices = _make_startend_row_indices([129, 128, 1], seqlen)
+        meta = CSADocMaskMetadata.build(ratio, 1, seqlen, startend_row_indices)
+
+        self.assertEqual(meta.doc_lens.numpy().tolist(), [129, 128, 1])
+        self.assertEqual(meta.doc_starts.numpy().tolist(), [0, 129, 257])
+        self.assertEqual(meta.doc_lens_cutoff.numpy().tolist(), [128, 128, 0])
+        self.assertEqual(meta.doc_starts_cutoff.numpy().tolist(), [0, 128, 256])
+        self.assertEqual(meta.actual_n_compressed, 2)
+        self.assertEqual(
+            meta.get_is_first_compressed_group().numpy().tolist(),
+            [True, True],
+        )
+
+        valid_range = meta.valid_range.numpy().tolist()[0]
+        self.assertEqual(valid_range[126], [0, 0])
+        self.assertEqual(valid_range[127], [0, 1])
+        self.assertEqual(valid_range[128], [0, 1])
+        self.assertEqual(valid_range[129], [0, 0])
+        self.assertEqual(valid_range[256], [1, 2])
+        self.assertEqual(valid_range[257], [0, 0])
+        self.assertEqual(valid_range[-1], [0, 0])
+
+        compressed = meta.get_compress_topk_idxs(offset=seqlen)
+        self.assertEqual(compressed[0, 127, :].numpy().tolist(), [384, -1, -1])
+        self.assertEqual(compressed[0, 256, :].numpy().tolist(), [-1, 385, -1])
+        self.assertEqual(compressed[0, 257, :].numpy().tolist(), [-1, -1, -1])
+
+    def test_metadata_lazy_cache_keys_recompute_when_inputs_change(self):
+        meta = CSADocMaskMetadata.build(4, 1, 16, self._make_docmask())
+
+        window_3 = meta.get_window_topk_idxs(3)
+        self.assertIs(window_3, meta.get_window_topk_idxs(3))
+        window_5 = meta.get_window_topk_idxs(5)
+        self.assertIs(window_5, meta.get_window_topk_idxs(5))
+        self.assertIsNot(window_3, window_5)
+        self.assertTrue(
+            paddle.equal_all(
+                window_5,
+                get_window_topk_idxs(5, 1, 16, self._make_docmask()),
+            ).item()
+        )
+
+        compressed_16 = meta.get_compress_topk_idxs(offset=16)
+        self.assertIs(compressed_16, meta.get_compress_topk_idxs(offset=16))
+        compressed_32 = meta.get_compress_topk_idxs(offset=32)
+        self.assertIs(compressed_32, meta.get_compress_topk_idxs(offset=32))
+        self.assertIsNot(compressed_16, compressed_32)
+        self.assertTrue(
+            paddle.equal_all(
+                compressed_32,
+                get_compress_topk_idxs(4, 1, 16, 32, self._make_docmask()),
+            ).item()
+        )
+
+    def test_metadata_none_when_no_docmask(self):
+        self.assertIsNone(CSADocMaskMetadata.build(4, 1, 16, None))
+
+    def test_helpers_reuse_supplied_metadata(self):
+        startend_row_indices = self._make_docmask()
+        meta = CSADocMaskMetadata.build(4, 1, 16, startend_row_indices)
+
+        window = get_window_topk_idxs(
+            3, 1, 16, startend_row_indices, docmask_meta=meta
+        )
+        compressed = get_compress_topk_idxs(
+            4, 1, 16, 16, startend_row_indices, docmask_meta=meta
+        )
+        valid_range = get_valid_range(
+            4, 1, 16, startend_row_indices, docmask_meta=meta
+        )
+        causal_mask = _build_compressed_causal_mask(
+            4, 1, 16, 4, startend_row_indices, docmask_meta=meta
+        )
+
+        self.assertIs(window, meta.get_window_topk_idxs(3))
+        self.assertIs(compressed, meta.get_compress_topk_idxs(16))
+        self.assertIs(valid_range, meta.valid_range)
+        self.assertIs(causal_mask, meta.get_compressed_causal_mask())
+
+    def test_metadata_rejects_inconsistent_shape(self):
+        with self.assertRaisesRegex(ValueError, "startend_row_indices"):
+            CSADocMaskMetadata.build(4, 1, 8, self._make_docmask())
+
+
 class TestDSv4HybridDocumentRoPE(unittest.TestCase):
+    def test_document_rope_freqs_reuses_supplied_doc_lens(self):
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        startend_row_indices = paddle.to_tensor(
+            [4, 4, 4, 4, 8, 8, 8, 8], dtype="int32"
+        ).reshape([1, 1, 8, 1])
+        doc_lens = paddle.to_tensor([4, 4], dtype="int32")
+
+        freqs_from_meta, mscale_from_meta = build_document_rope_freqs(
+            rotary_pos_emb,
+            8,
+            startend_row_indices,
+            doc_lens=doc_lens,
+        )
+        freqs_from_mask, mscale_from_mask = build_document_rope_freqs(
+            rotary_pos_emb,
+            8,
+            startend_row_indices,
+        )
+
+        self.assertEqual(mscale_from_meta, mscale_from_mask)
+        self.assertTrue(
+            paddle.equal_all(
+                freqs_from_meta.cast("float32"),
+                freqs_from_mask.cast("float32"),
+            ).item()
+        )
+
     def test_document_rope_freqs_with_position_offset_pads_to_local_slice(self):
         config = _make_config(rope_type="yarn")
         rotary_pos_emb = YarnRotaryEmbedding(
@@ -743,6 +1035,90 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
                         doc2_out.cast("float32"),
                     ).item()
                 )
+
+    def test_attention_top_level_reuses_docmask_metadata_once(self):
+        paddle.seed(_SEED)
+        config = _make_config(
+            hidden_size=64,
+            num_attention_heads=2,
+            v_head_dim=32,
+            q_lora_rank=32,
+            o_groups=2,
+            o_lora_rank=16,
+            csa_window_size=32,
+            dsa_indexer_loss_coeff=0.0,
+            csa_compress_ratios=[4],
+            num_layers=1,
+            csa_indexer_backend="unfused",
+            csa_sparse_attn_backend="unfused",
+        )
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(config, layer_number=0)
+        attn.eval()
+        hidden = paddle.randn([1, 64, config.hidden_size], dtype="bfloat16")
+        startend_row_indices = _make_startend_row_indices([17, 23, 11], 64)
+
+        with (
+            patch(
+                "paddlefleet.transformer.dsv4_hybrid_attention.CSADocMaskMetadata.build",
+                wraps=CSADocMaskMetadata.build,
+            ) as build_meta,
+            paddle.no_grad(),
+        ):
+            out_first, _ = attn(
+                hidden_states=hidden,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
+            out_second, _ = attn(
+                hidden_states=hidden.clone(),
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
+
+        self.assertEqual(build_meta.call_count, 2)
+        self.assertTrue(
+            paddle.equal_all(
+                out_first.cast("float32"),
+                out_second.cast("float32"),
+            ).item()
+        )
+
+    def test_top_level_builds_ratio_one_metadata_for_window_only_docmask(self):
+        paddle.seed(_SEED)
+        config = _make_config(
+            hidden_size=64,
+            num_attention_heads=2,
+            v_head_dim=32,
+            q_lora_rank=32,
+            o_groups=2,
+            o_lora_rank=16,
+            csa_compress_ratios=[0],
+            num_layers=1,
+            csa_indexer_backend="unfused",
+            csa_sparse_attn_backend="unfused",
+        )
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(config, layer_number=0)
+        attn.eval()
+        hidden = paddle.randn([1, 32, config.hidden_size], dtype="bfloat16")
+        startend_row_indices = _make_startend_row_indices([17, 11], 32)
+
+        with (
+            patch(
+                "paddlefleet.transformer.dsv4_hybrid_attention.CSADocMaskMetadata.build",
+                wraps=CSADocMaskMetadata.build,
+            ) as mocked,
+            paddle.no_grad(),
+        ):
+            attn(
+                hidden_states=hidden,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
+
+        self.assertGreaterEqual(mocked.call_count, 1)
+        self.assertEqual(mocked.call_args_list[0].args[0], 1)
 
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):

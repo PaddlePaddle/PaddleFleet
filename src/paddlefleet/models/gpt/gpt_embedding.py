@@ -112,6 +112,9 @@ class GPTEmbedding(FleetLayer):
                 rotary_interleaved=config.rotary_interleaved,
                 rotary_base=rotary_base,
                 rope_scaling=rope_scaling,
+                use_accuracy_compatible=getattr(
+                    config, "use_accuracy_compatible", False
+                ),
             )
 
             if config.sliding_window is not None:

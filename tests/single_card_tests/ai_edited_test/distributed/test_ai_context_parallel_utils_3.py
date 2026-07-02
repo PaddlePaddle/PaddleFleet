@@ -204,6 +204,7 @@ class TestFlashMaskContextParallelBackward(unittest.TestCase):
         mock_ctx.group = mock.MagicMock()
         mock_ctx.causal = False
         mock_ctx.fa_version = 2
+        mock_ctx.softmax_scale = None
 
         grad = paddle.randn([2, 8, 4, 16])
 
@@ -214,11 +215,13 @@ class TestFlashMaskContextParallelBackward(unittest.TestCase):
             result = FlashMaskContextParallel.backward(mock_ctx, grad)
             mock_bwd.assert_called_once()
             call_args = mock_bwd.call_args[0]
-            # First args are tensors (query/key/value); fa_version is the last arg.
+            # First args are tensors (query/key/value); fa_version is second-to-last,
+            # softmax_scale is last.
             self.assertIs(call_args[0], query)
             self.assertIs(call_args[1], key)
             self.assertIs(call_args[2], value)
-            self.assertEqual(call_args[-1], mock_ctx.fa_version)
+            self.assertEqual(call_args[-2], mock_ctx.fa_version)
+            self.assertEqual(call_args[-1], mock_ctx.softmax_scale)
 
 
 class TestFlashmaskAttentionCP(unittest.TestCase):
@@ -377,6 +380,7 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
                 return_softmax_lse=False,
                 training=False,
                 block_mask=None,
+                softmax_scale=None,
             ):
                 return paddle.zeros_like(q), paddle.zeros([1, 1, 4])
         else:
@@ -389,6 +393,7 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
                 causal=False,
                 return_softmax_lse=False,
                 training=False,
+                softmax_scale=None,
             ):
                 return paddle.zeros_like(q), paddle.zeros([1, 1, 4])
 
@@ -411,7 +416,7 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
             mock.patch.object(paddle, "get_flags", return_value=flags_det),
         ):
             out = cpu.cp_flashmask_allgatherkv_balance_forward(
-                query, key, value, indices, None, group, False, True
+                query, key, value, indices, None, group, False, True, None
             )
         return out[-1]  # fa_version
 
@@ -442,6 +447,51 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
             has_block_mask=False, deterministic=False, hdim=64, fa_flag=3
         )
         self.assertEqual(fa, 3)
+
+
+class TestCpFlashmaskBackwardSoftmaxScaleNotSupported(unittest.TestCase):
+    """Cover the softmax_scale branch at line 806 in
+    cp_flashmask_allgatherkv_balance_backward (fa_version==2, softmax_scale not None)."""
+
+    def test_fa_version2_softmax_scale_raises(self):
+        """fa_version==2 with softmax_scale != None raises NotImplementedError."""
+        from paddlefleet.context_parallel_utils import (
+            cp_flashmask_allgatherkv_balance_backward,
+        )
+
+        B, S, H, D = 1, 8, 2, 16
+        q = paddle.randn([B, S, H, D])
+        k = paddle.randn([B, S, H, D])
+        v = paddle.randn([B, S, H, D])
+        indices = paddle.zeros([B, 2, S], dtype="int64")
+        out = paddle.randn([B, S, H, D])
+        lse = paddle.randn([B, H, S])
+        out_grad = paddle.randn([B, S, H, D])
+
+        group = mock.MagicMock()
+        group.rank = 0
+        group.world_size = 2
+
+        with mock.patch(
+            "paddlefleet.context_parallel_utils.all_gather_balance",
+            side_effect=lambda x, **kw: x,
+        ):
+            with self.assertRaises(NotImplementedError) as ctx:
+                cp_flashmask_allgatherkv_balance_backward(
+                    q,
+                    k,
+                    v,
+                    indices,
+                    out,
+                    lse,
+                    out_grad,
+                    None,  # learnable_sink
+                    group,
+                    False,  # causal
+                    2,  # fa_version
+                    0.5,  # softmax_scale (not None, triggers the branch)
+                )
+            self.assertIn("softmax_scale", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -428,6 +428,10 @@ class TransformerLayer(nn.Layer):
             layer_number=self.layer_number,
         )
 
+    @property
+    def transformer_layer_weights(self):
+        return self.named_parameters()
+
     def forward(
         self,
         dict_args: dict,
@@ -1384,12 +1388,22 @@ class TransformerLayerWithOverlap(TransformerLayer):
             assert self.mlp.expert_model_parallel_size > 1, (
                 "By enabling `forward_backward_overlap_scheduler`, you should use expert parallel."
             )
-            assert self.mlp.moe_token_dispatcher_type in (
+            if self.mlp.moe_token_dispatcher_type not in (
                 "deepep",
                 "hybridep",
-            ), (
-                "By enabling `forward_backward_overlap_scheduler`, you should use deepep or hybridep for dispatching tokens."
-            )
+            ):
+                raise ValueError(
+                    f"TransformerLayerWithOverlap "
+                    f"(forward_backward_overlap_scheduler) requires "
+                    f"moe_token_dispatcher_type='deepep' or 'hybridep', but "
+                    f"got '{self.mlp.moe_token_dispatcher_type}'. The "
+                    f"'{self.mlp.moe_token_dispatcher_type}' dispatcher does "
+                    f"not implement the overlap dataflow contract "
+                    f"(_comm_manager, token_dispatch_overlap, dispatched_* "
+                    f"metadata) required by the overlap scheduler. Please "
+                    f"either switch to deepep/hybridep or disable "
+                    f"forward_backward_overlap_scheduler."
+                )
 
     def compute_attention(self, dict_args, is_first_fwd=False):
         with profile("attn"):
