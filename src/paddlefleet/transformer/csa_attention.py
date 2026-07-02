@@ -1302,6 +1302,10 @@ class Compressor(nn.Layer):
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
         self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
+        self.swa_high_precision_norm = getattr(
+            config, "swa_high_precision_norm", False
+        )
+        self.high_precision_rope = getattr(config, "high_precision_rope", False)
 
     def _overlap_transform(
         self,
@@ -1370,7 +1374,7 @@ class Compressor(nn.Layer):
 
         if sq < ratio:
             return None
-        if self.config.swa_high_precision_norm:
+        if self.swa_high_precision_norm:
             kv = linear_bf16_fp32(
                 x, self.linear_wkv.weight
             )  # [b, sq, coff * head_dim]
@@ -1440,7 +1444,7 @@ class Compressor(nn.Layer):
             kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
             # kv: [b, actual_n_compressed, head_dim]
 
-            if self.config.swa_high_precision_norm:
+            if self.swa_high_precision_norm:
                 kv = self.norm(
                     kv,
                     high_precision_norm=True,
@@ -1473,14 +1477,14 @@ class Compressor(nn.Layer):
                     n_compressed,
                     ratio=ratio,
                     doc_lens_cutoff=doc_lens_cutoff,
-                    high_precision_rope=self.config.high_precision_rope,
+                    high_precision_rope=self.high_precision_rope,
                 )
 
             if self.rotate:
                 kv = rotate_activation(
                     kv,
                     use_fast_hadamard=self.use_fast_hadamard,
-                    high_precision_hadamard=self.config.swa_high_precision_norm,
+                    high_precision_hadamard=self.swa_high_precision_norm,
                 )
                 if self.use_fp8_qat:
                     kv = fp8_simulate_qat(kv, 128)
@@ -1491,7 +1495,7 @@ class Compressor(nn.Layer):
                         kv[..., :nope_dim], 64
                     )
 
-            if self.config.swa_high_precision_norm:
+            if self.swa_high_precision_norm:
                 kv = kv.cast(x.dtype)
             return kv  # [b, n_compressed, head_dim]
         else:
