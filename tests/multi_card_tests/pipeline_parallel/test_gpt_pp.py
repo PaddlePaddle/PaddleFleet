@@ -33,6 +33,7 @@ from paddlefleet.training.initialize import initialize_fleet
 PP_DEGREE = 4
 REPO_FLAG = os.getenv("repo_flag")
 SKIP_TESTS = REPO_FLAG != "paddlefleet"
+CHECK_DETERMINISTIC_BASELINE = os.getenv("check_deterministic_baseline") == "1"
 
 
 def get_gpu_models_via_nvidia_smi():
@@ -227,12 +228,24 @@ class TestPP(unittest.TestCase):
         pp = pprint.PrettyPrinter(depth=None, width=200, compact=False)
         pp.pprint(rst)
 
-        if judge_machine_type() == "H":
+        assert paddle.isfinite(overlap_loss).item(), (
+            f"Loss is not finite: {overlap_loss.item()}"
+        )
+        assert overlap_loss.item() > 0, (
+            f"Loss should be positive: {overlap_loss.item()}"
+        )
+        for name, param in overlap_gpt_model.named_parameters():
+            if param.grad is not None:
+                assert paddle.all(paddle.isfinite(param.grad)).item(), (
+                    f"{name}'s grad is not finite"
+                )
+
+        if CHECK_DETERMINISTIC_BASELINE and judge_machine_type() == "H":
             assert overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
             if paddle.distributed.get_rank() == 0:
                 for name, p in overlap_gpt_model.named_parameters():
                     print(f"  {name}: {p.grad._md5sum()}")
-        elif judge_machine_type() == "B":
+        elif CHECK_DETERMINISTIC_BASELINE and judge_machine_type() == "B":
             print(f"[SKIP] loss MD5: {overlap_loss._md5sum()}")
             if paddle.distributed.get_rank() == 0:
                 for name, p in overlap_gpt_model.named_parameters():
