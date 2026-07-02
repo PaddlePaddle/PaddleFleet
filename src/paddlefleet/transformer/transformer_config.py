@@ -1098,11 +1098,11 @@ class TransformerConfig(ModelParallelConfig):
                 f"sigma=0.5/sqrt(hidden_size={self.hidden_size})={sigma}"
             )
         elif self.magic_init:
-            if self.hidden_size == 0:
-                raise ValueError(
-                    "hidden_size must be non-zero when magic_init is True."
-                )
-            sigma = math.sqrt(0.3333 / self.hidden_size)
+            sigma = (
+                self.init_method_std
+                if self.hidden_size == 0
+                else math.sqrt(0.3333 / self.hidden_size)
+            )
             self.init_method = get_magic_init_method(sigma)
             self.init_method_std = sigma
         elif self.init_method is None:
