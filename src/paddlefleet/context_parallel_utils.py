@@ -1216,10 +1216,6 @@ def flashmask_attention_cp(
         )
         ```
     """
-    if learnable_sink is not None:
-        raise NotImplementedError(
-            "learnable_sink is not supported on flashmask_attention_cp"
-        )
 
     output = FlashMaskContextParallel.apply(
         query,
