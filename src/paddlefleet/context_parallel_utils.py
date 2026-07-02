@@ -661,6 +661,7 @@ def cp_flashmask_allgatherkv_balance_forward(
     group,
     causal,
     is_training,
+    softmax_scale,
 ):
     """
     Forward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -731,6 +732,7 @@ def cp_flashmask_allgatherkv_balance_forward(
             startend_row_indices=startend_row_indices,
             learnable_sink=learnable_sink,
             pack_gqa=False,
+            softmax_scale=softmax_scale,
         )
     else:
         if learnable_sink is not None:
@@ -745,6 +747,7 @@ def cp_flashmask_allgatherkv_balance_forward(
             causal=causal,
             return_softmax_lse=True,
             training=is_training,
+            softmax_scale=softmax_scale,
         )
 
     paddle.base.core.nvprof_nvtx_pop()
@@ -763,6 +766,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     group,
     causal,
     fa_version: int,
+    softmax_scale,
 ):
     """
     Backward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -797,6 +801,10 @@ def cp_flashmask_allgatherkv_balance_backward(
         if learnable_sink is not None:
             raise NotImplementedError(
                 "learnable_sink only supported on fa_version==4 cute backend"
+            )
+        if softmax_scale is not None:
+            raise NotImplementedError(
+                "fa_version==2 does not support setting softmax_scale"
             )
         # Create seed offset tensor (required for gradient computation)
         seed_offset = paddle.zeros(
@@ -835,7 +843,9 @@ def cp_flashmask_allgatherkv_balance_backward(
                     startend_row_indices,
                     None,  # block_mask
                     output_grad,
-                    query.shape[-1] ** (-0.5),
+                    query.shape[-1] ** (-0.5)
+                    if softmax_scale is None
+                    else softmax_scale,
                     False,
                     0,  # rank
                     1,  # nranks
@@ -852,7 +862,9 @@ def cp_flashmask_allgatherkv_balance_backward(
                     startend_row_indices,
                     None,  # block_mask
                     output_grad,
-                    query.shape[-1] ** (-0.5),
+                    query.shape[-1] ** (-0.5)
+                    if softmax_scale is None
+                    else softmax_scale,
                     False,
                 )
             )
@@ -866,7 +878,9 @@ def cp_flashmask_allgatherkv_balance_backward(
                     log_sum_exp,
                     startend_row_indices,
                     output_grad,
-                    query.shape[-1] ** (-0.5),
+                    query.shape[-1] ** (-0.5)
+                    if softmax_scale is None
+                    else softmax_scale,
                     False,
                 )
             )
@@ -889,6 +903,7 @@ def cp_flashmask_allgatherkv_balance_backward(
                 flashmask_info,
                 learnable_sink=learnable_sink,
                 causal=causal,
+                softmax_scale=softmax_scale,
                 deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
                     "FLAGS_cudnn_deterministic"
                 ],
@@ -1047,6 +1062,7 @@ class FlashMaskContextParallel(PyLayer):
         causal=False,
         training=True,
         learnable_sink=None,
+        softmax_scale=None,
         mode="allgather_kv",
     ):
         """
@@ -1104,6 +1120,7 @@ class FlashMaskContextParallel(PyLayer):
                 group,
                 causal,
                 training,
+                softmax_scale,
             )
         )
 
@@ -1115,6 +1132,7 @@ class FlashMaskContextParallel(PyLayer):
         ctx.causal = causal
         ctx.fa_version = fa_version
         ctx.learnable_sink = learnable_sink
+        ctx.softmax_scale = softmax_scale
         # Only a trainable sink (a Parameter) needs a gradient returned from
         # backward. A fixed off-by-one sink is created as a stop_gradient=True
         # Tensor, and Paddle's PyLayer requires None in that return slot.
@@ -1142,6 +1160,7 @@ class FlashMaskContextParallel(PyLayer):
         causal = ctx.causal
         fa_version = ctx.fa_version
         learnable_sink = ctx.learnable_sink
+        softmax_scale = ctx.softmax_scale
 
         # Compute gradients
         query_grad, key_grad, value_grad, grad_sink = (
@@ -1157,6 +1176,7 @@ class FlashMaskContextParallel(PyLayer):
                 group,
                 causal,
                 fa_version,
+                softmax_scale,
             )
         )
 
@@ -1181,6 +1201,7 @@ def flashmask_attention_cp(
     causal=False,
     training=True,
     learnable_sink=None,
+    softmax_scale=None,
     mode="allgather_kv",
 ):
     """
@@ -1227,6 +1248,7 @@ def flashmask_attention_cp(
         causal,
         training,
         learnable_sink,
+        softmax_scale,
         mode,
     )
     return output
