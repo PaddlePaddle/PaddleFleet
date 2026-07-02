@@ -209,6 +209,10 @@ def run_vha_cp_e2e():
     assert loss.item() > 0, f"Loss should be positive: {loss.item()}"
 
     print(f"actual loss: {loss.item()}")
+    loss_baseline = 8.556518
+    np.testing.assert_allclose(
+        np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
+    )
 
     # Verify VHA parameter gradients exist and are finite
     vha_param_names = ["premix_weight", "postmix_U", "postmix_V"]

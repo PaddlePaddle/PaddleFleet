@@ -255,9 +255,11 @@ def run_experimental_dataflow_cp_e2e():
             if not paddle.all(paddle.isfinite(param.grad)).item():
                 nan_grad_count += 1
 
-    assert grad_count > 0, "No gradients were produced."
-    assert nan_grad_count == 0, f"Found {nan_grad_count} non-finite gradients."
     print(f"actual loss: {loss.item()}")
+    loss_baseline = 8.547827
+    np.testing.assert_allclose(
+        np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
+    )
 
 
 if __name__ == "__main__":

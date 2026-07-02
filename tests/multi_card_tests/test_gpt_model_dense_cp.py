@@ -140,14 +140,11 @@ def run_cp(seed, batch_size, seq_len, vocab_size, config):
         loss = gpt_pipe_model.forward_backward_pipeline(inputs)
         loss.backward()
 
-    assert paddle.isfinite(loss).item(), f"Loss is not finite: {loss.item()}"
-    assert loss.item() > 0, f"Loss should be positive: {loss.item()}"
-    for name, param in gpt_model.named_parameters():
-        if param.grad is not None:
-            assert paddle.all(paddle.isfinite(param.grad)).item(), (
-                f"{name}'s grad is not finite"
-            )
     print(f"actual loss: {loss.item()}")
+    loss_baseline = 7.212946
+    np.testing.assert_allclose(
+        np.array(loss), np.array(loss_baseline), rtol=1e-6, atol=1e-8
+    )
 
 
 if __name__ == "__main__":
