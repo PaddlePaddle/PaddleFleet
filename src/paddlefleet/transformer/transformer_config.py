@@ -902,7 +902,7 @@ class TransformerConfig(ModelParallelConfig):
     routing_map_fusion: bool = False
     """If True, use Triton fused routing map kernel for MoE routing."""
 
-    magic_init: bool = True
+    magic_init: bool = False
     """Use the magic initialization method."""
 
     use_truncated_normal_init: bool = False
