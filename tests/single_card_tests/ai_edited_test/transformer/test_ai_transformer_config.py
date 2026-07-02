@@ -322,9 +322,11 @@ class TestTransformerConfigEdgeCases(unittest.TestCase):
     """Test edge cases and boundary conditions."""
 
     def test_zero_hidden_layers(self):
-        # num_hidden_layers=0 causes ZeroDivisionError in output_layer_init_method
-        with self.assertRaises(ZeroDivisionError):
-            _make_config(num_hidden_layers=0)
+        cfg = _make_config(num_hidden_layers=0)
+        self.assertEqual(cfg.num_hidden_layers, 0)
+        self.assertIsNotNone(cfg.init_method)
+        self.assertIsNotNone(cfg.output_layer_init_method)
+        self.assertIsNotNone(cfg.embedding_init_method)
 
     def test_large_hidden_size(self):
         cfg = _make_config(hidden_size=4096, num_attention_heads=32)
