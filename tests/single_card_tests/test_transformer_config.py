@@ -196,139 +196,6 @@ class TestMoETokenDispatcherConfig(unittest.TestCase):
         self.assertTrue(config.moe_use_fusion_node)
 
 
-class TestMagicInit(unittest.TestCase):
-    """Tests for the magic_init functionality in TransformerConfig."""
-
-    def test_magic_init_false_default_behavior(self):
-        """When magic_init is False (default), normal init methods should be used."""
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=768,
-            magic_init=False,
-        )
-        # When False, init_method should be set but not the magic init
-        self.assertIsNotNone(config.init_method)
-        self.assertIsNotNone(config.output_layer_init_method)
-
-    def test_magic_init_true_sigma_calculation(self):
-        """When magic_init is True, sigma should be sqrt(0.3333 / hidden_size)."""
-        import math
-
-        hidden_size = 768
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=hidden_size,
-            magic_init=True,
-        )
-        expected_sigma = math.sqrt(0.3333 / hidden_size)
-        self.assertAlmostEqual(config.init_method_std, expected_sigma, places=6)
-
-    def test_magic_init_true_all_methods_same(self):
-        """When magic_init is True, all init methods should be the same."""
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=768,
-            magic_init=True,
-        )
-        # All init methods should be the same function
-        self.assertIs(config.init_method, config.output_layer_init_method)
-        self.assertIs(config.init_method, config.embedding_init_method)
-
-    def test_magic_init_true_different_hidden_sizes(self):
-        """Test sigma calculation with different hidden sizes."""
-        import math
-
-        for hidden_size in [512, 768, 1024, 2048, 4096]:
-            config = TransformerConfig(
-                num_hidden_layers=12,
-                hidden_size=hidden_size,
-                magic_init=True,
-            )
-            expected_sigma = math.sqrt(0.3333 / hidden_size)
-            self.assertAlmostEqual(
-                config.init_method_std, expected_sigma, places=6
-            )
-
-    def test_magic_init_true_init_method_matches_get_magic_init_method(self):
-        """When magic_init is True, init method should match get_magic_init_method."""
-        import math
-
-        from paddlefleet.utils import get_magic_init_method
-
-        hidden_size = 768
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=hidden_size,
-            magic_init=True,
-        )
-
-        # Create test weight
-        weight = paddle.randn([100, 100])
-
-        # Apply config's init method
-        config.init_method(weight)
-
-        # Calculate expected using get_magic_init_method
-        expected_sigma = math.sqrt(0.3333 / hidden_size)
-        magic_init = get_magic_init_method(expected_sigma)
-        expected_weight = paddle.randn([100, 100])
-        magic_init(expected_weight)
-
-        # Compare results using same random seed
-        paddle.seed(1234)
-        weight1 = paddle.randn([100, 100])
-        config.init_method(weight1)
-
-        paddle.seed(1234)
-        weight2 = paddle.randn([100, 100])
-        magic_init(weight2)
-
-        paddle.testing.assert_close(weight1, weight2, rtol=1e-6, atol=1e-6)
-
-    def test_magic_init_false_uses_normal_init(self):
-        """When magic_init is False, normal init methods should be used."""
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=768,
-            magic_init=False,
-        )
-        # Should have init_method_std set to normal value
-        self.assertIsNotNone(config.init_method_std)
-        # Should be a reasonable value for normal init (not the magic init value)
-        import math
-
-        magic_sigma = math.sqrt(0.3333 / 768)
-        self.assertNotAlmostEqual(config.init_method_std, magic_sigma, places=6)
-
-    def test_magic_init_true_with_moe(self):
-        """Test magic_init works correctly with MoE models."""
-        import math
-
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=768,
-            n_routed_experts=8,
-            magic_init=True,
-        )
-        expected_sigma = math.sqrt(0.3333 / 768)
-        self.assertAlmostEqual(config.init_method_std, expected_sigma, places=6)
-        # All init methods should still be the same
-        self.assertIs(config.init_method, config.output_layer_init_method)
-        self.assertIs(config.init_method, config.embedding_init_method)
-
-    def test_magic_init_true_raises_on_zero_hidden_size(self):
-        """When magic_init is True and hidden_size is 0, should raise ValueError."""
-        with self.assertRaises(
-            ValueError,
-            msg="hidden_size must be non-zero when magic_init is True.",
-        ):
-            TransformerConfig(
-                num_hidden_layers=12,
-                hidden_size=0,
-                magic_init=True,
-            )
-
-
 class TestTruncateNormInit(unittest.TestCase):
     """Tests for the default truncated normal initialization in TransformerConfig."""
 
@@ -360,7 +227,7 @@ class TestTruncateNormInit(unittest.TestCase):
         self.assertIs(config.init_method, config.output_layer_init_method)
         self.assertIs(config.init_method, config.embedding_init_method)
 
-    def test_magic_init_takes_precedence_over_default(self):
+    def test_magic_init_is_forced_to_truncate_norm_default(self):
         hidden_size = 1024
         config = TransformerConfig(
             num_hidden_layers=12,
@@ -368,11 +235,14 @@ class TestTruncateNormInit(unittest.TestCase):
             magic_init=True,
         )
 
+        self.assertFalse(config.magic_init)
         self.assertAlmostEqual(
             config.init_method_std,
-            math.sqrt(0.3333 / hidden_size),
+            0.5 / math.sqrt(hidden_size),
             places=6,
         )
+        self.assertIs(config.init_method, config.output_layer_init_method)
+        self.assertIs(config.init_method, config.embedding_init_method)
 
     def test_explicit_init_method_disables_default(self):
         import paddle
@@ -384,6 +254,46 @@ class TestTruncateNormInit(unittest.TestCase):
             init_method=custom,
         )
         self.assertIs(config.init_method, custom)
+
+    def test_explicit_output_and_embedding_init_methods_are_preserved(self):
+        import paddle
+
+        custom_output = paddle.nn.initializer.Constant(0.0)
+        custom_embedding = paddle.nn.initializer.Constant(1.0)
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=1024,
+            output_layer_init_method=custom_output,
+            embedding_init_method=custom_embedding,
+        )
+
+        self.assertIs(config.output_layer_init_method, custom_output)
+        self.assertIs(config.embedding_init_method, custom_embedding)
+        self.assertIsNot(config.init_method, custom_output)
+
+    def test_explicit_init_method_std_is_preserved(self):
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=128,
+            init_method_std=0.03,
+            embedding_init_method_std=None,
+        )
+
+        self.assertEqual(config.init_method_std, 0.03)
+        self.assertEqual(config.embedding_init_method_std, 0.03)
+        self.assertIs(config.init_method, config.embedding_init_method)
+
+    def test_explicit_embedding_init_method_std_is_preserved(self):
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=128,
+            init_method_std=0.03,
+            embedding_init_method_std=0.04,
+        )
+
+        self.assertEqual(config.init_method_std, 0.03)
+        self.assertEqual(config.embedding_init_method_std, 0.04)
+        self.assertIsNot(config.init_method, config.embedding_init_method)
 
     def test_truncate_norm_init_method_restores_default_dtype(self):
         from paddlefleet.utils import truncated_init_method_normal
@@ -408,9 +318,11 @@ class TestTruncateNormInit(unittest.TestCase):
 
         try:
             paddle.set_default_dtype("float64")
-            with patch("paddle.nn.init.trunc_normal_", side_effect=RuntimeError):
-                with self.assertRaises(RuntimeError):
-                    init_method(weight)
+            with (
+                patch("paddle.nn.init.trunc_normal_", side_effect=RuntimeError),
+                self.assertRaises(RuntimeError),
+            ):
+                init_method(weight)
             self.assertEqual(paddle.get_default_dtype(), "float64")
         finally:
             paddle.set_default_dtype(original_dtype)
