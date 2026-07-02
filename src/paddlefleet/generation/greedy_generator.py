@@ -230,7 +230,7 @@ class GreedyGenerator:
                         sliding_window, window_attn_skip_freq, real_i
                     )
                 )
-        window_size = (
+        self.window_size = (
             sliding_window[0]
             if sliding_window and sliding_window[0] > 0
             else None
@@ -247,7 +247,7 @@ class GreedyGenerator:
         self.cache = DynamicKVCache(
             num_layers=total_layers,
             swa_layers=swa_layers,
-            window_size=window_size,
+            window_size=self.window_size,
         )
 
     @paddle.no_grad()
@@ -292,9 +292,13 @@ class GreedyGenerator:
             # full(prompt_len) = standard causal (no cross-doc masking).
             # SWA is applied inside DotProductAttention via
             # startend_row_indices_add_sliding_window.
-            prefill_startend = paddle.full(
-                [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
-            )
+
+            if self.window_size:
+                prefill_startend = paddle.full(
+                    [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
+                )
+            else:
+                prefill_startend = None
             logits = self.model(
                 {
                     "input_ids": input_ids,
