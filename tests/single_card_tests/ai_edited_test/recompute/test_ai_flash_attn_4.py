@@ -153,7 +153,9 @@ class TestFlashMaskAttnFunctorForwardVersions(unittest.TestCase):
             ),
             self.assertRaises(ValueError),
         ):
-            FlashMaskAttnFunctor.forward(ctx, q, k, v, startend, hold_tensors)
+            FlashMaskAttnFunctor.forward(
+                ctx, q, k, v, startend, None, hold_tensors
+            )
 
 
 @unittest.skipUnless(
