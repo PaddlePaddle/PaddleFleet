@@ -178,12 +178,15 @@ class DotProductAttention(FleetLayer):
             self.softmax_scale = 1.0 / math.sqrt(
                 self.hidden_size_per_attention_head
             )
+            self._has_custom_softmax_scale = False
         else:
             self.softmax_scale = softmax_scale
+            self._has_custom_softmax_scale = True
 
         if self.config.apply_query_key_layer_scaling:
             coeff = max(1, self.layer_number)
             self.softmax_scale /= coeff
+            self._has_custom_softmax_scale = True
 
         if self.is_swa:
             sliding_window = self.config.sliding_window
@@ -433,6 +436,10 @@ class DotProductAttention(FleetLayer):
 
             if use_rr_flash_attention:
                 flashmask_attention_func = self.rr_flashmask_attention_func
+                assert not self._has_custom_softmax_scale, (
+                    "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
+                    "Disable refined_recompute or use default softmax_scale."
+                )
             elif self.config.flashmask_use_varlen:
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
@@ -447,6 +454,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=False,
+                softmax_scale=self.softmax_scale,
             )
             attn_output = attn_output.reshape([bsz, q_len, -1])
             return attn_output
@@ -484,6 +492,7 @@ class DotProductAttention(FleetLayer):
                 attn_mask_kv,
                 self.config.attention_dropout,
                 is_causal=is_causal,
+                scale=self.softmax_scale,
             )
 
             attn_output = paddle.reshape(
@@ -520,8 +529,17 @@ class DotProductAttention(FleetLayer):
                     False  # only support non-causal for flashmask_attention_cp
                 )
                 assert attn_mask_startend_row_indices.shape[-1] == 2
+                if use_rr_flash_attention:
+                    assert not self._has_custom_softmax_scale, (
+                        "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
+                        "Disable refined_recompute or use default softmax_scale."
+                    )
             elif use_rr_flash_attention:
                 flashmask_attention_func = self.rr_flashmask_attention_func
+                assert not self._has_custom_softmax_scale, (
+                    "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
+                    "Disable refined_recompute or use default softmax_scale."
+                )
             elif self.config.flashmask_use_varlen:
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
@@ -568,6 +586,7 @@ class DotProductAttention(FleetLayer):
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
                 learnable_sink=self.softmax_offset,
+                softmax_scale=self.softmax_scale,
             )
 
             if need_value_padding:
