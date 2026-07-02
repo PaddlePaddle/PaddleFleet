@@ -599,6 +599,7 @@ class TransformerLayer(nn.Layer):
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
             input_ids = dict_args.get("input_ids", None)
+            origin_input_ids = dict_args.get("origin_input_ids", None)
             outputs = recompute(
                 self._forward_impl,
                 hidden_states=hidden_states,
@@ -632,6 +633,7 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
+                origin_input_ids=origin_input_ids,
             )
         else:
             outputs = self._forward_impl(**dict_args)
@@ -718,6 +720,7 @@ class TransformerLayer(nn.Layer):
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
+        origin_input_ids: Tensor | None = None,
         **kwargs,
     ):
         def need_do_attention():
@@ -808,6 +811,7 @@ class TransformerLayer(nn.Layer):
                     hidden_states,
                     block_attention_residuals=True,
                     input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
                 )
 
             # Accumulate mlp output into partial_block
@@ -839,7 +843,11 @@ class TransformerLayer(nn.Layer):
                 hidden_states, "post_attn_residual", self.layer_number
             )
             with profile(timer_name):
-                output = self._forward_mlp(hidden_states, input_ids=input_ids)
+                output = self._forward_mlp(
+                    hidden_states,
+                    input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
+                )
             self._log_md5(output, "layer_output", self.layer_number)
         if context is not None:
             return output, context
@@ -1009,6 +1017,7 @@ class TransformerLayer(nn.Layer):
         is_first_fwd=False,
         block_attention_residuals=False,
         input_ids=None,
+        origin_input_ids=None,
         **kwargs,
     ):
         """
@@ -1044,14 +1053,20 @@ class TransformerLayer(nn.Layer):
             _mlp_input_ids = (
                 input_ids if isinstance(self.mlp, MoELayer) else None
             )
+            _mlp_origin_input_ids = (
+                origin_input_ids if isinstance(self.mlp, MoELayer) else None
+            )
 
             def recompute_handler(
-                post_attention_layernorm_output, _mlp_input_ids=None
+                post_attention_layernorm_output,
+                _mlp_input_ids=None,
+                _mlp_origin_input_ids=None,
             ):
                 if _mlp_input_ids is not None:
                     mlp_output, bias = self.mlp(
                         post_attention_layernorm_output,
                         input_ids=_mlp_input_ids,
+                        origin_input_ids=_mlp_origin_input_ids,
                     )
                 else:
                     mlp_output, bias = self.mlp(post_attention_layernorm_output)
@@ -1063,6 +1078,7 @@ class TransformerLayer(nn.Layer):
                 recompute_handler,
                 post_attention_layernorm_output,
                 _mlp_input_ids,
+                _mlp_origin_input_ids,
             )
             if not isinstance(mlp_output_with_bias, tuple):
                 mlp_output_with_bias = (
@@ -1072,7 +1088,9 @@ class TransformerLayer(nn.Layer):
         else:
             if isinstance(self.mlp, MoELayer) and input_ids is not None:
                 mlp_output_with_bias = self.mlp(
-                    post_attention_layernorm_output, input_ids=input_ids
+                    post_attention_layernorm_output,
+                    input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)

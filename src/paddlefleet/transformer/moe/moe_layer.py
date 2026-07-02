@@ -942,10 +942,16 @@ class MoELayer(nn.Layer):
 
         return hidden_states
 
-    def compute_gate(self, hidden_states, input_ids=None):
+    def compute_gate(
+        self, hidden_states, input_ids=None, origin_input_ids=None
+    ):
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             hidden_states = GatherOp.apply(hidden_states)
-        return self.gate(hidden_states, input_ids=input_ids)
+        return self.gate(
+            hidden_states,
+            input_ids=input_ids,
+            origin_input_ids=origin_input_ids,
+        )
 
     def _use_hybrid_ep_fusion(self):
         return self.moe_use_fusion_node and self.use_hybrid_ep_backend
@@ -1124,11 +1130,14 @@ class MoELayer(nn.Layer):
         self,
         hidden_states: paddle.Tensor,
         input_ids: paddle.Tensor | None = None,
+        origin_input_ids: paddle.Tensor | None = None,
     ) -> paddle.Tensor:
         """
         Args:
             hidden_states: Shape: [batch_size, seq_len, hidden_size]
             input_ids: Shape: [batch_size, seq_len], optional token ids from embedding input.
+            origin_input_ids: Shape: [batch_size, seq_len + num_mtp_layers], optional original input_ids.
+                Only passed when gpt_model_use_experimental_version is True.
 
         Returns:
             output: Shape: [batch_size, seq_len, hidden_size]
@@ -1156,6 +1165,7 @@ class MoELayer(nn.Layer):
         ) = self.gate(
             hidden_states,
             input_ids=input_ids,
+            origin_input_ids=origin_input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]
         # probs: combine weights in [S, E] sparse layout (non-selected positions are 0) [seq_len, num_experts]
