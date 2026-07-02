@@ -1070,9 +1070,14 @@ class MLASelfAttention(MultiLatentAttention):
                                 else position_ids,
                             )
 
-                # Replace paddle.split with zero-copy slice views.
-                q_no_pe = q[..., : self.config.qk_nope_head_dim]
-                q_pos_emb = q[..., self.config.qk_nope_head_dim :]
+                q_no_pe, q_pos_emb = paddle.split(
+                    q,
+                    [
+                        self.config.qk_nope_head_dim,
+                        q.shape[-1] - self.config.qk_nope_head_dim,
+                    ],
+                    axis=-1,
+                )
 
                 # k_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # value: [num_tokens, n, v_head_dim]
