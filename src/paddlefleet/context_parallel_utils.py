@@ -1436,6 +1436,8 @@ def flashmask_attention_ulysses(
     dropout=0.0,
     causal=False,
     training=True,
+    learnable_sink=None,
+    softmax_scale=None,
 ):
     """
     FlashMask attention with Ulysses context parallelism.
@@ -1460,6 +1462,16 @@ def flashmask_attention_ulysses(
     Returns:
         [batch, seq_len/P, num_heads, head_dim] - sequence-partitioned output
     """
+    if learnable_sink is not None:
+        raise NotImplementedError(
+            "flashmask_attention_ulysses does not support learnable_sink "
+            "(softmax sink)"
+        )
+
+    if softmax_scale is not None:
+        raise NotImplementedError(
+            "flashmask_attention_ulysses does not support setting softmax_scale"
+        )
     hcg = fleet.get_hybrid_communicate_group()
     cp_group = hcg.get_context_parallel_group()
     cp_size = cp_group.nranks
@@ -1515,6 +1527,7 @@ def flashmask_attention_ulysses(
         dropout=dropout,
         causal=causal,
         training=training,
+        softmax_scale=softmax_scale,
     )
 
     # After attention: scatter sequence across ranks, gather full heads from all ranks
