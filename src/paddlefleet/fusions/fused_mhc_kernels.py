@@ -2313,6 +2313,7 @@ if _CUTILE_AVAILABLE:
         M: int,
         N: int,
         K: int,
+        eps: float,
         TILE_SIZE_M: ConstInt,
         TILE_SIZE_N: ConstInt,
         TILE_SIZE_K: ConstInt,
@@ -2364,7 +2365,7 @@ if _CUTILE_AVAILABLE:
                 ct.float32,
             )
 
-            inv_rK = 1.0 / (r_tile * K)
+            inv_rK = 1.0 / (r_tile * K + eps)
             acc_grad_x = (grad_r_total * inv_rK) * ct.astype(x_tile, ct.float32)
             acc_grad_x = ct.mma(
                 grad_proj_tile.astype(ct.tfloat32),
@@ -2400,6 +2401,7 @@ if _CUTILE_AVAILABLE:
         M: int,
         N: int,
         K: int,
+        eps: float,
         TILE_N_SIZE: ConstInt,
     ):
         """Fused backward (small K path) with work-stealing.
@@ -2481,7 +2483,7 @@ if _CUTILE_AVAILABLE:
                     shape=(TILE_DA_SIZE_M, TILE_DA_SIZE_K),
                     padding_mode=zero_pad,
                 )
-                inv_rK = 1.0 / (r_tile * K)
+                inv_rK = 1.0 / (r_tile * K + eps)
                 accumulator_da = (grad_r_total * inv_rK) * ct.astype(
                     x_tile, ct.float32
                 )
@@ -2749,6 +2751,7 @@ if _CUTILE_AVAILABLE:
                     M,
                     N,
                     K,
+                    eps,
                     tm,
                     tn,
                     tk,
@@ -2773,6 +2776,7 @@ if _CUTILE_AVAILABLE:
                     M,
                     N,
                     K,
+                    eps,
                     TILE_N,
                 ),
             )
