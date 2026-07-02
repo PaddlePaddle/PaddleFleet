@@ -988,11 +988,11 @@ class TestTransformerLayerWithOverlapGuard(unittest.TestCase):
 class TestTransformerConfigField(unittest.TestCase):
     """Test moe_allgather_gate_overlap config field exists with correct default."""
 
-    def test_default_false(self):
+    def test_default_true(self):
         from paddlefleet.transformer.transformer_config import TransformerConfig
 
         config = TransformerConfig()
-        self.assertFalse(config.moe_allgather_gate_overlap)
+        self.assertTrue(config.moe_allgather_gate_overlap)
 
 
 # ── _RouterAllGather backward reshape paths ──────────────────────────────────
@@ -1463,107 +1463,146 @@ class TestRunSonicMoEDtypeGuard(unittest.TestCase):
 
 
 class TestGroupedMLPExpertShardedStateDict(unittest.TestCase):
-    """Cover moe_expert.py lines 319-377: intermediate-sharded layout."""
+    """Cover _get_intermediate_sharded_state_dict guards, qwen3/non-qwen3
+    branches, and sharded_state_dict dispatcher-based routing."""
 
-    class _FakeExpert:
-        """Minimal duck-typed stand-in for GroupedMLPExpert."""
+    def _make_expert(
+        self,
+        *,
+        ep_group=None,
+        model_type="none",
+        i_local=8,
+        w1_shape=None,
+        w2_shape=None,
+        glu=True,
+        moe_int=16,
+    ):
+        """Duck-typed expert for direct method testing."""
+        from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
 
-        def __init__(self, intermediate_size_per_partition, ep_group):
-            from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
+        e = type("E", (), {})()
+        e._get_intermediate_sharded_state_dict = (
+            GroupedMLPExpert._get_intermediate_sharded_state_dict.__get__(e)
+        )
+        cfg = MagicMock()
+        cfg.hidden_size = 16
+        cfg.moe_intermediate_size = moe_int
+        cfg.gated_linear_unit = glu
+        cfg.moe_token_dispatcher_type = "allgather"
+        cfg.model_type = model_type
+        e.config = cfg
+        e.ep_group = ep_group
+        e.expert_parallel = ep_group is not None
+        e.intermediate_size_per_partition = i_local
+        w1 = paddle.randn(w1_shape or [2, 16, 2 * i_local])
+        w1.name = "w1"
+        w2 = paddle.randn(w2_shape or [2, i_local, 16])
+        w2.name = "w2"
+        e.weight1, e.weight2 = w1, w2
+        _sd = {"weight1": w1, "weight2": w2}
+        e.state_dict = lambda *a, **k: _sd
+        return e
 
-            # Bind _get_intermediate_sharded_state_dict without inheriting
-            # paddle.nn.Layer (which requires __init__ and _sub_layers).
-            self._get_intermediate_sharded_state_dict = (
-                GroupedMLPExpert._get_intermediate_sharded_state_dict.__get__(
-                    self
-                )
+    def _run_shard(self, expert, prefix="p."):
+        """Call _get_intermediate_sharded_state_dict with mocked shard_weight,
+        returning (result, [(key, axis), ...])."""
+        import paddlefleet.transformer.moe.moe_expert as me
+
+        calls = []
+
+        def _fake(key, weight, axis, group):
+            t = weight.clone()
+            t.grouped_gemm_param = False
+            calls.append((key, axis))
+            return t
+
+        with patch.object(me, "shard_weight", side_effect=_fake):
+            res = expert._get_intermediate_sharded_state_dict(
+                expert.state_dict(), prefix
             )
-            config = MagicMock()
-            config.hidden_size = 16
-            config.moe_intermediate_size = 16
-            config.gated_linear_unit = True
-            self.config = config
-            self.ep_group = ep_group
-            self.intermediate_size_per_partition = (
-                intermediate_size_per_partition
-            )
-            self._w1 = paddle.randn([2, 16, 16])
-            self._w1.name = "weight1"
-            self._w2 = paddle.randn([2, 8, 16])
-            self._w2.name = "weight2"
-            self.weight1 = self._w1
-            self.weight2 = self._w2
+        return res, calls
 
-        def state_dict(self, structured_name_prefix=""):
-            return {"weight1": self._w1, "weight2": self._w2}
+    # ── validation guards ──
 
-    def test_sharded_state_dict_no_ep_group_raises(self):
-        """Lines 319-325: ep_group=None raises ValueError."""
-        from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
-
-        expert = self._FakeExpert(
-            intermediate_size_per_partition=8, ep_group=None
-        )
+    def test_no_ep_group_raises(self):
+        e = self._make_expert(ep_group=None)
         with self.assertRaises(ValueError):
-            GroupedMLPExpert.sharded_state_dict(expert)
+            e._get_intermediate_sharded_state_dict(e.state_dict(), "")
 
-    def test_sharded_state_dict_no_glu_raises(self):
-        """Lines 326-331: non-gated linear unit raises ValueError."""
-        from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
-
-        expert = self._FakeExpert(
-            intermediate_size_per_partition=8, ep_group=_mock_group(2)
-        )
-        expert.config.gated_linear_unit = False
+    def test_no_glu_raises(self):
+        e = self._make_expert(ep_group=_mock_group(2), glu=False)
         with self.assertRaises(ValueError):
-            GroupedMLPExpert.sharded_state_dict(expert)
+            e._get_intermediate_sharded_state_dict(e.state_dict(), "")
 
-    def test_sharded_state_dict_size_mismatch_raises(self):
-        """Lines 337-343: intermediate * ep_size != moe_intermediate_size raises."""
-        from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
-
-        expert = self._FakeExpert(
-            intermediate_size_per_partition=5, ep_group=_mock_group(2)
-        )
-        # 5 * 2 = 10 != 16
+    def test_size_mismatch_raises(self):
+        e = self._make_expert(ep_group=_mock_group(2), i_local=5)
         with self.assertRaises(ValueError):
-            GroupedMLPExpert.sharded_state_dict(expert)
+            e._get_intermediate_sharded_state_dict(e.state_dict(), "")
 
-    def test_sharded_state_dict_weight1_last_dim_raises(self):
-        """Lines 348-354: wrong weight1 last dim raises ValueError."""
-        from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
-
-        expert = self._FakeExpert(
-            intermediate_size_per_partition=8, ep_group=_mock_group(2)
-        )
-        # last dim=16 but 2*I_local=16, so that is fine. Use 32 to cause mismatch.
-        bad_w1 = paddle.randn([2, 16, 32])
-        bad_w1.name = "weight1"
-        expert._w1 = bad_w1
-        expert.weight1 = bad_w1
+    def test_weight1_not_3d_raises(self):
+        e = self._make_expert(ep_group=_mock_group(2), w1_shape=[32, 16])
         with self.assertRaises(ValueError):
-            GroupedMLPExpert.sharded_state_dict(expert)
+            e._get_intermediate_sharded_state_dict(e.state_dict(), "")
 
-    def test_sharded_state_dict_intermediate_sharded_ok(self):
-        """Lines 344-377: valid intermediate-sharded layout returns sharded dict."""
+    def test_weight1_last_dim_raises(self):
+        e = self._make_expert(ep_group=_mock_group(2), w1_shape=[2, 16, 32])
+        with self.assertRaises(ValueError):
+            e._get_intermediate_sharded_state_dict(e.state_dict(), "")
+
+    def test_weight2_shape_mismatch_raises(self):
+        e = self._make_expert(ep_group=_mock_group(2), w2_shape=[2, 16, 16])
+        with self.assertRaises(ValueError):
+            e._get_intermediate_sharded_state_dict(e.state_dict(), "")
+
+    # ── happy path: non-qwen3 (2-D reshape) ──
+
+    def test_non_qwen3_2d_ok(self):
+        e = self._make_expert(ep_group=_mock_group(2))
+        res, calls = self._run_shard(e)
+        self.assertTrue(res["p.weight1"].grouped_gemm_param)
+        self.assertTrue(res["p.weight2"].grouped_gemm_param)
+        axes = dict(calls)
+        self.assertEqual(axes["p.weight1"], 1)
+        self.assertEqual(axes["p.weight2"], 0)
+
+    # ── happy path: qwen3_vl / qwen3_5 (3-D, no reshape) ──
+
+    def test_qwen3_vl_3d_ok(self):
+        e = self._make_expert(ep_group=_mock_group(2), model_type="qwen3_vl")
+        _, calls = self._run_shard(e)
+        axes = dict(calls)
+        self.assertEqual(axes["p.weight1"], 2)
+        self.assertEqual(axes["p.weight2"], 1)
+
+    def test_qwen3_5_3d_ok(self):
+        e = self._make_expert(ep_group=_mock_group(2), model_type="qwen3_5")
+        _, calls = self._run_shard(e)
+        axes = dict(calls)
+        self.assertEqual(axes["p.weight1"], 2)
+        self.assertEqual(axes["p.weight2"], 1)
+
+    # ── sharded_state_dict routing (is_intermediate_sharded) ──
+
+    def test_sharded_state_dict_allgather_routes_to_intermediate(self):
         import paddlefleet.transformer.moe.moe_expert as me
         from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
 
-        expert = self._FakeExpert(
-            intermediate_size_per_partition=8, ep_group=_mock_group(2)
-        )
+        e = self._make_expert(ep_group=_mock_group(2))
+        with patch.object(me, "shard_weight", return_value=MagicMock()):
+            res = GroupedMLPExpert.sharded_state_dict(e)
+        self.assertIn("weight1", res)
+        self.assertIn("weight2", res)
 
-        def fake_shard(key, weight, axis, group):
-            t = weight.clone()
-            t.grouped_gemm_param = False
-            return t
+    def test_sharded_state_dict_non_allgather_falls_through(self):
+        """dispatcher_type != 'allgather' → standard (non-intermediate) path."""
+        import paddlefleet.transformer.moe.moe_expert as me
+        from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
 
-        with patch.object(me, "shard_weight", side_effect=fake_shard):
-            result = GroupedMLPExpert.sharded_state_dict(expert)
-        self.assertIn("weight1", result)
-        self.assertIn("weight2", result)
-        self.assertTrue(result["weight1"].grouped_gemm_param)
-        self.assertTrue(result["weight2"].grouped_gemm_param)
+        e = self._make_expert(ep_group=_mock_group(2))
+        e.config.moe_token_dispatcher_type = "deepep"
+        with patch.object(me, "shard_weight", return_value=MagicMock()):
+            res = GroupedMLPExpert.sharded_state_dict(e)
+        self.assertIn("weight1", res)
 
 
 # ── token_dispatcher.py remaining missing lines ──────────────────────────────

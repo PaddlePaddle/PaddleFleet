@@ -305,12 +305,14 @@ class GroupedMLPExpert(FleetLayer):
         #              shard along expert dim (axis=0).
         #   allgather — rank owns all experts with intermediate dim sharded
         #              across EP; shard along intermediate dim.
-        # weight1's last dim is [gate; up] concat — reshape to [E, H, 2, I_local]
-        # before sharding axis=3 so AllGather reassembles [gate_full; up_full]
-        # (not interleaved per rank).
+        # Both layouts use matching global shapes (2-D, or 3-D for qwen3)
+        # so that deepep and allgather checkpoints can be converted via
+        # DCP resharder + AOA (AOA not yet implemented).
+        # See _get_intermediate_sharded_state_dict for the allgather details.
         is_intermediate_sharded = (
-            self.intermediate_size_per_partition
-            != self.config.moe_intermediate_size
+            getattr(self.config, "moe_token_dispatcher_type", None)
+            == "allgather"
+            and self.expert_parallel
         )
 
         state_dict = self.state_dict(structured_name_prefix="")
@@ -359,11 +361,34 @@ class GroupedMLPExpert(FleetLayer):
         """Build the sharded state dict for the intermediate-sharded (allgather)
         EP layout.
 
-        Every rank holds all experts but only its ``I/EP`` shard of each
-        expert's intermediate dim.  ``weight1`` (``[E, H, 2, I_full]``) is
-        reshaped to ``[E, H, 2, I_local]`` and sharded on ``axis=3`` so AllGather
-        reassembles ``[gate_full; up_full]`` rather than interleaving per rank;
-        ``weight2`` (``[E, I_full, H]``) is sharded on ``axis=1``.
+        Uses global_shapes identical to the standard (deepep) path so that
+        deepep and allgather checkpoints share the same global_shape,
+        enabling conversion via DCP resharder + AOA (AOA not yet
+        implemented).
+
+        For non-qwen3 models (2-D global shapes):
+        * ``weight1`` ``[E, H, 2*I_local]`` is reshaped to ``[E*H, 2*I_local]``
+          and sharded on ``axis=1`` (intermediate dim) → global
+          ``[E_all*H, 2*I_full]``.
+        * ``weight2`` ``[E, I_local, H]`` is reshaped to ``[E*I_local, H]``
+          and sharded on ``axis=0`` (expert×intermediate) → global
+          ``[E_all*I_full, H]``.
+
+        For qwen3_vl / qwen3_5 models (3-D global shapes, no reshape):
+        * ``weight1`` ``[E, H, 2*I_local]`` sharded on ``axis=2`` → global
+          ``[E_all, H, 2*I_full]``.
+        * ``weight2`` ``[E, I_local, H]`` sharded on ``axis=1`` → global
+          ``[E_all, I_full, H]``.
+
+        Because the sharding axis differs from deepep (axis=0 expert dim), the
+        data ordering inside the global tensor differs.  When loading a deepep
+        checkpoint into an allgather model, AOA reordering must be applied
+        (not yet implemented).  When loading an allgather checkpoint into an
+        allgather model, no AOA is needed (same ordering).
+
+        Note:
+            ``num_local_experts`` must be identical between save and load,
+            since it is baked into the global shape.
         """
         if self.ep_group is None:
             raise ValueError(
@@ -390,21 +415,47 @@ class GroupedMLPExpert(FleetLayer):
                 f"{ep_size} != moe_intermediate_size="
                 f"{self.config.moe_intermediate_size}"
             )
-        E = state_dict["weight1"].shape[0]
-        H = state_dict["weight1"].shape[1]
+        w1_raw = state_dict["weight1"]
+        w2_raw = state_dict["weight2"]
+        # weight1 must be 3-D [E, H, 2*I_local]
+        if len(w1_raw.shape) != 3:
+            raise ValueError(
+                f"weight1 must be 3-D [E, H, 2*I_local], got shape "
+                f"{w1_raw.shape}"
+            )
+        E = w1_raw.shape[0]
+        H = w1_raw.shape[1]
         I_local = self.intermediate_size_per_partition
         expected_last = 2 * I_local
-        if state_dict["weight1"].shape[-1] != expected_last:
+        if w1_raw.shape[-1] != expected_last:
             raise ValueError(
-                f"weight1 last dim {state_dict['weight1'].shape[-1]} "
+                f"weight1 last dim {w1_raw.shape[-1]} "
                 f"!= 2 * intermediate_size_per_partition "
-                f"({expected_last}); cannot reshape to [E, H, 2, "
-                f"I_local]"
+                f"({expected_last})"
             )
-        w1 = state_dict["weight1"].reshape([E, H, 2, I_local])
-        w1.name = self.weight1.name
-        w2 = state_dict["weight2"]  # [E, I_local, H]
-        w2.name = self.weight2.name
+        # weight2 shape must be [E, I_local, H]
+        expected_w2_shape = [E, I_local, H]
+        if list(w2_raw.shape) != expected_w2_shape:
+            raise ValueError(
+                f"weight2 shape {list(w2_raw.shape)} != expected "
+                f"{expected_w2_shape} [E, I_local, H]"
+            )
+        # qwen3_vl / qwen3_5 keep 3-D layout (match standard path)
+        model_type = getattr(self.config, "model_type", "none")
+        if "qwen3_vl" in model_type or "qwen3_5" in model_type:
+            w1 = w1_raw
+            w2 = w2_raw
+            w1_axis = 2  # [E, H, 2*I_local] — shard intermediate dim
+            w2_axis = 1  # [E, I_local, H] — shard intermediate dim
+        else:
+            # 2-D reshape: [E, H, 2*I_local] -> [E*H, 2*I_local]
+            w1 = w1_raw.reshape([E * H, 2 * I_local])
+            w1.name = self.weight1.name
+            # 2-D reshape: [E, I_local, H] -> [E*I_local, H]
+            w2 = w2_raw.reshape([E * I_local, H])
+            w2.name = self.weight2.name
+            w1_axis = 1  # [E*H, 2*I_local] — shard intermediate dim
+            w2_axis = 0  # [E*I_local, H] — shard expert×intermediate dim
 
         sharded_dict = {}
         full_key1 = f"{structured_name_prefix}weight1"
@@ -412,14 +463,14 @@ class GroupedMLPExpert(FleetLayer):
         sharded_dict[full_key1] = shard_weight(
             key=full_key1,
             weight=w1,
-            axis=3,  # I_local — intermediate dim per rank
+            axis=w1_axis,
             group=self.ep_group,
         )
         sharded_dict[full_key1].grouped_gemm_param = True
         sharded_dict[full_key2] = shard_weight(
             key=full_key2,
             weight=w2,
-            axis=1,  # I_local — intermediate dim per rank
+            axis=w2_axis,
             group=self.ep_group,
         )
         sharded_dict[full_key2].grouped_gemm_param = True
