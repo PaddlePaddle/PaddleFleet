@@ -349,10 +349,22 @@ class MultiLatentAttention(Attention):
 
         # Gated attention
         self.gated_attention = getattr(self.config, "gated_attention", False)
+        self.gated_attn_use_q_lora = getattr(
+            self.config, "gated_attn_use_q_lora", False
+        )
         if self.gated_attention and sublayers_spec.gate_proj is not None:
+            # Gate input source: q_compressed (post q_a_layernorm, dim=q_lora_rank) when
+            # gated_attn_use_q_lora is set, otherwise the full hidden_states.
+            if self.gated_attn_use_q_lora:
+                assert self.config.q_lora_rank is not None, (
+                    "gated_attn_use_q_lora=True requires q_lora_rank is not None"
+                )
+                gate_in_dim = self.config.q_lora_rank
+            else:
+                gate_in_dim = self.config.hidden_size
             self.gate_proj = build_spec_layer(
                 sublayers_spec.gate_proj,
-                self.config.hidden_size,
+                gate_in_dim,
                 self.out_projection_size,
                 config=self.config,
                 init_method=self.config.init_method,
@@ -362,6 +374,16 @@ class MultiLatentAttention(Attention):
                 is_expert=False,
                 tp_comm_buffer_name="mla_gate",
                 tp_group=self.pg_collection.tp,
+            )
+            print(
+                f"[GatedAttnCheck][init] layer={getattr(self, 'layer_number', -1)} "
+                f"gated_attention={self.gated_attention} "
+                f"gated_attn_use_q_lora={self.gated_attn_use_q_lora} "
+                f"q_lora_rank={self.config.q_lora_rank} "
+                f"hidden_size={self.config.hidden_size} "
+                f"gate_in_dim={gate_in_dim} "
+                f"gate_out_dim={self.out_projection_size}",
+                flush=True,
             )
         else:
             self.gated_attention = False
@@ -575,17 +597,36 @@ class MultiLatentAttention(Attention):
 
         # Apply gated attention
         if self.gated_attention:
+            # Gate input source: q_compressed (post q_a_layernorm, dim=q_lora_rank) when
+            # gated_attn_use_q_lora is set, otherwise hidden_states.
+            gate_source = (
+                q_compressed if self.gated_attn_use_q_lora else hidden_states
+            )
+            # [GatedAttnCheck][forward] debug print (kept commented for on-demand use):
+            # if not getattr(self, "_gated_attn_fwd_logged", False):
+            #     self._gated_attn_fwd_logged = True
+            #     _src_is_qc = gate_source is q_compressed
+            #     print(
+            #         f"[GatedAttnCheck][forward] layer={getattr(self, 'layer_number', -1)} "
+            #         f"gated_attn_use_q_lora={self.gated_attn_use_q_lora} "
+            #         f"gate_source_is_q_compressed={_src_is_qc} "
+            #         f"gate_source.shape={list(gate_source.shape)} "
+            #         f"q_compressed.shape={list(q_compressed.shape)} "
+            #         f"hidden_states.shape={list(hidden_states.shape)} "
+            #         f"recompute_gated_attn={self.recompute_gated_attn}",
+            #         flush=True,
+            #     )
             if self.recompute_gated_attn:
                 gate_recompute = RecomputeWithoutOutput()
                 core_attn_out = gate_recompute.recompute(
                     self._gate,
-                    hidden_states,
+                    gate_source,
                     core_attn_out,
                     preserve_rng_state=False,
                     share_grad_holder=True,
                 )
             else:
-                core_attn_out = self._gate(hidden_states, core_attn_out)
+                core_attn_out = self._gate(gate_source, core_attn_out)
 
         if getattr(self.config, "dw_p2p_overlap", False) and not getattr(
             self.config, "use_bias", False
@@ -602,8 +643,8 @@ class MultiLatentAttention(Attention):
 
         return output, bias
 
-    def _gate(self, hidden_states, core_attn_out):
-        gate, _ = self.gate_proj(hidden_states)
+    def _gate(self, gate_source, core_attn_out):
+        gate, _ = self.gate_proj(gate_source)
         if self.config.sigmoid_gate_fusion:
             from paddlefleet.triton_ops import SigmoidGateFusionTriton
 

@@ -331,6 +331,12 @@ class TransformerConfig(ModelParallelConfig):
     from the fused QKV projection (doubling the query projection size). This allows the model
     to dynamically control the information flow from attention. See Qwen3.5 for reference."""
 
+    gated_attn_use_q_lora: bool = False
+    """If True, the gated attention gate uses the q_a_proj output (q_compressed, post
+    q_a_layernorm, dim = q_lora_rank) as the gate input instead of hidden_states. This is a
+    low-rank gate input for MLA networks that also reduces the gate projection parameter count.
+    Requires q_lora_rank is not None. Only applies when gated_attention is True."""
+
     ####################
     # block attention residuals
     ####################
