@@ -1311,8 +1311,17 @@ class Compressor(nn.Layer):
         if sq < ratio:
             return None
 
-        kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
-        score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
+        if getattr(self.config, "high_precision_compressor", False):
+            with paddle.amp.auto_cast(enable=False):
+                kv = paddle.matmul(
+                    x.cast("float32"), self.linear_wkv.weight.cast("float32")
+                )
+                score = paddle.matmul(
+                    x.cast("float32"), self.linear_wgate.weight.cast("float32")
+                )
+        else:
+            kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
+            score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
 
         # CP: gather projected KV globally before pooling (Miles pattern).
         # This lets the compressor pool across the full sequence while keeping
@@ -1373,7 +1382,13 @@ class Compressor(nn.Layer):
             kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
             # kv: [b, actual_n_compressed, head_dim]
 
-            kv = self.norm(kv.cast(x.dtype))
+            if getattr(self.config, "high_precision_compressor", False):
+                with paddle.amp.auto_cast(enable=False):
+                    var = kv.square().mean(-1, keepdim=True)
+                    kv = kv * paddle.rsqrt(var + self.norm.variance_epsilon)
+                    kv = (self.norm.weight.cast("float32") * kv).cast(x.dtype)
+            else:
+                kv = self.norm(kv.cast(x.dtype))
 
             # Pad to n_compressed before RoPE
             if actual_n_compressed < n_compressed:
@@ -1445,7 +1460,13 @@ class Compressor(nn.Layer):
             axis=2
         )  # [b, n_compressed, head_dim]
 
-        kv = self.norm(kv.cast(x.dtype))
+        if getattr(self.config, "high_precision_compressor", False):
+            with paddle.amp.auto_cast(enable=False):
+                var = kv.square().mean(-1, keepdim=True)
+                kv = kv * paddle.rsqrt(var + self.norm.variance_epsilon)
+                kv = (self.norm.weight.cast("float32") * kv).cast(x.dtype)
+        else:
+            kv = self.norm(kv.cast(x.dtype))
 
         # Apply RoPE with subsampled positions
         if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:

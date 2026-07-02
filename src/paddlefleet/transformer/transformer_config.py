@@ -689,6 +689,9 @@ class TransformerConfig(ModelParallelConfig):
     high_precision_mhc: bool = True
     """Use high precision (float32) for mHC forward and backward computation."""
 
+    high_precision_compressor: bool = False
+    """Use high precision (float32) for compressor forward and backward computation."""
+
     ####################
     # miscellaneous
     ####################
