@@ -212,6 +212,24 @@ class TestTruncateNormInit(unittest.TestCase):
             places=6,
         )
 
+    def test_truncate_norm_passes_hidden_size_sigma_to_initializer(self):
+        hidden_size = 256
+        init_method = Mock()
+
+        with patch(
+            "paddlefleet.transformer.transformer_config.truncated_init_method_normal",
+            return_value=init_method,
+        ) as mock_truncated_init:
+            config = TransformerConfig(
+                num_hidden_layers=12,
+                hidden_size=hidden_size,
+            )
+
+        mock_truncated_init.assert_called_once_with(0.5 / math.sqrt(hidden_size))
+        self.assertIs(config.init_method, init_method)
+        self.assertIs(config.output_layer_init_method, init_method)
+        self.assertIs(config.embedding_init_method, init_method)
+
     def test_truncate_norm_is_default_and_reused(self):
         hidden_size = 1024
         config = TransformerConfig(
@@ -328,12 +346,22 @@ class TestTruncateNormInit(unittest.TestCase):
             paddle.set_default_dtype(original_dtype)
 
     def test_truncate_norm_zero_hidden_size_falls_back_to_init_method_std(self):
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=0,
-        )
+        init_method = Mock()
 
+        with patch(
+            "paddlefleet.transformer.transformer_config.truncated_init_method_normal",
+            return_value=init_method,
+        ) as mock_truncated_init:
+            config = TransformerConfig(
+                num_hidden_layers=12,
+                hidden_size=0,
+            )
+
+        mock_truncated_init.assert_called_once_with(0.02)
         self.assertEqual(config.init_method_std, 0.02)
+        self.assertIs(config.init_method, init_method)
+        self.assertIs(config.output_layer_init_method, init_method)
+        self.assertIs(config.embedding_init_method, init_method)
 
 
 class TestPadTokenId(unittest.TestCase):

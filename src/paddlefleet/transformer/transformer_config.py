@@ -1080,9 +1080,11 @@ class TransformerConfig(ModelParallelConfig):
             self.init_method_std = sigma
             if self.output_layer_init_method is None:
                 self.output_layer_init_method = self.init_method
+            if self.embedding_init_method is None:
+                self.embedding_init_method = self.init_method
             logger.info(
                 f"[init] default truncated normal init: TruncNormal(0, sigma^2) clipped to "
-                f"[-3*sigma, 3*sigma], sigma=0.5/sqrt(hidden_size={self.hidden_size})={sigma}"
+                f"[-3*sigma, 3*sigma], sigma={sigma}"
             )
 
         if self.init_method_std is None:
