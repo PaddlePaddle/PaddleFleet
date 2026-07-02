@@ -251,6 +251,12 @@ class TransformerConfig(ModelParallelConfig):
     swa_rope_theta: float | None = None
     """The base period of the RoPE embeddings for sliding window attention layers. Defaults to rope_theta."""
 
+    swa_qk_nope_head_dim: int = None
+    """Dimension of the nope part of QK heads for SWA layers. If None, falls back to qk_nope_head_dim."""
+
+    swa_qk_rope_head_dim: int = None
+    """Dimension of the rope part of QK heads for SWA layers. If None, falls back to qk_rope_head_dim."""
+
     head_wise_swa_ratio: float = 0.0
     """Ratio of KV heads that use sliding window attention within an SWA layer.
     0.0 means all heads use SWA; values between 0 and 1 create a mix where

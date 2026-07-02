@@ -259,9 +259,23 @@ class MultiLatentAttention(Attention):
 
         self.out_projection_size = self.v_head_dim * self.num_attention_heads
 
-        self.q_head_dim = (
-            self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
-        )
+        if (
+            self.is_swa
+            and getattr(self.config, "swa_qk_nope_head_dim", None) is not None
+        ):
+            self.qk_nope_head_dim = self.config.swa_qk_nope_head_dim
+        else:
+            self.qk_nope_head_dim = self.config.qk_nope_head_dim
+
+        if (
+            self.is_swa
+            and getattr(self.config, "swa_qk_rope_head_dim", None) is not None
+        ):
+            self.qk_rope_head_dim = self.config.swa_qk_rope_head_dim
+        else:
+            self.qk_rope_head_dim = self.config.qk_rope_head_dim
+
+        self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         mscale = _yarn_get_mscale(
             self.config.rotary_scaling_factor, self.config.mscale_all_dim
@@ -270,7 +284,7 @@ class MultiLatentAttention(Attention):
 
         if self.config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
-                self.config.qk_rope_head_dim,
+                self.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=1.0,
                 rotary_base=self.rope_theta,
@@ -281,7 +295,7 @@ class MultiLatentAttention(Attention):
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
-                self.config.qk_rope_head_dim,
+                self.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_base=self.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
@@ -376,8 +390,8 @@ class MultiLatentAttention(Attention):
             q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
             wv_b: [heads, kv_lora_rank, v_head_dim]
         """
-        qk_nope_head_dim = self.config.qk_nope_head_dim
-        qk_rope_head_dim = self.config.qk_rope_head_dim
+        qk_nope_head_dim = self.qk_nope_head_dim
+        qk_rope_head_dim = self.qk_rope_head_dim
         kv_lora_rank = self.config.kv_lora_rank
         v_head_dim = self.v_head_dim
         num_heads = self.num_attention_heads_per_partition
@@ -677,7 +691,7 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_a_proj_with_mqa = build_spec_layer(
             sublayers_spec.kv_a_proj_with_mqa,
             self.config.hidden_size,
-            self.config.kv_lora_rank + self.config.qk_rope_head_dim,
+            self.config.kv_lora_rank + self.qk_rope_head_dim,
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -692,7 +706,7 @@ class MLASelfAttention(MultiLatentAttention):
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
             self.num_attention_heads
-            * (self.config.qk_nope_head_dim + self.v_head_dim),
+            * (self.qk_nope_head_dim + self.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -836,14 +850,14 @@ class MLASelfAttention(MultiLatentAttention):
         kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
         if (
             kv_combined.size(-1)
-            != self.config.kv_lora_rank + self.config.qk_rope_head_dim
+            != self.config.kv_lora_rank + self.qk_rope_head_dim
         ):
             # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
             # kv_compressed:[b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
-                [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
+                [self.config.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
             if self.config.sequence_parallel:
@@ -855,7 +869,7 @@ class MLASelfAttention(MultiLatentAttention):
             # kv_compressed:[b, s / TP, kv_lora_rank], k_pos_emb: [b, s / TP, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
-                [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
+                [self.config.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
             if (
@@ -939,7 +953,7 @@ class MLASelfAttention(MultiLatentAttention):
             kv = kv.view(
                 *kv.size()[:-1],
                 self.num_attention_heads_per_partition,
-                self.config.qk_nope_head_dim + self.v_head_dim,
+                self.qk_nope_head_dim + self.v_head_dim,
             )
 
             # if self.layer_number == 0:
@@ -982,8 +996,8 @@ class MLASelfAttention(MultiLatentAttention):
                     q,
                     cos,
                     sin,
-                    self.config.qk_nope_head_dim,
-                    self.config.qk_rope_head_dim,
+                    self.qk_nope_head_dim,
+                    self.qk_rope_head_dim,
                     cu_seqlens_q,
                     cp_rank,
                     cp_size,
@@ -993,8 +1007,8 @@ class MLASelfAttention(MultiLatentAttention):
                     k_pos_emb,
                     cos,
                     sin,
-                    self.config.qk_rope_head_dim,
-                    self.config.qk_nope_head_dim,
+                    self.qk_rope_head_dim,
+                    self.qk_nope_head_dim,
                     self.v_head_dim,
                     cu_seqlens_kv,
                     cp_rank,
@@ -1071,14 +1085,14 @@ class MLASelfAttention(MultiLatentAttention):
                             )
 
                 # Replace paddle.split with zero-copy slice views.
-                q_no_pe = q[..., : self.config.qk_nope_head_dim]
-                q_pos_emb = q[..., self.config.qk_nope_head_dim :]
+                q_no_pe = q[..., : self.qk_nope_head_dim]
+                q_pos_emb = q[..., self.qk_nope_head_dim :]
 
                 # k_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # value: [num_tokens, n, v_head_dim]
                 k_no_pe, value = paddle.split(
                     kv,
-                    [self.config.qk_nope_head_dim, self.v_head_dim],
+                    [self.qk_nope_head_dim, self.v_head_dim],
                     axis=-1,
                 )
 
