@@ -15,10 +15,11 @@
 import inspect
 
 import paddle
+import paddlefleet_ops.flash_mask_facade
 from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
-from paddlefleet_ops.flash_mask_facade import flashmask_attention
+from paddle.nn.functional.flash_attention import flashmask_attention
 
 _flash_mask_available = False
 try:
@@ -1454,7 +1455,7 @@ def flashmask_attention_ulysses(
     )
 
     # Local flashmask attention on full sequence with h/P heads
-    attn_output = flashmask_attention(
+    attn_output = paddlefleet_ops.flash_mask_facade.flashmask_attention(
         query,
         key,
         value,

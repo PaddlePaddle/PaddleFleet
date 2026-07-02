@@ -469,7 +469,7 @@ class TestFlashmaskAttentionUlysses(unittest.TestCase):
                 )
             self.assertIn("head dim must be 1", str(ctx.exception))
 
-    @patch("paddlefleet.context_parallel_utils.flashmask_attention")
+    @patch("paddlefleet_ops.flash_mask_facade.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.UlyssesAlltoAll.apply")
     def test_happy_path_broadcast_mask(self, mock_a2a_apply, mock_fm_attn):
         """Normal path with num_mask_heads=1 (broadcast), should not slice mask."""
@@ -505,7 +505,7 @@ class TestFlashmaskAttentionUlysses(unittest.TestCase):
         self.assertEqual(result.shape, [2, 4, 4, 8])
         mock_fm_attn.assert_called_once()
 
-    @patch("paddlefleet.context_parallel_utils.flashmask_attention")
+    @patch("paddlefleet_ops.flash_mask_facade.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.UlyssesAlltoAll.apply")
     def test_happy_path_per_head_mask_slicing(
         self, mock_a2a_apply, mock_fm_attn

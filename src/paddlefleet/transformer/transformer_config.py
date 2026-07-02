@@ -1391,5 +1391,5 @@ class TransformerConfig(ModelParallelConfig):
         }:
             raise ValueError(
                 f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
-                "Must be one of {'dualchunk_allgather', 'contiguous_allgather'}."
+                "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
             )
