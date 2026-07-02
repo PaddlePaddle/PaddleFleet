@@ -625,8 +625,8 @@ class TransformerConfig(ModelParallelConfig):
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
     takes a single Tensor and initializes it. If None, weights are initialized with a truncated
     normal distribution N(0, sigma^2) clipped to
-    [-truncated_normal_init_factor*sigma, truncated_normal_init_factor*sigma] with
-    sigma=0.5/sqrt(hidden_size). This is overridden when magic_init is True."""
+    [-3*sigma, 3*sigma] with sigma=0.5/sqrt(hidden_size). This is overridden when
+    magic_init is True."""
 
     output_layer_init_method: callable = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
@@ -907,10 +907,6 @@ class TransformerConfig(ModelParallelConfig):
     magic_init: bool = False
     """Use the magic initialization method."""
 
-    truncated_normal_init_factor: float = 3.0
-    """Truncation factor for the default truncated normal initialization: weights are drawn from
-    N(0, sigma^2) clipped to [-factor*sigma, factor*sigma] with sigma=0.5/sqrt(hidden_size)."""
-
     ####################
     # Ernie Trainer Configs
     ####################
@@ -1092,23 +1088,15 @@ class TransformerConfig(ModelParallelConfig):
             self._default_init_reuse = True
         elif self.init_method is None:
             if self.hidden_size == 0:
-                raise ValueError(
-                    "hidden_size must be non-zero for the default truncated normal init."
-                )
-            if self.truncated_normal_init_factor <= 0:
-                raise ValueError(
-                    "truncated_normal_init_factor must be positive."
-                )
-            sigma = 0.5 / math.sqrt(self.hidden_size)
-            self.init_method = truncated_init_method_normal(
-                sigma, truncate_factor=self.truncated_normal_init_factor
-            )
+                sigma = self.init_method_std
+            else:
+                sigma = 0.5 / math.sqrt(self.hidden_size)
+            self.init_method = truncated_init_method_normal(sigma)
             self.init_method_std = sigma
             self._default_init_reuse = True
             logger.info(
                 f"[init] default truncated normal init: TruncNormal(0, sigma^2) clipped to "
-                f"[-{self.truncated_normal_init_factor}*sigma, {self.truncated_normal_init_factor}*sigma], "
-                f"sigma=0.5/sqrt(hidden_size={self.hidden_size})={sigma}"
+                f"[-3*sigma, 3*sigma], sigma=0.5/sqrt(hidden_size={self.hidden_size})={sigma}"
             )
 
         if (

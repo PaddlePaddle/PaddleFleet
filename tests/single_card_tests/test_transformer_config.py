@@ -415,26 +415,13 @@ class TestTruncateNormInit(unittest.TestCase):
         finally:
             paddle.set_default_dtype(original_dtype)
 
-    def test_truncate_norm_raises_on_zero_hidden_size(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            "hidden_size must be non-zero for the default truncated normal init.",
-        ):
-            TransformerConfig(
-                num_hidden_layers=12,
-                hidden_size=0,
-            )
+    def test_truncate_norm_zero_hidden_size_falls_back_to_init_method_std(self):
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=0,
+        )
 
-    def test_truncate_norm_raises_on_non_positive_factor(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            "truncated_normal_init_factor must be positive.",
-        ):
-            TransformerConfig(
-                num_hidden_layers=12,
-                hidden_size=1024,
-                truncated_normal_init_factor=0,
-            )
+        self.assertEqual(config.init_method_std, 0.02)
 
 
 class TestPadTokenId(unittest.TestCase):
