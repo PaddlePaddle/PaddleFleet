@@ -569,10 +569,10 @@ class TransformerConfig(ModelParallelConfig):
     ##################
     # Context Parallel
     ##################
-    cp_comm_type: str | list[str] | None = None
-    """Inter-gpu communication type for context parallelism. Not support now.
+    cp_comm_type: str | list[str] = "allgather_kv"
+    """Inter-gpu communication type for context parallelism.
     str: all layers share same communication type.
-    List[str]: each layer has its separate communication type.
+    List[str]: each layer has its separate communication type. Not support now.
     """
 
     cp_balance_mode: str = "dualchunk_allgather"
@@ -1382,3 +1382,49 @@ class TransformerConfig(ModelParallelConfig):
                     "lm_head modulation will take effect."
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
+
+        if self.cp_comm_type not in {"allgather_kv", "a2a"}:
+            raise ValueError(
+                f"cp_comm_type={self.cp_comm_type!r} is invalid. "
+                "Must be one of {'allgather_kv', 'a2a'}."
+            )
+
+        if self.cp_balance_mode not in {
+            "dualchunk_allgather",
+            "contiguous_allgather",
+        }:
+            raise ValueError(
+                f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
+                "Must be one of {'dualchunk_allgather', 'contiguous_allgather'}."
+            )
+
+        if (
+            self.cp_comm_type == "allgather_kv"
+            and self.cp_balance_mode != "dualchunk_allgather"
+        ):
+            raise ValueError(
+                f"cp_comm_type={self.cp_comm_type!r} does not support cp_balance_mode={self.cp_balance_mode!r}. "
+                "Use 'dualchunk_allgather' instead."
+            )
+
+        if (
+            self.cp_comm_type == "a2a"
+            and self.cp_balance_mode != "contiguous_allgather"
+        ):
+            raise ValueError(
+                f"cp_comm_type={self.cp_comm_type!r} does not support cp_balance_mode={self.cp_balance_mode!r}. "
+                "Use 'contiguous_allgather' instead."
+            )
+
+        if (
+            self.multi_latent_attention
+            and self.window_attn_skip_freq is not None
+        ):
+            if (
+                self.context_parallel_size > 1
+                and self.cp_balance_mode != "contiguous_allgather"
+            ):
+                raise ValueError(
+                    f" cp_balance_mode={self.cp_balance_mode!r} is not supported when using multi_latent_attention and window_attn_skip_freq is not None. "
+                    "Use 'contiguous_allgather' instead."
+                )
