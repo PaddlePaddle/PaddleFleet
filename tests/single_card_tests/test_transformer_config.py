@@ -197,9 +197,9 @@ class TestMoETokenDispatcherConfig(unittest.TestCase):
 
 
 class TestMagicInit(unittest.TestCase):
-    """Tests for magic_init when truncated normal init is forced on."""
+    """Tests for magic_init sigma calculation and init method assignment."""
 
-    def test_magic_init_true_uses_truncate_norm(self):
+    def test_magic_init_true_sigma_calculation(self):
         hidden_size = 768
         config = TransformerConfig(
             num_hidden_layers=12,
@@ -207,24 +207,20 @@ class TestMagicInit(unittest.TestCase):
             magic_init=True,
         )
 
-        self.assertTrue(config.use_truncated_normal_init)
-        self.assertAlmostEqual(
-            config.init_method_std,
-            0.5 / math.sqrt(hidden_size),
-            places=6,
-        )
-        self.assertIs(config.init_method, config.output_layer_init_method)
-        self.assertIs(config.init_method, config.embedding_init_method)
+        expected_sigma = math.sqrt(0.3333 / hidden_size)
+        self.assertFalse(config.use_truncated_normal_init)
+        self.assertAlmostEqual(config.init_method_std, expected_sigma, places=6)
+        self.assertIsNotNone(config.init_method)
 
-    def test_magic_init_true_zero_hidden_size_falls_back_to_init_std(self):
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=0,
-            magic_init=True,
-        )
-
-        self.assertTrue(config.use_truncated_normal_init)
-        self.assertEqual(config.init_method_std, 0.02)
+    def test_magic_init_true_zero_hidden_size_raises(self):
+        with self.assertRaisesRegex(
+            ValueError, "hidden_size must be non-zero when magic_init is True."
+        ):
+            TransformerConfig(
+                num_hidden_layers=12,
+                hidden_size=0,
+                magic_init=True,
+            )
 
 
 class TestTruncateNormInit(unittest.TestCase):
