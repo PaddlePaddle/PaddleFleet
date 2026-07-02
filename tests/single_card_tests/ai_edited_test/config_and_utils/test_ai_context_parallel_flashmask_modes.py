@@ -663,7 +663,9 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
             patch.object(
                 cp_utils.paddle.base.core, "nvprof_nvtx_pop", lambda: None
             ),
-            patch.object(cp_utils, "_flash_attn_fwd", fake_flash_fwd),
+            patch.object(
+                cp_utils, "_flash_attn_fwd", fake_flash_fwd, create=True
+            ),
         ):
             result, result_lse, recv_key, recv_value, processed = (
                 cp_utils.cp_flashmask_swa_p2p_forward(
@@ -730,7 +732,9 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
                 "get_flags",
                 lambda _: {"FLAGS_cudnn_deterministic": False},
             ),
-            patch.object(cp_utils, "_flash_attn_bwd", fake_flash_bwd),
+            patch.object(
+                cp_utils, "_flash_attn_bwd", fake_flash_bwd, create=True
+            ),
         ):
             qg, kg, vg, grad_sink = cp_utils.cp_flashmask_swa_p2p_backward(
                 self.query,
