@@ -300,17 +300,14 @@ class GroupedMLPExpert(FleetLayer):
         self,
         structured_name_prefix: str = "",
     ):
-        # Two EP weight layouts:
-        #   standard — rank owns disjoint experts at full intermediate width;
-        #              shard along expert dim (axis=0).
-        #   allgather — rank owns all experts with intermediate dim sharded
-        #              across EP; shard along intermediate dim.
-        # weight1's last dim is [gate; up] concat — reshape to [E, H, 2, I_local]
-        # before sharding axis=3 so AllGather reassembles [gate_full; up_full]
-        # (not interleaved per rank).
+        # standard:  shard on expert dim (axis=0), each rank owns disjoint experts.
+        # allgather: shard on intermediate dim, each rank owns all experts.
+        # Cross-topology reshard is handled by the DCP resharder.
+        # See _get_intermediate_sharded_state_dict for allgather details.
         is_intermediate_sharded = (
-            self.intermediate_size_per_partition
-            != self.config.moe_intermediate_size
+            getattr(self.config, "moe_token_dispatcher_type", None)
+            == "allgather"
+            and self.expert_parallel
         )
 
         state_dict = self.state_dict(structured_name_prefix="")
@@ -356,14 +353,18 @@ class GroupedMLPExpert(FleetLayer):
     def _get_intermediate_sharded_state_dict(
         self, state_dict, structured_name_prefix: str
     ):
-        """Build the sharded state dict for the intermediate-sharded (allgather)
-        EP layout.
+        """Build sharded state dict for the allgather EP layout.
 
-        Every rank holds all experts but only its ``I/EP`` shard of each
-        expert's intermediate dim.  ``weight1`` (``[E, H, 2, I_full]``) is
-        reshaped to ``[E, H, 2, I_local]`` and sharded on ``axis=3`` so AllGather
-        reassembles ``[gate_full; up_full]`` rather than interleaving per rank;
-        ``weight2`` (``[E, I_full, H]``) is sharded on ``axis=1``.
+        weight1 [E, H, 2*I_local] is reshaped to [E, H, 2, I_local] and
+        sharded on axis=3 → global [E, H, 2, I_full].
+        Separating gate (axis=2, idx=0) and up (axis=2, idx=1) before
+        sharding ensures they stay contiguous across ranks.
+
+        weight2 [E, I_local, H] is sharded on axis=1 → global [E, I_full, H].
+
+        In allgather mode E = num_experts (all experts per rank); in deepep
+        mode E = num_experts // EP (disjoint experts per rank).  The DCP
+        resharder handles this difference during cross-topology loading.
         """
         if self.ep_group is None:
             raise ValueError(
@@ -390,21 +391,41 @@ class GroupedMLPExpert(FleetLayer):
                 f"{ep_size} != moe_intermediate_size="
                 f"{self.config.moe_intermediate_size}"
             )
-        E = state_dict["weight1"].shape[0]
-        H = state_dict["weight1"].shape[1]
+        w1_raw = state_dict["weight1"]
+        w2_raw = state_dict["weight2"]
+        # weight1 must be 3-D [E, H, 2*I_local]
+        if len(w1_raw.shape) != 3:
+            raise ValueError(
+                f"weight1 must be 3-D [E, H, 2*I_local], got shape "
+                f"{w1_raw.shape}"
+            )
+        E = w1_raw.shape[0]
+        H = w1_raw.shape[1]
         I_local = self.intermediate_size_per_partition
         expected_last = 2 * I_local
-        if state_dict["weight1"].shape[-1] != expected_last:
+        if w1_raw.shape[-1] != expected_last:
             raise ValueError(
-                f"weight1 last dim {state_dict['weight1'].shape[-1]} "
+                f"weight1 last dim {w1_raw.shape[-1]} "
                 f"!= 2 * intermediate_size_per_partition "
-                f"({expected_last}); cannot reshape to [E, H, 2, "
-                f"I_local]"
+                f"({expected_last})"
             )
-        w1 = state_dict["weight1"].reshape([E, H, 2, I_local])
+        # weight2 shape must be [E, I_local, H]
+        expected_w2_shape = [E, I_local, H]
+        if list(w2_raw.shape) != expected_w2_shape:
+            raise ValueError(
+                f"weight2 shape {list(w2_raw.shape)} != expected "
+                f"{expected_w2_shape} [E, I_local, H]"
+            )
+        # Reshape [E, H, 2*I_local] -> [E, H, 2, I_local], shard axis=3.
+        # Gate (idx 0) and up (idx 1) are separated on axis=2, so each
+        # stays contiguous when axis=3 is sharded across ranks.
+        w1 = w1_raw.reshape([E, H, 2, I_local])
         w1.name = self.weight1.name
-        w2 = state_dict["weight2"]  # [E, I_local, H]
+        # weight2 [E, I_local, H], shard axis=1
+        w2 = w2_raw
         w2.name = self.weight2.name
+        w1_axis = 3
+        w2_axis = 1
 
         sharded_dict = {}
         full_key1 = f"{structured_name_prefix}weight1"
@@ -412,14 +433,14 @@ class GroupedMLPExpert(FleetLayer):
         sharded_dict[full_key1] = shard_weight(
             key=full_key1,
             weight=w1,
-            axis=3,  # I_local — intermediate dim per rank
+            axis=w1_axis,
             group=self.ep_group,
         )
         sharded_dict[full_key1].grouped_gemm_param = True
         sharded_dict[full_key2] = shard_weight(
             key=full_key2,
             weight=w2,
-            axis=1,  # I_local — intermediate dim per rank
+            axis=w2_axis,
             group=self.ep_group,
         )
         sharded_dict[full_key2].grouped_gemm_param = True
