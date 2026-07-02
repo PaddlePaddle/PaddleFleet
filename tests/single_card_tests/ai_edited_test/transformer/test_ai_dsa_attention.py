@@ -267,11 +267,11 @@ class TestFusedDSAIndexerLoss(unittest.TestCase):
         # FusedDSAIndexerLoss is a PyLayer, use .apply() to call
         # Required args: q, weights, k, query, key
         sq, b, h, d = 2, 1, 2, 4
-        q = paddle.randn([sq, b, h, d], dtype="float32")
-        weights = paddle.randn([sq, b, h], dtype="float32")
-        k = paddle.randn([sq, b, d], dtype="float32")
-        query = paddle.randn([sq, b, h, d], dtype="float32")
-        key = paddle.randn([sq, b, h, d], dtype="float32")
+        q = paddle.randn([b, sq, h, d], dtype="float32")
+        weights = paddle.randn([b, sq, h], dtype="float32")
+        k = paddle.randn([b, sq, d], dtype="float32")
+        query = paddle.randn([b, sq, h, d], dtype="float32")
+        key = paddle.randn([b, sq, h, d], dtype="float32")
         loss = loss_fn.apply(q, weights, k, query, key)
         self.assertEqual(loss.shape, [])
 

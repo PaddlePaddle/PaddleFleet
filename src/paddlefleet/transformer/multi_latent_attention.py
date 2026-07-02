@@ -275,6 +275,9 @@ class MultiLatentAttention(Attention):
                 rotary_percent=1.0,
                 rotary_base=self.rope_theta,
                 cp_group=self.pg_collection.cp,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
@@ -288,6 +291,9 @@ class MultiLatentAttention(Attention):
                 mscale=self.config.mscale,
                 mscale_all_dim=self.config.mscale_all_dim,
                 # cp_group=self.pg_collection.cp,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
             )
         else:
             raise ValueError(
@@ -488,11 +494,7 @@ class MultiLatentAttention(Attention):
         layer_idx = kwargs.get("layer_idx")
         use_cache = kwargs.get("use_cache", False)
 
-        if (
-            hasattr(self.core_attention.config, "forward_meta")
-            and self.core_attention.config.forward_meta.max_len_tensor_cpu[2]
-            > 0
-        ):  # decode mode
+        if hasattr(self.core_attention.config, "forward_meta"):  # decode mode
             # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
             # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
             # wv_b: [heads, kv_lora_rank, v_head_dim]

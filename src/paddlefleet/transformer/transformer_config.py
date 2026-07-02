@@ -73,6 +73,9 @@ class TransformerConfig(ModelParallelConfig):
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
+    mtp_shared_last_layer: bool = False
+    """When True, MTP layers share the last backbone TransformerLayer parameters."""
+
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
 
@@ -348,6 +351,7 @@ class TransformerConfig(ModelParallelConfig):
     apply_query_key_layer_scaling is True."""
 
     high_precision_rope: bool = False
+    swa_high_precision_norm: bool = False
     ####################
     # fusion
     ####################
@@ -450,6 +454,11 @@ class TransformerConfig(ModelParallelConfig):
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
     Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
+
+    moe_allgather_gate_overlap: bool = False
+    """Whether to issue the AllGather before the gate so it overlaps with gate
+    compute. Only honoured when ``moe_token_dispatcher_type='allgather'`` and
+    ``expert_model_parallel_size > 1``; ignored otherwise."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -850,27 +859,14 @@ class TransformerConfig(ModelParallelConfig):
     Useful for debugging or ablation studies.
     """
 
-    csa_tilelang_backend: str | None = None
-    """Optional CSA TileLang backend.
-
-    None keeps the default Paddle implementation. 'attention_paddle_compat'
-    enables the TileLang indexer and sparse attention paths by default while
-    preserving Paddle-compatible tensor layouts and algorithm semantics.
-    """
-
-    csa_tilelang_enable_indexer: bool | None = None
-    """Optional override for the CSA TileLang indexer path.
-
-    None follows csa_tilelang_backend. True requires
-    csa_tilelang_backend='attention_paddle_compat'. False disables only the
-    CSA indexer TileLang path.
-    """
-
     csa_indexer_backend: str = "tilelang"
-    """CSA indexer backward backend.
+    """CSA indexer backend. Single switch selecting one of three
+    implementations of the compressed top-k indexer.
 
-    One of {"tilelang", "cudnn"}. Default "tilelang" preserves the legacy
-    path.
+    One of {"unfused", "tilelang", "cudnn"}:
+      * "unfused": Paddle/FusedDSAIndexerLoss reference path.
+      * "tilelang" (default): TileLang top-k and selected-set loss path.
+      * "cudnn": cuDNN indexer top-k/forward path.
     """
 
     csa_sparse_attn_backend: str = "tilelang"
@@ -904,6 +900,10 @@ class TransformerConfig(ModelParallelConfig):
 
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
+
+    use_accuracy_compatible: bool = False
+    """Whether to enable accuracy-compatible kernels for cross-framework numerical
+    alignment. Defaults to False."""
 
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
@@ -939,8 +939,6 @@ class TransformerConfig(ModelParallelConfig):
         "csa_compress_ratios": "csa_compress_ratios",
         "csa_compress_rotary_base": "csa_compress_rotary_base",
         "csa_dense_mode": "csa_dense_mode",
-        "csa_tilelang_backend": "csa_tilelang_backend",
-        "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
         "csa_indexer_backend": "csa_indexer_backend",
         "csa_sparse_attn_backend": "csa_sparse_attn_backend",
         "o_groups": "o_groups",
@@ -999,6 +997,15 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.mtp_shared_last_layer:
+            # When MTP reuses the last backbone TransformerLayer's parameters,
+            # the MTP transformer block must have an identical structure to the
+            # backbone-last layer (same MoE / dense shape). Force-disable
+            # use_dense_mtp so the MTP layer matches whatever the backbone is.
+            assert not self.use_dense_mtp, (
+                "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
+            )
+
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
@@ -1181,13 +1188,18 @@ class TransformerConfig(ModelParallelConfig):
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
+            mtp_num_layers = (
+                self.mtp_num_layers
+                if self.mtp_num_layers > 0
+                else self.num_nextn_predict_layers
+            )
             if (
                 len(self.csa_compress_ratios)
-                != self.num_hidden_layers + self.num_nextn_predict_layers
+                != self.num_hidden_layers + mtp_num_layers
             ):
                 raise ValueError(
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
-                    f"must equal num_hidden_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
+                    f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
             valid_ratios = {0, 4, 128}
             for i, r in enumerate(self.csa_compress_ratios):
@@ -1197,19 +1209,6 @@ class TransformerConfig(ModelParallelConfig):
                         f"Must be one of {valid_ratios}."
                     )
 
-            valid_tilelang_backends = {None, "attention_paddle_compat"}
-            if self.csa_tilelang_backend not in valid_tilelang_backends:
-                raise ValueError(
-                    f"csa_tilelang_backend={self.csa_tilelang_backend!r} is invalid. "
-                    f"Must be one of {valid_tilelang_backends}."
-                )
-            if (
-                self.csa_tilelang_backend is None
-                and self.csa_tilelang_enable_indexer
-            ):
-                raise ValueError(
-                    "csa_tilelang_enable_indexer=True requires csa_tilelang_backend='attention_paddle_compat'."
-                )
             if (
                 getattr(self, "csa_tilelang_enable_sparse_attn", None)
                 is not None
@@ -1220,10 +1219,33 @@ class TransformerConfig(ModelParallelConfig):
                     "instead (unfused=non-fused Paddle, tilelang=TileLang "
                     "fwd/bwd, cudnn=FlashMLA fwd + cuDNN bwd)."
                 )
-            if self.csa_indexer_backend not in {"tilelang", "cudnn"}:
+            if getattr(self, "csa_tilelang_enable_indexer", None) is not None:
+                raise ValueError(
+                    "csa_tilelang_enable_indexer has been removed. Use "
+                    "csa_indexer_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead (unfused=non-fused Paddle/FusedDSAIndexerLoss, "
+                    "tilelang=TileLang indexer, cudnn=cuDNN indexer)."
+                )
+            if getattr(self, "csa_tilelang_backend", None) is not None:
+                raise ValueError(
+                    "csa_tilelang_backend has been removed. Use "
+                    "csa_indexer_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "and csa_sparse_attn_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead."
+                )
+            valid_indexer_backends = {"unfused", "tilelang", "cudnn"}
+            if self.csa_indexer_backend not in valid_indexer_backends:
                 raise ValueError(
                     f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
-                    "Must be one of {'tilelang', 'cudnn'}."
+                    "Must be one of {'unfused', 'tilelang', 'cudnn'}."
+                )
+            if (
+                self.csa_indexer_backend == "cudnn"
+                and self.context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "csa_indexer_backend='cudnn' is not supported in the "
+                    "context-parallel CSA indexer path."
                 )
             if self.csa_sparse_attn_backend not in {
                 "unfused",
@@ -1234,6 +1256,18 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+
+        # swa_high_precision_norm is only supported for DSv4 models.
+        if (
+            self.swa_high_precision_norm
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
+            raise ValueError(
+                "swa_high_precision_norm=True is only supported when "
+                "experimental_attention_variant='dsv4_hybrid'. "
+                "High-precision norm mode is only adapted for DSv4 to align "
+                "training and inference numerical behavior."
+            )
 
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:

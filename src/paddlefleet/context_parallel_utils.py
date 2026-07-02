@@ -153,16 +153,34 @@ def scatter_balance(input_tensor, group=None, axis=0):
 
 def all_gather_balance(input_tensor, group=None, axis=0):
     """
-    All-gather operation with balanced reconstruction.
-    This function performs all-gather to reconstruct the original tensor
-    from balanced scattered chunks.
+    Balanced all-gather operation using Triton reorder kernel.
+
+    Gathers tensors from all ranks via all_gather, then reorders the gathered data
+    using a Triton kernel (balanced_gather_reorder_kernel) to reconstruct the original
+    sequence order from the DualChunkSwap balanced layout. Each rank's local tensor
+    contains two chunks (one from the start, one from the end of the sequence), and
+    this function reassembles them into the full contiguous sequence.
+
+    This is the inverse of reduce_scatter_any_axis_balance and scatter_balance.
+
     Args:
-        input_tensor (paddle.Tensor): Input tensor chunk
-        group (paddle.distributed.Group, optional): Communication group
-        axis (int, optional): Axis along which to gather. Defaults to 0
+        input_tensor (paddle.Tensor): Local tensor chunk to gather. Each rank's
+            chunk size along `axis` must be even (split into two halves by the
+            balanced strategy).
+        group (paddle.distributed.Group, optional): Communication group. If None,
+            uses the model parallel group from fleet.
+        axis (int, optional): Axis along which to gather and reorder. Defaults to 0.
+
     Returns:
-        paddle.Tensor: Reconstructed full tensor
+        paddle.Tensor: Full gathered tensor with shape[axis] = input_shape[axis] * parallelism,
+            reordered to restore the original sequence order.
     """
+    import triton
+
+    from paddlefleet.triton_ops.balanced_reorder import (
+        balanced_gather_reorder_kernel,
+    )
+
     if group is None:
         hcg = fleet.get_hybrid_communicate_group()
         group = hcg.get_model_parallel_group()
@@ -171,60 +189,60 @@ def all_gather_balance(input_tensor, group=None, axis=0):
     if parallelism == 1:
         return input_tensor.clone()
 
-    # Split input into two halves (start and end chunks)
-    chunk_start, chunk_end = paddle.split(input_tensor, 2, axis=axis)
+    # Single all_gather (gathers along axis=0)
+    shape = list(input_tensor.shape)
+    gathered_shape = list(shape)
+    gathered_shape[0] = shape[0] * parallelism
+    gathered = paddle.empty(gathered_shape, dtype=input_tensor.dtype)
+    dist.stream.all_gather(
+        gathered, input_tensor.contiguous(), group=group, use_calc_stream=True
+    )
 
-    if axis == 0:
-        # Handle axis=0 case with optimized memory layout
-        output_shape_start = list(chunk_start.shape)
-        output_shape_start[axis] = output_shape_start[axis] * parallelism
+    # Compute strides for reorder kernel
+    axis_size = shape[axis]
+    chunk_size = axis_size // 2
+    N = parallelism
 
-        gathered_start = paddle.empty(
-            shape=output_shape_start, dtype=input_tensor.dtype
-        )
-        dist.stream.all_gather(
-            gathered_start, chunk_start, group=group, use_calc_stream=True
-        )
+    # outer_size: product of all dims left of axis in the *original* (per-rank) shape
+    outer_size = 1
+    for i in range(axis):
+        outer_size *= shape[i]
 
-        # Gather end chunks
-        gathered_end_list = [
-            paddle.empty(chunk_end.shape, dtype=input_tensor.dtype)
-            for _ in range(parallelism)
-        ]
-        dist.stream.all_gather(
-            gathered_end_list, chunk_end, group=group, use_calc_stream=True
-        )
+    # inner_size: product of all dims right of axis
+    inner_size = 1
+    for i in range(axis + 1, len(shape)):
+        inner_size *= shape[i]
 
-        # Reverse the end chunks to reconstruct original order
-        gathered_end_list.reverse()
+    # src is gathered along axis=0: shape = [N*S0, S1, ..., S_axis, ..., S_last]
+    # src_rank_stride = elements per rank = product of original shape
+    src_rank_stride = 1
+    for s in shape:
+        src_rank_stride *= s
 
-        result = paddle.concat([gathered_start, *gathered_end_list], axis=axis)
-        return result
-    else:
-        # Handle other axes
-        gathered_start_list = [
-            paddle.empty(chunk_start.shape, dtype=input_tensor.dtype)
-            for _ in range(parallelism)
-        ]
-        dist.stream.all_gather(
-            gathered_start_list, chunk_start, group=group, use_calc_stream=True
-        )
+    # src_outer_stride = elements to skip per outer index = S_axis * inner_size
+    src_outer_stride = axis_size * inner_size
 
-        gathered_end_list = [
-            paddle.empty(chunk_end.shape, dtype=input_tensor.dtype)
-            for _ in range(parallelism)
-        ]
-        dist.stream.all_gather(
-            gathered_end_list, chunk_end, group=group, use_calc_stream=True
-        )
+    out_shape = list(shape)
+    out_shape[axis] = 2 * N * chunk_size
+    output = paddle.empty(out_shape, dtype=input_tensor.dtype)
 
-        # Reverse the end chunks
-        gathered_end_list = gathered_end_list[::-1]
+    BLOCK_SIZE = 1024
+    num_blocks_per_chunk = triton.cdiv(chunk_size * inner_size, BLOCK_SIZE)
+    grid = (num_blocks_per_chunk * 2 * N, outer_size, 1)
 
-        result = paddle.concat(
-            gathered_start_list + gathered_end_list, axis=axis
-        )
-        return result
+    balanced_gather_reorder_kernel[grid](
+        gathered,
+        output,
+        N,
+        chunk_size,
+        inner_size,
+        src_rank_stride,
+        src_outer_stride,
+        num_blocks_per_chunk,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return output
 
 
 def reduce_scatter_any_axis(input_tensor, axis, group=None):
@@ -286,16 +304,32 @@ def reduce_scatter_any_axis(input_tensor, axis, group=None):
 
 def reduce_scatter_any_axis_balance(input_tensor, axis, group=None):
     """
-    Balanced reduce-scatter operation along any axis.
-    Similar to reduce_scatter_any_axis but uses balanced splitting strategy
-    by processing chunks from both ends of the tensor.
+    Balanced reduce-scatter operation along any axis using Triton reorder kernel.
+
+    Performs reduce-scatter with the DualChunkSwap balanced strategy: first reorders
+    the input tensor via a Triton kernel (balanced_scatter_reorder_kernel) to prepare
+    balanced chunks for each rank, then uses alltoall_single to exchange data, and
+    finally sums the received chunks to produce the reduced result.
+
+    This is the inverse of all_gather_balance and is used in backward passes of
+    context parallel attention (e.g., to reduce-scatter key/value gradients).
+
     Args:
-        input_tensor (paddle.Tensor): Input tensor to reduce and scatter
-        axis (int): Axis along which to perform reduce-scatter
-        group (paddle.distributed.Group, optional): Communication group
+        input_tensor (paddle.Tensor): Input tensor to reduce and scatter. The size
+            along `axis` must be divisible by (parallelism * 2).
+        axis (int): Axis along which to perform the balanced reduce-scatter.
+        group (paddle.distributed.Group, optional): Communication group. If None,
+            uses the context parallel group from fleet.
+
     Returns:
-        paddle.Tensor: Reduced and scattered tensor chunk with balanced distribution
+        paddle.Tensor: Reduced tensor with shape[axis] = input_shape[axis] / parallelism.
     """
+    import triton
+
+    from paddlefleet.triton_ops.balanced_reorder import (
+        balanced_scatter_reorder_kernel,
+    )
+
     if group is None:
         hcg = fleet.get_hybrid_communicate_group()
         group = hcg.get_context_parallel_group()
@@ -304,45 +338,62 @@ def reduce_scatter_any_axis_balance(input_tensor, axis, group=None):
     if parallelism == 1:
         return input_tensor.clone()
 
-    assert input_tensor.shape[axis] % (parallelism * 2) == 0, (
-        f"Input sequence length {input_tensor.shape[axis]} can't be ",
-        f"divided exactly by context parallelism * 2 {parallelism * 2}",
+    N = parallelism
+    shape = list(input_tensor.shape)
+
+    assert shape[axis] % (N * 2) == 0, (
+        f"Input sequence length {shape[axis]} can't be "
+        f"divided exactly by context parallelism * 2 {N * 2}"
     )
 
-    # Split input into two halves
-    input_start, input_end = paddle.split(input_tensor, 2, axis=axis)
+    chunk_size = shape[axis] // (2 * N)
 
-    # Split each half across ranks
-    chunks_start = paddle.split(input_start, parallelism, axis=axis)
-    chunks_end = paddle.split(input_end, parallelism, axis=axis)
+    outer_size = 1
+    for i in range(axis):
+        outer_size *= shape[i]
 
-    # Reverse end chunks for balanced distribution
-    chunks_end = chunks_end[::-1]
+    inner_size = 1
+    for i in range(axis + 1, len(shape)):
+        inner_size *= shape[i]
 
-    # Combine corresponding start and end chunks
-    combined_chunks = [
-        paddle.concat([start_chunk, end_chunk], axis=axis)
-        for start_chunk, end_chunk in zip(chunks_start, chunks_end)
-    ]
+    src_outer_stride = shape[axis] * inner_size
+    dst_outer_stride = 2 * chunk_size * inner_size
+    dst_rank_stride = outer_size * dst_outer_stride
 
-    # Perform alltoall communication
-    output_buffers = [
-        paddle.empty(combined_chunks[0].shape, dtype=input_tensor.dtype)
-        for _ in range(parallelism)
-    ]
+    per_rank_shape = list(shape)
+    per_rank_shape[axis] = 2 * chunk_size
+    # send_buf: [N, *per_rank_shape], contiguous, kernel writes into it
+    send_buf = paddle.empty([N, *per_rank_shape], dtype=input_tensor.dtype)
 
-    dist.stream.alltoall(
-        output_buffers, combined_chunks, group=group, use_calc_stream=True
+    BLOCK_SIZE = 1024
+    num_blocks_per_chunk = triton.cdiv(chunk_size * inner_size, BLOCK_SIZE)
+    grid = (num_blocks_per_chunk * 2 * N, outer_size, 1)
+
+    balanced_scatter_reorder_kernel[grid](
+        input_tensor,
+        send_buf,
+        N,
+        chunk_size,
+        inner_size,
+        src_outer_stride,
+        dst_rank_stride,
+        dst_outer_stride,
+        num_blocks_per_chunk,
+        BLOCK_SIZE=BLOCK_SIZE,
     )
 
-    # Sum the received chunks
-    result = paddle.stack(output_buffers, axis=0).sum(axis=0)
+    # alltoall_single: send_buf[r] -> rank r's recv_buf[my_rank]
+    recv_buf = paddle.empty_like(send_buf)
+    dist.stream.alltoall_single(
+        recv_buf.reshape([-1]),
+        send_buf.reshape([-1]),
+        group=group,
+        use_calc_stream=True,
+    )
+
+    # sum across N received chunks: same order as original stack+sum
+    result = recv_buf.reshape([N, *per_rank_shape]).sum(axis=0)
     return result
-
-
-# ===========================================================================
-# Contiguous CP primitives (rank r owns [r*chunk, (r+1)*chunk])
-# ===========================================================================
 
 
 def scatter_contiguous(input_tensor, group=None, axis=0):
@@ -602,7 +653,15 @@ def preprocess_index_dual_chunks(
 
 
 def cp_flashmask_allgatherkv_balance_forward(
-    query, key, value, startend_row_indices, group, causal, is_training
+    query,
+    key,
+    value,
+    startend_row_indices,
+    learnable_sink,
+    group,
+    causal,
+    is_training,
+    softmax_scale,
 ):
     """
     Forward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -671,9 +730,15 @@ def cp_flashmask_allgatherkv_balance_forward(
             causal=causal,
             return_lse=True,
             startend_row_indices=startend_row_indices,
+            learnable_sink=learnable_sink,
             pack_gqa=False,
+            softmax_scale=softmax_scale,
         )
     else:
+        if learnable_sink is not None:
+            raise NotImplementedError(
+                "learnable_sink only supported on fa_version==4 cute backend"
+            )
         output, log_sum_exp = flashmask_attention(
             query,
             key_gathered,
@@ -682,6 +747,7 @@ def cp_flashmask_allgatherkv_balance_forward(
             causal=causal,
             return_softmax_lse=True,
             training=is_training,
+            softmax_scale=softmax_scale,
         )
 
     paddle.base.core.nvprof_nvtx_pop()
@@ -696,9 +762,11 @@ def cp_flashmask_allgatherkv_balance_backward(
     output,
     log_sum_exp,
     output_grad,
+    learnable_sink,
     group,
     causal,
     fa_version: int,
+    softmax_scale,
 ):
     """
     Backward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -718,7 +786,7 @@ def cp_flashmask_allgatherkv_balance_backward(
             forward kernel. Must be propagated from the forward call to keep
             fwd/bwd consistent.
     Returns:
-        tuple: (query_grad, key_grad, value_grad)
+        tuple: (query_grad, key_grad, value_grad, grad_sink)
     """
     paddle.base.core.nvprof_nvtx_push(
         "cp_flashmask_allgatherkv_balance_backward"
@@ -728,7 +796,16 @@ def cp_flashmask_allgatherkv_balance_backward(
     key_gathered = all_gather_balance(key, axis=1, group=group)
     value_gathered = all_gather_balance(value, axis=1, group=group)
 
+    grad_sink = None
     if fa_version == 2:
+        if learnable_sink is not None:
+            raise NotImplementedError(
+                "learnable_sink only supported on fa_version==4 cute backend"
+            )
+        if softmax_scale is not None:
+            raise NotImplementedError(
+                "fa_version==2 does not support setting softmax_scale"
+            )
         # Create seed offset tensor (required for gradient computation)
         seed_offset = paddle.zeros(
             shape=[query.shape[1], query.shape[2]], dtype=paddle.int64
@@ -750,6 +827,10 @@ def cp_flashmask_allgatherkv_balance_backward(
             )
         )
     elif fa_version == 3:
+        if learnable_sink is not None:
+            raise NotImplementedError(
+                "learnable_sink only supported on fa_version==4 cute backend"
+            )
         sig_params = inspect.signature(flashmask_attention).parameters
         if "group" in sig_params:
             query_grad, key_grad_gathered, value_grad_gathered = (
@@ -762,7 +843,9 @@ def cp_flashmask_allgatherkv_balance_backward(
                     startend_row_indices,
                     None,  # block_mask
                     output_grad,
-                    query.shape[-1] ** (-0.5),
+                    query.shape[-1] ** (-0.5)
+                    if softmax_scale is None
+                    else softmax_scale,
                     False,
                     0,  # rank
                     1,  # nranks
@@ -779,7 +862,9 @@ def cp_flashmask_allgatherkv_balance_backward(
                     startend_row_indices,
                     None,  # block_mask
                     output_grad,
-                    query.shape[-1] ** (-0.5),
+                    query.shape[-1] ** (-0.5)
+                    if softmax_scale is None
+                    else softmax_scale,
                     False,
                 )
             )
@@ -793,7 +878,9 @@ def cp_flashmask_allgatherkv_balance_backward(
                     log_sum_exp,
                     startend_row_indices,
                     output_grad,
-                    query.shape[-1] ** (-0.5),
+                    query.shape[-1] ** (-0.5)
+                    if softmax_scale is None
+                    else softmax_scale,
                     False,
                 )
             )
@@ -805,18 +892,22 @@ def cp_flashmask_allgatherkv_balance_backward(
             )
         else:
             flashmask_info = None
-        query_grad, key_grad_gathered, value_grad_gathered = _flash_attn_bwd(
-            query,
-            key_gathered,
-            value_gathered,
-            output,
-            output_grad,
-            log_sum_exp,
-            flashmask_info,
-            causal=causal,
-            deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-                "FLAGS_cudnn_deterministic"
-            ],
+        query_grad, key_grad_gathered, value_grad_gathered, grad_sink = (
+            _flash_attn_bwd(
+                query,
+                key_gathered,
+                value_gathered,
+                output,
+                output_grad,
+                log_sum_exp,
+                flashmask_info,
+                learnable_sink=learnable_sink,
+                causal=causal,
+                softmax_scale=softmax_scale,
+                deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+                    "FLAGS_cudnn_deterministic"
+                ],
+            )
         )
     else:
         raise ValueError(
@@ -832,7 +923,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     )
 
     paddle.base.core.nvprof_nvtx_pop()
-    return query_grad, key_grad, value_grad
+    return query_grad, key_grad, value_grad, grad_sink
 
 
 def scatter_with_padding(input_tensor, num_pad, axis, group):
@@ -970,6 +1061,8 @@ class FlashMaskContextParallel(PyLayer):
         dropout=0.0,
         causal=False,
         training=True,
+        learnable_sink=None,
+        softmax_scale=None,
         mode="allgather_kv",
     ):
         """
@@ -1019,7 +1112,15 @@ class FlashMaskContextParallel(PyLayer):
         # Perform forward pass
         output, log_sum_exp, startend_row_indices, fa_version = (
             cp_flashmask_allgatherkv_balance_forward(
-                query, key, value, startend_row_indices, group, causal, training
+                query,
+                key,
+                value,
+                startend_row_indices,
+                learnable_sink,
+                group,
+                causal,
+                training,
+                softmax_scale,
             )
         )
 
@@ -1030,6 +1131,14 @@ class FlashMaskContextParallel(PyLayer):
         ctx.group = group
         ctx.causal = causal
         ctx.fa_version = fa_version
+        ctx.learnable_sink = learnable_sink
+        ctx.softmax_scale = softmax_scale
+        # Only a trainable sink (a Parameter) needs a gradient returned from
+        # backward. A fixed off-by-one sink is created as a stop_gradient=True
+        # Tensor, and Paddle's PyLayer requires None in that return slot.
+        ctx.sink_requires_grad = (
+            learnable_sink is not None and not learnable_sink.stop_gradient
+        )
 
         return output
 
@@ -1050,9 +1159,11 @@ class FlashMaskContextParallel(PyLayer):
         group = ctx.group
         causal = ctx.causal
         fa_version = ctx.fa_version
+        learnable_sink = ctx.learnable_sink
+        softmax_scale = ctx.softmax_scale
 
         # Compute gradients
-        query_grad, key_grad, value_grad = (
+        query_grad, key_grad, value_grad, grad_sink = (
             cp_flashmask_allgatherkv_balance_backward(
                 query,
                 key,
@@ -1061,12 +1172,22 @@ class FlashMaskContextParallel(PyLayer):
                 output,
                 log_sum_exp,
                 output_grad,
+                learnable_sink,
                 group,
                 causal,
                 fa_version,
+                softmax_scale,
             )
         )
 
+        # PyLayer maps backward returns positionally onto the forward TENSOR
+        # inputs: query(0)/key(1)/value(2)/startend_row_indices(3)/
+        # learnable_sink(4). startend_row_indices is stop_gradient=True, so its
+        # slot (position 3) must be None -- grad_sink belongs in position 4.
+        # A fixed off-by-one sink is also stop_gradient=True, so for it the
+        # 3-tuple (sink slot omitted) is correct.
+        if ctx.sink_requires_grad:
+            return query_grad, key_grad, value_grad, None, grad_sink
         return query_grad, key_grad, value_grad
 
 
@@ -1079,6 +1200,8 @@ def flashmask_attention_cp(
     dropout=0.0,
     causal=False,
     training=True,
+    learnable_sink=None,
+    softmax_scale=None,
     mode="allgather_kv",
 ):
     """
@@ -1114,6 +1237,7 @@ def flashmask_attention_cp(
         )
         ```
     """
+
     output = FlashMaskContextParallel.apply(
         query,
         key,
@@ -1123,6 +1247,8 @@ def flashmask_attention_cp(
         dropout,
         causal,
         training,
+        learnable_sink,
+        softmax_scale,
         mode,
     )
     return output

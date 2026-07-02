@@ -63,6 +63,9 @@ else:
 _buffer = None
 _hybrid_ep_buffer = None
 
+# HybridEP dispatch/combine kernels use 64-token chunks for public APIs.
+HYBRIDEP_TOKEN_ALIGNMENT = 64
+
 
 def barrier_ep(ep_group):
     """barrier_ep"""
@@ -168,7 +171,12 @@ def get_buffer(group: Group, hidden_bytes: int):
         or _buffer.num_nvl_bytes < num_nvl_bytes
         or _buffer.num_rdma_bytes < num_rdma_bytes
     ):
-        _buffer = deep_ep.Buffer(group, num_nvl_bytes, num_rdma_bytes)
+        _buffer = deep_ep.Buffer(
+            group,
+            num_nvl_bytes,
+            num_rdma_bytes,
+            num_qps_per_rank=max(24, deep_ep.Buffer.num_sms),
+        )
     return _buffer
 
 
@@ -904,6 +912,7 @@ class HybridEPDispatch(PyLayer):
         ctx.buffer = manager._active_buffer
         ctx.handle = manager.handle
         ctx.token_indices = token_indices
+        ctx.num_unpadded_tokens = x.shape[0]
         ctx.hidden_dtype = x.dtype
         ctx.use_fp8_dispatch = fp8_dispatch
         ctx.set_grad_in_dtype_consistent(False)
@@ -922,6 +931,10 @@ class HybridEPDispatch(PyLayer):
             handle=ctx.handle,
             pad_multiple=FP8_ALIGN if ctx.use_fp8_dispatch else None,
         )
+        if grad_x.shape[0] != ctx.num_unpadded_tokens:
+            grad_x = grad_x[: ctx.num_unpadded_tokens]
+            if grad_dense_probs is not None:
+                grad_dense_probs = grad_dense_probs[: ctx.num_unpadded_tokens]
         grad_probs = None
         if grad_dense_probs is not None:
             grad_probs = paddle.take_along_axis(
@@ -966,8 +979,15 @@ class HybridEPCombine(PyLayer):
     """Fused HybridEP combine bridge for Paddle autograd."""
 
     @staticmethod
-    def forward(ctx, x, manager):
+    def forward(ctx, x, manager, num_permuted_tokens=None):
         handle = manager.handle
+        if num_permuted_tokens is None:
+            num_permuted_tokens = x.shape[0]
+        assert x.shape[0] == num_permuted_tokens, (
+            "HybridEP combine expects active permuted rows, got "
+            f"{x.shape[0]} rows but num_permuted_tokens is "
+            f"{num_permuted_tokens}."
+        )
         use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
         combined_x, _ = manager._active_buffer.combine_with_unpermute(
             hidden=x,
@@ -978,7 +998,7 @@ class HybridEPCombine(PyLayer):
         ctx.buffer = manager._active_buffer
         ctx.handle = handle
         ctx.use_fp8_dispatch = use_fp8_dispatch
-        ctx.num_permuted_tokens = x.shape[0]
+        ctx.num_permuted_tokens = num_permuted_tokens
         return combined_x
 
     @staticmethod
@@ -1010,11 +1030,12 @@ def hybrid_ep_dispatch(
     )
 
 
-def hybrid_ep_combine(x, manager):
+def hybrid_ep_combine(x, manager, num_permuted_tokens=None):
     """Perform HybridEP combine_with_unpermute with explicit Paddle autograd."""
     return HybridEPCombine.apply(
         x,
         manager,
+        num_permuted_tokens,
     )
 
 

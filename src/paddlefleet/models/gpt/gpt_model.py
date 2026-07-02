@@ -266,10 +266,23 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(spec.mhc_expand), f"{name_prefix}.mhc_expand"
             )
 
-        for transformer_layer_spec in spec.transformer_layers:
+        for idx, transformer_layer_spec in enumerate(spec.transformer_layers):
+            is_last = idx == len(spec.transformer_layers) - 1
+            if (
+                is_last
+                and getattr(self.config, "mtp_shared_last_layer", False)
+                and spec.mtp
+            ):
+                desc = SharedLayerDesc(
+                    "mtp_reuse_transformer",
+                    transformer_layer_spec,
+                    shared_weight_attr="transformer_layer_weights",
+                )
+            else:
+                desc = LayerDesc(transformer_layer_spec)
             self.add_sequential_layer(
                 layers,
-                LayerDesc(transformer_layer_spec),
+                desc,
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
@@ -305,8 +318,17 @@ class GPTModel(PipelineLayer):
                     f"{name_prefix}.mtp_embedding",
                 )
             for mtp_spec in spec.mtp:
+                if getattr(self.config, "mtp_shared_last_layer", False):
+                    desc = SharedLayerDesc(
+                        "mtp_reuse_transformer",
+                        mtp_spec,
+                        shared_submodule_weight_only=True,
+                        shared_weight_attr="transformer_layer_weights",
+                    )
+                else:
+                    desc = LayerDesc(mtp_spec)
                 self.add_sequential_layer(
-                    layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
+                    layers, desc, f"{name_prefix}.layers.{i}"
                 )
                 i += 1
 

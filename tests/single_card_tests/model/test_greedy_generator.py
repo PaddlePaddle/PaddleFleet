@@ -147,6 +147,120 @@ class TestDynamicKVCache(unittest.TestCase):
         self.assertEqual(cache.get_seq_len(3), 3)
 
 
+class TestSWACacheInit(unittest.TestCase):
+    """Test SWA layer detection and DynamicKVCache initialization in GreedyGenerator."""
+
+    def _make_generator_with_cfg(
+        self,
+        num_hidden_layers=4,
+        sliding_window=None,
+        window_attn_skip_freq=None,
+        num_empty_layers_add_in_head=0,
+        num_empty_layers_add_in_tail=0,
+    ):
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import GreedyGenerator
+
+        model = MagicMock()
+        cfg = MagicMock()
+        cfg.num_hidden_layers = num_hidden_layers
+        cfg.sequence_parallel = False
+        cfg.apply_rope_fusion = False
+        cfg.recompute_granularity = None
+        cfg.sliding_window = sliding_window
+        cfg.window_attn_skip_freq = window_attn_skip_freq
+        cfg.num_empty_layers_add_in_head = num_empty_layers_add_in_head
+        cfg.num_empty_layers_add_in_tail = num_empty_layers_add_in_tail
+        cfg.head_wise_swa_ratio = 0.0  # Ensure this doesn't interfere
+        model.config = cfg
+        return GreedyGenerator(model)
+
+    def test_no_sliding_window(self):
+        """No sliding_window: all swa_layers should be False."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4, sliding_window=None
+        )
+        self.assertEqual(len(gen.cache.swa_layers), 4)
+        self.assertTrue(all(not x for x in gen.cache.swa_layers))
+        self.assertIsNone(gen.cache.window_size)
+
+    def test_sliding_window_no_skip_freq(self):
+        """sliding_window set, no skip_freq: all layers use SWA."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4,
+            sliding_window=(512, 512),
+            window_attn_skip_freq=None,
+        )
+        self.assertTrue(all(gen.cache.swa_layers))
+        self.assertEqual(gen.cache.window_size, 512)
+
+    def test_sliding_window_with_int_skip_freq(self):
+        """skip_freq=2: every 2nd layer (0,2,...) skips SWA."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4,
+            sliding_window=(256, 256),
+            window_attn_skip_freq=2,
+        )
+        # layer % 2 != 0 => SWA: layers 1,3 are True; 0,2 are False
+        self.assertEqual(gen.cache.swa_layers, [False, True, False, True])
+
+    def test_sliding_window_with_list_skip_freq(self):
+        """skip_freq as list: per-layer control."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4,
+            sliding_window=(128, 128),
+            window_attn_skip_freq=[0, 1, 1, 0],
+        )
+        self.assertEqual(gen.cache.swa_layers, [False, True, True, False])
+
+    def test_empty_layers_increase_total(self):
+        """Empty layers in head/tail increase total cache layers."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=2,
+            sliding_window=None,
+            num_empty_layers_add_in_head=1,
+            num_empty_layers_add_in_tail=1,
+        )
+        # total = 2 + 1 + 1 = 4
+        self.assertEqual(len(gen.cache.swa_layers), 4)
+        self.assertEqual(len(gen.cache.k), 4)
+
+    def _make_generator_with_head_wise_swa(self, head_wise_swa_ratio):
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import GreedyGenerator
+
+        model = MagicMock()
+        cfg = MagicMock()
+        cfg.num_hidden_layers = 4
+        cfg.sequence_parallel = False
+        cfg.apply_rope_fusion = False
+        cfg.recompute_granularity = None
+        cfg.sliding_window = (512, 512)
+        cfg.window_attn_skip_freq = None
+        cfg.num_empty_layers_add_in_head = 0
+        cfg.num_empty_layers_add_in_tail = 0
+        cfg.head_wise_swa_ratio = head_wise_swa_ratio
+        model.config = cfg
+        return GreedyGenerator(model)
+
+    def test_head_wise_swa_ratio_disables_window_size(self):
+        """head_wise_swa_ratio in (0, 1) should set window_size to None."""
+        with self.assertRaises(ValueError):
+            self._make_generator_with_head_wise_swa(0.5)
+
+    def test_head_wise_swa_ratio_zero_preserves_window_size(self):
+        """head_wise_swa_ratio=0 should preserve window_size."""
+        gen = self._make_generator_with_head_wise_swa(0.0)
+        self.assertEqual(gen.cache.window_size, 512)
+
+    def test_head_wise_swa_ratio_one_preserves_window_size(self):
+        """head_wise_swa_ratio=1.0 (boundary) should preserve window_size."""
+        gen = self._make_generator_with_head_wise_swa(1.0)
+        self.assertEqual(gen.cache.window_size, 512)
+
+
 class TestGreedyGeneratorEosStop(unittest.TestCase):
     """Test eos_token_id handling in GreedyGenerator.generate (mocked model)."""
 
@@ -224,6 +338,86 @@ class TestGreedyGeneratorEosStop(unittest.TestCase):
         out = gen.generate(input_ids, max_new_tokens=5, eos_token_id=None)
         generated = out[0, 2:].tolist()
         self.assertEqual(len(generated), 5)
+
+
+class TestGenerateUseCacheIsCausal(unittest.TestCase):
+    """Test that DotProductAttention flashmask branch sets is_causal correctly with KV cache."""
+
+    def _call_attention_forward(self, q_len):
+        """Call DotProductAttention.forward entering flashmask+KV cache path."""
+        from unittest.mock import MagicMock, patch
+
+        from paddlefleet.transformer.dot_product_attention import (
+            DotProductAttention,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+
+        config = MagicMock()
+        config.gpt_model_use_experimental_version = False
+        config.context_parallel_size = 1
+        config.head_dim = 64
+        config.num_attention_heads = 4
+        config.num_key_value_heads = 4
+        config.apply_query_key_layer_scaling = False
+        config.fp16 = False
+        config.bf16 = True
+        config.masked_softmax_fusion = False
+        config.attention_softmax_in_fp32 = True
+        config.attention_dropout = 0.0
+        config.sliding_window = None
+        config.window_attn_skip_freq = None
+        config.softmax_type = "vanilla"
+        config.perform_initialization = True
+        config.params_dtype = "bfloat16"
+        config.init_method = MagicMock()
+        config._attn_implementation = "flash"
+        config.flashmask_use_varlen = False
+        config.experimental_dataflow = False
+
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+        )
+
+        B, H, D = 1, 4, 64
+        query = paddle.randn([B, q_len, H, D]).cast("bfloat16")
+        key = paddle.randn([B, q_len, H, D]).cast("bfloat16")
+        value = paddle.randn([B, q_len, H, D]).cast("bfloat16")
+        startend = paddle.zeros([B, 1, q_len, 2], dtype="int32")
+
+        past_kv = MagicMock()
+        past_kv.update = MagicMock(return_value=(key, value))
+
+        with patch(
+            "paddlefleet.transformer.dot_product_attention.flashmask_attention"
+        ) as mock_fm:
+            mock_fm.return_value = paddle.randn([B, q_len, H, D]).cast(
+                "bfloat16"
+            )
+            attn.forward(
+                query=query,
+                key=key,
+                value=value,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend,
+                attn_mask_type=AttnMaskType.causal,
+                past_key_values=past_kv,
+                layer_idx=0,
+                use_cache=True,
+            )
+            past_kv.update.assert_called_once()
+            _, kwargs = mock_fm.call_args
+            return kwargs["causal"]
+
+    def test_decode_q_len_1_is_causal_false(self):
+        """Decode step (q_len==1) should set is_causal=False."""
+        self.assertFalse(self._call_attention_forward(q_len=1))
+
+    def test_prefill_q_len_gt_1_is_causal_true(self):
+        """Prefill step (q_len>1) should set is_causal=True."""
+        self.assertTrue(self._call_attention_forward(q_len=4))
 
 
 if __name__ == "__main__":

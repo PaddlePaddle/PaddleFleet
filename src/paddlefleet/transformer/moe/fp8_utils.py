@@ -451,6 +451,7 @@ class ExpertsGroupGemmContiguousNode:
         dw_p2p_overlap=False,
         moe_expert_fusion=False,
         clamp_value=None,
+        use_accuracy_compatible=False,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -518,6 +519,7 @@ class ExpertsGroupGemmContiguousNode:
         self.dw_p2p_overlap = dw_p2p_overlap
         self.moe_expert_fusion = moe_expert_fusion
         self.clamp_value = clamp_value
+        self.use_accuracy_compatible = use_accuracy_compatible
 
     def cached_tensors(self):
         """
@@ -940,9 +942,14 @@ class ExpertsGroupGemmContiguousNode:
                         start_idx:end_idx
                     ].contiguous()
                     expert_w2_i = expert_w2[i].T.contiguous()
-                    do2_s_list.append(
-                        F.linear(x=unzipped_grad_i, weight=expert_w2_i)
-                    )
+                    if self.use_accuracy_compatible:
+                        do2_s_list.append(
+                            paddle.matmul(unzipped_grad_i, expert_w2_i)
+                        )
+                    else:
+                        do2_s_list.append(
+                            F.linear(x=unzipped_grad_i, weight=expert_w2_i)
+                        )
                     start_idx = end_idx
                 do2_s = paddle.concat(do2_s_list, axis=0)
         else:
@@ -1137,7 +1144,10 @@ class ExpertsGroupGemmContiguousNode:
                     end_idx = start_idx + token_num
                     do1_i = do1[start_idx:end_idx].contiguous()
                     expert_w1_i = expert_w1[i].T.contiguous()
-                    dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
+                    if self.use_accuracy_compatible:
+                        dx_list.append(paddle.matmul(do1_i, expert_w1_i))
+                    else:
+                        dx_list.append(F.linear(x=do1_i, weight=expert_w1_i))
                     start_idx = end_idx
                 dx = paddle.concat(dx_list, axis=0)
         else:

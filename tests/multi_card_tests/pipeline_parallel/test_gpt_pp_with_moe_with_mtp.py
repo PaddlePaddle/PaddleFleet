@@ -14,6 +14,7 @@
 
 
 import functools
+import os
 import pprint
 import random
 import subprocess
@@ -31,6 +32,9 @@ from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
 MTP_DEGREE = 3
+# skip test for paddle pr 79368 merge
+REPO_FLAG = os.getenv("repo_flag")
+SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
 def get_gpu_models_via_nvidia_smi():
@@ -179,6 +183,7 @@ class TestPP(unittest.TestCase):
         self.seq_len = 128
         self.vocab_size = 1024
 
+    @unittest.skipIf(SKIP_TESTS, "repo_flag is not paddlefleet")
     def test_pp(self):
         config = GPTConfig(
             moe_expert_fusion=False,

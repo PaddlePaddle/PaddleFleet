@@ -22,7 +22,9 @@ import paddlefleet_ops
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
 from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
+from .moe_utils import get_auto_sb_history
 from .vmm_utils import (
+    allocator_free_block_info,
     auto_subbatch_allocator_backend,
     find_max_concurrent_subbatch_size,
     find_max_sequence_subbatch_size,
@@ -315,6 +317,7 @@ class MlpNode:
         use_ue8m0=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_accuracy_compatible=False,
     ):
         """
         Constructor
@@ -400,6 +403,7 @@ class MlpNode:
                     dw_p2p_overlap=dw_p2p_overlap,
                     moe_expert_fusion=moe_expert_fusion,
                     clamp_value=clamp_value,
+                    use_accuracy_compatible=use_accuracy_compatible,
                 )
                 for local_expert_id in range(self.num_experts_per_device)
             ]
@@ -416,6 +420,7 @@ class MlpNode:
                 dw_p2p_overlap=dw_p2p_overlap,
                 moe_expert_fusion=moe_expert_fusion,
                 clamp_value=clamp_value,
+                use_accuracy_compatible=use_accuracy_compatible,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -1140,16 +1145,26 @@ class MlpNode:
 
         num_unzipped_tokens = self.token_offsets[-1]
         hidden_size = zipped_out.shape[1]
-        zip_unzip_fusion = (
-            find_max_concurrent_subbatch_size(
-                [
-                    num_unzipped_tokens * zipped_out.shape[1] * 2,
-                    num_unzipped_tokens * zipped_out.shape[1],
-                ],
-                upper=1,
+
+        # 基于 warmup 历史峰值预测剩余 forward 是否需要降级
+        _free_blocks_now = allocator_free_block_info()
+        _allocator_total_free = sum(s for s, _ in _free_blocks_now)
+        _history = get_auto_sb_history()
+        _history.record_forward(_allocator_total_free)
+        _should_degrade = _history.should_degrade(_allocator_total_free)
+        if _should_degrade:
+            zip_unzip_fusion = False
+        else:
+            zip_unzip_fusion = (
+                find_max_concurrent_subbatch_size(
+                    [
+                        num_unzipped_tokens * zipped_out.shape[1] * 2,
+                        num_unzipped_tokens * zipped_out.shape[1],
+                    ],
+                    upper=1,
+                )
+                > 0
             )
-            > 0
-        )
 
         if zip_unzip_fusion:
             expert_unzipped_out = paddle.empty(
@@ -1339,14 +1354,30 @@ class MlpNode:
         output.stop_gradient = False
 
         if self.moe_subbatch_diag:
+            _predicted_need = _history.predicted_need_for_remaining()
+            _in_warmup = _history.in_warmup()
             logger.info(
                 "[AutoSubbatch FWD] backend=%s, path=%s, total_tokens=%d, "
-                "subbatch_rows=%d, zip_unzip_fusion=%s",
+                "subbatch_rows=%d, zip_unzip_fusion=%s, "
+                "history_step=%d, history_forward_count=%d, history_backward_count=%d, "
+                "history_prev_steps=%d, history_prev_max_delta_mb=%.2f, history_max_delta_mb=%.2f, "
+                "history_in_warmup=%s, allocator_free_mb=%.2f, "
+                "predicted_need_mb=%.2f, should_degrade=%s",
                 auto_subbatch_allocator_backend(),
                 fwd_path,
                 num_unzipped_tokens,
                 subbatch_rows,
                 zip_unzip_fusion,
+                _history.step_idx,
+                _history.forward_count,
+                _history.backward_count,
+                _history.prev_total_steps,
+                _history.prev_max_delta / 1024 / 1024,
+                _history.max_delta / 1024 / 1024,
+                _in_warmup,
+                _allocator_total_free / 1024 / 1024,
+                _predicted_need / 1024 / 1024,
+                _should_degrade,
             )
         return output
 
@@ -1645,15 +1676,25 @@ class MlpNode:
 
         self.reset_state()
 
+        _history = get_auto_sb_history()
+        _iteration_finished = _history.record_backward()
+
         if self.moe_subbatch_diag:
             logger.info(
                 "[AutoSubbatch BWD] backend=%s, path=%s, total_tokens=%d, "
-                "subbatch_rows=%d, zip_unzip_fusion=%s",
+                "subbatch_rows=%d, zip_unzip_fusion=%s, "
+                "history_step=%d, history_forward_count=%d, history_backward_count=%d, "
+                "history_prev_steps=%d, history_iteration_finished=%s",
                 auto_subbatch_allocator_backend(),
                 bwd_path,
                 num_unzipped_tokens,
                 subbatch_rows,
                 zip_unzip_fusion,
+                _history.step_idx,
+                _history.forward_count,
+                _history.backward_count,
+                _history.prev_total_steps,
+                _iteration_finished,
             )
 
         return hs_fp8_dispatched_grad, dispatched_probs_grad
@@ -1989,6 +2030,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_ue8m0=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_accuracy_compatible=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -2018,6 +2060,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_ue8m0=use_ue8m0,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
+            use_accuracy_compatible=use_accuracy_compatible,
         )
 
         if fp8_dispatched_handle is not None:
@@ -2080,14 +2123,17 @@ def _hybrid_ep_prepare_expert_counts(
         "HybridEP manager must populate padded_tokens_per_expert before "
         "HybridEPMoePyLayer runs."
     )
+    num_permuted_tokens = manager.num_permuted_tokens
+    assert num_permuted_tokens is not None, (
+        "HybridEP manager must populate num_permuted_tokens before "
+        "HybridEPMoePyLayer runs."
+    )
     padded_tokens_per_expert_tensor = padded_tokens_per_expert.astype("int64")
 
     if not use_fp8_mlp or not moe_expert_fusion:
         padded_tokens_per_expert_list = padded_tokens_per_expert_tensor.tolist()
-        return padded_tokens_per_expert_list, sum(padded_tokens_per_expert_list)
-    return padded_tokens_per_expert_tensor, paddle.sum(
-        padded_tokens_per_expert_tensor
-    )
+        return padded_tokens_per_expert_list, num_permuted_tokens
+    return padded_tokens_per_expert_tensor, num_permuted_tokens
 
 
 def _pad_front_rows(tensor, target_shape):
@@ -2144,6 +2190,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         is_first_fwd=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_accuracy_compatible=False,
     ):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
@@ -2155,6 +2202,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             moe_expert_fusion=moe_expert_fusion,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
+            use_accuracy_compatible=use_accuracy_compatible,
         )
         original_hidden_shape = tuple(hidden_states.shape)
         original_probs_shape = tuple(dispatched_probs.shape)
@@ -2232,6 +2280,15 @@ def run_sonic_moe(
             paddle.int32
         )
 
+    # paddle.cast is not a no-op for matching dtype (it allocates + copies),
+    # so cast once with a guard instead of twice below. Allgather feeds int32
+    # (zero copies); deepep feeds int64 (one copy instead of two).
+    topk_indices_i32 = (
+        topk_indices
+        if topk_indices.dtype == paddle.int32
+        else topk_indices.cast(paddle.int32)
+    )
+
     (
         expert_frequency_offset,
         x_gather_idx,
@@ -2244,7 +2301,7 @@ def run_sonic_moe(
         _N_recv,
         _score_src_idx,
     ) = deepep_topk_to_sonic_metadata(
-        topk_indices.cast(paddle.int32),
+        topk_indices_i32,
         topk_scores,
         tokens_per_expert,
         E,
@@ -2257,7 +2314,7 @@ def run_sonic_moe(
     total_expert_freq = TK_padded
     scores_for_down = _differentiable_router_scores(
         topk_scores,
-        topk_indices.cast(paddle.int32),
+        topk_indices_i32,
         num_activated_expert_per_token_offset,
         TK_padded - total_pad_rows,
         TK_padded,

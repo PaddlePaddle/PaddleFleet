@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING
 
 import paddle
 
+from paddlefleet.transformer.utils import is_layer_window_attention
+
 if TYPE_CHECKING:
     from paddlefleet.models.gpt.gpt_model import GPTModel
 
@@ -108,17 +110,26 @@ class DynamicKVCache:
     expected by :class:`DotProductAttention`.
     """
 
-    def __init__(self, num_layers: int):
+    def __init__(
+        self,
+        num_layers: int,
+        swa_layers: list[bool] | None = None,
+        window_size: int | None = None,
+    ):
         self.k: list[paddle.Tensor | None] = [None] * num_layers
         self.v: list[paddle.Tensor | None] = [None] * num_layers
+        self.swa_layers = swa_layers or [False] * num_layers
+        self.window_size = window_size
+        # Track absolute sequence length independently of truncated cache
+        self._seq_len: list[int] = [0] * num_layers
 
     def get_seq_len(self, layer_idx: int = 0) -> int:
-        if self.k[layer_idx] is not None:
-            return self.k[layer_idx].shape[1]
-        # Fallback: find first non-empty layer
-        for k in self.k:
-            if k is not None:
-                return k.shape[1]
+        if self._seq_len[layer_idx] > 0:
+            return self._seq_len[layer_idx]
+        # Fallback: find first non-zero layer
+        for s in self._seq_len:
+            if s > 0:
+                return s
         return 0
 
     def update(
@@ -134,12 +145,21 @@ class DynamicKVCache:
             self.v[layer_idx] = paddle.concat(
                 [self.v[layer_idx], v_new], axis=1
             )
-        return self.k[layer_idx], self.v[layer_idx]
+        # Update absolute sequence length before truncation
+        self._seq_len[layer_idx] = self._seq_len[layer_idx] + k_new.shape[1]
+        # Return full K/V for current attention computation
+        full_k, full_v = self.k[layer_idx], self.v[layer_idx]
+        # Truncate SWA layers in cache for subsequent decode steps
+        if self.window_size and self.swa_layers[layer_idx]:
+            self.k[layer_idx] = self.k[layer_idx][:, -self.window_size :]
+            self.v[layer_idx] = self.v[layer_idx][:, -self.window_size :]
+        return full_k, full_v
 
     def reset(self) -> None:
         for i in range(len(self.k)):
             self.k[i] = None
             self.v[i] = None
+            self._seq_len[i] = 0
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +215,40 @@ class GreedyGenerator:
             + num_empty_layers_add_in_head
             + num_empty_layers_add_in_tail
         )
-        self.cache = DynamicKVCache(num_layers=total_layers)
+
+        # Determine which layers use SWA for KV cache truncation
+        sliding_window = getattr(cfg, "sliding_window", None)
+        window_attn_skip_freq = getattr(cfg, "window_attn_skip_freq", None)
+        swa_layers = []
+        for i in range(total_layers):
+            real_i = i - num_empty_layers_add_in_head
+            if real_i < 0 or real_i >= num_layers:
+                swa_layers.append(False)
+            else:
+                swa_layers.append(
+                    is_layer_window_attention(
+                        sliding_window, window_attn_skip_freq, real_i
+                    )
+                )
+        window_size = (
+            sliding_window[0]
+            if sliding_window and sliding_window[0] > 0
+            else None
+        )
+        # head_wise_swa_ratio > 0 means some heads in SWA layers use full
+        # attention; per-layer KV truncation would break those heads.
+        head_wise_swa_ratio = getattr(cfg, "head_wise_swa_ratio", 0.0)
+        if head_wise_swa_ratio > 0 and head_wise_swa_ratio < 1.0:
+            raise ValueError(
+                f"head_wise_swa_ratio={head_wise_swa_ratio}: KV cache truncation "
+                "is unsupported because it would break full-attention heads in "
+                "SWA layers."
+            )
+        self.cache = DynamicKVCache(
+            num_layers=total_layers,
+            swa_layers=swa_layers,
+            window_size=window_size,
+        )
 
     @paddle.no_grad()
     def generate(
@@ -234,12 +287,21 @@ class GreedyGenerator:
                 .unsqueeze(0)
                 .expand([bsz, prompt_len])
             )
+            # Build startend_row_indices for flashmask causal attention.
+            # causal=True, K=1: LTS[i] = document end boundary (exclusive).
+            # full(prompt_len) = standard causal (no cross-doc masking).
+            # SWA is applied inside DotProductAttention via
+            # startend_row_indices_add_sliding_window.
+            prefill_startend = paddle.full(
+                [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
+            )
             logits = self.model(
                 {
                     "input_ids": input_ids,
                     "position_ids": position_ids,
                     "past_key_values": self.cache,
                     "use_cache": True,
+                    "attn_mask_startend_row_indices": prefill_startend,
                 }
             )
             # Apply repetition penalty to prefill output
