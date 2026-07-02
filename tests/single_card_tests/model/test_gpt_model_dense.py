@@ -14,7 +14,6 @@
 
 
 import functools
-import os
 import random
 import subprocess
 import unittest
@@ -57,7 +56,6 @@ def judge_machine_type():
 
 result = judge_machine_type()
 print("The type of your machine", result)
-CHECK_DETERMINISTIC_BASELINE = os.getenv("check_deterministic_baseline") == "1"
 
 
 class TestGPTModel(unittest.TestCase):
@@ -164,20 +162,14 @@ class TestGPTModel(unittest.TestCase):
         print("loss", loss.item())
         print("embed_tokens_grad_norm", embed_tokens_grad_norm)
 
-        assert paddle.isfinite(loss).item(), f"Loss is not finite: {loss.item()}"
-        assert loss.item() > 0, f"Loss should be positive: {loss.item()}"
-        assert embed_tokens_grad_norm > 0, (
-            f"embed_tokens_grad_norm should be positive: {embed_tokens_grad_norm}"
-        )
-
-        if CHECK_DETERMINISTIC_BASELINE and judge_machine_type() == "H":
+        if judge_machine_type() == "H":
             assert loss.item() == 5.399779796600342, (
                 f"loss is not equal ({loss.item()} != 5.399779796600342), please check your modify"
             )
             assert embed_tokens_grad_norm == 4.742391586303711, (
                 f"grad norm of embed_tokens is not equal ({embed_tokens_grad_norm} != 4.742391586303711), please check your modify"
             )
-        elif CHECK_DETERMINISTIC_BASELINE and judge_machine_type() == "V":
+        elif judge_machine_type() == "V":
             assert loss.item() == 5.344659805297852, (
                 f"loss is not equal ({loss.item()} != 5.344659805297852), please check your modify"
             )

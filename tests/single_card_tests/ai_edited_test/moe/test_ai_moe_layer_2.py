@@ -146,8 +146,6 @@ class TestMoELayerInitSharedExperts(unittest.TestCase):
             moe_intermediate_size=8,
             moe_shared_expert_gate=True,
             init_method=init_method,
-            output_layer_init_method=init_method,
-            embedding_init_method=init_method,
         )
 
         def fake_mlp_init(
