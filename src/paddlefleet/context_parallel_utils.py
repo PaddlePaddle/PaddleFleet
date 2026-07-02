@@ -1559,8 +1559,8 @@ def flashmask_attention_cp(
             value=value,
             startend_row_indices=startend_row_indices,
             causal=causal,
-            learnable_sink=None,
-            softmax_scale=None,
+            learnable_sink=learnable_sink,
+            softmax_scale=softmax_scale,
         )
     else:
         raise ValueError(f"invalid cp_comm_type: {mode}")
