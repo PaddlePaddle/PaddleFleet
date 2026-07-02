@@ -386,9 +386,11 @@ class TestTruncateNormInit(unittest.TestCase):
 
         try:
             paddle.set_default_dtype("float64")
-            with patch("paddle.nn.init.trunc_normal_", side_effect=RuntimeError):
-                with self.assertRaises(RuntimeError):
-                    init_method(weight)
+            with (
+                patch("paddle.nn.init.trunc_normal_", side_effect=RuntimeError),
+                self.assertRaises(RuntimeError),
+            ):
+                init_method(weight)
             self.assertEqual(paddle.get_default_dtype(), "float64")
         finally:
             paddle.set_default_dtype(original_dtype)
