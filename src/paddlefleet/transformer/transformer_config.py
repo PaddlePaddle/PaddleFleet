@@ -614,21 +614,10 @@ class TransformerConfig(ModelParallelConfig):
     ####################
     init_method: callable = None
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
-    takes a single Tensor and initializes it. If None, will be set to
-    paddlefleet.utils.init_method_normal(init_method_std) which is paddle nn init normal with
-    mean=0.0 and std=init_method_std."""
-
-    embedding_init_method: Callable | None = None
-    """
-    Method to initialize weights of the embedding layer. If None, will be set as described
-    in init_method above.
-    """
-
-    embedding_init_method_std: float | None = None
-    """
-    Standard deviation of the zero mean normal for the default initialization method for the
-    embedding layer. If None, will be set to init_method_std.
-    """
+    takes a single Tensor and initializes it. If None, weights are initialized with a truncated
+    normal distribution N(0, sigma^2) clipped to
+    [-truncated_normal_init_factor*sigma, truncated_normal_init_factor*sigma] with
+    sigma=0.5/sqrt(hidden_size). This is overridden when magic_init is True."""
 
     output_layer_init_method: callable = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
@@ -905,15 +894,9 @@ class TransformerConfig(ModelParallelConfig):
     magic_init: bool = False
     """Use the magic initialization method."""
 
-    use_truncated_normal_init: bool = False
-    """Use truncated normal init N(0, sigma^2) clipped to
-    [-truncated_normal_init_factor*sigma, truncated_normal_init_factor*sigma] with
-    sigma=0.5/sqrt(hidden_size). Independent switch; takes precedence over
-    magic_init when enabled."""
-
     truncated_normal_init_factor: float = 3.0
-    """Truncation factor for use_truncated_normal_init: clip range is
-    [-factor*sigma, factor*sigma]."""
+    """Truncation factor for the default truncated normal initialization: weights are drawn from
+    N(0, sigma^2) clipped to [-factor*sigma, factor*sigma] with sigma=0.5/sqrt(hidden_size)."""
 
     ####################
     # Ernie Trainer Configs
@@ -1075,26 +1058,8 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if self.use_truncated_normal_init:
-            if self.hidden_size == 0:
-                raise ValueError(
-                    "hidden_size must be non-zero when use_truncated_normal_init is True."
-                )
-            if self.truncated_normal_init_factor <= 0:
-                raise ValueError(
-                    "truncated_normal_init_factor must be positive when use_truncated_normal_init is True."
-                )
-            sigma = 0.5 / math.sqrt(self.hidden_size)
-            self.init_method = truncated_init_method_normal(
-                sigma, truncate_factor=self.truncated_normal_init_factor
-            )
-            self.init_method_std = sigma
-            logger.info(
-                f"[init] use_truncated_normal_init=True: TruncNormal(0, sigma^2) clipped to "
-                f"[-{self.truncated_normal_init_factor}*sigma, {self.truncated_normal_init_factor}*sigma], "
-                f"sigma=0.5/sqrt(hidden_size={self.hidden_size})={sigma}"
-            )
-        elif self.magic_init:
+        self._default_init_reuse = False
+        if self.magic_init:
             if self.hidden_size == 0:
                 raise ValueError(
                     "hidden_size must be non-zero when magic_init is True."
@@ -1102,8 +1067,27 @@ class TransformerConfig(ModelParallelConfig):
             sigma = math.sqrt(0.3333 / self.hidden_size)
             self.init_method = get_magic_init_method(sigma)
             self.init_method_std = sigma
+            self._default_init_reuse = True
         elif self.init_method is None:
-            self.init_method = init_method_normal(self.init_method_std)
+            if self.hidden_size == 0:
+                raise ValueError(
+                    "hidden_size must be non-zero for the default truncated normal init."
+                )
+            if self.truncated_normal_init_factor <= 0:
+                raise ValueError(
+                    "truncated_normal_init_factor must be positive."
+                )
+            sigma = 0.5 / math.sqrt(self.hidden_size)
+            self.init_method = truncated_init_method_normal(
+                sigma, truncate_factor=self.truncated_normal_init_factor
+            )
+            self.init_method_std = sigma
+            self._default_init_reuse = True
+            logger.info(
+                f"[init] default truncated normal init: TruncNormal(0, sigma^2) clipped to "
+                f"[-{self.truncated_normal_init_factor}*sigma, {self.truncated_normal_init_factor}*sigma], "
+                f"sigma=0.5/sqrt(hidden_size={self.hidden_size})={sigma}"
+            )
 
         if (
             self.first_k_dense_replace
@@ -1159,7 +1143,7 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.use_truncated_normal_init or self.magic_init:
+        if self._default_init_reuse:
             self.output_layer_init_method = self.init_method
         elif self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
@@ -1173,7 +1157,7 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.use_truncated_normal_init or self.magic_init:
+        if self._default_init_reuse:
             self.embedding_init_method = self.init_method
             self.embedding_init_method_std = self.init_method_std
         elif self.embedding_init_method is None:

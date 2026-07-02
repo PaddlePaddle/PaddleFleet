@@ -330,14 +330,13 @@ class TestMagicInit(unittest.TestCase):
 
 
 class TestTruncateNormInit(unittest.TestCase):
-    """Tests for the use_truncated_normal_init functionality in TransformerConfig."""
+    """Tests for the default truncated normal initialization in TransformerConfig."""
 
     def test_truncate_norm_sigma_calculation(self):
         hidden_size = 1024
         config = TransformerConfig(
             num_hidden_layers=12,
             hidden_size=hidden_size,
-            use_truncated_normal_init=True,
         )
 
         self.assertAlmostEqual(
@@ -346,13 +345,11 @@ class TestTruncateNormInit(unittest.TestCase):
             places=6,
         )
 
-    def test_truncate_norm_takes_precedence_over_magic_init(self):
+    def test_truncate_norm_is_default_and_reused(self):
         hidden_size = 1024
         config = TransformerConfig(
             num_hidden_layers=12,
             hidden_size=hidden_size,
-            magic_init=True,
-            use_truncated_normal_init=True,
         )
 
         self.assertAlmostEqual(
@@ -362,6 +359,31 @@ class TestTruncateNormInit(unittest.TestCase):
         )
         self.assertIs(config.init_method, config.output_layer_init_method)
         self.assertIs(config.init_method, config.embedding_init_method)
+
+    def test_magic_init_takes_precedence_over_default(self):
+        hidden_size = 1024
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=hidden_size,
+            magic_init=True,
+        )
+
+        self.assertAlmostEqual(
+            config.init_method_std,
+            math.sqrt(0.3333 / hidden_size),
+            places=6,
+        )
+
+    def test_explicit_init_method_disables_default(self):
+        import paddle
+
+        custom = paddle.nn.initializer.Constant(0.0)
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            hidden_size=1024,
+            init_method=custom,
+        )
+        self.assertIs(config.init_method, custom)
 
     def test_truncate_norm_init_method_restores_default_dtype(self):
         from paddlefleet.utils import truncated_init_method_normal
@@ -396,23 +418,21 @@ class TestTruncateNormInit(unittest.TestCase):
     def test_truncate_norm_raises_on_zero_hidden_size(self):
         with self.assertRaisesRegex(
             ValueError,
-            "hidden_size must be non-zero when use_truncated_normal_init is True.",
+            "hidden_size must be non-zero for the default truncated normal init.",
         ):
             TransformerConfig(
                 num_hidden_layers=12,
                 hidden_size=0,
-                use_truncated_normal_init=True,
             )
 
     def test_truncate_norm_raises_on_non_positive_factor(self):
         with self.assertRaisesRegex(
             ValueError,
-            "truncated_normal_init_factor must be positive when use_truncated_normal_init is True.",
+            "truncated_normal_init_factor must be positive.",
         ):
             TransformerConfig(
                 num_hidden_layers=12,
                 hidden_size=1024,
-                use_truncated_normal_init=True,
                 truncated_normal_init_factor=0,
             )
 
