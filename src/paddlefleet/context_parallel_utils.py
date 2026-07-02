@@ -506,13 +506,13 @@ class ContextParallelScatterOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return scatter_contiguous(input_tensor, group=group, axis=axis)
         return scatter_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return all_gather_contiguous(
                 grad_output, group=ctx.group, axis=ctx.axis
             )
@@ -540,13 +540,13 @@ class ContextParallelGatherOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return all_gather_contiguous(input_tensor, group=group, axis=axis)
         return all_gather_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return scatter_contiguous(
                 grad_output, group=ctx.group, axis=ctx.axis
             )
@@ -574,13 +574,13 @@ class ContextParallelAllGatherOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return all_gather_contiguous(input_tensor, group=group, axis=axis)
         return all_gather_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return reduce_scatter_contiguous(
                 grad_output, axis=ctx.axis, group=ctx.group
             )
@@ -1227,69 +1227,6 @@ class FlashMaskContextParallel(PyLayer):
         return query_grad, key_grad, value_grad
 
 
-def flashmask_attention_cp(
-    query,
-    key,
-    value,
-    startend_row_indices,
-    fixed_seed_offset=None,
-    dropout=0.0,
-    causal=False,
-    training=True,
-    learnable_sink=None,
-    softmax_scale=None,
-    mode="dualchunk_allgather",
-):
-    """
-    FlashMask attention with context parallelism - public API.
-    This is the main entry point for using FlashMask attention with context parallelism.
-    It provides a convenient interface that wraps the FlashMaskContextParallel PyLayer.
-    Args:
-        query (paddle.Tensor): Query tensor with shape [batch, seq_len/n, num_heads, head_dim]
-        key (paddle.Tensor): Key tensor with shape [batch, seq_len/n, num_heads, head_dim]
-        value (paddle.Tensor): Value tensor with shape [batch, seq_len/n, num_heads, head_dim]
-        startend_row_indices (paddle.Tensor): Row indices for attention mask
-        fixed_seed_offset (paddle.Tensor, optional): Fixed seed offset for dropout
-        dropout (float, optional): Dropout probability. Defaults to 0.0
-        causal (bool, optional): Whether to use causal attention. Defaults to False
-        training (bool, optional): Whether in training mode. Defaults to True
-        mode (str, optional): Attention mode. Defaults to "dualchunk_allgather"
-    Returns:
-        paddle.Tensor: Attention output with shape [batch, seq_len/n, num_heads, head_dim]
-    Example:
-        ```python
-        # Initialize tensors (assuming context parallelism is set up)
-        query = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
-        key = paddle.randn([2, 512, 8, 64])    # [batch, seq_len/n, heads, head_dim]
-        value = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
-        mask_indices = paddle.randint(0, 1024, [100, 2])
-        # Apply FlashMask attention with context parallelism
-        output = flashmask_attention_cp(
-            query=query,
-            key=key,
-            value=value,
-            startend_row_indices=mask_indices,
-            training=True
-        )
-        ```
-    """
-
-    output = FlashMaskContextParallel.apply(
-        query,
-        key,
-        value,
-        startend_row_indices,
-        fixed_seed_offset,
-        dropout,
-        causal,
-        training,
-        learnable_sink,
-        softmax_scale,
-        mode,
-    )
-    return output
-
-
 # ======================== P2P SWA CP fast path Layer ========================
 
 SWA_WIN_SIZE = 128
@@ -1533,8 +1470,6 @@ class SwaP2PFlashMask(PyLayer):
             )
         if fixed_seed_offset is not None:
             raise NotImplementedError("Fixed seed offset is not supported yet.")
-        if group is None:
-            group = fleet.get_hybrid_communicate_group().get_context_parallel_group()
 
         output, log_sum_exp, recv_key, recv_value, startend_row_indices = (
             cp_flashmask_swa_p2p_forward(
@@ -1604,7 +1539,7 @@ class SwaP2PFlashMask(PyLayer):
         return query_grad, key_grad, value_grad
 
 
-def p2p_flashmask_attention(
+def flashmask_attention_cp(
     query,
     key,
     value,
@@ -1615,27 +1550,75 @@ def p2p_flashmask_attention(
     training=True,
     learnable_sink=None,
     softmax_scale=None,
-    mode="contiguous_allgather",
+    mode="dualchunk_allgather",
 ):
-    """Apply the SWA P2P FlashMask context-parallel fast path."""
-    hcg = fleet.get_hybrid_communicate_group()
-    cp_group = hcg.get_context_parallel_group()
+    """
+    FlashMask attention with context parallelism - public API.
+    This is the main entry point for using FlashMask attention with context parallelism.
+    It provides a convenient interface that wraps the FlashMaskContextParallel PyLayer.
+    Args:
+        query (paddle.Tensor): Query tensor with shape [batch, seq_len/n, num_heads, head_dim]
+        key (paddle.Tensor): Key tensor with shape [batch, seq_len/n, num_heads, head_dim]
+        value (paddle.Tensor): Value tensor with shape [batch, seq_len/n, num_heads, head_dim]
+        startend_row_indices (paddle.Tensor): Row indices for attention mask
+        fixed_seed_offset (paddle.Tensor, optional): Fixed seed offset for dropout
+        dropout (float, optional): Dropout probability. Defaults to 0.0
+        causal (bool, optional): Whether to use causal attention. Defaults to False
+        training (bool, optional): Whether in training mode. Defaults to True
+        mode (str, optional): Attention mode. Defaults to "dualchunk_allgather"
+    Returns:
+        paddle.Tensor: Attention output with shape [batch, seq_len/n, num_heads, head_dim]
+    Example:
+        ```python
+        # Initialize tensors (assuming context parallelism is set up)
+        query = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
+        key = paddle.randn([2, 512, 8, 64])    # [batch, seq_len/n, heads, head_dim]
+        value = paddle.randn([2, 512, 8, 64])  # [batch, seq_len/n, heads, head_dim]
+        mask_indices = paddle.randint(0, 1024, [100, 2])
+        # Apply FlashMask attention with context parallelism
+        output = flashmask_attention_cp(
+            query=query,
+            key=key,
+            value=value,
+            startend_row_indices=mask_indices,
+            training=True
+        )
+        ```
+    """
+    if mode == "contiguous_swap2p":
+        hcg = fleet.get_hybrid_communicate_group()
+        cp_group = hcg.get_context_parallel_group()
 
-    assert _flash_mask_available, (
-        "P2P SWA fast path requires flashmask installed. Please check."
-    )
+        assert _flash_mask_available, (
+            "P2P SWA fast path requires flashmask installed. Please check."
+        )
 
-    return SwaP2PFlashMask.apply(
-        query,
-        key,
-        value,
-        startend_row_indices,
-        fixed_seed_offset,
-        dropout,
-        causal,
-        training,
-        learnable_sink,
-        softmax_scale,
-        cp_group,
-        mode,
-    )
+        return SwaP2PFlashMask.apply(
+            query,
+            key,
+            value,
+            startend_row_indices,
+            fixed_seed_offset,
+            dropout,
+            causal,
+            training,
+            learnable_sink,
+            softmax_scale,
+            cp_group,
+            mode,
+        )
+    else:
+        output = FlashMaskContextParallel.apply(
+            query,
+            key,
+            value,
+            startend_row_indices,
+            fixed_seed_offset,
+            dropout,
+            causal,
+            training,
+            learnable_sink,
+            softmax_scale,
+            mode,
+        )
+    return output

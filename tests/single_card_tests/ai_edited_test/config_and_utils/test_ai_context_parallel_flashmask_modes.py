@@ -50,6 +50,9 @@ class FakeHcg:
     def get_context_parallel_group(self):
         return self.group
 
+    def get_context_parallel_world_size(self):
+        return self.group.world_size
+
 
 class FakeTask:
     def wait(self):
@@ -363,6 +366,116 @@ class TestFlashMaskContextParallelMode(unittest.TestCase):
         self.assertEqual(ctx.mode, "contiguous_allgather")
         self.assertEqual(ctx.fa_version, 2)
         assert_tensor_equal(self, ctx.saved[-1], indices + 1)
+
+
+class TestContextParallelOpsModes(unittest.TestCase):
+    def setUp(self):
+        self.group = FakeGroup(rank=0, world_size=2)
+        self.tensor = paddle.zeros([2, 4], dtype="float32")
+
+    def _patch_hcg(self):
+        return patch.object(
+            cp_utils.fleet,
+            "get_hybrid_communicate_group",
+            lambda: FakeHcg(self.group),
+        )
+
+    def test_contiguous_prefixed_modes_use_rank_order_scatter(self):
+        for mode in ("contiguous_a2a", "contiguous_swap2p"):
+            with (
+                self.subTest(mode=mode),
+                self._patch_hcg(),
+                patch.object(cp_utils, "scatter_contiguous") as contiguous,
+                patch.object(cp_utils, "scatter_balance") as balanced,
+            ):
+                contiguous.return_value = self.tensor + 1
+                result = cp_utils.ContextParallelScatterOp.forward(
+                    FakeContext(), self.tensor, -1, mode
+                )
+
+            assert_tensor_equal(self, result, self.tensor + 1)
+            contiguous.assert_called_once()
+            balanced.assert_not_called()
+
+    def test_non_contiguous_mode_uses_balanced_scatter(self):
+        with (
+            self._patch_hcg(),
+            patch.object(cp_utils, "scatter_contiguous") as contiguous,
+            patch.object(cp_utils, "scatter_balance") as balanced,
+        ):
+            balanced.return_value = self.tensor + 2
+            result = cp_utils.ContextParallelScatterOp.forward(
+                FakeContext(), self.tensor, -1, "dualchunk_allgather"
+            )
+
+        assert_tensor_equal(self, result, self.tensor + 2)
+        contiguous.assert_not_called()
+        balanced.assert_called_once()
+
+    def test_contiguous_prefixed_modes_use_rank_order_gather_and_allgather(
+        self,
+    ):
+        for op_cls, contiguous_name, balanced_name in (
+            (
+                cp_utils.ContextParallelGatherOp,
+                "all_gather_contiguous",
+                "all_gather_balance",
+            ),
+            (
+                cp_utils.ContextParallelAllGatherOp,
+                "all_gather_contiguous",
+                "all_gather_balance",
+            ),
+        ):
+            with (
+                self.subTest(op=op_cls.__name__),
+                self._patch_hcg(),
+                patch.object(cp_utils, contiguous_name) as contiguous,
+                patch.object(cp_utils, balanced_name) as balanced,
+            ):
+                contiguous.return_value = self.tensor + 3
+                result = op_cls.forward(
+                    FakeContext(), self.tensor, -1, "contiguous_a2a"
+                )
+
+            assert_tensor_equal(self, result, self.tensor + 3)
+            contiguous.assert_called_once()
+            balanced.assert_not_called()
+
+    def test_contiguous_prefixed_modes_use_rank_order_backward_ops(self):
+        cases = (
+            (
+                cp_utils.ContextParallelScatterOp,
+                "all_gather_contiguous",
+                "all_gather_balance",
+            ),
+            (
+                cp_utils.ContextParallelGatherOp,
+                "scatter_contiguous",
+                "scatter_balance",
+            ),
+            (
+                cp_utils.ContextParallelAllGatherOp,
+                "reduce_scatter_contiguous",
+                "reduce_scatter_any_axis_balance",
+            ),
+        )
+        for op_cls, contiguous_name, balanced_name in cases:
+            ctx = FakeContext()
+            ctx.mode = "contiguous_a2a"
+            ctx.axis = -1
+            ctx.group = self.group
+            with (
+                self.subTest(op=op_cls.__name__),
+                patch.object(cp_utils, contiguous_name) as contiguous,
+                patch.object(cp_utils, balanced_name) as balanced,
+            ):
+                contiguous.return_value = self.tensor + 4
+                result = op_cls.backward(ctx, self.tensor)
+
+            assert_tensor_equal(self, result, self.tensor + 4)
+            contiguous.assert_called_once()
+            balanced.assert_not_called()
 
 
 class TestSwaP2PHelpers(unittest.TestCase):
@@ -692,7 +805,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
         assert_tensor_equal(self, backward_result[1], kg)
         assert_tensor_equal(self, backward_result[2], vg)
 
-    def test_p2p_flashmask_attention_requires_flashmask(self):
+    def test_flashmask_attention_cp_requires_flashmask_for_p2p_mode(self):
         with (
             patch.object(cp_utils, "_flash_mask_available", False),
             patch.object(
@@ -702,11 +815,15 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
             ),
             self.assertRaises(AssertionError),
         ):
-            cp_utils.p2p_flashmask_attention(
-                self.query, self.key, self.value, self.indices
+            cp_utils.flashmask_attention_cp(
+                self.query,
+                self.key,
+                self.value,
+                self.indices,
+                mode="contiguous_swap2p",
             )
 
-    def test_p2p_flashmask_attention_applies_pylayer_with_cp_group(self):
+    def test_flashmask_attention_cp_dispatches_p2p_mode_to_pylayer(self):
         captured = {}
         result = paddle.full([1, 4, 1, 1], 5.0, dtype="float32")
         learnable_sink = paddle.ones([1], dtype="float32")
@@ -724,7 +841,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
             ),
             patch.object(cp_utils.SwaP2PFlashMask, "apply", fake_apply),
         ):
-            out = cp_utils.p2p_flashmask_attention(
+            out = cp_utils.flashmask_attention_cp(
                 self.query,
                 self.key,
                 self.value,
@@ -733,6 +850,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
                 training=False,
                 learnable_sink=learnable_sink,
                 softmax_scale=0.5,
+                mode="contiguous_swap2p",
             )
 
         assert_tensor_equal(self, out, result)
@@ -744,6 +862,7 @@ class TestSwaP2PFlashMaskPath(unittest.TestCase):
         self.assertIs(captured["args"][8], learnable_sink)
         self.assertEqual(captured["args"][9], 0.5)
         self.assertIs(captured["args"][10], self.group)
+        self.assertEqual(captured["args"][11], "contiguous_swap2p")
 
 
 if __name__ == "__main__":

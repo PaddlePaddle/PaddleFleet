@@ -34,10 +34,7 @@ from paddlefleet_ops.flash_mask_facade import (
     flashmask_attention,
 )
 
-from paddlefleet.context_parallel_utils import (
-    flashmask_attention_cp,
-    p2p_flashmask_attention,
-)
+from paddlefleet.context_parallel_utils import flashmask_attention_cp
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -513,6 +510,8 @@ class DotProductAttention(FleetLayer):
                     is_causal = True
             else:
                 is_causal = attn_mask_type == AttnMaskType.causal
+
+            extra_kwargs = {}
             if self.context_parallel_size > 1:
                 flashmask_attention_func = (
                     self.rr_flashmask_attention_cp_func
@@ -522,8 +521,12 @@ class DotProductAttention(FleetLayer):
                 use_mla = bool(
                     getattr(self.config, "multi_latent_attention", False)
                 )
-                if self.is_swa and use_mla:
-                    flashmask_attention_func = p2p_flashmask_attention
+
+                extra_kwargs["mode"] = self.config.cp_balance_mode
+                if self.config.cp_balance_mode == "contiguous_a2a":
+                    if self.is_swa and use_mla:
+                        extra_kwargs["mode"] = "contiguous_swap2p"
+
                 is_causal = (
                     False  # only support non-causal for flashmask_attention_cp
                 )
@@ -576,6 +579,7 @@ class DotProductAttention(FleetLayer):
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
                 learnable_sink=self.softmax_offset,
+                **extra_kwargs,
             )
 
             if need_value_padding:
