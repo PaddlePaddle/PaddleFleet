@@ -1079,15 +1079,15 @@ class TransformerConfig(ModelParallelConfig):
         self.use_truncated_normal_init = True
 
         if self.use_truncated_normal_init:
-            if self.hidden_size == 0:
-                raise ValueError(
-                    "hidden_size must be non-zero when use_truncated_normal_init is True."
-                )
             if self.truncated_normal_init_factor <= 0:
                 raise ValueError(
                     "truncated_normal_init_factor must be positive when use_truncated_normal_init is True."
                 )
-            sigma = 0.5 / math.sqrt(self.hidden_size)
+            sigma = (
+                self.init_method_std
+                if self.hidden_size == 0
+                else 0.5 / math.sqrt(self.hidden_size)
+            )
             self.init_method = truncated_init_method_normal(
                 sigma, truncate_factor=self.truncated_normal_init_factor
             )
