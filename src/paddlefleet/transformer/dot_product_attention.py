@@ -454,7 +454,9 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=False,
-                softmax_scale=self.softmax_scale,
+                softmax_scale=self.softmax_scale
+                if self._has_custom_softmax_scale
+                else None,
             )
             attn_output = attn_output.reshape([bsz, q_len, -1])
             return attn_output
@@ -492,7 +494,9 @@ class DotProductAttention(FleetLayer):
                 attn_mask_kv,
                 self.config.attention_dropout,
                 is_causal=is_causal,
-                scale=self.softmax_scale,
+                scale=self.softmax_scale
+                if self._has_custom_softmax_scale
+                else None,
             )
 
             attn_output = paddle.reshape(
@@ -578,6 +582,15 @@ class DotProductAttention(FleetLayer):
                     )
                 )
 
+            extra_kwargs = (
+                {}
+                if use_rr_flash_attention
+                else {
+                    "softmax_scale": self.softmax_scale
+                    if self._has_custom_softmax_scale
+                    else None
+                }
+            )
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -586,7 +599,7 @@ class DotProductAttention(FleetLayer):
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
                 learnable_sink=self.softmax_offset,
-                softmax_scale=self.softmax_scale,
+                **extra_kwargs,
             )
 
             if need_value_padding:

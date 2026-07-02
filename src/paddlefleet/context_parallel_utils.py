@@ -739,6 +739,11 @@ def cp_flashmask_allgatherkv_balance_forward(
             raise NotImplementedError(
                 "learnable_sink only supported on fa_version==4 cute backend"
             )
+        if softmax_scale is not None:
+            raise NotImplementedError(
+                "flashmask_attention (fa_version<4) does not support setting softmax_scale, "
+                "please set FLAGS_flash_attn_version=4 to use cute backend"
+            )
         output, log_sum_exp = flashmask_attention(
             query,
             key_gathered,
@@ -747,7 +752,6 @@ def cp_flashmask_allgatherkv_balance_forward(
             causal=causal,
             return_softmax_lse=True,
             training=is_training,
-            softmax_scale=softmax_scale,
         )
 
     paddle.base.core.nvprof_nvtx_pop()
