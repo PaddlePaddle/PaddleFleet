@@ -14,6 +14,9 @@
 
 case_name=$1
 base_name=$2
+if [[ $BRANCH == "develop" ]]; then
+    base_name="${base_name}_develop"
+fi
 case_gt_file=${base_name}_${case_name}_gt.txt
 wget --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/ce/${case_gt_file} -O ${case_gt_file}
 exit_code=$?
