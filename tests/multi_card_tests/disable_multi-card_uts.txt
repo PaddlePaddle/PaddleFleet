@@ -7,3 +7,6 @@ test_gpt_pp_with_moe_with_mtp_with_overlap.py
 test_gpt_pp_dense.py
 test_gpt_pp_with_group_gemm.py
 test_gpt_pp_with_moe_recompute.py
+test_gpt_model_dense.py
+test_gpt_pp_with_moe_with_mtp.py
+test_gpt_pp_with_moe.py
