@@ -510,12 +510,24 @@ class DotProductAttention(FleetLayer):
                     is_causal = True
             else:
                 is_causal = attn_mask_type == AttnMaskType.causal
+
+            extra_kwargs = {}
             if self.context_parallel_size > 1:
                 flashmask_attention_func = (
                     self.rr_flashmask_attention_cp_func
                     if use_rr_flash_attention
                     else flashmask_attention_cp
                 )
+                use_mla = bool(
+                    getattr(self.config, "multi_latent_attention", False)
+                )
+
+                extra_kwargs["mode"] = self.config.cp_balance_mode
+                if self.config.cp_balance_mode == "contiguous_a2a":
+                    if self.is_swa and use_mla:
+                        extra_kwargs["mode"] = "contiguous_swap2p"
+                        extra_kwargs["window_size"] = self.sliding_window[0]
+
                 is_causal = (
                     False  # only support non-causal for flashmask_attention_cp
                 )
@@ -568,6 +580,7 @@ class DotProductAttention(FleetLayer):
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
                 learnable_sink=self.softmax_offset,
+                **extra_kwargs,
             )
 
             if need_value_padding:

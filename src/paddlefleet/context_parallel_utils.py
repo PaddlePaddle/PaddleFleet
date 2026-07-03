@@ -506,13 +506,13 @@ class ContextParallelScatterOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return scatter_contiguous(input_tensor, group=group, axis=axis)
         return scatter_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return all_gather_contiguous(
                 grad_output, group=ctx.group, axis=ctx.axis
             )
@@ -540,13 +540,13 @@ class ContextParallelGatherOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return all_gather_contiguous(input_tensor, group=group, axis=axis)
         return all_gather_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return scatter_contiguous(
                 grad_output, group=ctx.group, axis=ctx.axis
             )
@@ -574,13 +574,13 @@ class ContextParallelAllGatherOp(PyLayer):
         group = hcg.get_context_parallel_group()
         ctx.group = group
 
-        if mode == "contiguous_allgather":
+        if mode.startswith("contiguous"):
             return all_gather_contiguous(input_tensor, group=group, axis=axis)
         return all_gather_balance(input_tensor, axis=axis, group=group)
 
     @staticmethod
     def backward(ctx, grad_output):
-        if ctx.mode == "contiguous_allgather":
+        if ctx.mode.startswith("contiguous"):
             return reduce_scatter_contiguous(
                 grad_output, axis=ctx.axis, group=ctx.group
             )
@@ -662,6 +662,7 @@ def cp_flashmask_allgatherkv_balance_forward(
     causal,
     is_training,
     softmax_scale,
+    mode: str = "dualchunk_allgather",
 ):
     """
     Forward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -675,6 +676,8 @@ def cp_flashmask_allgatherkv_balance_forward(
         group (paddle.distributed.Group): Communication group
         causal (bool): Whether to use causal attention
         is_training (bool): Whether in training mode
+        softmax_scale (float): softmax scaling factor
+        mode (str): Attention mode, support 'dualchunk_allgather' and 'contiguous_allgather'
     Returns:
         tuple: (output, log_sum_exp, processed_indices, fa_version)
             ``fa_version`` is the effective FlashAttention version actually
@@ -688,23 +691,33 @@ def cp_flashmask_allgatherkv_balance_forward(
     rank = group.rank
     cp_size = group.world_size
 
-    # All-gather key tensors across context parallel ranks
-    key_gathered = all_gather_balance(key, axis=1, group=group)
+    if mode == "dualchunk_allgather":
+        key_gathered = all_gather_balance(key, axis=1, group=group)
+        value_gathered = all_gather_balance(value, axis=1, group=group)
 
-    # All-gather value tensors across context parallel ranks
-    value_gathered = all_gather_balance(value, axis=1, group=group)
+        # Calculate sequence block size for dual-chunk strategy
+        seq_blocksize = query.shape[1] // 2
 
-    # Calculate sequence block size for dual-chunk strategy
-    seq_blocksize = query.shape[1] // 2
+        # Preprocess indices for dual-chunk strategy
+        startend_row_indices = preprocess_index_dual_chunks(
+            startend_row_indices,
+            chunk_id_first=rank,
+            chunk_id_second=2 * cp_size - rank - 1,
+            seq_blocksize=seq_blocksize,
+            max_seqlen_q=seq_blocksize,
+        )
+    elif mode == "contiguous_allgather":
+        key_gathered = all_gather_contiguous(key, axis=1, group=group)
+        value_gathered = all_gather_contiguous(value, axis=1, group=group)
 
-    # Preprocess indices for dual-chunk strategy
-    startend_row_indices = preprocess_index_dual_chunks(
-        startend_row_indices,
-        chunk_id_first=rank,
-        chunk_id_second=2 * cp_size - rank - 1,
-        seq_blocksize=seq_blocksize,
-        max_seqlen_q=seq_blocksize,
-    )
+        startend_row_indices = preprocess_index(
+            startend_row_indices,
+            chunk_id=group.rank,
+            seq_blocksize=query.shape[1],
+            max_seqlen_q=query.shape[1],
+        )
+    else:
+        raise ValueError(f"Unsupported FlashMask context parallel mode: {mode}")
 
     # Perform flashmask attention with startend_row_indices
     fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
@@ -767,6 +780,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     causal,
     fa_version: int,
     softmax_scale,
+    mode: str = "dualchunk_allgather",
 ):
     """
     Backward pass of context parallel flashmask attention with balanced all-gather strategy.
@@ -785,6 +799,8 @@ def cp_flashmask_allgatherkv_balance_backward(
         fa_version (int): FlashAttention version that was actually used by the
             forward kernel. Must be propagated from the forward call to keep
             fwd/bwd consistent.
+        softmax_scale (float): Softmax scaling factor
+        mode (str): Attention mode, support 'dualchunk_allgather' and 'contiguous_allgather'
     Returns:
         tuple: (query_grad, key_grad, value_grad, grad_sink)
     """
@@ -793,8 +809,14 @@ def cp_flashmask_allgatherkv_balance_backward(
     )
 
     # All-gather key and value tensors (same as forward pass)
-    key_gathered = all_gather_balance(key, axis=1, group=group)
-    value_gathered = all_gather_balance(value, axis=1, group=group)
+    if mode == "dualchunk_allgather":
+        key_gathered = all_gather_balance(key, axis=1, group=group)
+        value_gathered = all_gather_balance(value, axis=1, group=group)
+    elif mode == "contiguous_allgather":
+        key_gathered = all_gather_contiguous(key, axis=1, group=group)
+        value_gathered = all_gather_contiguous(value, axis=1, group=group)
+    else:
+        raise ValueError(f"Unsupported FlashMask context parallel mode: {mode}")
 
     grad_sink = None
     if fa_version == 2:
@@ -915,12 +937,22 @@ def cp_flashmask_allgatherkv_balance_backward(
         )
 
     # Reduce-scatter key and value gradients
-    key_grad = reduce_scatter_any_axis_balance(
-        key_grad_gathered, axis=1, group=group
-    )
-    value_grad = reduce_scatter_any_axis_balance(
-        value_grad_gathered, axis=1, group=group
-    )
+    if mode == "dualchunk_allgather":
+        key_grad = reduce_scatter_any_axis_balance(
+            key_grad_gathered, axis=1, group=group
+        )
+        value_grad = reduce_scatter_any_axis_balance(
+            value_grad_gathered, axis=1, group=group
+        )
+    elif mode == "contiguous_allgather":
+        key_grad = reduce_scatter_contiguous(
+            key_grad_gathered, axis=1, group=group
+        )
+        value_grad = reduce_scatter_contiguous(
+            value_grad_gathered, axis=1, group=group
+        )
+    else:
+        raise ValueError(f"Unsupported FlashMask context parallel mode: {mode}")
 
     paddle.base.core.nvprof_nvtx_pop()
     return query_grad, key_grad, value_grad, grad_sink
@@ -1063,7 +1095,7 @@ class FlashMaskContextParallel(PyLayer):
         training=True,
         learnable_sink=None,
         softmax_scale=None,
-        mode="allgather_kv",
+        mode="dualchunk_allgather",
     ):
         """
         Forward pass of FlashMask attention with context parallelism.
@@ -1077,7 +1109,7 @@ class FlashMaskContextParallel(PyLayer):
             dropout (float): Dropout probability
             causal (bool): Whether to use causal attention
             training (bool): Whether in training mode
-            mode (str): Attention mode, currently supports "allgather_kv"
+            mode (str): Attention mode, supports "dualchunk_allgather" and "contiguous_allgather"
         Returns:
             paddle.Tensor: Attention output
         Raises:
@@ -1121,6 +1153,7 @@ class FlashMaskContextParallel(PyLayer):
                 causal,
                 training,
                 softmax_scale,
+                mode,
             )
         )
 
@@ -1139,6 +1172,7 @@ class FlashMaskContextParallel(PyLayer):
         ctx.sink_requires_grad = (
             learnable_sink is not None and not learnable_sink.stop_gradient
         )
+        ctx.mode = mode
 
         return output
 
@@ -1161,6 +1195,7 @@ class FlashMaskContextParallel(PyLayer):
         fa_version = ctx.fa_version
         learnable_sink = ctx.learnable_sink
         softmax_scale = ctx.softmax_scale
+        mode = ctx.mode
 
         # Compute gradients
         query_grad, key_grad, value_grad, grad_sink = (
@@ -1177,6 +1212,7 @@ class FlashMaskContextParallel(PyLayer):
                 causal,
                 fa_version,
                 softmax_scale,
+                mode,
             )
         )
 
@@ -1186,6 +1222,327 @@ class FlashMaskContextParallel(PyLayer):
         # slot (position 3) must be None -- grad_sink belongs in position 4.
         # A fixed off-by-one sink is also stop_gradient=True, so for it the
         # 3-tuple (sink slot omitted) is correct.
+        if ctx.sink_requires_grad:
+            return query_grad, key_grad, value_grad, None, grad_sink
+        return query_grad, key_grad, value_grad
+
+
+# ======================== P2P SWA CP fast path Layer ========================
+
+
+def _wait_all(tasks):
+    """Wait for all asynchronous communication tasks."""
+    for task in tasks:
+        task.wait()
+
+
+def _exchange_prev_window(key, value, group, window_size=128):
+    """Exchange each rank's tail KV window with the next CP rank."""
+    rank = group.rank
+    cp_size = group.world_size
+
+    assert len(key.shape) == 4, (
+        f"SWA P2P expects BSHD KV, got key.shape={key.shape}"
+    )
+    assert key.shape[1] >= window_size, (
+        f"SWA window requires local KV sequence length >= {window_size}, "
+        f"got {key.shape[1]}"
+    )
+    assert value.shape == key.shape, (
+        f"key/value shape mismatch: key={key.shape}, value={value.shape}"
+    )
+
+    recv_window = paddle.empty(
+        [2, key.shape[0], window_size, key.shape[2], key.shape[3]],
+        dtype=key.dtype,
+    )
+    ops = []
+
+    if rank > 0:
+        recv_rank = group.ranks[rank - 1]
+        ops.append(dist.P2POp(dist.irecv, recv_window, recv_rank, group))
+
+    if rank < cp_size - 1:
+        send_rank = group.ranks[rank + 1]
+        send_window = paddle.stack(
+            [key[:, -window_size:, :, :], value[:, -window_size:, :, :]], axis=0
+        ).contiguous()
+        ops.append(dist.P2POp(dist.isend, send_window, send_rank, group))
+
+    if ops:
+        _wait_all(dist.batch_isend_irecv(ops))
+
+    return recv_window[0], recv_window[1]
+
+
+def _scatter_kv_to_global_tensor(key, value, recv_key, recv_value, group):
+    """Place local KV and received previous-window KV into global sequence layout."""
+    rank = group.rank
+    cp_size = group.world_size
+    local_seqlen = key.shape[1]
+    total_seqlen = local_seqlen * cp_size
+    local_start = rank * local_seqlen
+    local_end = local_start + local_seqlen
+
+    if cp_size == 1:
+        return key, value
+
+    scratch_shape = [key.shape[0], total_seqlen, key.shape[2], key.shape[3]]
+    key_tensor = paddle.empty(scratch_shape, dtype=key.dtype)
+    value_tensor = paddle.empty(scratch_shape, dtype=value.dtype)
+    key_tensor[:, local_start:local_end, :, :] = key
+    value_tensor[:, local_start:local_end, :, :] = value
+
+    if rank > 0:
+        window_size = recv_key.shape[1]
+        window_start = local_start - window_size
+        key_tensor[:, window_start:local_start, :, :] = recv_key
+        value_tensor[:, window_start:local_start, :, :] = recv_value
+
+    return key_tensor, value_tensor
+
+
+def _send_window_grad_back(
+    key_grad_tensor, value_grad_tensor, key, value, group, window_size
+):
+    """Return remote-window KV gradients to owner ranks and accumulate them."""
+    rank = group.rank
+    cp_size = group.world_size
+    local_seqlen = key.shape[1]
+    local_start = rank * local_seqlen
+    local_end = local_start + local_seqlen
+
+    if cp_size == 1:
+        return key_grad_tensor, value_grad_tensor
+
+    # TODO(heqianyue): the following can be optimized via cudaMemcpyAsync2D (3ms -> 0.7ms)
+    key_grad = key_grad_tensor[:, local_start:local_end, :, :].contiguous()
+    value_grad = value_grad_tensor[:, local_start:local_end, :, :].contiguous()
+
+    recv_grad_window = paddle.empty(
+        [2, key.shape[0], window_size, key.shape[2], key.shape[3]],
+        dtype=key.dtype,
+    )
+    ops = []
+
+    if rank < cp_size - 1:
+        send_rank = group.ranks[rank + 1]
+        ops.append(dist.P2POp(dist.irecv, recv_grad_window, send_rank, group))
+
+    if rank > 0:
+        recv_rank = group.ranks[rank - 1]
+        window_start = local_start - window_size
+        send_grad_window = paddle.stack(
+            [
+                key_grad_tensor[:, window_start:local_start, :, :],
+                value_grad_tensor[:, window_start:local_start, :, :],
+            ],
+            axis=0,
+        ).contiguous()
+        ops.append(dist.P2POp(dist.isend, send_grad_window, recv_rank, group))
+
+    if ops:
+        _wait_all(dist.batch_isend_irecv(ops))
+
+    if rank < cp_size - 1:
+        key_grad[:, -window_size:, :, :].add_(recv_grad_window[0])
+        value_grad[:, -window_size:, :, :].add_(recv_grad_window[1])
+
+    return key_grad, value_grad
+
+
+def cp_flashmask_swa_p2p_forward(
+    query,
+    key,
+    value,
+    startend_row_indices,
+    learnable_sink,
+    group,
+    causal,
+    is_training,
+    softmax_scale,
+    window_size,
+):
+    """Run forward SWA FlashMask CP with one-hop P2P KV exchange."""
+    paddle.base.core.nvprof_nvtx_push("cp_flashmask_swa_p2p_forward")
+
+    startend_row_indices = preprocess_index(
+        startend_row_indices,
+        chunk_id=group.rank,
+        seq_blocksize=query.shape[1],
+        max_seqlen_q=query.shape[1],
+    )
+
+    recv_key, recv_value = _exchange_prev_window(key, value, group, window_size)
+
+    key_tensor, value_tensor = _scatter_kv_to_global_tensor(
+        key, value, recv_key, recv_value, group
+    )
+
+    output, log_sum_exp = _flash_attn_fwd(
+        query,
+        key_tensor,
+        value_tensor,
+        startend_row_indices=startend_row_indices,
+        learnable_sink=learnable_sink,
+        causal=causal,
+        return_lse=True,
+        pack_gqa=False,
+        softmax_scale=softmax_scale,
+    )
+
+    paddle.base.core.nvprof_nvtx_pop()
+
+    return output, log_sum_exp, recv_key, recv_value, startend_row_indices
+
+
+def cp_flashmask_swa_p2p_backward(
+    query,
+    key,
+    value,
+    recv_key,
+    recv_value,
+    startend_row_indices,
+    output,
+    log_sum_exp,
+    output_grad,
+    learnable_sink,
+    group,
+    causal,
+    softmax_scale,
+    window_size,
+):
+    """Run backward SWA FlashMask CP and return P2P KV gradients."""
+    paddle.base.core.nvprof_nvtx_push("cp_flashmask_swa_p2p_backward")
+
+    key_tensor, value_tensor = _scatter_kv_to_global_tensor(
+        key, value, recv_key, recv_value, group
+    )
+
+    query_grad, key_grad_tensor, value_grad_tensor, grad_sink = _flash_attn_bwd(
+        query,
+        key_tensor,
+        value_tensor,
+        output,
+        output_grad,
+        log_sum_exp,
+        flashmask_info=startend_row_indices,
+        learnable_sink=learnable_sink,
+        causal=causal,
+        softmax_scale=softmax_scale,
+        deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ],
+    )
+
+    key_grad, value_grad = _send_window_grad_back(
+        key_grad_tensor, value_grad_tensor, key, value, group, window_size
+    )
+
+    paddle.base.core.nvprof_nvtx_pop()
+
+    return query_grad, key_grad, value_grad, grad_sink
+
+
+class FlashMaskSwaP2P(PyLayer):
+    """PyLayer for FlashMask SWA context parallelism using one-hop P2P KV exchange."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        query,
+        key,
+        value,
+        startend_row_indices,
+        fixed_seed_offset=None,
+        dropout=0.0,
+        causal=False,
+        training=True,
+        learnable_sink=None,
+        softmax_scale=None,
+        group=None,
+        mode="contiguous_allgather",
+        window_size=None,
+    ):
+        """Forward pass for SWA P2P FlashMask attention."""
+        if dropout > 0.0:
+            raise NotImplementedError(
+                "Dropout is not supported in FlashMask context parallel yet."
+            )
+        if fixed_seed_offset is not None:
+            raise NotImplementedError("Fixed seed offset is not supported yet.")
+        window_size = 128 if window_size is None else window_size
+        if window_size <= 0:
+            raise ValueError(
+                f"SWA P2P window_size must be positive, got {window_size}"
+            )
+
+        output, log_sum_exp, recv_key, recv_value, startend_row_indices = (
+            cp_flashmask_swa_p2p_forward(
+                query,
+                key,
+                value,
+                startend_row_indices,
+                learnable_sink,
+                group,
+                causal,
+                training,
+                softmax_scale,
+                window_size,
+            )
+        )
+
+        ctx.save_for_backward(
+            query,
+            key,
+            value,
+            recv_key,
+            recv_value,
+            output,
+            log_sum_exp,
+            startend_row_indices,
+        )
+        ctx.learnable_sink = learnable_sink
+        ctx.softmax_scale = softmax_scale
+        ctx.sink_requires_grad = (
+            learnable_sink is not None and not learnable_sink.stop_gradient
+        )
+        ctx.group = group
+        ctx.causal = causal
+        ctx.window_size = window_size
+        return output
+
+    @staticmethod
+    def backward(ctx, output_grad):
+        """Backward pass for SWA P2P FlashMask attention."""
+        (
+            query,
+            key,
+            value,
+            recv_key,
+            recv_value,
+            output,
+            log_sum_exp,
+            startend_row_indices,
+        ) = ctx.saved_tensor()
+        query_grad, key_grad, value_grad, grad_sink = (
+            cp_flashmask_swa_p2p_backward(
+                query,
+                key,
+                value,
+                recv_key,
+                recv_value,
+                startend_row_indices,
+                output,
+                log_sum_exp,
+                output_grad,
+                ctx.learnable_sink,
+                ctx.group,
+                ctx.causal,
+                ctx.softmax_scale,
+                ctx.window_size,
+            )
+        )
         if ctx.sink_requires_grad:
             return query_grad, key_grad, value_grad, None, grad_sink
         return query_grad, key_grad, value_grad
@@ -1202,7 +1559,8 @@ def flashmask_attention_cp(
     training=True,
     learnable_sink=None,
     softmax_scale=None,
-    mode="allgather_kv",
+    mode="dualchunk_allgather",
+    window_size=None,
 ):
     """
     FlashMask attention with context parallelism - public API.
@@ -1217,7 +1575,7 @@ def flashmask_attention_cp(
         dropout (float, optional): Dropout probability. Defaults to 0.0
         causal (bool, optional): Whether to use causal attention. Defaults to False
         training (bool, optional): Whether in training mode. Defaults to True
-        mode (str, optional): Attention mode. Defaults to "allgather_kv"
+        mode (str, optional): Attention mode. Defaults to "dualchunk_allgather"
     Returns:
         paddle.Tensor: Attention output with shape [batch, seq_len/n, num_heads, head_dim]
     Example:
@@ -1237,18 +1595,41 @@ def flashmask_attention_cp(
         )
         ```
     """
+    if mode == "contiguous_swap2p":
+        hcg = fleet.get_hybrid_communicate_group()
+        cp_group = hcg.get_context_parallel_group()
 
-    output = FlashMaskContextParallel.apply(
-        query,
-        key,
-        value,
-        startend_row_indices,
-        fixed_seed_offset,
-        dropout,
-        causal,
-        training,
-        learnable_sink,
-        softmax_scale,
-        mode,
-    )
+        assert _flash_mask_available, (
+            "P2P SWA fast path requires flashmask installed. Please check."
+        )
+
+        return FlashMaskSwaP2P.apply(
+            query,
+            key,
+            value,
+            startend_row_indices,
+            fixed_seed_offset,
+            dropout,
+            causal,
+            training,
+            learnable_sink,
+            softmax_scale,
+            cp_group,
+            mode,
+            window_size,
+        )
+    else:
+        output = FlashMaskContextParallel.apply(
+            query,
+            key,
+            value,
+            startend_row_indices,
+            fixed_seed_offset,
+            dropout,
+            causal,
+            training,
+            learnable_sink,
+            softmax_scale,
+            mode,
+        )
     return output
