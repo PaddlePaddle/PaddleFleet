@@ -205,6 +205,7 @@ class TestFlashMaskContextParallelBackward(unittest.TestCase):
         mock_ctx.causal = False
         mock_ctx.fa_version = 2
         mock_ctx.softmax_scale = None
+        mock_ctx.mode = "dualchunk_allgather"
 
         grad = paddle.randn([2, 8, 4, 16])
 
@@ -215,13 +216,14 @@ class TestFlashMaskContextParallelBackward(unittest.TestCase):
             result = FlashMaskContextParallel.backward(mock_ctx, grad)
             mock_bwd.assert_called_once()
             call_args = mock_bwd.call_args[0]
-            # First args are tensors (query/key/value); fa_version is second-to-last,
-            # softmax_scale is last.
+            # First args are tensors (query/key/value); tail args are
+            # fa_version, softmax_scale, mode.
             self.assertIs(call_args[0], query)
             self.assertIs(call_args[1], key)
             self.assertIs(call_args[2], value)
-            self.assertEqual(call_args[-2], mock_ctx.fa_version)
-            self.assertEqual(call_args[-1], mock_ctx.softmax_scale)
+            self.assertEqual(call_args[-3], mock_ctx.fa_version)
+            self.assertEqual(call_args[-2], mock_ctx.softmax_scale)
+            self.assertEqual(call_args[-1], mock_ctx.mode)
 
 
 class TestFlashmaskAttentionCP(unittest.TestCase):
