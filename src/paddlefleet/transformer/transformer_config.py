@@ -1092,7 +1092,7 @@ class TransformerConfig(ModelParallelConfig):
             logger.info(
                 f"[init] use_truncated_normal_init=True: TruncNormal(0, sigma^2) clipped to "
                 f"[-{self.truncated_normal_init_factor}*sigma, {self.truncated_normal_init_factor}*sigma], "
-                f"sigma=0.5/sqrt(hidden_size={self.hidden_size})={sigma}"
+                f"sigma={sigma}"
             )
         elif self.magic_init:
             sigma = (
