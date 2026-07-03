@@ -1082,7 +1082,7 @@ class TransformerConfig(ModelParallelConfig):
                 )
             sigma = (
                 self.init_method_std
-                if self.hidden_size == 0
+                if self.init_method_std is not None
                 else 0.5 / math.sqrt(self.hidden_size)
             )
             self.init_method = truncated_init_method_normal(
