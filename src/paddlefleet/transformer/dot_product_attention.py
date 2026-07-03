@@ -34,7 +34,9 @@ from paddlefleet_ops.flash_mask_facade import (
     flashmask_attention,
 )
 
-from paddlefleet.context_parallel_utils import flashmask_attention_cp
+from paddlefleet.context_parallel_utils import (
+    flashmask_attention_cp,
+)
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -362,6 +364,8 @@ class DotProductAttention(FleetLayer):
                 "SWA doesn't support _attn_implementation is eager"
             )
 
+        use_mla = bool(getattr(self.config, "multi_latent_attention", False))
+
         if self.context_parallel_size > 1:
             assert packed_seq_params is None, (
                 "Packed sequence is not supported by context_parallel_size > 1 now."
@@ -369,11 +373,14 @@ class DotProductAttention(FleetLayer):
             assert not self.config.flashmask_use_varlen, (
                 "flashmask_use_varlen does not support context parallel now."
             )
-            attn_mask_startend_row_indices = (
-                self.expand_attn_mask_startend_row_indices_for_cp(
-                    attn_mask_startend_row_indices, key
+            if self.config.cp_balance_mode != "contiguous_a2a" or (
+                self.is_swa and use_mla
+            ):
+                attn_mask_startend_row_indices = (
+                    self.expand_attn_mask_startend_row_indices_for_cp(
+                        attn_mask_startend_row_indices, key
+                    )
                 )
-            )
             assert (
                 (
                     query.dtype == paddle.bfloat16
@@ -518,20 +525,24 @@ class DotProductAttention(FleetLayer):
                     if use_rr_flash_attention
                     else flashmask_attention_cp
                 )
-                use_mla = bool(
-                    getattr(self.config, "multi_latent_attention", False)
-                )
-
                 extra_kwargs["mode"] = self.config.cp_balance_mode
                 if self.config.cp_balance_mode == "contiguous_a2a":
+                    if use_rr_flash_attention:
+                        raise NotImplementedError(
+                            "cp_balance_mode contiguous_a2a does not support refined recompute"
+                        )
+                    if not self.config.multi_latent_attention:
+                        raise NotImplementedError(
+                            "cp_balance_mode contiguous_a2a only supports mla now"
+                        )
                     if self.is_swa and use_mla:
                         extra_kwargs["mode"] = "contiguous_swap2p"
                         extra_kwargs["window_size"] = self.sliding_window[0]
-
-                is_causal = (
-                    False  # only support non-causal for flashmask_attention_cp
-                )
-                assert attn_mask_startend_row_indices.shape[-1] == 2
+                        is_causal = False  # only support non-causal for flashmask_attention_cp
+                        assert attn_mask_startend_row_indices.shape[-1] == 2
+                else:
+                    is_causal = False  # only support non-causal for flashmask_attention_cp
+                    assert attn_mask_startend_row_indices.shape[-1] == 2
             elif use_rr_flash_attention:
                 flashmask_attention_func = self.rr_flashmask_attention_func
             elif self.config.flashmask_use_varlen:
