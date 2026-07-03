@@ -290,29 +290,41 @@ class TestUlyssesAlltoAll(unittest.TestCase):
         )
         self.assertEqual(result.shape, [2, 8, 2, 8])
 
-    @patch("paddlefleet.context_parallel_utils._ulysses_single_all_to_all")
-    def test_backward_swaps_scatter_gather(self, mock_a2a):
-        """UlyssesAlltoAll.backward swaps scatter_idx and gather_idx."""
+    @patch("paddlefleet.context_parallel_utils._ulysses_fused_supported")
+    @patch(
+        "paddlefleet.context_parallel_utils._ulysses_single_all_to_all_fused"
+    )
+    def test_forward_uses_fused_path(self, mock_a2a, mock_supported):
+        """Forward on the production path (batch_dim_idx=0, 4-D) uses the fused
+        kernel with scatter_idx=2."""
         from paddlefleet.context_parallel_utils import UlyssesAlltoAll
 
-        mock_a2a.return_value = paddle.randn([2, 4, 4, 8])
+        mock_supported.return_value = True
+        mock_a2a.return_value = paddle.randn([2, 8, 2, 8])
         group = MagicMock()
 
-        # Simulate forward to populate ctx
         inp = paddle.randn([2, 4, 4, 8])
         inp.stop_gradient = False
-        result = UlyssesAlltoAll.apply(
+        UlyssesAlltoAll.apply(
             inp, scatter_idx=2, gather_idx=1, batch_dim_idx=0, group=group
         )
 
-        # Check that _ulysses_single_all_to_all was called with scatter_idx=2
+        # Fused signature: _ulysses_single_all_to_all_fused(input, scatter_idx, group)
         call_args = mock_a2a.call_args_list[0]
-        self.assertEqual(call_args[1].get("scatter_idx", call_args[0][1]), 2)
+        self.assertEqual(call_args[0][1], 2)
 
-    @patch("paddlefleet.context_parallel_utils._ulysses_single_all_to_all")
-    def test_backward_is_called_on_grad(self, mock_a2a):
-        """UlyssesAlltoAll.backward should call _ulysses_single_all_to_all with swapped indices."""
+    @patch("paddlefleet.context_parallel_utils._ulysses_fused_supported")
+    @patch(
+        "paddlefleet.context_parallel_utils._ulysses_single_all_to_all_fused"
+    )
+    def test_backward_uses_fused_path_with_swapped_index(
+        self, mock_a2a, mock_supported
+    ):
+        """Backward on the production path (batch_dim_idx=0, 4-D) calls the fused
+        a2a with the swapped (gather) index."""
         from paddlefleet.context_parallel_utils import UlyssesAlltoAll
+
+        mock_supported.return_value = True
 
         # Call backward directly via the static method
         mock_ctx = MagicMock()
@@ -324,12 +336,44 @@ class TestUlyssesAlltoAll(unittest.TestCase):
         grad_output = paddle.randn([2, 8, 2, 8])
         mock_a2a.return_value = paddle.randn([2, 4, 4, 8])
 
-        result = UlyssesAlltoAll.backward(mock_ctx, grad_output)
+        UlyssesAlltoAll.backward(mock_ctx, grad_output)
 
-        # Backward should swap: scatter_idx=gather_idx=1, gather_idx=scatter_idx=2
+        # The inverse a2a swaps scatter/gather; the fused path passes the
+        # backward scatter index (= ctx.gather_idx) as the fused scatter_idx.
         mock_a2a.assert_called_once()
         call_args = mock_a2a.call_args
-        # positional args: (grad_output, gather_idx, scatter_idx, batch_dim_idx, group)
+        # positional args: (grad_output, gather_idx, group)
+        self.assertIs(call_args[0][0], grad_output)
+        self.assertEqual(
+            call_args[0][1], 1
+        )  # swapped scatter index = gather_idx
+        self.assertIs(call_args[0][2], mock_ctx.group)
+
+    @patch("paddlefleet.context_parallel_utils._ulysses_single_all_to_all")
+    @patch("paddlefleet.context_parallel_utils._ulysses_fused_supported")
+    def test_backward_falls_back_swaps_scatter_gather(
+        self, mock_supported, mock_a2a
+    ):
+        """When the fused path is unsupported, backward falls back to the
+        reference a2a with swapped (scatter, gather) indices."""
+        from paddlefleet.context_parallel_utils import UlyssesAlltoAll
+
+        mock_supported.return_value = False
+        mock_a2a.return_value = paddle.randn([2, 4, 4, 8])
+
+        mock_ctx = MagicMock()
+        mock_ctx.scatter_idx = 2
+        mock_ctx.gather_idx = 1
+        mock_ctx.batch_dim_idx = 0
+        mock_ctx.group = MagicMock()
+
+        grad_output = paddle.randn([2, 8, 2, 8])
+        UlyssesAlltoAll.backward(mock_ctx, grad_output)
+
+        # Reference signature: (grad_output, gather_idx, scatter_idx,
+        # batch_dim_idx, group) -- scatter and gather are swapped.
+        mock_a2a.assert_called_once()
+        call_args = mock_a2a.call_args
         self.assertIs(call_args[0][0], grad_output)
         self.assertEqual(call_args[0][1], 1)  # was gather_idx=1
         self.assertEqual(call_args[0][2], 2)  # was scatter_idx=2
