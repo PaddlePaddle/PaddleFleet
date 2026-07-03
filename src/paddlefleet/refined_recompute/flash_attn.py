@@ -138,6 +138,7 @@ class FlashAttnFunctor(PyLayer):
         """
         fa_version = _get_fa_version(q.shape[-1])
         ctx.fa_version = fa_version
+        ctx.softmax_scale = hold_tensors.get("softmax_scale")
 
         # Save the necessary tensors that will be needed to compute the gradient.
         if fa_version == 2:
@@ -228,7 +229,9 @@ class FlashAttnFunctor(PyLayer):
                 result_attention,
                 softmax_lse,
                 grad,
-                q.shape[-1] ** (-0.5),  # default softmax_scale
+                q.shape[-1] ** (-0.5)
+                if ctx.softmax_scale is None
+                else ctx.softmax_scale,  # softmax_scale
                 causal,
                 -1,  # window_size_left
                 -1,  # window_size_right
@@ -246,6 +249,7 @@ class FlashAttnFunctor(PyLayer):
                 grad,
                 softmax_lse,
                 flashmask_info,
+                softmax_scale=ctx.softmax_scale,
                 causal=causal,
                 deterministic=bool(
                     paddle.get_flags(["FLAGS_cudnn_deterministic"])[
@@ -283,6 +287,7 @@ class RefinedRcomputeFlashAttention:
         causal=True,
         return_softmax=False,
         training=True,
+        softmax_scale=None,
     ):
         """
         The main entry point for the forward pass.
@@ -300,6 +305,7 @@ class RefinedRcomputeFlashAttention:
                 causal=causal,
                 return_softmax=return_softmax,
                 training=training,
+                softmax_scale=softmax_scale,
             )
         else:
             # This is the second forward pass, executed during the backward pass of recompute.
@@ -322,6 +328,7 @@ class RefinedRcomputeFlashAttention:
         causal=True,
         return_softmax=False,
         training=True,
+        softmax_scale=None,
     ):
         """
         The first forward pass. It runs the actual FlashAttention computation
@@ -334,6 +341,10 @@ class RefinedRcomputeFlashAttention:
 
         fa_version = _get_fa_version(query_states.shape[-1])
         if fa_version == 2:
+            if softmax_scale is not None:
+                raise NotImplementedError(
+                    "fa_version==2 does not support setting softmax_scale"
+                )
             (result_attention, result_softmax, softmax_lse, seed_offset) = (
                 _C_ops.flash_attn(
                     query_states,
@@ -366,7 +377,9 @@ class RefinedRcomputeFlashAttention:
                 None,
                 None,
                 None,
-                query_states.shape[-1] ** (-0.5),
+                query_states.shape[-1] ** (-0.5)
+                if softmax_scale is None
+                else softmax_scale,
                 causal,
                 -1,
                 -1,
@@ -380,6 +393,7 @@ class RefinedRcomputeFlashAttention:
                 "result_attention": result_attention,
                 "softmax_lse": softmax_lse,
                 "causal": causal,
+                "softmax_scale": softmax_scale,
             }
             result_softmax = None  # FA v3 does not return softmax.
         elif fa_version == 4:
@@ -390,12 +404,14 @@ class RefinedRcomputeFlashAttention:
                 causal=causal,
                 return_lse=True,
                 startend_row_indices=None,
+                softmax_scale=softmax_scale,
                 pack_gqa=False,
             )
             hold_tensors = {
                 "result_attention": result_attention,
                 "softmax_lse": softmax_lse,
                 "causal": causal,
+                "softmax_scale": softmax_scale,
             }
             result_softmax = None
         else:
@@ -447,6 +463,7 @@ class FlashMaskAttnFunctor(PyLayer):
         """
         fa_version = _get_fa_version(q.shape[-1])
         ctx.fa_version = fa_version
+        ctx.softmax_scale = hold_tensors.get("softmax_scale")
         ctx.sink_requires_grad = (
             learnable_sink is not None and not learnable_sink.stop_gradient
         )
@@ -546,6 +563,13 @@ class FlashMaskAttnFunctor(PyLayer):
             ) = ctx.saved_tensor()
 
             sig_params = inspect.signature(flashmask_attention).parameters
+
+            softmax_scale = (
+                q.shape[-1] ** (-0.5)
+                if ctx.softmax_scale is None
+                else ctx.softmax_scale,
+            )
+
             if "group" in sig_params:
                 q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
                     q.detach(),
@@ -556,7 +580,7 @@ class FlashMaskAttnFunctor(PyLayer):
                     startend_row_indices,
                     None,  # block_mask
                     grad,
-                    q.shape[-1] ** (-0.5),
+                    softmax_scale,
                     causal,
                     0,  # rank
                     1,  # nranks
@@ -571,7 +595,7 @@ class FlashMaskAttnFunctor(PyLayer):
                     startend_row_indices,
                     None,  # block_mask
                     grad,
-                    q.shape[-1] ** (-0.5),
+                    softmax_scale,
                     causal,
                 )
             else:
@@ -583,7 +607,7 @@ class FlashMaskAttnFunctor(PyLayer):
                     softmax_lse,
                     startend_row_indices,
                     grad,
-                    q.shape[-1] ** (-0.5),
+                    softmax_scale,
                     causal,
                 )
         elif fa_version == 4:
@@ -613,6 +637,7 @@ class FlashMaskAttnFunctor(PyLayer):
                 softmax_lse,
                 flashmask_info,
                 learnable_sink=learnable_sink,
+                softmax_scale=ctx.softmax_scale,
                 causal=causal,
                 deterministic=bool(
                     paddle.get_flags(["FLAGS_cudnn_deterministic"])[
@@ -661,6 +686,7 @@ class RefinedRcomputeFlashMaskAttention:
         return_softmax=False,
         training=True,
         learnable_sink=None,
+        softmax_scale=None,
     ):
         """
         The main entry point for the forward pass.
@@ -684,6 +710,7 @@ class RefinedRcomputeFlashMaskAttention:
                 return_softmax=return_softmax,
                 training=training,
                 learnable_sink=learnable_sink,
+                softmax_scale=softmax_scale,
             )
         else:
             # This is the second forward pass, executed during the backward pass of recompute.
@@ -712,6 +739,7 @@ class RefinedRcomputeFlashMaskAttention:
         return_softmax=False,
         training=True,
         learnable_sink=None,
+        softmax_scale=None,
     ):
         """
         The first forward pass for masked attention. It runs the actual computation,
@@ -722,6 +750,10 @@ class RefinedRcomputeFlashMaskAttention:
         )
         fa_version = _get_fa_version(query_states.shape[-1])
         if fa_version == 2:
+            if softmax_scale is not None:
+                raise NotImplementedError(
+                    "fa_version==2 does not support setting softmax_scale"
+                )
             (result_attention, result_softmax, softmax_lse, seed_offset) = (
                 _C_ops.flashmask_attention(
                     query_states,
@@ -746,6 +778,11 @@ class RefinedRcomputeFlashMaskAttention:
             }
         elif fa_version == 3:
             sig_params = inspect.signature(flashmask_attention).parameters
+            scale = (
+                query_states.shape[-1] ** (-0.5)
+                if softmax_scale is None
+                else softmax_scale
+            )
             if "group" in sig_params:
                 (result_attention, softmax_lse) = _C_ops.flashmask_attention_v2(
                     query_states,
@@ -754,7 +791,7 @@ class RefinedRcomputeFlashMaskAttention:
                     startend_row_indices,
                     None,  # block_mask
                     None,  # nvshmem unique id
-                    query_states.shape[-1] ** (-0.5),
+                    scale,
                     causal,
                     0,  # rank
                     1,  # nranks
@@ -766,7 +803,7 @@ class RefinedRcomputeFlashMaskAttention:
                     value_states,
                     startend_row_indices,
                     None,  # block_mask
-                    query_states.shape[-1] ** (-0.5),
+                    scale,
                     causal,
                 )
             else:
@@ -775,13 +812,14 @@ class RefinedRcomputeFlashMaskAttention:
                     key_states,
                     value_states,
                     startend_row_indices,
-                    query_states.shape[-1] ** (-0.5),
+                    scale,
                     causal,
                 )
             hold_tensors = {
                 "result_attention": result_attention,
                 "softmax_lse": softmax_lse,
                 "causal": causal,
+                "softmax_scale": softmax_scale,
             }
         elif fa_version == 4:
             (result_attention, softmax_lse) = _flash_attn_fwd(
@@ -792,6 +830,7 @@ class RefinedRcomputeFlashMaskAttention:
                 return_lse=True,
                 startend_row_indices=startend_row_indices,
                 learnable_sink=learnable_sink,
+                softmax_scale=softmax_scale,
                 pack_gqa=False,
             )
             hold_tensors = {
@@ -799,6 +838,7 @@ class RefinedRcomputeFlashMaskAttention:
                 "softmax_lse": softmax_lse,
                 "causal": causal,
                 "learnable_sink": learnable_sink,
+                "softmax_scale": softmax_scale,
             }
         else:
             raise ValueError(f"Invalid flash attention version: {fa_version}")
@@ -861,6 +901,7 @@ class FlashMaskAttnCpFunctor(PyLayer):
         causal = hold_tensors["causal"]
 
         ctx.fa_version = fa_version
+        ctx.softmax_scale = hold_tensors.get("softmax_scale")
         ctx.sink_requires_grad = (
             learnable_sink is not None and not learnable_sink.stop_gradient
         )
@@ -912,7 +953,7 @@ class FlashMaskAttnCpFunctor(PyLayer):
                 group,
                 causal,
                 fa_version,
-                None,  # softmax_scale
+                ctx.softmax_scale,  # softmax_scale
             )
         )
 
@@ -954,6 +995,7 @@ class RefinedRcomputeFlashMaskCpAttention:
         training=True,
         mode="allgather_kv",
         learnable_sink=None,
+        softmax_scale=None,
     ):
         """
         The main entry point for the forward pass.
@@ -980,6 +1022,7 @@ class RefinedRcomputeFlashMaskCpAttention:
                 training=training,
                 mode=mode,
                 learnable_sink=learnable_sink,
+                softmax_scale=softmax_scale,
             )
         else:
             # This is the second forward pass, executed during the backward pass of recompute.
@@ -1008,6 +1051,7 @@ class RefinedRcomputeFlashMaskCpAttention:
         training=True,
         mode="allgather_kv",
         learnable_sink=None,
+        softmax_scale=None,
     ):
         """
         The first forward pass for masked attention. It runs the actual computation,
@@ -1049,7 +1093,7 @@ class RefinedRcomputeFlashMaskCpAttention:
                 group,
                 causal,
                 training,
-                None,  # softmax_scale
+                softmax_scale,
             )
         )
 
@@ -1061,6 +1105,7 @@ class RefinedRcomputeFlashMaskCpAttention:
             "group": group,
             "causal": causal,
             "learnable_sink": learnable_sink,
+            "softmax_scale": softmax_scale,
         }
 
         self._hold_tensors_queue.put(hold_tensors)
