@@ -27,6 +27,7 @@ import paddle
 from paddlefleet_ops import CUDNN_FRONTEND_HINT, is_cudnn_frontend_available
 
 
+
 def _require_cudnn_frontend():
     if not is_cudnn_frontend_available():
         raise ImportError(CUDNN_FRONTEND_HINT)
@@ -164,11 +165,15 @@ def _cudnn_indexer_topk_fwd_docmask_thd(
     sq = int(index_q.shape[1])
     if batch != 1:
         return None
+    if int(startend_row_indices.reshape([-1]).shape[0]) != sq:
+        return None
 
     doc_lens = _doc_lens_to_list(doc_lens)
     if doc_lens is None:
         doc_lens = _doc_lens_from_startend(startend_row_indices, sq)
     if not doc_lens:
+        return None
+    if sum(int(length) for length in doc_lens) > sq:
         return None
 
     # The cuDNN ratio-causal forward requires S_q <= S_k * ratio for each THD
@@ -197,19 +202,6 @@ def _cudnn_indexer_topk_fwd_docmask_thd(
         )
 
     _require_cudnn_frontend()
-    try:
-        import contextlib
-
-        from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_forward import (
-            _interface as _indexer_fwd_interface,
-        )
-
-        if not hasattr(_indexer_fwd_interface.torch.cuda.nvtx, "range"):
-            _indexer_fwd_interface.torch.cuda.nvtx.range = (
-                lambda *_args, **_kwargs: contextlib.nullcontext()
-            )
-    except Exception:
-        pass
     from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_forward.api import (
         indexer_forward_wrapper,
     )
@@ -356,12 +348,21 @@ def cudnn_indexer_forward(
         indexer_forward_wrapper,
     )
 
+    q_causal_offsets = None
+    if seq_offset != 0:
+        q_causal_offsets = paddle.full(
+            [int(index_q.shape[0])],
+            seq_offset,
+            dtype="int32",
+        )
+
     result = indexer_forward_wrapper(
         index_q.contiguous(),
         index_k_comp.unsqueeze(2).contiguous(),
         weights.contiguous(),
         ratio=int(ratio),
         sm_scale=float(sm_scale),
+        q_causal_offsets=q_causal_offsets,
     )
     return result["scores"]
 
@@ -491,6 +492,34 @@ def cudnn_indexer_topk_fwd(
         topk_length:  [B, S] int32, per-row valid count.
         topk_scores:  optional [B, S, topk_effective] fp32 selected scores.
     """
+    return _cudnn_indexer_topk_fwd_impl(
+        index_q,
+        index_k_comp,
+        weights,
+        ratio=ratio,
+        topk_effective=topk_effective,
+        indexer_softmax_scale=indexer_softmax_scale,
+        valid_range=valid_range,
+        startend_row_indices=startend_row_indices,
+        doc_lens=doc_lens,
+        seq_offset=seq_offset,
+        return_topk_scores=return_topk_scores,
+    )
+
+
+def _cudnn_indexer_topk_fwd_impl(
+    index_q,
+    index_k_comp,
+    weights,
+    ratio=4,
+    topk_effective=64,
+    indexer_softmax_scale=1.0,
+    valid_range=None,
+    startend_row_indices=None,
+    doc_lens=None,
+    seq_offset=0,
+    return_topk_scores=False,
+):
     _validate_indexer_inputs(index_q, index_k_comp, weights)
     if int(topk_effective) <= 0:
         raise ValueError(

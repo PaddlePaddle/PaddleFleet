@@ -73,6 +73,35 @@ class TestCudnnDocmaskMetadataReuse(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    def test_thd_fast_path_rejects_mismatched_global_startend(self):
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+            _cudnn_indexer_topk_fwd_docmask_thd,
+        )
+
+        ratio, sq_local, sq_global, h, d = 4, 64, 128, 32, 128
+        index_q = paddle.zeros([1, sq_local, h, d], dtype="bfloat16")
+        index_k_comp = paddle.zeros(
+            [1, sq_global // ratio, d], dtype="bfloat16"
+        )
+        weights = paddle.zeros([1, sq_local, h], dtype="bfloat16")
+        valid_range = paddle.zeros([1, sq_local, 2], dtype="int32")
+        startend_row_indices = paddle.full(
+            [1, 1, sq_global, 1], sq_global, dtype="int32"
+        )
+
+        result = _cudnn_indexer_topk_fwd_docmask_thd(
+            index_q,
+            index_k_comp,
+            weights,
+            ratio=ratio,
+            topk_effective=8,
+            sm_scale=1.0,
+            valid_range=valid_range,
+            startend_row_indices=startend_row_indices,
+            doc_lens=[sq_global],
+        )
+        self.assertIsNone(result)
+
 
 class TestTopkLocalGlobal(unittest.TestCase):
     """topk_local_to_global / topk_global_to_local."""
@@ -372,7 +401,7 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
                 paddle.full([23], 23, dtype="int32"),
                 paddle.full([9], 32, dtype="int32"),
             ]
-        ).reshape([1, sq, 1])
+        ).reshape([1, 1, sq, 1])
         valid_range = get_valid_range(ratio, 1, sq, startend)
         scores = paddle.randn([1, sq, sk]).astype("float32")
 
@@ -462,7 +491,7 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
         for length in doc_lens:
             offset += length
             ends.extend([offset] * length)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, sq, 1])
+        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
         valid_range = get_valid_range(ratio, 1, sq, startend)
         index_q = paddle.randn([1, sq, h, d]).astype("bfloat16")
         index_k = paddle.randn([1, sk, d]).astype("bfloat16")
@@ -520,7 +549,7 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
         for length in doc_lens:
             offset += length
             ends.extend([offset] * length)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, sq, 1])
+        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
         valid_range = get_valid_range(ratio, 1, sq, startend)
         index_q = paddle.randn([1, sq, h, d]).astype("bfloat16")
         index_k = paddle.randn([1, sk, d]).astype("bfloat16")
@@ -578,7 +607,7 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
         for length in doc_lens:
             offset += length
             ends.extend([offset] * length)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, sq, 1])
+        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
         valid_range = get_valid_range(ratio, 1, sq, startend)
         index_q = paddle.randn([1, sq, h, d]).astype("bfloat16")
         index_k = paddle.randn([1, sk, d]).astype("bfloat16")
@@ -813,7 +842,7 @@ class TestMapCompressedTopkToKvFullDocmask(unittest.TestCase):
         for dl in doc_lens:
             acc += dl
             ends.extend([acc] * dl)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, sq, 1])
+        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
         valid_range = get_valid_range(ratio, 1, sq, startend)  # [1, sq, 2]
 
         scores = paddle.randn([1, sq, sk]).astype("float32")
@@ -870,7 +899,7 @@ class TestMapCompressedTopkToKvFullDocmask(unittest.TestCase):
         for dl in doc_lens:
             acc += dl
             ends.extend([acc] * dl)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, sq, 1])
+        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
         valid_range = get_valid_range(ratio, 1, sq, startend)
 
         scores = paddle.randn([1, sq, sk]).astype("float32")
@@ -923,7 +952,7 @@ def _docmask_topk_idxs_for_attn(doc_lens, ratio, window_size, topk, seed):
     for dl in doc_lens:
         acc += dl
         ends.extend([acc] * dl)
-    startend = paddle.to_tensor(ends, dtype="int32").reshape([1, sq, 1])
+    startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
 
     valid_range = get_valid_range(ratio, 1, sq, startend)  # [1, sq, 2]
     scores = paddle.randn([1, sq, n_compressed]).astype("float32")
@@ -1268,7 +1297,7 @@ class TestCudnnVsTilelangIndexerBwdDocmask(unittest.TestCase):
         for dl in doc_lens:
             acc += dl
             ends.extend([acc] * dl)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, sq, 1])
+        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
         valid_range = get_valid_range(ratio, 1, sq, startend)
 
         index_q = paddle.randn([1, sq, h, d]).astype("bfloat16")

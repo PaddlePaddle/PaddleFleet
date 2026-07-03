@@ -322,10 +322,14 @@ class CSADocMaskMetadata:
         """
         if startend_row_indices is None:
             return None
-        ratio, batch_size, seqlen, n_compressed = _normalize_csa_docmask_args(
-            ratio, batch_size, seqlen, n_compressed
+        ratio, batch_size, seqlen, n_compressed = (
+            _normalize_csa_docmask_args(
+                ratio, batch_size, seqlen, n_compressed
+            )
         )
-        _validate_csa_docmask_shape(startend_row_indices, batch_size, seqlen)
+        _validate_csa_docmask_shape(
+            startend_row_indices, batch_size, seqlen
+        )
 
         (
             doc_start_per_pos,
@@ -971,7 +975,9 @@ def _compute_fused_csa_indexer_loss_forward(
                 if docmask_meta is not None
                 else startend_row_indices
             ),
-            doc_lens=docmask_meta.doc_lens_list if docmask_meta is not None else None,
+            doc_lens=docmask_meta.doc_lens_list
+            if docmask_meta is not None
+            else None,
             seq_offset=int(seq_offset),
             return_topk_scores=True,
         )
@@ -1847,7 +1853,9 @@ class CompressedSparseAttention(FleetLayer):
                 indexer_backend=backend,
                 loss_mask=loss_mask,
                 global_valid_count=global_valid_count,
-                startend_row_indices=docmask_meta.startend_row_indices if docmask_meta is not None else None,
+                startend_row_indices=docmask_meta.startend_row_indices
+                if docmask_meta is not None
+                else None,
                 docmask_meta=docmask_meta,
             )
             loss_state = (
@@ -1901,8 +1909,12 @@ class CompressedSparseAttention(FleetLayer):
                         ratio=self.compress_ratio,
                         topk_effective=attn_topk_effective,
                         valid_range=valid_range,
-                        startend_row_indices=docmask_meta.startend_row_indices if docmask_meta is not None else None,
-                        doc_lens=docmask_meta.doc_lens_list if docmask_meta is not None else None,
+                        startend_row_indices=docmask_meta.startend_row_indices
+                        if docmask_meta is not None
+                        else None,
+                        doc_lens=docmask_meta.doc_lens_list
+                        if docmask_meta is not None
+                        else None,
                     )
                 topk_indices_compressed = cu_topk_indices
 
@@ -2361,7 +2373,9 @@ class CompressedSparseAttention(FleetLayer):
                         seq_offset=position_offset,
                         loss_mask=loss_mask,
                         global_valid_count=global_valid_count,
-                        startend_row_indices=docmask_meta.startend_row_indices if docmask_meta is not None else None,
+                        startend_row_indices=docmask_meta.startend_row_indices
+                        if docmask_meta is not None
+                        else None,
                         docmask_meta=docmask_meta,
                         indexer_backend=indexer_backend,
                     )
@@ -2501,8 +2515,12 @@ class CompressedSparseAttention(FleetLayer):
                                 ratio=self.compress_ratio,
                                 topk_effective=attn_topk_effective,
                                 valid_range=valid_range,
-                                startend_row_indices=docmask_meta.startend_row_indices if docmask_meta is not None else None,
-                                doc_lens=docmask_meta.doc_lens_list if docmask_meta is not None else None,
+                                startend_row_indices=docmask_meta.startend_row_indices
+                                if docmask_meta is not None
+                                else None,
+                                doc_lens=docmask_meta.doc_lens_list
+                                if docmask_meta is not None
+                                else None,
                                 seq_offset=position_offset,
                             )
                         else:

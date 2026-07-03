@@ -1145,7 +1145,6 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
         self.assertGreaterEqual(mocked.call_count, 1)
         self.assertEqual(mocked.call_args_list[0].args[0], 1)
 
-
     def test_cudnn_indexer_document_mask_matches_separate_documents(self):
         """Main-path integration: csa_indexer_backend='cudnn' packed-vs-separate.
 
@@ -1255,6 +1254,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             ).item(),
             "cuDNN-indexer docmask: packed doc1 != doc1 alone",
         )
+
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):
     def test_basic_construction(self):
