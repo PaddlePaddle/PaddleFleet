@@ -89,6 +89,7 @@ class TestContextParallelScatterOp(unittest.TestCase):
         mock_ctx = mock.MagicMock()
         mock_ctx.axis = 0
         mock_ctx.group = mock.MagicMock()
+        mock_ctx.mode = "dualchunk_allgather"
 
         grad = paddle.randn([4, 16])
 
@@ -156,6 +157,7 @@ class TestContextParallelGatherOp(unittest.TestCase):
         mock_ctx = mock.MagicMock()
         mock_ctx.axis = 1
         mock_ctx.group = mock.MagicMock()
+        mock_ctx.mode = "dualchunk_allgather"
 
         grad = paddle.randn([8, 16])
 
@@ -229,6 +231,7 @@ class TestContextParallelAllGatherOp(unittest.TestCase):
         mock_ctx = mock.MagicMock()
         mock_ctx.axis = 1
         mock_ctx.group = mock.MagicMock()
+        mock_ctx.mode = "dualchunk_allgather"
 
         grad = paddle.randn([8, 16])
 

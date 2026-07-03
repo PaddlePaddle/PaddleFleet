@@ -251,6 +251,12 @@ class TransformerConfig(ModelParallelConfig):
     swa_rope_theta: float | None = None
     """The base period of the RoPE embeddings for sliding window attention layers. Defaults to rope_theta."""
 
+    swa_qk_nope_head_dim: int = None
+    """Dimension of the nope part of QK heads for SWA layers. If None, falls back to qk_nope_head_dim."""
+
+    swa_qk_rope_head_dim: int = None
+    """Dimension of the rope part of QK heads for SWA layers. If None, falls back to qk_rope_head_dim."""
+
     head_wise_swa_ratio: float = 0.0
     """Ratio of KV heads that use sliding window attention within an SWA layer.
     0.0 means all heads use SWA; values between 0 and 1 create a mix where
@@ -324,6 +330,12 @@ class TransformerConfig(ModelParallelConfig):
     attention output before the output projection. The gate is produced alongside the query
     from the fused QKV projection (doubling the query projection size). This allows the model
     to dynamically control the information flow from attention. See Qwen3.5 for reference."""
+
+    gated_attn_use_q_lora: bool = False
+    """If True, the gated attention gate uses the q_a_proj output (q_compressed, post
+    q_a_layernorm, dim = q_lora_rank) as the gate input instead of hidden_states. This is a
+    low-rank gate input for MLA networks that also reduces the gate projection parameter count.
+    Requires q_lora_rank is not None. Only applies when gated_attention is True."""
 
     ####################
     # block attention residuals
@@ -546,6 +558,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
 
+    moe_split_feature_routing: bool = False
+    """Enable multi-view (split-feature) MoE routing. When True, the router
+    scores each expert with the sum of two independent views: the existing
+    ``self.weight`` gate plus a new ``self.weight_1`` projection, i.e.
+    ``score_func(logits_0) + score_func(logits_1)`` instead of a single gate
+    projection. The expert FFN compute path is unchanged. Disabled by default;
+    has no effect on hash-routing layers (moe_n_hash_layers), which keep using
+    the original single gate."""
+
     moe_n_hash_layers: int = 0
     """Number of leading transformer layers that use hash-based MoE routing.
     Layers with layer_number < moe_n_hash_layers (0-indexed) use a pre-computed
@@ -588,6 +609,7 @@ class TransformerConfig(ModelParallelConfig):
     """Context parallel scatter/gather layout mode.
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
+    "contiguous_a2a".
     """
 
     ####################
@@ -1416,3 +1438,13 @@ class TransformerConfig(ModelParallelConfig):
                     "lm_head modulation will take effect."
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
+
+        if self.cp_balance_mode not in {
+            "dualchunk_allgather",
+            "contiguous_allgather",
+            "contiguous_a2a",
+        }:
+            raise ValueError(
+                f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
+                "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
+            )
