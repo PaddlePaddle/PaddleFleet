@@ -907,8 +907,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_truncated_normal_init: bool = False
     """Use truncated normal init N(0, sigma^2) clipped to
-    [-truncated_normal_init_factor*sigma, truncated_normal_init_factor*sigma] with
-    sigma=0.5/sqrt(hidden_size). Independent switch; takes precedence over
+    [-truncated_normal_init_factor*sigma, truncated_normal_init_factor*sigma].
+    Sigma prefers init_method_std, falling back to 0.5/sqrt(hidden_size)
+    when init_method_std is None. Independent switch; takes precedence over
     magic_init when enabled."""
 
     truncated_normal_init_factor: float = 3.0
