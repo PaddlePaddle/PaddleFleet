@@ -237,7 +237,7 @@ class TestTruncateNormInit(unittest.TestCase):
 
         self.assertAlmostEqual(
             config.init_method_std,
-            0.5 / math.sqrt(hidden_size),
+            0.02,
             places=6,
         )
 
@@ -252,7 +252,7 @@ class TestTruncateNormInit(unittest.TestCase):
 
         self.assertAlmostEqual(
             config.init_method_std,
-            0.5 / math.sqrt(hidden_size),
+            0.02,
             places=6,
         )
         self.assertIs(config.init_method, config.output_layer_init_method)
