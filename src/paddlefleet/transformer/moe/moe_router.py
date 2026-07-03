@@ -523,9 +523,7 @@ class StandardMoERouter(nn.Layer):
                         axis=-1, keepdim=True
                     )
                 else:
-                    token_count_per_line = origin_valid_mask.sum(
-                        axis=-1, keepdim=True
-                    )
+                    token_count_per_line = origin_valid_mask.sum()
             else:
                 token_count_per_line = origin_valid_mask.sum(
                     axis=-1, keepdim=True
