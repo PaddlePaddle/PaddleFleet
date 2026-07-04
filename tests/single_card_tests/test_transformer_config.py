@@ -212,16 +212,15 @@ class TestMagicInit(unittest.TestCase):
         self.assertAlmostEqual(config.init_method_std, expected_sigma, places=6)
         self.assertIsNotNone(config.init_method)
 
-    def test_magic_init_true_zero_hidden_size_falls_back_to_init_std(self):
-        config = TransformerConfig(
-            num_hidden_layers=12,
-            hidden_size=0,
-            magic_init=True,
-        )
-
-        self.assertFalse(config.use_truncated_normal_init)
-        self.assertEqual(config.init_method_std, 0.02)
-        self.assertIsNotNone(config.init_method)
+    def test_magic_init_true_zero_hidden_size_raises(self):
+        with self.assertRaisesRegex(
+            ValueError, "hidden_size must be non-zero when magic_init is True."
+        ):
+            TransformerConfig(
+                num_hidden_layers=12,
+                hidden_size=0,
+                magic_init=True,
+            )
 
 
 class TestTruncateNormInit(unittest.TestCase):
