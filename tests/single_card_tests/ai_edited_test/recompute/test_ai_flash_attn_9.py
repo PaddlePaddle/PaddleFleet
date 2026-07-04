@@ -278,7 +278,7 @@ class TestFlashMaskAttnCpFunctorForwardAndBackward(unittest.TestCase):
             "fa_version": 2,
         }
 
-        result = FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
+        result = FlashMaskAttnCpFunctor.apply(q, k, v, None, hold_tensors)
         self.assertTrue(result is result_attn)
 
 
