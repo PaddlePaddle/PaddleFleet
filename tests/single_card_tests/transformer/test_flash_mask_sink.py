@@ -22,6 +22,8 @@ Covers PR "Support FA4 sink." (ab8c450) on the non-CP paths:
      startend_row_indices; lse reshape only valid for nheads==1).
   3. ``DotProductAttention`` softmax_offset construction (vanilla/off-by-one/
      learnable + sink-bias promotion) and the fwd/bwd sink branch.
+  4. Refined-recompute (rr) FlashMask attention with learnable_sink, driven
+     through ``recompute`` to force both forward passes, vs the non-rr path.
 """
 
 import math
@@ -554,54 +556,165 @@ class TestDotProductAttentionSinkForward(unittest.TestCase):
 
 
 @unittest.skipUnless(_SINK_AVAILABLE, _SKIP_REASON)
-class TestDotProductAttentionRefinedRecompute(unittest.TestCase):
-    """Refined-recompute (rr) non-CP path does NOT support learnable_sink.
+class TestRefinedRecomputeFlashMaskSink(unittest.TestCase):
+    """Refined-recompute (rr) non-CP path with learnable_sink.
 
-    dot_product_attention.forward unconditionally passes
-    learnable_sink=self.softmax_offset to flashmask_attention_func. When the
-    sink is active (softmax_type != "vanilla") and the rr functor is selected,
-    the rr entry point must reject it with NotImplementedError rather than
-    silently dropping the sink. This asserts that contract end-to-end against
-    the real rr functor (no stub).
+    The rr FlashMask attention keys off ``framework._dygraph_tracer()._has_grad``
+    to pick between two forward passes: the first (``_has_grad`` False) runs the
+    real cute kernel under no_grad and stashes tensors; the second (``_has_grad``
+    True) rebuilds the graph via ``FlashMaskAttnFunctor``, whose custom backward
+    computes the grads. We drive both passes manually so the test exercises the
+    rr functor's fwd/bwd directly, and compare against the non-rr cute
+    ``flashmask_attention`` sink path.
     """
 
-    def test_rr_path_with_active_sink_raises(self):
-        from paddlefleet.transformer.dot_product_attention import (
-            DotProductAttention,
+    def _run(self, causal, use_sink, sink_trainable=True):
+        from paddle import framework
+        from paddlefleet_ops.flash_mask.cute.interface import (
+            flashmask_attention,
         )
-        from paddlefleet.transformer.enums import AttnMaskType
+
+        from paddlefleet.refined_recompute.flash_attn import (
+            RefinedRcomputeFlashMaskAttention,
+        )
 
         paddle.seed(SEED)
-        config = _make_config(softmax_type="learnable")
-        attn = DotProductAttention(
-            config=config,
-            layer_number=1,
-            attn_mask_type=AttnMaskType.causal,
-            attention_type="self",
-        )
-        # softmax_type="learnable" -> a non-None sink is forwarded.
-        self.assertIsNotNone(attn.softmax_offset)
+        np.random.seed(SEED)
+        b, s, h, d = 2, 256, 4, 128
 
-        b, s = 2, 64
-        h = config.num_attention_heads
-        d = config.head_dim
-        q = paddle.randn([b, s, h, d], dtype=DTYPE)
-        k = paddle.randn([b, s, h, d], dtype=DTYPE)
-        v = paddle.randn([b, s, h, d], dtype=DTYPE)
+        q_ref = paddle.randn([b, s, h, d], dtype=DTYPE)
+        k_ref = paddle.randn([b, s, h, d], dtype=DTYPE)
+        v_ref = paddle.randn([b, s, h, d], dtype=DTYPE)
+        for t in (q_ref, k_ref, v_ref):
+            t.stop_gradient = False
+
+        q, k, v = [x.detach().clone() for x in (q_ref, k_ref, v_ref)]
         for t in (q, k, v):
             t.stop_gradient = False
 
-        idx = _startend_row_indices(b, s, causal=True)
-        with self.assertRaises(NotImplementedError):
-            attn(
-                query=q,
-                key=k,
-                value=v,
-                attention_mask=None,
-                attn_mask_startend_row_indices=idx,
-                attn_mask_type=AttnMaskType.causal,
-                use_rr_flash_attention=True,
+        if use_sink:
+            sink_ref = paddle.randn([h], dtype=DTYPE)
+            sink_ref.stop_gradient = not sink_trainable
+            sink = sink_ref.detach().clone()
+            sink.stop_gradient = not sink_trainable
+        else:
+            sink_ref = sink = None
+
+        idx = _startend_row_indices(b, s, causal)
+
+        # Non-rr reference through the plain cute flashmask_attention.
+        out_ref = flashmask_attention(
+            q_ref,
+            k_ref,
+            v_ref,
+            startend_row_indices=idx,
+            causal=causal,
+            learnable_sink=sink_ref,
+        )
+
+        # Drive the rr two-pass mechanism MANUALLY (no recompute) so the test
+        # exercises FlashMaskAttnFunctor's fwd/bwd directly. The first call runs
+        # with _has_grad False (stash pass, no grad tracked); the second runs
+        # with _has_grad True (graph-rebuild pass) so `out` carries the functor
+        # grad node and out.backward() invokes the rr custom backward directly.
+        rr_attn = RefinedRcomputeFlashMaskAttention()
+        tracer = framework._dygraph_tracer()
+        prev_has_grad = tracer._has_grad
+
+        tracer._has_grad = False
+        try:
+            rr_attn(q, k, v, idx, causal=causal, learnable_sink=sink)
+        finally:
+            tracer._has_grad = prev_has_grad
+
+        tracer._has_grad = True
+        try:
+            out = rr_attn(q, k, v, idx, causal=causal, learnable_sink=sink)
+        finally:
+            tracer._has_grad = prev_has_grad
+        self.assertEqual(list(out.shape), [b, s, h, d])
+
+        # rr should match the non-rr sink path exactly (same kernel).
+        max_diff = (out - out_ref).abs().max().item()
+        self.assertLessEqual(
+            max_diff, 1e-2, f"rr fwd max diff {max_diff} vs non-rr too large"
+        )
+
+        # A fixed (stop_gradient) sink makes the non-rr flashmask_attention
+        # PyLayer return a dsink slot that Paddle rejects on backward (a known
+        # limitation of that op, covered by test_fixed_sink_backward_returns_
+        # dsink_slot). So only run the reference backward when the sink is not a
+        # fixed tensor; the rr backward is always exercised below.
+        ref_backward_safe = not (use_sink and not sink_trainable)
+
+        g = paddle.randn(out.shape, dtype=out.dtype)
+        out.backward(g.clone())
+        if ref_backward_safe:
+            out_ref.backward(g.clone())
+            for name, a, ref in (
+                ("dq", q.grad, q_ref.grad),
+                ("dk", k.grad, k_ref.grad),
+                ("dv", v.grad, v_ref.grad),
+            ):
+                self.assertIsNotNone(a, f"{name} grad is None")
+                diff = (a - ref).abs().max().item()
+                self.assertLessEqual(
+                    diff, 2e-2, f"rr {name} max diff {diff} vs non-rr too large"
+                )
+        else:
+            # Still assert the rr backward produced q/k/v grads.
+            for name, a in (("dq", q.grad), ("dk", k.grad), ("dv", v.grad)):
+                self.assertIsNotNone(a, f"{name} grad is None")
+
+        if use_sink and sink_trainable:
+            self.assertIsNotNone(sink.grad)
+            self.assertEqual(sink.grad.dtype, DTYPE)
+            self.assertEqual(list(sink.grad.shape), [h])
+            sink_diff = (sink.grad - sink_ref.grad).abs().max().item()
+            self.assertLessEqual(
+                sink_diff,
+                2e-2,
+                f"rr dsink max diff {sink_diff} vs non-rr too large",
             )
+        elif use_sink and not sink_trainable:
+            # Fixed sink is stop_gradient -> rr returns no sink grad.
+            self.assertIsNone(sink.grad)
+
+    def test_rr_causal_trainable_sink(self):
+        self._run(causal=True, use_sink=True)
+
+    def test_rr_noncausal_trainable_sink(self):
+        self._run(causal=False, use_sink=True)
+
+    def test_rr_sink_none(self):
+        self._run(causal=True, use_sink=False)
+
+    def test_rr_fixed_sink_no_grad(self):
+        self._run(causal=True, use_sink=True, sink_trainable=False)
+
+    def test_rr_non_fa4_sink_raises(self):
+        # Sink is only supported on the fa_version==4 cute backend; forcing v3
+        # must make the rr entry point reject a non-None sink.
+        from paddlefleet.refined_recompute.flash_attn import (
+            RefinedRcomputeFlashMaskAttention,
+        )
+
+        paddle.seed(SEED)
+        b, s, h, d = 2, 128, 4, 128
+        q = paddle.randn([b, s, h, d], dtype=DTYPE)
+        idx = _startend_row_indices(b, s, causal=True)
+        sink = paddle.randn([h], dtype=DTYPE)
+        rr_attn = RefinedRcomputeFlashMaskAttention()
+
+        old = paddle.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        paddle.set_flags({"FLAGS_flash_attn_version": 3})
+        try:
+            with self.assertRaises(NotImplementedError):
+                rr_attn.forward(q, q, q, idx, learnable_sink=sink)
+        finally:
+            paddle.set_flags({"FLAGS_flash_attn_version": old})
 
 
 if __name__ == "__main__":

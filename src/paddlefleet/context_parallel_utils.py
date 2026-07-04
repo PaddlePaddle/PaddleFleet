@@ -803,7 +803,7 @@ def cp_flashmask_allgatherkv_balance_backward(
         softmax_scale (float): Softmax scaling factor
         mode (str): Attention mode, support 'dualchunk_allgather' and 'contiguous_allgather'
     Returns:
-        tuple: (query_grad, key_grad, value_grad, grad_sink)
+        tuple: (query_grad, key_grad, value_grad, sink_grad)
     """
     paddle.base.core.nvprof_nvtx_push(
         "cp_flashmask_allgatherkv_balance_backward"
@@ -819,7 +819,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     else:
         raise ValueError(f"Unsupported FlashMask context parallel mode: {mode}")
 
-    grad_sink = None
+    sink_grad = None
     if fa_version == 2:
         if learnable_sink is not None:
             raise NotImplementedError(
@@ -915,7 +915,7 @@ def cp_flashmask_allgatherkv_balance_backward(
             )
         else:
             flashmask_info = None
-        query_grad, key_grad_gathered, value_grad_gathered, grad_sink = (
+        query_grad, key_grad_gathered, value_grad_gathered, sink_grad = (
             _flash_attn_bwd(
                 query,
                 key_gathered,
@@ -956,7 +956,7 @@ def cp_flashmask_allgatherkv_balance_backward(
         raise ValueError(f"Unsupported FlashMask context parallel mode: {mode}")
 
     paddle.base.core.nvprof_nvtx_pop()
-    return query_grad, key_grad, value_grad, grad_sink
+    return query_grad, key_grad, value_grad, sink_grad
 
 
 def scatter_with_padding(input_tensor, num_pad, axis, group):
@@ -1199,7 +1199,7 @@ class FlashMaskContextParallel(PyLayer):
         mode = ctx.mode
 
         # Compute gradients
-        query_grad, key_grad, value_grad, grad_sink = (
+        query_grad, key_grad, value_grad, sink_grad = (
             cp_flashmask_allgatherkv_balance_backward(
                 query,
                 key,
@@ -1220,11 +1220,11 @@ class FlashMaskContextParallel(PyLayer):
         # PyLayer maps backward returns positionally onto the forward TENSOR
         # inputs: query(0)/key(1)/value(2)/startend_row_indices(3)/
         # learnable_sink(4). startend_row_indices is stop_gradient=True, so its
-        # slot (position 3) must be None -- grad_sink belongs in position 4.
+        # slot (position 3) must be None -- sink_grad belongs in position 4.
         # A fixed off-by-one sink is also stop_gradient=True, so for it the
         # 3-tuple (sink slot omitted) is correct.
         if ctx.sink_requires_grad:
-            return query_grad, key_grad, value_grad, None, grad_sink
+            return query_grad, key_grad, value_grad, None, sink_grad
         return query_grad, key_grad, value_grad
 
 
