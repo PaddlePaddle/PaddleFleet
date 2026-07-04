@@ -61,21 +61,22 @@ def _get_fa_version(hdim):
     if "xpu" in paddle.get_device():
         return 2
     # Xiangrui: For deterministic, NOT support for hdim > 128 currently.
-    if "block_mask" in inspect.signature(flashmask_attention).parameters:
-        if (
-            paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-                "FLAGS_cudnn_deterministic"
-            ]
-            and hdim > 128
-        ):
-            return 2
-    elif paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-        "FLAGS_cudnn_deterministic"
-    ]:
-        return 2
     fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
         "FLAGS_flash_attn_version"
     ]
+    if fa_version == 3:
+        if "block_mask" in inspect.signature(flashmask_attention).parameters:
+            if (
+                paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+                    "FLAGS_cudnn_deterministic"
+                ]
+                and hdim > 128
+            ):
+                return 2
+        elif paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+            "FLAGS_cudnn_deterministic"
+        ]:
+            return 2
     # Fall back to version 3 if flash_mask is not available
     if fa_version == 4 and not _flash_mask_available:
         logger.warning(
