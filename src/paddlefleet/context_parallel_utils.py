@@ -730,11 +730,12 @@ def cp_flashmask_allgatherkv_balance_forward(
     deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
         "FLAGS_cudnn_deterministic"
     ]
-    if "block_mask" in inspect.signature(flashmask_attention).parameters:
-        if deterministic and query.shape[-1] > 128:
+    if fa_version == 3:
+        if "block_mask" in inspect.signature(flashmask_attention).parameters:
+            if deterministic and query.shape[-1] > 128:
+                fa_version = 2
+        elif deterministic:
             fa_version = 2
-    elif deterministic:
-        fa_version = 2
 
     if fa_version == 4 and _flash_mask_available:
         output, log_sum_exp = _flash_attn_fwd(
