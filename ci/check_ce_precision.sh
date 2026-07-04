@@ -27,6 +27,8 @@ fi
 if [[ ! -f "${case_name}.txt" && "$case_name" == *glm* ]]; then
     cp glm45_fleet/${case_name}.txt ./
 fi
+
+
 python  PaddleFormers/tests/integration_test/check_loss.py --log_file ${case_name}.txt --gt_file ${case_gt_file}
 exit_code=$?
 if [ $exit_code -ne 0 ]; then
