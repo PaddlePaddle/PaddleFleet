@@ -126,12 +126,6 @@ class _SonicRouterScoresFromMetadata(paddle.autograd.PyLayer):
                 f"score_src_idx; got {metadata_scores.shape[0]} scores and "
                 f"{score_src_idx.shape[0]} indices"
             )
-        pad_scores = metadata_scores.shape[0] - score_src_idx.shape[0]
-        if pad_scores >= FP8_ALIGN:
-            raise ValueError(
-                "metadata_scores has too many padding scores; expected fewer "
-                f"than {FP8_ALIGN}, got {pad_scores}"
-            )
         if "int32" not in str(score_src_idx.dtype):
             raise ValueError(
                 f"score_src_idx: expected int32, got {score_src_idx.dtype}"
