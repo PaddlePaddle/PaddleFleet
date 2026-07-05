@@ -13,9 +13,9 @@
 # limitations under the License.
 
 
+import logging
 from contextlib import nullcontext
 from copy import deepcopy
-import logging
 
 import paddle
 import paddle.nn.functional as F
@@ -474,7 +474,9 @@ class SonicMoEExpert(GroupedMLPExpert):
                 if fused_grouped_w1_to_sonic is not None:
                     return fused_grouped_w1_to_sonic(weight)
             except Exception:
-                logger.exception("fused grouped->sonic W1 layout failed; fallback")
+                logger.exception(
+                    "fused grouped->sonic W1 layout failed; fallback"
+                )
         target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
         gate, up = paddle.chunk(weight, 2, axis=-1)
         gate = gate.transpose([0, 2, 1])
@@ -488,7 +490,9 @@ class SonicMoEExpert(GroupedMLPExpert):
                 if fused_sonic_w1_to_grouped is not None:
                     return fused_sonic_w1_to_grouped(weight)
             except Exception:
-                logger.exception("fused sonic->grouped W1 layout failed; fallback")
+                logger.exception(
+                    "fused sonic->grouped W1 layout failed; fallback"
+                )
         target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
         weight = weight.reshape([weight.shape[0], -1, 2, weight.shape[2]])
         gate = weight[:, :, 0, :].transpose([0, 2, 1])

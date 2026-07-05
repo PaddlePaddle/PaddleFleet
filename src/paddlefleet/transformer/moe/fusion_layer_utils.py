@@ -32,6 +32,9 @@ from .vmm_utils import (
     tokens_zip_unique_add_with_subbatch,
 )
 
+SonicMoEConfig = None
+_scatter_router_scores_i32 = None
+
 if paddlefleet_ops.is_sonic_moe_available():
     from paddlefleet_ops.sonicmoe.enums import ActivationType
     from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
@@ -46,13 +49,18 @@ if paddlefleet_ops.is_sonic_moe_available():
         _UpProjection,
     )
     from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+
     try:
         from paddlefleet_ops.sonicmoe.config import SonicMoEConfig
     except (ImportError, RuntimeError):
-        SonicMoEConfig = None
-    from paddlefleet_ops.sonicmoe.quack_utils.blockscaled_fp8_gemm import (
-        _scatter_router_scores_i32,
-    )
+        pass
+
+    try:
+        from paddlefleet_ops.sonicmoe.quack_utils.blockscaled_fp8_gemm import (
+            _scatter_router_scores_i32,
+        )
+    except (ImportError, RuntimeError):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +131,13 @@ class _SonicRouterScoresFromMetadata(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, grad_out):
         (score_src_idx,) = ctx.saved_tensor()
+        if _scatter_router_scores_i32 is None:
+            raise RuntimeError(
+                "SonicMoE metadata router score backward requires "
+                "paddlefleet_ops.sonicmoe.quack_utils.blockscaled_fp8_gemm."
+                "_scatter_router_scores_i32; update paddlefleet_ops or use "
+                "the differentiable router-score fallback."
+            )
         grad_flat = _scatter_router_scores_i32(
             grad_out.contiguous(), score_src_idx, ctx.n_total
         )
@@ -2359,7 +2374,7 @@ def run_sonic_moe(
     activation_type = ActivationType("swiglu")
 
     total_expert_freq = TK_padded
-    if _score_src_idx is not None:
+    if _score_src_idx is not None and _scatter_router_scores_i32 is not None:
         scores_for_down = _SonicRouterScoresFromMetadata.apply(
             topk_scores, _router_scores, _score_src_idx
         )
