@@ -15,6 +15,7 @@
 import contextlib
 import copy
 import logging
+import os
 
 import paddle
 import paddlefleet_ops
@@ -46,6 +47,13 @@ if paddlefleet_ops.is_sonic_moe_available():
         _UpProjection,
     )
     from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+    try:
+        from paddlefleet_ops.sonicmoe.config import SonicMoEConfig
+    except (ImportError, RuntimeError):
+        SonicMoEConfig = None
+    from paddlefleet_ops.sonicmoe.quack_utils.blockscaled_fp8_gemm import (
+        _scatter_router_scores_i32,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +72,8 @@ def _copy_sonic_fp8_weight_attrs(src, dst):
 class _SonicFP8WeightCarrier(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, weight):
-        carrier = paddle.empty([1], dtype=weight.dtype).as_strided(
+        # The carrier data is never read; it only carries shape, dtype, and FP8 attrs.
+        carrier = weight.as_strided(
             [weight.shape[1], weight.shape[2], weight.shape[0]], [0, 0, 0]
         )
         carrier.stop_gradient = weight.stop_gradient
@@ -80,6 +89,62 @@ class _SonicFP8WeightCarrier(paddle.autograd.PyLayer):
 
 def _make_sonic_fp8_weight_carrier(weight):
     return _SonicFP8WeightCarrier.apply(weight)
+
+
+def _env_flag(name, default=None):
+    value = os.getenv(name, "").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _sonic_moe_runtime_config_context():
+    fuse_y1_quant = _env_flag("SONIC_MOE_FUSE_Y1_QUANT", False)
+    if not fuse_y1_quant:
+        return contextlib.nullcontext()
+    if SonicMoEConfig is None:
+        raise RuntimeError(
+            "SONIC_MOE_FUSE_Y1_QUANT=1 requires paddlefleet_ops.sonicmoe.config"
+        )
+    return SonicMoEConfig(
+        fuse_y1_quant=True,
+        fuse_y1_bf16_trunc=_env_flag("SONIC_MOE_FUSE_Y1_BF16_TRUNC", True),
+    ).activate()
+
+
+class _SonicRouterScoresFromMetadata(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, topk_scores, metadata_scores, score_src_idx):
+        if len(topk_scores.shape) != 2:
+            raise ValueError(
+                f"topk_scores: expected rank 2, got shape {topk_scores.shape}"
+            )
+        if metadata_scores.shape[0] < score_src_idx.shape[0]:
+            raise ValueError(
+                "metadata_scores must include every real score referenced by "
+                f"score_src_idx; got {metadata_scores.shape[0]} scores and "
+                f"{score_src_idx.shape[0]} indices"
+            )
+        if "int32" not in str(score_src_idx.dtype):
+            raise ValueError(
+                f"score_src_idx: expected int32, got {score_src_idx.dtype}"
+            )
+        metadata_scores.stop_gradient = True
+        score_src_idx.stop_gradient = True
+        ctx.save_for_backward(score_src_idx)
+        ctx.input_shape = list(topk_scores.shape)
+        ctx.n_total = int(topk_scores.shape[0]) * int(topk_scores.shape[1])
+        return metadata_scores.clone()
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (score_src_idx,) = ctx.saved_tensor()
+        grad_flat = _scatter_router_scores_i32(
+            grad_out.contiguous(), score_src_idx, ctx.n_total
+        )
+        return grad_flat.reshape(ctx.input_shape), None, None
 
 
 class UnZipNode:
@@ -2312,15 +2377,20 @@ def run_sonic_moe(
     activation_type = ActivationType("swiglu")
 
     total_expert_freq = TK_padded
-    scores_for_down = _differentiable_router_scores(
-        topk_scores,
-        topk_indices_i32,
-        num_activated_expert_per_token_offset,
-        TK_padded - total_pad_rows,
-        TK_padded,
-        E,
-        score_src_idx=_score_src_idx,
-    )
+    if _score_src_idx is not None:
+        scores_for_down = _SonicRouterScoresFromMetadata.apply(
+            topk_scores, _router_scores, _score_src_idx
+        )
+    else:
+        scores_for_down = _differentiable_router_scores(
+            topk_scores,
+            topk_indices_i32,
+            num_activated_expert_per_token_offset,
+            TK_padded - total_pad_rows,
+            TK_padded,
+            E,
+            score_src_idx=_score_src_idx,
+        )
 
     fp8_hidden_states = None
     if fp8_scale is not None:
@@ -2333,7 +2403,7 @@ def run_sonic_moe(
         w1_sonic = w1.permute([1, 2, 0])
         w2_sonic = w2.permute([1, 2, 0])
 
-    with enable_fp8(fp8):
+    with enable_fp8(fp8), _sonic_moe_runtime_config_context():
         _refresh_fp8_config()
         y1, z = _UpProjection.apply(
             hidden_states,

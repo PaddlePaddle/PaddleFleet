@@ -15,6 +15,8 @@
 
 from contextlib import nullcontext
 from copy import deepcopy
+import logging
+import os
 
 import paddle
 import paddle.nn.functional as F
@@ -44,6 +46,20 @@ try:
     from paddlefleet_ops.sonicmoe.quack_utils import quantize_native_fp8_weights
 except (ImportError, RuntimeError):
     pass
+
+fused_grouped_w1_to_sonic = None
+fused_sonic_w1_to_grouped = None
+fused_transpose_w2_layout = None
+try:
+    from paddlefleet_ops.sonicmoe.ernie_compat.weight_layout_fusion import (
+        fused_grouped_w1_to_sonic,
+        fused_sonic_w1_to_grouped,
+        fused_transpose_w2_layout,
+    )
+except (ImportError, RuntimeError):
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 class BMMFunction(paddle.autograd.PyLayer):
@@ -437,7 +453,22 @@ class SonicMoEExpert(GroupedMLPExpert):
         )
 
     @staticmethod
+    def _use_fused_weight_layout():
+        return os.getenv("SONIC_MOE_FUSED_WEIGHT_LAYOUT", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @staticmethod
     def _grouped_w1_to_sonic(weight):
+        if SonicMoEExpert._use_fused_weight_layout():
+            try:
+                if fused_grouped_w1_to_sonic is not None:
+                    return fused_grouped_w1_to_sonic(weight)
+            except Exception:
+                logger.exception("fused grouped->sonic W1 layout failed; fallback")
         target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
         gate, up = paddle.chunk(weight, 2, axis=-1)
         gate = gate.transpose([0, 2, 1])
@@ -446,6 +477,12 @@ class SonicMoEExpert(GroupedMLPExpert):
 
     @staticmethod
     def _sonic_w1_to_grouped(weight):
+        if SonicMoEExpert._use_fused_weight_layout():
+            try:
+                if fused_sonic_w1_to_grouped is not None:
+                    return fused_sonic_w1_to_grouped(weight)
+            except Exception:
+                logger.exception("fused sonic->grouped W1 layout failed; fallback")
         target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
         weight = weight.reshape([weight.shape[0], -1, 2, weight.shape[2]])
         gate = weight[:, :, 0, :].transpose([0, 2, 1])
@@ -456,6 +493,12 @@ class SonicMoEExpert(GroupedMLPExpert):
     def _transpose_w2_layout(weight):
         # if not SonicMoEExpert._is_tensor_initialized(weight):
         #     return weight
+        if SonicMoEExpert._use_fused_weight_layout():
+            try:
+                if fused_transpose_w2_layout is not None:
+                    return fused_transpose_w2_layout(weight)
+            except Exception:
+                logger.exception("fused W2 layout transpose failed; fallback")
         return weight.transpose([0, 2, 1])
 
     @staticmethod
