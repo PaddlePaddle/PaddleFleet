@@ -16,7 +16,6 @@
 from contextlib import nullcontext
 from copy import deepcopy
 import logging
-import os
 
 import paddle
 import paddle.nn.functional as F
@@ -50,6 +49,12 @@ except (ImportError, RuntimeError):
 fused_grouped_w1_to_sonic = None
 fused_sonic_w1_to_grouped = None
 fused_transpose_w2_layout = None
+SonicMoEConfig = None
+try:
+    from paddlefleet_ops.sonicmoe.config import SonicMoEConfig
+except (ImportError, RuntimeError):
+    pass
+
 try:
     from paddlefleet_ops.sonicmoe.ernie_compat.weight_layout_fusion import (
         fused_grouped_w1_to_sonic,
@@ -58,6 +63,10 @@ try:
     )
 except (ImportError, RuntimeError):
     pass
+
+_SONIC_MOE_DEFAULT_CONFIG = (
+    SonicMoEConfig() if SonicMoEConfig is not None else None
+)
 
 logger = logging.getLogger(__name__)
 
@@ -454,12 +463,9 @@ class SonicMoEExpert(GroupedMLPExpert):
 
     @staticmethod
     def _use_fused_weight_layout():
-        return os.getenv("SONIC_MOE_FUSED_WEIGHT_LAYOUT", "0").lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        if _SONIC_MOE_DEFAULT_CONFIG is None:
+            return True
+        return _SONIC_MOE_DEFAULT_CONFIG.resolve_fused_weight_layout()
 
     @staticmethod
     def _grouped_w1_to_sonic(weight):

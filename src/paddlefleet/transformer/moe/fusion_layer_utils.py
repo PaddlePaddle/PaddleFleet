@@ -15,7 +15,6 @@
 import contextlib
 import copy
 import logging
-import os
 
 import paddle
 import paddlefleet_ops
@@ -91,27 +90,10 @@ def _make_sonic_fp8_weight_carrier(weight):
     return _SonicFP8WeightCarrier.apply(weight)
 
 
-def _env_flag(name, default=None):
-    value = os.getenv(name, "").strip().lower()
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    if value in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
 def _sonic_moe_runtime_config_context():
-    fuse_y1_quant = _env_flag("SONIC_MOE_FUSE_Y1_QUANT", False)
-    if not fuse_y1_quant:
-        return contextlib.nullcontext()
     if SonicMoEConfig is None:
-        raise RuntimeError(
-            "SONIC_MOE_FUSE_Y1_QUANT=1 requires paddlefleet_ops.sonicmoe.config"
-        )
-    return SonicMoEConfig(
-        fuse_y1_quant=True,
-        fuse_y1_bf16_trunc=_env_flag("SONIC_MOE_FUSE_Y1_BF16_TRUNC", True),
-    ).activate()
+        return contextlib.nullcontext()
+    return SonicMoEConfig().activate()
 
 
 class _SonicRouterScoresFromMetadata(paddle.autograd.PyLayer):
