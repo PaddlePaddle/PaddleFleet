@@ -111,11 +111,26 @@ class _SonicRouterScoresFromMetadata(paddle.autograd.PyLayer):
             raise ValueError(
                 f"topk_scores: expected rank 2, got shape {topk_scores.shape}"
             )
+        if len(metadata_scores.shape) != 1:
+            raise ValueError(
+                "metadata_scores: expected rank 1, got shape "
+                f"{metadata_scores.shape}"
+            )
+        if len(score_src_idx.shape) != 1:
+            raise ValueError(
+                f"score_src_idx: expected rank 1, got shape {score_src_idx.shape}"
+            )
         if metadata_scores.shape[0] < score_src_idx.shape[0]:
             raise ValueError(
                 "metadata_scores must include every real score referenced by "
                 f"score_src_idx; got {metadata_scores.shape[0]} scores and "
                 f"{score_src_idx.shape[0]} indices"
+            )
+        pad_scores = metadata_scores.shape[0] - score_src_idx.shape[0]
+        if pad_scores >= FP8_ALIGN:
+            raise ValueError(
+                "metadata_scores has too many padding scores; expected fewer "
+                f"than {FP8_ALIGN}, got {pad_scores}"
             )
         if "int32" not in str(score_src_idx.dtype):
             raise ValueError(
@@ -126,7 +141,9 @@ class _SonicRouterScoresFromMetadata(paddle.autograd.PyLayer):
         ctx.save_for_backward(score_src_idx)
         ctx.input_shape = list(topk_scores.shape)
         ctx.n_total = int(topk_scores.shape[0]) * int(topk_scores.shape[1])
-        return metadata_scores.clone()
+        scores = metadata_scores.clone()
+        scores.stop_gradient = topk_scores.stop_gradient
+        return scores
 
     @staticmethod
     def backward(ctx, grad_out):
