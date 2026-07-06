@@ -527,10 +527,6 @@ class DotProductAttention(FleetLayer):
                 )
                 extra_kwargs["mode"] = self.config.cp_balance_mode
                 if self.config.cp_balance_mode == "contiguous_a2a":
-                    if use_rr_flash_attention:
-                        raise NotImplementedError(
-                            "cp_balance_mode contiguous_a2a does not support refined recompute"
-                        )
                     if not self.config.multi_latent_attention:
                         raise NotImplementedError(
                             "cp_balance_mode contiguous_a2a only supports mla now"

@@ -23,8 +23,11 @@ from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
 
 from paddlefleet.context_parallel_utils import (
+    UlyssesAlltoAll,
     cp_flashmask_allgatherkv_balance_backward,
     cp_flashmask_allgatherkv_balance_forward,
+    cp_flashmask_swa_p2p_backward,
+    cp_flashmask_swa_p2p_forward,
 )
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
@@ -900,9 +903,11 @@ class FlashMaskAttnCpFunctor(PyLayer):
         fa_version = hold_tensors["fa_version"]
         group = hold_tensors["group"]
         causal = hold_tensors["causal"]
+        mode = hold_tensors["mode"]
 
         ctx.fa_version = fa_version
         ctx.softmax_scale = hold_tensors.get("softmax_scale")
+        ctx.mode = mode
         ctx.sink_requires_grad = (
             learnable_sink is not None and not learnable_sink.stop_gradient
         )
@@ -955,6 +960,7 @@ class FlashMaskAttnCpFunctor(PyLayer):
                 causal,
                 fa_version,
                 ctx.softmax_scale,  # softmax_scale
+                ctx.mode,
             )
         )
 
@@ -969,6 +975,202 @@ class FlashMaskAttnCpFunctor(PyLayer):
         if ctx.sink_requires_grad:
             return query_grad, key_grad, value_grad, sink_grad
         return query_grad, key_grad, value_grad
+
+
+class FlashMaskSwaP2PFunctor(PyLayer):
+    """Surrogate PyLayer for RR P2P SWA FlashMask attention."""
+
+    @staticmethod
+    def forward(ctx, q, k, v, learnable_sink, hold_tensors):
+        """Return saved first-forward output and keep tensors for backward."""
+        result_attention = hold_tensors["result_attention"]
+        softmax_lse = hold_tensors["softmax_lse"]
+        recv_key = hold_tensors["recv_key"]
+        recv_value = hold_tensors["recv_value"]
+        startend_row_indices = hold_tensors["startend_row_indices"]
+        group = hold_tensors["group"]
+        causal = hold_tensors["causal"]
+
+        ctx.learnable_sink = learnable_sink
+        ctx.softmax_scale = hold_tensors.get("softmax_scale")
+        ctx.window_size = hold_tensors["window_size"]
+        ctx.group = group
+        ctx.causal = causal
+        ctx.sink_requires_grad = (
+            learnable_sink is not None and not learnable_sink.stop_gradient
+        )
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            recv_key,
+            recv_value,
+            result_attention,
+            softmax_lse,
+            startend_row_indices,
+        )
+        return result_attention
+
+    @staticmethod
+    def backward(ctx, grad):
+        """Run explicit P2P SWA FlashMask backward from saved tensors."""
+        (
+            q,
+            k,
+            v,
+            recv_key,
+            recv_value,
+            result_attention,
+            softmax_lse,
+            startend_row_indices,
+        ) = ctx.saved_tensor()
+        query_grad, key_grad, value_grad, grad_sink = (
+            cp_flashmask_swa_p2p_backward(
+                q,
+                k,
+                v,
+                recv_key,
+                recv_value,
+                startend_row_indices,
+                result_attention,
+                softmax_lse,
+                grad,
+                ctx.learnable_sink,
+                ctx.group,
+                ctx.causal,
+                ctx.softmax_scale,
+                ctx.window_size,
+            )
+        )
+        result_attention._clear_dataptr()
+        softmax_lse._clear_dataptr()
+        if ctx.sink_requires_grad:
+            return query_grad, key_grad, value_grad, grad_sink
+        return query_grad, key_grad, value_grad
+
+
+def slice_ulysses_mask_heads(startend_row_indices, num_k_heads, cp_group):
+    """Slice per-head FlashMask indices for the local Ulysses head shard."""
+    num_mask_heads = startend_row_indices.shape[1]
+    assert num_mask_heads == 1 or num_mask_heads == num_k_heads, (
+        f"startend_row_indices head dim must be 1 or num_kv_heads ({num_k_heads}), "
+        f"got {num_mask_heads}"
+    )
+    if num_mask_heads == 1:
+        return startend_row_indices
+    assert num_mask_heads % cp_group.nranks == 0, (
+        f"startend_row_indices head dim ({num_mask_heads}) must be divisible "
+        f"by cp_size ({cp_group.nranks}) for Ulysses"
+    )
+    heads_per_rank = num_mask_heads // cp_group.nranks
+    head_start = cp_group.rank * heads_per_rank
+    return startend_row_indices[
+        :, head_start : head_start + heads_per_rank, :, :
+    ]
+
+
+def ulysses_local_flashmask_first_fwd(
+    query_states,
+    key_states,
+    value_states,
+    startend_row_indices,
+    causal,
+    softmax_scale,
+):
+    """Run local Ulysses FlashMask first forward and save RR tensors."""
+    fa_version = _get_fa_version(query_states.shape[-1])
+    if fa_version == 2:
+        if softmax_scale is not None:
+            raise NotImplementedError(
+                "fa_version==2 does not support setting softmax_scale"
+            )
+        result_attention, result_softmax, softmax_lse, seed_offset = (
+            _C_ops.flashmask_attention(
+                query_states,
+                key_states,
+                value_states,
+                startend_row_indices,
+                None,
+                0.0,
+                causal,
+                False,
+                False,
+                "",
+            )
+        )
+        hold_tensors = {
+            "result_attention": result_attention,
+            "softmax_lse": softmax_lse,
+            "seed_offset": seed_offset,
+            "result_softmax": result_softmax,
+            "dropout": 0.0,
+            "causal": causal,
+        }
+    elif fa_version == 3:
+        sig_params = inspect.signature(flashmask_attention).parameters
+        scale = (
+            query_states.shape[-1] ** (-0.5)
+            if softmax_scale is None
+            else softmax_scale
+        )
+        if "group" in sig_params:
+            result_attention, softmax_lse = _C_ops.flashmask_attention_v2(
+                query_states,
+                key_states,
+                value_states,
+                startend_row_indices,
+                None,
+                None,
+                scale,
+                causal,
+                0,
+                1,
+            )
+        elif "block_mask" in sig_params:
+            result_attention, softmax_lse = _C_ops.flashmask_attention_v2(
+                query_states,
+                key_states,
+                value_states,
+                startend_row_indices,
+                None,
+                scale,
+                causal,
+            )
+        else:
+            result_attention, softmax_lse = _C_ops.flashmask_attention_v2(
+                query_states,
+                key_states,
+                value_states,
+                startend_row_indices,
+                scale,
+                causal,
+            )
+        hold_tensors = {
+            "result_attention": result_attention,
+            "softmax_lse": softmax_lse,
+            "causal": causal,
+            "softmax_scale": softmax_scale,
+        }
+    elif fa_version == 4:
+        result_attention, softmax_lse = _flash_attn_fwd(
+            query_states,
+            key_states,
+            value_states,
+            causal=causal,
+            return_lse=True,
+            startend_row_indices=startend_row_indices,
+            pack_gqa=False,
+            softmax_scale=softmax_scale,
+        )
+        hold_tensors = {
+            "result_attention": result_attention,
+            "softmax_lse": softmax_lse,
+            "causal": causal,
+            "softmax_scale": softmax_scale,
+        }
+    else:
+        raise ValueError(f"Invalid flash attention version: {fa_version}")
+    return result_attention, hold_tensors
 
 
 class RefinedRcomputeFlashMaskCpAttention:
@@ -994,9 +1196,10 @@ class RefinedRcomputeFlashMaskCpAttention:
         dropout=0.0,
         causal=False,
         training=True,
-        mode="allgather_kv",
+        mode="dualchunk_allgather",
         learnable_sink=None,
         softmax_scale=None,
+        window_size=None,
     ):
         """
         The main entry point for the forward pass.
@@ -1024,6 +1227,7 @@ class RefinedRcomputeFlashMaskCpAttention:
                 mode=mode,
                 learnable_sink=learnable_sink,
                 softmax_scale=softmax_scale,
+                window_size=window_size,
             )
         else:
             # This is the second forward pass, executed during the backward pass of recompute.
@@ -1050,9 +1254,10 @@ class RefinedRcomputeFlashMaskCpAttention:
         dropout=0.0,
         causal=False,
         training=True,
-        mode="allgather_kv",
+        mode="dualchunk_allgather",
         learnable_sink=None,
         softmax_scale=None,
+        window_size=None,
     ):
         """
         The first forward pass for masked attention. It runs the actual computation,
@@ -1084,8 +1289,51 @@ class RefinedRcomputeFlashMaskCpAttention:
             f"Current query sequence length: {query_states.shape[1]}"
         )
 
-        result_attention, softmax_lse, startend_row_indices, fa_version = (
-            cp_flashmask_allgatherkv_balance_forward(
+        if mode in ("dualchunk_allgather", "contiguous_allgather"):
+            result_attention, softmax_lse, startend_row_indices, fa_version = (
+                cp_flashmask_allgatherkv_balance_forward(
+                    query_states,
+                    key_states,
+                    value_states,
+                    startend_row_indices,
+                    learnable_sink,
+                    group,
+                    causal,
+                    training,
+                    softmax_scale,
+                    mode,
+                )
+            )
+            hold_tensors = {
+                "mode": mode,
+                "result_attention": result_attention,
+                "softmax_lse": softmax_lse,
+                "startend_row_indices": startend_row_indices,
+                "fa_version": fa_version,
+                "group": group,
+                "causal": causal,
+                "learnable_sink": learnable_sink,
+                "softmax_scale": softmax_scale,
+            }
+
+            self._hold_tensors_queue.put(hold_tensors)
+            return result_attention
+        elif mode == "contiguous_swap2p":
+            assert _flash_mask_available, (
+                "P2P SWA fast path requires flashmask installed. Please check."
+            )
+            window_size = 128 if window_size is None else window_size
+            if window_size <= 0:
+                raise ValueError(
+                    f"SWA P2P window_size must be positive, got {window_size}"
+                )
+            (
+                result_attention,
+                softmax_lse,
+                recv_key,
+                recv_value,
+                startend_row_indices,
+            ) = cp_flashmask_swa_p2p_forward(
                 query_states,
                 key_states,
                 value_states,
@@ -1095,39 +1343,165 @@ class RefinedRcomputeFlashMaskCpAttention:
                 causal,
                 training,
                 softmax_scale,
+                window_size,
             )
+            hold_tensors = {
+                "mode": mode,
+                "result_attention": result_attention,
+                "softmax_lse": softmax_lse,
+                "recv_key": recv_key,
+                "recv_value": recv_value,
+                "startend_row_indices": startend_row_indices,
+                "group": group,
+                "causal": causal,
+                "learnable_sink": learnable_sink,
+                "softmax_scale": softmax_scale,
+                "window_size": window_size,
+            }
+            self._hold_tensors_queue.put(hold_tensors)
+            return result_attention
+        elif mode == "contiguous_a2a":
+            return self._ulysses_first_fwd(
+                query_states,
+                key_states,
+                value_states,
+                startend_row_indices,
+                group,
+                causal,
+                learnable_sink,
+                softmax_scale,
+            )
+        else:
+            raise ValueError(f"invalid cp_balance_mode: {mode}")
+
+    def _ulysses_alltoall_qkv(self, query, key, value, group):
+        """Redistribute Q/K/V from sequence shards to Ulysses head shards."""
+        query = UlyssesAlltoAll.apply(
+            query, scatter_idx=2, gather_idx=1, batch_dim_idx=0, group=group
+        )
+        key = UlyssesAlltoAll.apply(
+            key, scatter_idx=2, gather_idx=1, batch_dim_idx=0, group=group
+        )
+        value = UlyssesAlltoAll.apply(
+            value, scatter_idx=2, gather_idx=1, batch_dim_idx=0, group=group
+        )
+        return query, key, value
+
+    def _ulysses_alltoall_output(self, output, group):
+        """Redistribute Ulysses local output back to sequence shards."""
+        return UlyssesAlltoAll.apply(
+            output,
+            scatter_idx=1,
+            gather_idx=2,
+            batch_dim_idx=0,
+            group=group,
         )
 
-        hold_tensors = {
-            "result_attention": result_attention,
-            "softmax_lse": softmax_lse,
-            "startend_row_indices": startend_row_indices,
-            "fa_version": fa_version,
-            "group": group,
-            "causal": causal,
-            "learnable_sink": learnable_sink,
-            "softmax_scale": softmax_scale,
-        }
+    def _ulysses_first_fwd(
+        self,
+        query_states,
+        key_states,
+        value_states,
+        startend_row_indices,
+        group,
+        causal,
+        learnable_sink,
+        softmax_scale,
+    ):
+        """Run first forward for RR Ulysses FlashMask CP."""
+        if learnable_sink is not None:
+            raise NotImplementedError(
+                "flashmask_attention_ulysses does not support learnable_sink "
+                "(softmax sink)"
+            )
+        if softmax_scale is not None:
+            raise NotImplementedError(
+                "flashmask_attention_ulysses does not support setting softmax_scale"
+            )
+        num_q_heads = query_states.shape[2]
+        num_k_heads = key_states.shape[2]
+        num_v_heads = value_states.shape[2]
+        assert num_q_heads == num_k_heads == num_v_heads, (
+            f"Ulysses a2a CP requires q_heads == k_heads == v_heads, "
+            f"got q={num_q_heads}, k={num_k_heads}, v={num_v_heads}"
+        )
+        assert num_q_heads % group.nranks == 0, (
+            f"num_heads ({num_q_heads}) must be divisible by cp_size ({group.nranks}) for Ulysses"
+        )
 
-        self._hold_tensors_queue.put(hold_tensors)
-        return result_attention
+        startend_row_indices = slice_ulysses_mask_heads(
+            startend_row_indices, num_k_heads, group
+        )
+        query, key, value = self._ulysses_alltoall_qkv(
+            query_states, key_states, value_states, group
+        )
+        local_attention, local_hold_tensors = ulysses_local_flashmask_first_fwd(
+            query,
+            key,
+            value,
+            startend_row_indices,
+            causal,
+            softmax_scale,
+        )
+        self._hold_tensors_queue.put(
+            {
+                "mode": "contiguous_a2a",
+                "group": group,
+                "startend_row_indices": startend_row_indices,
+                "local_hold_tensors": local_hold_tensors,
+            }
+        )
+        return self._ulysses_alltoall_output(local_attention, group)
+
+    def _ulysses_second_fwd(
+        self, query_states, key_states, value_states, hold_tensors
+    ):
+        """Rebuild Ulysses graph and use a local FlashMask surrogate."""
+        group = hold_tensors["group"]
+        query, key, value = self._ulysses_alltoall_qkv(
+            query_states, key_states, value_states, group
+        )
+        local_output = FlashMaskAttnFunctor.apply(
+            query,
+            key,
+            value,
+            hold_tensors["startend_row_indices"],
+            None,
+            hold_tensors["local_hold_tensors"],
+        )
+        return self._ulysses_alltoall_output(local_output, group)
 
     def _second_fwd(
         self, query_states, key_states, value_states, learnable_sink=None
     ):
         """
         The second forward pass for masked attention. It reconstructs the graph
-        by calling the `FlashMaskAttnFunctor` surrogate layer.
+        by calling the mode-specific surrogate layer.
         """
         hold_tensors = self._hold_tensors_queue.get()
-        output = FlashMaskAttnCpFunctor.apply(
-            query_states,
-            key_states,
-            value_states,
-            learnable_sink,
-            hold_tensors,
-        )
-        return output
+        mode = hold_tensors["mode"]
+        if mode in ("dualchunk_allgather", "contiguous_allgather"):
+            return FlashMaskAttnCpFunctor.apply(
+                query_states,
+                key_states,
+                value_states,
+                learnable_sink,
+                hold_tensors,
+            )
+        elif mode == "contiguous_swap2p":
+            return FlashMaskSwaP2PFunctor.apply(
+                query_states,
+                key_states,
+                value_states,
+                learnable_sink,
+                hold_tensors,
+            )
+        elif mode == "contiguous_a2a":
+            return self._ulysses_second_fwd(
+                query_states, key_states, value_states, hold_tensors
+            )
+        else:
+            raise ValueError(f"invalid cp_balance_mode: {mode}")
 
     def __call__(self, *args, **kwds):
         """Makes the class instance callable, similar to a standard nn.Layer."""
