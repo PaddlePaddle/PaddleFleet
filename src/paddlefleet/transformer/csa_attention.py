@@ -800,6 +800,24 @@ def _compute_fused_csa_indexer_loss_forward(
     return loss, topk_indices, topk_probs, target
 
 
+def _compute_csa_selected_set_kl_loss(
+    target: Tensor,
+    topk_probs: Tensor,
+    loss_coeff: float,
+    loss_mask: Tensor | None = None,
+    global_valid_count: float | None = None,
+) -> Tensor:
+    eps = 1e-10
+    kl_per_elem = target * (
+        paddle.log(target + eps) - paddle.log(topk_probs + eps)
+    )
+    kl_per_pos = kl_per_elem.sum(axis=-1)
+    if loss_mask is not None:
+        lm = loss_mask.reshape(kl_per_pos.shape).astype(kl_per_pos.dtype)
+        return (kl_per_pos * lm).sum() / global_valid_count * float(loss_coeff)
+    return kl_per_pos.mean() * float(loss_coeff)
+
+
 class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
     """Attach TileLang CSA indexer loss gradients to the main output.
 
@@ -1578,6 +1596,379 @@ class CompressedSparseAttention(FleetLayer):
         else:
             self.indexer = None
 
+    def _indexcache_pattern(self) -> str | None:
+        pattern = getattr(self.config, "index_topk_pattern", None)
+        if pattern is None:
+            return None
+        pattern = str(pattern).strip().upper()
+        if not pattern:
+            return None
+        invalid_chars = sorted(set(pattern) - {"F", "S"})
+        if invalid_chars:
+            raise ValueError(
+                "index_topk_pattern may only contain 'F' and 'S', "
+                f"got invalid chars: {invalid_chars}."
+            )
+        if pattern[0] != "F":
+            raise ValueError("index_topk_pattern must start with 'F'.")
+        return pattern
+
+    def _indexcache_debug(self, msg: str) -> None:
+        if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
+            cp_msg = (
+                f" cp_rank={self.cp_rank} cp_size={self.cp_size}"
+                if self.cp_enabled
+                else ""
+            )
+            print(
+                f"[INDEXCACHE_TRAIN] layer={self.layer_number}{cp_msg} {msg}",
+                flush=True,
+            )
+
+    def _indexcache_distill_debug(self, msg: str) -> None:
+        if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
+            cp_msg = (
+                f" cp_rank={self.cp_rank} cp_size={self.cp_size}"
+                if self.cp_enabled
+                else ""
+            )
+            print(
+                f"[INDEXCACHE_DISTILL] layer={self.layer_number}{cp_msg} {msg}",
+                flush=True,
+            )
+
+    def _indexcache_multi_layer_distill_enabled(self) -> bool:
+        return bool(getattr(self.config, "indexcache_multi_layer_distill", False))
+
+    @staticmethod
+    def _indexcache_served_count(pattern: str, c4_ordinal: int) -> int:
+        next_f = pattern.find("F", c4_ordinal + 1)
+        if next_f == -1:
+            next_f = len(pattern)
+        return max(1, next_f - c4_ordinal)
+
+    def _indexcache_scaled_loss_coeff(self, served_count: int) -> float:
+        coeff = getattr(self.config, "dsa_indexer_loss_coeff", 0.0) or 0.0
+        return float(coeff) / float(max(int(served_count), 1))
+
+    def _indexcache_c4_layers(self) -> list[int]:
+        ratios = getattr(self.config, "csa_compress_ratios", None) or []
+        empty_head = int(
+            getattr(self.config, "num_empty_layers_add_in_head", 0) or 0
+        )
+        return [
+            int(layer_idx) + empty_head
+            for layer_idx, ratio in enumerate(ratios)
+            if int(ratio) == 4
+        ]
+
+    def _indexcache_infer_producer_layer(
+        self, c4_ordinal: int, pattern: str
+    ) -> int | None:
+        producer_ordinal = min(c4_ordinal - 1, len(pattern) - 1)
+        while producer_ordinal >= 0 and pattern[producer_ordinal] != "F":
+            producer_ordinal -= 1
+        if producer_ordinal < 0:
+            return None
+
+        c4_layers = self._indexcache_c4_layers()
+        if producer_ordinal >= len(c4_layers):
+            return None
+        return c4_layers[producer_ordinal]
+
+    def _indexcache_next_c4_action(self) -> tuple[int, str, str] | None:
+        pattern = self._indexcache_pattern()
+        if pattern is None or self.compress_ratio != 4 or self.indexer is None:
+            return None
+
+        c4_layers = self._indexcache_c4_layers()
+        if self.layer_number not in c4_layers:
+            raise RuntimeError(
+                "IndexCache C4 static mapping could not find the current "
+                f"layer={self.layer_number} in csa_compress_ratios C4 layers "
+                f"{c4_layers}."
+            )
+        c4_ordinal = c4_layers.index(self.layer_number)
+        if c4_ordinal >= len(pattern):
+            raise ValueError(
+                "index_topk_pattern must cover every C4 layer in this "
+                f"configuration. pattern={pattern}, c4_layers={c4_layers}, "
+                f"current_c4_ordinal={c4_ordinal}."
+            )
+
+        if c4_ordinal == 0:
+            self.config._indexcache_last_topk_idxs = None
+            self.config._indexcache_last_layer_number = None
+            self.config._indexcache_last_distill_state = None
+            self.config._indexcache_last_served_count = None
+
+        action = pattern[c4_ordinal]
+        return c4_ordinal, action, pattern
+
+    @staticmethod
+    def _indexcache_tensor_to_int(value: Tensor | int | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        try:
+            return int(value.item())
+        except Exception:
+            return int(value.numpy().reshape([-1])[0])
+
+    def _indexcache_pack_state(
+        self,
+        compress_topk_idxs: Tensor,
+        tilelang_indexer_loss_state: tuple | None = None,
+        served_count: int | None = None,
+    ) -> tuple[Tensor, ...]:
+        state = [compress_topk_idxs.detach()]
+        if tilelang_indexer_loss_state is not None:
+            (
+                q_indexer_bf,
+                weights_indexer_bf,
+                k_indexer_bf,
+                topk_indices_compressed,
+                topk_probs,
+                *_,
+            ) = tilelang_indexer_loss_state
+            state.extend(
+                [
+                    q_indexer_bf,
+                    weights_indexer_bf,
+                    k_indexer_bf,
+                    topk_indices_compressed,
+                    topk_probs,
+                    paddle.full([1], self.layer_number, dtype="int64"),
+                    paddle.full(
+                        [1], int(served_count or 1), dtype="int64"
+                    ),
+                ]
+            )
+        return tuple(state)
+
+    def _indexcache_state_topk(
+        self, indexcache_state: tuple | list | None
+    ) -> tuple[Tensor | None, int | None]:
+        if not indexcache_state:
+            return None, None
+        producer_layer = None
+        if len(indexcache_state) > 6:
+            producer_layer = self._indexcache_tensor_to_int(
+                indexcache_state[6]
+            )
+        if producer_layer is None:
+            producer_layer = getattr(
+                self.config, "_indexcache_last_layer_number", None
+            )
+        return indexcache_state[0], producer_layer
+
+    def _indexcache_cache_topk(
+        self,
+        compress_topk_idxs: Tensor,
+        c4_ordinal: int,
+        pattern: str,
+        tilelang_indexer_loss_state: tuple | None = None,
+        served_count: int | None = None,
+        loss_scale: float | None = None,
+    ) -> tuple[Tensor, ...]:
+        self.config._indexcache_last_topk_idxs = compress_topk_idxs.detach()
+        self.config._indexcache_last_layer_number = self.layer_number
+        if (
+            self._indexcache_multi_layer_distill_enabled()
+            and tilelang_indexer_loss_state is not None
+        ):
+            self.config._indexcache_last_distill_state = tilelang_indexer_loss_state
+            self.config._indexcache_last_served_count = served_count
+            self._indexcache_distill_debug(
+                "action=producer "
+                f"c4_ordinal={c4_ordinal} served_count={served_count} "
+                f"loss_scale={loss_scale:.8g}"
+            )
+        self._indexcache_debug(
+            "action=produce "
+            f"c4_ordinal={c4_ordinal} pattern={pattern} "
+            f"topk_shape={list(compress_topk_idxs.shape)}"
+        )
+        return self._indexcache_pack_state(
+            compress_topk_idxs,
+            tilelang_indexer_loss_state,
+            served_count,
+        )
+
+    def _indexcache_reuse_topk(
+        self,
+        b: int,
+        sq: int,
+        c4_ordinal: int,
+        pattern: str,
+        indexcache_state: tuple | list | None = None,
+    ) -> Tensor:
+        cached, producer_layer = self._indexcache_state_topk(
+            indexcache_state
+        )
+        if cached is None:
+            cached = getattr(self.config, "_indexcache_last_topk_idxs", None)
+            producer_layer = getattr(
+                self.config, "_indexcache_last_layer_number", None
+            )
+        if cached is None:
+            raise RuntimeError(
+                "index_topk_pattern requested reuse before a cached producer "
+                f"top-k exists at c4_ordinal={c4_ordinal}, pattern={pattern}."
+            )
+        cached_shape = list(cached.shape)
+        if len(cached_shape) < 3 or cached_shape[0] != b or cached_shape[1] != sq:
+            raise ValueError(
+                "Cached IndexCache top-k shape does not match the current "
+                f"layer input. cached={cached_shape}, current_batch={b}, "
+                f"current_seq={sq}."
+            )
+        if producer_layer is None:
+            producer_layer = self._indexcache_infer_producer_layer(
+                c4_ordinal, pattern
+            )
+        self._indexcache_debug(
+            "action=reuse "
+            f"c4_ordinal={c4_ordinal} pattern={pattern} "
+            f"producer_layer={producer_layer} topk_shape={cached_shape}"
+        )
+        return cached
+
+    def _indexcache_served_distill_state(
+        self,
+        query: Tensor,
+        compressed_kv: Tensor,
+        c4_ordinal: int,
+        pattern: str,
+        loss_mask: Tensor | None = None,
+        global_valid_count: float | None = None,
+        indexcache_state: tuple | list | None = None,
+    ) -> tuple | None:
+        if not (
+            self._indexcache_multi_layer_distill_enabled()
+            and self.training
+            and paddle.is_grad_enabled()
+        ):
+            return None
+
+        producer_state = None
+        producer_layer = None
+        served_count = None
+        if indexcache_state is not None:
+            if len(indexcache_state) >= 8:
+                producer_state = (
+                    indexcache_state[1],
+                    indexcache_state[2],
+                    indexcache_state[3],
+                    indexcache_state[4],
+                    indexcache_state[5],
+                    None,
+                    None,
+                    getattr(self.config, "csa_indexer_backend", "tilelang"),
+                    None,
+                    None,
+                )
+                producer_layer = self._indexcache_tensor_to_int(
+                    indexcache_state[6]
+                )
+                served_count = self._indexcache_tensor_to_int(
+                    indexcache_state[7]
+                )
+            else:
+                raise RuntimeError(
+                    "indexcache_multi_layer_distill received a producer "
+                    "top-k state without producer loss tensors. "
+                    f"c4_ordinal={c4_ordinal}, pattern={pattern}."
+                )
+
+        if producer_state is None:
+            producer_state = getattr(
+                self.config, "_indexcache_last_distill_state", None
+            )
+            producer_layer = getattr(
+                self.config, "_indexcache_last_layer_number", None
+            )
+            served_count = getattr(
+                self.config, "_indexcache_last_served_count", None
+            )
+        if producer_state is None or served_count is None:
+            raise RuntimeError(
+                "indexcache_multi_layer_distill requested an S-layer target "
+                "before a producer distill state exists. "
+                f"c4_ordinal={c4_ordinal}, pattern={pattern}."
+            )
+
+        (
+            q_indexer_bf,
+            weights_indexer_bf,
+            k_indexer_bf,
+            topk_indices_compressed,
+            topk_probs,
+            _producer_target,
+            _producer_loss_coeff,
+            backend,
+            _producer_num_rows,
+            _producer_loss_mask,
+        ) = producer_state
+        key_comp_mla = compressed_kv.detach()
+
+        if self.tp_group is not None and getattr(self.tp_group, "nranks", 1) > 1:
+            target = _compute_attn_target_on_selected_set(
+                query.detach(),
+                key_comp_mla,
+                topk_indices_compressed.detach(),
+                self.softmax_scale,
+                self.tp_group,
+            )
+        else:
+            from paddlefleet.tilelang_ops import csa_attn_target_reducesum
+
+            target = csa_attn_target_reducesum(
+                query.detach(),
+                key_comp_mla,
+                topk_indices_compressed.detach(),
+                self.softmax_scale,
+            )
+
+        loss_scale = self._indexcache_scaled_loss_coeff(int(served_count))
+        if self.cp_enabled and loss_mask is None:
+            loss_scale /= float(self.cp_size)
+        if loss_scale > 0:
+            loss = _compute_csa_selected_set_kl_loss(
+                target.detach(),
+                topk_probs.detach(),
+                loss_scale,
+                loss_mask,
+                global_valid_count,
+            )
+            DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                loss=loss,
+                layer_number=self.layer_number,
+                num_layers=DSAIndexerLossLoggingHelper.get_total_num_layers(
+                    self.config
+                ),
+            )
+        self._indexcache_distill_debug(
+            "action=served "
+            f"c4_ordinal={c4_ordinal} pattern={pattern} "
+            f"producer_layer={producer_layer} served_count={served_count} "
+            f"topk_shape={list(topk_indices_compressed.shape)} "
+            f"loss_scale={loss_scale:.8g}"
+        )
+        return (
+            q_indexer_bf,
+            weights_indexer_bf,
+            k_indexer_bf,
+            topk_indices_compressed,
+            topk_probs,
+            target,
+            loss_scale,
+            backend,
+            global_valid_count if loss_mask is not None else None,
+            loss_mask,
+        )
+
     def _compute_indexer_compressed_topk_idxs(
         self,
         query: Tensor,
@@ -1589,6 +1980,7 @@ class CompressedSparseAttention(FleetLayer):
         startend_row_indices: Tensor | None = None,
         loss_mask: Tensor | None = None,
         global_valid_count: float | None = None,
+        indexer_loss_coeff_override: float | None = None,
     ) -> tuple[Tensor, Tensor | None, tuple | None]:
         """Build indexer-selected compressed KV indices and loss state."""
         b, sq, np_heads, _ = query.shape
@@ -1642,8 +2034,10 @@ class CompressedSparseAttention(FleetLayer):
             # Training grad-enabled forward with TileLang/cuDNN backend.
             # The same backend's top-k-only kernel is used during recompute's
             # first no-grad forward below.
-            indexer_loss_coeff = getattr(
-                self.config, "dsa_indexer_loss_coeff", 0.0
+            indexer_loss_coeff = (
+                indexer_loss_coeff_override
+                if indexer_loss_coeff_override is not None
+                else getattr(self.config, "dsa_indexer_loss_coeff", 0.0)
             )
             q_indexer_bf, k_indexer_bf, weights_indexer_bf = (
                 self.indexer.forward_before_topk(
@@ -1760,8 +2154,10 @@ class CompressedSparseAttention(FleetLayer):
                         x_det, qr_det, startend_row_indices
                     )
                 )
-                indexer_loss_coeff = getattr(
-                    self.config, "dsa_indexer_loss_coeff", 0.0
+                indexer_loss_coeff = (
+                    indexer_loss_coeff_override
+                    if indexer_loss_coeff_override is not None
+                    else getattr(self.config, "dsa_indexer_loss_coeff", 0.0)
                 )
                 key_for_loss = compressed_kv.unsqueeze(2).expand(
                     [-1, -1, np_heads, -1]
@@ -1829,6 +2225,7 @@ class CompressedSparseAttention(FleetLayer):
         x: Tensor = None,
         qr: Tensor = None,
         input_ids: Tensor | None = None,
+        indexcache_state: tuple | list | None = None,
     ) -> Tensor:
         """Forward pass for CompressedSparseAttention.
 
@@ -1844,6 +2241,7 @@ class CompressedSparseAttention(FleetLayer):
             output: [b, sq, np * v_head_dim]
         """
         b, sq, np_heads, hn = query.shape
+        indexcache_state_next = indexcache_state
 
         if startend_row_indices is not None:
             assert b == 1, (
@@ -1889,7 +2287,7 @@ class CompressedSparseAttention(FleetLayer):
             global_valid_count = None
 
         if self.cp_enabled:
-            return self._forward_cp(
+            cp_result = self._forward_cp(
                 query,
                 key,
                 x,
@@ -1897,7 +2295,15 @@ class CompressedSparseAttention(FleetLayer):
                 startend_row_indices,
                 loss_mask=loss_mask,
                 global_valid_count=global_valid_count,
+                indexcache_state=indexcache_state,
             )
+            if isinstance(cp_result, tuple):
+                output, indexcache_state_next = cp_result
+            else:
+                output = cp_result
+            if indexcache_state_next is not None:
+                return output, indexcache_state_next
+            return output
 
         if startend_row_indices is not None and self.compress_ratio > 1:
             doc_lens = get_doc_lens(startend_row_indices)
@@ -1941,6 +2347,7 @@ class CompressedSparseAttention(FleetLayer):
         # Step 4: Compressed indices
         indexer_loss = None
         tilelang_indexer_loss_state = None
+        indexcache_served_loss_state = None
 
         if (
             self.compress_ratio > 1
@@ -1948,21 +2355,70 @@ class CompressedSparseAttention(FleetLayer):
             and actual_n_compressed > 0
         ):
             if self.indexer is not None:
-                (
-                    compress_topk_idxs,
-                    indexer_loss,
-                    tilelang_indexer_loss_state,
-                ) = self._compute_indexer_compressed_topk_idxs(
-                    query,
-                    x,
-                    qr,
-                    compressed_kv,
-                    n_compressed,
-                    offset,
-                    startend_row_indices,
-                    loss_mask=loss_mask,
-                    global_valid_count=global_valid_count,
-                )
+                indexcache_action = self._indexcache_next_c4_action()
+                if (
+                    indexcache_action is not None
+                    and indexcache_action[1] == "S"
+                ):
+                    c4_ordinal, _action, pattern = indexcache_action
+                    compress_topk_idxs = self._indexcache_reuse_topk(
+                        b,
+                        sq,
+                        c4_ordinal,
+                        pattern,
+                        indexcache_state=indexcache_state,
+                    )
+                    indexcache_served_loss_state = (
+                        self._indexcache_served_distill_state(
+                            query,
+                            compressed_kv,
+                            c4_ordinal,
+                            pattern,
+                            loss_mask=loss_mask,
+                            global_valid_count=global_valid_count,
+                            indexcache_state=indexcache_state,
+                        )
+                    )
+                else:
+                    served_count = None
+                    loss_coeff_override = None
+                    if (
+                        indexcache_action is not None
+                        and self._indexcache_multi_layer_distill_enabled()
+                    ):
+                        c4_ordinal, _action, pattern = indexcache_action
+                        served_count = self._indexcache_served_count(
+                            pattern, c4_ordinal
+                        )
+                        loss_coeff_override = self._indexcache_scaled_loss_coeff(
+                            served_count
+                        )
+                    (
+                        compress_topk_idxs,
+                        indexer_loss,
+                        tilelang_indexer_loss_state,
+                    ) = self._compute_indexer_compressed_topk_idxs(
+                        query,
+                        x,
+                        qr,
+                        compressed_kv,
+                        n_compressed,
+                        offset,
+                        startend_row_indices,
+                        loss_mask=loss_mask,
+                        global_valid_count=global_valid_count,
+                        indexer_loss_coeff_override=loss_coeff_override,
+                    )
+                    if indexcache_action is not None:
+                        c4_ordinal, _action, pattern = indexcache_action
+                        indexcache_state_next = self._indexcache_cache_topk(
+                            compress_topk_idxs,
+                            c4_ordinal,
+                            pattern,
+                            tilelang_indexer_loss_state,
+                            served_count,
+                            loss_coeff_override,
+                        )
             else:
                 # ratio=128: attend to all compressed positions
                 compress_topk_idxs = get_compress_topk_idxs(
@@ -2000,7 +2456,14 @@ class CompressedSparseAttention(FleetLayer):
             )
         elif indexer_loss is not None and self.training:
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
+        if indexcache_served_loss_state is not None:
+            output = TileLangCSAIndexerLossAutoScaler.apply(
+                output,
+                *indexcache_served_loss_state,
+            )
 
+        if indexcache_state_next is not None:
+            return output, indexcache_state_next
         return output
 
     def _forward_cp(
@@ -2012,6 +2475,7 @@ class CompressedSparseAttention(FleetLayer):
         startend_row_indices: Tensor | None = None,
         loss_mask: Tensor | None = None,
         global_valid_count: float | None = None,
+        indexcache_state: tuple | list | None = None,
     ) -> Tensor:
         """CP-aware forward: local compress + all-gather, sparse attention.
 
@@ -2028,6 +2492,7 @@ class CompressedSparseAttention(FleetLayer):
             reduce_scatter(SUM) + optimizer x cp_size aggregates them correctly
         """
         b, sq, np_heads, hn = query.shape
+        indexcache_state_next = indexcache_state
         sq_global = sq * self.cp_size
         position_offset = self.cp_rank * sq
         q_positions = paddle.arange(
@@ -2096,6 +2561,7 @@ class CompressedSparseAttention(FleetLayer):
         # Step 3: Compressed topk + optional fused indexer loss
         indexer_loss = None
         tilelang_indexer_loss_state = None
+        indexcache_served_loss_state = None
 
         if (
             self.compress_ratio > 1
@@ -2103,233 +2569,301 @@ class CompressedSparseAttention(FleetLayer):
             and actual_n_compressed > 0
         ):
             if self.indexer is not None:
-                x_det = x.detach()
-                qr_det = qr.detach()
-                if self.training:
-                    x_det.stop_gradient = False
-                    qr_det.stop_gradient = False
-
-                indexer_backend = getattr(
-                    self.config, "csa_indexer_backend", "tilelang"
-                )
-                use_tilelang_indexer = indexer_backend == "tilelang"
-                use_tilelang_loss_path = (
-                    use_tilelang_indexer
-                    and self.training
-                    and paddle.is_grad_enabled()
-                )
-                loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
-                    self.config, self.indexer.index_topk, n_compressed_global
-                )
-                attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
-                    self.indexer.index_topk, n_compressed_global
-                )
-
-                # valid_range for varlen: [b, sq_local, 2] or None
-                if startend_row_indices is not None:
-                    valid_range_full = get_valid_range(
-                        int(self.compress_ratio),
-                        b,
-                        sq_global,
-                        startend_row_indices,
-                    )
-                    valid_range = valid_range_full[
-                        :, position_offset : position_offset + sq, :
-                    ]
-                else:
-                    valid_range = None
-
-                q_indexer_bf, k_indexer_global, weights_indexer_bf = (
-                    self.indexer.forward_before_topk(
-                        x_det,
-                        qr_det,
-                        startend_row_indices=startend_row_indices,
-                        position_offset=position_offset,
-                        cp_group=self.cp_group,
-                    )
-                )
-
-                indexer_loss_coeff = getattr(
-                    self.config, "dsa_indexer_loss_coeff", 0.0
-                )
-
-                if use_tilelang_loss_path:  # CP training grad-enabled forward with TileLang indexer backend.
-                    # Fused TileLang: single PyLayer produces topk + loss.
-                    # key_comp_mla is 3D [b, n_comp_global, hn] (shared across heads).
-                    key_comp_mla = compressed_kv_global.detach()
-                    (
-                        indexer_loss,
-                        topk_indices_compressed,
-                        topk_probs,
-                        target,
-                    ) = _compute_fused_csa_indexer_loss_forward(
-                        q_indexer_bf,
-                        weights_indexer_bf,
-                        k_indexer_global,
-                        query.detach(),
-                        key_comp_mla,
-                        valid_range,
-                        int(self.compress_ratio),
-                        int(loss_topk_effective),
-                        float(self.softmax_scale),
-                        float(indexer_loss_coeff),
-                        self.tp_group,
-                        seq_offset=position_offset,
-                        loss_mask=loss_mask,
-                        global_valid_count=global_valid_count,
-                    )
-                    tilelang_indexer_loss_state = (
-                        q_indexer_bf,
-                        weights_indexer_bf,
-                        k_indexer_global,
-                        topk_indices_compressed,
-                        topk_probs,
-                        target,
-                        float(indexer_loss_coeff)
-                        if loss_mask is not None
-                        else float(indexer_loss_coeff) / self.cp_size,
-                        getattr(self.config, "csa_indexer_backend", "tilelang"),
-                        global_valid_count if loss_mask is not None else None,
-                        loss_mask,
-                    )
-                    if (
-                        indexer_loss_coeff > 0
-                    ):  # CP TileLang training path logs only when indexer loss is enabled.
-                        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                            loss=indexer_loss,
-                            layer_number=self.layer_number,
-                            num_layers=self.config.num_hidden_layers,
-                        )
-                    # Scale: each rank's loss is mean over sq_local;
-                    # global loss is mean over sq_global = sq_local * cp_size.
-                    if loss_mask is None:
-                        indexer_loss = indexer_loss / self.cp_size
-
-                elif (
-                    self.training and not use_tilelang_indexer
-                ):  # CP training forward with unfused indexer backend.
-                    # Paddle reference loss path
-                    key_for_loss = (
-                        compressed_kv_global.detach()
-                        .unsqueeze(2)
-                        .expand([-1, -1, np_heads, -1])
-                    )
-
-                    if startend_row_indices is None:
-                        causal_mask = build_causal_mask_cp(
-                            q_positions,
-                            n_compressed_global,
-                            self.compress_ratio,
-                            b,
-                        )
-                    else:
-                        causal_mask_full = _build_compressed_causal_mask(
-                            self.compress_ratio,
-                            b,
-                            sq_global,
-                            n_compressed_global,
-                            startend_row_indices,
-                        )
-                        causal_mask = causal_mask_full[
-                            :, position_offset : position_offset + sq, ...
-                        ]
-
-                    weights_for_loss = (
-                        weights_indexer_bf * self.indexer.softmax_scale
-                    )
-                    mask_for_loss = causal_mask.unsqueeze(1)
-
-                    indexer_loss = FusedDSAIndexerLoss.apply(
-                        q_indexer_bf,
-                        weights_for_loss,
-                        k_indexer_global,
-                        query.detach(),
-                        key_for_loss.detach(),
-                        self.softmax_scale,
-                        min(self.indexer.index_topk, n_compressed_global),
-                        indexer_loss_coeff,
-                        mask_for_loss,
-                        getattr(
-                            self.config, "dsa_indexer_use_sparse_loss", True
-                        ),
-                        self.tp_group,
-                        loss_mask,
-                        global_valid_count,
-                    )
-                    topk_indices_compressed = (
-                        FusedDSAIndexerLoss._last_topk_indices
-                    )
-                    if (
-                        indexer_loss_coeff > 0
-                    ):  # CP unfused training path logs only when indexer loss is enabled.
-                        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                            loss=indexer_loss,
-                            layer_number=self.layer_number,
-                            num_layers=self.config.num_hidden_layers,
-                        )
-                    if loss_mask is None:
-                        indexer_loss = indexer_loss / self.cp_size
-
-                elif not use_tilelang_indexer:  # CP eval/no-grad forward with unfused backend; only materialize attention top-k.
-                    # Inference-only Paddle topk (use already-gathered global K)
-                    if startend_row_indices is None:
-                        causal_mask = build_causal_mask_cp(
-                            q_positions,
-                            n_compressed_global,
-                            self.compress_ratio,
-                            b,
-                        )
-                    else:
-                        causal_mask_full = _build_compressed_causal_mask(
-                            self.compress_ratio,
-                            b,
-                            sq_global,
-                            n_compressed_global,
-                            startend_row_indices,
-                        )
-                        causal_mask = causal_mask_full[
-                            :, position_offset : position_offset + sq, ...
-                        ]
-
-                    _, topk_indices_compressed = fused_qk_topk_naive(
-                        q_indexer_bf,
-                        k_indexer_global,
-                        weights_indexer_bf,
-                        attn_topk_effective,
-                        causal_mask,
-                    )
-
-                # TileLang fwd-only topk (no loss, or loss already produced above)
+                indexcache_action = self._indexcache_next_c4_action()
                 if (
-                    use_tilelang_indexer and not use_tilelang_loss_path
-                ):  # CP eval/no-grad or recompute first forward with TileLang backend.
-                    from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
+                    indexcache_action is not None
+                    and indexcache_action[1] == "S"
+                ):
+                    c4_ordinal, _action, pattern = indexcache_action
+                    compress_topk_idxs = self._indexcache_reuse_topk(
+                        b,
+                        sq,
+                        c4_ordinal,
+                        pattern,
+                        indexcache_state=indexcache_state,
+                    )
+                    indexcache_served_loss_state = (
+                        self._indexcache_served_distill_state(
+                            query,
+                            compressed_kv_global,
+                            c4_ordinal,
+                            pattern,
+                            loss_mask=loss_mask,
+                            global_valid_count=global_valid_count,
+                            indexcache_state=indexcache_state,
+                        )
+                    )
+                else:
+                    x_det = x.detach()
+                    qr_det = qr.detach()
+                    if self.training:
+                        x_det.stop_gradient = False
+                        qr_det.stop_gradient = False
 
-                    with paddle.no_grad():
-                        tl_topk_indices, _ = csa_indexer_topk_fwd(
+                    indexer_backend = getattr(
+                        self.config, "csa_indexer_backend", "tilelang"
+                    )
+                    use_tilelang_indexer = indexer_backend == "tilelang"
+                    use_tilelang_loss_path = (
+                        use_tilelang_indexer
+                        and self.training
+                        and paddle.is_grad_enabled()
+                    )
+                    loss_topk_effective = (
+                        _resolve_csa_indexer_loss_topk_effective(
+                            self.config,
+                            self.indexer.index_topk,
+                            n_compressed_global,
+                        )
+                    )
+                    attn_topk_effective = (
+                        _resolve_csa_indexer_attn_topk_effective(
+                            self.indexer.index_topk, n_compressed_global
+                        )
+                    )
+
+                    # valid_range for varlen: [b, sq_local, 2] or None
+                    if startend_row_indices is not None:
+                        valid_range_full = get_valid_range(
+                            int(self.compress_ratio),
+                            b,
+                            sq_global,
+                            startend_row_indices,
+                        )
+                        valid_range = valid_range_full[
+                            :, position_offset : position_offset + sq, :
+                        ]
+                    else:
+                        valid_range = None
+
+                    q_indexer_bf, k_indexer_global, weights_indexer_bf = (
+                        self.indexer.forward_before_topk(
+                            x_det,
+                            qr_det,
+                            startend_row_indices=startend_row_indices,
+                            position_offset=position_offset,
+                            cp_group=self.cp_group,
+                        )
+                    )
+
+                    served_count = None
+                    loss_coeff_override = None
+                    if (
+                        indexcache_action is not None
+                        and self._indexcache_multi_layer_distill_enabled()
+                    ):
+                        c4_ordinal, _action, pattern = indexcache_action
+                        served_count = self._indexcache_served_count(
+                            pattern, c4_ordinal
+                        )
+                        loss_coeff_override = (
+                            self._indexcache_scaled_loss_coeff(served_count)
+                        )
+                    indexer_loss_coeff = (
+                        loss_coeff_override
+                        if loss_coeff_override is not None
+                        else getattr(self.config, "dsa_indexer_loss_coeff", 0.0)
+                    )
+
+                    if use_tilelang_loss_path:  # CP training grad-enabled forward with TileLang indexer backend.
+                        # Fused TileLang: single PyLayer produces topk + loss.
+                        # key_comp_mla is 3D [b, n_comp_global, hn] (shared across heads).
+                        key_comp_mla = compressed_kv_global.detach()
+                        (
+                            indexer_loss,
+                            topk_indices_compressed,
+                            topk_probs,
+                            target,
+                        ) = _compute_fused_csa_indexer_loss_forward(
+                            q_indexer_bf,
+                            weights_indexer_bf,
+                            k_indexer_global,
+                            query.detach(),
+                            key_comp_mla,
+                            valid_range,
+                            int(self.compress_ratio),
+                            int(loss_topk_effective),
+                            float(self.softmax_scale),
+                            float(indexer_loss_coeff),
+                            self.tp_group,
+                            seq_offset=position_offset,
+                            loss_mask=loss_mask,
+                            global_valid_count=global_valid_count,
+                        )
+                        tilelang_indexer_loss_state = (
+                            q_indexer_bf,
+                            weights_indexer_bf,
+                            k_indexer_global,
+                            topk_indices_compressed,
+                            topk_probs,
+                            target,
+                            float(indexer_loss_coeff)
+                            if loss_mask is not None
+                            else float(indexer_loss_coeff) / self.cp_size,
+                            getattr(
+                                self.config, "csa_indexer_backend", "tilelang"
+                            ),
+                            global_valid_count
+                            if loss_mask is not None
+                            else None,
+                            loss_mask,
+                        )
+                        if (
+                            indexer_loss_coeff > 0
+                        ):  # CP TileLang training path logs only when indexer loss is enabled.
+                            DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                                loss=indexer_loss,
+                                layer_number=self.layer_number,
+                                num_layers=self.config.num_hidden_layers,
+                            )
+                        # Scale: each rank's loss is mean over sq_local;
+                        # global loss is mean over sq_global = sq_local * cp_size.
+                        if loss_mask is None:
+                            indexer_loss = indexer_loss / self.cp_size
+
+                    elif (
+                        self.training and not use_tilelang_indexer
+                    ):  # CP training forward with unfused indexer backend.
+                        # Paddle reference loss path
+                        key_for_loss = (
+                            compressed_kv_global.detach()
+                            .unsqueeze(2)
+                            .expand([-1, -1, np_heads, -1])
+                        )
+
+                        if startend_row_indices is None:
+                            causal_mask = build_causal_mask_cp(
+                                q_positions,
+                                n_compressed_global,
+                                self.compress_ratio,
+                                b,
+                            )
+                        else:
+                            causal_mask_full = _build_compressed_causal_mask(
+                                self.compress_ratio,
+                                b,
+                                sq_global,
+                                n_compressed_global,
+                                startend_row_indices,
+                            )
+                            causal_mask = causal_mask_full[
+                                :, position_offset : position_offset + sq, ...
+                            ]
+
+                        weights_for_loss = (
+                            weights_indexer_bf * self.indexer.softmax_scale
+                        )
+                        mask_for_loss = causal_mask.unsqueeze(1)
+
+                        indexer_loss = FusedDSAIndexerLoss.apply(
+                            q_indexer_bf,
+                            weights_for_loss,
+                            k_indexer_global,
+                            query.detach(),
+                            key_for_loss.detach(),
+                            self.softmax_scale,
+                            min(self.indexer.index_topk, n_compressed_global),
+                            indexer_loss_coeff,
+                            mask_for_loss,
+                            getattr(
+                                self.config,
+                                "dsa_indexer_use_sparse_loss",
+                                True,
+                            ),
+                            self.tp_group,
+                            loss_mask,
+                            global_valid_count,
+                        )
+                        topk_indices_compressed = (
+                            FusedDSAIndexerLoss._last_topk_indices
+                        )
+                        if (
+                            indexer_loss_coeff > 0
+                        ):  # CP unfused training path logs only when indexer loss is enabled.
+                            DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                                loss=indexer_loss,
+                                layer_number=self.layer_number,
+                                num_layers=self.config.num_hidden_layers,
+                            )
+                        if loss_mask is None:
+                            indexer_loss = indexer_loss / self.cp_size
+
+                    elif not use_tilelang_indexer:  # CP eval/no-grad forward with unfused backend; only materialize attention top-k.
+                        # Inference-only Paddle topk (use already-gathered global K)
+                        if startend_row_indices is None:
+                            causal_mask = build_causal_mask_cp(
+                                q_positions,
+                                n_compressed_global,
+                                self.compress_ratio,
+                                b,
+                            )
+                        else:
+                            causal_mask_full = _build_compressed_causal_mask(
+                                self.compress_ratio,
+                                b,
+                                sq_global,
+                                n_compressed_global,
+                                startend_row_indices,
+                            )
+                            causal_mask = causal_mask_full[
+                                :, position_offset : position_offset + sq, ...
+                            ]
+
+                        _, topk_indices_compressed = fused_qk_topk_naive(
                             q_indexer_bf,
                             k_indexer_global,
                             weights_indexer_bf,
-                            ratio=self.compress_ratio,
-                            topk_effective=attn_topk_effective,
-                            seq_offset=position_offset,
-                            valid_range=valid_range,
+                            attn_topk_effective,
+                            causal_mask,
                         )
-                    topk_indices_compressed = tl_topk_indices
 
-                if (
-                    topk_indices_compressed.shape[-1] > attn_topk_effective
-                ):  # CP loss path may return wider top-k than attention consumes.
-                    topk_indices_compressed = topk_indices_compressed[
-                        ..., :attn_topk_effective
-                    ].contiguous()
+                    # TileLang fwd-only topk (no loss, or loss already produced above)
+                    if (
+                        use_tilelang_indexer and not use_tilelang_loss_path
+                    ):  # CP eval/no-grad or recompute first forward with TileLang backend.
+                        from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
 
-                compress_topk_idxs = map_compressed_topk_to_kv_full_cp(
-                    topk_indices_compressed,
-                    q_positions,
-                    self.compress_ratio,
-                    offset,
-                )
+                        with paddle.no_grad():
+                            tl_topk_indices, _ = csa_indexer_topk_fwd(
+                                q_indexer_bf,
+                                k_indexer_global,
+                                weights_indexer_bf,
+                                ratio=self.compress_ratio,
+                                topk_effective=attn_topk_effective,
+                                seq_offset=position_offset,
+                                valid_range=valid_range,
+                            )
+                        topk_indices_compressed = tl_topk_indices
+
+                    if (
+                        topk_indices_compressed.shape[-1]
+                        > attn_topk_effective
+                    ):  # CP loss path may return wider top-k than attention consumes.
+                        topk_indices_compressed = topk_indices_compressed[
+                            ..., :attn_topk_effective
+                        ].contiguous()
+
+                    compress_topk_idxs = map_compressed_topk_to_kv_full_cp(
+                        topk_indices_compressed,
+                        q_positions,
+                        self.compress_ratio,
+                        offset,
+                    )
+                    if indexcache_action is not None:
+                        c4_ordinal, _action, pattern = indexcache_action
+                        effective_loss_scale = (
+                            tilelang_indexer_loss_state[6]
+                            if tilelang_indexer_loss_state is not None
+                            else loss_coeff_override
+                        )
+                        indexcache_state_next = self._indexcache_cache_topk(
+                            compress_topk_idxs,
+                            c4_ordinal,
+                            pattern,
+                            tilelang_indexer_loss_state,
+                            served_count,
+                            effective_loss_scale,
+                        )
             else:
                 # HCA path: attend to all compressed positions
                 if startend_row_indices is None:
@@ -2374,7 +2908,13 @@ class CompressedSparseAttention(FleetLayer):
             )
         elif indexer_loss is not None and self.training:
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
+        if indexcache_served_loss_state is not None:
+            output = TileLangCSAIndexerLossAutoScaler.apply(
+                output, *indexcache_served_loss_state
+            )
 
+        if indexcache_state_next is not None:
+            return output, indexcache_state_next
         return output
 
     def compressed_sparse_attn(
