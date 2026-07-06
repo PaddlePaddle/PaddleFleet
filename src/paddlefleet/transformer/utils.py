@@ -200,7 +200,7 @@ def inspect_and_load_tensor(tag, layer_idx, tensor, load=True):
         layer_idx: transformer layer index.
         tensor: the live paddle tensor.
         load: if True, attempt to load and override the tensor from disk (layer 0 only).
-              Default is True (only print info).
+              Default is True.
 
     Returns:
         The original tensor (if load=False or no file found), or the loaded tensor.
