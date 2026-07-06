@@ -841,6 +841,12 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         num_rows_override: float | None = None,
         loss_mask: Tensor | None = None,
     ) -> Tensor:
+        ctx.input_stop_gradients = (
+            bool(output.stop_gradient),
+            bool(index_q.stop_gradient),
+            bool(weights.stop_gradient),
+            bool(index_k_comp.stop_gradient),
+        )
         ctx.save_for_backward(
             index_q.detach(),
             weights.detach(),
@@ -952,7 +958,14 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         if grad_k.dtype != index_k_comp.dtype:
             grad_k = grad_k.cast(index_k_comp.dtype)
 
-        grads = (grad_output, grad_q, grad_weights, grad_k) + (None,) * (
+        grad_slots = [grad_output, grad_q, grad_weights, grad_k]
+        for idx, stop_gradient in enumerate(
+            getattr(ctx, "input_stop_gradients", ())
+        ):
+            if stop_gradient:
+                grad_slots[idx] = None
+
+        grads = tuple(grad_slots) + (None,) * (
             4 if getattr(ctx, "loss_mask", None) is not None else 3
         )
         return grads
@@ -1651,6 +1664,12 @@ class CompressedSparseAttention(FleetLayer):
         coeff = getattr(self.config, "dsa_indexer_loss_coeff", 0.0) or 0.0
         return float(coeff) / float(max(int(served_count), 1))
 
+    def _indexcache_clear_cached_state(self) -> None:
+        self.config._indexcache_last_topk_idxs = None
+        self.config._indexcache_last_layer_number = None
+        self.config._indexcache_last_distill_state = None
+        self.config._indexcache_last_served_count = None
+
     def _indexcache_c4_layers(self) -> list[int]:
         ratios = getattr(self.config, "csa_compress_ratios", None) or []
         empty_head = int(
@@ -1676,6 +1695,14 @@ class CompressedSparseAttention(FleetLayer):
             return None
         return c4_layers[producer_ordinal]
 
+    @staticmethod
+    def _indexcache_has_future_served_layer(
+        pattern: str, c4_ordinal: int
+    ) -> bool:
+        next_f = pattern.find("F", c4_ordinal + 1)
+        end = next_f if next_f != -1 else len(pattern)
+        return "S" in pattern[c4_ordinal + 1 : end]
+
     def _indexcache_next_c4_action(self) -> tuple[int, str, str] | None:
         pattern = self._indexcache_pattern()
         if pattern is None or self.compress_ratio != 4 or self.indexer is None:
@@ -1697,10 +1724,7 @@ class CompressedSparseAttention(FleetLayer):
             )
 
         if c4_ordinal == 0:
-            self.config._indexcache_last_topk_idxs = None
-            self.config._indexcache_last_layer_number = None
-            self.config._indexcache_last_distill_state = None
-            self.config._indexcache_last_served_count = None
+            self._indexcache_clear_cached_state()
 
         action = pattern[c4_ordinal]
         return c4_ordinal, action, pattern
@@ -1716,13 +1740,19 @@ class CompressedSparseAttention(FleetLayer):
         except Exception:
             return int(value.numpy().reshape([-1])[0])
 
+    @staticmethod
+    def _indexcache_forward_state_tensor(value: Tensor) -> Tensor:
+        value = value.detach()
+        value.stop_gradient = True
+        return value
+
     def _indexcache_pack_state(
         self,
         compress_topk_idxs: Tensor,
         tilelang_indexer_loss_state: tuple | None = None,
         served_count: int | None = None,
     ) -> tuple[Tensor, ...]:
-        state = [compress_topk_idxs.detach()]
+        state = [self._indexcache_forward_state_tensor(compress_topk_idxs)]
         if tilelang_indexer_loss_state is not None:
             (
                 q_indexer_bf,
@@ -1734,14 +1764,29 @@ class CompressedSparseAttention(FleetLayer):
             ) = tilelang_indexer_loss_state
             state.extend(
                 [
-                    q_indexer_bf,
-                    weights_indexer_bf,
-                    k_indexer_bf,
-                    topk_indices_compressed,
-                    topk_probs,
-                    paddle.full([1], self.layer_number, dtype="int64"),
-                    paddle.full(
-                        [1], int(served_count or 1), dtype="int64"
+                    self._indexcache_forward_state_tensor(q_indexer_bf),
+                    self._indexcache_forward_state_tensor(weights_indexer_bf),
+                    self._indexcache_forward_state_tensor(k_indexer_bf),
+                    self._indexcache_forward_state_tensor(
+                        topk_indices_compressed
+                    ),
+                    self._indexcache_forward_state_tensor(topk_probs),
+                    self._indexcache_forward_state_tensor(
+                        paddle.full([1], self.layer_number, dtype="int64")
+                    ),
+                    self._indexcache_forward_state_tensor(
+                        paddle.full([1], int(served_count or 1), dtype="int64")
+                    ),
+                ]
+            )
+        else:
+            state.extend(
+                [
+                    self._indexcache_forward_state_tensor(
+                        paddle.full([1], self.layer_number, dtype="int64")
+                    ),
+                    self._indexcache_forward_state_tensor(
+                        paddle.full([1], int(served_count or 1), dtype="int64")
                     ),
                 ]
             )
@@ -1753,9 +1798,13 @@ class CompressedSparseAttention(FleetLayer):
         if not indexcache_state:
             return None, None
         producer_layer = None
-        if len(indexcache_state) > 6:
+        if len(indexcache_state) >= 8:
             producer_layer = self._indexcache_tensor_to_int(
                 indexcache_state[6]
+            )
+        elif len(indexcache_state) >= 3:
+            producer_layer = self._indexcache_tensor_to_int(
+                indexcache_state[1]
             )
         if producer_layer is None:
             producer_layer = getattr(
@@ -2242,6 +2291,7 @@ class CompressedSparseAttention(FleetLayer):
         """
         b, sq, np_heads, hn = query.shape
         indexcache_state_next = indexcache_state
+        indexcache_state_updated = False
 
         if startend_row_indices is not None:
             assert b == 1, (
@@ -2297,12 +2347,15 @@ class CompressedSparseAttention(FleetLayer):
                 global_valid_count=global_valid_count,
                 indexcache_state=indexcache_state,
             )
+            cp_indexcache_state_updated = isinstance(cp_result, tuple)
             if isinstance(cp_result, tuple):
                 output, indexcache_state_next = cp_result
             else:
                 output = cp_result
             if indexcache_state_next is not None:
                 return output, indexcache_state_next
+            if cp_indexcache_state_updated:
+                return output, None
             return output
 
         if startend_row_indices is not None and self.compress_ratio > 1:
@@ -2379,6 +2432,14 @@ class CompressedSparseAttention(FleetLayer):
                             indexcache_state=indexcache_state,
                         )
                     )
+                    if self._indexcache_has_future_served_layer(
+                        pattern, c4_ordinal
+                    ):
+                        indexcache_state_next = indexcache_state
+                    else:
+                        indexcache_state_next = None
+                        self._indexcache_clear_cached_state()
+                    indexcache_state_updated = True
                 else:
                     served_count = None
                     loss_coeff_override = None
@@ -2411,7 +2472,7 @@ class CompressedSparseAttention(FleetLayer):
                     )
                     if indexcache_action is not None:
                         c4_ordinal, _action, pattern = indexcache_action
-                        indexcache_state_next = self._indexcache_cache_topk(
+                        produced_state = self._indexcache_cache_topk(
                             compress_topk_idxs,
                             c4_ordinal,
                             pattern,
@@ -2419,6 +2480,14 @@ class CompressedSparseAttention(FleetLayer):
                             served_count,
                             loss_coeff_override,
                         )
+                        if self._indexcache_has_future_served_layer(
+                            pattern, c4_ordinal
+                        ):
+                            indexcache_state_next = produced_state
+                        else:
+                            indexcache_state_next = None
+                            self._indexcache_clear_cached_state()
+                        indexcache_state_updated = True
             else:
                 # ratio=128: attend to all compressed positions
                 compress_topk_idxs = get_compress_topk_idxs(
@@ -2464,6 +2533,8 @@ class CompressedSparseAttention(FleetLayer):
 
         if indexcache_state_next is not None:
             return output, indexcache_state_next
+        if indexcache_state_updated:
+            return output, None
         return output
 
     def _forward_cp(
@@ -2493,6 +2564,7 @@ class CompressedSparseAttention(FleetLayer):
         """
         b, sq, np_heads, hn = query.shape
         indexcache_state_next = indexcache_state
+        indexcache_state_updated = False
         sq_global = sq * self.cp_size
         position_offset = self.cp_rank * sq
         q_positions = paddle.arange(
@@ -2593,6 +2665,14 @@ class CompressedSparseAttention(FleetLayer):
                             indexcache_state=indexcache_state,
                         )
                     )
+                    if self._indexcache_has_future_served_layer(
+                        pattern, c4_ordinal
+                    ):
+                        indexcache_state_next = indexcache_state
+                    else:
+                        indexcache_state_next = None
+                        self._indexcache_clear_cached_state()
+                    indexcache_state_updated = True
                 else:
                     x_det = x.detach()
                     qr_det = qr.detach()
@@ -2856,7 +2936,7 @@ class CompressedSparseAttention(FleetLayer):
                             if tilelang_indexer_loss_state is not None
                             else loss_coeff_override
                         )
-                        indexcache_state_next = self._indexcache_cache_topk(
+                        produced_state = self._indexcache_cache_topk(
                             compress_topk_idxs,
                             c4_ordinal,
                             pattern,
@@ -2864,6 +2944,14 @@ class CompressedSparseAttention(FleetLayer):
                             served_count,
                             effective_loss_scale,
                         )
+                        if self._indexcache_has_future_served_layer(
+                            pattern, c4_ordinal
+                        ):
+                            indexcache_state_next = produced_state
+                        else:
+                            indexcache_state_next = None
+                            self._indexcache_clear_cached_state()
+                        indexcache_state_updated = True
             else:
                 # HCA path: attend to all compressed positions
                 if startend_row_indices is None:
@@ -2915,6 +3003,8 @@ class CompressedSparseAttention(FleetLayer):
 
         if indexcache_state_next is not None:
             return output, indexcache_state_next
+        if indexcache_state_updated:
+            return output, None
         return output
 
     def compressed_sparse_attn(
