@@ -278,10 +278,11 @@ jobs:
             export AK=paddle
             export SK=paddle
             python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
-            python ../bos/BosClient.py paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-py3-none-linux_aarch64.whl
+            echo paddlefleet-0.0.0-py3-none-linux_aarch64.whl > paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name
+            python ../bos/BosClient.py paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
             python ../bos/BosClient.py paddlefleet-0.0.0-py3-none-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet
