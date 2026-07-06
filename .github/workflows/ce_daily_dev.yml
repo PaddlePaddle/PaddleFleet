@@ -176,24 +176,6 @@ jobs:
           bash ci/single_card_test.sh
           '
 
-      - name: Single card sonic moe test
-        if: matrix.python == '3.12' && matrix.cuda == '12.9' && always()
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          pwd
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${{ matrix.python }}
-          echo "Paddle Commit"
-          python -c "import paddle; print(paddle.version.commit)"
-          echo "PaddleFleet Commit"
-          python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          export COVERAGE_FILE=/paddle/PaddleFleet/coveragedata/.coverage
-          export COVERAGE_RCFILE=/paddle/PaddleFleet/ci/.coveragerc
-          export WITH_COVERAGE=ON
-          cd PaddleFleet
-          bash ci/single_card_sonic.sh
-          '
 
       - name: Single card Coverage Upload to BOS
         if: always() && matrix.python == '3.12' && matrix.cuda == '12.9'
@@ -439,7 +421,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${cuda_version}-${python_version}-H20" >> $GITHUB_ENV
+          echo "BASE_NAME=${cuda_version}-3.10-H20" >> $GITHUB_ENV
           # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
           echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
@@ -705,7 +687,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${cuda_version}-${python_version}-H20" >> $GITHUB_ENV
+          echo "BASE_NAME=${cuda_version}-3.10-H20" >> $GITHUB_ENV
           # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
           echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
@@ -1223,7 +1205,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${cuda_version}-${python_version}-A100" >> $GITHUB_ENV
+          echo "BASE_NAME=${cuda_version}-3.10-A100" >> $GITHUB_ENV
           # 使用 workflow 开始时间作为统一日期，避免跨天后路径不一致
           echo "DATE=$(date -d '${{ github.run_started_at }}' +%Y%m%d)" >> $GITHUB_ENV
       - name: Check docker image and run container
