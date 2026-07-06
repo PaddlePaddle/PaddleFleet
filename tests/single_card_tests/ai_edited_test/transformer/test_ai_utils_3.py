@@ -12,23 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import numpy as np
 import paddle
-
-_PROJECT_ROOT = os.path.dirname(
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    )
-)
-sys.path.insert(0, os.path.join(_PROJECT_ROOT, "src"))
-sys.path.insert(0, _PROJECT_ROOT)
 
 from paddlefleet.transformer.utils import (
     get_doc_lens,
@@ -188,7 +177,3 @@ class TestGetDocStarts(unittest.TestCase):
         doc_lens = paddle.to_tensor([1, 1, 1], dtype="int32")
         starts = get_doc_starts(doc_lens)
         self.assertEqual(starts.numpy().tolist(), [0, 1, 2])
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -244,6 +244,7 @@ def inspect_and_load_tensor(tag, layer_idx, tensor, load=True):
     # --- load (override) ---
     if (
         load
+        and tensor is not None
         and ablation_load_path
         and layer_idx == 0
         and tag not in dump_skip_tags
