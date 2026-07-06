@@ -23,7 +23,7 @@ case_gt_file=${base_name}_${case_name}_gt.txt
 
 if [[ "$update_baseline" == "true" ]]; then
     cp ${case_name}.txt ${case_gt_file}
-    # upload the new ground truth file to the bos
+    echo "update baseline"
     wget -q --no-proxy --no-check-certificate \
             https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
             -O bos_tools.py
