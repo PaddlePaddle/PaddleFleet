@@ -302,7 +302,7 @@ class GreedyGenerator:
                     position_ids.tolist(),
                 )
 
-            if self.cache.window_size:
+            if self.cache.window_size and any(self.cache.swa_layers):
                 prefill_startend = paddle.full(
                     [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
                 )
