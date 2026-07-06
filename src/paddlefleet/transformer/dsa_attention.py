@@ -246,9 +246,20 @@ def build_dsa_varlen_mask(
     if attn_mask_startend_row_indices is None:
         return None
 
-    mask = attn_mask_startend_row_indices.reshape([batch_size, sq]).cast(
-        "int64"
-    )
+    indices = attn_mask_startend_row_indices
+    if (
+        indices.ndim == 4
+        and indices.shape[1] == 1
+        and indices.shape[3] in [1, 2, 4]
+    ):
+        indices = indices[:, 0, :, 0]
+    elif indices.ndim != 2:
+        raise ValueError(
+            "attn_mask_startend_row_indices should be [B, S] or "
+            "[B, 1, S, 1/2/4]"
+        )
+
+    mask = indices.reshape([batch_size, sq]).cast("int64")
     doc_start = _get_doc_start(mask, sq).unsqueeze(2)  # [b, sq, 1]
     doc_end = mask.unsqueeze(2)  # [b, sq, 1]
     key_pos = paddle.arange(sk, dtype="int64").reshape([1, 1, sk])
@@ -1838,6 +1849,23 @@ class DSAttention(FleetLayer):
             indexer_float_mask = indexer_float_mask + varlen_mask
 
         indexer_float_mask = indexer_float_mask.unsqueeze(1)
+        use_tilelang_fused = (
+            self._use_tilelang
+            and q_absorbed is not None
+            and kv_compressed is not None
+            and k_pos_emb is not None
+            and self._v_channels is not None
+        )
+        if (
+            use_tilelang_fused
+            and self.config.sequence_parallel
+            and self.pg_collection.tp is not None
+            and self.pg_collection.tp.nranks > 1
+        ):
+            raise NotImplementedError(
+                "TileLang DSA does not support sequence_parallel yet. "
+                "Disable dsa_tilelang_enable or sequence_parallel."
+            )
 
         # Training with indexer loss
         if self.training and self.dsa_indexer_loss_coeff is not None:
@@ -1846,13 +1874,7 @@ class DSAttention(FleetLayer):
             q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(x, qr)
 
             # TileLang fused indexer + sparse MLA branch
-            if (
-                self._use_tilelang
-                and q_absorbed is not None
-                and kv_compressed is not None
-                and k_pos_emb is not None
-                and self._v_channels is not None
-            ):
+            if use_tilelang_fused:
                 from paddlefleet.tilelang_ops.indexer.dsa_indexer import (
                     dsa_bshd_to_thd,
                     dsa_thd_to_bshd,
@@ -1927,13 +1949,7 @@ class DSAttention(FleetLayer):
                 topk_indices = FusedDSAIndexerLoss._last_topk_indices
         else:
             # Inference or no loss
-            if (
-                self._use_tilelang
-                and q_absorbed is not None
-                and kv_compressed is not None
-                and k_pos_emb is not None
-                and self._v_channels is not None
-            ):
+            if use_tilelang_fused:
                 # Use tilelang fused path with loss_coeff=0 (no indexer loss)
                 from paddlefleet.tilelang_ops.indexer.dsa_indexer import (
                     dsa_bshd_to_thd,
