@@ -3187,8 +3187,6 @@ def run_sonic_moe(
     fp8_scale=None,
     fp8_combine_grad_handle=None,
     fp8_config=None,
-    w1_original=None,
-    w2_original=None,
 ):
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
@@ -3246,18 +3244,18 @@ def run_sonic_moe(
     if fp8_scale is not None:
         fp8_hidden_states = (hidden_states, fp8_scale)
 
-    if fp8:
-        w1_sonic = _make_sonic_fp8_weight_carrier(w1)
-        w2_sonic = _make_sonic_fp8_weight_carrier(w2)
-    else:
-        w1_sonic = w1.permute([1, 2, 0])
-        w2_sonic = w2.permute([1, 2, 0])
+    # if fp8:
+    #     w1_sonic = _make_sonic_fp8_weight_carrier(w1)
+    #     w2_sonic = _make_sonic_fp8_weight_carrier(w2)
+    # else:
+    #     w1_sonic = w1.permute([1, 2, 0])
+    #     w2_sonic = w2.permute([1, 2, 0])
 
     with enable_fp8(fp8):
         # _refresh_fp8_config()
         y1, z = _UpProjection.apply(
             hidden_states,
-            w1_sonic,
+            w1,
             None,
             expert_frequency_offset,
             total_expert_freq,
@@ -3273,12 +3271,11 @@ def run_sonic_moe(
             use_low_precision_postact_buffer=False,
             prequant_activation_payload=fp8_hidden_states,
             fp8_config=fp8_config,
-            w1_original=w1_original,
         )
         hidden_states = _DownProjection.apply(
             y1,
             z,
-            w2_sonic,
+            w2,
             None,
             scores_for_down,
             s_scatter_idx,
@@ -3295,7 +3292,6 @@ def run_sonic_moe(
             None,
             fp8_combine_grad_handle,
             fp8_config=fp8_config,
-            w2_original=w2_original,
         )
 
     return hidden_states

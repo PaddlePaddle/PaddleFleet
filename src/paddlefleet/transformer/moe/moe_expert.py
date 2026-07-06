@@ -625,8 +625,6 @@ class SonicMoEExpert(GroupedMLPExpert):
             fp8_scale=fp8_scale,
             fp8_combine_grad_handle=fp8_combine_grad_handle,
             fp8_config=self.sonic_moe_config,
-            w1_original=self.weight1,
-            w2_original=self.weight2,
         )
         return hidden_states
 
