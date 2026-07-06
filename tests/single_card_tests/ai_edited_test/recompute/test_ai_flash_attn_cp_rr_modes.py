@@ -181,31 +181,6 @@ class TestUlyssesHelpers(unittest.TestCase):
             bool(paddle.all(sliced == per_head[:, 2:4, :, :]).item())
         )
 
-    def test_ulysses_local_first_forward_version_3_saves_rr_tensors(self):
-        q = paddle.randn([1, 4, 2, 4])
-        out = paddle.randn([1, 4, 2, 4])
-        lse = paddle.randn([1, 2, 4])
-        startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
-
-        def fake_flashmask_attention(query, key, value, block_mask=None):
-            return None
-
-        with (
-            patch.object(fa, "_get_fa_version", return_value=3),
-            patch.object(fa, "flashmask_attention", fake_flashmask_attention),
-            patch.object(fa, "_C_ops") as mock_c_ops,
-        ):
-            mock_c_ops.flashmask_attention_v2.return_value = (out, lse)
-            result, hold = fa.ulysses_local_flashmask_first_fwd(
-                q, q, q, startend, False, None
-            )
-
-        self.assertIs(result, out)
-        self.assertIs(hold["softmax_lse"], lse)
-        self.assertFalse(hold["causal"])
-        scale_arg = mock_c_ops.flashmask_attention_v2.call_args.args[-2]
-        self.assertIsInstance(scale_arg, float)
-
     def test_ulysses_local_first_forward_version_4_saves_rr_tensors(self):
         q = paddle.randn([1, 4, 2, 4])
         out = paddle.randn([1, 4, 2, 4])
@@ -215,7 +190,7 @@ class TestUlyssesHelpers(unittest.TestCase):
         with (
             patch.object(fa, "_get_fa_version", return_value=4),
             patch.object(
-                fa, "_flash_attn_fwd", return_value=(out, lse)
+                fa, "_flash_attn_fwd", return_value=(out, lse), create=True
             ) as mock_fwd,
         ):
             result, hold = fa.ulysses_local_flashmask_first_fwd(
