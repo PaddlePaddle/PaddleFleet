@@ -571,7 +571,7 @@ class FlashMaskAttnFunctor(PyLayer):
             softmax_scale = (
                 q.shape[-1] ** (-0.5)
                 if ctx.softmax_scale is None
-                else ctx.softmax_scale,
+                else ctx.softmax_scale
             )
 
             if "group" in sig_params:
@@ -1270,9 +1270,9 @@ class RefinedRcomputeFlashMaskCpAttention:
                 "Dropout is not supported in FlashMask context parallel yet."
             )
 
-        if causal:
+        if causal and mode != "contiguous_a2a":
             raise NotImplementedError(
-                "FlashMaskContextParallel does not support causal=True yet."
+                "FlashMaskContextParallel does not support causal=True for mode other than 'contiguous_a2a'"
             )
 
         if fixed_seed_offset is not None:
@@ -1282,12 +1282,12 @@ class RefinedRcomputeFlashMaskCpAttention:
         hcg = fleet.get_hybrid_communicate_group()
         group = hcg.get_context_parallel_group()
 
-        # Validate query sequence length for DualChunkSwap strategy
-        assert query_states.shape[1] % 2 == 0, (
-            f"Query sequence length must be divisible by 2. "
-            f"FlashMaskContextParallel uses DualChunkSwap strategy for load balancing. "
-            f"Current query sequence length: {query_states.shape[1]}"
-        )
+        if mode == "dualchunk_allgather":
+            assert query_states.shape[1] % 2 == 0, (
+                f"Query sequence length must be divisible by 2. "
+                f"FlashMaskContextParallel uses DualChunkSwap strategy for load balancing. "
+                f"Current query sequence length: {query_states.shape[1]}"
+            )
 
         if mode in ("dualchunk_allgather", "contiguous_allgather"):
             result_attention, softmax_lse, startend_row_indices, fa_version = (
