@@ -298,6 +298,18 @@ class TestTruncateNormInit(unittest.TestCase):
 
         self.assertEqual(config.init_method_std, 0.02)
 
+    def test_truncate_norm_none_init_std_zero_hidden_size_raises(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "hidden_size must be non-zero when init_method_std is None and use_truncated_normal_init is True.",
+        ):
+            TransformerConfig(
+                num_hidden_layers=12,
+                hidden_size=0,
+                init_method_std=None,
+                use_truncated_normal_init=True,
+            )
+
     def test_truncate_norm_raises_on_non_positive_factor(self):
         with self.assertRaisesRegex(
             ValueError,
