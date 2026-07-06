@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
-from paddle import nn
+from paddle import framework, nn
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     AllGatherOp,
     mark_as_sequence_parallel_parameter,
@@ -1404,7 +1404,10 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(probs, "probs", self._layer_number)
         _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
 
-        if self.topk_method == "noaux_tc":
+        if (
+            self.topk_method == "noaux_tc"
+            and framework._dygraph_tracer()._has_grad
+        ):
             with paddle.no_grad():
                 self.expert_usage += exp_counts
 
