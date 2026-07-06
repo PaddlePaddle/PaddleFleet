@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -29,10 +30,13 @@ from ..utils import (
     get_magic_init_method,
     init_method_normal,
     scaled_init_method_normal,
+    truncated_init_method_normal,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -641,30 +645,19 @@ class TransformerConfig(ModelParallelConfig):
     ####################
     init_method: callable = None
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
-    takes a single Tensor and initializes it. If None, will be set to
-    paddlefleet.utils.init_method_normal(init_method_std) which is paddle nn init normal with
-    mean=0.0 and std=init_method_std."""
-
-    embedding_init_method: Callable | None = None
-    """
-    Method to initialize weights of the embedding layer. If None, will be set as described
-    in init_method above.
-    """
-
-    embedding_init_method_std: float | None = None
-    """
-    Standard deviation of the zero mean normal for the default initialization method for the
-    embedding layer. If None, will be set to init_method_std.
-    """
+    takes a single Tensor and initializes it. If None, weights are initialized with a truncated
+    normal distribution N(0, sigma^2) clipped to
+    [-3*sigma, 3*sigma] with sigma=0.5/sqrt(hidden_size)."""
 
     output_layer_init_method: callable = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
     will be set to paddlefleet.utils.scaled_init_method_normal(init_method_std) which is paddle nn
     init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_hidden_layers)."""
 
-    init_method_std: float = 0.02
+    init_method_std: float | None = None
     """Standard deviation of the zero mean normal for the default initialization method, not used if
-    init_method and output_layer_init_method are provided."""
+    init_method and output_layer_init_method are provided. If None, will be set to
+    0.5/sqrt(hidden_size) for truncated normal init or 0.02 when hidden_size is 0."""
 
     embedding_init_method: callable = None
     """
@@ -672,7 +665,7 @@ class TransformerConfig(ModelParallelConfig):
     in init_method above.
     """
 
-    embedding_init_method_std: float = None
+    embedding_init_method_std: float | None = None
     """
     Standard deviation of the zero mean normal for the default initialization method for the
     embedding layer. If None, will be set to init_method_std.
@@ -1084,27 +1077,8 @@ class TransformerConfig(ModelParallelConfig):
         if self.apply_query_key_layer_scaling:
             self.attention_softmax_in_fp32 = True
 
-        # Set the embedding init method
-        if self.embedding_init_method_std is None:
-            # By default, use the same init std as you use for every other non-output layer.
-            self.embedding_init_method_std = self.init_method_std
-
-        if self.embedding_init_method is None:
-            if self.init_method is None or (
-                self.embedding_init_method_std != self.init_method_std
-            ):
-                # In this case, we set both the init method and the embedding init method to
-                #  whatever std value requested (or defaulted) for the embedding_init_layer
-                self.embedding_init_method = init_method_normal(
-                    self.embedding_init_method_std
-                )
-            else:
-                # Replicate the current behavior where if you are not changing the std of the
-                #  embedding init differently and the init method is set, we fallback to the
-                #  init method for this layer. Since we are here after an OR we know that
-                #  init_method is not None
-                self.embedding_init_method = self.init_method
-
+        # Force truncated normal initialization: magic_init is intentionally disabled.
+        self.magic_init = False
         if self.magic_init:
             if self.hidden_size == 0:
                 raise ValueError(
@@ -1113,8 +1087,30 @@ class TransformerConfig(ModelParallelConfig):
             sigma = math.sqrt(0.3333 / self.hidden_size)
             self.init_method = get_magic_init_method(sigma)
             self.init_method_std = sigma
+            self.output_layer_init_method = self.init_method
+            self.embedding_init_method = self.init_method
+            self.embedding_init_method_std = self.init_method_std
         elif self.init_method is None:
-            self.init_method = init_method_normal(self.init_method_std)
+            sigma = self.init_method_std
+            if sigma is None:
+                sigma = (
+                    0.02
+                    if self.hidden_size == 0
+                    else 0.5 / math.sqrt(self.hidden_size)
+                )
+            self.init_method = truncated_init_method_normal(sigma)
+            self.init_method_std = sigma
+            if self.output_layer_init_method is None:
+                self.output_layer_init_method = self.init_method
+            if self.embedding_init_method is None:
+                self.embedding_init_method = self.init_method
+            logger.info(
+                f"[init] default truncated normal init: TruncNormal(0, sigma^2) clipped to "
+                f"[-3*sigma, 3*sigma], sigma={sigma}"
+            )
+
+        if self.init_method_std is None:
+            self.init_method_std = 0.02
 
         if (
             self.first_k_dense_replace
@@ -1170,9 +1166,7 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.magic_init:
-            self.output_layer_init_method = self.init_method
-        elif self.output_layer_init_method is None:
+        if self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
                 self.init_method_std,
                 self.num_hidden_layers,
@@ -1184,10 +1178,7 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.magic_init:
-            self.embedding_init_method = self.init_method
-            self.embedding_init_method_std = self.init_method_std
-        elif self.embedding_init_method is None:
+        if self.embedding_init_method is None:
             if self.init_method is None or (
                 self.embedding_init_method_std != self.init_method_std
             ):
