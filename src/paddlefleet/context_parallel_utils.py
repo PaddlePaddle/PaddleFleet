@@ -1947,3 +1947,117 @@ def flashmask_attention_cp(
     else:
         raise ValueError(f"invalid cp_balance_mode: {mode}")
     return output
+
+
+# ===================== MTP Distillation Loss Shift Layer =====================
+
+
+def _mtp_distillation_loss_shift_forward(tensor, nextn, group):
+    ops = []
+
+    bs, _, hidden = tensor.shape
+    rank = group.rank
+    cp_size = group.world_size
+
+    if rank > 0:
+        send_rank = group.ranks[rank - 1]
+        send_window = tensor[:, :nextn].contiguous()
+        ops.append(dist.P2POp(dist.isend, send_window, send_rank, group))
+
+    if rank < cp_size - 1:
+        recv_rank = group.ranks[rank + 1]
+        recv_window = paddle.empty([bs, nextn, hidden], tensor.dtype)
+        ops.append(dist.P2POp(dist.irecv, recv_window, recv_rank, group))
+    else:
+        recv_window = paddle.zeros([bs, nextn, hidden], tensor.dtype)
+
+    _wait_all(dist.batch_isend_irecv(ops))
+
+    tensor = paddle.concat([tensor[:, 1:], recv_window], axis=1)
+    return tensor
+
+
+def _mtp_distillation_loss_shift_backward(tensor, nextn, group):
+    ops = []
+
+    bs, _, hidden = tensor.shape
+    rank = group.rank
+    cp_size = group.world_size
+
+    if rank < cp_size - 1:
+        send_rank = group.ranks[rank + 1]
+        send_window = tensor[:, -nextn:].contiguous()
+        ops.append(dist.P2POp(dist.isend, send_window, send_rank, group))
+
+    if rank > 0:
+        recv_rank = group.ranks[rank - 1]
+        recv_window = paddle.empty([bs, nextn, hidden], tensor.dtype)
+        ops.append(dist.P2POp(dist.irecv, recv_window, recv_rank, group))
+    else:
+        recv_window = paddle.zeros([bs, nextn, hidden], tensor.dtype)
+
+    _wait_all(dist.batch_isend_irecv(ops))
+
+    # output has shape [bs, seq_len, hidden]
+    output = paddle.nn.functional.pad(
+        tensor[:, :-nextn], [0, 0, 1], mode="constant", value=0
+    )
+    output[:, :nextn] += recv_window
+    return output
+
+
+class MTPDistillationLossShift(PyLayer):
+    """
+    Shift LMHead logits for MTP distillation loss computation.
+
+    Given a local input tensor of shape [B, S, H] on each rank of a CP group, this function is
+    conceptually equivalent to first all-gathering the global tensor of shape [B, S*cp_size, H]
+    and then returning the slice [:, S*cp_rank+1 : S*(cp_rank+1)+nextn, :] on each rank.
+    In practice, only the boundary tokens are exchanged between neighboring ranks instead of
+    performing a full gather.
+    """
+
+    @staticmethod
+    def forward(
+        ctx, tensor, num_nextn_predict_layers, mode="contiguous_allgather"
+    ):
+        hcg = fleet.get_hybrid_communicate_group()
+        group = hcg.get_context_parallel_group()
+
+        assert len(tensor.shape) == 3, (
+            f"Expect input of shape [B, S, H], got {tensor.shape}"
+        )
+        batch_size, seq_len, hidden_size = tensor.shape
+        assert seq_len > num_nextn_predict_layers, (
+            "The local seq_len per-rank should be greater than nextn, "
+            f"got {seq_len=} and {num_nextn_predict_layers=}"
+        )
+        assert num_nextn_predict_layers > 0, (
+            f"num_nextn_predict_layers must be greater than 0, got {num_nextn_predict_layers}"
+        )
+        assert mode == "contiguous_allgather", (
+            f"MTPDistillationLossShift only supports 'contiguous_allgather' mode, got {mode}"
+        )
+
+        ctx.group = group
+        ctx.batch_size = batch_size
+        ctx.seq_len = seq_len
+        ctx.hidden_size = hidden_size
+        ctx.num_nextn_predict_layers = num_nextn_predict_layers
+
+        return _mtp_distillation_loss_shift_forward(
+            tensor, num_nextn_predict_layers, group
+        )
+
+    @staticmethod
+    def backward(ctx, output_grad):
+        output_grad = output_grad.reshape(
+            [
+                ctx.batch_size,
+                ctx.seq_len + ctx.num_nextn_predict_layers - 1,
+                ctx.hidden_size,
+            ]
+        )
+        return _mtp_distillation_loss_shift_backward(
+            output_grad, ctx.num_nextn_predict_layers, ctx.group
+        )
