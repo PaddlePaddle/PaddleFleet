@@ -296,8 +296,8 @@ class DSv4HybridAttention(Attention):
         )
 
         # Core attention (CompressedSparseAttention)
-        input_ids = kwargs.get("input_ids", None)
-        core_attn_out = self.core_attention(
+        indexcache_state = kwargs.get("indexcache_state", None)
+        core_attn_result = self.core_attention(
             query,
             key,
             value,
@@ -306,7 +306,13 @@ class DSv4HybridAttention(Attention):
             x=hidden_states,
             qr=q_compressed,
             input_ids=kwargs.get("input_ids", None),
+            indexcache_state=indexcache_state,
         )
+        core_attn_returns_indexcache_state = isinstance(core_attn_result, tuple)
+        if isinstance(core_attn_result, tuple):
+            core_attn_out, indexcache_state = core_attn_result
+        else:
+            core_attn_out = core_attn_result
         # core_attn_out: [b, sq, np * v_head_dim]
 
         # Inverse RoPE on last qk_pos_emb_head_dim of each head
@@ -384,6 +390,8 @@ class DSv4HybridAttention(Attention):
         # Output projection
         output, bias = self.o_proj(core_attn_out)
 
+        if indexcache_state is not None or core_attn_returns_indexcache_state:
+            return output, bias, indexcache_state
         return output, bias
 
     def get_query_key_value_tensors(

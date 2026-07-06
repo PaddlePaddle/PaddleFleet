@@ -595,6 +595,7 @@ class TransformerLayer(nn.Layer):
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
             input_ids = dict_args.get("input_ids", None)
+            indexcache_state = dict_args.get("indexcache_state", None)
             outputs = recompute(
                 self._forward_impl,
                 hidden_states=hidden_states,
@@ -628,12 +629,16 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
+                indexcache_state=indexcache_state,
             )
         else:
             outputs = self._forward_impl(**dict_args)
 
+        indexcache_state = None
         if isinstance(outputs, tuple):
             output, context = outputs[0], outputs[1]
+            if len(outputs) > 2:
+                indexcache_state = outputs[2]
         else:
             output, context = outputs, None
 
@@ -694,6 +699,10 @@ class TransformerLayer(nn.Layer):
             # dict_args unchanged and will be consumed by MTP layer directly
         if context is not None:
             rst["context"] = context
+        if indexcache_state is not None:
+            rst["indexcache_state"] = indexcache_state
+        else:
+            dict_args.pop("indexcache_state", None)
         rst = {**dict_args, **rst}
         return rst
 
@@ -716,6 +725,17 @@ class TransformerLayer(nn.Layer):
         input_ids: Tensor | None = None,
         **kwargs,
     ):
+        indexcache_state = kwargs.get("indexcache_state", None)
+
+        def unpack_attention_outputs(attention_outputs):
+            if isinstance(attention_outputs, tuple) and len(attention_outputs) == 3:
+                return (
+                    attention_outputs[0],
+                    attention_outputs[1],
+                    attention_outputs[2],
+                )
+            return attention_outputs[0], attention_outputs[1], indexcache_state
+
         def need_do_attention():
             # need_do_prefill = forward_meta.max_len_tensor_cpu[1] > 0
             # need_do_decode = forward_meta.max_len_tensor_cpu[2] > 0
@@ -760,25 +780,29 @@ class TransformerLayer(nn.Layer):
             # Self-attention (skip internal bda residual)
             with profile("attn"):
                 if need_do_attention():
-                    hidden_states, context = self._forward_attention(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        rotary_pos_cos=rotary_pos_cos,
-                        rotary_pos_sin=rotary_pos_sin,
-                        swa_rotary_pos_emb=swa_rotary_pos_emb,
-                        swa_rotary_pos_cos=swa_rotary_pos_cos,
-                        swa_rotary_pos_sin=swa_rotary_pos_sin,
-                        position_ids=position_ids,
-                        attention_bias=attention_bias,
-                        packed_seq_params=packed_seq_params,
-                        block_attention_residuals=True,
-                        in_recompute=self.full_recompute,
-                        input_ids=input_ids,
-                        **kwargs,
+                    hidden_states, context, indexcache_state = (
+                        unpack_attention_outputs(
+                            self._forward_attention(
+                                hidden_states=hidden_states,
+                                attention_mask=attention_mask,
+                                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                                context=context,
+                                context_mask=context_mask,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                                swa_rotary_pos_sin=swa_rotary_pos_sin,
+                                position_ids=position_ids,
+                                attention_bias=attention_bias,
+                                packed_seq_params=packed_seq_params,
+                                block_attention_residuals=True,
+                                in_recompute=self.full_recompute,
+                                input_ids=input_ids,
+                                **kwargs,
+                            )
+                        )
                     )
 
             # Accumulate attn output into partial_block
@@ -812,24 +836,28 @@ class TransformerLayer(nn.Layer):
             self._log_md5(hidden_states, "input", self.layer_number)
             with profile("attn"):
                 if need_do_attention():
-                    hidden_states, context = self._forward_attention(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        rotary_pos_cos=rotary_pos_cos,
-                        rotary_pos_sin=rotary_pos_sin,
-                        swa_rotary_pos_emb=swa_rotary_pos_emb,
-                        swa_rotary_pos_cos=swa_rotary_pos_cos,
-                        swa_rotary_pos_sin=swa_rotary_pos_sin,
-                        position_ids=position_ids,
-                        attention_bias=attention_bias,
-                        packed_seq_params=packed_seq_params,
-                        in_recompute=self.full_recompute,
-                        input_ids=input_ids,
-                        **kwargs,
+                    hidden_states, context, indexcache_state = (
+                        unpack_attention_outputs(
+                            self._forward_attention(
+                                hidden_states=hidden_states,
+                                attention_mask=attention_mask,
+                                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                                context=context,
+                                context_mask=context_mask,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                                swa_rotary_pos_sin=swa_rotary_pos_sin,
+                                position_ids=position_ids,
+                                attention_bias=attention_bias,
+                                packed_seq_params=packed_seq_params,
+                                in_recompute=self.full_recompute,
+                                input_ids=input_ids,
+                                **kwargs,
+                            )
+                        )
                     )
             self._log_md5(
                 hidden_states, "post_attn_residual", self.layer_number
@@ -837,6 +865,8 @@ class TransformerLayer(nn.Layer):
             with profile(timer_name):
                 output = self._forward_mlp(hidden_states, input_ids=input_ids)
             self._log_md5(output, "layer_output", self.layer_number)
+        if indexcache_state is not None:
+            return output, context, indexcache_state
         if context is not None:
             return output, context
         return output
@@ -911,6 +941,11 @@ class TransformerLayer(nn.Layer):
             self.self_attn, DSv4HybridAttention
         ):
             extra_kwargs["input_ids"] = input_ids
+        indexcache_state = kwargs.get("indexcache_state", None)
+        if indexcache_state is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["indexcache_state"] = indexcache_state
 
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
@@ -947,6 +982,13 @@ class TransformerLayer(nn.Layer):
                 use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
+
+        if (
+            isinstance(attention_output_with_bias, tuple)
+            and len(attention_output_with_bias) == 3
+        ):
+            indexcache_state = attention_output_with_bias[2]
+            attention_output_with_bias = attention_output_with_bias[:2]
 
         with paddle.enable_grad():
             if block_attention_residuals:
@@ -997,6 +1039,8 @@ class TransformerLayer(nn.Layer):
         if is_first_fwd:
             hidden_states.stop_gradient = False
 
+        if indexcache_state is not None:
+            return hidden_states, context, indexcache_state
         return hidden_states, context
 
     def _forward_mlp(
@@ -1217,6 +1261,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             self.self_attn, DSv4HybridAttention
         ):
             extra_kwargs["input_ids"] = kwargs["input_ids"]
+        indexcache_state = kwargs.get("indexcache_state", None)
+        if indexcache_state is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["indexcache_state"] = indexcache_state
 
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
@@ -1244,6 +1293,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 in_recompute=in_recompute,
                 **extra_kwargs,
             )
+
+        if (
+            isinstance(attention_output_with_bias, tuple)
+            and len(attention_output_with_bias) == 3
+        ):
+            indexcache_state = attention_output_with_bias[2]
+            attention_output_with_bias = attention_output_with_bias[:2]
 
         # mHC: fused H_res + H_post + bias-dropout-add
         hidden_states = (
@@ -1284,6 +1340,8 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         if is_first_fwd:
             hidden_states.stop_gradient = False
 
+        if indexcache_state is not None:
+            return hidden_states, context, indexcache_state
         return hidden_states, context
 
     def _forward_mlp(
