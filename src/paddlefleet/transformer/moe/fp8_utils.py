@@ -1675,16 +1675,54 @@ class ExpertsGroupGemmContiguousNode:
                     grad_attr = weights[i].grad
 
                 if n > 0:
-                    n = (n + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
-                    end_idx = start_idx + n
-                    paddle._C_ops.fused_linear_param_grad_add(
-                        x._slice(start_idx, end_idx),
-                        dy._slice(start_idx, end_idx),
-                        grad_attr,
-                        None,
-                        True,
-                        False,
-                    )
+                    # == 【MG 精度对齐 diff · 参考 PF PR#968 · expert wgrad】==
+                    # 仅 use_accuracy_compatible=True 生效：padding 用
+                    #   self.token_padding_alignment（非 fp8/非 grouped_gemm 时
+                    #   为 1，即真实 token 数）替代固定 FP8_ALIGN，且非 fp8 路径
+                    #   把 x/dy 分片先 astype fp32 再累加，对齐 MG SequentialMLP
+                    #   的 fp32 expert wgrad。否则保持原有行为（FP8_ALIGN 对齐 +
+                    #   直接 fused_linear_param_grad_add）。
+                    # ==========================================================
+                    if self.use_accuracy_compatible:
+                        n = (
+                            (n + self.token_padding_alignment - 1)
+                            // self.token_padding_alignment
+                            * self.token_padding_alignment
+                        )
+                        end_idx = start_idx + n
+                        if self.use_fp8_mlp:
+                            paddle._C_ops.fused_linear_param_grad_add(
+                                x._slice(start_idx, end_idx),
+                                dy._slice(start_idx, end_idx),
+                                grad_attr,
+                                None,
+                                True,
+                                False,
+                            )
+                        else:
+                            paddle._C_ops.fused_linear_param_grad_add(
+                                x._slice(start_idx, end_idx).astype(
+                                    "float32"
+                                ),
+                                dy._slice(start_idx, end_idx).astype(
+                                    "float32"
+                                ),
+                                grad_attr,
+                                None,
+                                True,
+                                False,
+                            )
+                    else:
+                        n = (n + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
+                        end_idx = start_idx + n
+                        paddle._C_ops.fused_linear_param_grad_add(
+                            x._slice(start_idx, end_idx),
+                            dy._slice(start_idx, end_idx),
+                            grad_attr,
+                            None,
+                            True,
+                            False,
+                        )
                     start_idx = end_idx
 
                 if (
