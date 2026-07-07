@@ -1166,6 +1166,16 @@ def _resolve_dsa_offsets(packed_seq_params, startend_row_indices, b, sq):
         return paddle.concat(
             [boundary_positions, paddle.to_tensor([sq], dtype="int32")]
         )
+
+    if (
+        packed_seq_params is not None
+        and getattr(packed_seq_params, "qkv_format", None) == "thd"
+    ):
+        offsets = getattr(packed_seq_params, "cu_seqlens_q_padded", None)
+        if offsets is None:
+            offsets = packed_seq_params.cu_seqlens_q
+        return offsets.cast("int32")
+
     return (paddle.arange(0, b + 1, dtype="int32") * sq).cast("int32")
 
 

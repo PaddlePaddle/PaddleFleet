@@ -17,14 +17,7 @@
 Includes precision alignment tests against paddle small-op reference from dsa_attention.py.
 """
 
-import sys
 import unittest
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[3]
-SRC_DIR = REPO_ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
 
 import paddle
 import paddle.nn.functional as F
