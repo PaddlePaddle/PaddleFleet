@@ -1294,7 +1294,7 @@ class DSAttention(FleetLayer):
 
         if softmax_scale is None:
             # Default to 1/sqrt(k_channels) consistent with DotProductAttention
-            k_ch = k_channels if k_channels is not None else config.kv_channels
+            k_ch = k_channels if k_channels is not None else config.head_dim
             self.softmax_scale = k_ch**-0.5
         else:
             self.softmax_scale = softmax_scale

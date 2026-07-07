@@ -167,7 +167,7 @@ class TestRRFlashAttentionSoftmaxScaleAssert(unittest.TestCase):
         packed_seq = MagicMock()
         packed_seq.cu_seqlens_kv = paddle.to_tensor([0, 2, 4])
 
-        with self.assertRaises(AssertionError) as ctx:
+        with self.assertRaises(NotImplementedError) as ctx:
             attn(
                 query,
                 key,
@@ -241,7 +241,7 @@ class TestCPRRFlashAttentionSoftmaxScaleAssert(unittest.TestCase):
         value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
 
-        with self.assertRaises(AssertionError) as ctx:
+        with self.assertRaises(NotImplementedError) as ctx:
             attn(
                 query,
                 key,
@@ -277,7 +277,7 @@ class TestNonCPRRFlashAttentionSoftmaxScaleAssert(unittest.TestCase):
         value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         startend = paddle.zeros([1, 1, 4, 4], dtype="int32")
 
-        with self.assertRaises(AssertionError) as ctx:
+        with self.assertRaises(NotImplementedError) as ctx:
             attn(
                 query,
                 key,
@@ -549,15 +549,18 @@ class TestFlashmaskExtraKwargsSoftmaxScale(unittest.TestCase):
 
 class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     """
-    Tests that context_parallel_utils.py raises NotImplementedError
-    when softmax_scale is not None and fa_version < 4.
+    Tests that context_parallel_utils.py correctly handles softmax_scale
+    for different fa_version values:
+    - fa_version==2: raises NotImplementedError when softmax_scale is not None
+    - fa_version==3: passes softmax_scale to flashmask_attention if supported
+    - fa_version==3: raises NotImplementedError if flashmask_attention lacks softmax_scale param
+    - fa_version==4: passes softmax_scale to _flash_attn_fwd (covered elsewhere)
     """
 
     @patch(
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
         return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
     )
-    @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
     @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
@@ -581,10 +584,11 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         mock_get_flags,
         mock_get_flags2,
         mock_all_gather,
-        mock_fm,
         mock_preprocess,
     ):
-        """cp_flashmask forward raises NotImplementedError for softmax_scale != None on fa<4."""
+        """fa_version==3: raises NotImplementedError when flashmask_attention lacks softmax_scale param."""
+        import inspect
+
         from paddlefleet.context_parallel_utils import (
             cp_flashmask_allgatherkv_balance_forward,
         )
@@ -595,29 +599,48 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
 
         mock_all_gather.side_effect = fake_all_gather
 
-        query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-        key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-        value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-        startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
-        group = MagicMock()
-        group.nranks = 2
-        group.rank = 0
+        # Mock a flashmask_attention that does NOT have softmax_scale param
+        def _fake_fm(
+            query,
+            key,
+            value,
+            startend_row_indices,
+            causal,
+            return_softmax_lse,
+            training,
+        ):
+            pass
 
-        with self.assertRaises(NotImplementedError) as ctx:
-            cp_flashmask_allgatherkv_balance_forward(
-                query,
-                key,
-                value,
-                startend,
-                learnable_sink=None,
-                group=group,
-                causal=True,
-                is_training=True,
-                softmax_scale=0.5,
+        mock_fm = MagicMock()
+        mock_fm.__signature__ = inspect.signature(_fake_fm)
+
+        with patch(
+            "paddlefleet.context_parallel_utils.flashmask_attention", mock_fm
+        ):
+            query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+            group = MagicMock()
+            group.nranks = 2
+            group.rank = 0
+            group.world_size = 2
+
+            with self.assertRaises(NotImplementedError) as ctx:
+                cp_flashmask_allgatherkv_balance_forward(
+                    query,
+                    key,
+                    value,
+                    startend,
+                    learnable_sink=None,
+                    group=group,
+                    causal=True,
+                    is_training=True,
+                    softmax_scale=0.5,
+                )
+            self.assertIn(
+                "does not support setting softmax_scale", str(ctx.exception)
             )
-        self.assertIn(
-            "does not support setting softmax_scale", str(ctx.exception)
-        )
 
     @patch(
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
@@ -689,6 +712,316 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
             self.fail(
                 "Should not raise NotImplementedError when softmax_scale is None"
             )
+
+    @patch(
+        "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
+        return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
+    )
+    @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
+    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": False},
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.framework.get_flags",
+        return_value={"FLAGS_flash_attn_version": 3},
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_push"
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_pop"
+    )
+    def test_forward_fa3_passes_softmax_scale_when_supported(
+        self,
+        mock_pop,
+        mock_push,
+        mock_get_flags,
+        mock_get_flags2,
+        mock_all_gather,
+        mock_preprocess,
+    ):
+        """fa_version==3: softmax_scale passed to flashmask_attention when param exists."""
+        import inspect
+
+        from paddle.nn.functional.flash_attention import (
+            flashmask_attention as real_fm,
+        )
+
+        from paddlefleet.context_parallel_utils import (
+            cp_flashmask_allgatherkv_balance_forward,
+        )
+
+        def fake_all_gather(out_list, tensor, group):
+            for i in range(len(out_list)):
+                out_list[i] = tensor
+
+        mock_all_gather.side_effect = fake_all_gather
+
+        # Create a mock that preserves the real signature (has softmax_scale param)
+        mock_fm = MagicMock()
+        mock_fm.return_value = (
+            paddle.randn([1, 4, 4, 32]).astype("bfloat16"),
+            paddle.randn([1, 4, 1, 32]).astype("float32"),
+        )
+        # Patch inspect.signature to return real flashmask_attention's signature
+        # so the code sees softmax_scale in parameters
+        with (
+            patch(
+                "paddlefleet.context_parallel_utils.flashmask_attention",
+                mock_fm,
+            ),
+            patch(
+                "paddlefleet.context_parallel_utils.inspect.signature",
+                return_value=inspect.signature(real_fm),
+            ),
+        ):
+            query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+            group = MagicMock()
+            group.nranks = 2
+            group.rank = 0
+            group.world_size = 2
+
+            cp_flashmask_allgatherkv_balance_forward(
+                query,
+                key,
+                value,
+                startend,
+                learnable_sink=None,
+                group=group,
+                causal=True,
+                is_training=True,
+                softmax_scale=0.125,
+            )
+
+        # Verify softmax_scale was passed through
+        call_kwargs = mock_fm.call_args[1]
+        self.assertEqual(call_kwargs["softmax_scale"], 0.125)
+
+    @patch(
+        "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
+        return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
+    )
+    @patch("paddlefleet.context_parallel_utils.flashmask_attention")
+    @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
+    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": False},
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.framework.get_flags",
+        return_value={"FLAGS_flash_attn_version": 2},
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_push"
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_pop"
+    )
+    def test_forward_fa2_raises_with_softmax_scale(
+        self,
+        mock_pop,
+        mock_push,
+        mock_get_flags,
+        mock_get_flags2,
+        mock_all_gather,
+        mock_fm,
+        mock_preprocess,
+    ):
+        """fa_version==2: raises NotImplementedError when softmax_scale is not None."""
+        from paddlefleet.context_parallel_utils import (
+            cp_flashmask_allgatherkv_balance_forward,
+        )
+
+        def fake_all_gather(out_list, tensor, group):
+            for i in range(len(out_list)):
+                out_list[i] = tensor
+
+        mock_all_gather.side_effect = fake_all_gather
+
+        query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+        group = MagicMock()
+        group.nranks = 2
+        group.rank = 0
+
+        with self.assertRaises(NotImplementedError) as ctx:
+            cp_flashmask_allgatherkv_balance_forward(
+                query,
+                key,
+                value,
+                startend,
+                learnable_sink=None,
+                group=group,
+                causal=True,
+                is_training=True,
+                softmax_scale=0.5,
+            )
+        self.assertIn("fa_version==2", str(ctx.exception))
+
+    @patch(
+        "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
+        return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
+    )
+    @patch("paddlefleet.context_parallel_utils.flashmask_attention")
+    @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
+    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": False},
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.framework.get_flags",
+        return_value={"FLAGS_flash_attn_version": 2},
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_push"
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_pop"
+    )
+    def test_forward_fa2_ok_without_softmax_scale(
+        self,
+        mock_pop,
+        mock_push,
+        mock_get_flags,
+        mock_get_flags2,
+        mock_all_gather,
+        mock_fm,
+        mock_preprocess,
+    ):
+        """fa_version==2: no error when softmax_scale is None."""
+        from paddlefleet.context_parallel_utils import (
+            cp_flashmask_allgatherkv_balance_forward,
+        )
+
+        def fake_all_gather(out_list, tensor, group):
+            for i in range(len(out_list)):
+                out_list[i] = tensor
+
+        mock_all_gather.side_effect = fake_all_gather
+        mock_fm.return_value = (
+            paddle.randn([1, 4, 4, 32]).astype("bfloat16"),
+            paddle.randn([1, 4, 1, 32]).astype("float32"),
+        )
+
+        query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+        group = MagicMock()
+        group.nranks = 2
+        group.rank = 0
+
+        try:
+            cp_flashmask_allgatherkv_balance_forward(
+                query,
+                key,
+                value,
+                startend,
+                learnable_sink=None,
+                group=group,
+                causal=True,
+                is_training=True,
+                softmax_scale=None,
+            )
+        except NotImplementedError:
+            self.fail(
+                "Should not raise NotImplementedError when softmax_scale is None on fa2"
+            )
+
+    @patch(
+        "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
+        return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
+    )
+    @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
+    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": False},
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.framework.get_flags",
+        return_value={"FLAGS_flash_attn_version": 3},
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_push"
+    )
+    @patch(
+        "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_pop"
+    )
+    def test_forward_fa3_no_scale_does_not_pass_softmax_scale(
+        self,
+        mock_pop,
+        mock_push,
+        mock_get_flags,
+        mock_get_flags2,
+        mock_all_gather,
+        mock_preprocess,
+    ):
+        """fa_version==3: when softmax_scale is None, no softmax_scale kwarg passed."""
+        import inspect
+
+        from paddle.nn.functional.flash_attention import (
+            flashmask_attention as real_fm,
+        )
+
+        from paddlefleet.context_parallel_utils import (
+            cp_flashmask_allgatherkv_balance_forward,
+        )
+
+        def fake_all_gather(out_list, tensor, group):
+            for i in range(len(out_list)):
+                out_list[i] = tensor
+
+        mock_all_gather.side_effect = fake_all_gather
+
+        mock_fm = MagicMock()
+        mock_fm.return_value = (
+            paddle.randn([1, 4, 4, 32]).astype("bfloat16"),
+            paddle.randn([1, 4, 1, 32]).astype("float32"),
+        )
+        with (
+            patch(
+                "paddlefleet.context_parallel_utils.flashmask_attention",
+                mock_fm,
+            ),
+            patch(
+                "paddlefleet.context_parallel_utils.inspect.signature",
+                return_value=inspect.signature(real_fm),
+            ),
+        ):
+            query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+            startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+            group = MagicMock()
+            group.nranks = 2
+            group.rank = 0
+            group.world_size = 2
+
+            cp_flashmask_allgatherkv_balance_forward(
+                query,
+                key,
+                value,
+                startend,
+                learnable_sink=None,
+                group=group,
+                causal=True,
+                is_training=True,
+                softmax_scale=None,
+            )
+
+        # Verify softmax_scale was NOT passed
+        call_kwargs = mock_fm.call_args[1]
+        self.assertNotIn("softmax_scale", call_kwargs)
 
 
 if __name__ == "__main__":
