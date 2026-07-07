@@ -613,15 +613,11 @@ class DotProductAttention(FleetLayer):
                     )
                 )
 
-            extra_kwargs = (
-                {}
-                if use_rr_flash_attention
-                else (
-                    {"softmax_scale": self.softmax_scale}
-                    if self._has_custom_softmax_scale
-                    else {}
-                )
-            )
+            if (
+                not use_rr_flash_attention
+                and self._has_custom_softmax_scale
+            ):
+                extra_kwargs["softmax_scale"] = self.softmax_scale
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
