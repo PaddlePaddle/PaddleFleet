@@ -90,6 +90,19 @@ __all__ = [
 FP8_ALIGN = 128
 
 
+def moe_token_padding_alignment(
+    *, use_fp8_mlp: bool, moe_grouped_gemm: bool, use_accuracy_compatible: bool
+) -> int:
+    # == 【MG 精度对齐 diff · 参考 PF PR#968】per-expert token padding 对齐 ==
+    # 仅在 use_accuracy_compatible=True 且纯 bf16 非 grouped_gemm 路径下不做
+    #   padding（返回 1），使每个 expert 的 GEMM M 维 == 真实 token 数，cuBLAS
+    #   选到与 MG SequentialMLP 相同算法；其余情况（含未开启 accuracy
+    #   compatible）按 FP8_ALIGN 对齐，保持原有行为。
+    if use_accuracy_compatible and not use_fp8_mlp and not moe_grouped_gemm:
+        return 1
+    return FP8_ALIGN
+
+
 def _get_fp8_weight_and_scale(weight, transpose=False):
     """_get_fp8_weight_and_scale"""
     fp8_weight, fp8_scale = (
@@ -350,6 +363,11 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_grouped_gemm = moe_grouped_gemm
         self.is_split_group_gemm = not moe_grouped_gemm
         self.use_accuracy_compatible = use_accuracy_compatible
+        self.token_padding_alignment = moe_token_padding_alignment(
+            use_fp8_mlp=use_fp8_mlp,
+            moe_grouped_gemm=moe_grouped_gemm,
+            use_accuracy_compatible=use_accuracy_compatible,
+        )
 
     def cached_tensors(self):
         """

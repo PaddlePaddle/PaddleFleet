@@ -21,7 +21,12 @@ import paddle
 import paddlefleet
 from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
 
-from .fp8_utils import FP8_ALIGN, USE_INPLACE_SWIGLU_BWD, tilewise_quant
+from .fp8_utils import (
+    FP8_ALIGN,
+    USE_INPLACE_SWIGLU_BWD,
+    moe_token_padding_alignment,
+    tilewise_quant,
+)
 from .vmm_utils import (
     find_max_concurrent_subbatch_size,
     find_max_sequence_subbatch_size,
@@ -85,6 +90,7 @@ class UnZipNode:
         num_experts,
         tokens_per_expert,
         fill_output=True,
+        padding_alignment=FP8_ALIGN,
     ):
         """
         前向传播函数，用于解压输入的张量。
@@ -118,7 +124,7 @@ class UnZipNode:
                 dispatched_probs,
                 num_experts=num_experts,
                 tokens_per_expert=tokens_per_expert,
-                padding_alignment=FP8_ALIGN,
+                padding_alignment=padding_alignment,
                 do_gather=fill_output,
             )
 
@@ -221,6 +227,7 @@ class ZipNode:
         num_experts,
         tokens_per_expert,
         fill_output=True,
+        padding_alignment=FP8_ALIGN,
     ):
         with paddle.amp.auto_cast(False):
             (
@@ -235,7 +242,7 @@ class ZipNode:
                 dispatched_probs,
                 num_experts,
                 tokens_per_expert,
-                padding_alignment=FP8_ALIGN,
+                padding_alignment=padding_alignment,
                 do_gather=fill_output,
             )
         return unzipped_grad
@@ -354,8 +361,20 @@ class MlpNode:
         self.tokens_per_expert = (
             self.token_dispatcher._comm_manager.tokens_per_expert
         )
+        # == 【MG 精度对齐 diff · 参考 PF PR#968】per-expert padding 对齐 ==
+        # 仅 use_accuracy_compatible=True 且非 fp8/非 grouped_gemm 时
+        #   alignment=1（真实 token 数），使 permute 与 per-expert GEMM 的 M 维
+        #   等于真实 tokens_per_expert，cuBLAS 选到与 MG SequentialMLP 相同算法；
+        #   否则按 FP8_ALIGN（kernel 需求），保持原有行为。
+        self.moe_permute_padding_alignment = moe_token_padding_alignment(
+            use_fp8_mlp=use_fp8_mlp,
+            moe_grouped_gemm=moe_grouped_gemm,
+            use_accuracy_compatible=use_accuracy_compatible,
+        )
         self.padding_token_per_experts = [
-            (x + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
+            (x + self.moe_permute_padding_alignment - 1)
+            // self.moe_permute_padding_alignment
+            * self.moe_permute_padding_alignment
             for x in self.tokens_per_expert
         ]
         self.token_offsets = [0]
@@ -797,6 +816,7 @@ class MlpNode:
         dispatched_indices,
         dispatched_probs,
         fill_output,
+        padding_alignment=None,
     ):
         """
         前向计算的公共预处理，被 forward() 和 forward_auto_subbatch() 共用。
@@ -876,6 +896,11 @@ class MlpNode:
             num_experts=num_experts,
             tokens_per_expert=self.tokens_per_expert,
             fill_output=fill_output,
+            **(
+                {}
+                if padding_alignment is None
+                else {"padding_alignment": padding_alignment}
+            ),
         )
         self.unzipped_probs = unzipped_probs
 
@@ -1528,6 +1553,7 @@ class MlpNode:
             dispatched_indices,
             dispatched_probs,
             fill_output=self.moe_expert_fusion,
+            padding_alignment=self.moe_permute_padding_alignment,
         )
 
         if not self.moe_expert_fusion:
@@ -1666,6 +1692,7 @@ class MlpNode:
             num_experts=len(self.tokens_per_expert),
             tokens_per_expert=self.tokens_per_expert,
             fill_output=self.moe_expert_fusion,
+            padding_alignment=self.moe_permute_padding_alignment,
         )
         hidden_states_out_grad._record_stream()
 
