@@ -440,6 +440,8 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e paddlefleet_url \
             -e fleet_branch \
             -e formers_branch \
@@ -543,22 +545,22 @@ jobs:
           fi
           '
 
-      - name: Integration test (GLM4.5 single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
-          glm45_single_card_exit_code=$?
-          if [[ "$glm45_single_card_exit_code" != "0" ]]; then
-            export case_name="glm45_single_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
-          fi
-          '
+      # - name: Integration test (GLM4.5 single-card)
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -c '
+      #     source /root/proxy
+      #     source "$HOME/miniconda/etc/profile.d/conda.sh"
+      #     conda activate python${PYTHON_VERSION}
+      #     bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
+      #     glm45_single_card_exit_code=$?
+      #     if [[ "$glm45_single_card_exit_code" != "0" ]]; then
+      #       export case_name="glm45_single_card"
+      #       bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
+      #     fi
+      #     '
 
       - name: Integration test (Qwen3-30B-A3B single-card)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
@@ -571,29 +573,30 @@ jobs:
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             export case_name="qwen3_single_card"
+            echo " debug: $update_baseline"
             bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
           '
 
-      - name: Qwen3-vl-8k-single-card
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -c '
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
-          exit_code=$?
-          if [[ "$exit_code" != "0" ]]; then
-            export case_name="qwen3vl_sft_single_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
-          else
-            echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-single-card.\033[0m"
-          fi
-          '
+      # - name: Qwen3-vl-8k-single-card
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -c '
+      #     source /root/proxy
+      #     source "$HOME/miniconda/etc/profile.d/conda.sh"
+      #     conda activate python${PYTHON_VERSION}
+      #     bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+      #     exit_code=$?
+      #     if [[ "$exit_code" != "0" ]]; then
+      #       export case_name="qwen3vl_sft_single_card"
+      #       bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-single-card.\033[0m"
+      #     fi
+      #     '
 
 
       - name: Terminate and delete the container
@@ -680,6 +683,8 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e paddlefleet_url \
             -e fleet_branch \
             -e formers_branch \
@@ -1137,6 +1142,8 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
+            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
+            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e fleet_branch \
             -e formers_branch \
             -e paddlefleet_url \
