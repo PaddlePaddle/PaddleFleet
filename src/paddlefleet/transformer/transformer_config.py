@@ -1044,9 +1044,20 @@ class TransformerConfig(ModelParallelConfig):
             )
 
         if self.enable_mtp_magic_send:
-            assert self.num_nextn_predict_layers == 1, (
-                "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
+            assert not getattr(self, "tie_word_embeddings", False), (
+                "enable_mtp_magic_send with tie_word_embeddings=True is not yet validated. "
+                "Please disable tie_word_embeddings when using magic send MTP."
             )
+            assert not self.mtp_shared_last_layer, (
+                "enable_mtp_magic_send and mtp_shared_last_layer cannot both be True. "
+                "Magic send uses per-layer mtp_embed with broadcast sync, which is "
+                "incompatible with SharedLayerDesc-based last-layer reuse."
+            )
+            if self.num_nextn_predict_layers > 1:
+                assert self.variable_seq_lengths, (
+                    "enable_mtp_magic_send with num_nextn_predict_layers > 1 requires "
+                    "variable_seq_lengths=True (dynamic-shape P2P)."
+                )
             assert self.pipeline_model_parallel_size > 1, (
                 "enable_mtp_magic_send requires pipeline_model_parallel_size > 1"
             )
