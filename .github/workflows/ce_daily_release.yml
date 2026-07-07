@@ -22,7 +22,7 @@ on:
         options:
           - 'true'
           - 'false'
-        default: 'false'
+        default: 'true'
         required: false
 
 permissions: read-all
@@ -45,7 +45,7 @@ env:
   paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl"
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.3/latest/"
   use_release: ${{ inputs.use_release || 'true' }}
-  update_baseline: ${{ inputs.update_baseline || 'false' }}
+  update_baseline: ${{ inputs.update_baseline || 'true' }}
   fleet_branch: "release/0.3"
   formers_branch: "release/1.2"
 defaults:
