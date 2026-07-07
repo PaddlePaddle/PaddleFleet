@@ -519,12 +519,7 @@ class SonicMoEExpert(GroupedMLPExpert):
             value = value.contiguous()
         if list(tensor.shape) != list(value.shape):
             tensor.reshape_(list(value.shape))
-        try:
-            value._share_buffer_to(tensor)
-        except Exception:
-            # Keep the conservative copy path if Paddle cannot share this
-            # tensor's storage, e.g. for an unsupported place or tensor type.
-            paddle.assign(value, output=tensor)
+        paddle.assign(value, output=tensor)
 
     def __init__(
         self,
