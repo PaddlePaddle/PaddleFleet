@@ -618,10 +618,17 @@ class LanguageLoss(FleetLayer):
                     loss_val,
                 )
 
+            # Track the standalone main (non-MTP) LM loss so it can be logged
+            # separately from the combined total loss.
+            if not isinstance(lm_loss, float):
+                LanguageLoss.mtp_loss_tracker["main_lm_loss"] = lm_loss.detach()
+
             logs = get_global_training_logs()
             if logs is not None and hasattr(logs, "update"):
                 for i, loss_val in enumerate(mtp_loss):
                     logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
+                if not isinstance(lm_loss, float):
+                    logs.update(main_lm_loss=lm_loss.detach())
 
             def add_loss(main_loss, loss):
                 if _use_accuracy_compatible_kernel():
