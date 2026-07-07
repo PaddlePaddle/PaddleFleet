@@ -998,7 +998,52 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        if self.clamp_value is not None and self.clamp_value > 0:
+        # == [MG accuracy-alignment diff · bwd SwiGLU×probs] ==
+        # Original impl: `fused_swiglu_scale_forward` + `fused_swiglu_scale_backward`.
+        #   This fused-kernel pair recomputes o2_s and derives do1 / probs_grad, but
+        #   its backward precision path differs from the forward hand-written fp32
+        #   path (fwd_down_bf16), leaving backward gradients misaligned with MG in
+        #   the last bits.
+        # Change (only when use_accuracy_compatible=True and non-grouped_gemm and
+        #   non-empty grad): rebuild the compute graph with the exact same fp32
+        #   expression as the forward (F.silu(gate) * val * scale) and let autograd
+        #   run the backward, so forward and backward share one fp32 math path;
+        #   otherwise keep the original fused kernel (preserve existing behavior).
+        # ==================================================================
+        if (
+            self.use_accuracy_compatible
+            and self.is_split_group_gemm
+            and numpy.prod(unzipped_grad.shape) != 0
+        ):
+            x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
+            probs_v = (
+                unzipped_probs
+                if unzipped_probs.ndim > 1
+                else unzipped_probs.unsqueeze(-1)
+            )
+            with paddle.enable_grad():
+                gate_g = x_glu.astype("float32").detach()
+                val_g = x_linear.astype("float32").detach()
+                scale_g = probs_v.astype("float32").detach()
+                gate_g.stop_gradient = False
+                val_g.stop_gradient = False
+                scale_g.stop_gradient = False
+                o2_f32 = F.silu(gate_g) * val_g * scale_g
+                paddle.autograd.backward(
+                    [o2_f32], [do2_s.astype("float32").detach()]
+                )
+                d_gate_f32 = gate_g.grad
+                d_up_f32 = val_g.grad
+                d_scale_f32 = scale_g.grad.reshape(
+                    unzipped_probs.shape
+                ).astype("float32")
+
+            do1 = paddle.concat([d_gate_f32, d_up_f32], axis=-1).astype(
+                o1.dtype
+            )
+            o2_s = o2_f32.detach().astype(o1.dtype)
+            probs_grad = d_scale_f32.astype(unzipped_probs.dtype)
+        elif self.clamp_value is not None and self.clamp_value > 0:
             do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
                 o1, unzipped_probs, do2_s, float(self.clamp_value)
             )
