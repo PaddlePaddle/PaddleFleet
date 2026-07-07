@@ -449,6 +449,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
             ),
             self.out,
         )
+        flashmask_info = object()
         with (
             patch.object(
                 fa,
@@ -457,8 +458,15 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
             ) as mock_a2a,
             patch.object(
                 fa,
+                "FlashMaskInfoPaddle",
+                return_value=flashmask_info,
+                create=True,
+            ) as mock_info,
+            patch.object(
+                fa,
                 "_flash_attn_bwd",
                 return_value=(self.q, self.k, self.v, None),
+                create=True,
             ) as mock_backward,
         ):
             grads = fa.FlashMaskUlyssesCpFunctor.backward(
@@ -473,7 +481,12 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         for call in mock_a2a.call_args_list[1:]:
             self.assertEqual(call.kwargs["scatter_idx"], 1)
             self.assertEqual(call.kwargs["gather_idx"], 2)
+        mock_info.assert_called_once_with(
+            startend_row_indices=self.startend,
+            is_causal=False,
+        )
         self.assertIs(mock_backward.call_args.args[4], local_grad)
+        self.assertIs(mock_backward.call_args.args[6], flashmask_info)
 
     def test_second_forward_dispatches_each_mode(self):
         attn = fa.RefinedRcomputeFlashMaskCpAttention()
