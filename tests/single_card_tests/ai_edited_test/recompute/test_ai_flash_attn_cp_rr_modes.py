@@ -232,6 +232,11 @@ class TestUlyssesHelpers(unittest.TestCase):
                         mock_op.call_args.kwargs["startend_row_indices"],
                         startend,
                     )
+        with (
+            patch.object(fa, "_get_fa_version", return_value=0),
+            self.assertRaises(ValueError),
+        ):
+            fa.ulysses_local_flashmask_first_fwd(q, q, q, startend, False, None)
 
 
 class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
@@ -355,15 +360,16 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
 
     def test_ulysses_first_and_second_forward_use_surrogate(self):
         attn = fa.RefinedRcomputeFlashMaskCpAttention()
+
+        def fake_alltoall(
+            tensor, scatter_idx, gather_idx, batch_dim_idx, group
+        ):
+            return tensor
+
         with (
             patch.object(
-                attn,
-                "_ulysses_alltoall_qkv",
-                side_effect=lambda q, k, v, g: (q, k, v),
-            ),
-            patch.object(
-                attn, "_ulysses_alltoall_output", side_effect=lambda x, g: x
-            ),
+                fa.UlyssesAlltoAll, "apply", side_effect=fake_alltoall
+            ) as mock_alltoall,
             patch.object(
                 fa,
                 "ulysses_local_flashmask_first_fwd",
@@ -381,17 +387,19 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
                 None,
             )
         self.assertIs(result, self.out)
+        self.assertEqual(mock_alltoall.call_count, 4)
+        self.assertEqual(
+            mock_alltoall.call_args_list[0].kwargs["scatter_idx"], 2
+        )
+        self.assertEqual(
+            mock_alltoall.call_args_list[-1].kwargs["scatter_idx"], 1
+        )
         hold = attn._hold_tensors_queue.get_nowait()
         self.assertEqual(hold["mode"], "contiguous_a2a")
 
         with (
             patch.object(
-                attn,
-                "_ulysses_alltoall_qkv",
-                side_effect=lambda q, k, v, g: (q, k, v),
-            ),
-            patch.object(
-                attn, "_ulysses_alltoall_output", side_effect=lambda x, g: x
+                fa.UlyssesAlltoAll, "apply", side_effect=fake_alltoall
             ),
             patch.object(
                 fa.FlashMaskAttnFunctor, "apply", return_value=self.out
@@ -417,6 +425,17 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
                 )
                 mock_apply.assert_called_once()
 
+        attn._hold_tensors_queue.put({"mode": "contiguous_a2a"})
+        with patch.object(
+            attn, "_ulysses_second_fwd", return_value=self.out
+        ) as mock_ulysses:
+            self.assertIs(attn._second_fwd(self.q, self.k, self.v), self.out)
+            mock_ulysses.assert_called_once()
+
+        attn._hold_tensors_queue.put({"mode": "bad_mode"})
+        with self.assertRaises(ValueError):
+            attn._second_fwd(self.q, self.k, self.v)
+
     def test_validation_errors_are_preserved(self):
         attn = fa.RefinedRcomputeFlashMaskCpAttention()
         with self.assertRaises(NotImplementedError):
@@ -425,6 +444,21 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
             attn._first_fwd(self.q, self.k, self.v, self.startend, dropout=0.1)
         with self._patch_group(), self.assertRaises(AssertionError):
             attn._first_fwd(self.q[:, :3], self.k, self.v, self.startend)
+        for kwargs in ({"learnable_sink": self.q}, {"softmax_scale": 0.5}):
+            with (
+                self.subTest(kwargs=kwargs),
+                self.assertRaises(NotImplementedError),
+            ):
+                attn._ulysses_first_fwd(
+                    self.q,
+                    self.k,
+                    self.v,
+                    self.startend,
+                    self.group,
+                    False,
+                    kwargs.get("learnable_sink"),
+                    kwargs.get("softmax_scale"),
+                )
 
 
 if __name__ == "__main__":
