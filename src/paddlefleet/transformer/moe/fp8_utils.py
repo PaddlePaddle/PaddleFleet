@@ -775,7 +775,27 @@ class ExpertsGroupGemmContiguousNode:
         fwd_down_bf16
         """
 
-        if self.clamp_value is not None and self.clamp_value > 0:
+        # == [MG accuracy-alignment diff · fwd SwiGLU×probs] ==
+        # Original impl: `o2 = fused_swiglu_scale_forward(o1, unzipped_probs)`.
+        #   The fused kernel computes SwiGLU and the probs multiply along its own
+        #   precision path, which differs from MG SequentialMLP and leaves the
+        #   post-swiglu-scale output misaligned in the last bits.
+        # Change (only active when use_accuracy_compatible=True): compute the
+        #   equivalent by hand -- promote both SwiGLU and the per-token router
+        #   scale to fp32, then cast back to the original dtype once, replicating
+        #   MG's "compute in fp32, round once"; otherwise keep the fused kernel.
+        # ==================================================================
+        if self.use_accuracy_compatible:
+            x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
+            probs = unzipped_probs
+            if len(probs.shape) == 1:
+                probs = probs.unsqueeze(-1)
+            o2 = (
+                F.silu(x_glu.astype("float32"))
+                * x_linear.astype("float32")
+                * probs.astype("float32")
+            ).astype(o1.dtype)
+        elif self.clamp_value is not None and self.clamp_value > 0:
             o2 = fused_swiglu_scale_forward(
                 o1, unzipped_probs, self.clamp_value
             )
