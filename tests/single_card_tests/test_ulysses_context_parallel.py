@@ -1315,5 +1315,148 @@ class TestContextParallelOpsBackward(unittest.TestCase):
         mock_contiguous.assert_not_called()
 
 
+# =============================================================================
+# Tests that actually execute the fused Triton permute kernels
+# =============================================================================
+
+
+def _fused_kernels_available():
+    """CUDA build + GPU place + importable Triton fused kernels."""
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        paddle.set_device("gpu")
+        import triton  # noqa: F401
+
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (  # noqa: F401
+            _head2seq_post_kernel,
+            _seq2head_pre_kernel,
+        )
+    except (ImportError, OSError):
+        return False
+    return True
+
+
+@unittest.skipUnless(
+    _fused_kernels_available(), "requires CUDA + Triton fused kernels"
+)
+class TestUlyssesFusedKernels(unittest.TestCase):
+    """Run the fused permute kernels and compare their index mapping against
+    an explicit paddle reshape/transpose reference (bit-exact).
+
+    These exercise the actual `_seq2head_*` / `_head2seq_*` kernels for P>1,
+    which the mock-based dispatch tests above do not, guarding the index math
+    and buffer layout against silent regressions.
+    """
+
+    P, B, SLOC, HLOC, D = 4, 2, 3, 2, 8
+
+    def _launch(self, kernel, src, dst):
+        import triton
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        seg = Hloc * D
+        block = min(triton.next_power_of_2(seg), 4096)
+        grid = (P * b * Sloc, triton.cdiv(seg, block))
+        kernel[grid](src, dst, P, b, Sloc, Hloc, D, seg, BLOCK=block)
+
+    def test_seq2head_pre_matches_reference(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            _seq2head_pre_kernel,
+        )
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        x = paddle.randn([b, Sloc, P * Hloc, D])
+        out = paddle.empty([P, b, Sloc, Hloc, D], dtype=x.dtype)
+        self._launch(_seq2head_pre_kernel, x, out)
+        ref = x.reshape([b, Sloc, P, Hloc, D]).transpose([2, 0, 1, 3, 4])
+        self.assertTrue(paddle.equal_all(out, ref).item())
+
+    def test_seq2head_post_matches_reference(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            _seq2head_post_kernel,
+        )
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        recv = paddle.randn([P, b, Sloc, Hloc, D])
+        out = paddle.empty([b, P * Sloc, Hloc, D], dtype=recv.dtype)
+        self._launch(_seq2head_post_kernel, recv, out)
+        ref = recv.transpose([1, 0, 2, 3, 4]).reshape([b, P * Sloc, Hloc, D])
+        self.assertTrue(paddle.equal_all(out, ref).item())
+
+    def test_head2seq_pre_matches_reference(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            _head2seq_pre_kernel,
+        )
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        g = paddle.randn([b, P * Sloc, Hloc, D])
+        out = paddle.empty([P, b, Sloc, Hloc, D], dtype=g.dtype)
+        self._launch(_head2seq_pre_kernel, g, out)
+        ref = g.reshape([b, P, Sloc, Hloc, D]).transpose([1, 0, 2, 3, 4])
+        self.assertTrue(paddle.equal_all(out, ref).item())
+
+    def test_head2seq_post_matches_reference(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            _head2seq_post_kernel,
+        )
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        recv = paddle.randn([P, b, Sloc, Hloc, D])
+        out = paddle.empty([b, Sloc, P * Hloc, D], dtype=recv.dtype)
+        self._launch(_head2seq_post_kernel, recv, out)
+        ref = recv.transpose([1, 2, 0, 3, 4]).reshape([b, Sloc, P * Hloc, D])
+        self.assertTrue(paddle.equal_all(out, ref).item())
+
+    def test_fused_full_a2a_matches_reference_single_rank(self):
+        """End-to-end fused vs reference all-to-all on a 1-rank group (P=1):
+        exercises the public wrapper, pre+post kernels, send-buffer reuse and
+        the alltoall_single call together."""
+        from unittest.mock import patch
+
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_single_all_to_all,
+        )
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            ulysses_single_all_to_all_fused,
+        )
+
+        b, Sloc, H, D = 2, 4, 4, 8
+
+        def fake_a2a_single(recv, send, group=None, use_calc_stream=True):
+            recv.copy_(send, False)  # 1-rank all-to-all is a copy
+
+        for scatter_idx, gather_idx in ((2, 1), (1, 2)):
+            inp = paddle.randn([b, Sloc, H, D])
+            with (
+                patch(
+                    "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                    ".get_world_size",
+                    return_value=1,
+                ),
+                patch(
+                    "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                    ".stream.alltoall_single",
+                    side_effect=fake_a2a_single,
+                ),
+            ):
+                fused = ulysses_single_all_to_all_fused(inp, scatter_idx, None)
+            with (
+                patch(
+                    "paddlefleet.context_parallel_utils.dist.get_world_size",
+                    return_value=1,
+                ),
+                patch(
+                    "paddlefleet.context_parallel_utils.dist.alltoall",
+                    side_effect=lambda out, i, group=None: out.copy_(i, False),
+                ),
+            ):
+                ref = _ulysses_single_all_to_all(
+                    inp, scatter_idx, gather_idx, 0, None
+                )
+            self.assertEqual(fused.shape, ref.shape)
+            self.assertTrue(paddle.equal_all(fused, ref).item())
+
+
 if __name__ == "__main__":
     unittest.main()

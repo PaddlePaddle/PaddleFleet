@@ -153,14 +153,21 @@ def ulysses_single_all_to_all_fused(input, scatter_idx, group):
 
     if scatter_idx >= 2:
         b, Sloc, H, D = input.shape
-        assert H % P == 0
+        if H % P != 0:
+            raise ValueError(
+                f"Number of heads ({H}) must be divisible by world size ({P})"
+            )
         Hloc = H // P
         pre_kernel = _seq2head_pre_kernel
         post_kernel = _seq2head_post_kernel
         out_shape = [b, P * Sloc, Hloc, D]
     else:
         b, Nglob, Hloc, D = input.shape
-        assert Nglob % P == 0
+        if Nglob % P != 0:
+            raise ValueError(
+                f"Global sequence length ({Nglob}) must be divisible by "
+                f"world size ({P})"
+            )
         Sloc = Nglob // P
         H = P * Hloc
         pre_kernel = _head2seq_pre_kernel

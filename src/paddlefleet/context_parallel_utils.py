@@ -1729,7 +1729,10 @@ def _ulysses_fused_supported(scatter_idx, batch_dim_idx, input):
         from paddlefleet.triton_ops.ulysses_alltoall_fused import (
             ulysses_alltoall_fused_supported,
         )
-    except ImportError:
+    except (ImportError, OSError):
+        # ImportError: Triton not installed. OSError: Triton present but its
+        # binary deps fail to load (e.g. shared library errors). Either way,
+        # fall back to the reference reshape/permute path.
         return False
 
     return ulysses_alltoall_fused_supported(scatter_idx, batch_dim_idx, input)
