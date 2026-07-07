@@ -373,7 +373,15 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
             patch.object(
                 fa,
                 "ulysses_local_flashmask_first_fwd",
-                return_value=(self.out, {"result_attention": self.out}),
+                return_value=(
+                    self.out,
+                    {
+                        "result_attention": self.out,
+                        "softmax_lse": self.lse,
+                        "causal": False,
+                        "fa_version": 4,
+                    },
+                ),
             ),
         ):
             result = attn._ulysses_first_fwd(
@@ -396,18 +404,67 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         )
         hold = attn._hold_tensors_queue.get_nowait()
         self.assertEqual(hold["mode"], "contiguous_a2a")
+        self.assertIs(hold["result_attention"], self.out)
+        self.assertIs(hold["local_query"], self.q)
+        self.assertIs(hold["local_key"], self.k)
+        self.assertIs(hold["local_value"], self.v)
 
+        with patch.object(
+            fa.FlashMaskUlyssesCpFunctor, "apply", return_value=self.out
+        ) as mock_apply:
+            attn._hold_tensors_queue.put(hold)
+            self.assertIs(attn._second_fwd(self.q, self.k, self.v), self.out)
+        mock_apply.assert_called_once()
+
+    def test_ulysses_functor_backward_returns_original_layout_grads(self):
+        ctx = FakeCtx()
+        local_grad = paddle.ones_like(self.out)
+        hold = {
+            "group": self.group,
+            "result_attention": self.out,
+            "local_query": self.q,
+            "local_key": self.k,
+            "local_value": self.v,
+            "startend_row_indices": self.startend,
+            "local_hold_tensors": {
+                "result_attention": self.out,
+                "softmax_lse": self.lse,
+                "causal": False,
+                "fa_version": 4,
+            },
+        }
+
+        self.assertIs(
+            fa.FlashMaskUlyssesCpFunctor.forward(
+                ctx, self.q, self.k, self.v, hold
+            ),
+            self.out,
+        )
         with (
             patch.object(
-                fa.UlyssesAlltoAll, "apply", side_effect=fake_alltoall
-            ),
+                fa,
+                "_ulysses_single_all_to_all",
+                side_effect=(local_grad, self.q, self.k, self.v),
+            ) as mock_a2a,
             patch.object(
-                fa.FlashMaskAttnFunctor, "apply", return_value=self.out
-            ) as mock_apply,
+                fa,
+                "_flash_attn_bwd",
+                return_value=(self.q, self.k, self.v, None),
+            ) as mock_backward,
         ):
-            second = attn._ulysses_second_fwd(self.q, self.k, self.v, hold)
-        self.assertIs(second, self.out)
-        mock_apply.assert_called_once()
+            grads = fa.FlashMaskUlyssesCpFunctor.backward(
+                ctx, paddle.ones_like(self.out)
+            )
+
+        self.assertIs(grads[0], self.q)
+        self.assertIs(grads[1], self.k)
+        self.assertIs(grads[2], self.v)
+        self.assertEqual(mock_a2a.call_args_list[0].kwargs["scatter_idx"], 2)
+        self.assertEqual(mock_a2a.call_args_list[0].kwargs["gather_idx"], 1)
+        for call in mock_a2a.call_args_list[1:]:
+            self.assertEqual(call.kwargs["scatter_idx"], 1)
+            self.assertEqual(call.kwargs["gather_idx"], 2)
+        self.assertIs(mock_backward.call_args.args[4], local_grad)
 
     def test_second_forward_dispatches_each_mode(self):
         attn = fa.RefinedRcomputeFlashMaskCpAttention()
@@ -426,9 +483,18 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
                 mock_apply.assert_called_once()
 
         attn._hold_tensors_queue.put({"mode": "contiguous_a2a"})
-        with patch.object(
-            attn, "_ulysses_second_fwd", return_value=self.out
-        ) as mock_ulysses:
+        with (
+            patch.object(
+                fa.FlashMaskUlyssesCpFunctor, "apply", return_value=self.out
+            ) as mock_ulysses,
+            patch.object(
+                fa.UlyssesAlltoAll,
+                "apply",
+                side_effect=AssertionError(
+                    "second forward should not all-to-all"
+                ),
+            ),
+        ):
             self.assertIs(attn._second_fwd(self.q, self.k, self.v), self.out)
             mock_ulysses.assert_called_once()
 

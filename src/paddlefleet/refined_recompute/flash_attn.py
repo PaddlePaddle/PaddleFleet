@@ -24,6 +24,7 @@ from paddle.nn.functional.flash_attention import flashmask_attention
 
 from paddlefleet.context_parallel_utils import (
     UlyssesAlltoAll,
+    _ulysses_single_all_to_all,
     cp_flashmask_allgatherkv_balance_backward,
     cp_flashmask_allgatherkv_balance_forward,
     cp_flashmask_swa_p2p_backward,
@@ -977,6 +978,190 @@ class FlashMaskAttnCpFunctor(PyLayer):
         return query_grad, key_grad, value_grad
 
 
+class FlashMaskUlyssesCpFunctor(PyLayer):
+    """Surrogate PyLayer for RR Ulysses FlashMask CP attention."""
+
+    @staticmethod
+    def forward(ctx, q, k, v, hold_tensors):
+        """Return saved final output and keep local tensors for backward."""
+        local_hold_tensors = hold_tensors["local_hold_tensors"]
+        ctx.group = hold_tensors["group"]
+        ctx.softmax_scale = local_hold_tensors.get("softmax_scale")
+        ctx.fa_version = local_hold_tensors["fa_version"]
+        ctx.dropout = local_hold_tensors.get("dropout", 0.0)
+        if ctx.fa_version == 2:
+            ctx.save_for_backward(
+                hold_tensors["local_query"],
+                hold_tensors["local_key"],
+                hold_tensors["local_value"],
+                hold_tensors["startend_row_indices"],
+                local_hold_tensors["result_attention"],
+                local_hold_tensors["softmax_lse"],
+                local_hold_tensors["causal"],
+                local_hold_tensors["seed_offset"],
+            )
+        else:
+            ctx.save_for_backward(
+                hold_tensors["local_query"],
+                hold_tensors["local_key"],
+                hold_tensors["local_value"],
+                hold_tensors["startend_row_indices"],
+                local_hold_tensors["result_attention"],
+                local_hold_tensors["softmax_lse"],
+                local_hold_tensors["causal"],
+            )
+        return hold_tensors["result_attention"]
+
+    @staticmethod
+    def backward(ctx, grad):
+        """Run local attention backward, then map local grads to input layout."""
+        if ctx.fa_version == 2:
+            (
+                q,
+                k,
+                v,
+                startend_row_indices,
+                result_attention,
+                softmax_lse,
+                causal,
+                seed_offset,
+            ) = ctx.saved_tensor()
+        else:
+            (
+                q,
+                k,
+                v,
+                startend_row_indices,
+                result_attention,
+                softmax_lse,
+                causal,
+            ) = ctx.saved_tensor()
+            seed_offset = None
+        group = ctx.group
+        local_grad = _ulysses_single_all_to_all(
+            grad,
+            scatter_idx=2,
+            gather_idx=1,
+            batch_dim_idx=0,
+            group=group,
+        )
+        if ctx.fa_version == 2:
+            q_grad, k_grad, v_grad = _C_ops.flashmask_attention_grad(
+                q.detach(),
+                k.detach(),
+                v.detach(),
+                startend_row_indices,
+                result_attention,
+                softmax_lse,
+                seed_offset,
+                local_grad,
+                ctx.dropout,
+                causal,
+            )
+            seed_offset._clear_dataptr()
+        elif ctx.fa_version == 3:
+            sig_params = inspect.signature(flashmask_attention).parameters
+            scale = (
+                q.shape[-1] ** (-0.5)
+                if ctx.softmax_scale is None
+                else ctx.softmax_scale
+            )
+            if "group" in sig_params:
+                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
+                    q.detach(),
+                    k.detach(),
+                    v.detach(),
+                    result_attention,
+                    softmax_lse,
+                    startend_row_indices,
+                    None,
+                    local_grad,
+                    scale,
+                    causal,
+                    0,
+                    1,
+                )
+            elif "block_mask" in sig_params:
+                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
+                    q.detach(),
+                    k.detach(),
+                    v.detach(),
+                    result_attention,
+                    softmax_lse,
+                    startend_row_indices,
+                    None,
+                    local_grad,
+                    scale,
+                    causal,
+                )
+            else:
+                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
+                    q.detach(),
+                    k.detach(),
+                    v.detach(),
+                    result_attention,
+                    softmax_lse,
+                    startend_row_indices,
+                    local_grad,
+                    scale,
+                    causal,
+                )
+        elif ctx.fa_version == 4:
+            if startend_row_indices is not None:
+                flashmask_info = FlashMaskInfoPaddle(
+                    startend_row_indices=startend_row_indices,
+                    is_causal=causal,
+                )
+            else:
+                flashmask_info = None
+            q_grad, k_grad, v_grad, _ = _flash_attn_bwd(
+                q.detach(),
+                k.detach(),
+                v.detach(),
+                result_attention,
+                local_grad,
+                softmax_lse,
+                flashmask_info,
+                learnable_sink=None,
+                softmax_scale=ctx.softmax_scale,
+                causal=causal,
+                deterministic=bool(
+                    paddle.get_flags(["FLAGS_cudnn_deterministic"])[
+                        "FLAGS_cudnn_deterministic"
+                    ]
+                ),
+            )
+        else:
+            raise ValueError(
+                f"Invalid flash attention version: {ctx.fa_version}"
+            )
+
+        query_grad = _ulysses_single_all_to_all(
+            q_grad,
+            scatter_idx=1,
+            gather_idx=2,
+            batch_dim_idx=0,
+            group=group,
+        )
+        key_grad = _ulysses_single_all_to_all(
+            k_grad,
+            scatter_idx=1,
+            gather_idx=2,
+            batch_dim_idx=0,
+            group=group,
+        )
+        value_grad = _ulysses_single_all_to_all(
+            v_grad,
+            scatter_idx=1,
+            gather_idx=2,
+            batch_dim_idx=0,
+            group=group,
+        )
+        result_attention._clear_dataptr()
+        softmax_lse._clear_dataptr()
+        return query_grad, key_grad, value_grad
+
+
 class FlashMaskSwaP2PFunctor(PyLayer):
     """Surrogate PyLayer for RR P2P SWA FlashMask attention."""
 
@@ -1170,6 +1355,7 @@ def ulysses_local_flashmask_first_fwd(
         }
     else:
         raise ValueError(f"Invalid flash attention version: {fa_version}")
+    hold_tensors["fa_version"] = fa_version
     return result_attention, hold_tensors
 
 
@@ -1443,33 +1629,20 @@ class RefinedRcomputeFlashMaskCpAttention:
             causal,
             softmax_scale,
         )
+        result_attention = self._ulysses_alltoall_output(local_attention, group)
         self._hold_tensors_queue.put(
             {
                 "mode": "contiguous_a2a",
                 "group": group,
+                "result_attention": result_attention,
+                "local_query": query,
+                "local_key": key,
+                "local_value": value,
                 "startend_row_indices": startend_row_indices,
                 "local_hold_tensors": local_hold_tensors,
             }
         )
-        return self._ulysses_alltoall_output(local_attention, group)
-
-    def _ulysses_second_fwd(
-        self, query_states, key_states, value_states, hold_tensors
-    ):
-        """Rebuild Ulysses graph and use a local FlashMask surrogate."""
-        group = hold_tensors["group"]
-        query, key, value = self._ulysses_alltoall_qkv(
-            query_states, key_states, value_states, group
-        )
-        local_output = FlashMaskAttnFunctor.apply(
-            query,
-            key,
-            value,
-            hold_tensors["startend_row_indices"],
-            None,
-            hold_tensors["local_hold_tensors"],
-        )
-        return self._ulysses_alltoall_output(local_output, group)
+        return result_attention
 
     def _second_fwd(
         self, query_states, key_states, value_states, learnable_sink=None
@@ -1497,7 +1670,7 @@ class RefinedRcomputeFlashMaskCpAttention:
                 hold_tensors,
             )
         elif mode == "contiguous_a2a":
-            return self._ulysses_second_fwd(
+            return FlashMaskUlyssesCpFunctor.apply(
                 query_states, key_states, value_states, hold_tensors
             )
         else:
