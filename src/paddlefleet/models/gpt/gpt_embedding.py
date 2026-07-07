@@ -217,6 +217,11 @@ class GPTEmbedding(FleetLayer):
                 )
                 input_ids_for_moe_mask = input_ids
             if (
+                input_ids_for_moe_mask is None
+                and getattr(self.config, "moe_n_hash_layers", 0) > 0
+            ):
+                input_ids_for_moe_mask = input_ids
+            if (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
                 and not self.config.mtp_load_weight_only

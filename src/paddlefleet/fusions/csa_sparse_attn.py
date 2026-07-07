@@ -107,6 +107,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         ctx.query_shape = (b, sq, np_heads, hn)
         ctx.softmax_scale = float(softmax_scale)
         ctx.attn_sink_dtype = attn_sink.dtype
+        ctx.attn_sink_stop_gradient = bool(attn_sink.stop_gradient)
         ctx.backend = backend
 
         query, kv_full, attn_sink, topk_idxs = prepare_inputs(
@@ -195,6 +196,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 ctx.attn_sink_dtype
             )
 
+        d_attn_sink = None if ctx.attn_sink_stop_gradient else d_attn_sink
         return (dq, dkv, d_attn_sink, None)
 
 

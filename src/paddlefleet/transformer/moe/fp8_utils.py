@@ -1902,6 +1902,22 @@ class ExpertsGroupGemmContiguousNode:
         """
         BF16 GEMM for weight grad
         """
+        def _get_stop_gradient(w):
+            if isinstance(w, (list, tuple)):
+                return all(getattr(item, "stop_gradient", True) for item in w)
+            parent = getattr(w, "_parent", None)
+            if parent is not None:
+                for attr in ("weight1", "weight2"):
+                    parent_weight = getattr(parent, attr, None)
+                    if parent_weight is not None and hasattr(
+                        parent_weight, "stop_gradient"
+                    ):
+                        return bool(parent_weight.stop_gradient)
+            return bool(getattr(w, "stop_gradient", True))
+
+        if _get_stop_gradient(weights):
+            return
+
         if x is None:
             if self.dequant_input:
                 x = paddle.incubate.nn.functional.fused_act_dequant(
