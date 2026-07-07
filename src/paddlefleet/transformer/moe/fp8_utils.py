@@ -2168,14 +2168,34 @@ class ExpertsGroupGemmContiguousNode:
 
                 if n > 0:
                     end_idx = start_idx + n
-                    paddle._C_ops.fused_linear_param_grad_add(
-                        x._slice(start_idx, end_idx),
-                        dy._slice(start_idx, end_idx),
-                        grad_attr,
-                        None,
-                        True,
-                        False,
-                    )
+                    # == [MG accuracy-alignment diff · expert wgrad] ==
+                    # Only active when use_accuracy_compatible=True: on the non-fp8
+                    #   path, cast the x/dy slices to fp32 before accumulating via
+                    #   fused_linear_param_grad_add, matching MG SequentialMLP's fp32
+                    #   expert wgrad. Otherwise keep the original direct accumulation.
+                    # Note: this local tree already pre-pads tokens_per_expert
+                    #   upstream (padding_token_per_experts, which is alignment-aware),
+                    #   so the FP8_ALIGN re-padding from the upstream PR is a no-op
+                    #   here and is intentionally omitted.
+                    # ============================================================
+                    if self.use_accuracy_compatible and not self.use_fp8_mlp:
+                        paddle._C_ops.fused_linear_param_grad_add(
+                            x._slice(start_idx, end_idx).astype("float32"),
+                            dy._slice(start_idx, end_idx).astype("float32"),
+                            grad_attr,
+                            None,
+                            True,
+                            False,
+                        )
+                    else:
+                        paddle._C_ops.fused_linear_param_grad_add(
+                            x._slice(start_idx, end_idx),
+                            dy._slice(start_idx, end_idx),
+                            grad_attr,
+                            None,
+                            True,
+                            False,
+                        )
                     start_idx = end_idx
 
                 if (
