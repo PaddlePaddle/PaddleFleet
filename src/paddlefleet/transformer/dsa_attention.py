@@ -112,7 +112,11 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     return (x.reshape(original_shape) * scale).cast(output_dtype)
 
 
-def rotate_activation(x: Tensor, use_fast_hadamard: bool = False) -> Tensor:
+def rotate_activation(
+    x: Tensor,
+    use_fast_hadamard: bool = False,
+    high_precision_hadamard: bool = False,
+) -> Tensor:
     """Apply Hadamard rotation activation.
 
     Reference:
@@ -120,13 +124,15 @@ def rotate_activation(x: Tensor, use_fast_hadamard: bool = False) -> Tensor:
 
     Args:
         x: Input tensor (must be bfloat16).
+        high_precision_hadamard: if True, means type of input x is float32.
 
     Returns:
         Rotated tensor.
     """
-    assert x.dtype == paddle.bfloat16, (
-        f"rotate_activation only support bf16 input, but got {x.dtype}"
-    )
+    if not high_precision_hadamard:
+        assert x.dtype == paddle.bfloat16, (
+            f"rotate_activation only support bf16 input, but got {x.dtype}"
+        )
     hidden_size = x.shape[-1]
     scale = hidden_size**-0.5
 

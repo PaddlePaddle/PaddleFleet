@@ -201,7 +201,7 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
             "causal": causal,
         }
 
-        result = FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
+        result = FlashMaskAttnCpFunctor.apply(q, k, v, None, hold_tensors)
         self.assertEqual(result.shape, result_attn.shape)
 
 
@@ -217,6 +217,7 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
+            None,  # sink_grad
         )
 
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -237,7 +238,7 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             "causal": causal,
         }
 
-        FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
+        FlashMaskAttnCpFunctor.apply(q, k, v, None, hold_tensors)
         mock_cp_backward.assert_not_called()  # Not called in forward
 
 

@@ -285,6 +285,42 @@ class StandardMoERouter(nn.Layer):
         ):
             mark_as_sequence_parallel_parameter(self.weight)
 
+        # Multi-view (split-feature) routing: instead of a single gate
+        # projection, score each expert with the SUM of two independent views.
+        # The routing score is score_func(logits_0) + score_func(logits_1),
+        # where logits_0 reuses the existing ``self.weight`` gate and logits_1
+        # comes from a new projection ``self.weight_1``. This gives the router
+        # two independent "views" of each token while adding only one extra
+        # projection and keeping the expert FFN compute unchanged.
+        #
+        # Disabled by default so that existing configs / checkpoints keep using
+        # the single ``self.weight`` gate unchanged; enable via the
+        # ``moe_split_feature_routing`` config flag. Hash-routing layers keep
+        # using ``self.weight`` as the single gate regardless of this flag.
+        self.moe_split_feature_routing = getattr(
+            config, "moe_split_feature_routing", False
+        )
+        if self.moe_split_feature_routing:
+            # Same layout / init as ``self.weight`` ([num_experts, hidden_size])
+            # so the two views are symmetric and the projection can reuse the
+            # fused gate matmul (force-load-balancing and dw_p2p_overlap paths
+            # included). ``self.weight`` is reused as the first view, so no
+            # extra gate is wasted. The scoring_func == "sigmoid" contract is
+            # checked later in set_layer_number(), once we know whether this is
+            # a hash-routing layer (hash layers bypass split routing and may use
+            # a non-sigmoid scoring_func).
+            self.weight_1 = paddle.create_parameter(
+                shape=[self.num_experts, self.hidden_size],
+                dtype="float32",
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+            config.init_method(self.weight_1)
+            if (
+                self.sequence_parallel
+                and self.config.expert_model_parallel_size > 1
+            ):
+                mark_as_sequence_parallel_parameter(self.weight_1)
+
         if self.routed_scaling_factor_learnable:
             self.routed_scaling_factor_param = self.create_parameter(
                 shape=[self.num_experts],
@@ -954,6 +990,17 @@ class StandardMoERouter(nn.Layer):
             and layer_number is not None
             and layer_number < n_hash
         )
+        # Enforce the split-feature routing contract now that is_hash_layer is
+        # known. Split routing only applies to non-hash layers (hash layers
+        # bypass it and may legitimately use a non-sigmoid scoring_func), so
+        # validate scoring_func only on layers that will run the two-view
+        # sigmoid path.
+        if self.moe_split_feature_routing and not self.is_hash_layer:
+            if self.scoring_func != "sigmoid":
+                raise ValueError(
+                    "moe_split_feature_routing requires scoring_func "
+                    f"== 'sigmoid', but got {self.scoring_func!r}."
+                )
         if not self.is_hash_layer:
             return
 
@@ -996,6 +1043,12 @@ class StandardMoERouter(nn.Layer):
             del self.e_score_correction_bias
         if hasattr(self, "expert_usage"):
             del self.expert_usage
+
+        # Hash layers bypass split-feature routing (see forward's ``use_split``
+        # guard), so the second-view gate created in __init__ is never used
+        # here. Drop it to avoid registering an unused parameter.
+        if hasattr(self, "weight_1"):
+            del self.weight_1
 
 
 class TopKRouter(StandardMoERouter):
@@ -1108,14 +1161,58 @@ class TopKRouter(StandardMoERouter):
                 "to the MoE layer."
             )
 
+        # Split-feature routing applies to non-hash layers only; hash-routing
+        # layers keep using the original single gate projection.
+        use_split = self.moe_split_feature_routing and not self.is_hash_layer
+
         with paddle.amp.auto_cast(False):
-            logits = gate_detach_matmul(
-                input,
-                self.weight,
-                True,
-                self.config.moe_router_force_load_balancing,
-                getattr(self.config, "dw_p2p_overlap", False),
-            )
+            if use_split:
+                # The two-view contract is sigmoid + sigmoid. Re-assert it here
+                # at the point of use: set_layer_number() validates scoring_func
+                # early, but if the router is invoked before set_layer_number()
+                # (is_hash_layer still at its __init__ default of False), this
+                # guard prevents the split branch from running under a
+                # non-sigmoid scoring_func.
+                if self.scoring_func != "sigmoid":
+                    raise ValueError(
+                        "moe_split_feature_routing requires scoring_func "
+                        f"== 'sigmoid', but got {self.scoring_func!r}."
+                    )
+                # Two independent views; the routing score is the SUM of their
+                # per-expert scores. View 0 reuses the existing self.weight
+                # gate, view 1 uses the new self.weight_1 projection. Both
+                # reuse the fused gate matmul so they share the
+                # force-load-balancing and dw_p2p_overlap paths.
+                logits_0 = gate_detach_matmul(
+                    input,
+                    self.weight,
+                    True,
+                    self.config.moe_router_force_load_balancing,
+                    getattr(self.config, "dw_p2p_overlap", False),
+                )
+                logits_1 = gate_detach_matmul(
+                    input,
+                    self.weight_1,
+                    True,
+                    self.config.moe_router_force_load_balancing,
+                    getattr(self.config, "dw_p2p_overlap", False),
+                )
+                # The two-view contract is sigmoid + sigmoid. scoring_func is
+                # guaranteed to be "sigmoid" here (validated above and in
+                # set_layer_number), so route both views through the shared
+                # gate_score_func instead of hardcoding F.sigmoid.
+                gates = self.gate_score_func(logits_0) + self.gate_score_func(
+                    logits_1
+                )
+                logits = logits_0 + logits_1  # used by z-loss
+            else:
+                logits = gate_detach_matmul(
+                    input,
+                    self.weight,
+                    True,
+                    self.config.moe_router_force_load_balancing,
+                    getattr(self.config, "dw_p2p_overlap", False),
+                )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
 
@@ -1155,7 +1252,13 @@ class TopKRouter(StandardMoERouter):
             return (None, top_gate, top_idx, probs, mask, None, None, None)
         # ---- end hash routing ----
 
-        gates = self.gate_score_func(logits)
+        # Split-feature routing already produced `gates` (sum of the two
+        # score_func views) inside the auto_cast block above; only the
+        # single-gate path needs the scoring function applied here. (Hash
+        # layers have already returned above, so `use_split` here is equivalent
+        # to `self.moe_split_feature_routing`.)
+        if not use_split:
+            gates = self.gate_score_func(logits)
 
         if input_ids_none_zero_mask is not None:
             # input_ids_none_zero_mask shape: [b*s,1]

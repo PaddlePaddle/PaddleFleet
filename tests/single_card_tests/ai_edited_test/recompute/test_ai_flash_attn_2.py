@@ -269,7 +269,9 @@ class TestFlashMaskAttnFunctorVersion3(unittest.TestCase):
             "causal": True,
         }
 
-        result = FlashMaskAttnFunctor.apply(q, k, v, startend, hold_tensors)
+        result = FlashMaskAttnFunctor.apply(
+            q, k, v, startend, None, hold_tensors
+        )
         self.assertEqual(result.shape, result_attn.shape)
 
 
@@ -295,7 +297,9 @@ class TestFlashMaskAttnFunctorVersion4(unittest.TestCase):
             "causal": True,
         }
 
-        result = FlashMaskAttnFunctor.apply(q, k, v, startend, hold_tensors)
+        result = FlashMaskAttnFunctor.apply(
+            q, k, v, startend, None, hold_tensors
+        )
         self.assertEqual(result.shape, result_attn.shape)
 
 

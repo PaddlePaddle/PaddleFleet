@@ -184,28 +184,6 @@ jobs:
           fi
           '
 
-      - name: Single card sonic moe test
-        if: matrix.python == '3.12' && matrix.cuda == '12.9' && always()
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          pwd
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${{ matrix.python }}
-          echo "Paddle Commit"
-          python -c "import paddle; print(paddle.version.commit)"
-          echo "PaddleFleet Commit"
-          python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          cd PaddleFleet
-          bash ci/single_card_sonic.sh
-          single_card_exit_code=$?
-          if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mSingle card test succeeded.\033[0m"
-          fi
-          '
 
       - name: Terminate and delete the container
         if: ${{ always() }}

@@ -16,6 +16,9 @@
 
 Verifies that flashmask_attention_cp with a learnable_sink produces forward
 output and input/sink gradients matching a single-rank full-sequence reference.
+Also covers the refined-recompute CP path
+(RefinedRcomputeFlashMaskCpAttention) with a learnable_sink, driven through
+``recompute`` to force its two forward passes, vs the non-rr *_cp path.
 
 Key detail: CP uses the DualChunkSwap load-balancing layout (scatter_balance),
 so the per-rank input slice AND the reference-output slice must both be taken
@@ -361,37 +364,142 @@ class TestFlashMaskSinkCP(unittest.TestCase):
         self._run(2, 128, 4, 64, use_sink=True)
 
 
-class TestSinkUnsupportedPaths(unittest.TestCase):
-    """learnable_sink must be confined to flashmask_attention / *_cp.
+class TestRefinedRecomputeFlashMaskSinkCP(unittest.TestCase):
+    """rr-CP FlashMask attention + learnable_sink.
 
-    The refined-recompute (RR / RR-CP) path does NOT support attention sink.
-    Passing a sink to it must raise NotImplementedError rather than being
-    silently dropped (the bug this PR guards against).
+    The rr-CP path keys off ``framework._dygraph_tracer()._has_grad`` to pick
+    between two forward passes: the first (``_has_grad`` False) runs the real CP
+    kernel under no_grad and stashes tensors; the second (``_has_grad`` True)
+    rebuilds the graph via ``FlashMaskAttnCpFunctor``, whose custom backward
+    computes the grads. We drive both passes manually so the test exercises the
+    rr-CP functor's fwd/bwd directly, and compare against the non-rr
+    ``flashmask_attention_cp`` sink path on the same scatter_balance layout.
     """
 
-    def test_rr_cp_rejects_sink(self):
+    def _full_inputs(self, batch_size, seq_len, nheads, d):
+        paddle.seed(SEED)
+        np.random.seed(SEED)
+        q = paddle.randn([batch_size, seq_len, nheads, d], dtype=DTYPE)
+        k = paddle.randn([batch_size, seq_len, nheads, d], dtype=DTYPE)
+        v = paddle.randn([batch_size, seq_len, nheads, d], dtype=DTYPE)
+        return q, k, v
+
+    def _run(self, batch_size, seq_len, nheads, d, sink_trainable=True):
+        from paddle import framework
+
         from paddlefleet.refined_recompute.flash_attn import (
             RefinedRcomputeFlashMaskCpAttention,
         )
 
-        q = paddle.randn([2, 256, 4, 128], dtype=DTYPE)
-        startend = _noncausal_startend_row_indices(2, 256)
-        sink = paddle.randn([4], dtype=DTYPE)
-        attn = RefinedRcomputeFlashMaskCpAttention()
-        with self.assertRaises(NotImplementedError):
-            attn.forward(q, q, q, startend, learnable_sink=sink)
+        assert seq_len % (CP_SIZE * 2) == 0
 
-    def test_rr_rejects_sink(self):
-        from paddlefleet.refined_recompute.flash_attn import (
-            RefinedRcomputeFlashMaskAttention,
+        q_full, k_full, v_full = self._full_inputs(
+            batch_size, seq_len, nheads, d
         )
 
-        q = paddle.randn([2, 256, 4, 128], dtype=DTYPE)
-        startend = _noncausal_startend_row_indices(2, 256)
-        sink = paddle.randn([4], dtype=DTYPE)
-        attn = RefinedRcomputeFlashMaskAttention()
-        with self.assertRaises(NotImplementedError):
-            attn.forward(q, q, q, startend, learnable_sink=sink)
+        paddle.seed(SEED + 1)
+        sink_full = paddle.randn([nheads], dtype=DTYPE) + SINK_BIAS
+
+        startend_row_indices = _noncausal_startend_row_indices(
+            batch_size, seq_len
+        )
+
+        # Non-rr reference on the same per-rank scatter_balance layout.
+        q_ref = _scatter_leaf(q_full)
+        k_ref = _scatter_leaf(k_full)
+        v_ref = _scatter_leaf(v_full)
+        sink_ref = sink_full.detach().clone()
+        sink_ref.stop_gradient = not sink_trainable
+        out_ref = flashmask_attention_cp(
+            q_ref,
+            k_ref,
+            v_ref,
+            startend_row_indices,
+            causal=False,
+            learnable_sink=sink_ref,
+        )
+
+        # rr-CP path: drive the two-pass mechanism manually.
+        q_local = _scatter_leaf(q_full)
+        k_local = _scatter_leaf(k_full)
+        v_local = _scatter_leaf(v_full)
+        sink_local = sink_full.detach().clone()
+        sink_local.stop_gradient = not sink_trainable
+
+        rr_attn = RefinedRcomputeFlashMaskCpAttention()
+        tracer = framework._dygraph_tracer()
+        prev_has_grad = tracer._has_grad
+
+        tracer._has_grad = False
+        try:
+            rr_attn(
+                q_local,
+                k_local,
+                v_local,
+                startend_row_indices,
+                causal=False,
+                learnable_sink=sink_local,
+            )
+        finally:
+            tracer._has_grad = prev_has_grad
+
+        tracer._has_grad = True
+        try:
+            out_local = rr_attn(
+                q_local,
+                k_local,
+                v_local,
+                startend_row_indices,
+                causal=False,
+                learnable_sink=sink_local,
+            )
+        finally:
+            tracer._has_grad = prev_has_grad
+
+        cos = _cosine_sim(out_local, out_ref)
+        self.assertGreaterEqual(
+            cos,
+            COS_SIM_THRESHOLD,
+            f"[rank {CP_RANK}] rr-CP fwd cosine {cos} < {COS_SIM_THRESHOLD}",
+        )
+
+        paddle.seed(SEED + 2)
+        g = paddle.randn(out_ref.shape, dtype=out_ref.dtype)
+        out_local.backward(g.clone())
+        out_ref.backward(g.clone())
+
+        for name, got, ref in (
+            ("dq", q_local.grad, q_ref.grad),
+            ("dk", k_local.grad, k_ref.grad),
+            ("dv", v_local.grad, v_ref.grad),
+        ):
+            self.assertIsNotNone(got, f"[rank {CP_RANK}] rr-CP {name} is None")
+            c = _cosine_sim(got, ref)
+            self.assertGreaterEqual(
+                c,
+                COS_SIM_THRESHOLD,
+                f"[rank {CP_RANK}] rr-CP {name} cosine {c} < {COS_SIM_THRESHOLD}",
+            )
+
+        if sink_trainable:
+            self.assertIsNotNone(sink_local.grad)
+            self.assertEqual(list(sink_local.grad.shape), [nheads])
+            self.assertIsNotNone(sink_ref.grad)
+            sc = _cosine_sim(sink_local.grad, sink_ref.grad)
+            self.assertGreaterEqual(
+                sc,
+                COS_SIM_THRESHOLD,
+                f"[rank {CP_RANK}] rr-CP dsink cosine {sc} < {COS_SIM_THRESHOLD}",
+            )
+        else:
+            # Fixed sink is stop_gradient -> rr-CP returns no sink grad.
+            self.assertIsNone(sink_local.grad)
+
+    def test_rr_cp_trainable_sink(self):
+        self._run(2, 256, 4, 128)
+
+    def test_rr_cp_fixed_sink_no_grad(self):
+        self._run(2, 256, 4, 128, sink_trainable=False)
 
 
 if __name__ == "__main__":
