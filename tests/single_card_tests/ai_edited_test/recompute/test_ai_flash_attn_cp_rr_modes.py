@@ -181,32 +181,57 @@ class TestUlyssesHelpers(unittest.TestCase):
             bool(paddle.all(sliced == per_head[:, 2:4, :, :]).item())
         )
 
-    def test_ulysses_local_first_forward_version_4_saves_rr_tensors(self):
+    def test_ulysses_local_first_forward_versions_save_rr_tensors(self):
         q = paddle.randn([1, 4, 2, 4])
         out = paddle.randn([1, 4, 2, 4])
         lse = paddle.randn([1, 2, 4])
+        softmax = paddle.randn([1, 2, 4])
+        seed = paddle.zeros([1], dtype="int64")
         startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
 
-        with (
-            patch.object(fa, "_get_fa_version", return_value=4),
-            patch.object(
-                fa, "_flash_attn_fwd", return_value=(out, lse), create=True
-            ) as mock_fwd,
-        ):
-            result, hold = fa.ulysses_local_flashmask_first_fwd(
-                q, q, q, startend, False, None
-            )
+        def fake_flashmask_attention(query, key, value, block_mask=None):
+            return None
 
-        self.assertIs(result, out)
-        self.assertIs(hold["result_attention"], out)
-        self.assertIs(hold["softmax_lse"], lse)
-        self.assertFalse(hold["causal"])
-        mock_fwd.assert_called_once()
-        self.assertEqual(mock_fwd.call_args.args[0].dtype, q.dtype)
-        self.assertIs(
-            mock_fwd.call_args.kwargs["startend_row_indices"], startend
+        cases = (
+            (2, "flashmask_attention", (out, softmax, lse, seed)),
+            (3, "flashmask_attention_v2", (out, lse)),
+            (4, "_flash_attn_fwd", (out, lse)),
         )
-        self.assertFalse(mock_fwd.call_args.kwargs["causal"])
+        for version, target, return_value in cases:
+            with self.subTest(version=version):
+                with patch.object(fa, "_get_fa_version", return_value=version):
+                    if version == 4:
+                        patcher = patch.object(
+                            fa, target, return_value=return_value, create=True
+                        )
+                    else:
+                        patcher = patch.object(fa, "_C_ops")
+                    with patcher as mock_op:
+                        if version != 4:
+                            getattr(mock_op, target).return_value = return_value
+                        with patch.object(
+                            fa, "flashmask_attention", fake_flashmask_attention
+                        ):
+                            result, hold = fa.ulysses_local_flashmask_first_fwd(
+                                q, q, q, startend, False, None
+                            )
+
+                self.assertIs(result, out)
+                self.assertIs(hold["result_attention"], out)
+                self.assertIs(hold["softmax_lse"], lse)
+                self.assertFalse(hold["causal"])
+                if version == 2:
+                    self.assertIs(hold["seed_offset"], seed)
+                if version == 3:
+                    scale_arg = mock_op.flashmask_attention_v2.call_args.args[
+                        -2
+                    ]
+                    self.assertIsInstance(scale_arg, float)
+                if version == 4:
+                    self.assertIs(
+                        mock_op.call_args.kwargs["startend_row_indices"],
+                        startend,
+                    )
 
 
 class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
@@ -319,7 +344,14 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         self.assertIs(result, self.out)
         mock_ulysses.assert_called_once()
         self.assertIs(mock_ulysses.call_args.args[0], odd_q)
+        self.assertIs(mock_ulysses.call_args.args[4], self.group)
         self.assertTrue(mock_ulysses.call_args.args[5])
+
+    def test_first_forward_rejects_invalid_mode(self):
+        with self._patch_group(), self.assertRaises(ValueError):
+            fa.RefinedRcomputeFlashMaskCpAttention()._first_fwd(
+                self.q, self.k, self.v, self.startend, mode="bad_mode"
+            )
 
     def test_ulysses_first_and_second_forward_use_surrogate(self):
         attn = fa.RefinedRcomputeFlashMaskCpAttention()
