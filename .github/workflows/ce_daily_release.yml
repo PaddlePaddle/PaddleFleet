@@ -480,7 +480,12 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          git checkout ${fleet_branch}
+          if [ "${GITHUB_EVENT_NAME}" == "pull_request" ]; then
+            git fetch origin refs/pull/${PR_ID}/head:pr-${PR_ID}
+            git checkout pr-${PR_ID}
+          else
+            git checkout ${fleet_branch}
+          fi
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
