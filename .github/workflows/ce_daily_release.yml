@@ -440,8 +440,6 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
-            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
-            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e paddlefleet_url \
             -e fleet_branch \
             -e formers_branch \
@@ -688,8 +686,6 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
-            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
-            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e paddlefleet_url \
             -e fleet_branch \
             -e formers_branch \
@@ -1147,8 +1143,6 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
-            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
-            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
             -e fleet_branch \
             -e formers_branch \
             -e paddlefleet_url \
