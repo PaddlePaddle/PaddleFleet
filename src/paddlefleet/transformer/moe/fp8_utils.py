@@ -104,6 +104,20 @@ __all__ = [
 FP8_ALIGN = 128
 
 
+def moe_token_padding_alignment(
+    *, use_fp8_mlp: bool, moe_grouped_gemm: bool, use_accuracy_compatible: bool
+) -> int:
+    # == [MG accuracy-alignment diff] per-expert token padding alignment ==
+    # Only when use_accuracy_compatible=True and on the pure-bf16 non-grouped_gemm
+    #   path do we skip padding (return 1), so each expert's GEMM M dim == the real
+    #   token count and cuBLAS picks the same algorithm as MG SequentialMLP. In all
+    #   other cases (including when accuracy compatible is off) align to FP8_ALIGN
+    #   to preserve the original behavior.
+    if use_accuracy_compatible and not use_fp8_mlp and not moe_grouped_gemm:
+        return 1
+    return FP8_ALIGN
+
+
 def _get_fp8_weight_and_scale(
     weight, transpose=False, num_expert=None, use_ue8m0=None
 ):
@@ -520,6 +534,11 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_expert_fusion = moe_expert_fusion
         self.clamp_value = clamp_value
         self.use_accuracy_compatible = use_accuracy_compatible
+        self.token_padding_alignment = moe_token_padding_alignment(
+            use_fp8_mlp=use_fp8_mlp,
+            moe_grouped_gemm=not self.is_split_group_gemm,
+            use_accuracy_compatible=use_accuracy_compatible,
+        )
 
     def cached_tensors(self):
         """
