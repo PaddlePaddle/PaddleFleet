@@ -574,7 +574,26 @@ class ExpertsGroupGemmContiguousNode:
         fwd_down_bf16
         """
 
-        o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
+        # == 【MG 精度对齐 diff · 参考 PF PR#968 · 前向 SwiGLU×probs】==
+        # 原始实现：`o2 = fused_swiglu_scale_forward(o1, unzipped_probs)`，
+        #   融合 kernel 内部按自己的精度路径算 SwiGLU 与 probs 相乘，与 MG
+        #   SequentialMLP 的数值路径不同，post-swiglu-scale 输出末位对不齐。
+        # 改动（仅 use_accuracy_compatible=True 生效）：手写等价计算——把 SwiGLU
+        #   与 per-token router scale 都提到 fp32 计算，最后一次性 cast 回原
+        #   dtype，复刻 MG 的「fp32 计算、单次 round」；否则走原融合 kernel。
+        # ==============================================================
+        if self.use_accuracy_compatible:
+            x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
+            probs = unzipped_probs
+            if len(probs.shape) == 1:
+                probs = probs.unsqueeze(-1)
+            o2 = (
+                F.silu(x_glu.astype("float32"))
+                * x_linear.astype("float32")
+                * probs.astype("float32")
+            ).astype(o1.dtype)
+        else:
+            o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
 
         if clear_o1:
             o1._clear_to_zero_allocation()
