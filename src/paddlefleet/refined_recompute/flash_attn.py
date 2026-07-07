@@ -1508,8 +1508,7 @@ class RefinedRcomputeFlashMaskCpAttention:
             assert _flash_mask_available, (
                 "P2P SWA fast path requires flashmask installed. Please check."
             )
-            window_size = 128 if window_size is None else window_size
-            if window_size <= 0:
+            if window_size is None or window_size <= 0:
                 raise ValueError(
                     f"SWA P2P window_size must be positive, got {window_size}"
                 )

@@ -282,7 +282,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         self.assertEqual(hold["mode"], "contiguous_allgather")
         self.assertEqual(hold["fa_version"], 4)
 
-    def test_p2p_first_forward_defaults_window_and_saves_recv_tensors(self):
+    def test_p2p_first_forward_requires_window_and_saves_recv_tensors(self):
         recv_k = paddle.randn([1, 2, 2, 4])
         recv_v = paddle.randn([1, 2, 2, 4])
         with (
@@ -302,15 +302,20 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         ):
             attn = fa.RefinedRcomputeFlashMaskCpAttention()
             result = attn._first_fwd(
-                self.q, self.k, self.v, self.startend, mode="contiguous_swap2p"
+                self.q,
+                self.k,
+                self.v,
+                self.startend,
+                mode="contiguous_swap2p",
+                window_size=64,
             )
 
         self.assertIs(result, self.out)
-        self.assertEqual(mock_forward.call_args.args[-1], 128)
+        self.assertEqual(mock_forward.call_args.args[-1], 64)
         hold = attn._hold_tensors_queue.get_nowait()
         self.assertEqual(hold["mode"], "contiguous_swap2p")
         self.assertIs(hold["recv_key"], recv_k)
-        self.assertEqual(hold["window_size"], 128)
+        self.assertEqual(hold["window_size"], 64)
 
     def test_p2p_rejects_invalid_window(self):
         with (
@@ -318,15 +323,19 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
             patch.object(fa, "_flash_mask_available", True),
         ):
             attn = fa.RefinedRcomputeFlashMaskCpAttention()
-            with self.assertRaises(ValueError):
-                attn._first_fwd(
-                    self.q,
-                    self.k,
-                    self.v,
-                    self.startend,
-                    mode="contiguous_swap2p",
-                    window_size=0,
-                )
+            for window_size in (None, 0):
+                with (
+                    self.subTest(window_size=window_size),
+                    self.assertRaises(ValueError),
+                ):
+                    attn._first_fwd(
+                        self.q,
+                        self.k,
+                        self.v,
+                        self.startend,
+                        mode="contiguous_swap2p",
+                        window_size=window_size,
+                    )
 
     def test_ulysses_first_forward_allows_causal_and_odd_local_seq(self):
         attn = fa.RefinedRcomputeFlashMaskCpAttention()
