@@ -55,7 +55,7 @@ class TestRefinedRcomputeFlashMaskAttentionForward(unittest.TestCase):
     """Tests for RefinedRcomputeFlashMaskAttention.forward."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=2,
     )
     @patch(
@@ -135,7 +135,7 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV4(unittest.TestCase):
     """Tests for _first_fwd with version 4."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=4,
     )
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")

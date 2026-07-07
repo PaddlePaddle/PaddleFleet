@@ -27,68 +27,60 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
+from paddlefleet_ops.flash_mask_facade import get_fa_version
 
 from paddlefleet.refined_recompute.flash_attn import (
     FlashAttnFunctor,
     FlashMaskAttnFunctor,
     RefinedRcomputeFlashAttention,
     RefinedRcomputeFlashMaskAttention,
-    _get_fa_version,
     flashattn_auto_cast,
 )
 
 
 class TestGetFAVersion(unittest.TestCase):
-    """Tests for _get_fa_version function."""
+    """Tests for get_fa_version function (flash_mask_facade)."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
         return_value="xpu:0",
     )
     def test_xpu_returns_version_2(self, mock_device):
         """Test that XPU device returns version 2."""
-        result = _get_fa_version(64)
+        result = get_fa_version(64)
         self.assertEqual(result, 2)
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
         return_value="gpu:0",
     )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.base.framework.get_flags"
-    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
     def test_gpu_returns_flag_value(self, mock_get_flags, mock_device):
         """Test that GPU returns the FLAGS_flash_attn_version value."""
         mock_get_flags.return_value = {"FLAGS_flash_attn_version": 3}
-        with (
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-                return_value=MagicMock(parameters={}),
-            ),
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
-                return_value={"FLAGS_cudnn_deterministic": False},
-            ),
+        with patch(
+            "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+            return_value={"FLAGS_cudnn_deterministic": False},
         ):
-            result = _get_fa_version(64)
+            result = get_fa_version(64)
             self.assertEqual(result, 3)
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_device",
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
         return_value="gpu:0",
     )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
     @patch(
-        "paddlefleet.refined_recompute.flash_attn.paddle.get_flags",
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": True},
     )
-    def test_deterministic_returns_2(self, mock_get_flags, mock_device):
-        """Test that deterministic mode returns version 2."""
-        with patch(
-            "paddlefleet.refined_recompute.flash_attn.inspect.signature",
-            return_value=MagicMock(parameters={}),
-        ):
-            result = _get_fa_version(64)
-            self.assertEqual(result, 2)
+    def test_deterministic_fa3_large_hdim_returns_2(
+        self, mock_get_flags, mock_base_flags, mock_device
+    ):
+        """Test FA3 + deterministic + hdim>128 falls back to version 2."""
+        mock_base_flags.return_value = {"FLAGS_flash_attn_version": 3}
+        result = get_fa_version(192)
+        self.assertEqual(result, 2)
 
 
 class TestFlashattnAutoCast(unittest.TestCase):
@@ -139,7 +131,7 @@ class TestFlashAttnFunctorForwardVersion3(unittest.TestCase):
     """Tests for FlashAttnFunctor.forward with FA version 3."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     def test_forward_version_3_saves_correct_tensors(self, mock_version):
@@ -164,7 +156,7 @@ class TestFlashAttnFunctorForwardVersion4(unittest.TestCase):
     """Tests for FlashAttnFunctor.forward with FA version 4."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=4,
     )
     def test_forward_version_4_saves_correct_tensors(self, mock_version):
@@ -189,7 +181,7 @@ class TestRefinedRcomputeFlashAttentionFirstFwd(unittest.TestCase):
     """Tests for RefinedRcomputeFlashAttention._first_fwd."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     @patch("paddlefleet.refined_recompute.flash_attn._C_ops.flash_attn_v3")
@@ -216,7 +208,7 @@ class TestRefinedRcomputeFlashAttentionFirstFwd(unittest.TestCase):
         self.assertFalse(attn._hold_tensors_queue.empty())
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=2,
     )
     @patch("paddlefleet.refined_recompute.flash_attn._C_ops.flash_attn")
@@ -251,7 +243,7 @@ class TestFlashMaskAttnFunctorVersion3(unittest.TestCase):
     """Tests for FlashMaskAttnFunctor with FA version 3."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     def test_forward_version_3(self, mock_version):
@@ -279,7 +271,7 @@ class TestFlashMaskAttnFunctorVersion4(unittest.TestCase):
     """Tests for FlashMaskAttnFunctor with FA version 4."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=4,
     )
     def test_forward_version_4(self, mock_version):
@@ -307,7 +299,7 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV3(unittest.TestCase):
     """Tests for RefinedRcomputeFlashMaskAttention._first_fwd with v3."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     @patch(

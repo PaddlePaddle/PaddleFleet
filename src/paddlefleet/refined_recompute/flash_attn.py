@@ -21,6 +21,8 @@ from paddle import _C_ops, framework
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
+from paddlefleet_ops import is_flash_mask_available
+from paddlefleet_ops.flash_mask_facade import get_fa_version
 
 from paddlefleet.context_parallel_utils import (
     cp_flashmask_allgatherkv_balance_backward,
@@ -28,62 +30,16 @@ from paddlefleet.context_parallel_utils import (
 )
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
-_flash_mask_available = False
-try:
-    if (
-        paddle.cuda.is_available()
-        and paddle.cuda.get_device_capability()[0] == 10
-    ):
-        from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
-            FlashMaskInfoPaddle,
-        )
-        from paddlefleet_ops.flash_mask.cute.interface import (
-            _flash_attn_bwd,
-            _flash_attn_fwd,
-        )
-
-        _flash_mask_available = True
-except (ImportError, AttributeError):
-    _flash_mask_available = False
+if is_flash_mask_available():
+    from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
+        FlashMaskInfoPaddle,
+    )
+    from paddlefleet_ops.flash_mask.cute.interface import (
+        _flash_attn_bwd,
+        _flash_attn_fwd,
+    )
 
 logger = logging.getLogger(__name__)
-
-
-def _get_fa_version(hdim):
-    """
-    Determines which version of the FlashAttention C++ operator to use.
-    It checks environment flags to decide between version 2 and version 3,
-    and defaults to version 2 for XPU devices.
-
-    Returns:
-        int: The version number of FlashAttention to be used (2 or 3).
-    """
-    if "xpu" in paddle.get_device():
-        return 2
-    # Xiangrui: For deterministic, NOT support for hdim > 128 currently.
-    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-        "FLAGS_flash_attn_version"
-    ]
-    if fa_version == 3:
-        if "block_mask" in inspect.signature(flashmask_attention).parameters:
-            if (
-                paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-                    "FLAGS_cudnn_deterministic"
-                ]
-                and hdim > 128
-            ):
-                return 2
-        elif paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-            "FLAGS_cudnn_deterministic"
-        ]:
-            return 2
-    # Fall back to version 3 if flash_mask is not available
-    if fa_version == 4 and not _flash_mask_available:
-        logger.warning(
-            "FlashMask (fa_version=4) is not available, falling back to fa_version=3"
-        )
-        return 3
-    return fa_version
 
 
 def flashattn_auto_cast(q, k, v, dtype=paddle.bfloat16):
@@ -137,7 +93,9 @@ class FlashAttnFunctor(PyLayer):
         Returns:
             paddle.Tensor: The pre-computed attention output.
         """
-        fa_version = _get_fa_version(q.shape[-1])
+
+        # startend_row_indices is None
+        fa_version = get_fa_version(q.shape[-1], v.shape[-1])
         ctx.fa_version = fa_version
         ctx.softmax_scale = hold_tensors.get("softmax_scale")
 
@@ -340,7 +298,10 @@ class RefinedRcomputeFlashAttention:
             query_states, key_states, value_states
         )
 
-        fa_version = _get_fa_version(query_states.shape[-1])
+        # startend_row_indices is None
+        fa_version = get_fa_version(
+            query_states.shape[-1], value_states.shape[-1]
+        )
         if fa_version == 2:
             if softmax_scale is not None:
                 raise NotImplementedError(
@@ -462,7 +423,9 @@ class FlashMaskAttnFunctor(PyLayer):
         The forward pass for the masked attention surrogate layer.
         It saves all necessary tensors, including `startend_row_indices`, for the backward pass.
         """
-        fa_version = _get_fa_version(q.shape[-1])
+        fa_version = get_fa_version(
+            q.shape[-1], v.shape[-1], startend_row_indices
+        )
         ctx.fa_version = fa_version
         ctx.softmax_scale = hold_tensors.get("softmax_scale")
         ctx.sink_requires_grad = (
@@ -694,7 +657,11 @@ class RefinedRcomputeFlashMaskAttention:
         Dispatches to either the first or second forward pass based on autograd state.
         """
         if learnable_sink is not None:
-            fa_version = _get_fa_version(query_states.shape[-1])
+            fa_version = get_fa_version(
+                query_states.shape[-1],
+                value_states.shape[-1],
+                startend_row_indices,
+            )
             if fa_version != 4:
                 raise NotImplementedError(
                     "learnable_sink only supported on fa_version==4 cute backend"
@@ -749,7 +716,9 @@ class RefinedRcomputeFlashMaskAttention:
         query_states, key_states, value_states = flashattn_auto_cast(
             query_states, key_states, value_states
         )
-        fa_version = _get_fa_version(query_states.shape[-1])
+        fa_version = get_fa_version(
+            query_states.shape[-1], value_states.shape[-1], startend_row_indices
+        )
         if fa_version == 2:
             if softmax_scale is not None:
                 raise NotImplementedError(
@@ -1003,10 +972,12 @@ class RefinedRcomputeFlashMaskCpAttention:
         Dispatches to either the first or second forward pass based on autograd state.
         """
         if learnable_sink is not None:
-            fa_version = paddle.base.framework.get_flags(
-                ["FLAGS_flash_attn_version"]
-            )["FLAGS_flash_attn_version"]
-            if not (fa_version == 4 and _flash_mask_available):
+            fa_version = get_fa_version(
+                query_states.shape[-1],
+                value_states.shape[-1],
+                startend_row_indices,
+            )
+            if not fa_version == 4:
                 raise NotImplementedError(
                     "learnable_sink only supported on fa_version==4 cute backend"
                 )

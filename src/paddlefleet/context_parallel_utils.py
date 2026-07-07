@@ -20,6 +20,7 @@ from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
+from paddlefleet_ops.flash_mask_facade import get_fa_version
 
 _flash_mask_available = False
 try:
@@ -720,22 +721,9 @@ def cp_flashmask_allgatherkv_balance_forward(
     else:
         raise ValueError(f"Unsupported FlashMask context parallel mode: {mode}")
 
-    # Perform flashmask attention with startend_row_indices
-    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-        "FLAGS_flash_attn_version"
-    ]
-    # Apply deterministic override here so forward and backward use the same
-    # effective fa_version (mirrors backward's previous logic and the
-    # framework flashmask_attention's internal deterministic fallback).
-    deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-        "FLAGS_cudnn_deterministic"
-    ]
-    if fa_version == 3:
-        if "block_mask" in inspect.signature(flashmask_attention).parameters:
-            if deterministic and query.shape[-1] > 128:
-                fa_version = 2
-        elif deterministic:
-            fa_version = 2
+    q_head_dim = query.shape[-1]
+    v_head_dim = value_gathered.shape[-1]
+    fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
 
     if fa_version == 4 and _flash_mask_available:
         output, log_sum_exp = _flash_attn_fwd(
