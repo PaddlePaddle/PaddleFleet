@@ -49,7 +49,7 @@ jobs:
           triggering_run_id = os.environ.get('TRIGGERING_RUN_ID', '')
 
           watched = {
-              "Test", "Test-release"
+              "Test", "Test-release", "CE Daily Dev", "CE Daily Release"
           }
 
           skip_keywords = ["post-comment"]
