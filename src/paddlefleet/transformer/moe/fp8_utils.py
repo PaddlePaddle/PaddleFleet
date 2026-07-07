@@ -749,8 +749,53 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        o2_s = fused_swiglu_scale_forward(o1, unzipped_probs)
-        do1, probs_grad = fused_swiglu_scale_backward(o1, unzipped_probs, do2_s)
+        # == 【MG 精度对齐 diff · 参考 PF PR#968 · 反向 SwiGLU×probs】==
+        # 原始实现：`fused_swiglu_scale_forward` + `fused_swiglu_scale_backward`
+        #   这对融合 kernel 复算 o2_s 并求 do1 / probs_grad，反向数值路径与前向
+        #   手写 fp32 路径（fwd_down_bf16）不一致，backward 梯度末位对不齐 MG。
+        # 改动（仅 use_accuracy_compatible=True 且非 grouped_gemm、非空 grad 时）：
+        #   用与前向完全相同的 fp32 表达式（F.silu(gate) * val * scale）重建计算
+        #   图交给 autograd 反向，前后向共用一套 fp32 数学；其余情况仍走原融合
+        #   kernel（保持原有行为）。
+        # ==============================================================
+        if (
+            self.use_accuracy_compatible
+            and not self.moe_grouped_gemm
+            and numpy.prod(unzipped_grad.shape) != 0
+        ):
+            x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
+            probs_v = (
+                unzipped_probs
+                if unzipped_probs.ndim > 1
+                else unzipped_probs.unsqueeze(-1)
+            )
+            with paddle.enable_grad():
+                gate_g = x_glu.astype("float32").detach()
+                val_g = x_linear.astype("float32").detach()
+                scale_g = probs_v.astype("float32").detach()
+                gate_g.stop_gradient = False
+                val_g.stop_gradient = False
+                scale_g.stop_gradient = False
+                o2_f32 = F.silu(gate_g) * val_g * scale_g
+                paddle.autograd.backward(
+                    [o2_f32], [do2_s.astype("float32").detach()]
+                )
+                d_gate_f32 = gate_g.grad
+                d_up_f32 = val_g.grad
+                d_scale_f32 = scale_g.grad.reshape(
+                    unzipped_probs.shape
+                ).astype("float32")
+
+            do1 = paddle.concat([d_gate_f32, d_up_f32], axis=-1).astype(
+                o1.dtype
+            )
+            o2_s = o2_f32.detach().astype(o1.dtype)
+            probs_grad = d_scale_f32.astype(unzipped_probs.dtype)
+        else:
+            o2_s = fused_swiglu_scale_forward(o1, unzipped_probs)
+            do1, probs_grad = fused_swiglu_scale_backward(
+                o1, unzipped_probs, do2_s
+            )
 
         return do1, o2_s, probs_grad
 
