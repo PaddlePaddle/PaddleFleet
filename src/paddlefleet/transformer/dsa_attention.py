@@ -1272,7 +1272,7 @@ class DSAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
-        softmax_scale: float,
+        softmax_scale: float | None = None,
         k_channels: int | None = None,
         v_channels: int | None = None,
         is_mtp_layer: bool = False,
@@ -1292,7 +1292,12 @@ class DSAttention(FleetLayer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
-        self.softmax_scale = softmax_scale
+        if softmax_scale is None:
+            # Default to 1/sqrt(k_channels) consistent with DotProductAttention
+            k_ch = k_channels if k_channels is not None else config.head_dim
+            self.softmax_scale = k_ch**-0.5
+        else:
+            self.softmax_scale = softmax_scale
 
         # DSA Indexer - build from spec
         # sublayers_spec.indexer should be a LayerSpec for DSAIndexer

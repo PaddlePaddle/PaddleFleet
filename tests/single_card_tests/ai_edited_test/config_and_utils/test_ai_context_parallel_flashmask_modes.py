@@ -79,7 +79,6 @@ class TestFlashMaskAllGatherModes(unittest.TestCase):
             captured["key"] = key
             captured["value"] = value
             captured["indices"] = kwargs["startend_row_indices"]
-            captured["softmax_scale"] = kwargs["softmax_scale"]
             return self.output, self.lse
 
         patches = [
@@ -128,7 +127,8 @@ class TestFlashMaskAllGatherModes(unittest.TestCase):
                     self.group,
                     False,
                     True,
-                    0.25,
+                    # fa_version==2 does not support softmax_scale, pass None
+                    None,
                     mode,
                 )
             )
@@ -137,7 +137,6 @@ class TestFlashMaskAllGatherModes(unittest.TestCase):
         assert_tensor_equal(self, lse, self.lse)
         self.assertEqual(fa_version, 2)
         assert_tensor_equal(self, processed_indices, captured["indices"])
-        self.assertEqual(captured["softmax_scale"], 0.25)
         return captured, processed_indices
 
     def test_dualchunk_forward_preprocesses_indices_and_uses_balanced_layout(

@@ -281,6 +281,8 @@ class MultiLatentAttention(Attention):
             self.config.rotary_scaling_factor, self.config.mscale_all_dim
         )
         self.softmax_scale = mscale * mscale / math.sqrt(self.q_head_dim)
+        # mscale == 1.0 means softmax_scale equals default 1/sqrt(d), no need to pass explicitly
+        self._softmax_scale_arg = None if mscale == 1.0 else self.softmax_scale
 
         if self.config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
@@ -323,7 +325,7 @@ class MultiLatentAttention(Attention):
             attention_type=self.attention_type,
             is_mtp_layer=self.is_mtp_layer,
             is_swa=self.is_swa,
-            softmax_scale=self.softmax_scale,
+            softmax_scale=self._softmax_scale_arg,
             k_channels=self.q_head_dim,
             v_channels=self.v_head_dim,
             num_attention_heads=self.num_attention_heads,
