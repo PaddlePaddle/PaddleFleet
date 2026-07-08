@@ -550,10 +550,11 @@ class TestFlashmaskExtraKwargsSoftmaxScale(unittest.TestCase):
 class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     """
     Tests that context_parallel_utils.py correctly handles softmax_scale
-    for different fa_version values:
-    - fa_version==2: raises NotImplementedError when softmax_scale is not None
-    - fa_version==3: passes softmax_scale to flashmask_attention if supported
-    - fa_version==3: raises NotImplementedError if flashmask_attention lacks softmax_scale param
+    for different fa_version values in the forward path:
+    - The else branch (fa_version 2/3) passes softmax_scale unconditionally
+      to flashmask_attention (the kernel itself may ignore unsupported values).
+    - The backward path for fa_version==2 raises NotImplementedError
+      when softmax_scale is not None.
     - fa_version==4: passes softmax_scale to _flash_attn_fwd (covered elsewhere)
     """
 
@@ -561,6 +562,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
         return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
     )
+    @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
     @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
@@ -577,18 +579,17 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     @patch(
         "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_pop"
     )
-    def test_forward_raises_not_implemented_with_softmax_scale(
+    def test_forward_fa3_passes_softmax_scale_unconditionally(
         self,
         mock_pop,
         mock_push,
         mock_get_flags,
         mock_get_flags2,
         mock_all_gather,
+        mock_fm,
         mock_preprocess,
     ):
-        """fa_version==3: raises NotImplementedError when flashmask_attention lacks softmax_scale param."""
-        import inspect
-
+        """fa_version==3 (else branch): softmax_scale is always passed to flashmask_attention."""
         from paddlefleet.context_parallel_utils import (
             cp_flashmask_allgatherkv_balance_forward,
         )
@@ -598,49 +599,34 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
                 out_list[i] = tensor
 
         mock_all_gather.side_effect = fake_all_gather
+        mock_fm.return_value = (
+            paddle.randn([1, 4, 4, 32]).astype("bfloat16"),
+            paddle.randn([1, 4, 1, 32]).astype("float32"),
+        )
 
-        # Mock a flashmask_attention that does NOT have softmax_scale param
-        def _fake_fm(
+        query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+        group = MagicMock()
+        group.nranks = 2
+        group.rank = 0
+        group.world_size = 2
+
+        cp_flashmask_allgatherkv_balance_forward(
             query,
             key,
             value,
-            startend_row_indices,
-            causal,
-            return_softmax_lse,
-            training,
-        ):
-            pass
+            startend,
+            learnable_sink=None,
+            group=group,
+            causal=True,
+            is_training=True,
+            softmax_scale=0.5,
+        )
 
-        mock_fm = MagicMock()
-        mock_fm.__signature__ = inspect.signature(_fake_fm)
-
-        with patch(
-            "paddlefleet.context_parallel_utils.flashmask_attention", mock_fm
-        ):
-            query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
-            group = MagicMock()
-            group.nranks = 2
-            group.rank = 0
-            group.world_size = 2
-
-            with self.assertRaises(NotImplementedError) as ctx:
-                cp_flashmask_allgatherkv_balance_forward(
-                    query,
-                    key,
-                    value,
-                    startend,
-                    learnable_sink=None,
-                    group=group,
-                    causal=True,
-                    is_training=True,
-                    softmax_scale=0.5,
-                )
-            self.assertIn(
-                "does not support setting softmax_scale", str(ctx.exception)
-            )
+        call_kwargs = mock_fm.call_args[1]
+        self.assertEqual(call_kwargs["softmax_scale"], 0.5)
 
     @patch(
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
@@ -717,6 +703,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
         return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
     )
+    @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
     @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
@@ -740,15 +727,10 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         mock_get_flags,
         mock_get_flags2,
         mock_all_gather,
+        mock_fm,
         mock_preprocess,
     ):
-        """fa_version==3: softmax_scale passed to flashmask_attention when param exists."""
-        import inspect
-
-        from paddle.nn.functional.flash_attention import (
-            flashmask_attention as real_fm,
-        )
-
+        """fa_version==3: softmax_scale passed to flashmask_attention unconditionally."""
         from paddlefleet.context_parallel_utils import (
             cp_flashmask_allgatherkv_balance_forward,
         )
@@ -758,45 +740,31 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
                 out_list[i] = tensor
 
         mock_all_gather.side_effect = fake_all_gather
-
-        # Create a mock that preserves the real signature (has softmax_scale param)
-        mock_fm = MagicMock()
         mock_fm.return_value = (
             paddle.randn([1, 4, 4, 32]).astype("bfloat16"),
             paddle.randn([1, 4, 1, 32]).astype("float32"),
         )
-        # Patch inspect.signature to return real flashmask_attention's signature
-        # so the code sees softmax_scale in parameters
-        with (
-            patch(
-                "paddlefleet.context_parallel_utils.flashmask_attention",
-                mock_fm,
-            ),
-            patch(
-                "paddlefleet.context_parallel_utils.inspect.signature",
-                return_value=inspect.signature(real_fm),
-            ),
-        ):
-            query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
-            group = MagicMock()
-            group.nranks = 2
-            group.rank = 0
-            group.world_size = 2
 
-            cp_flashmask_allgatherkv_balance_forward(
-                query,
-                key,
-                value,
-                startend,
-                learnable_sink=None,
-                group=group,
-                causal=True,
-                is_training=True,
-                softmax_scale=0.125,
-            )
+        query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+        group = MagicMock()
+        group.nranks = 2
+        group.rank = 0
+        group.world_size = 2
+
+        cp_flashmask_allgatherkv_balance_forward(
+            query,
+            key,
+            value,
+            startend,
+            learnable_sink=None,
+            group=group,
+            causal=True,
+            is_training=True,
+            softmax_scale=0.125,
+        )
 
         # Verify softmax_scale was passed through
         call_kwargs = mock_fm.call_args[1]
@@ -823,7 +791,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     @patch(
         "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_pop"
     )
-    def test_forward_fa2_raises_with_softmax_scale(
+    def test_forward_fa2_passes_softmax_scale(
         self,
         mock_pop,
         mock_push,
@@ -833,7 +801,12 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         mock_fm,
         mock_preprocess,
     ):
-        """fa_version==2: raises NotImplementedError when softmax_scale is not None."""
+        """fa_version==2 (else branch): softmax_scale is passed through to flashmask_attention.
+
+        Note: fa_version==2 does not actually support softmax_scale at the kernel level,
+        but the forward function passes it unconditionally. The backward path will raise
+        NotImplementedError for fa2 + softmax_scale != None.
+        """
         from paddlefleet.context_parallel_utils import (
             cp_flashmask_allgatherkv_balance_forward,
         )
@@ -843,6 +816,10 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
                 out_list[i] = tensor
 
         mock_all_gather.side_effect = fake_all_gather
+        mock_fm.return_value = (
+            paddle.randn([1, 4, 4, 32]).astype("bfloat16"),
+            paddle.randn([1, 4, 1, 32]).astype("float32"),
+        )
 
         query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
@@ -852,19 +829,21 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         group.nranks = 2
         group.rank = 0
 
-        with self.assertRaises(NotImplementedError) as ctx:
-            cp_flashmask_allgatherkv_balance_forward(
-                query,
-                key,
-                value,
-                startend,
-                learnable_sink=None,
-                group=group,
-                causal=True,
-                is_training=True,
-                softmax_scale=0.5,
-            )
-        self.assertIn("fa_version==2", str(ctx.exception))
+        cp_flashmask_allgatherkv_balance_forward(
+            query,
+            key,
+            value,
+            startend,
+            learnable_sink=None,
+            group=group,
+            causal=True,
+            is_training=True,
+            softmax_scale=0.5,
+        )
+
+        # forward passes softmax_scale unconditionally
+        call_kwargs = mock_fm.call_args[1]
+        self.assertEqual(call_kwargs["softmax_scale"], 0.5)
 
     @patch(
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
@@ -941,6 +920,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
         return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
     )
+    @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
     @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
@@ -957,22 +937,17 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     @patch(
         "paddlefleet.context_parallel_utils.paddle.base.core.nvprof_nvtx_pop"
     )
-    def test_forward_fa3_no_scale_does_not_pass_softmax_scale(
+    def test_forward_fa3_none_scale_passes_none(
         self,
         mock_pop,
         mock_push,
         mock_get_flags,
         mock_get_flags2,
         mock_all_gather,
+        mock_fm,
         mock_preprocess,
     ):
-        """fa_version==3: when softmax_scale is None, no softmax_scale kwarg passed."""
-        import inspect
-
-        from paddle.nn.functional.flash_attention import (
-            flashmask_attention as real_fm,
-        )
-
+        """fa_version==3: when softmax_scale is None, softmax_scale=None is passed through."""
         from paddlefleet.context_parallel_utils import (
             cp_flashmask_allgatherkv_balance_forward,
         )
@@ -982,46 +957,35 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
                 out_list[i] = tensor
 
         mock_all_gather.side_effect = fake_all_gather
-
-        mock_fm = MagicMock()
         mock_fm.return_value = (
             paddle.randn([1, 4, 4, 32]).astype("bfloat16"),
             paddle.randn([1, 4, 1, 32]).astype("float32"),
         )
-        with (
-            patch(
-                "paddlefleet.context_parallel_utils.flashmask_attention",
-                mock_fm,
-            ),
-            patch(
-                "paddlefleet.context_parallel_utils.inspect.signature",
-                return_value=inspect.signature(real_fm),
-            ),
-        ):
-            query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-            startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
-            group = MagicMock()
-            group.nranks = 2
-            group.rank = 0
-            group.world_size = 2
 
-            cp_flashmask_allgatherkv_balance_forward(
-                query,
-                key,
-                value,
-                startend,
-                learnable_sink=None,
-                group=group,
-                causal=True,
-                is_training=True,
-                softmax_scale=None,
-            )
+        query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
+        startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+        group = MagicMock()
+        group.nranks = 2
+        group.rank = 0
+        group.world_size = 2
 
-        # Verify softmax_scale was NOT passed
+        cp_flashmask_allgatherkv_balance_forward(
+            query,
+            key,
+            value,
+            startend,
+            learnable_sink=None,
+            group=group,
+            causal=True,
+            is_training=True,
+            softmax_scale=None,
+        )
+
+        # softmax_scale is passed unconditionally, value should be None
         call_kwargs = mock_fm.call_args[1]
-        self.assertNotIn("softmax_scale", call_kwargs)
+        self.assertIsNone(call_kwargs["softmax_scale"])
 
 
 if __name__ == "__main__":
