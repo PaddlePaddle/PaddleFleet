@@ -74,8 +74,12 @@ def select_topk_blocks(
 
     Returns:
         indices: [B, S, topk] int32 selected block ids, shared across heads;
-                 slots beyond the number of valid blocks are -1.
+                 slots beyond the number of valid blocks are -1. The width is
+                 always ``topk`` even when ``topk > num_blocks`` (the extra
+                 slots are -1 padding), keeping the shape contract stable.
     """
+    if topk <= 0:
+        raise ValueError(f"topk must be positive, got {topk}")
     b, h, s, num_blocks = block_logit.shape
     scores = block_scores_from_logit(block_logit, lse, sm_scale)  # [B,H,S,nb]
     # aggregate across heads (block selection shared across the query group)
@@ -94,7 +98,14 @@ def select_topk_blocks(
     top_val, top_idx = paddle.topk(agg, k=k, axis=-1)  # [B, S, k]
     # slots that landed on an invalid block (negative score) -> -1
     top_idx = paddle.where(top_val >= 0, top_idx, paddle.full_like(top_idx, -1))
-    return top_idx.astype("int32").contiguous()
+    top_idx = top_idx.astype("int32")
+    if k < topk:
+        # honour the promised [B, S, topk] width when topk exceeds the number
+        # of blocks; the surplus slots are -1 padding (already ignored by the
+        # gather kernel and the reference).
+        pad = paddle.full([b, s, topk - k], -1, dtype="int32")
+        top_idx = paddle.concat([top_idx, pad], axis=-1)
+    return top_idx.contiguous()
 
 
 def hysparse_forward_mqa(q, k, v, valid_range, topk, sm_scale=None, block_B=64):

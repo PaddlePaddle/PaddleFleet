@@ -253,6 +253,17 @@ def block_score_mqa_attn_fwd(q, k, v, valid_range, sm_scale=None, block_B=64):
     assert q.is_contiguous()
     b, s, h, d = q.shape
     s_kv = k.shape[1]
+    # lightweight host-side shape checks (no device sync) so mismatched inputs
+    # fail early and clearly instead of causing undefined kernel behaviour.
+    assert len(k.shape) == 3 and list(k.shape) == list(v.shape), (
+        f"k/v must be [B, S_kv, D] and match; got {k.shape} vs {v.shape}"
+    )
+    assert k.shape[0] == b and k.shape[2] == d, (
+        f"k/v batch/head_dim must match q; got k {k.shape}, q {q.shape}"
+    )
+    assert list(valid_range.shape) == [b, s, 2], (
+        f"valid_range must be [B, S, 2]; got {valid_range.shape}"
+    )
     if sm_scale is None:
         sm_scale = d**-0.5
     if valid_range.dtype != paddle.int32:

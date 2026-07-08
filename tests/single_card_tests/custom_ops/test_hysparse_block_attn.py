@@ -24,17 +24,10 @@ Validates, against the naive Paddle reference (散算子):
 Both causal and causal+document masking are covered via ``valid_range``.
 """
 
-import os
-import sys
 import unittest
 
 import numpy as np
 import paddle
-
-# Prefer the in-repo source tree (the hysparse ops may not be installed yet).
-_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../src"))
-if _SRC not in sys.path:
-    sys.path.insert(0, _SRC)
 
 paddle.enable_compat(scope={"tilelang"}, silent=True)
 
@@ -431,6 +424,25 @@ class TestPipelineMQA(unittest.TestCase):
                 ).all()
             )
         )
+
+    def test_topk_exceeds_num_blocks(self):
+        # topk larger than the number of key blocks must still return a stable
+        # [B, S, topk] index tensor, padding the surplus slots with -1.
+        _cuda_or_skip(self)
+        B, S, H, D = 1, 96, 4, 64
+        block_B = 64  # num_blocks = ceil(96/64) = 2
+        topk = 5
+        q, k, v = _rand_qkv_mqa(B, S, H, D, seed=11)
+        vr = make_causal_valid_range(S, batch=B)
+        _, _, indices, _, _ = hysparse_forward_mqa(
+            q, k, v, vr, topk, block_B=block_B
+        )
+        self.assertEqual(list(indices.shape), [B, S, topk])
+        # at most num_blocks real ids per row; the rest are -1 padding
+        idx_np = indices.numpy()
+        self.assertTrue(bool((idx_np < 2).all()))
+        self.assertTrue(bool((idx_np[:, -1, :] >= -1).all()))
+        self.assertTrue(bool((idx_np == -1).any()))
 
 
 class TestDocEquivalenceMQA(unittest.TestCase):

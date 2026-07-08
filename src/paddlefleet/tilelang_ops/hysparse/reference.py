@@ -185,11 +185,10 @@ def ref_block_sparse_attn_mqa(
     neg = paddle.full_like(logits, NEG_INF)
     logits = paddle.where(mask, logits, neg)
 
-    # Rows with no valid key -> softmax would be nan; guard to 0 output.
+    # LSE is taken from the fully -inf-masked logits so empty rows (no valid
+    # key) stay -inf, matching the kernel and the docstring. softmax then uses
+    # the same logits and its NaN empty rows are zeroed via ``row_has_key``.
     row_has_key = mask.any(axis=-1, keepdim=True)  # [B,1,S,1]
-    safe_logits = paddle.where(mask, logits, paddle.zeros_like(logits))
-    logits = paddle.where(row_has_key.expand_as(logits), logits, safe_logits)
-
     lse = paddle.logsumexp(logits, axis=-1)  # [B,H,S]
     probs = F.softmax(logits, axis=-1)
     probs = paddle.where(
