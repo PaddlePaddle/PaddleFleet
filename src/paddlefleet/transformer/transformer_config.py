@@ -788,6 +788,14 @@ class TransformerConfig(ModelParallelConfig):
     with num_chunks=N. Only compatible with tensor_model_parallel_size == 1
     (or parallel_output disabled)."""
 
+    enable_hy_sparse_attention: bool = False
+    """Enable the HySparse Attention variant.
+
+    HySparse has the following features: (1) adding a Block Sparse Attention in SWA
+    layers. (2) KV sharing between full attention and Block Sparse Attention. (3) using
+    MQA instead of MLA.
+    """
+
     # cache_mla_latents: bool = False
 
     ####################
