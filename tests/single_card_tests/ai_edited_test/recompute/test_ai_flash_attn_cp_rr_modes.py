@@ -84,6 +84,40 @@ class TestFlashMaskAttnCpFunctor(unittest.TestCase):
             mock_backward.call_args.args[-1], "contiguous_allgather"
         )
 
+    def test_backward_returns_sink_grad_when_sink_requires_grad(self):
+        q = paddle.randn([1, 4, 2, 4])
+        k = paddle.randn([1, 4, 2, 4])
+        v = paddle.randn([1, 4, 2, 4])
+        out = paddle.randn([1, 4, 2, 4])
+        sink = paddle.randn([2])
+        sink.stop_gradient = False
+        sink_grad = paddle.randn([2])
+        hold = {
+            "mode": "contiguous_allgather",
+            "result_attention": out,
+            "softmax_lse": paddle.randn([1, 2, 4]),
+            "startend_row_indices": paddle.zeros([1, 1, 4, 2], dtype="int32"),
+            "fa_version": 4,
+            "group": CpGroup(),
+            "causal": False,
+        }
+        ctx = FakeCtx()
+
+        fa.FlashMaskAttnCpFunctor.forward(ctx, q, k, v, sink, hold)
+        with patch.object(
+            fa,
+            "cp_flashmask_allgatherkv_balance_backward",
+            return_value=(q, k, v, sink_grad),
+        ):
+            grads = fa.FlashMaskAttnCpFunctor.backward(
+                ctx, paddle.ones_like(out)
+            )
+
+        self.assertIs(grads[0], q)
+        self.assertIs(grads[1], k)
+        self.assertIs(grads[2], v)
+        self.assertIs(grads[3], sink_grad)
+
 
 class TestFlashMaskAttnFunctor(unittest.TestCase):
     def test_v3_backward_passes_scalar_softmax_scale(self):
@@ -164,6 +198,41 @@ class TestFlashMaskSwaP2PFunctor(unittest.TestCase):
         self.assertIs(mock_backward.call_args.args[3], hold["recv_key"])
         self.assertEqual(mock_backward.call_args.args[-1], 2)
 
+    def test_backward_returns_sink_grad_when_sink_requires_grad(self):
+        q = paddle.randn([1, 4, 2, 4])
+        k = paddle.randn([1, 4, 2, 4])
+        v = paddle.randn([1, 4, 2, 4])
+        out = paddle.randn([1, 4, 2, 4])
+        sink = paddle.randn([2])
+        sink.stop_gradient = False
+        sink_grad = paddle.randn([2])
+        hold = {
+            "result_attention": out,
+            "softmax_lse": paddle.randn([1, 2, 4]),
+            "recv_key": paddle.randn([1, 2, 2, 4]),
+            "recv_value": paddle.randn([1, 2, 2, 4]),
+            "startend_row_indices": paddle.zeros([1, 1, 4, 2], dtype="int32"),
+            "group": CpGroup(),
+            "causal": False,
+            "window_size": 2,
+        }
+        ctx = FakeCtx()
+
+        fa.FlashMaskSwaP2PFunctor.forward(ctx, q, k, v, sink, hold)
+        with patch.object(
+            fa,
+            "cp_flashmask_swa_p2p_backward",
+            return_value=(q, k, v, sink_grad),
+        ):
+            grads = fa.FlashMaskSwaP2PFunctor.backward(
+                ctx, paddle.ones_like(out)
+            )
+
+        self.assertIs(grads[0], q)
+        self.assertIs(grads[1], k)
+        self.assertIs(grads[2], v)
+        self.assertIs(grads[3], sink_grad)
+
 
 class TestUlyssesHelpers(unittest.TestCase):
     def test_slice_ulysses_mask_heads_broadcast_and_per_head(self):
@@ -233,10 +302,46 @@ class TestUlyssesHelpers(unittest.TestCase):
                         startend,
                     )
         with (
+            patch.object(fa, "_get_fa_version", return_value=2),
+            self.assertRaises(NotImplementedError),
+        ):
+            fa.ulysses_local_flashmask_first_fwd(q, q, q, startend, False, 0.5)
+
+        with (
             patch.object(fa, "_get_fa_version", return_value=0),
             self.assertRaises(ValueError),
         ):
             fa.ulysses_local_flashmask_first_fwd(q, q, q, startend, False, None)
+
+    def test_ulysses_local_v3_forward_signature_variants(self):
+        q = paddle.randn([1, 4, 2, 4])
+        out = paddle.randn([1, 4, 2, 4])
+        lse = paddle.randn([1, 2, 4])
+        startend = paddle.zeros([1, 1, 4, 2], dtype="int32")
+
+        def flashmask_attention_with_group(query, key, value, group=None):
+            return None
+
+        def flashmask_attention_legacy(query, key, value):
+            return None
+
+        for fake_attention in (
+            flashmask_attention_with_group,
+            flashmask_attention_legacy,
+        ):
+            with self.subTest(signature=fake_attention.__name__):
+                with (
+                    patch.object(fa, "_get_fa_version", return_value=3),
+                    patch.object(fa, "flashmask_attention", fake_attention),
+                    patch.object(fa, "_C_ops") as mock_c_ops,
+                ):
+                    mock_c_ops.flashmask_attention_v2.return_value = (out, lse)
+                    result, hold = fa.ulysses_local_flashmask_first_fwd(
+                        q, q, q, startend, False, None
+                    )
+
+                self.assertIs(result, out)
+                self.assertEqual(hold["fa_version"], 3)
 
 
 class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
@@ -425,23 +530,28 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
             self.assertIs(attn._second_fwd(self.q, self.k, self.v), self.out)
         mock_apply.assert_called_once()
 
-    def test_ulysses_functor_backward_returns_original_layout_grads(self):
-        ctx = FakeCtx()
-        local_grad = paddle.ones_like(self.out)
-        hold = {
+    def _ulysses_hold(self, fa_version, **local_extra):
+        local_hold = {
+            "result_attention": self.out,
+            "softmax_lse": self.lse,
+            "causal": False,
+            "fa_version": fa_version,
+        }
+        local_hold.update(local_extra)
+        return {
             "group": self.group,
             "result_attention": self.out,
             "local_query": self.q,
             "local_key": self.k,
             "local_value": self.v,
             "startend_row_indices": self.startend,
-            "local_hold_tensors": {
-                "result_attention": self.out,
-                "softmax_lse": self.lse,
-                "causal": False,
-                "fa_version": 4,
-            },
+            "local_hold_tensors": local_hold,
         }
+
+    def test_ulysses_functor_backward_returns_original_layout_grads(self):
+        ctx = FakeCtx()
+        local_grad = paddle.ones_like(self.out)
+        hold = self._ulysses_hold(4)
 
         self.assertIs(
             fa.FlashMaskUlyssesCpFunctor.forward(
@@ -487,6 +597,110 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         )
         self.assertIs(mock_backward.call_args.args[4], local_grad)
         self.assertIs(mock_backward.call_args.args[6], flashmask_info)
+
+    def test_ulysses_functor_backward_fa2(self):
+        ctx = FakeCtx()
+        seed = paddle.zeros([1], dtype="int64")
+        local_grad = paddle.ones_like(self.out)
+        hold = self._ulysses_hold(2, seed_offset=seed)
+
+        fa.FlashMaskUlyssesCpFunctor.forward(ctx, self.q, self.k, self.v, hold)
+        with (
+            patch.object(
+                fa,
+                "_ulysses_single_all_to_all",
+                side_effect=(local_grad, self.q, self.k, self.v),
+            ),
+            patch.object(fa, "_C_ops") as mock_c_ops,
+        ):
+            mock_c_ops.flashmask_attention_grad.return_value = (
+                self.q,
+                self.k,
+                self.v,
+            )
+            grads = fa.FlashMaskUlyssesCpFunctor.backward(
+                ctx, paddle.ones_like(self.out)
+            )
+
+        self.assertIs(grads[0], self.q)
+        self.assertIs(
+            mock_c_ops.flashmask_attention_grad.call_args.args[6], seed
+        )
+        self.assertIs(
+            mock_c_ops.flashmask_attention_grad.call_args.args[7], local_grad
+        )
+
+    def test_ulysses_functor_backward_fa3_signature_variants(self):
+        local_grad = paddle.ones_like(self.out)
+
+        def flashmask_attention_with_group(query, key, value, group=None):
+            return None
+
+        def flashmask_attention_with_block_mask(
+            query, key, value, block_mask=None
+        ):
+            return None
+
+        def flashmask_attention_legacy(query, key, value):
+            return None
+
+        cases = (
+            (flashmask_attention_with_group, -5),
+            (flashmask_attention_with_block_mask, -3),
+            (flashmask_attention_legacy, -3),
+        )
+        for fake_attention, scale_arg_index in cases:
+            with self.subTest(signature=fake_attention.__name__):
+                ctx = FakeCtx()
+                out = paddle.randn([1, 4, 2, 4])
+                lse = paddle.randn([1, 2, 4])
+                hold = self._ulysses_hold(
+                    3, result_attention=out, softmax_lse=lse
+                )
+                fa.FlashMaskUlyssesCpFunctor.forward(
+                    ctx, self.q, self.k, self.v, hold
+                )
+                with (
+                    patch.object(fa, "flashmask_attention", fake_attention),
+                    patch.object(
+                        fa,
+                        "_ulysses_single_all_to_all",
+                        side_effect=(local_grad, self.q, self.k, self.v),
+                    ),
+                    patch.object(fa, "_C_ops") as mock_c_ops,
+                ):
+                    mock_c_ops.flashmask_attention_v2_grad.return_value = (
+                        self.q,
+                        self.k,
+                        self.v,
+                    )
+                    grads = fa.FlashMaskUlyssesCpFunctor.backward(
+                        ctx, paddle.ones([1, 4, 2, 4])
+                    )
+
+                self.assertIs(grads[0], self.q)
+                self.assertIs(
+                    mock_c_ops.flashmask_attention_v2_grad.call_args.args[
+                        scale_arg_index
+                    ],
+                    local_grad,
+                )
+
+    def test_ulysses_functor_backward_rejects_invalid_fa_version(self):
+        ctx = FakeCtx()
+        hold = self._ulysses_hold(0)
+        fa.FlashMaskUlyssesCpFunctor.forward(ctx, self.q, self.k, self.v, hold)
+        with (
+            patch.object(
+                fa,
+                "_ulysses_single_all_to_all",
+                return_value=paddle.ones_like(self.out),
+            ),
+            self.assertRaises(ValueError),
+        ):
+            fa.FlashMaskUlyssesCpFunctor.backward(
+                ctx, paddle.ones_like(self.out)
+            )
 
     def test_second_forward_dispatches_each_mode(self):
         attn = fa.RefinedRcomputeFlashMaskCpAttention()
