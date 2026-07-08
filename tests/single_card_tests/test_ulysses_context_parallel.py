@@ -274,7 +274,11 @@ class TestUlyssesAlltoAll(unittest.TestCase):
     @patch(
         "paddlefleet.context_parallel_utils.dist.get_world_size", return_value=2
     )
-    def test_forward(self, mock_ws, mock_a2a):
+    @patch(
+        "paddlefleet.context_parallel_utils._ulysses_fused_supported",
+        return_value=False,
+    )
+    def test_forward(self, mock_supported, mock_ws, mock_a2a):
         """UlyssesAlltoAll.forward should call _ulysses_single_all_to_all."""
         from paddlefleet.context_parallel_utils import UlyssesAlltoAll
 
@@ -1321,18 +1325,26 @@ class TestContextParallelOpsBackward(unittest.TestCase):
 
 
 def _fused_kernels_available():
-    """CUDA build + GPU place + importable Triton fused kernels."""
+    """Whether the CUDA + Triton fused kernels can actually run here.
+
+    Kept import-time cheap and side-effect free: it must NOT switch the global
+    default device (doing so at ``@skipUnless`` evaluation time would leak GPU
+    placement into the mock-based dispatch tests above and make them bypass
+    their mocks into the real fused path). It also swallows *any* optional-
+    backend failure (driver init, Triton runtime, missing GPU, etc.) so an
+    unavailable backend skips these tests instead of erroring at collection.
+    The GPU device switch itself happens in ``setUpClass`` below.
+    """
     if not paddle.is_compiled_with_cuda():
         return False
     try:
-        paddle.set_device("gpu")
         import triton  # noqa: F401
 
         from paddlefleet.triton_ops.ulysses_alltoall_fused import (  # noqa: F401
             _head2seq_post_kernel,
             _seq2head_pre_kernel,
         )
-    except (ImportError, OSError):
+    except Exception:
         return False
     return True
 
@@ -1364,6 +1376,18 @@ class TestUlyssesFusedKernels(unittest.TestCase):
     """
 
     P, B, SLOC, HLOC, D = 4, 2, 3, 2, 8
+
+    @classmethod
+    def setUpClass(cls):
+        # Switch to GPU only for these kernel tests and restore the previous
+        # default device afterwards, so the mock-based dispatch tests keep
+        # their CPU default (where _ulysses_fused_supported returns False).
+        cls._prev_device = paddle.get_device()
+        paddle.set_device("gpu")
+
+    @classmethod
+    def tearDownClass(cls):
+        paddle.set_device(cls._prev_device)
 
     def _launch(self, kernel, src, dst):
         import triton
@@ -1470,6 +1494,45 @@ class TestUlyssesFusedKernels(unittest.TestCase):
                 )
             self.assertEqual(fused.shape, ref.shape)
             self.assertTrue(paddle.equal_all(fused, ref).item())
+
+    def test_fused_supported_true_for_gpu_4d(self):
+        """The real guard accepts the production layout on GPU: exercises the
+        deferred Triton import and the underlying support check (returns True),
+        which the mock-based dispatch tests never run."""
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_fused_supported,
+        )
+
+        x = paddle.randn([2, 4, 8, 16])  # batch_dim0, 4-D, on GPU
+        self.assertTrue(_ulysses_fused_supported(2, 0, x))
+
+    def test_wrapper_dispatches_to_fused_op(self):
+        """The `_ulysses_single_all_to_all_fused` thin wrapper imports and
+        calls the Triton op (P=1 mock keeps it single-rank)."""
+        from unittest.mock import patch
+
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_single_all_to_all_fused,
+        )
+
+        def fake_a2a_single(recv, send, group=None, use_calc_stream=True):
+            recv.copy_(send, False)
+
+        inp = paddle.randn([2, 4, 4, 8])
+        with (
+            patch(
+                "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                ".get_world_size",
+                return_value=1,
+            ),
+            patch(
+                "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                ".stream.alltoall_single",
+                side_effect=fake_a2a_single,
+            ),
+        ):
+            out = _ulysses_single_all_to_all_fused(inp, 2, None)
+        self.assertEqual(out.shape, [2, 4, 4, 8])
 
 
 class TestUlyssesFusedSupportGuard(unittest.TestCase):
