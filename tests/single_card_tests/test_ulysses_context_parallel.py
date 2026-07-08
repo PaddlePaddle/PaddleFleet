@@ -274,7 +274,11 @@ class TestUlyssesAlltoAll(unittest.TestCase):
     @patch(
         "paddlefleet.context_parallel_utils.dist.get_world_size", return_value=2
     )
-    def test_forward(self, mock_ws, mock_a2a):
+    @patch(
+        "paddlefleet.context_parallel_utils._ulysses_fused_supported",
+        return_value=False,
+    )
+    def test_forward(self, mock_supported, mock_ws, mock_a2a):
         """UlyssesAlltoAll.forward should call _ulysses_single_all_to_all."""
         from paddlefleet.context_parallel_utils import UlyssesAlltoAll
 
@@ -290,29 +294,41 @@ class TestUlyssesAlltoAll(unittest.TestCase):
         )
         self.assertEqual(result.shape, [2, 8, 2, 8])
 
-    @patch("paddlefleet.context_parallel_utils._ulysses_single_all_to_all")
-    def test_backward_swaps_scatter_gather(self, mock_a2a):
-        """UlyssesAlltoAll.backward swaps scatter_idx and gather_idx."""
+    @patch("paddlefleet.context_parallel_utils._ulysses_fused_supported")
+    @patch(
+        "paddlefleet.context_parallel_utils._ulysses_single_all_to_all_fused"
+    )
+    def test_forward_uses_fused_path(self, mock_a2a, mock_supported):
+        """Forward on the production path (batch_dim_idx=0, 4-D) uses the fused
+        kernel with scatter_idx=2."""
         from paddlefleet.context_parallel_utils import UlyssesAlltoAll
 
-        mock_a2a.return_value = paddle.randn([2, 4, 4, 8])
+        mock_supported.return_value = True
+        mock_a2a.return_value = paddle.randn([2, 8, 2, 8])
         group = MagicMock()
 
-        # Simulate forward to populate ctx
         inp = paddle.randn([2, 4, 4, 8])
         inp.stop_gradient = False
-        result = UlyssesAlltoAll.apply(
+        UlyssesAlltoAll.apply(
             inp, scatter_idx=2, gather_idx=1, batch_dim_idx=0, group=group
         )
 
-        # Check that _ulysses_single_all_to_all was called with scatter_idx=2
+        # Fused signature: _ulysses_single_all_to_all_fused(input, scatter_idx, group)
         call_args = mock_a2a.call_args_list[0]
-        self.assertEqual(call_args[1].get("scatter_idx", call_args[0][1]), 2)
+        self.assertEqual(call_args[0][1], 2)
 
-    @patch("paddlefleet.context_parallel_utils._ulysses_single_all_to_all")
-    def test_backward_is_called_on_grad(self, mock_a2a):
-        """UlyssesAlltoAll.backward should call _ulysses_single_all_to_all with swapped indices."""
+    @patch("paddlefleet.context_parallel_utils._ulysses_fused_supported")
+    @patch(
+        "paddlefleet.context_parallel_utils._ulysses_single_all_to_all_fused"
+    )
+    def test_backward_uses_fused_path_with_swapped_index(
+        self, mock_a2a, mock_supported
+    ):
+        """Backward on the production path (batch_dim_idx=0, 4-D) calls the fused
+        a2a with the swapped (gather) index."""
         from paddlefleet.context_parallel_utils import UlyssesAlltoAll
+
+        mock_supported.return_value = True
 
         # Call backward directly via the static method
         mock_ctx = MagicMock()
@@ -324,12 +340,44 @@ class TestUlyssesAlltoAll(unittest.TestCase):
         grad_output = paddle.randn([2, 8, 2, 8])
         mock_a2a.return_value = paddle.randn([2, 4, 4, 8])
 
-        result = UlyssesAlltoAll.backward(mock_ctx, grad_output)
+        UlyssesAlltoAll.backward(mock_ctx, grad_output)
 
-        # Backward should swap: scatter_idx=gather_idx=1, gather_idx=scatter_idx=2
+        # The inverse a2a swaps scatter/gather; the fused path passes the
+        # backward scatter index (= ctx.gather_idx) as the fused scatter_idx.
         mock_a2a.assert_called_once()
         call_args = mock_a2a.call_args
-        # positional args: (grad_output, gather_idx, scatter_idx, batch_dim_idx, group)
+        # positional args: (grad_output, gather_idx, group)
+        self.assertIs(call_args[0][0], grad_output)
+        self.assertEqual(
+            call_args[0][1], 1
+        )  # swapped scatter index = gather_idx
+        self.assertIs(call_args[0][2], mock_ctx.group)
+
+    @patch("paddlefleet.context_parallel_utils._ulysses_single_all_to_all")
+    @patch("paddlefleet.context_parallel_utils._ulysses_fused_supported")
+    def test_backward_falls_back_swaps_scatter_gather(
+        self, mock_supported, mock_a2a
+    ):
+        """When the fused path is unsupported, backward falls back to the
+        reference a2a with swapped (scatter, gather) indices."""
+        from paddlefleet.context_parallel_utils import UlyssesAlltoAll
+
+        mock_supported.return_value = False
+        mock_a2a.return_value = paddle.randn([2, 4, 4, 8])
+
+        mock_ctx = MagicMock()
+        mock_ctx.scatter_idx = 2
+        mock_ctx.gather_idx = 1
+        mock_ctx.batch_dim_idx = 0
+        mock_ctx.group = MagicMock()
+
+        grad_output = paddle.randn([2, 8, 2, 8])
+        UlyssesAlltoAll.backward(mock_ctx, grad_output)
+
+        # Reference signature: (grad_output, gather_idx, scatter_idx,
+        # batch_dim_idx, group) -- scatter and gather are swapped.
+        mock_a2a.assert_called_once()
+        call_args = mock_a2a.call_args
         self.assertIs(call_args[0][0], grad_output)
         self.assertEqual(call_args[0][1], 1)  # was gather_idx=1
         self.assertEqual(call_args[0][2], 2)  # was scatter_idx=2
@@ -1275,6 +1323,295 @@ class TestContextParallelOpsBackward(unittest.TestCase):
         ContextParallelAllGatherOp.backward(ctx, paddle.randn([8, 4]))
         mock_balance.assert_called_once()
         mock_contiguous.assert_not_called()
+
+
+# =============================================================================
+# Tests that actually execute the fused Triton permute kernels
+# =============================================================================
+
+
+def _fused_kernels_available():
+    """Whether the CUDA + Triton fused kernels can actually run here.
+
+    Kept import-time cheap and side-effect free: it must NOT switch the global
+    default device (doing so at ``@skipUnless`` evaluation time would leak GPU
+    placement into the mock-based dispatch tests above and make them bypass
+    their mocks into the real fused path). It also swallows *any* optional-
+    backend failure (driver init, Triton runtime, missing GPU, etc.) so an
+    unavailable backend skips these tests instead of erroring at collection.
+    The GPU device switch itself happens in ``setUpClass`` below.
+    """
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        import triton  # noqa: F401
+
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (  # noqa: F401
+            _head2seq_post_kernel,
+            _seq2head_pre_kernel,
+        )
+    except Exception:
+        return False
+    return True
+
+
+def _triton_available():
+    """Triton importable (the fused op module can be loaded). Does not
+    require a GPU: the shape-validation paths raise before any kernel runs."""
+    try:
+        import triton  # noqa: F401
+
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (  # noqa: F401
+            ulysses_single_all_to_all_fused,
+        )
+    except (ImportError, OSError):
+        return False
+    return True
+
+
+@unittest.skipUnless(
+    _fused_kernels_available(), "requires CUDA + Triton fused kernels"
+)
+class TestUlyssesFusedKernels(unittest.TestCase):
+    """Run the fused permute kernels and compare their index mapping against
+    an explicit paddle reshape/transpose reference (bit-exact).
+
+    These exercise the actual `_seq2head_*` / `_head2seq_*` kernels for P>1,
+    which the mock-based dispatch tests above do not, guarding the index math
+    and buffer layout against silent regressions.
+    """
+
+    P, B, SLOC, HLOC, D = 4, 2, 3, 2, 8
+
+    @classmethod
+    def setUpClass(cls):
+        # Switch to GPU only for these kernel tests and restore the previous
+        # default device afterwards, so the mock-based dispatch tests keep
+        # their CPU default (where _ulysses_fused_supported returns False).
+        cls._prev_device = paddle.get_device()
+        paddle.set_device("gpu")
+
+    @classmethod
+    def tearDownClass(cls):
+        paddle.set_device(cls._prev_device)
+
+    def _launch(self, kernel, src, dst):
+        import triton
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        seg = Hloc * D
+        block = min(triton.next_power_of_2(seg), 4096)
+        grid = (P * b * Sloc, triton.cdiv(seg, block))
+        kernel[grid](src, dst, P, b, Sloc, Hloc, D, seg, BLOCK=block)
+
+    def test_seq2head_pre_matches_reference(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            _seq2head_pre_kernel,
+        )
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        x = paddle.randn([b, Sloc, P * Hloc, D])
+        out = paddle.empty([P, b, Sloc, Hloc, D], dtype=x.dtype)
+        self._launch(_seq2head_pre_kernel, x, out)
+        ref = x.reshape([b, Sloc, P, Hloc, D]).transpose([2, 0, 1, 3, 4])
+        self.assertTrue(paddle.equal_all(out, ref).item())
+
+    def test_seq2head_post_matches_reference(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            _seq2head_post_kernel,
+        )
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        recv = paddle.randn([P, b, Sloc, Hloc, D])
+        out = paddle.empty([b, P * Sloc, Hloc, D], dtype=recv.dtype)
+        self._launch(_seq2head_post_kernel, recv, out)
+        ref = recv.transpose([1, 0, 2, 3, 4]).reshape([b, P * Sloc, Hloc, D])
+        self.assertTrue(paddle.equal_all(out, ref).item())
+
+    def test_head2seq_pre_matches_reference(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            _head2seq_pre_kernel,
+        )
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        g = paddle.randn([b, P * Sloc, Hloc, D])
+        out = paddle.empty([P, b, Sloc, Hloc, D], dtype=g.dtype)
+        self._launch(_head2seq_pre_kernel, g, out)
+        ref = g.reshape([b, P, Sloc, Hloc, D]).transpose([1, 0, 2, 3, 4])
+        self.assertTrue(paddle.equal_all(out, ref).item())
+
+    def test_head2seq_post_matches_reference(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            _head2seq_post_kernel,
+        )
+
+        P, b, Sloc, Hloc, D = self.P, self.B, self.SLOC, self.HLOC, self.D
+        recv = paddle.randn([P, b, Sloc, Hloc, D])
+        out = paddle.empty([b, Sloc, P * Hloc, D], dtype=recv.dtype)
+        self._launch(_head2seq_post_kernel, recv, out)
+        ref = recv.transpose([1, 2, 0, 3, 4]).reshape([b, Sloc, P * Hloc, D])
+        self.assertTrue(paddle.equal_all(out, ref).item())
+
+    def test_fused_full_a2a_matches_reference_single_rank(self):
+        """End-to-end fused vs reference all-to-all on a 1-rank group (P=1):
+        exercises the public wrapper, pre+post kernels, send-buffer reuse and
+        the alltoall_single call together."""
+        from unittest.mock import patch
+
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_single_all_to_all,
+        )
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            ulysses_single_all_to_all_fused,
+        )
+
+        b, Sloc, H, D = 2, 4, 4, 8
+
+        def fake_a2a_single(recv, send, group=None, use_calc_stream=True):
+            recv.copy_(send, False)  # 1-rank all-to-all is a copy
+
+        for scatter_idx, gather_idx in ((2, 1), (1, 2)):
+            inp = paddle.randn([b, Sloc, H, D])
+            with (
+                patch(
+                    "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                    ".get_world_size",
+                    return_value=1,
+                ),
+                patch(
+                    "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                    ".stream.alltoall_single",
+                    side_effect=fake_a2a_single,
+                ),
+            ):
+                fused = ulysses_single_all_to_all_fused(inp, scatter_idx, None)
+            with (
+                patch(
+                    "paddlefleet.context_parallel_utils.dist.get_world_size",
+                    return_value=1,
+                ),
+                patch(
+                    "paddlefleet.context_parallel_utils.dist.alltoall",
+                    side_effect=lambda out, i, group=None: out.copy_(i, False),
+                ),
+            ):
+                ref = _ulysses_single_all_to_all(
+                    inp, scatter_idx, gather_idx, 0, None
+                )
+            self.assertEqual(fused.shape, ref.shape)
+            self.assertTrue(paddle.equal_all(fused, ref).item())
+
+    def test_fused_supported_true_for_gpu_4d(self):
+        """The real guard accepts the production layout on GPU: exercises the
+        deferred Triton import and the underlying support check (returns True),
+        which the mock-based dispatch tests never run."""
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_fused_supported,
+        )
+
+        x = paddle.randn([2, 4, 8, 16])  # batch_dim0, 4-D, on GPU
+        self.assertTrue(_ulysses_fused_supported(2, 0, x))
+
+    def test_wrapper_dispatches_to_fused_op(self):
+        """The `_ulysses_single_all_to_all_fused` thin wrapper imports and
+        calls the Triton op (P=1 mock keeps it single-rank)."""
+        from unittest.mock import patch
+
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_single_all_to_all_fused,
+        )
+
+        def fake_a2a_single(recv, send, group=None, use_calc_stream=True):
+            recv.copy_(send, False)
+
+        inp = paddle.randn([2, 4, 4, 8])
+        with (
+            patch(
+                "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                ".get_world_size",
+                return_value=1,
+            ),
+            patch(
+                "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                ".stream.alltoall_single",
+                side_effect=fake_a2a_single,
+            ),
+        ):
+            out = _ulysses_single_all_to_all_fused(inp, 2, None)
+        self.assertEqual(out.shape, [2, 4, 4, 8])
+
+
+class TestUlyssesFusedSupportGuard(unittest.TestCase):
+    """Exercise the non-Triton `_ulysses_fused_supported` guard directly
+    (the dispatch tests above mock it out). CPU-safe: the reject branches and
+    the import-failure fallback do not touch a GPU."""
+
+    def test_false_for_non_batch_dim0(self):
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_fused_supported,
+        )
+
+        # batch_dim_idx != 0 short-circuits to the reference path regardless
+        # of build/device, so this covers the early `return False` guard.
+        x = paddle.randn([2, 4, 8, 16])
+        self.assertFalse(_ulysses_fused_supported(2, 1, x))
+
+    def test_false_when_triton_import_fails(self):
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_fused_supported,
+        )
+
+        # Force the first guard to pass (compiled-with-cuda + gpu place + 4-D)
+        # then make the deferred Triton import raise, hitting the except path.
+        fake_input = MagicMock()
+        fake_input.shape = [2, 4, 8, 16]
+        fake_input.place.is_gpu_place.return_value = True
+        with (
+            patch.object(paddle, "is_compiled_with_cuda", return_value=True),
+            patch.dict(
+                sys.modules,
+                {"paddlefleet.triton_ops.ulysses_alltoall_fused": None},
+            ),
+        ):
+            self.assertFalse(_ulysses_fused_supported(2, 0, fake_input))
+
+
+@unittest.skipUnless(_triton_available(), "requires Triton fused op module")
+class TestUlyssesFusedOpValidation(unittest.TestCase):
+    """Shape-divisibility validation in the fused op. The ValueError is raised
+    before any kernel launch, so these run without a GPU."""
+
+    def test_raises_on_indivisible_heads(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            ulysses_single_all_to_all_fused,
+        )
+
+        x = paddle.randn([2, 4, 5, 8])  # H=5 not divisible by world size 2
+        with (
+            patch(
+                "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                ".get_world_size",
+                return_value=2,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            ulysses_single_all_to_all_fused(x, 2, None)
+
+    def test_raises_on_indivisible_seq(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            ulysses_single_all_to_all_fused,
+        )
+
+        x = paddle.randn([2, 5, 4, 8])  # Nglob=5 not divisible by world size 2
+        with (
+            patch(
+                "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                ".get_world_size",
+                return_value=2,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            ulysses_single_all_to_all_fused(x, 1, None)
 
 
 if __name__ == "__main__":
