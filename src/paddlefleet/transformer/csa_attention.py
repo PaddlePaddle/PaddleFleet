@@ -72,6 +72,17 @@ from paddlefleet.transformer.cp_utils import (
     map_compressed_topk_to_kv_full_cp,
 )
 
+_INDEXCACHE_STATE_KIND_NONE = "none"
+_INDEXCACHE_STATE_KIND_TOPK_ONLY = "topk_only"
+_INDEXCACHE_STATE_KIND_DISTILL = "distill"
+_INDEXCACHE_STATE_KIND_INVALID = "invalid"
+_INDEXCACHE_TOPK_ONLY_STATE_LEN = 3
+_INDEXCACHE_DISTILL_STATE_LEN = 8
+_INDEXCACHE_STATE_TOPK_IDXS = 0
+_INDEXCACHE_STATE_PRODUCER_LAYER = 1
+_INDEXCACHE_DISTILL_STATE_PRODUCER_LAYER = 6
+_INDEXCACHE_DISTILL_STATE_SERVED_COUNT = 7
+
 
 class LinearBF16FP32Func(paddle.autograd.PyLayer):
     """BF16 activation x BF16 weight -> FP32 output autograd function.
@@ -1626,6 +1637,77 @@ class CompressedSparseAttention(FleetLayer):
             raise ValueError("index_topk_pattern must start with 'F'.")
         return pattern
 
+    def _indexcache_recompute_enabled(self) -> bool:
+        return bool(getattr(self.config, "recompute_granularity", None))
+
+    def _indexcache_in_recompute(self) -> bool:
+        return (
+            self._indexcache_recompute_enabled()
+            and self.training
+            and not paddle.is_grad_enabled()
+        )
+
+    def _indexcache_context_msg(
+        self, c4_ordinal: int, pattern: str
+    ) -> str:
+        return (
+            f"layer_number={self.layer_number}, "
+            f"c4_ordinal={c4_ordinal}, "
+            f"pattern={pattern}, "
+            "recompute_granularity="
+            f"{getattr(self.config, 'recompute_granularity', None)}, "
+            "pipeline_model_parallel_size="
+            f"{getattr(self.config, 'pipeline_model_parallel_size', 1)}, "
+            "context_parallel_size="
+            f"{getattr(self.config, 'context_parallel_size', 1)}"
+        )
+
+    def _indexcache_requires_explicit_state(self) -> bool:
+        pp_size = int(
+            getattr(self.config, "pipeline_model_parallel_size", 1) or 1
+        )
+        cp_size = int(getattr(self.config, "context_parallel_size", 1) or 1)
+        return self._indexcache_recompute_enabled() or pp_size > 1 or cp_size > 1
+
+    @staticmethod
+    def _indexcache_state_kind(indexcache_state: tuple | list | None) -> str:
+        if not indexcache_state:
+            return _INDEXCACHE_STATE_KIND_NONE
+        state_len = len(indexcache_state)
+        if state_len == _INDEXCACHE_TOPK_ONLY_STATE_LEN:
+            return _INDEXCACHE_STATE_KIND_TOPK_ONLY
+        if state_len >= _INDEXCACHE_DISTILL_STATE_LEN:
+            return _INDEXCACHE_STATE_KIND_DISTILL
+        return _INDEXCACHE_STATE_KIND_INVALID
+
+    def _indexcache_validate_state_for_reuse(
+        self,
+        indexcache_state: tuple | list | None,
+        c4_ordinal: int,
+        pattern: str,
+    ) -> str:
+        state_kind = self._indexcache_state_kind(indexcache_state)
+        if state_kind == _INDEXCACHE_STATE_KIND_INVALID:
+            raise ValueError(
+                "IndexCache state must be either topk-only "
+                f"({_INDEXCACHE_TOPK_ONLY_STATE_LEN} tensors) or distill "
+                f"(>={_INDEXCACHE_DISTILL_STATE_LEN} tensors), got "
+                f"len={len(indexcache_state)}. "
+                + self._indexcache_context_msg(c4_ordinal, pattern)
+            )
+        if (
+            self._indexcache_recompute_enabled()
+            and state_kind == _INDEXCACHE_STATE_KIND_DISTILL
+        ):
+            raise RuntimeError(
+                "IndexCache recompute reuse-only expects a topk-only "
+                "indexcache_state; distill-state tensors are not supported "
+                "with recompute in phase 1. "
+                f"state_kind={state_kind}. "
+                + self._indexcache_context_msg(c4_ordinal, pattern)
+            )
+        return state_kind
+
     def _indexcache_debug(self, msg: str) -> None:
         if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
             cp_msg = (
@@ -1633,8 +1715,17 @@ class CompressedSparseAttention(FleetLayer):
                 if self.cp_enabled
                 else ""
             )
+            recompute_msg = (
+                " recompute_enabled="
+                f"{self._indexcache_recompute_enabled()}"
+                " in_recompute="
+                f"{self._indexcache_in_recompute()}"
+                " grad_enabled="
+                f"{paddle.is_grad_enabled()}"
+            )
             print(
-                f"[INDEXCACHE_TRAIN] layer={self.layer_number}{cp_msg} {msg}",
+                f"[INDEXCACHE_TRAIN] layer={self.layer_number}{cp_msg}"
+                f"{recompute_msg} {msg}",
                 flush=True,
             )
 
@@ -1753,7 +1844,11 @@ class CompressedSparseAttention(FleetLayer):
         served_count: int | None = None,
     ) -> tuple[Tensor, ...]:
         state = [self._indexcache_forward_state_tensor(compress_topk_idxs)]
-        if tilelang_indexer_loss_state is not None:
+        include_distill_state = (
+            self._indexcache_multi_layer_distill_enabled()
+            and tilelang_indexer_loss_state is not None
+        )
+        if include_distill_state:
             (
                 q_indexer_bf,
                 weights_indexer_bf,
@@ -1793,24 +1888,34 @@ class CompressedSparseAttention(FleetLayer):
         return tuple(state)
 
     def _indexcache_state_topk(
-        self, indexcache_state: tuple | list | None
-    ) -> tuple[Tensor | None, int | None]:
+        self,
+        indexcache_state: tuple | list | None,
+        c4_ordinal: int,
+        pattern: str,
+    ) -> tuple[Tensor | None, int | None, str]:
+        state_kind = self._indexcache_validate_state_for_reuse(
+            indexcache_state, c4_ordinal, pattern
+        )
         if not indexcache_state:
-            return None, None
+            return None, None, state_kind
         producer_layer = None
-        if len(indexcache_state) >= 8:
+        if state_kind == _INDEXCACHE_STATE_KIND_DISTILL:
             producer_layer = self._indexcache_tensor_to_int(
-                indexcache_state[6]
+                indexcache_state[_INDEXCACHE_DISTILL_STATE_PRODUCER_LAYER]
             )
-        elif len(indexcache_state) >= 3:
+        elif state_kind == _INDEXCACHE_STATE_KIND_TOPK_ONLY:
             producer_layer = self._indexcache_tensor_to_int(
-                indexcache_state[1]
+                indexcache_state[_INDEXCACHE_STATE_PRODUCER_LAYER]
             )
         if producer_layer is None:
             producer_layer = getattr(
                 self.config, "_indexcache_last_layer_number", None
             )
-        return indexcache_state[0], producer_layer
+        return (
+            indexcache_state[_INDEXCACHE_STATE_TOPK_IDXS],
+            producer_layer,
+            state_kind,
+        )
 
     def _indexcache_cache_topk(
         self,
@@ -1827,6 +1932,7 @@ class CompressedSparseAttention(FleetLayer):
             self._indexcache_multi_layer_distill_enabled()
             and tilelang_indexer_loss_state is not None
         ):
+            state_kind = _INDEXCACHE_STATE_KIND_DISTILL
             self.config._indexcache_last_distill_state = tilelang_indexer_loss_state
             self.config._indexcache_last_served_count = served_count
             self._indexcache_distill_debug(
@@ -1834,9 +1940,12 @@ class CompressedSparseAttention(FleetLayer):
                 f"c4_ordinal={c4_ordinal} served_count={served_count} "
                 f"loss_scale={loss_scale:.8g}"
             )
+        else:
+            state_kind = _INDEXCACHE_STATE_KIND_TOPK_ONLY
         self._indexcache_debug(
             "action=produce "
             f"c4_ordinal={c4_ordinal} pattern={pattern} "
+            f"state_kind={state_kind} "
             f"topk_shape={list(compress_topk_idxs.shape)}"
         )
         return self._indexcache_pack_state(
@@ -1853,18 +1962,22 @@ class CompressedSparseAttention(FleetLayer):
         pattern: str,
         indexcache_state: tuple | list | None = None,
     ) -> Tensor:
-        cached, producer_layer = self._indexcache_state_topk(
-            indexcache_state
+        cached, producer_layer, state_kind = self._indexcache_state_topk(
+            indexcache_state, c4_ordinal, pattern
         )
-        if cached is None:
+        if cached is None and not self._indexcache_requires_explicit_state():
             cached = getattr(self.config, "_indexcache_last_topk_idxs", None)
             producer_layer = getattr(
                 self.config, "_indexcache_last_layer_number", None
             )
+            if cached is not None:
+                state_kind = "config_fallback"
         if cached is None:
             raise RuntimeError(
-                "index_topk_pattern requested reuse before a cached producer "
-                f"top-k exists at c4_ordinal={c4_ordinal}, pattern={pattern}."
+                "index_topk_pattern requested reuse before an explicit "
+                "producer top-k state exists. "
+                f"state_kind={state_kind}. "
+                + self._indexcache_context_msg(c4_ordinal, pattern)
             )
         cached_shape = list(cached.shape)
         if len(cached_shape) < 3 or cached_shape[0] != b or cached_shape[1] != sq:
@@ -1880,7 +1993,8 @@ class CompressedSparseAttention(FleetLayer):
         self._indexcache_debug(
             "action=reuse "
             f"c4_ordinal={c4_ordinal} pattern={pattern} "
-            f"producer_layer={producer_layer} topk_shape={cached_shape}"
+            f"producer_layer={producer_layer} state_kind={state_kind} "
+            f"topk_shape={cached_shape}"
         )
         return cached
 
@@ -1905,7 +2019,8 @@ class CompressedSparseAttention(FleetLayer):
         producer_layer = None
         served_count = None
         if indexcache_state is not None:
-            if len(indexcache_state) >= 8:
+            state_kind = self._indexcache_state_kind(indexcache_state)
+            if state_kind == _INDEXCACHE_STATE_KIND_DISTILL:
                 producer_state = (
                     indexcache_state[1],
                     indexcache_state[2],
@@ -1919,10 +2034,10 @@ class CompressedSparseAttention(FleetLayer):
                     None,
                 )
                 producer_layer = self._indexcache_tensor_to_int(
-                    indexcache_state[6]
+                    indexcache_state[_INDEXCACHE_DISTILL_STATE_PRODUCER_LAYER]
                 )
                 served_count = self._indexcache_tensor_to_int(
-                    indexcache_state[7]
+                    indexcache_state[_INDEXCACHE_DISTILL_STATE_SERVED_COUNT]
                 )
             else:
                 raise RuntimeError(
@@ -1931,7 +2046,7 @@ class CompressedSparseAttention(FleetLayer):
                     f"c4_ordinal={c4_ordinal}, pattern={pattern}."
                 )
 
-        if producer_state is None:
+        if producer_state is None and not self._indexcache_requires_explicit_state():
             producer_state = getattr(
                 self.config, "_indexcache_last_distill_state", None
             )
@@ -1944,8 +2059,8 @@ class CompressedSparseAttention(FleetLayer):
         if producer_state is None or served_count is None:
             raise RuntimeError(
                 "indexcache_multi_layer_distill requested an S-layer target "
-                "before a producer distill state exists. "
-                f"c4_ordinal={c4_ordinal}, pattern={pattern}."
+                "before an explicit producer distill state exists. "
+                + self._indexcache_context_msg(c4_ordinal, pattern)
             )
 
         (

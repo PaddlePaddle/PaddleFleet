@@ -1242,6 +1242,13 @@ class TransformerConfig(ModelParallelConfig):
                         "indexcache_multi_layer_distill=True requires a "
                         "non-empty index_topk_pattern."
                     )
+                if self.recompute_granularity:
+                    raise NotImplementedError(
+                        "indexcache_multi_layer_distill + recompute is not "
+                        "supported in IndexCache phase 1. Use reuse-only "
+                        "IndexCache with full/uniform recompute, or disable "
+                        "recompute for multi-layer distill."
+                    )
                 if self.context_parallel_size > 1 and (
                     self.num_nextn_predict_layers is not None
                     and self.num_nextn_predict_layers > 0
@@ -1264,6 +1271,29 @@ class TransformerConfig(ModelParallelConfig):
                     raise NotImplementedError(
                         "indexcache_multi_layer_distill currently supports "
                         "only csa_sparse_attn_backend='tilelang'."
+                    )
+
+            if self.index_topk_pattern and self.recompute_granularity:
+                if not (
+                    self.recompute_granularity == "full"
+                    and self.recompute_method == "uniform"
+                    and self.recompute_num_layers == 1
+                ):
+                    raise NotImplementedError(
+                        "IndexCache reuse-only recompute phase 1 only supports "
+                        "recompute_granularity='full', "
+                        "recompute_method='uniform', and "
+                        "recompute_num_layers=1."
+                    )
+                if self.csa_indexer_backend != "tilelang":
+                    raise NotImplementedError(
+                        "IndexCache reuse-only recompute phase 1 only supports "
+                        "csa_indexer_backend='tilelang'."
+                    )
+                if self.csa_sparse_attn_backend != "tilelang":
+                    raise NotImplementedError(
+                        "IndexCache reuse-only recompute phase 1 only supports "
+                        "csa_sparse_attn_backend='tilelang'."
                     )
 
             if (
