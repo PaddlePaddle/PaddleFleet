@@ -38,14 +38,15 @@ def _has_indexcache_key(tensors) -> bool:
 
 
 def _mark_indexcache_state_stop_gradient(value):
+    from paddlefleet.transformer.indexcache_state import (
+        apply_stop_gradient_mask,
+    )
+
     if value is None:
         return value
     if not isinstance(value, (tuple, list)):
         value = (value,)
-    for tensor in value:
-        if isinstance(tensor, paddle.Tensor):
-            tensor.stop_gradient = True
-    return tuple(value)
+    return apply_stop_gradient_mask(value)
 
 
 def _describe_tensor_keys(tensors):

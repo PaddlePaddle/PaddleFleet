@@ -43,6 +43,18 @@ from paddlefleet.recompute_utils import (
 )
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
+from paddlefleet.transformer.indexcache_state import (
+    INDEXCACHE_DISTILL_STATE_LEN,
+    INDEXCACHE_RECOMPUTE_STATE_MAX_LEN,
+    INDEXCACHE_STATE_KIND_DISTILL,
+    INDEXCACHE_STATE_KIND_TOPK_ONLY,
+    INDEXCACHE_TOPK_ONLY_STATE_LEN,
+    apply_stop_gradient_mask,
+    clone_state_outputs,
+    state_from_slots,
+    state_kind,
+    state_to_slots,
+)
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.utils import profile
@@ -59,8 +71,6 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)
-
-_INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN = 3
 
 
 def tensors_clone(outputs):
@@ -96,20 +106,24 @@ def tensors_clone(outputs):
         )
 
 
-def _is_indexcache_recompute_topk_state(value):
-    return (
+def _is_indexcache_recompute_state(value):
+    if not (
         isinstance(value, (tuple, list))
-        and len(value) == _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN
+        and len(value)
+        in (INDEXCACHE_TOPK_ONLY_STATE_LEN, INDEXCACHE_DISTILL_STATE_LEN)
         and all(isinstance(item, paddle.Tensor) for item in value)
+    ):
+        return False
+    return state_kind(value) in (
+        INDEXCACHE_STATE_KIND_TOPK_ONLY,
+        INDEXCACHE_STATE_KIND_DISTILL,
     )
 
 
-def _mark_indexcache_recompute_topk_state_stop_gradient(value):
-    if not _is_indexcache_recompute_topk_state(value):
+def _mark_indexcache_recompute_state_stop_gradient(value):
+    if not _is_indexcache_recompute_state(value):
         return value
-    for tensor in value:
-        tensor.stop_gradient = True
-    return tuple(value)
+    return apply_stop_gradient_mask(value)
 
 
 def _ensure_recompute_non_leaf_tensor(value):
@@ -143,9 +157,7 @@ def _describe_indexcache_recompute_input(value):
 
 
 def _clone_indexcache_recompute_state_outputs(value):
-    value = _mark_indexcache_recompute_topk_state_stop_gradient(value)
-    cloned = tuple(tensor.clone() for tensor in value)
-    return _mark_indexcache_recompute_topk_state_stop_gradient(cloned)
+    return clone_state_outputs(value)
 
 
 def _flatten_indexcache_recompute_outputs(outputs):
@@ -153,7 +165,7 @@ def _flatten_indexcache_recompute_outputs(outputs):
         return outputs
 
     output, context, indexcache_state = outputs[0], outputs[1], outputs[2]
-    if not _is_indexcache_recompute_topk_state(indexcache_state):
+    if not _is_indexcache_recompute_state(indexcache_state):
         return outputs
 
     indexcache_state = _clone_indexcache_recompute_state_outputs(indexcache_state)
@@ -168,36 +180,22 @@ def _unpack_flattened_indexcache_recompute_outputs(outputs):
         return None
 
     if (
-        len(outputs) == 1 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN
-        and all(
-            isinstance(item, paddle.Tensor)
-            for item in outputs[1 : 1 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN]
+        len(outputs) in (
+            1 + INDEXCACHE_TOPK_ONLY_STATE_LEN,
+            1 + INDEXCACHE_DISTILL_STATE_LEN,
         )
+        and all(isinstance(item, paddle.Tensor) for item in outputs[1:])
     ):
-        indexcache_state = _mark_indexcache_recompute_topk_state_stop_gradient(
-            outputs[1 : 1 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN]
-        )
-        return (
-            outputs[0],
-            None,
-            indexcache_state,
-        )
+        indexcache_state = apply_stop_gradient_mask(outputs[1:])
+        return outputs[0], None, indexcache_state
 
     if (
-        len(outputs) == 2 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN
-        and all(
-            isinstance(item, paddle.Tensor)
-            for item in outputs[2 : 2 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN]
-        )
+        len(outputs)
+        in (2 + INDEXCACHE_TOPK_ONLY_STATE_LEN, 2 + INDEXCACHE_DISTILL_STATE_LEN)
+        and all(isinstance(item, paddle.Tensor) for item in outputs[2:])
     ):
-        indexcache_state = _mark_indexcache_recompute_topk_state_stop_gradient(
-            outputs[2 : 2 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN]
-        )
-        return (
-            outputs[0],
-            outputs[1],
-            indexcache_state,
-        )
+        indexcache_state = apply_stop_gradient_mask(outputs[2:])
+        return outputs[0], outputs[1], indexcache_state
 
     return None
 
@@ -705,11 +703,13 @@ class TransformerLayer(nn.Layer):
             input_ids = dict_args.get("input_ids", None)
             indexcache_state = dict_args.get("indexcache_state", None)
             indexcache_state = (
-                _mark_indexcache_recompute_topk_state_stop_gradient(
-                    indexcache_state
-                )
+                apply_stop_gradient_mask(indexcache_state)
                 if indexcache_state is not None
                 else None
+            )
+            indexcache_state_slots = state_to_slots(indexcache_state)
+            assert (
+                len(indexcache_state_slots) == INDEXCACHE_RECOMPUTE_STATE_MAX_LEN
             )
             hidden_states = _ensure_recompute_non_leaf_tensor(hidden_states)
             attention_mask = _ensure_recompute_non_leaf_tensor(attention_mask)
@@ -773,8 +773,27 @@ class TransformerLayer(nn.Layer):
                 attention_bias=None,
                 packed_seq_params=None,
                 input_ids=None,
-                indexcache_state=None,
+                indexcache_state_0=None,
+                indexcache_state_1=None,
+                indexcache_state_2=None,
+                indexcache_state_3=None,
+                indexcache_state_4=None,
+                indexcache_state_5=None,
+                indexcache_state_6=None,
+                indexcache_state_7=None,
             ):
+                indexcache_state = state_from_slots(
+                    (
+                        indexcache_state_0,
+                        indexcache_state_1,
+                        indexcache_state_2,
+                        indexcache_state_3,
+                        indexcache_state_4,
+                        indexcache_state_5,
+                        indexcache_state_6,
+                        indexcache_state_7,
+                    )
+                )
                 return _flatten_indexcache_recompute_outputs(
                     self._forward_impl(
                         hidden_states=hidden_states,
@@ -829,7 +848,14 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
-                indexcache_state=indexcache_state,
+                indexcache_state_0=indexcache_state_slots[0],
+                indexcache_state_1=indexcache_state_slots[1],
+                indexcache_state_2=indexcache_state_slots[2],
+                indexcache_state_3=indexcache_state_slots[3],
+                indexcache_state_4=indexcache_state_slots[4],
+                indexcache_state_5=indexcache_state_slots[5],
+                indexcache_state_6=indexcache_state_slots[6],
+                indexcache_state_7=indexcache_state_slots[7],
             )
         else:
             outputs = self._forward_impl(**dict_args)
@@ -968,8 +994,8 @@ class TransformerLayer(nn.Layer):
     ):
         if indexcache_state is None:
             indexcache_state = kwargs.get("indexcache_state", None)
-        if _is_indexcache_recompute_topk_state(indexcache_state):
-            indexcache_state = _mark_indexcache_recompute_topk_state_stop_gradient(
+        if _is_indexcache_recompute_state(indexcache_state):
+            indexcache_state = _mark_indexcache_recompute_state_stop_gradient(
                 indexcache_state
             )
             kwargs["indexcache_state"] = indexcache_state

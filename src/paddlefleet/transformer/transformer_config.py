@@ -885,7 +885,7 @@ class TransformerConfig(ModelParallelConfig):
     indexcache_multi_layer_distill: bool = False
     """Train retained IndexCache indexers with targets from all served layers.
 
-    CP training is supported only for no-MTP, no-recompute TileLang CSA.
+    CP training is supported only for no-MTP TileLang CSA.
     """
 
     use_fast_hadamard: bool = False
@@ -1242,13 +1242,6 @@ class TransformerConfig(ModelParallelConfig):
                         "indexcache_multi_layer_distill=True requires a "
                         "non-empty index_topk_pattern."
                     )
-                if self.recompute_granularity:
-                    raise NotImplementedError(
-                        "indexcache_multi_layer_distill + recompute is not "
-                        "supported in IndexCache phase 1. Use reuse-only "
-                        "IndexCache with full/uniform recompute, or disable "
-                        "recompute for multi-layer distill."
-                    )
                 if self.context_parallel_size > 1 and (
                     self.num_nextn_predict_layers is not None
                     and self.num_nextn_predict_layers > 0
@@ -1256,11 +1249,6 @@ class TransformerConfig(ModelParallelConfig):
                     raise NotImplementedError(
                         "indexcache_multi_layer_distill currently supports "
                         "CP training only when num_nextn_predict_layers=0."
-                    )
-                if self.context_parallel_size > 1 and self.recompute_granularity:
-                    raise NotImplementedError(
-                        "indexcache_multi_layer_distill currently supports "
-                        "CP training only with recompute disabled."
                     )
                 if self.csa_indexer_backend != "tilelang":
                     raise NotImplementedError(
@@ -1280,19 +1268,19 @@ class TransformerConfig(ModelParallelConfig):
                     and self.recompute_num_layers == 1
                 ):
                     raise NotImplementedError(
-                        "IndexCache reuse-only recompute phase 1 only supports "
+                        "IndexCache recompute currently supports only "
                         "recompute_granularity='full', "
                         "recompute_method='uniform', and "
                         "recompute_num_layers=1."
                     )
                 if self.csa_indexer_backend != "tilelang":
                     raise NotImplementedError(
-                        "IndexCache reuse-only recompute phase 1 only supports "
+                        "IndexCache recompute currently supports only "
                         "csa_indexer_backend='tilelang'."
                     )
                 if self.csa_sparse_attn_backend != "tilelang":
                     raise NotImplementedError(
-                        "IndexCache reuse-only recompute phase 1 only supports "
+                        "IndexCache recompute currently supports only "
                         "csa_sparse_attn_backend='tilelang'."
                     )
 
