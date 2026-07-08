@@ -587,11 +587,11 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         self.assertIs(grads[0], self.q)
         self.assertIs(grads[1], self.k)
         self.assertIs(grads[2], self.v)
-        self.assertEqual(mock_a2a.call_args_list[0].kwargs["scatter_idx"], 2)
-        self.assertEqual(mock_a2a.call_args_list[0].kwargs["gather_idx"], 1)
+        self.assertEqual(mock_a2a.call_args_list[0].args[1], 2)
+        self.assertEqual(mock_a2a.call_args_list[0].args[2], 1)
         for call in mock_a2a.call_args_list[1:]:
-            self.assertEqual(call.kwargs["scatter_idx"], 1)
-            self.assertEqual(call.kwargs["gather_idx"], 2)
+            self.assertEqual(call.args[1], 1)
+            self.assertEqual(call.args[2], 2)
         mock_info.assert_called_once_with(
             startend_row_indices=self.startend,
             is_causal=False,
@@ -610,7 +610,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
             patch.object(
                 fa,
                 "_ulysses_single_all_to_all_fused",
-                side_effect=(local_grad, self.q, self.k, self.v),
+                side_effect=(local_grad, self.q, self.k, self.v, self.q),
             ) as mock_fused,
             patch.object(fa, "_ulysses_single_all_to_all") as mock_ref,
             patch.object(
@@ -626,6 +626,10 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
             grads = fa.FlashMaskUlyssesCpFunctor.backward(
                 ctx, paddle.ones_like(self.out)
             )
+            self.assertIs(
+                fa._ulysses_single_all_to_all_rr(self.q, 2, 1, 0, self.group),
+                self.q,
+            )
 
         self.assertIs(grads[0], self.q)
         self.assertIs(grads[1], self.k)
@@ -633,7 +637,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         mock_ref.assert_not_called()
         self.assertEqual(
             [call.args[1] for call in mock_fused.call_args_list],
-            [2, 1, 1, 1],
+            [2, 1, 1, 1, 2],
         )
 
     def test_ulysses_functor_backward_fa2(self):
