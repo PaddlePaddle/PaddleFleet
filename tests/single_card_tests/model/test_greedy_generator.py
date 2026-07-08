@@ -420,6 +420,76 @@ class TestGenerateUseCacheIsCausal(unittest.TestCase):
         self.assertTrue(self._call_attention_forward(q_len=4))
 
 
+class TestGreedyGeneratorDebugMode(unittest.TestCase):
+    """Cover all _DEBUG branches in GreedyGenerator.generate by forcing GREEDY_DEBUG=1."""
+
+    def _make_debug_generator(self, token_sequence):
+        """Return a GreedyGenerator whose fake model yields token_sequence,
+        with _DEBUG patched to True in the greedy_generator module."""
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        self._call_idx = 0
+        seq = token_sequence
+
+        def fake_forward(inputs):
+            vocab_size = 100
+            logits = paddle.zeros([1, 1, vocab_size], dtype="float32")
+            tok_id = seq[min(self._call_idx, len(seq) - 1)]
+            logits[0, 0, tok_id] = 10.0
+            self._call_idx += 1
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    def test_debug_mode_runs_without_error(self):
+        """With _DEBUG=True all debug log branches execute without raising."""
+        import paddlefleet.generation.greedy_generator as _m
+
+        orig = _m._DEBUG
+        try:
+            _m._DEBUG = True
+            gen = self._make_debug_generator([5, 6, 7])
+            input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+            out = gen.generate(input_ids, max_new_tokens=4, eos_token_id=None)
+            self.assertEqual(out.shape[0], 1)
+            self.assertEqual(out.shape[1], 2 + 4)
+        finally:
+            _m._DEBUG = orig
+
+    def test_debug_mode_eos_stops_early(self):
+        """_DEBUG=True still stops correctly at eos token."""
+        import paddlefleet.generation.greedy_generator as _installed
+
+        orig = getattr(_installed, "_DEBUG", False)
+        try:
+            _installed._DEBUG = True
+            gen = self._make_debug_generator([5, 5, 3, 5, 5])
+            input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+            out = gen.generate(input_ids, max_new_tokens=10, eos_token_id=3)
+            generated = out[0, 2:].tolist()
+            self.assertEqual(generated, [5, 5, 3])
+        finally:
+            _installed._DEBUG = orig
+
+
 if __name__ == "__main__":
     print("Running greedy generator unit tests...")
     unittest.main(verbosity=2)
