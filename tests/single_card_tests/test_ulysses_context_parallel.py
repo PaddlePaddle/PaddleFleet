@@ -1337,6 +1337,20 @@ def _fused_kernels_available():
     return True
 
 
+def _triton_available():
+    """Triton importable (the fused op module can be loaded). Does not
+    require a GPU: the shape-validation paths raise before any kernel runs."""
+    try:
+        import triton  # noqa: F401
+
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (  # noqa: F401
+            ulysses_single_all_to_all_fused,
+        )
+    except (ImportError, OSError):
+        return False
+    return True
+
+
 @unittest.skipUnless(
     _fused_kernels_available(), "requires CUDA + Triton fused kernels"
 )
@@ -1456,6 +1470,79 @@ class TestUlyssesFusedKernels(unittest.TestCase):
                 )
             self.assertEqual(fused.shape, ref.shape)
             self.assertTrue(paddle.equal_all(fused, ref).item())
+
+
+class TestUlyssesFusedSupportGuard(unittest.TestCase):
+    """Exercise the non-Triton `_ulysses_fused_supported` guard directly
+    (the dispatch tests above mock it out). CPU-safe: the reject branches and
+    the import-failure fallback do not touch a GPU."""
+
+    def test_false_for_non_batch_dim0(self):
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_fused_supported,
+        )
+
+        # batch_dim_idx != 0 short-circuits to the reference path regardless
+        # of build/device, so this covers the early `return False` guard.
+        x = paddle.randn([2, 4, 8, 16])
+        self.assertFalse(_ulysses_fused_supported(2, 1, x))
+
+    def test_false_when_triton_import_fails(self):
+        from paddlefleet.context_parallel_utils import (
+            _ulysses_fused_supported,
+        )
+
+        # Force the first guard to pass (compiled-with-cuda + gpu place + 4-D)
+        # then make the deferred Triton import raise, hitting the except path.
+        fake_input = MagicMock()
+        fake_input.shape = [2, 4, 8, 16]
+        fake_input.place.is_gpu_place.return_value = True
+        with (
+            patch.object(paddle, "is_compiled_with_cuda", return_value=True),
+            patch.dict(
+                sys.modules,
+                {"paddlefleet.triton_ops.ulysses_alltoall_fused": None},
+            ),
+        ):
+            self.assertFalse(_ulysses_fused_supported(2, 0, fake_input))
+
+
+@unittest.skipUnless(_triton_available(), "requires Triton fused op module")
+class TestUlyssesFusedOpValidation(unittest.TestCase):
+    """Shape-divisibility validation in the fused op. The ValueError is raised
+    before any kernel launch, so these run without a GPU."""
+
+    def test_raises_on_indivisible_heads(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            ulysses_single_all_to_all_fused,
+        )
+
+        x = paddle.randn([2, 4, 5, 8])  # H=5 not divisible by world size 2
+        with (
+            patch(
+                "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                ".get_world_size",
+                return_value=2,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            ulysses_single_all_to_all_fused(x, 2, None)
+
+    def test_raises_on_indivisible_seq(self):
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            ulysses_single_all_to_all_fused,
+        )
+
+        x = paddle.randn([2, 5, 4, 8])  # Nglob=5 not divisible by world size 2
+        with (
+            patch(
+                "paddlefleet.triton_ops.ulysses_alltoall_fused.dist"
+                ".get_world_size",
+                return_value=2,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            ulysses_single_all_to_all_fused(x, 1, None)
 
 
 if __name__ == "__main__":

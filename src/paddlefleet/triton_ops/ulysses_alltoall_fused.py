@@ -43,7 +43,7 @@ import triton.language as tl
 
 @enable_compat_on_triton_kernel
 @triton.jit
-def _seq2head_pre_kernel(
+def _seq2head_pre_kernel(  # pragma: no cover
     x_ptr, out_ptr, P, b, Sloc, Hloc, D, SEG, BLOCK: tl.constexpr
 ):
     # seq->head pre: send[dst, bb, s, hl, dd] = x[bb, s, dst*Hloc+hl, dd].
@@ -66,7 +66,7 @@ def _seq2head_pre_kernel(
 
 @enable_compat_on_triton_kernel
 @triton.jit
-def _seq2head_post_kernel(
+def _seq2head_post_kernel(  # pragma: no cover
     recv_ptr, out_ptr, P, b, Sloc, Hloc, D, SEG, BLOCK: tl.constexpr
 ):
     # seq->head post: out[bb, src*Sloc+s, hl, dd] = recv[src, bb, s, hl, dd].
@@ -87,7 +87,7 @@ def _seq2head_post_kernel(
 
 @enable_compat_on_triton_kernel
 @triton.jit
-def _head2seq_pre_kernel(
+def _head2seq_pre_kernel(  # pragma: no cover
     g_ptr, out_ptr, P, b, Sloc, Hloc, D, SEG, BLOCK: tl.constexpr
 ):
     # head->seq pre: send[dst, bb, s, hl, dd] = g[bb, dst*Sloc+s, hl, dd].
@@ -108,7 +108,7 @@ def _head2seq_pre_kernel(
 
 @enable_compat_on_triton_kernel
 @triton.jit
-def _head2seq_post_kernel(
+def _head2seq_post_kernel(  # pragma: no cover
     recv_ptr, out_ptr, P, b, Sloc, Hloc, D, SEG, BLOCK: tl.constexpr
 ):
     # head->seq post: out[bb, s, src*Hloc+hl, dd] = recv[src, bb, s, hl, dd].
