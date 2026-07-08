@@ -322,14 +322,10 @@ class CSADocMaskMetadata:
         """
         if startend_row_indices is None:
             return None
-        ratio, batch_size, seqlen, n_compressed = (
-            _normalize_csa_docmask_args(
-                ratio, batch_size, seqlen, n_compressed
-            )
+        ratio, batch_size, seqlen, n_compressed = _normalize_csa_docmask_args(
+            ratio, batch_size, seqlen, n_compressed
         )
-        _validate_csa_docmask_shape(
-            startend_row_indices, batch_size, seqlen
-        )
+        _validate_csa_docmask_shape(startend_row_indices, batch_size, seqlen)
 
         (
             doc_start_per_pos,

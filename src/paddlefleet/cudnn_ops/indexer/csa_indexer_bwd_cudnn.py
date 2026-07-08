@@ -29,7 +29,6 @@ import paddle
 from paddlefleet_ops import CUDNN_FRONTEND_HINT, is_cudnn_frontend_available
 
 
-
 def _require_cudnn_frontend():
     if not is_cudnn_frontend_available():
         raise ImportError(CUDNN_FRONTEND_HINT)

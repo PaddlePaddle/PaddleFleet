@@ -15,16 +15,13 @@
 """Host-side shape guard for the cuDNN CSA indexer forward.
 
 The cuDNN CSA indexer forward kernel does not reliably support short
-compressed-KV shapes:
+compressed-KV shapes: ``S_k == 1`` (n_compressed == 1) crashes inside the CUDA
+kernel with ``cudaErrorIllegalInstruction`` (715) regardless of ``S_q`` —
+verified by a per-process sweep before the v1.26 integration.
 
-* ``S_k == 1`` (n_compressed == 1) crashes inside the CUDA kernel with
-  ``cudaErrorIllegalInstruction`` (715) regardless of ``S_q`` — verified by a
-  per-process sweep: ``S_k == 1`` always crashes, ``S_k >= 2`` is stable.
-* the ratio-causal kernel requires ``S_q <= S_k * ratio``.
-
-``_check_cudnn_indexer_shape_support`` converts both into a readable
-``ValueError`` so an unsupported short-sequence case fails clearly instead of
-poisoning the CUDA context. These checks are pure host-side and need no GPU.
+``_check_cudnn_indexer_shape_support`` converts that unsupported short-sequence
+case into a readable ``ValueError`` so it fails clearly instead of poisoning the
+CUDA context. These checks are pure host-side and need no GPU.
 """
 
 import unittest
@@ -44,59 +41,40 @@ def _qkw(sq, sk, h=64, d=128):
 
 
 class TestCudnnIndexerShapeGuard(unittest.TestCase):
-    """_check_cudnn_indexer_shape_support: short-Sk and S_q>S_k*ratio guards."""
+    """_check_cudnn_indexer_shape_support rejects unsupported short S_k."""
 
     def test_sk1_raises_value_error(self):
         # S_k == 1 (n_compressed == 1) crashes the CUDA kernel; guard rejects it.
-        for sq in (1, 4, 5):
+        for sq in (1, 4, 5, 9):
             iq, ik, w = _qkw(sq, 1)
             with self.assertRaises(ValueError) as cm:
                 _check_cudnn_indexer_shape_support(iq, ik, ratio=4)
             self.assertIn("compressed KV length >= 2", str(cm.exception))
 
-    def test_sq_gt_sk_ratio_raises_value_error(self):
-        # S_q > S_k * ratio violates the ratio-causal contract.
+    def test_sq_gt_sk_ratio_passes_on_v126(self):
+        # v1.26 clamps ratio-causal block count to S_k; tail query rows are valid.
         iq, ik, w = _qkw(9, 2)  # 9 > 2 * 4
-        with self.assertRaises(ValueError) as cm:
-            _check_cudnn_indexer_shape_support(iq, ik, ratio=4)
-        self.assertIn("S_q <= S_k * ratio", str(cm.exception))
+        _check_cudnn_indexer_shape_support(iq, ik, ratio=4)
 
-    def test_seq_offset_counts_toward_ratio_bound(self):
-        # CP causal-only mode pads virtual query rows before the local chunk,
-        # so S_q + seq_offset must still fit the global compressed length.
+    def test_seq_offset_past_ratio_bound_passes_on_v126(self):
+        # CP causal-only mode may have local chunks whose q offset exceeds S_k*ratio.
         iq, ik, w = _qkw(4, 2)  # 4 + 5 > 2 * 4
-        with self.assertRaises(ValueError) as cm:
-            _check_cudnn_indexer_shape_support(iq, ik, ratio=4, seq_offset=5)
-        self.assertIn("seq_offset=5", str(cm.exception))
-
-    def test_seq_offset_boundary_passes(self):
-        iq, ik, w = _qkw(4, 2)  # 4 + 4 == 2 * 4
-        _check_cudnn_indexer_shape_support(iq, ik, ratio=4, seq_offset=4)
-
-    def test_sk1_checked_before_ratio(self):
-        # When both would trip, the S_k>=2 message wins (checked first).
-        iq, ik, w = _qkw(5, 1)  # S_k==1 and 5 > 1*4
-        with self.assertRaises(ValueError) as cm:
-            _check_cudnn_indexer_shape_support(iq, ik, ratio=4)
-        self.assertIn("compressed KV length >= 2", str(cm.exception))
+        _check_cudnn_indexer_shape_support(iq, ik, ratio=4, seq_offset=5)
 
     def test_valid_shapes_pass(self):
-        # S_k >= 2 and S_q <= S_k * ratio: no error.
+        # S_k >= 2: no host-side shape error.
         for sq, sk in [(8, 2), (4, 2), (16, 4), (1, 2), (32, 8)]:
             iq, ik, w = _qkw(sq, sk)
             _check_cudnn_indexer_shape_support(iq, ik, ratio=4)  # no raise
 
     def test_boundary_sq_equals_sk_ratio_passes(self):
-        # S_q == S_k * ratio is the inclusive upper bound: allowed.
         iq, ik, w = _qkw(8, 2)  # 8 == 2 * 4
         _check_cudnn_indexer_shape_support(iq, ik, ratio=4)  # no raise
 
-    def test_ratio_respected(self):
-        # Same shapes, different ratio flips validity at the boundary.
+    def test_ratio_no_longer_restricts_host_shape(self):
         iq, ik, w = _qkw(8, 2)
-        _check_cudnn_indexer_shape_support(iq, ik, ratio=4)  # 8 <= 8 ok
-        with self.assertRaises(ValueError):
-            _check_cudnn_indexer_shape_support(iq, ik, ratio=2)  # 8 > 4
+        _check_cudnn_indexer_shape_support(iq, ik, ratio=4)
+        _check_cudnn_indexer_shape_support(iq, ik, ratio=2)
 
 
 @unittest.skipIf(
