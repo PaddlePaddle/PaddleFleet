@@ -24,7 +24,9 @@ from paddle.nn.functional.flash_attention import flashmask_attention
 
 from paddlefleet.context_parallel_utils import (
     UlyssesAlltoAll,
+    _ulysses_fused_supported,
     _ulysses_single_all_to_all,
+    _ulysses_single_all_to_all_fused,
     cp_flashmask_allgatherkv_balance_backward,
     cp_flashmask_allgatherkv_balance_forward,
     cp_flashmask_swa_p2p_backward,
@@ -978,6 +980,16 @@ class FlashMaskAttnCpFunctor(PyLayer):
         return query_grad, key_grad, value_grad
 
 
+def _ulysses_single_all_to_all_rr(
+    input, scatter_idx, gather_idx, batch_dim_idx, group
+):
+    if _ulysses_fused_supported(scatter_idx, batch_dim_idx, input):
+        return _ulysses_single_all_to_all_fused(input, scatter_idx, group)
+    return _ulysses_single_all_to_all(
+        input, scatter_idx, gather_idx, batch_dim_idx, group
+    )
+
+
 class FlashMaskUlyssesCpFunctor(PyLayer):
     """Surrogate PyLayer for RR Ulysses FlashMask CP attention."""
 
@@ -1038,7 +1050,7 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
             ) = ctx.saved_tensor()
             seed_offset = None
         group = ctx.group
-        local_grad = _ulysses_single_all_to_all(
+        local_grad = _ulysses_single_all_to_all_rr(
             grad,
             scatter_idx=2,
             gather_idx=1,
@@ -1136,21 +1148,21 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
                 f"Invalid flash attention version: {ctx.fa_version}"
             )
 
-        query_grad = _ulysses_single_all_to_all(
+        query_grad = _ulysses_single_all_to_all_rr(
             q_grad,
             scatter_idx=1,
             gather_idx=2,
             batch_dim_idx=0,
             group=group,
         )
-        key_grad = _ulysses_single_all_to_all(
+        key_grad = _ulysses_single_all_to_all_rr(
             k_grad,
             scatter_idx=1,
             gather_idx=2,
             batch_dim_idx=0,
             group=group,
         )
-        value_grad = _ulysses_single_all_to_all(
+        value_grad = _ulysses_single_all_to_all_rr(
             v_grad,
             scatter_idx=1,
             gather_idx=2,

@@ -561,6 +561,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         )
         flashmask_info = object()
         with (
+            patch.object(fa, "_ulysses_fused_supported", return_value=False),
             patch.object(
                 fa,
                 "_ulysses_single_all_to_all",
@@ -598,6 +599,43 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         self.assertIs(mock_backward.call_args.args[4], local_grad)
         self.assertIs(mock_backward.call_args.args[6], flashmask_info)
 
+    def test_ulysses_functor_backward_uses_fused_a2a_when_supported(self):
+        ctx = FakeCtx()
+        local_grad = paddle.ones_like(self.out)
+        hold = self._ulysses_hold(4)
+
+        fa.FlashMaskUlyssesCpFunctor.forward(ctx, self.q, self.k, self.v, hold)
+        with (
+            patch.object(fa, "_ulysses_fused_supported", return_value=True),
+            patch.object(
+                fa,
+                "_ulysses_single_all_to_all_fused",
+                side_effect=(local_grad, self.q, self.k, self.v),
+            ) as mock_fused,
+            patch.object(fa, "_ulysses_single_all_to_all") as mock_ref,
+            patch.object(
+                fa, "FlashMaskInfoPaddle", return_value=object(), create=True
+            ),
+            patch.object(
+                fa,
+                "_flash_attn_bwd",
+                return_value=(self.q, self.k, self.v, None),
+                create=True,
+            ),
+        ):
+            grads = fa.FlashMaskUlyssesCpFunctor.backward(
+                ctx, paddle.ones_like(self.out)
+            )
+
+        self.assertIs(grads[0], self.q)
+        self.assertIs(grads[1], self.k)
+        self.assertIs(grads[2], self.v)
+        mock_ref.assert_not_called()
+        self.assertEqual(
+            [call.args[1] for call in mock_fused.call_args_list],
+            [2, 1, 1, 1],
+        )
+
     def test_ulysses_functor_backward_fa2(self):
         ctx = FakeCtx()
         seed = paddle.zeros([1], dtype="int64")
@@ -606,6 +644,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
 
         fa.FlashMaskUlyssesCpFunctor.forward(ctx, self.q, self.k, self.v, hold)
         with (
+            patch.object(fa, "_ulysses_fused_supported", return_value=False),
             patch.object(
                 fa,
                 "_ulysses_single_all_to_all",
@@ -663,6 +702,9 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
                 with (
                     patch.object(fa, "flashmask_attention", fake_attention),
                     patch.object(
+                        fa, "_ulysses_fused_supported", return_value=False
+                    ),
+                    patch.object(
                         fa,
                         "_ulysses_single_all_to_all",
                         side_effect=(local_grad, self.q, self.k, self.v),
@@ -691,6 +733,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         hold = self._ulysses_hold(0)
         fa.FlashMaskUlyssesCpFunctor.forward(ctx, self.q, self.k, self.v, hold)
         with (
+            patch.object(fa, "_ulysses_fused_supported", return_value=False),
             patch.object(
                 fa,
                 "_ulysses_single_all_to_all",
