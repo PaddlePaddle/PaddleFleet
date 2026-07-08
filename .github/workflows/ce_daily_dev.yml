@@ -13,6 +13,14 @@ on:
           - 'false'
         default: 'true'
         required: false
+      update_baseline:
+        description: '是否更新基线'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'false'
+        required: false
 
 permissions: read-all
 
@@ -34,6 +42,7 @@ env:
   paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl"
   use_release: ${{ inputs.use_release || 'true' }}
   MAX_PARALLEL: ${{ github.event.inputs.parallel_jobs || '2' }}
+  update_baseline: ${{ github.event.inputs.update_baseline || 'false' }}
 
 defaults:
   run:
@@ -114,6 +123,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e use_release \
+            -e update_baseline \
             -e repo_flag="paddlefleet" \
             -e PIP_CACHE_DIR \
             -e work_dir \
@@ -277,6 +287,7 @@ jobs:
             -e PIP_CACHE_DIR \
             -e repo_flag="paddlefleet" \
             -e use_release \
+            -e update_baseline \
             -e work_dir \
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
@@ -325,7 +336,7 @@ jobs:
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib==3.10.8
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
 
@@ -451,6 +462,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e use_release \
+            -e update_baseline \
             -e PIP_CACHE_DIR \
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
@@ -492,7 +504,7 @@ jobs:
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
 
@@ -566,7 +578,7 @@ jobs:
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             export case_name="glm45_single_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
           fi
@@ -586,7 +598,7 @@ jobs:
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             export case_name="qwen3_single_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
@@ -607,7 +619,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_single_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-single-card.\033[0m"
           fi
@@ -721,6 +733,7 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e DATE \
+            -e update_baseline \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -755,7 +768,7 @@ jobs:
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/$CUDA_VERSION/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
 
@@ -813,7 +826,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -833,7 +846,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -853,7 +866,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft_cp"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 sft cp.\033[0m"
           fi
@@ -873,7 +886,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_lora"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -893,7 +906,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_dpo"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
           fi
@@ -914,7 +927,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="glm45_dpo_lora"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo_lora.\033[0m"
           fi
@@ -938,7 +951,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_grouped_gemm"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
           fi
@@ -961,7 +974,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_fp8"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
           fi
@@ -981,7 +994,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_ep4"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 EP4.\033[0m"
           fi
@@ -1001,7 +1014,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_pt"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen pre-train.\033[0m"
           fi
@@ -1021,7 +1034,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_sft"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen sft.\033[0m"
           fi
@@ -1041,7 +1054,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_lora"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen lora.\033[0m"
           fi
@@ -1062,7 +1075,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_tp8_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl sft.\033[0m"
           fi
@@ -1083,7 +1096,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_lora_h20_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl lora.\033[0m"
           fi
@@ -1104,7 +1117,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_moe_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl moe.\033[0m"
           fi
@@ -1125,7 +1138,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_fsdp_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-fsdp.\033[0m"
           fi
@@ -1233,6 +1246,7 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e use_release \
+            -e update_baseline \
             -e PIP_CACHE_DIR \
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
@@ -1275,7 +1289,7 @@ jobs:
           pip install colorlog>=6.10.1
           python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
 
@@ -1330,7 +1344,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_pt_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 pre-train.\033[0m"
           fi
@@ -1350,7 +1364,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_sft_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 sft.\033[0m"
           fi
@@ -1370,7 +1384,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_lora_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 lora.\033[0m"
           fi
@@ -1390,7 +1404,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
           fi
@@ -1410,7 +1424,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_lora_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo_lora.\033[0m"
           fi
@@ -1430,7 +1444,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_pt_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen pre-train.\033[0m"
           fi
@@ -1450,7 +1464,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_sft_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen sft.\033[0m"
           fi
@@ -1470,7 +1484,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_lora_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen lora.\033[0m"
           fi
@@ -1490,7 +1504,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_tp8_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl sft.\033[0m"
           fi
@@ -1510,7 +1524,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_lora_a100_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl lora.\033[0m"
           fi
@@ -1530,7 +1544,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_moe_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl moe.\033[0m"
           fi
