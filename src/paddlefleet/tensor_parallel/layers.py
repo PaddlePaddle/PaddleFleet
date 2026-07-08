@@ -1058,6 +1058,7 @@ def column_sequence_parallel_linear(
     weight,
     bias=None,
     mp_group=None,
+    use_accuracy_compatible: bool = False,
 ):
     """Functional version of ColumnSequenceParallelLinear using fused_linear.
 
@@ -1085,6 +1086,20 @@ def column_sequence_parallel_linear(
         input_parallel = AllGatherOpLegacy.apply(x, 0, mp_group)
     else:
         input_parallel = x
+
+    if (
+        use_accuracy_compatible
+        and not is_mp
+        and input_parallel.dtype == paddle.bfloat16
+        and weight.dtype == paddle.bfloat16
+    ):
+        # Accuracy-compatible Kimi alignment: in TP=1 there is no sequence
+        # parallel communication to preserve here, and Paddle fused_linear
+        # selects a BF16 GEMM path that diverges from Megatron-Core no-TE
+        # torch.nn.functional.linear for shared-expert fc1.  Use Paddle's
+        # F.linear path under the explicit accuracy gate; default experimental
+        # fused_linear behavior remains unchanged.
+        return F.linear(input_parallel, weight, bias)
 
     output = fused_linear(input_parallel, weight, bias)
     return output
@@ -1404,7 +1419,13 @@ class ColumnParallelLinear(paddle.nn.Layer):
 
         if getattr(self.config, "gpt_model_use_experimental_version", False):
             output = column_sequence_parallel_linear(
-                input_, weight, self.bias, mp_group=self.tp_group
+                input_,
+                weight,
+                self.bias,
+                mp_group=self.tp_group,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
             )
             return output, None
 
