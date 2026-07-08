@@ -60,6 +60,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN = 3
+
 
 def tensors_clone(outputs):
     """
@@ -92,6 +94,112 @@ def tensors_clone(outputs):
         raise ValueError(
             f"Unsupported data type:{type(outputs)} in tensors_clone"
         )
+
+
+def _is_indexcache_recompute_topk_state(value):
+    return (
+        isinstance(value, (tuple, list))
+        and len(value) == _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN
+        and all(isinstance(item, paddle.Tensor) for item in value)
+    )
+
+
+def _mark_indexcache_recompute_topk_state_stop_gradient(value):
+    if not _is_indexcache_recompute_topk_state(value):
+        return value
+    for tensor in value:
+        tensor.stop_gradient = True
+    return tuple(value)
+
+
+def _ensure_recompute_non_leaf_tensor(value):
+    if (
+        isinstance(value, paddle.Tensor)
+        and not value.stop_gradient
+        and getattr(value, "is_leaf", False)
+    ):
+        return paddle.scale(value, scale=1.0, bias=0.0)
+    return value
+
+
+def _describe_indexcache_recompute_input(value):
+    if value is None:
+        return None
+    if isinstance(value, paddle.Tensor):
+        return {
+            "type": "Tensor",
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+            "stop_gradient": bool(value.stop_gradient),
+            "is_leaf": bool(getattr(value, "is_leaf", False)),
+        }
+    if isinstance(value, (tuple, list)):
+        return [
+            _describe_indexcache_recompute_input(item)
+            for item in value
+            if item is not None
+        ]
+    return {"type": type(value).__name__}
+
+
+def _clone_indexcache_recompute_state_outputs(value):
+    value = _mark_indexcache_recompute_topk_state_stop_gradient(value)
+    cloned = tuple(tensor.clone() for tensor in value)
+    return _mark_indexcache_recompute_topk_state_stop_gradient(cloned)
+
+
+def _flatten_indexcache_recompute_outputs(outputs):
+    if not isinstance(outputs, tuple) or len(outputs) <= 2:
+        return outputs
+
+    output, context, indexcache_state = outputs[0], outputs[1], outputs[2]
+    if not _is_indexcache_recompute_topk_state(indexcache_state):
+        return outputs
+
+    indexcache_state = _clone_indexcache_recompute_state_outputs(indexcache_state)
+
+    if context is None:
+        return (output, *indexcache_state)
+    return (output, context, *indexcache_state)
+
+
+def _unpack_flattened_indexcache_recompute_outputs(outputs):
+    if not isinstance(outputs, tuple):
+        return None
+
+    if (
+        len(outputs) == 1 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN
+        and all(
+            isinstance(item, paddle.Tensor)
+            for item in outputs[1 : 1 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN]
+        )
+    ):
+        indexcache_state = _mark_indexcache_recompute_topk_state_stop_gradient(
+            outputs[1 : 1 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN]
+        )
+        return (
+            outputs[0],
+            None,
+            indexcache_state,
+        )
+
+    if (
+        len(outputs) == 2 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN
+        and all(
+            isinstance(item, paddle.Tensor)
+            for item in outputs[2 : 2 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN]
+        )
+    ):
+        indexcache_state = _mark_indexcache_recompute_topk_state_stop_gradient(
+            outputs[2 : 2 + _INDEXCACHE_RECOMPUTE_TOPK_STATE_LEN]
+        )
+        return (
+            outputs[0],
+            outputs[1],
+            indexcache_state,
+        )
+
+    return None
 
 
 @dataclass
@@ -596,8 +704,100 @@ class TransformerLayer(nn.Layer):
             packed_seq_params = dict_args.get("packed_seq_params", None)
             input_ids = dict_args.get("input_ids", None)
             indexcache_state = dict_args.get("indexcache_state", None)
+            indexcache_state = (
+                _mark_indexcache_recompute_topk_state_stop_gradient(
+                    indexcache_state
+                )
+                if indexcache_state is not None
+                else None
+            )
+            hidden_states = _ensure_recompute_non_leaf_tensor(hidden_states)
+            attention_mask = _ensure_recompute_non_leaf_tensor(attention_mask)
+            context = _ensure_recompute_non_leaf_tensor(context)
+            context_mask = _ensure_recompute_non_leaf_tensor(context_mask)
+            attn_mask_startend_row_indices = _ensure_recompute_non_leaf_tensor(
+                attn_mask_startend_row_indices
+            )
+            rotary_pos_emb = _ensure_recompute_non_leaf_tensor(rotary_pos_emb)
+            rotary_pos_cos = _ensure_recompute_non_leaf_tensor(rotary_pos_cos)
+            rotary_pos_sin = _ensure_recompute_non_leaf_tensor(rotary_pos_sin)
+            swa_rotary_pos_emb = _ensure_recompute_non_leaf_tensor(
+                swa_rotary_pos_emb
+            )
+            swa_rotary_pos_cos = _ensure_recompute_non_leaf_tensor(
+                swa_rotary_pos_cos
+            )
+            swa_rotary_pos_sin = _ensure_recompute_non_leaf_tensor(
+                swa_rotary_pos_sin
+            )
+            position_ids = _ensure_recompute_non_leaf_tensor(position_ids)
+            attention_bias = _ensure_recompute_non_leaf_tensor(attention_bias)
+            input_ids = _ensure_recompute_non_leaf_tensor(input_ids)
+
+            if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
+                print(
+                    "[INDEXCACHE_RECOMPUTE_INPUT] "
+                    f"layer_number={self.layer_number} "
+                    f"hidden_states={_describe_indexcache_recompute_input(hidden_states)} "
+                    f"attention_mask={_describe_indexcache_recompute_input(attention_mask)} "
+                    f"attn_mask_startend_row_indices={_describe_indexcache_recompute_input(attn_mask_startend_row_indices)} "
+                    f"context={_describe_indexcache_recompute_input(context)} "
+                    f"context_mask={_describe_indexcache_recompute_input(context_mask)} "
+                    f"rotary_pos_emb={_describe_indexcache_recompute_input(rotary_pos_emb)} "
+                    f"rotary_pos_cos={_describe_indexcache_recompute_input(rotary_pos_cos)} "
+                    f"rotary_pos_sin={_describe_indexcache_recompute_input(rotary_pos_sin)} "
+                    f"swa_rotary_pos_emb={_describe_indexcache_recompute_input(swa_rotary_pos_emb)} "
+                    f"swa_rotary_pos_cos={_describe_indexcache_recompute_input(swa_rotary_pos_cos)} "
+                    f"swa_rotary_pos_sin={_describe_indexcache_recompute_input(swa_rotary_pos_sin)} "
+                    f"position_ids={_describe_indexcache_recompute_input(position_ids)} "
+                    f"attention_bias={_describe_indexcache_recompute_input(attention_bias)} "
+                    f"packed_seq_params={_describe_indexcache_recompute_input(packed_seq_params)} "
+                    f"input_ids={_describe_indexcache_recompute_input(input_ids)} "
+                    f"indexcache_state={_describe_indexcache_recompute_input(indexcache_state)}",
+                    flush=True,
+                )
+
+            def _forward_impl_for_recompute(
+                hidden_states,
+                attention_mask=None,
+                attn_mask_startend_row_indices=None,
+                context=None,
+                context_mask=None,
+                rotary_pos_emb=None,
+                rotary_pos_cos=None,
+                rotary_pos_sin=None,
+                swa_rotary_pos_emb=None,
+                swa_rotary_pos_cos=None,
+                swa_rotary_pos_sin=None,
+                position_ids=None,
+                attention_bias=None,
+                packed_seq_params=None,
+                input_ids=None,
+                indexcache_state=None,
+            ):
+                return _flatten_indexcache_recompute_outputs(
+                    self._forward_impl(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                        context=context,
+                        context_mask=context_mask,
+                        rotary_pos_emb=rotary_pos_emb,
+                        rotary_pos_cos=rotary_pos_cos,
+                        rotary_pos_sin=rotary_pos_sin,
+                        swa_rotary_pos_emb=swa_rotary_pos_emb,
+                        swa_rotary_pos_cos=swa_rotary_pos_cos,
+                        swa_rotary_pos_sin=swa_rotary_pos_sin,
+                        position_ids=position_ids,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                        input_ids=input_ids,
+                        indexcache_state=indexcache_state,
+                    )
+                )
+
             outputs = recompute(
-                self._forward_impl,
+                _forward_impl_for_recompute,
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 attn_mask_startend_row_indices=attn_mask_startend_row_indices.clone()  # Clone is necessary!
@@ -635,7 +835,14 @@ class TransformerLayer(nn.Layer):
             outputs = self._forward_impl(**dict_args)
 
         indexcache_state = None
-        if isinstance(outputs, tuple):
+        flattened_indexcache_outputs = (
+            _unpack_flattened_indexcache_recompute_outputs(outputs)
+            if self.full_recompute
+            else None
+        )
+        if flattened_indexcache_outputs is not None:
+            output, context, indexcache_state = flattened_indexcache_outputs
+        elif isinstance(outputs, tuple):
             output, context = outputs[0], outputs[1]
             if len(outputs) > 2:
                 indexcache_state = outputs[2]
@@ -704,6 +911,39 @@ class TransformerLayer(nn.Layer):
         else:
             dict_args.pop("indexcache_state", None)
         rst = {**dict_args, **rst}
+        if (
+            os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1"
+            and getattr(self.config, "index_topk_pattern", None)
+        ):
+            state = rst.get("indexcache_state", None)
+            if isinstance(state, (tuple, list)):
+                state_len = len(state)
+                state_shapes = [
+                    list(item.shape)
+                    if isinstance(item, paddle.Tensor)
+                    else type(item).__name__
+                    for item in state
+                ]
+                state_stop_gradients = [
+                    bool(item.stop_gradient)
+                    if isinstance(item, paddle.Tensor)
+                    else None
+                    for item in state
+                ]
+            else:
+                state_len = 0
+                state_shapes = None
+                state_stop_gradients = None
+            print(
+                "[INDEXCACHE_TRAIN_FLOW] "
+                f"layer={self.layer_number} "
+                f"full_recompute={self.full_recompute} "
+                f"flattened={flattened_indexcache_outputs is not None} "
+                f"state_len={state_len} state_shapes={state_shapes} "
+                f"state_stop_gradients={state_stop_gradients} "
+                f"keys={list(rst.keys())}",
+                flush=True,
+            )
         return rst
 
     def _forward_impl(
@@ -723,9 +963,18 @@ class TransformerLayer(nn.Layer):
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
+        indexcache_state: tuple | list | None = None,
         **kwargs,
     ):
-        indexcache_state = kwargs.get("indexcache_state", None)
+        if indexcache_state is None:
+            indexcache_state = kwargs.get("indexcache_state", None)
+        if _is_indexcache_recompute_topk_state(indexcache_state):
+            indexcache_state = _mark_indexcache_recompute_topk_state_stop_gradient(
+                indexcache_state
+            )
+            kwargs["indexcache_state"] = indexcache_state
+        elif indexcache_state is not None and "indexcache_state" not in kwargs:
+            kwargs["indexcache_state"] = indexcache_state
 
         def unpack_attention_outputs(attention_outputs):
             if isinstance(attention_outputs, tuple) and len(attention_outputs) == 3:
