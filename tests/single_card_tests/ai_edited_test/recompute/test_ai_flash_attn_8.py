@@ -193,6 +193,7 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
         causal = False
 
         hold_tensors = {
+            "mode": "dualchunk_allgather",
             "result_attention": result_attn,
             "softmax_lse": softmax_lse,
             "startend_row_indices": startend,
@@ -230,6 +231,7 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
         causal = False
 
         hold_tensors = {
+            "mode": "dualchunk_allgather",
             "result_attention": result_attn,
             "softmax_lse": softmax_lse,
             "startend_row_indices": startend,

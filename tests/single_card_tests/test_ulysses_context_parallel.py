@@ -1024,8 +1024,8 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         call_kwargs = mock_cp_attn.call_args[1]
         self.assertEqual(call_kwargs.get("mode"), "dualchunk_allgather")
 
-    def test_forward_contiguous_a2a_rr_raises(self):
-        """contiguous_a2a + refined recompute should raise NotImplementedError."""
+    def test_forward_contiguous_a2a_rr_passes_mode_kwarg(self):
+        """contiguous_a2a + refined recompute dispatches to the RR CP wrapper."""
         config = self._make_config(
             cp_balance_mode="contiguous_a2a", multi_latent_attention=True
         )
@@ -1042,7 +1042,11 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
                 "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
-            self.assertRaises(NotImplementedError) as ctx,
+            patch.object(
+                attn,
+                "rr_flashmask_attention_cp_func",
+                return_value=paddle.randn([2, 4, 4, 32], dtype="bfloat16"),
+            ) as mock_rr_cp,
         ):
             attn(
                 q,
@@ -1053,7 +1057,9 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
                 use_rr_flash_attention=True,
             )
 
-        self.assertIn("refined recompute", str(ctx.exception))
+        mock_rr_cp.assert_called_once()
+        call_kwargs = mock_rr_cp.call_args.kwargs
+        self.assertEqual(call_kwargs.get("mode"), "contiguous_a2a")
 
     def test_forward_contiguous_a2a_without_mla_raises(self):
         """contiguous_a2a without multi_latent_attention should raise."""
