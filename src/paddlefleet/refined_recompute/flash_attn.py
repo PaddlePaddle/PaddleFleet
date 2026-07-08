@@ -1232,7 +1232,9 @@ def ulysses_local_flashmask_first_fwd(
     softmax_scale,
 ):
     """Run local Ulysses FlashMask first forward and save RR tensors."""
-    fa_version = _get_fa_version(query_states.shape[-1])
+    fa_version = get_fa_version(
+        query_states.shape[-1], value_states.shape[-1], startend_row_indices
+    )
     if fa_version == 2:
         if softmax_scale is not None:
             raise NotImplementedError(
@@ -1476,7 +1478,7 @@ class RefinedRcomputeFlashMaskCpAttention:
             self._hold_tensors_queue.put(hold_tensors)
             return result_attention
         elif mode == "contiguous_swap2p":
-            assert _flash_mask_available, (
+            assert is_flash_mask_available(), (
                 "P2P SWA fast path requires flashmask installed. Please check."
             )
             if window_size is None or window_size <= 0:
