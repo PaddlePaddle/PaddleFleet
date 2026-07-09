@@ -442,6 +442,23 @@ class TransformerConfig(ModelParallelConfig):
     dict: keys contains all submodule need recompute, value means submodule in which layers need recompute
     """
 
+    decoderlayer_act_offload_settings: dict = None
+    """Settings for decoder layer activation offloading to CPU.
+
+    A dict with two keys:
+      - "type": str, the offload strategy type. Supported values:
+          - "mod": offload layers where (layer_number % value[0] == value[1]).
+                   "value" should be a list/tuple of two ints [divisor, remainder].
+          - "layer_idxs": offload specific layers by index.
+                   "value" should be a list of layer indices to offload.
+      - "value": the strategy parameter, format depends on "type".
+
+    Example:
+        {"type": "mod", "value": [1, 0]}       # offload all layers (every layer % 1 == 0)
+        {"type": "mod", "value": [2, 0]}       # offload even-numbered layers
+        {"type": "layer_idxs", "value": [0, 5, 10]}  # offload layers 0, 5, 10
+    """
+
     ####################
     # MoE related
     ####################
