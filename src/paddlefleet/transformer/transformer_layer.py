@@ -651,6 +651,7 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
+                **offload_kwargs,
             )
         else:
             outputs = self._forward_impl(**dict_args)
