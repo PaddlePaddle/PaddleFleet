@@ -39,9 +39,19 @@ class _TileProjection:
         return paddle.tile(x, reps)[..., : self.out_dim], None
 
 
+def _expected_rotary_seq_len(hidden_states, config):
+    if config.sequence_parallel:
+        return (
+            hidden_states.shape[0]
+            * config.tensor_model_parallel_size
+            * config.context_parallel_size
+        )
+    return hidden_states.shape[1] * config.context_parallel_size
+
+
 class _NoneRotaryEmbedding:
     def get_rotary_seq_len(self, hidden_states, config, packed_seq_params=None):
-        return hidden_states.shape[1] * config.context_parallel_size
+        return _expected_rotary_seq_len(hidden_states, config)
 
     def __call__(self, *args, **kwargs):
         return None
@@ -52,7 +62,7 @@ class _FakeRotaryEmbedding:
         self.dim = dim
 
     def get_rotary_seq_len(self, hidden_states, config, packed_seq_params=None):
-        return hidden_states.shape[1] * config.context_parallel_size
+        return _expected_rotary_seq_len(hidden_states, config)
 
     def __call__(
         self,
@@ -195,7 +205,14 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         except Exception:
             pass
 
-    def _make_layer(self, rope_type, apply_rope_fusion, context_parallel_size):
+    def _make_layer(
+        self,
+        rope_type,
+        apply_rope_fusion,
+        context_parallel_size,
+        sequence_parallel=False,
+        tensor_model_parallel_size=1,
+    ):
         heads = 2
         qk_nope = 4
         qk_rope = 8
@@ -214,8 +231,8 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             q_lora_rank=None,
             hidden_size=hidden,
             kv_lora_rank=kv_lora,
-            sequence_parallel=False,
-            tensor_model_parallel_size=1,
+            sequence_parallel=sequence_parallel,
+            tensor_model_parallel_size=tensor_model_parallel_size,
             context_parallel_size=context_parallel_size,
             cp_balance_mode="dualchunk_allgather",
             rope_type=rope_type,
@@ -263,7 +280,15 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         module.TransformerLayer = TransformerLayer
         return module
 
-    def _run_layer(self, layer, hidden, cp_size, cp_rank, scatter_calls=None):
+    def _run_layer(
+        self,
+        layer,
+        hidden,
+        cp_size,
+        cp_rank,
+        scatter_calls=None,
+        packed_seq_params=None,
+    ):
         def scatter_spy(tensor, axis=0, mode="dualchunk_allgather"):
             if scatter_calls is not None:
                 scatter_calls.append((list(tensor.shape), axis, mode))
@@ -289,7 +314,9 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             ),
         ]
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
-            return layer.get_query_key_value_tensors(hidden)
+            return layer.get_query_key_value_tensors(
+                hidden, packed_seq_params=packed_seq_params
+            )
 
     def _assert_equal(self, actual, expected, name):
         self.assertTrue(
@@ -457,6 +484,173 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             ValueError, "Context parallel requires rotary_pos_emb"
         ):
             self._run_layer(layer, self._hidden(seq=8), cp_size=4, cp_rank=0)
+
+    def test_context_parallel_rejects_packed_seq_params(self):
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=True,
+            context_parallel_size=4,
+        )
+        packed_seq_params = types.SimpleNamespace(qkv_format="thd")
+        with self.assertRaisesRegex(
+            ValueError, "does not support packed_seq_params"
+        ):
+            self._run_layer(
+                layer,
+                self._hidden(seq=8),
+                cp_size=4,
+                cp_rank=0,
+                packed_seq_params=packed_seq_params,
+            )
+
+    def test_sequence_parallel_rotary_seq_len_validation(self):
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=False,
+            context_parallel_size=4,
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+        )
+        hidden = self._hidden(batch=8, seq=2)
+        with mock.patch.object(
+            mla_mod,
+            "apply_rotary_pos_emb",
+            side_effect=_apply_rotary_pos_emb_identity,
+        ):
+            q_ref, *_ = self._run_layer(layer, hidden, cp_size=4, cp_rank=0)
+        self.assertEqual(q_ref.shape[0], hidden.shape[0])
+
+    def test_context_parallel_rejects_wrong_rotary_seq_len(self):
+        class _BadSeqLenRotaryEmbedding(_FakeRotaryEmbedding):
+            def get_rotary_seq_len(
+                self, hidden_states, config, packed_seq_params=None
+            ):
+                return _expected_rotary_seq_len(hidden_states, config) + 8
+
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=True,
+            context_parallel_size=4,
+        )
+        layer.rotary_pos_emb = _BadSeqLenRotaryEmbedding(layer.qk_rope_head_dim)
+        with self.assertRaisesRegex(
+            ValueError, "rotary_seq_len to be the global sequence length"
+        ):
+            self._run_layer(layer, self._hidden(seq=8), cp_size=4, cp_rank=0)
+
+    def test_context_parallel_rejects_wrong_cached_cos_sin_length(self):
+        class _LongCachedRotaryEmbedding(_FakeRotaryEmbedding):
+            def get_cached_cos_sin(
+                self,
+                seq_len,
+                offset=0,
+                dtype=paddle.get_default_dtype(),
+                packed_seq=False,
+            ):
+                emb = self._emb(seq_len + 8, offset).astype(dtype)
+                return emb + 1.0, emb * 0.5 + 0.25
+
+        layer = self._make_layer(
+            rope_type="yarn",
+            apply_rope_fusion=True,
+            context_parallel_size=4,
+        )
+        layer.rotary_pos_emb = _LongCachedRotaryEmbedding(
+            layer.qk_rope_head_dim
+        )
+        with self.assertRaisesRegex(
+            ValueError, "rotary_pos_cos/sin sequence length"
+        ):
+            self._run_layer(layer, self._hidden(seq=8), cp_size=4, cp_rank=0)
+
+    def test_context_parallel_rejects_wrong_rotary_pos_emb_length(self):
+        class _LongRotaryEmbedding(_FakeRotaryEmbedding):
+            def __call__(
+                self,
+                max_seq_len,
+                offset=0,
+                packed_seq=False,
+                position_ids=None,
+            ):
+                return self._emb(max_seq_len + 8, offset)
+
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=True,
+            context_parallel_size=4,
+        )
+        layer.rotary_pos_emb = _LongRotaryEmbedding(layer.qk_rope_head_dim)
+        with self.assertRaisesRegex(
+            ValueError, "rotary_pos_emb sequence length"
+        ):
+            self._run_layer(layer, self._hidden(seq=8), cp_size=4, cp_rank=0)
+
+    def test_fused_rope_rejects_local_cos_sin_length_mismatch(self):
+        layer = self._make_layer(
+            rope_type="yarn",
+            apply_rope_fusion=True,
+            context_parallel_size=1,
+        )
+        hidden = self._hidden(seq=8)
+        with (
+            mock.patch.object(
+                layer.rotary_pos_emb,
+                "get_cached_cos_sin",
+                return_value=(
+                    layer.rotary_pos_emb._emb(9) + 1.0,
+                    layer.rotary_pos_emb._emb(9) * 0.5 + 0.25,
+                ),
+            ),
+            self.assertRaisesRegex(ValueError, "local cos/sin sequence length"),
+        ):
+            self._run_layer(layer, hidden, cp_size=1, cp_rank=0)
+
+    def test_unfused_rope_rejects_local_rotary_pos_emb_mismatch(self):
+        class _ShortRotaryEmbedding(_FakeRotaryEmbedding):
+            def __call__(
+                self,
+                max_seq_len,
+                offset=0,
+                packed_seq=False,
+                position_ids=None,
+            ):
+                return self._emb(max_seq_len - 1, offset)
+
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=False,
+            context_parallel_size=1,
+        )
+        layer.rotary_pos_emb = _ShortRotaryEmbedding(layer.qk_rope_head_dim)
+        with self.assertRaisesRegex(
+            ValueError, "local rotary_pos_emb sequence"
+        ):
+            self._run_layer(layer, self._hidden(seq=8), cp_size=1, cp_rank=0)
+
+    def test_unfused_rope_rejects_packed_seq_params(self):
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=False,
+            context_parallel_size=1,
+        )
+        cu_seqlens = paddle.to_tensor([0, 8], dtype="int32")
+        packed_seq_params = types.SimpleNamespace(
+            qkv_format="thd",
+            cu_seqlens_q_padded=None,
+            cu_seqlens_kv_padded=None,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+        )
+        with self.assertRaisesRegex(
+            ValueError, "qkv_up_proj_and_rope_apply does not support"
+        ):
+            self._run_layer(
+                layer,
+                self._hidden(seq=8),
+                cp_size=1,
+                cp_rank=0,
+                packed_seq_params=packed_seq_params,
+            )
 
 
 if __name__ == "__main__":
