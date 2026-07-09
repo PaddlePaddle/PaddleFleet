@@ -32,6 +32,7 @@ from paddle import Tensor
 from paddlefleet_ops.flash_mask_facade import (
     flash_attention,
     flashmask_attention,
+    get_fa_version,
 )
 
 from paddlefleet.context_parallel_utils import (
@@ -585,14 +586,25 @@ class DotProductAttention(FleetLayer):
             else:
                 flashmask_attention_func = flashmask_attention
 
-            # TODO(umiswing): move this padding to flash_mask_facade,
-            # flash_mask_facade wrap the padding logic for fa/fm function call,
-            # but it does not wrap the padding for rr now.
-            # Handle MLA case where query/key head_dim != value head_dim
-            # flashmask_attention requires head_dim_q == head_dim_v for backward pass
-            need_value_padding = (
-                use_rr_flash_attention and q_head_dim != v_head_dim
+            if self.sliding_window is not None:
+                attn_mask_startend_row_indices = (
+                    startend_row_indices_add_sliding_window(
+                        attn_mask_startend_row_indices,
+                        self.sliding_window,
+                        self.head_wise_swa_ratio,
+                        value.shape[2],
+                    )
+                )
+
+            fa_version = get_fa_version(
+                q_head_dim, v_head_dim, attn_mask_startend_row_indices
             )
+
+            need_value_padding = (
+                not (
+                    fa_version == 4 and q_head_dim == 192 and v_head_dim == 128
+                )
+            ) and q_head_dim != v_head_dim
 
             if need_value_padding:
                 # Pad value to match query head_dim
@@ -606,18 +618,9 @@ class DotProductAttention(FleetLayer):
             else:
                 value_padded = value
 
-            if self.sliding_window is not None:
-                attn_mask_startend_row_indices = (
-                    startend_row_indices_add_sliding_window(
-                        attn_mask_startend_row_indices,
-                        self.sliding_window,
-                        self.head_wise_swa_ratio,
-                        value.shape[2],
-                    )
-                )
-
             if not use_rr_flash_attention and self._has_custom_softmax_scale:
                 extra_kwargs["softmax_scale"] = self.softmax_scale
+
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),

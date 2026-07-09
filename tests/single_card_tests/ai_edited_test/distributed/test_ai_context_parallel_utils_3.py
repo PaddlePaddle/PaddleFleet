@@ -347,14 +347,17 @@ class TestPreprocessIndexDualChunks(unittest.TestCase):
 
 
 class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
-    """Tests covering the deterministic fa_version override in
-    cp_flashmask_allgatherkv_balance_forward (lines around 595-609).
+    """Tests covering the fa_version selection in
+    cp_flashmask_allgatherkv_balance_forward, which now delegates to
+    ``flash_mask_facade.get_fa_version``.
 
-    Four branches are covered:
-      A) block_mask in signature, deterministic + hdim>128 -> override to 2
-      B) block_mask in signature, deterministic but hdim<=128 -> no override
-      C) block_mask NOT in signature, deterministic -> override to 2
-      D) block_mask NOT in signature, no deterministic -> no override
+    Under FA3, deterministic mode only falls back to FA2 when head_dim > 128;
+    the ``block_mask`` signature no longer affects the decision.
+
+      A) deterministic + hdim>128 -> override to 2
+      B) deterministic + hdim<=128 -> no override (stays 3)
+      C) deterministic + small hdim -> no override (stays 3)
+      D) no deterministic -> no override (stays 3)
     """
 
     def _run_forward(self, *, has_block_mask, deterministic, hdim, fa_flag=3):
@@ -423,28 +426,28 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
         return out[-1]  # fa_version
 
     def test_branch_a_block_mask_det_hdim_gt_128(self):
-        """A) block_mask in sig, deterministic + hdim>128 -> 2."""
+        """A) deterministic + hdim>128 -> 2."""
         fa = self._run_forward(
             has_block_mask=True, deterministic=True, hdim=192, fa_flag=3
         )
         self.assertEqual(fa, 2)
 
     def test_branch_b_block_mask_det_hdim_le_128(self):
-        """B) block_mask in sig, deterministic but hdim<=128 -> no override."""
+        """B) deterministic but hdim<=128 -> no override."""
         fa = self._run_forward(
             has_block_mask=True, deterministic=True, hdim=128, fa_flag=3
         )
         self.assertEqual(fa, 3)
 
     def test_branch_c_no_block_mask_deterministic(self):
-        """C) block_mask NOT in sig, deterministic -> override to 2."""
+        """C) deterministic + small hdim -> no override (stays 3)."""
         fa = self._run_forward(
             has_block_mask=False, deterministic=True, hdim=64, fa_flag=3
         )
-        self.assertEqual(fa, 2)
+        self.assertEqual(fa, 3)
 
     def test_branch_d_no_block_mask_no_deterministic(self):
-        """D) block_mask NOT in sig, no deterministic -> no override."""
+        """D) no deterministic -> no override."""
         fa = self._run_forward(
             has_block_mask=False, deterministic=False, hdim=64, fa_flag=3
         )

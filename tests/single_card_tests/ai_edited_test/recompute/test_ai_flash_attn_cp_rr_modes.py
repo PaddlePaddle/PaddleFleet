@@ -138,7 +138,7 @@ class TestFlashMaskAttnFunctor(unittest.TestCase):
         def fake_flashmask_attention(query, key, value, block_mask=None):
             return None
 
-        with patch.object(fa, "_get_fa_version", return_value=3):
+        with patch.object(fa, "get_fa_version", return_value=3):
             self.assertIs(
                 fa.FlashMaskAttnFunctor.forward(
                     ctx, q, k, v, startend, None, hold
@@ -268,7 +268,7 @@ class TestUlyssesHelpers(unittest.TestCase):
         )
         for version, target, return_value in cases:
             with self.subTest(version=version):
-                with patch.object(fa, "_get_fa_version", return_value=version):
+                with patch.object(fa, "get_fa_version", return_value=version):
                     if version == 4:
                         patcher = patch.object(
                             fa, target, return_value=return_value, create=True
@@ -302,13 +302,13 @@ class TestUlyssesHelpers(unittest.TestCase):
                         startend,
                     )
         with (
-            patch.object(fa, "_get_fa_version", return_value=2),
+            patch.object(fa, "get_fa_version", return_value=2),
             self.assertRaises(NotImplementedError),
         ):
             fa.ulysses_local_flashmask_first_fwd(q, q, q, startend, False, 0.5)
 
         with (
-            patch.object(fa, "_get_fa_version", return_value=0),
+            patch.object(fa, "get_fa_version", return_value=0),
             self.assertRaises(ValueError),
         ):
             fa.ulysses_local_flashmask_first_fwd(q, q, q, startend, False, None)
@@ -331,7 +331,7 @@ class TestUlyssesHelpers(unittest.TestCase):
         ):
             with self.subTest(signature=fake_attention.__name__):
                 with (
-                    patch.object(fa, "_get_fa_version", return_value=3),
+                    patch.object(fa, "get_fa_version", return_value=3),
                     patch.object(fa, "flashmask_attention", fake_attention),
                     patch.object(fa, "_C_ops") as mock_c_ops,
                 ):
@@ -392,7 +392,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
         recv_v = paddle.randn([1, 2, 2, 4])
         with (
             self._patch_group(),
-            patch.object(fa, "_flash_mask_available", True),
+            patch.object(fa, "is_flash_mask_available", return_value=True),
             patch.object(
                 fa,
                 "cp_flashmask_swa_p2p_forward",
@@ -425,7 +425,7 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
     def test_p2p_rejects_invalid_window(self):
         with (
             self._patch_group(),
-            patch.object(fa, "_flash_mask_available", True),
+            patch.object(fa, "is_flash_mask_available", return_value=True),
         ):
             attn = fa.RefinedRcomputeFlashMaskCpAttention()
             for window_size in (None, 0):
