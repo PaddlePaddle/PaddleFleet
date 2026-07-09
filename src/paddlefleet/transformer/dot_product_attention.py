@@ -92,6 +92,8 @@ def scaled_dot_product_attention_with_softmax_offset(
     softmax_offset=None,
     q_head_dim=None,
     scale=None,
+    dropout_p=0.0,
+    training=False,
 ):
     # --- CORRECT FIX (v2): manual softmax with virtual sink token ---
     # learnable_sink in flashmask adds a virtual extra token to the softmax
@@ -161,6 +163,12 @@ def scaled_dot_product_attention_with_softmax_offset(
     row_sum = row_sum + paddle.exp(sink - row_max)  # add sink
 
     weights = exp_s / row_sum  # [B, Hq, Q, K]
+    if dropout_p > 0.0:
+        weights = paddle.nn.functional.dropout(
+            weights,
+            p=dropout_p,
+            training=training,
+        )
 
     if groups > 1:
         # weights [B, Hkv, groups, Q, K] needed for V matmul without expanding V
@@ -626,6 +634,8 @@ class DotProductAttention(FleetLayer):
                     scale=self.softmax_scale
                     if self._has_custom_softmax_scale
                     else None,
+                    dropout_p=self.config.attention_dropout,
+                    training=self.training,
                 )
             else:
                 sdpa_kwargs = {}
