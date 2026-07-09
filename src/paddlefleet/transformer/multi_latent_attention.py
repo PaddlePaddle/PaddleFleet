@@ -849,6 +849,26 @@ class MLASelfAttention(MultiLatentAttention):
                 # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
                 # mscale = 1.0
 
+        if get_context_parallel_world_size() > 1:
+            # Keep RoPE inputs local to the current CP rank before the fused
+            # and non-fused apply paths consume them.
+            if rotary_pos_cos is not None and rotary_pos_sin is not None:
+                rotary_pos_cos = ContextParallelScatterOp.apply(
+                    rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
+                ).contiguous()
+                rotary_pos_sin = ContextParallelScatterOp.apply(
+                    rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
+                ).contiguous()
+            elif rotary_pos_emb is not None:
+                rotary_pos_emb = ContextParallelScatterOp.apply(
+                    rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
+                )
+            else:
+                raise ValueError(
+                    "Context parallel requires rotary_pos_emb or rotary_pos_cos/sin "
+                    "to be prepared before applying MLA RoPE."
+                )
+
         if (
             packed_seq_params is not None
             and packed_seq_params.qkv_format == "thd"
@@ -1084,13 +1104,7 @@ class MLASelfAttention(MultiLatentAttention):
                     if position_ids.numel() == q_len:
                         start_pos = int(position_ids.flatten()[0].item())
 
-                if get_context_parallel_world_size() > 1:
-                    # In EB dataflow and CP size > 1, rotary_pos_emb is [1, s, 1, d];
-                    # we need to scatter it to [1, s/cp, 1, d] here.
-                    rotary_pos_emb = ContextParallelScatterOp.apply(
-                        rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
-                    )
-                elif (
+                if get_context_parallel_world_size() == 1 and (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
                 ):
