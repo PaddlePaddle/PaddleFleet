@@ -849,10 +849,25 @@ class MLASelfAttention(MultiLatentAttention):
                 # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
                 # mscale = 1.0
 
-        if get_context_parallel_world_size() > 1:
+        cp_size = get_context_parallel_world_size()
+        if cp_size > 1:
             # Keep RoPE inputs local to the current CP rank before the fused
             # and non-fused apply paths consume them.
+            assert rotary_seq_len == cp_size * hidden_states.shape[1], (
+                "Context parallel requires rotary_seq_len to be the global "
+                f"sequence length, got rotary_seq_len={rotary_seq_len}, "
+                f"cp_size={cp_size}, local_seq_len={hidden_states.shape[1]}."
+            )
             if rotary_pos_cos is not None and rotary_pos_sin is not None:
+                assert (
+                    rotary_pos_cos.shape[1] == rotary_seq_len
+                    and rotary_pos_sin.shape[1] == rotary_seq_len
+                ), (
+                    "Context parallel requires rotary_pos_cos/sin sequence "
+                    f"length to match rotary_seq_len, got "
+                    f"cos={rotary_pos_cos.shape}, sin={rotary_pos_sin.shape}, "
+                    f"rotary_seq_len={rotary_seq_len}."
+                )
                 rotary_pos_cos = ContextParallelScatterOp.apply(
                     rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
                 ).contiguous()
@@ -860,6 +875,11 @@ class MLASelfAttention(MultiLatentAttention):
                     rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
                 ).contiguous()
             elif rotary_pos_emb is not None:
+                assert rotary_pos_emb.shape[1] == rotary_seq_len, (
+                    "Context parallel requires rotary_pos_emb sequence length "
+                    f"to match rotary_seq_len, got rotary_pos_emb="
+                    f"{rotary_pos_emb.shape}, rotary_seq_len={rotary_seq_len}."
+                )
                 rotary_pos_emb = ContextParallelScatterOp.apply(
                     rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
                 )
