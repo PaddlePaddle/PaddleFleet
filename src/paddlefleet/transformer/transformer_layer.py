@@ -37,10 +37,12 @@ from paddlefleet.parallel_state import (
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
+    has_recovered,
     need_full_recompute,
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
+from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -429,6 +431,10 @@ class TransformerLayer(nn.Layer):
             layer_number=self.layer_number,
         )
 
+    @property
+    def transformer_layer_weights(self):
+        return self.named_parameters()
+
     def forward(
         self,
         dict_args: dict,
@@ -578,7 +584,7 @@ class TransformerLayer(nn.Layer):
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
 
-        if self.full_recompute:
+        if self.full_recompute or (not has_recovered()):
             hidden_states = dict_args["hidden_states"]
             attention_mask = dict_args.get("attention_mask", None)
             attn_mask_startend_row_indices = dict_args.get(
@@ -778,6 +784,7 @@ class TransformerLayer(nn.Layer):
                         packed_seq_params=packed_seq_params,
                         block_attention_residuals=True,
                         in_recompute=self.full_recompute,
+                        input_ids=input_ids,
                         **kwargs,
                     )
 
@@ -828,6 +835,7 @@ class TransformerLayer(nn.Layer):
                         attention_bias=attention_bias,
                         packed_seq_params=packed_seq_params,
                         in_recompute=self.full_recompute,
+                        input_ids=input_ids,
                         **kwargs,
                     )
             self._log_md5(
@@ -860,6 +868,7 @@ class TransformerLayer(nn.Layer):
         in_recompute: bool = False,
         is_first_fwd: bool = False,
         block_attention_residuals: bool = False,
+        input_ids: Tensor | None = None,
         **kwargs,
     ):
         """
@@ -904,6 +913,12 @@ class TransformerLayer(nn.Layer):
             input_layernorm_output, "input_layernorm_out", self.layer_number
         )
 
+        extra_kwargs = {}
+        if input_ids is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["input_ids"] = input_ids
+
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
                 input_layernorm_output,
@@ -917,6 +932,7 @@ class TransformerLayer(nn.Layer):
                 past_key_values=kwargs.get("past_key_values"),
                 layer_idx=self.layer_number,
                 use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
             )
         else:
             attention_output_with_bias = self.self_attn(
@@ -936,6 +952,7 @@ class TransformerLayer(nn.Layer):
                 past_key_values=kwargs.get("past_key_values"),
                 layer_idx=self.layer_number,
                 use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
             )
 
         with paddle.enable_grad():
@@ -1202,6 +1219,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         )
 
         # Self-attention
+        extra_kwargs = {}
+        if kwargs.get("input_ids") is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["input_ids"] = kwargs["input_ids"]
+
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
                 input_layernorm_output,
@@ -1212,6 +1235,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                **extra_kwargs,
             )
         else:
             attention_output_with_bias = self.self_attn(
@@ -1225,6 +1249,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                **extra_kwargs,
             )
 
         # mHC: fused H_res + H_post + bias-dropout-add
@@ -1366,12 +1391,22 @@ class TransformerLayerWithOverlap(TransformerLayer):
             assert self.mlp.expert_model_parallel_size > 1, (
                 "By enabling `forward_backward_overlap_scheduler`, you should use expert parallel."
             )
-            assert self.mlp.moe_token_dispatcher_type in (
+            if self.mlp.moe_token_dispatcher_type not in (
                 "deepep",
                 "hybridep",
-            ), (
-                "By enabling `forward_backward_overlap_scheduler`, you should use deepep or hybridep for dispatching tokens."
-            )
+            ):
+                raise ValueError(
+                    f"TransformerLayerWithOverlap "
+                    f"(forward_backward_overlap_scheduler) requires "
+                    f"moe_token_dispatcher_type='deepep' or 'hybridep', but "
+                    f"got '{self.mlp.moe_token_dispatcher_type}'. The "
+                    f"'{self.mlp.moe_token_dispatcher_type}' dispatcher does "
+                    f"not implement the overlap dataflow contract "
+                    f"(_comm_manager, token_dispatch_overlap, dispatched_* "
+                    f"metadata) required by the overlap scheduler. Please "
+                    f"either switch to deepep/hybridep or disable "
+                    f"forward_backward_overlap_scheduler."
+                )
 
     def compute_attention(self, dict_args, is_first_fwd=False):
         with profile("attn"):

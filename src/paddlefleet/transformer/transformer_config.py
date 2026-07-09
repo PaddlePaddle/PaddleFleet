@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -29,10 +30,13 @@ from ..utils import (
     get_magic_init_method,
     init_method_normal,
     scaled_init_method_normal,
+    truncated_init_method_normal,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,6 +76,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
+
+    mtp_shared_last_layer: bool = False
+    """When True, MTP layers share the last backbone TransformerLayer parameters."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
@@ -248,6 +255,12 @@ class TransformerConfig(ModelParallelConfig):
     swa_rope_theta: float | None = None
     """The base period of the RoPE embeddings for sliding window attention layers. Defaults to rope_theta."""
 
+    swa_qk_nope_head_dim: int = None
+    """Dimension of the nope part of QK heads for SWA layers. If None, falls back to qk_nope_head_dim."""
+
+    swa_qk_rope_head_dim: int = None
+    """Dimension of the rope part of QK heads for SWA layers. If None, falls back to qk_rope_head_dim."""
+
     head_wise_swa_ratio: float = 0.0
     """Ratio of KV heads that use sliding window attention within an SWA layer.
     0.0 means all heads use SWA; values between 0 and 1 create a mix where
@@ -322,6 +335,12 @@ class TransformerConfig(ModelParallelConfig):
     from the fused QKV projection (doubling the query projection size). This allows the model
     to dynamically control the information flow from attention. See Qwen3.5 for reference."""
 
+    gated_attn_use_q_lora: bool = False
+    """If True, the gated attention gate uses the q_a_proj output (q_compressed, post
+    q_a_layernorm, dim = q_lora_rank) as the gate input instead of hidden_states. This is a
+    low-rank gate input for MLA networks that also reduces the gate projection parameter count.
+    Requires q_lora_rank is not None. Only applies when gated_attention is True."""
+
     ####################
     # block attention residuals
     ####################
@@ -348,6 +367,7 @@ class TransformerConfig(ModelParallelConfig):
     apply_query_key_layer_scaling is True."""
 
     high_precision_rope: bool = False
+    swa_high_precision_norm: bool = False
     ####################
     # fusion
     ####################
@@ -451,6 +471,11 @@ class TransformerConfig(ModelParallelConfig):
     """The type of token dispatcher to use. The default is 'deepep'.
     Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
+    moe_allgather_gate_overlap: bool = False
+    """Whether to issue the AllGather before the gate so it overlaps with gate
+    compute. Only honoured when ``moe_token_dispatcher_type='allgather'`` and
+    ``expert_model_parallel_size > 1``; ignored otherwise."""
+
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
 
@@ -537,6 +562,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
 
+    moe_split_feature_routing: bool = False
+    """Enable multi-view (split-feature) MoE routing. When True, the router
+    scores each expert with the sum of two independent views: the existing
+    ``self.weight`` gate plus a new ``self.weight_1`` projection, i.e.
+    ``score_func(logits_0) + score_func(logits_1)`` instead of a single gate
+    projection. The expert FFN compute path is unchanged. Disabled by default;
+    has no effect on hash-routing layers (moe_n_hash_layers), which keep using
+    the original single gate."""
+
     moe_n_hash_layers: int = 0
     """Number of leading transformer layers that use hash-based MoE routing.
     Layers with layer_number < moe_n_hash_layers (0-indexed) use a pre-computed
@@ -579,6 +613,7 @@ class TransformerConfig(ModelParallelConfig):
     """Context parallel scatter/gather layout mode.
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
+    "contiguous_a2a".
     """
 
     ####################
@@ -850,27 +885,14 @@ class TransformerConfig(ModelParallelConfig):
     Useful for debugging or ablation studies.
     """
 
-    csa_tilelang_backend: str | None = None
-    """Optional CSA TileLang backend.
-
-    None keeps the default Paddle implementation. 'attention_paddle_compat'
-    enables the TileLang indexer and sparse attention paths by default while
-    preserving Paddle-compatible tensor layouts and algorithm semantics.
-    """
-
-    csa_tilelang_enable_indexer: bool | None = None
-    """Optional override for the CSA TileLang indexer path.
-
-    None follows csa_tilelang_backend. True requires
-    csa_tilelang_backend='attention_paddle_compat'. False disables only the
-    CSA indexer TileLang path.
-    """
-
     csa_indexer_backend: str = "tilelang"
-    """CSA indexer backward backend.
+    """CSA indexer backend. Single switch selecting one of three
+    implementations of the compressed top-k indexer.
 
-    One of {"tilelang", "cudnn"}. Default "tilelang" preserves the legacy
-    path.
+    One of {"unfused", "tilelang", "cudnn"}:
+      * "unfused": Paddle/FusedDSAIndexerLoss reference path.
+      * "tilelang" (default): TileLang top-k and selected-set loss path.
+      * "cudnn": cuDNN indexer top-k/forward path.
     """
 
     csa_sparse_attn_backend: str = "tilelang"
@@ -884,6 +906,9 @@ class TransformerConfig(ModelParallelConfig):
       * "cudnn": FlashMLA sparse forward kernel + cuDNN DSA backward
         kernel.
     """
+
+    use_fast_hadamard: bool = False
+    """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
 
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
@@ -902,6 +927,10 @@ class TransformerConfig(ModelParallelConfig):
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
 
+    use_accuracy_compatible: bool = False
+    """Whether to enable accuracy-compatible kernels for cross-framework numerical
+    alignment. Defaults to False."""
+
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
 
@@ -910,6 +939,27 @@ class TransformerConfig(ModelParallelConfig):
 
     magic_init: bool = False
     """Use the magic initialization method."""
+
+    use_truncated_normal_init: bool = False
+    """Use truncated normal init N(0, sigma^2) clipped to
+    [-truncated_normal_init_factor*sigma, truncated_normal_init_factor*sigma].
+    Sigma prefers init_method_std, falling back to 0.5/sqrt(hidden_size)
+    when init_method_std is None. Independent switch; takes precedence over
+    magic_init when enabled."""
+
+    truncated_normal_init_factor: float = 3.0
+    """Truncation factor for use_truncated_normal_init: clip range is
+    [-factor*sigma, factor*sigma]."""
+
+    ####################
+    # Ernie Trainer Configs
+    ####################
+
+    moe_logging: bool = False
+    """Whether to enable MoE logging."""
+
+    deepep_buffer_configs: dict | None = None
+    """DeepEP buffer configuration."""
 
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
@@ -926,8 +976,6 @@ class TransformerConfig(ModelParallelConfig):
         "csa_compress_ratios": "csa_compress_ratios",
         "csa_compress_rotary_base": "csa_compress_rotary_base",
         "csa_dense_mode": "csa_dense_mode",
-        "csa_tilelang_backend": "csa_tilelang_backend",
-        "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
         "csa_indexer_backend": "csa_indexer_backend",
         "csa_sparse_attn_backend": "csa_sparse_attn_backend",
         "o_groups": "o_groups",
@@ -986,6 +1034,15 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.mtp_shared_last_layer:
+            # When MTP reuses the last backbone TransformerLayer's parameters,
+            # the MTP transformer block must have an identical structure to the
+            # backbone-last layer (same MoE / dense shape). Force-disable
+            # use_dense_mtp so the MTP layer matches whatever the backbone is.
+            assert not self.use_dense_mtp, (
+                "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
+            )
+
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
@@ -1063,7 +1120,31 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if self.magic_init:
+        if self.use_truncated_normal_init:
+            if self.truncated_normal_init_factor <= 0:
+                raise ValueError(
+                    "truncated_normal_init_factor must be positive when use_truncated_normal_init is True."
+                )
+            if self.init_method_std is None and self.hidden_size == 0:
+                raise ValueError(
+                    "hidden_size must be non-zero when init_method_std is None "
+                    "and use_truncated_normal_init is True."
+                )
+            sigma = (
+                self.init_method_std
+                if self.init_method_std is not None
+                else 0.5 / math.sqrt(self.hidden_size)
+            )
+            self.init_method = truncated_init_method_normal(
+                sigma, truncate_factor=self.truncated_normal_init_factor
+            )
+            self.init_method_std = sigma
+            logger.info(
+                f"[init] use_truncated_normal_init=True: TruncNormal(0, sigma^2) clipped to "
+                f"[-{self.truncated_normal_init_factor}*sigma, {self.truncated_normal_init_factor}*sigma], "
+                f"sigma={sigma}"
+            )
+        elif self.magic_init:
             if self.hidden_size == 0:
                 raise ValueError(
                     "hidden_size must be non-zero when magic_init is True."
@@ -1128,7 +1209,7 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.magic_init:
+        if self.use_truncated_normal_init or self.magic_init:
             self.output_layer_init_method = self.init_method
         elif self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
@@ -1142,7 +1223,7 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.magic_init:
+        if self.use_truncated_normal_init or self.magic_init:
             self.embedding_init_method = self.init_method
             self.embedding_init_method_std = self.init_method_std
         elif self.embedding_init_method is None:
@@ -1168,13 +1249,18 @@ class TransformerConfig(ModelParallelConfig):
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
+            mtp_num_layers = (
+                self.mtp_num_layers
+                if self.mtp_num_layers > 0
+                else self.num_nextn_predict_layers
+            )
             if (
                 len(self.csa_compress_ratios)
-                != self.num_hidden_layers + self.num_nextn_predict_layers
+                != self.num_hidden_layers + mtp_num_layers
             ):
                 raise ValueError(
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
-                    f"must equal num_hidden_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
+                    f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
             valid_ratios = {0, 4, 128}
             for i, r in enumerate(self.csa_compress_ratios):
@@ -1184,19 +1270,6 @@ class TransformerConfig(ModelParallelConfig):
                         f"Must be one of {valid_ratios}."
                     )
 
-            valid_tilelang_backends = {None, "attention_paddle_compat"}
-            if self.csa_tilelang_backend not in valid_tilelang_backends:
-                raise ValueError(
-                    f"csa_tilelang_backend={self.csa_tilelang_backend!r} is invalid. "
-                    f"Must be one of {valid_tilelang_backends}."
-                )
-            if (
-                self.csa_tilelang_backend is None
-                and self.csa_tilelang_enable_indexer
-            ):
-                raise ValueError(
-                    "csa_tilelang_enable_indexer=True requires csa_tilelang_backend='attention_paddle_compat'."
-                )
             if (
                 getattr(self, "csa_tilelang_enable_sparse_attn", None)
                 is not None
@@ -1207,10 +1280,33 @@ class TransformerConfig(ModelParallelConfig):
                     "instead (unfused=non-fused Paddle, tilelang=TileLang "
                     "fwd/bwd, cudnn=FlashMLA fwd + cuDNN bwd)."
                 )
-            if self.csa_indexer_backend not in {"tilelang", "cudnn"}:
+            if getattr(self, "csa_tilelang_enable_indexer", None) is not None:
+                raise ValueError(
+                    "csa_tilelang_enable_indexer has been removed. Use "
+                    "csa_indexer_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead (unfused=non-fused Paddle/FusedDSAIndexerLoss, "
+                    "tilelang=TileLang indexer, cudnn=cuDNN indexer)."
+                )
+            if getattr(self, "csa_tilelang_backend", None) is not None:
+                raise ValueError(
+                    "csa_tilelang_backend has been removed. Use "
+                    "csa_indexer_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "and csa_sparse_attn_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead."
+                )
+            valid_indexer_backends = {"unfused", "tilelang", "cudnn"}
+            if self.csa_indexer_backend not in valid_indexer_backends:
                 raise ValueError(
                     f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
-                    "Must be one of {'tilelang', 'cudnn'}."
+                    "Must be one of {'unfused', 'tilelang', 'cudnn'}."
+                )
+            if (
+                self.csa_indexer_backend == "cudnn"
+                and self.context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "csa_indexer_backend='cudnn' is not supported in the "
+                    "context-parallel CSA indexer path."
                 )
             if self.csa_sparse_attn_backend not in {
                 "unfused",
@@ -1221,6 +1317,18 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+
+        # swa_high_precision_norm is only supported for DSv4 models.
+        if (
+            self.swa_high_precision_norm
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
+            raise ValueError(
+                "swa_high_precision_norm=True is only supported when "
+                "experimental_attention_variant='dsv4_hybrid'. "
+                "High-precision norm mode is only adapted for DSv4 to align "
+                "training and inference numerical behavior."
+            )
 
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
@@ -1369,3 +1477,13 @@ class TransformerConfig(ModelParallelConfig):
                     "lm_head modulation will take effect."
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
+
+        if self.cp_balance_mode not in {
+            "dualchunk_allgather",
+            "contiguous_allgather",
+            "contiguous_a2a",
+        }:
+            raise ValueError(
+                f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
+                "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
+            )

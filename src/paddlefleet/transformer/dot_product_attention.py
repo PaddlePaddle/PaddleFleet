@@ -34,7 +34,9 @@ from paddlefleet_ops.flash_mask_facade import (
     flashmask_attention,
 )
 
-from paddlefleet.context_parallel_utils import flashmask_attention_cp
+from paddlefleet.context_parallel_utils import (
+    flashmask_attention_cp,
+)
 from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
 from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -49,6 +51,35 @@ from paddlefleet.transformer.utils import (
     startend_row_indices_add_sliding_window,
 )
 from paddlefleet.utils import divide
+
+
+class _EagerQKScoresFn(paddle.autograd.PyLayer):
+    """Compute QK scores with baddbmm forward and explicit matmul backward."""
+
+    @staticmethod
+    def forward(ctx, query, key_t, scale):
+        matmul_input_buffer = paddle.empty(
+            (query.shape[0], query.shape[1], key_t.shape[2]),
+            dtype=query.dtype,
+        )
+        scores = paddle.baddbmm(
+            matmul_input_buffer,
+            query,
+            key_t,
+            beta=0.0,
+            alpha=scale,
+        )
+        ctx.save_for_backward(query, key_t)
+        ctx.scale = scale
+        return scores
+
+    @staticmethod
+    def backward(ctx, d_scores):
+        query, key_t = ctx.saved_tensor()
+        scale = ctx.scale
+        d_query = paddle.matmul(d_scores, key_t, transpose_y=True) * scale
+        d_key_t = paddle.matmul(query, d_scores, transpose_x=True) * scale
+        return d_query, d_key_t
 
 
 class DotProductAttention(FleetLayer):
@@ -222,6 +253,12 @@ class DotProductAttention(FleetLayer):
         """
         bsz, q_len, num_heads, q_head_dim = query.shape
 
+        fm_kwargs = (
+            {"softmax_scale": self.softmax_scale}
+            if self._has_custom_softmax_scale
+            else {}
+        )
+
         if attn_mask_startend_row_indices is not None:
             # flashmask path — matches EC's scaled_dot_product_attention
             if self.config.flashmask_use_varlen:
@@ -239,6 +276,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=0.0,
                 causal=False,  # EC uses causal=False with 2-col startend_row_indices
+                **fm_kwargs,
             )
         else:
             # simple causal path — no document boundaries
@@ -249,6 +287,7 @@ class DotProductAttention(FleetLayer):
                 dropout=0.0,
                 causal=True,
                 return_softmax=False,
+                **fm_kwargs,
             )
 
         attn_output = attn_output.reshape([bsz, q_len, -1])
@@ -336,6 +375,8 @@ class DotProductAttention(FleetLayer):
                 "SWA doesn't support _attn_implementation is eager"
             )
 
+        use_mla = bool(getattr(self.config, "multi_latent_attention", False))
+
         if self.context_parallel_size > 1:
             assert packed_seq_params is None, (
                 "Packed sequence is not supported by context_parallel_size > 1 now."
@@ -343,11 +384,14 @@ class DotProductAttention(FleetLayer):
             assert not self.config.flashmask_use_varlen, (
                 "flashmask_use_varlen does not support context parallel now."
             )
-            attn_mask_startend_row_indices = (
-                self.expand_attn_mask_startend_row_indices_for_cp(
-                    attn_mask_startend_row_indices, key
+            if self.config.cp_balance_mode != "contiguous_a2a" or (
+                self.is_swa and use_mla
+            ):
+                attn_mask_startend_row_indices = (
+                    self.expand_attn_mask_startend_row_indices_for_cp(
+                        attn_mask_startend_row_indices, key
+                    )
                 )
-            )
             assert (
                 (
                     query.dtype == paddle.bfloat16
@@ -407,6 +451,11 @@ class DotProductAttention(FleetLayer):
 
             if use_rr_flash_attention:
                 flashmask_attention_func = self.rr_flashmask_attention_func
+                if self._has_custom_softmax_scale:
+                    raise NotImplementedError(
+                        "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
+                        "Disable refined_recompute or use default softmax_scale."
+                    )
             elif self.config.flashmask_use_varlen:
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
@@ -414,6 +463,11 @@ class DotProductAttention(FleetLayer):
             else:
                 flashmask_attention_func = flashmask_attention
 
+            fm_kwargs = (
+                {"softmax_scale": self.softmax_scale}
+                if self._has_custom_softmax_scale
+                else {}
+            )
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -421,6 +475,7 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=False,
+                **fm_kwargs,
             )
             attn_output = attn_output.reshape([bsz, q_len, -1])
             return attn_output
@@ -429,9 +484,12 @@ class DotProductAttention(FleetLayer):
             and attn_mask_startend_row_indices is None
             and not use_eager
         ):
-            assert self.is_swa is False, (
-                "SWA doesn't support scaled_dot_product_attention"
-            )
+            if self.training or query.shape[1] > 1:
+                assert self.is_swa is False, (
+                    "SWA prefill (q_len > 1) must not use SDPA — pass "
+                    "attn_mask_startend_row_indices to route through flashmask."
+                )
+
             # KV cache support for inference
             if use_cache and past_key_values is not None:
                 key, value = past_key_values.update(key, value, layer_idx)
@@ -448,6 +506,9 @@ class DotProductAttention(FleetLayer):
                 is_causal = True
                 attn_mask_kv = attention_mask
 
+            sdpa_kwargs = {}
+            if self._has_custom_softmax_scale:
+                sdpa_kwargs["scale"] = self.softmax_scale
             attn_output = paddle.nn.functional.scaled_dot_product_attention(
                 query,
                 key,
@@ -455,7 +516,7 @@ class DotProductAttention(FleetLayer):
                 attn_mask_kv,
                 self.config.attention_dropout,
                 is_causal=is_causal,
-                scale=self.softmax_scale,
+                **sdpa_kwargs,
             )
 
             attn_output = paddle.reshape(
@@ -472,27 +533,51 @@ class DotProductAttention(FleetLayer):
         ):
             # Note:
             # attn_mask_startend_row_indices is not None for flashmask
-            is_causal = attn_mask_type == AttnMaskType.causal
+            # KV cache support for inference with flashmask
+            if use_cache and past_key_values is not None:
+                key, value = past_key_values.update(key, value, layer_idx)
+                # During decode (q_len==1), disable causal since single query attends to all KV
+                if query.shape[1] == 1:
+                    is_causal = False
+                else:
+                    is_causal = True
+            else:
+                is_causal = attn_mask_type == AttnMaskType.causal
+
+            extra_kwargs = {}
             if self.context_parallel_size > 1:
                 flashmask_attention_func = (
                     self.rr_flashmask_attention_cp_func
                     if use_rr_flash_attention
                     else flashmask_attention_cp
                 )
-                is_causal = (
-                    False  # only support non-causal for flashmask_attention_cp
-                )
-                assert attn_mask_startend_row_indices.shape[-1] == 2
-                assert not self._has_custom_softmax_scale, (
-                    "flashmask_attention_cp does not support custom softmax_scale. "
-                    "Disable context_parallel or use default softmax_scale."
-                )
+                if use_rr_flash_attention:
+                    if self._has_custom_softmax_scale:
+                        raise NotImplementedError(
+                            "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
+                            "Disable refined_recompute or use default softmax_scale."
+                        )
+                extra_kwargs["mode"] = self.config.cp_balance_mode
+                if self.config.cp_balance_mode == "contiguous_a2a":
+                    if not self.config.multi_latent_attention:
+                        raise NotImplementedError(
+                            "cp_balance_mode contiguous_a2a only supports mla now"
+                        )
+                    if self.is_swa and use_mla:
+                        extra_kwargs["mode"] = "contiguous_swap2p"
+                        extra_kwargs["window_size"] = self.sliding_window[0]
+                        is_causal = False  # only support non-causal for flashmask_attention_cp
+                        assert attn_mask_startend_row_indices.shape[-1] == 2
+                else:
+                    is_causal = False  # only support non-causal for flashmask_attention_cp
+                    assert attn_mask_startend_row_indices.shape[-1] == 2
             elif use_rr_flash_attention:
                 flashmask_attention_func = self.rr_flashmask_attention_func
-                assert not self._has_custom_softmax_scale, (
-                    "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
-                    "Disable refined_recompute or use default softmax_scale."
-                )
+                if self._has_custom_softmax_scale:
+                    raise NotImplementedError(
+                        "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
+                        "Disable refined_recompute or use default softmax_scale."
+                    )
             elif self.config.flashmask_use_varlen:
                 flashmask_attention_func = partial(
                     flashmask_attention, use_varlen=True
@@ -531,6 +616,8 @@ class DotProductAttention(FleetLayer):
                     )
                 )
 
+            if not use_rr_flash_attention and self._has_custom_softmax_scale:
+                extra_kwargs["softmax_scale"] = self.softmax_scale
             attn_output = flashmask_attention_func(
                 query.astype(value.dtype),
                 key.astype(value.dtype),
@@ -538,11 +625,8 @@ class DotProductAttention(FleetLayer):
                 startend_row_indices=attn_mask_startend_row_indices,
                 dropout=self.config.attention_dropout,
                 causal=is_causal,
-                **(
-                    {"softmax_scale": self.softmax_scale}
-                    if self._has_custom_softmax_scale
-                    else {}
-                ),
+                learnable_sink=self.softmax_offset,
+                **extra_kwargs,
             )
 
             if need_value_padding:
@@ -604,20 +688,27 @@ class DotProductAttention(FleetLayer):
             output_size[0] * output_size[1], -1, output_size[3]
         )
 
-        # preallocting input tensor: [b * np, sq, sk]
-        matmul_input_buffer = paddle.empty(
-            (output_size[0] * output_size[1], output_size[2], output_size[3]),
-            query.dtype,
-        )
-
-        # Raw attention scores. [b * np, sq, sk]
-        matmul_result = paddle.baddbmm(
-            matmul_input_buffer,
-            query,
-            key,
-            beta=0.0,
-            alpha=self.softmax_scale,
-        )
+        if self.config.use_accuracy_compatible or use_eager:
+            matmul_result = _EagerQKScoresFn.apply(
+                query, key, self.softmax_scale
+            )
+        else:
+            # preallocating input tensor: [b * np, sq, sk]
+            matmul_input_buffer = paddle.empty(
+                (
+                    output_size[0] * output_size[1],
+                    output_size[2],
+                    output_size[3],
+                ),
+                query.dtype,
+            )
+            matmul_result = paddle.baddbmm(
+                matmul_input_buffer,
+                query,
+                key,
+                beta=0.0,
+                alpha=self.softmax_scale,
+            )
 
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.reshape(*output_size)
@@ -625,6 +716,35 @@ class DotProductAttention(FleetLayer):
         # ===========================
         # Attention probs and dropout
         # ===========================
+
+        if self.config.use_accuracy_compatible or use_eager:
+            if hasattr(self.scale_mask_softmax, "softmax_in_fp32"):
+                self.scale_mask_softmax.softmax_in_fp32 = True
+            if hasattr(self.config, "attention_softmax_in_fp32"):
+                self.config.attention_softmax_in_fp32 = True
+            if hasattr(self.scale_mask_softmax, "input_in_bf16"):
+                if attention_scores.dtype == paddle.bfloat16:
+                    self.scale_mask_softmax.input_in_fp16 = False
+                    self.scale_mask_softmax.input_in_bf16 = True
+                    self.scale_mask_softmax.input_in_float16 = True
+                elif attention_scores.dtype == paddle.float16:
+                    self.scale_mask_softmax.input_in_fp16 = True
+                    self.scale_mask_softmax.input_in_bf16 = False
+                    self.scale_mask_softmax.input_in_float16 = True
+                else:
+                    self.scale_mask_softmax.input_in_fp16 = False
+                    self.scale_mask_softmax.input_in_bf16 = False
+                    self.scale_mask_softmax.input_in_float16 = False
+
+        # PaddleFormers collate emits float32 lower-triangle masks where 1.0 means attend and 0.0
+        # means mask. PaddleFleet mask_func expects bool masks where True means
+        # masked-out, so convert to strict upper-triangle semantics.
+        if (
+            (self.config.use_accuracy_compatible or use_eager)
+            and attention_mask is not None
+            and attention_mask.dtype == paddle.float32
+        ):
+            attention_mask = (attention_mask < 0.5).cast("bool")
 
         # attention scores and attention mask [b, np, sq, sk]
         attention_probs: Tensor = self.scale_mask_softmax(

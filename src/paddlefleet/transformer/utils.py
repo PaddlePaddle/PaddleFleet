@@ -184,3 +184,95 @@ def get_doc_starts(doc_lens: paddle.Tensor) -> paddle.Tensor:
     if cum.shape[0] > 1:
         starts[1:] = cum[:-1]
     return starts
+
+
+def inspect_and_load_tensor(tag, layer_idx, tensor, load=True):
+    """Inspect tensor info and optionally override it with a saved numpy tensor.
+
+    Controlled by environment variables:
+        ABLATION_INSPECT_TENSOR: "1" to enable printing tensor info.
+        ABLATION_LOAD_TENSOR_PATH: path to directory with saved .npy files (layer 0 only).
+        ABLATION_INFO_SKIP_TAGS: comma-separated tags to skip for info printing.
+        ABLATION_DUMP_SKIP_TAGS: comma-separated tags to skip for tensor loading.
+
+    Args:
+        tag: identifier for the tensor checkpoint.
+        layer_idx: transformer layer index.
+        tensor: the live paddle tensor.
+        load: if True, attempt to load and override the tensor from disk (layer 0 only).
+              Default is True.
+
+    Returns:
+        The original tensor (if load=False or no file found), or the loaded tensor.
+    """
+    import hashlib
+    import os
+
+    import numpy as np
+
+    inspect_tensor = os.environ.get("ABLATION_INSPECT_TENSOR", "0") == "1"
+    ablation_load_path = os.environ.get("ABLATION_LOAD_TENSOR_PATH", "")
+    skip_tags = set(
+        filter(None, os.environ.get("ABLATION_INFO_SKIP_TAGS", "").split(","))
+    )
+    dump_skip_tags = set(
+        filter(None, os.environ.get("ABLATION_DUMP_SKIP_TAGS", "").split(","))
+    )
+
+    # --- info (print) ---
+    if inspect_tensor and tensor is not None and tag not in skip_tags:
+        try:
+            rank = (
+                paddle.distributed.get_rank()
+                if paddle.distributed.is_initialized()
+                else 0
+            )
+            t_f = tensor.astype("float32")
+            abssum = t_f.abs().sum().item()
+            md5 = hashlib.md5(t_f.numpy().tobytes()).hexdigest()
+            print(
+                f"[ABLATION_train] tag={tag} rank={rank} layer={layer_idx} "
+                f"abssum={abssum} md5={md5} shape={list(tensor.shape)} dtype={tensor.dtype}",
+                flush=True,
+            )
+        except Exception as e:
+            print(
+                f"[ABLATION_train] tag={tag} layer={layer_idx} info_failed={e}",
+                flush=True,
+            )
+
+    # --- load (override) ---
+    if (
+        load
+        and tensor is not None
+        and ablation_load_path
+        and layer_idx == 0
+        and tag not in dump_skip_tags
+    ):
+        path = os.path.join(ablation_load_path, f"{tag}.npy")
+        if os.path.exists(path):
+            arr = np.load(path)
+            if arr.shape != tuple(tensor.shape):
+                arr = arr.reshape(tensor.shape)
+            loaded = paddle.to_tensor(
+                arr, dtype=tensor.dtype, place=tensor.place
+            )
+            load_f32 = loaded.astype("float32")
+            abssum = load_f32.abs().sum().item()
+            md5 = hashlib.md5(load_f32.numpy().tobytes()).hexdigest()
+            print(
+                f"[ABLATION_load_tensor] loaded {tag} shape={list(loaded.shape)} dtype={loaded.dtype} abssum={abssum} md5={md5}",
+                flush=True,
+            )
+            orig_f32 = tensor.astype("float32")
+            diff = (orig_f32 - load_f32).abs()
+            max_abs_diff = diff.max().item()
+            mean_abs_diff = diff.mean().item()
+            rel_diff = mean_abs_diff / (load_f32.abs().mean().item() + 1e-12)
+            print(
+                f"[ABLATION_load_tensor] diff {tag} max_abs_diff={max_abs_diff} mean_abs_diff={mean_abs_diff} relative_diff={rel_diff}",
+                flush=True,
+            )
+            return loaded
+
+    return tensor

@@ -816,6 +816,7 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         expert_out_size = latent_size if use_latent_moe else hidden_size
         stub = MagicMock()
         stub.use_latent_moe = use_latent_moe
+        stub._latent_hidden = None
         if use_latent_moe:
             stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)
             stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
@@ -826,12 +827,24 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         stub.recompute_moe_gate_up = False
         stub.recompute_moe_premute = False
         stub.fp8_wgrad = True
+        stub._use_hybrid_ep_fusion.return_value = False
+        stub._project_to_latent.side_effect = (
+            (lambda x: stub.fc1_latent_proj(x))
+            if use_latent_moe
+            else (lambda x: x)
+        )
+        stub.combine.return_value = paddle.randn([bs_seq, expert_out_size])
         stub.dispatch.return_value = (
             paddle.randn([bs_seq, expert_out_size]),
             None,
         )
         stub.token_dispatcher._comm_manager.combine.return_value = paddle.randn(
             [bs_seq, expert_out_size]
+        )
+        stub.token_dispatcher.get_dispatched_routing.return_value = (
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
         )
         return stub, bs_seq
 

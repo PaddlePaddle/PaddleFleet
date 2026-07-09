@@ -81,9 +81,11 @@ class TestCpFlashmaskBackwardDispatch(unittest.TestCase):
                 out,
                 lse,
                 out_grad,
+                None,
                 group,
                 False,
                 config.fa_version,
+                None,  # softmax_scale
             )
 
         return mock_v2_grad
@@ -132,6 +134,7 @@ class TestFlashMaskAttnFunctorBackwardDispatch(unittest.TestCase):
 
         mock_ctx = MagicMock()
         mock_ctx.fa_version = 3
+        mock_ctx.sink_requires_grad = False
         mock_ctx.saved_tensor.return_value = (q, k, v, indices, out, lse, False)
 
         mock_v2_grad = MagicMock(return_value=(dummy, dummy, dummy))
