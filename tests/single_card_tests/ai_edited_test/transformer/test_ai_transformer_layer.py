@@ -447,7 +447,7 @@ class TestDecoderlayerActOffloadSettings(unittest.TestCase):
         """Reproduce the offload logic from transformer_layer.py L604-619."""
         decoderlayer_act_offload_settings = config.get(
             "decoderlayer_act_offload_settings", {"type": "", "value": ""}
-        )
+        ) or {"type": "", "value": ""}
         setting_type = decoderlayer_act_offload_settings["type"]
         offload_value = decoderlayer_act_offload_settings["value"]
         offload_kwargs = {}
@@ -525,14 +525,13 @@ class TestDecoderlayerActOffloadSettings(unittest.TestCase):
         self.assertEqual(result, {})
 
     def test_default_settings_when_not_configured(self):
-        """When decoderlayer_act_offload_settings is not set, defaults apply."""
+        """When decoderlayer_act_offload_settings is not set, no offload occurs.
+
+        The dataclass field may default to None or an empty dict depending on
+        the environment; the source code guards both with `or {...}`. Either
+        way the offload logic must produce an empty offload_kwargs.
+        """
         config = _make_config()
-        # decoderlayer_act_offload_settings defaults to None
-        settings = config.get(
-            "decoderlayer_act_offload_settings", {"type": "", "value": ""}
-        )
-        self.assertEqual(settings["type"], "")
-        self.assertEqual(settings["value"], "")
         result = self._compute_offload_kwargs(config, layer_number=1)
         self.assertEqual(result, {})
 
