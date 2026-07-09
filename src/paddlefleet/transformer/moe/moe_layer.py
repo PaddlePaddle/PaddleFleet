@@ -449,6 +449,7 @@ class MoELayer(nn.Layer):
                     )
                     logger.info(
                         "Automatically set NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=%d for hybrid EP backend.",
+                        num_of_hybrid_ep_ranks_per_nvlink_domain,
                     )
                 self.token_dispatcher = MoEFlexTokenDispatcher(
                     self.num_experts_per_device,
