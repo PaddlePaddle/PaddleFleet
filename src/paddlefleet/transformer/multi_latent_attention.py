@@ -1193,10 +1193,6 @@ class MLASelfAttention(MultiLatentAttention):
                         "packed_seq_params yet."
                     )
                 expected_rotary_pos_emb_len = q_len
-                if self.config.sequence_parallel:
-                    expected_rotary_pos_emb_len *= (
-                        self.config.tensor_model_parallel_size
-                    )
                 if rotary_pos_emb.shape[1] != expected_rotary_pos_emb_len:
                     raise ValueError(
                         "MLA RoPE requires local rotary_pos_emb sequence "

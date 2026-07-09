@@ -507,7 +507,7 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         layer = self._make_layer(
             rope_type="rope",
             apply_rope_fusion=False,
-            context_parallel_size=4,
+            context_parallel_size=1,
             sequence_parallel=True,
             tensor_model_parallel_size=2,
         )
@@ -517,7 +517,7 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             "apply_rotary_pos_emb",
             side_effect=_apply_rotary_pos_emb_identity,
         ):
-            q_ref, *_ = self._run_layer(layer, hidden, cp_size=4, cp_rank=0)
+            q_ref, *_ = self._run_layer(layer, hidden, cp_size=1, cp_rank=0)
         self.assertEqual(q_ref.shape[0], hidden.shape[0])
 
     def test_context_parallel_rejects_wrong_rotary_seq_len(self):
@@ -537,6 +537,30 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             ValueError, "rotary_seq_len to be the global sequence length"
         ):
             self._run_layer(layer, self._hidden(seq=8), cp_size=4, cp_rank=0)
+
+    def test_context_parallel_sequence_parallel_rejects_wrong_rotary_seq_len(
+        self,
+    ):
+        class _BadSeqLenRotaryEmbedding(_FakeRotaryEmbedding):
+            def get_rotary_seq_len(
+                self, hidden_states, config, packed_seq_params=None
+            ):
+                return _expected_rotary_seq_len(hidden_states, config) + 8
+
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=False,
+            context_parallel_size=4,
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+        )
+        layer.rotary_pos_emb = _BadSeqLenRotaryEmbedding(layer.qk_rope_head_dim)
+        with self.assertRaisesRegex(
+            ValueError, "rotary_seq_len to be the global sequence length"
+        ):
+            self._run_layer(
+                layer, self._hidden(batch=8, seq=2), cp_size=4, cp_rank=0
+            )
 
     def test_context_parallel_rejects_wrong_cached_cos_sin_length(self):
         class _LongCachedRotaryEmbedding(_FakeRotaryEmbedding):
