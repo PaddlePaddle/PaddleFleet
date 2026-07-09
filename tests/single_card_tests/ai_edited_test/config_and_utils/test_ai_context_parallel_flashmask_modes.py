@@ -99,9 +99,6 @@ class TestFlashMaskImportPath(unittest.TestCase):
             return module
 
         fake_modules = {
-            "paddlefleet_ops.flash_mask_facade": fake_module(
-                "paddlefleet_ops.flash_mask_facade"
-            ),
             "paddlefleet_ops.flash_mask": fake_module(
                 "paddlefleet_ops.flash_mask", is_package=True
             ),
