@@ -139,7 +139,14 @@ def scaled_dot_product_attention_with_softmax_offset(
         )  # [B, Hq, Q, K]
 
     if attn_mask_kv is not None:
-        scores = scores + attn_mask_kv.cast("float32")
+        if attn_mask_kv.dtype == paddle.bool:
+            scores = paddle.where(
+                attn_mask_kv,
+                paddle.full_like(scores, float("-inf")),
+                scores,
+            )
+        else:
+            scores = scores + attn_mask_kv.cast("float32")
     elif is_causal and query.shape[1] > 1:
         q_len_cur, kv_len_cur = query.shape[1], key.shape[1]
         causal_mask = paddle.tril(
