@@ -152,13 +152,13 @@ def scaled_dot_product_attention_with_softmax_offset(
         )
         scores = scores + neg_inf_mask
 
-    row_max = scores.max(axis=-1, keepdim=True)  # [B, H, Q, 1]
-    exp_s = paddle.exp(scores - row_max)  # [B, H, Q, K]
-    row_sum = exp_s.sum(axis=-1, keepdim=True)  # [B, H, Q, 1]
-
     # softmax_offset: [H] -> [1, Hq, 1, 1]
     sink = softmax_offset.reshape([1, -1, 1, 1]).cast("float32")
-    row_sum = row_sum + paddle.exp(sink - row_max)  # add sink
+    row_max = paddle.maximum(scores.max(axis=-1, keepdim=True), sink)
+    exp_s = paddle.exp(scores - row_max)  # [B, H, Q, K]
+    row_sum = exp_s.sum(axis=-1, keepdim=True) + paddle.exp(
+        sink - row_max
+    )
 
     weights = exp_s / row_sum  # [B, Hq, Q, K]
 
