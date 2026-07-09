@@ -433,6 +433,24 @@ class MoELayer(nn.Layer):
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type in ("deepep", "hybridep"):
+                # Set NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN automatically if not set by user.
+                if (
+                    self.moe_token_dispatcher_type == "hybridep"
+                    and os.getenv("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN")
+                    is None
+                ):
+                    # We limit the default domain size to 64 due to NVL72 topology. If user wants to use
+                    # a larger domain size, they can set the environment variable manually.
+                    num_of_hybrid_ep_ranks_per_nvlink_domain = min(
+                        self.expert_model_parallel_size, 64
+                    )
+                    os.environ["NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN"] = (
+                        str(num_of_hybrid_ep_ranks_per_nvlink_domain)
+                    )
+                    logger.info(
+                        "Automatically set NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN=%d for hybrid EP backend.",
+                        num_of_hybrid_ep_ranks_per_nvlink_domain,
+                    )
                 self.token_dispatcher = MoEFlexTokenDispatcher(
                     self.num_experts_per_device,
                     self.num_experts_per_tok,

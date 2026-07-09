@@ -95,7 +95,7 @@ class TestFlashAttnFunctorForwardVersions(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+                "paddlefleet.refined_recompute.flash_attn.get_fa_version",
                 return_value=99,
             ),
             self.assertRaises(ValueError),
@@ -148,12 +148,14 @@ class TestFlashMaskAttnFunctorForwardVersions(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+                "paddlefleet.refined_recompute.flash_attn.get_fa_version",
                 return_value=99,
             ),
             self.assertRaises(ValueError),
         ):
-            FlashMaskAttnFunctor.forward(ctx, q, k, v, startend, hold_tensors)
+            FlashMaskAttnFunctor.forward(
+                ctx, q, k, v, startend, None, hold_tensors
+            )
 
 
 @unittest.skipUnless(

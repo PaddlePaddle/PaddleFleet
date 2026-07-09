@@ -259,18 +259,34 @@ class MultiLatentAttention(Attention):
 
         self.out_projection_size = self.v_head_dim * self.num_attention_heads
 
-        self.q_head_dim = (
-            self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
-        )
+        if (
+            self.is_swa
+            and getattr(self.config, "swa_qk_nope_head_dim", None) is not None
+        ):
+            self.qk_nope_head_dim = self.config.swa_qk_nope_head_dim
+        else:
+            self.qk_nope_head_dim = self.config.qk_nope_head_dim
+
+        if (
+            self.is_swa
+            and getattr(self.config, "swa_qk_rope_head_dim", None) is not None
+        ):
+            self.qk_rope_head_dim = self.config.swa_qk_rope_head_dim
+        else:
+            self.qk_rope_head_dim = self.config.qk_rope_head_dim
+
+        self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         mscale = _yarn_get_mscale(
             self.config.rotary_scaling_factor, self.config.mscale_all_dim
         )
         self.softmax_scale = mscale * mscale / math.sqrt(self.q_head_dim)
+        # mscale == 1.0 means softmax_scale equals default 1/sqrt(d), no need to pass explicitly
+        self._softmax_scale_arg = None if mscale == 1.0 else self.softmax_scale
 
         if self.config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
-                self.config.qk_rope_head_dim,
+                self.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=1.0,
                 rotary_base=self.rope_theta,
@@ -281,7 +297,7 @@ class MultiLatentAttention(Attention):
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
-                self.config.qk_rope_head_dim,
+                self.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_base=self.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
@@ -309,7 +325,7 @@ class MultiLatentAttention(Attention):
             attention_type=self.attention_type,
             is_mtp_layer=self.is_mtp_layer,
             is_swa=self.is_swa,
-            softmax_scale=self.softmax_scale,
+            softmax_scale=self._softmax_scale_arg,
             k_channels=self.q_head_dim,
             v_channels=self.v_head_dim,
             num_attention_heads=self.num_attention_heads,
@@ -335,10 +351,22 @@ class MultiLatentAttention(Attention):
 
         # Gated attention
         self.gated_attention = getattr(self.config, "gated_attention", False)
+        self.gated_attn_use_q_lora = getattr(
+            self.config, "gated_attn_use_q_lora", False
+        )
         if self.gated_attention and sublayers_spec.gate_proj is not None:
+            # Gate input source: q_compressed (post q_a_layernorm, dim=q_lora_rank) when
+            # gated_attn_use_q_lora is set, otherwise the full hidden_states.
+            if self.gated_attn_use_q_lora:
+                assert self.config.q_lora_rank is not None, (
+                    "gated_attn_use_q_lora=True requires q_lora_rank is not None"
+                )
+                gate_in_dim = self.config.q_lora_rank
+            else:
+                gate_in_dim = self.config.hidden_size
             self.gate_proj = build_spec_layer(
                 sublayers_spec.gate_proj,
-                self.config.hidden_size,
+                gate_in_dim,
                 self.out_projection_size,
                 config=self.config,
                 init_method=self.config.init_method,
@@ -348,6 +376,16 @@ class MultiLatentAttention(Attention):
                 is_expert=False,
                 tp_comm_buffer_name="mla_gate",
                 tp_group=self.pg_collection.tp,
+            )
+            print(
+                f"[GatedAttnCheck][init] layer={getattr(self, 'layer_number', -1)} "
+                f"gated_attention={self.gated_attention} "
+                f"gated_attn_use_q_lora={self.gated_attn_use_q_lora} "
+                f"q_lora_rank={self.config.q_lora_rank} "
+                f"hidden_size={self.config.hidden_size} "
+                f"gate_in_dim={gate_in_dim} "
+                f"gate_out_dim={self.out_projection_size}",
+                flush=True,
             )
         else:
             self.gated_attention = False
@@ -376,8 +414,8 @@ class MultiLatentAttention(Attention):
             q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
             wv_b: [heads, kv_lora_rank, v_head_dim]
         """
-        qk_nope_head_dim = self.config.qk_nope_head_dim
-        qk_rope_head_dim = self.config.qk_rope_head_dim
+        qk_nope_head_dim = self.qk_nope_head_dim
+        qk_rope_head_dim = self.qk_rope_head_dim
         kv_lora_rank = self.config.kv_lora_rank
         v_head_dim = self.v_head_dim
         num_heads = self.num_attention_heads_per_partition
@@ -561,17 +599,36 @@ class MultiLatentAttention(Attention):
 
         # Apply gated attention
         if self.gated_attention:
+            # Gate input source: q_compressed (post q_a_layernorm, dim=q_lora_rank) when
+            # gated_attn_use_q_lora is set, otherwise hidden_states.
+            gate_source = (
+                q_compressed if self.gated_attn_use_q_lora else hidden_states
+            )
+            # [GatedAttnCheck][forward] debug print (kept commented for on-demand use):
+            # if not getattr(self, "_gated_attn_fwd_logged", False):
+            #     self._gated_attn_fwd_logged = True
+            #     _src_is_qc = gate_source is q_compressed
+            #     print(
+            #         f"[GatedAttnCheck][forward] layer={getattr(self, 'layer_number', -1)} "
+            #         f"gated_attn_use_q_lora={self.gated_attn_use_q_lora} "
+            #         f"gate_source_is_q_compressed={_src_is_qc} "
+            #         f"gate_source.shape={list(gate_source.shape)} "
+            #         f"q_compressed.shape={list(q_compressed.shape)} "
+            #         f"hidden_states.shape={list(hidden_states.shape)} "
+            #         f"recompute_gated_attn={self.recompute_gated_attn}",
+            #         flush=True,
+            #     )
             if self.recompute_gated_attn:
                 gate_recompute = RecomputeWithoutOutput()
                 core_attn_out = gate_recompute.recompute(
                     self._gate,
-                    hidden_states,
+                    gate_source,
                     core_attn_out,
                     preserve_rng_state=False,
                     share_grad_holder=True,
                 )
             else:
-                core_attn_out = self._gate(hidden_states, core_attn_out)
+                core_attn_out = self._gate(gate_source, core_attn_out)
 
         if getattr(self.config, "dw_p2p_overlap", False) and not getattr(
             self.config, "use_bias", False
@@ -588,8 +645,8 @@ class MultiLatentAttention(Attention):
 
         return output, bias
 
-    def _gate(self, hidden_states, core_attn_out):
-        gate, _ = self.gate_proj(hidden_states)
+    def _gate(self, gate_source, core_attn_out):
+        gate, _ = self.gate_proj(gate_source)
         if self.config.sigmoid_gate_fusion:
             from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
@@ -677,7 +734,7 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_a_proj_with_mqa = build_spec_layer(
             sublayers_spec.kv_a_proj_with_mqa,
             self.config.hidden_size,
-            self.config.kv_lora_rank + self.config.qk_rope_head_dim,
+            self.config.kv_lora_rank + self.qk_rope_head_dim,
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -692,7 +749,7 @@ class MLASelfAttention(MultiLatentAttention):
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
             self.num_attention_heads
-            * (self.config.qk_nope_head_dim + self.v_head_dim),
+            * (self.qk_nope_head_dim + self.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -836,14 +893,14 @@ class MLASelfAttention(MultiLatentAttention):
         kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
         if (
             kv_combined.size(-1)
-            != self.config.kv_lora_rank + self.config.qk_rope_head_dim
+            != self.config.kv_lora_rank + self.qk_rope_head_dim
         ):
             # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
             # kv_compressed:[b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
-                [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
+                [self.config.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
             if self.config.sequence_parallel:
@@ -855,7 +912,7 @@ class MLASelfAttention(MultiLatentAttention):
             # kv_compressed:[b, s / TP, kv_lora_rank], k_pos_emb: [b, s / TP, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
-                [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
+                [self.config.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
             if (
@@ -939,7 +996,7 @@ class MLASelfAttention(MultiLatentAttention):
             kv = kv.view(
                 *kv.size()[:-1],
                 self.num_attention_heads_per_partition,
-                self.config.qk_nope_head_dim + self.v_head_dim,
+                self.qk_nope_head_dim + self.v_head_dim,
             )
 
             # if self.layer_number == 0:
@@ -982,8 +1039,8 @@ class MLASelfAttention(MultiLatentAttention):
                     q,
                     cos,
                     sin,
-                    self.config.qk_nope_head_dim,
-                    self.config.qk_rope_head_dim,
+                    self.qk_nope_head_dim,
+                    self.qk_rope_head_dim,
                     cu_seqlens_q,
                     cp_rank,
                     cp_size,
@@ -993,8 +1050,8 @@ class MLASelfAttention(MultiLatentAttention):
                     k_pos_emb,
                     cos,
                     sin,
-                    self.config.qk_rope_head_dim,
-                    self.config.qk_nope_head_dim,
+                    self.qk_rope_head_dim,
+                    self.qk_nope_head_dim,
                     self.v_head_dim,
                     cu_seqlens_kv,
                     cp_rank,
@@ -1071,14 +1128,14 @@ class MLASelfAttention(MultiLatentAttention):
                             )
 
                 # Replace paddle.split with zero-copy slice views.
-                q_no_pe = q[..., : self.config.qk_nope_head_dim]
-                q_pos_emb = q[..., self.config.qk_nope_head_dim :]
+                q_no_pe = q[..., : self.qk_nope_head_dim]
+                q_pos_emb = q[..., self.qk_nope_head_dim :]
 
                 # k_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # value: [num_tokens, n, v_head_dim]
                 k_no_pe, value = paddle.split(
                     kv,
-                    [self.config.qk_nope_head_dim, self.v_head_dim],
+                    [self.qk_nope_head_dim, self.v_head_dim],
                     axis=-1,
                 )
 
