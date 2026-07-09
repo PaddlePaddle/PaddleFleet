@@ -1171,7 +1171,7 @@ class MoELayer(nn.Layer):
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
-        
+
         self._maybe_pre_allgather_overlap(hidden_states)
         gate_input = self._prepare_gate_input(hidden_states, residual)
 
@@ -1528,6 +1528,10 @@ class Gemma4TopKRouter(TopKRouter):
         config: TransformerConfig,
         pg_collection: ProcessGroupCollection | None = None,
     ):
+        # Use a shallow copy to avoid polluting the shared config object.
+        import copy
+
+        config = copy.copy(config)
         # Configure TopKRouter to match Gemma4 behavior
         config.scoring_func = "softmax"
         config.norm_topk_prob = True
@@ -1536,6 +1540,9 @@ class Gemma4TopKRouter(TopKRouter):
         config.routed_scaling_factor = 1.0
         config.router_aux_loss_coef = 0.0
         config.router_z_loss_coef = 0.0
+        # Greedy topk is incompatible with moe_topk_fusion (requires e_score_correction_bias
+        # which is only created for topk_method == "noaux_tc").
+        config.moe_topk_fusion = False
         super().__init__(config, pg_collection)
 
         # Gemma4-specific: input normalization scale (learnable, aligned with HF nn.Parameter)

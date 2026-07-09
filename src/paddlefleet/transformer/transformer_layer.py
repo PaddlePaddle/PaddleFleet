@@ -1923,6 +1923,9 @@ class Gemma4TransformerLayer(TransformerLayer):
             input_is_parallel=norm_input_parallel,
         )
 
+        # Per-layer output scalar (Google checkpoint key: "skip_scale").
+        # Registered as a non-trainable buffer aligned with HF/Megatron: initialized
+        # to 1.0 (no-op) and overwritten when loading pretrained weights.
         self.register_buffer("layer_scalar", paddle.ones([1], dtype="float32"))
 
     def _forward_impl(
@@ -1961,6 +1964,10 @@ class Gemma4TransformerLayer(TransformerLayer):
             position_ids=position_ids,
             attention_bias=attention_bias,
             packed_seq_params=packed_seq_params,
+            in_recompute=getattr(self, "full_recompute", False),
+            past_key_values=kwargs.get("past_key_values"),
+            layer_idx=getattr(self, "layer_number", None),
+            use_cache=kwargs.get("use_cache", False),
         )
         hidden_states = self.post_self_attn_layernorm(hidden_states)
         hidden_states = residual + hidden_states

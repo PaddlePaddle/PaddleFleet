@@ -1015,6 +1015,8 @@ class TestGemma4MoELayerForward(unittest.TestCase):
         layer.moe_shared_expert_overlap = False
         layer.training = False
         layer.router_aux_loss_coef = 0.0
+        layer.moe_token_dispatcher_type = "alltoall"
+        layer.moe_allgather_gate_overlap = False
 
         # Mock norms as identity
         layer.post_shared_expert_layernorm = nn.LayerNorm(64)
