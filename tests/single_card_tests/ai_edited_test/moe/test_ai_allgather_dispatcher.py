@@ -755,6 +755,7 @@ class TestMoELayerHelpers(unittest.TestCase):
             "moe_allgather_gate_overlap", True
         )
         layer.use_latent_moe = overrides.get("use_latent_moe", False)
+        layer.fp8 = overrides.get("fp8", None)
         layer._latent_hidden = None
         return layer
 
@@ -799,6 +800,49 @@ class TestMoELayerHelpers(unittest.TestCase):
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         layer = self._make_mock_layer()
+        MoELayer._validate_allgather_config(layer)
+        self.assertTrue(layer.using_sonic_moe)
+
+    def test_validate_allgather_fp8_bad_intermediate_per_rank_raises(self):
+        """allgather + fp8 requires moe_intermediate_size / EP % 128 == 0.
+
+        Reproduces the production crash where moe_intermediate_size=3584,
+        EP=8 gives intermediate_per_rank=448, and 448 % 128 != 0 fails
+        the fp8 block-scale quantization assert in sonicmoe.
+        """
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(
+            moe_intermediate_size=3584,
+            expert_model_parallel_size=8,
+            fp8="e4m3",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            MoELayer._validate_allgather_config(layer)
+        self.assertIn("128", str(ctx.exception))
+        self.assertIn("448", str(ctx.exception))
+
+    def test_validate_allgather_fp8_ok(self):
+        """allgather + fp8 passes when intermediate_per_rank is 128-aligned."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(
+            moe_intermediate_size=3584,
+            expert_model_parallel_size=4,
+            fp8="e4m3",
+        )
+        MoELayer._validate_allgather_config(layer)
+        self.assertTrue(layer.using_sonic_moe)
+
+    def test_validate_allgather_fp8_disabled_skips_128_check(self):
+        """Non-fp8 mode does not enforce the 128-alignment constraint."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = self._make_mock_layer(
+            moe_intermediate_size=3584,
+            expert_model_parallel_size=8,
+            fp8=None,
+        )
         MoELayer._validate_allgather_config(layer)
         self.assertTrue(layer.using_sonic_moe)
 

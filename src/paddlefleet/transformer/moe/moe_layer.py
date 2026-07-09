@@ -819,6 +819,22 @@ class MoELayer(nn.Layer):
                 f"must be divisible by EP="
                 f"{self.expert_model_parallel_size} in 'allgather' mode."
             )
+        if self.fp8:
+            intermediate_per_rank = (
+                self.moe_intermediate_size // self.expert_model_parallel_size
+            )
+            if intermediate_per_rank % 128 != 0:
+                raise ValueError(
+                    f"allgather + fp8 requires "
+                    f"moe_intermediate_size / EP to be divisible by 128 "
+                    f"(fp8 block-scale tile), got "
+                    f"moe_intermediate_size={self.moe_intermediate_size}, "
+                    f"EP={self.expert_model_parallel_size}, "
+                    f"intermediate_per_rank={intermediate_per_rank}. "
+                    f"Consider reducing EP to a divisor of "
+                    f"moe_intermediate_size // 128 = "
+                    f"{self.moe_intermediate_size // 128}."
+                )
 
     def _project_to_latent(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         """Project hidden_states to latent space, consuming any cached
