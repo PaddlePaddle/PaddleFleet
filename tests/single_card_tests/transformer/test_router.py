@@ -166,6 +166,23 @@ class TestTopKRouter(unittest.TestCase):
         self.assertFalse(hasattr(router_greedy, "e_score_correction_bias"))
         self.assertFalse(hasattr(router_greedy, "expert_usage"))
 
+    def test_hash_layer_respects_head_empty_layer_offset(self):
+        self.config.topk_method = "noaux_tc"
+        self.config.moe_n_hash_layers = 1
+        self.config.num_empty_layers_add_in_head = 2
+        self.config.actual_vocab_size = 16
+
+        router = TopKRouter(self.config)
+        router.set_layer_number(2)
+        self.assertTrue(router.is_hash_layer)
+        self.assertIsNotNone(router.tid2eid)
+        self.assertFalse(hasattr(router, "e_score_correction_bias"))
+
+        router = TopKRouter(self.config)
+        router.set_layer_number(1)
+        self.assertFalse(router.is_hash_layer)
+        self.assertIsNone(router.tid2eid)
+
     def test_call_topk_method_directly(self):
         """
         Directly test `_call_topk_method` to ensure it returns a tuple (gate, idx).

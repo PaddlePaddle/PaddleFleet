@@ -984,11 +984,20 @@ class StandardMoERouter(nn.Layer):
           on hash layers.
         """
         n_hash = getattr(self.config, "moe_n_hash_layers", 0)
+        head_empty_layers = getattr(
+            self.config, "num_empty_layers_add_in_head", 0
+        )
+        logical_layer_number = (
+            None
+            if layer_number is None or is_mtp_layer
+            else layer_number - head_empty_layers
+        )
         self.is_hash_layer = (
             not is_mtp_layer
             and n_hash > 0
-            and layer_number is not None
-            and layer_number < n_hash
+            and logical_layer_number is not None
+            and logical_layer_number >= 0
+            and logical_layer_number < n_hash
         )
         # Enforce the split-feature routing contract now that is_hash_layer is
         # known. Split routing only applies to non-hash layers (hash layers
