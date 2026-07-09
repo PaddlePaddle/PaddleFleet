@@ -91,6 +91,7 @@ def scaled_dot_product_attention_with_softmax_offset(
     is_causal=False,
     softmax_offset=None,
     q_head_dim=None,
+    scale=None,
 ):
     # --- CORRECT FIX (v2): manual softmax with virtual sink token ---
     # learnable_sink in flashmask adds a virtual extra token to the softmax
@@ -104,7 +105,7 @@ def scaled_dot_product_attention_with_softmax_offset(
     #   row_sum = sum(exp_s) + exp(sink_val - row_max)   ← virtual token
     #   weights = exp_s / row_sum                        (sum < 1)
     #   output  = weights @ V
-    scale_f = float(q_head_dim) ** -0.5
+    scale_f = float(scale if scale is not None else q_head_dim**-0.5)
     # query: [B, Q, Hq, dq], key/value: [B, K, Hkv, d]
     # GQA-preserving: reshape Q into groups instead of expanding K/V
     #   Q [B, Hq, Q, dq]   → [B, Hkv, groups, Q, dq]
@@ -622,6 +623,9 @@ class DotProductAttention(FleetLayer):
                     is_causal=is_causal,
                     softmax_offset=self.softmax_offset,
                     q_head_dim=q_head_dim,
+                    scale=self.softmax_scale
+                    if self._has_custom_softmax_scale
+                    else None,
                 )
             else:
                 sdpa_kwargs = {}
