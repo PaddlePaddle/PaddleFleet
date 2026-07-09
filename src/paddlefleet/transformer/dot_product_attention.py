@@ -80,6 +80,102 @@ class _EagerQKScoresFn(paddle.autograd.PyLayer):
         return d_query, d_key_t
 
 
+def scaled_dot_product_attention_with_softmax_offset(
+    query,
+    key,
+    value,
+    attn_mask_kv=None,
+    is_causal=False,
+    softmax_offset=None,
+    q_head_dim=None,
+):
+    # --- CORRECT FIX (v2): manual softmax with virtual sink token ---
+    # learnable_sink in flashmask adds a virtual extra token to the softmax
+    # denominator, reducing all attention weights proportionally so they sum <1.
+    # This is NOT equivalent to an additive mask (which softmax cancels out).
+    #
+    # Algorithm (mirrors flash_fwd.py / softmax.py finalize()):
+    #   scores  = Q @ K^T * scale                              [B, H, Q, K]
+    #   row_max = max(scores, dim=-1, keepdim=True)
+    #   exp_s   = exp(scores - row_max)
+    #   row_sum = sum(exp_s) + exp(sink_val - row_max)   ← virtual token
+    #   weights = exp_s / row_sum                        (sum < 1)
+    #   output  = weights @ V
+    scale_f = float(q_head_dim) ** -0.5
+    # query: [B, Q, Hq, dq], key/value: [B, K, Hkv, d]
+    # GQA-preserving: reshape Q into groups instead of expanding K/V
+    #   Q [B, Hq, Q, dq]   → [B, Hkv, groups, Q, dq]
+    #   K [B, Hkv, K, dk]  → [B, Hkv, 1,      K, dk]  (broadcast over groups)
+    #   scores             → [B, Hkv, groups, Q, K] → reshape [B, Hq, Q, K]
+    # K/V are never copied; compute cost scales with Hkv, not Hq.
+    bsz_cur = query.shape[0]
+    num_q_heads = query.shape[2]
+    num_kv_heads = key.shape[2]
+    q_len_cur = query.shape[1]
+    kv_len_cur = key.shape[1]
+    groups = num_q_heads // num_kv_heads  # 1 for MHA, >1 for GQA
+
+    q_f = query.transpose([0, 2, 1, 3]).cast("float32")  # [B, Hq, Q, dq]
+    k_f = key.transpose([0, 2, 1, 3]).cast("float32")  # [B, Hkv, K, dk]
+    v_f = value.transpose([0, 2, 1, 3]).cast("float32")  # [B, Hkv, K, dv]
+
+    if groups > 1:
+        # reshape Q: [B, Hkv, groups, Q, dq]
+        q_g = q_f.reshape(
+            [bsz_cur, num_kv_heads, groups, q_len_cur, q_head_dim]
+        )
+        # K/V get a broadcast dim: [B, Hkv, 1, K, d]
+        k_g = k_f.unsqueeze(2)
+        scores_g = paddle.matmul(q_g, k_g.transpose([0, 1, 2, 4, 3])) * scale_f
+        # [B, Hkv, groups, Q, K] → [B, Hq, Q, K]
+        scores = scores_g.reshape([bsz_cur, num_q_heads, q_len_cur, kv_len_cur])
+    else:
+        scores = (
+            paddle.matmul(q_f, k_f.transpose([0, 1, 3, 2])) * scale_f
+        )  # [B, Hq, Q, K]
+
+    if attn_mask_kv is not None:
+        scores = scores + attn_mask_kv.cast("float32")
+    elif is_causal and query.shape[1] > 1:
+        q_len_cur, kv_len_cur = query.shape[1], key.shape[1]
+        causal_mask = paddle.tril(
+            paddle.ones([q_len_cur, kv_len_cur], dtype="float32")
+        )
+        neg_inf_mask = paddle.where(
+            causal_mask.unsqueeze(0).unsqueeze(0) == 0,
+            paddle.full_like(scores, float("-inf")),
+            paddle.zeros_like(scores),
+        )
+        scores = scores + neg_inf_mask
+
+    row_max = scores.max(axis=-1, keepdim=True)  # [B, H, Q, 1]
+    exp_s = paddle.exp(scores - row_max)  # [B, H, Q, K]
+    row_sum = exp_s.sum(axis=-1, keepdim=True)  # [B, H, Q, 1]
+
+    # softmax_offset: [H] -> [1, Hq, 1, 1]
+    sink = softmax_offset.reshape([1, -1, 1, 1]).cast("float32")
+    row_sum = row_sum + paddle.exp(sink - row_max)  # add sink
+
+    weights = exp_s / row_sum  # [B, Hq, Q, K]
+
+    if groups > 1:
+        # weights [B, Hkv, groups, Q, K] needed for V matmul without expanding V
+        w_g = weights.reshape(
+            [bsz_cur, num_kv_heads, groups, q_len_cur, kv_len_cur]
+        )
+        v_g = v_f.unsqueeze(2)  # [B, Hkv, 1, K, dv]
+        out_g = paddle.matmul(w_g, v_g)  # [B, Hkv, groups, Q, dv]
+        attn_output = out_g.reshape(
+            [bsz_cur, num_q_heads, q_len_cur, v_f.shape[-1]]
+        )
+    else:
+        attn_output = paddle.matmul(weights, v_f)  # [B, Hq, Q, dv]
+    attn_output = attn_output.transpose([0, 2, 1, 3]).cast(
+        query.dtype
+    )  # [B, Q, H, dv]
+    return attn_output
+
+
 class DotProductAttention(FleetLayer):
     """
     Region where selective activation recomputation is applied.
@@ -477,18 +573,42 @@ class DotProductAttention(FleetLayer):
                 is_causal = True
                 attn_mask_kv = attention_mask
 
-            attn_output = paddle.nn.functional.scaled_dot_product_attention(
-                query,
-                key,
-                value,
-                attn_mask_kv,
-                self.config.attention_dropout,
-                is_causal=is_causal,
-            )
+            # Handle MLA case where q/k head_dim != v head_dim (e.g. 192 vs 128)
+            # memory_efficient_attention does not support asymmetric head dims
+            sdpa_need_value_padding = q_head_dim != v_head_dim
+            if sdpa_need_value_padding:
+                value_for_sdpa = paddle.nn.functional.pad(
+                    value, [0, q_head_dim - v_head_dim], value=0
+                )
+            else:
+                value_for_sdpa = value
+
+            if self.softmax_offset is not None:
+                attn_output = scaled_dot_product_attention_with_softmax_offset(
+                    query,
+                    key,
+                    value_for_sdpa,
+                    attn_mask_kv=attn_mask_kv,
+                    is_causal=is_causal,
+                    softmax_offset=self.softmax_offset,
+                    q_head_dim=q_head_dim,
+                )
+            else:
+                attn_output = paddle.nn.functional.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value_for_sdpa,
+                    attn_mask_kv,
+                    self.config.attention_dropout,
+                    is_causal=is_causal,
+                )
+
+            if sdpa_need_value_padding:
+                attn_output = attn_output[..., :v_head_dim]
 
             attn_output = paddle.reshape(
                 x=attn_output,
-                shape=[0, 0, attn_output.shape[2] * attn_output.shape[3]],
+                shape=[0, 0, attn_output.shape[2] * v_head_dim],
             )
 
             return attn_output
