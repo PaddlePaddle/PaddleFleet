@@ -603,7 +603,7 @@ class TransformerLayer(nn.Layer):
 
             decoderlayer_act_offload_settings = self.config.get(
                 "decoderlayer_act_offload_settings", {"type": "", "value": ""}
-            )
+            ) or {"type": "", "value": ""}
             setting_type = decoderlayer_act_offload_settings["type"]
             offload_value = decoderlayer_act_offload_settings["value"]
             offload_kwargs = {}
