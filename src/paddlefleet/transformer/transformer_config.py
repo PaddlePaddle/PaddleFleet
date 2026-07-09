@@ -556,6 +556,15 @@ class TransformerConfig(ModelParallelConfig):
     """When True, print auto_subbatch diagnostic info (path, subbatch_rows, zip_unzip_fusion)
     after each forward/backward pass. Useful for debugging memory behavior."""
 
+    auto_subbatch_mode: str | None = None
+    """Auto-subbatch splitting strategy. This only selects the strategy when
+    use_auto_subbatch=True; it does not enable auto-subbatch by itself.
+    - None: use the default "post_permute" strategy.
+    - "post_permute": run full moe_permute first, then subbatch in permuted space.
+    - "pre_permute": split chunks in dispatched space first, then run
+      permute→compute→unpermute independently for each chunk.
+    """
+
     router_z_loss_coef: float = None
     """Scaling coefficient for z-loss. Default is None."""
 

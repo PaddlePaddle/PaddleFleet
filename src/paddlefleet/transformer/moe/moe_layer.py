@@ -514,6 +514,9 @@ class MoELayer(nn.Layer):
         self.moe_subbatch_diag = getattr(
             self.config, "moe_subbatch_diag", False
         )
+        self.auto_subbatch_mode = getattr(
+            self.config, "auto_subbatch_mode", None
+        )
 
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
@@ -935,6 +938,7 @@ class MoELayer(nn.Layer):
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     use_bf16_gemm_weight_grad=not self.fp8_wgrad,
                     use_auto_subbatch=self.use_auto_subbatch,
+                    auto_subbatch_mode=self.auto_subbatch_mode,
                     moe_expert_fusion=self.moe_expert_fusion,
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
@@ -1086,6 +1090,7 @@ class MoELayer(nn.Layer):
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     use_bf16_gemm_weight_grad=not self.fp8_wgrad,
                     use_auto_subbatch=self.use_auto_subbatch,
+                    auto_subbatch_mode=self.auto_subbatch_mode,
                     moe_expert_fusion=self.moe_expert_fusion,
                     moe_subbatch_token_num_after_dispatch=self.moe_subbatch_token_num_after_dispatch,
                     moe_subbatch_diag=self.moe_subbatch_diag,
