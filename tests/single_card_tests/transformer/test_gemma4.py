@@ -1,4 +1,4 @@
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -298,7 +298,7 @@ class TestGemma4TransformerLayerSublayersSpec(unittest.TestCase):
 class TestGemma4ProportionalRotaryEmbedding(unittest.TestCase):
     def test_output_shape(self):
         """Output shape should be [1, seq_len, 1, head_dim]."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import (
+        from paddlefleet.models.common.embeddings import (
             Gemma4ProportionalRotaryEmbedding,
         )
 
@@ -310,7 +310,7 @@ class TestGemma4ProportionalRotaryEmbedding(unittest.TestCase):
 
     def test_zero_padded_inv_freq(self):
         """Non-rotated dims should have inv_freq=0 (cos=1, sin=0)."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import (
+        from paddlefleet.models.common.embeddings import (
             Gemma4ProportionalRotaryEmbedding,
         )
 
@@ -326,7 +326,7 @@ class TestGemma4ProportionalRotaryEmbedding(unittest.TestCase):
 
     def test_with_position_ids(self):
         """forward with position_ids should produce batch-aware output."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import (
+        from paddlefleet.models.common.embeddings import (
             Gemma4ProportionalRotaryEmbedding,
         )
 
@@ -342,7 +342,7 @@ class TestGemma4ProportionalRotaryEmbedding(unittest.TestCase):
 class TestDualRoPEOutput(unittest.TestCase):
     def test_indexing(self):
         """DualRoPEOutput supports [0] and [1] indexing."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import DualRoPEOutput
+        from paddlefleet.models.common.embeddings import DualRoPEOutput
 
         a = paddle.ones([1, 4, 1, 8])
         b = paddle.zeros([1, 4, 1, 8])
@@ -353,7 +353,7 @@ class TestDualRoPEOutput(unittest.TestCase):
 
     def test_clone(self):
         """clone() produces independent copy."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import DualRoPEOutput
+        from paddlefleet.models.common.embeddings import DualRoPEOutput
 
         a = paddle.ones([1, 4, 1, 8])
         b = paddle.zeros([1, 4, 1, 8])
@@ -366,7 +366,7 @@ class TestDualRoPEOutput(unittest.TestCase):
 
     def test_index_error(self):
         """Out-of-range index raises IndexError."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import DualRoPEOutput
+        from paddlefleet.models.common.embeddings import DualRoPEOutput
 
         dual = DualRoPEOutput(paddle.ones([1]), paddle.ones([1]))
         with self.assertRaises(IndexError):
@@ -376,7 +376,7 @@ class TestDualRoPEOutput(unittest.TestCase):
 class TestGemma4DualRotaryEmbedding(unittest.TestCase):
     def test_forward_returns_dual(self):
         """forward returns DualRoPEOutput with correct shapes."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import (
+        from paddlefleet.models.common.embeddings import (
             DualRoPEOutput,
             Gemma4DualRotaryEmbedding,
         )
@@ -398,7 +398,7 @@ class TestGemma4DualRotaryEmbedding(unittest.TestCase):
 class TestGemma4Embedding(unittest.TestCase):
     def test_scaling(self):
         """Embedding output is scaled by sqrt(hidden_size)."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import Gemma4Embedding
+        from paddlefleet.models.common.embeddings import Gemma4Embedding
 
         config = SimpleNamespace(
             hidden_size=64,
@@ -431,35 +431,6 @@ class TestGemma4Embedding(unittest.TestCase):
                     (base_output * expected_scale).numpy(),
                     rtol=1e-5,
                 )
-
-
-class TestGemma4OutputLayer(unittest.TestCase):
-    def test_softcap(self):
-        """Output is clamped by tanh(x/cap)*cap."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import Gemma4OutputLayer
-
-        linear = nn.Linear(64, 100)
-        layer = Gemma4OutputLayer(linear, softcap=30.0)
-        x = paddle.randn([2, 4, 64])
-        out = layer(x)
-        # All values should be in [-30, 30]
-        self.assertTrue((out.numpy() <= 30.0 + 1e-5).all())
-        self.assertTrue((out.numpy() >= -30.0 - 1e-5).all())
-
-    def test_softcap_tuple_output(self):
-        """Handles tuple output (logits, bias) from linear."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import Gemma4OutputLayer
-
-        class FakeLinear(nn.Layer):
-            def forward(self, x):
-                return x.sum(-1, keepdim=True), paddle.zeros([1])
-
-        layer = Gemma4OutputLayer(FakeLinear(), softcap=10.0)
-        x = paddle.randn([2, 4, 64])
-        result = layer(x)
-        self.assertIsInstance(result, tuple)
-        logits, bias = result
-        self.assertTrue((logits.numpy() <= 10.0 + 1e-5).all())
 
 
 # ===========================================================
@@ -1132,7 +1103,7 @@ class TestGemma4TopKRouterForwardFull(unittest.TestCase):
 class TestGemma4LayerSpecsAdditional(unittest.TestCase):
     def test_proportional_rope_full_rotation(self):
         """When partial_rotary_factor=1.0, nope_angles=0 (no zero-padding)."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import (
+        from paddlefleet.models.common.embeddings import (
             Gemma4ProportionalRotaryEmbedding,
         )
 
@@ -1147,7 +1118,7 @@ class TestGemma4LayerSpecsAdditional(unittest.TestCase):
 
     def test_dual_rope_get_rotary_seq_len(self):
         """get_rotary_seq_len delegates to rope_local."""
-        from paddlefleet.models.gpt.gemma4_layer_specs import (
+        from paddlefleet.models.common.embeddings import (
             Gemma4DualRotaryEmbedding,
         )
 

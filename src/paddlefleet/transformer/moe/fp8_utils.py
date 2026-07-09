@@ -822,6 +822,12 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
+            assert self.activation_type != "geglu", (
+                "FP8 MoE path does not support activation_type='geglu' yet. "
+                "The fwd_down_fp8 branch uses fused SwiGLU FP8 kernels which are "
+                "incompatible with GeGLU. Please disable fp8 for Gemma4 MoE or "
+                "implement a GeGLU FP8 kernel."
+            )
             return self.fwd_down_fp8(
                 o1, unzipped_probs, expert_w2, num_expert, o3, clear_o1
             )
