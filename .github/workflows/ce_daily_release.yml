@@ -34,7 +34,7 @@ env:
   work_dir: /paddle/PaddleFleet
   PADDLE_ROOT: /paddle
   ci_scripts: /paddle/ci
-  BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
+  BRANCH: release
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
   docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda130-py312-dev"
