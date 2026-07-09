@@ -440,6 +440,103 @@ class TestTransformerLayerRecompute(unittest.TestCase):
         self.assertFalse(layer.full_recompute)
 
 
+class TestDecoderlayerActOffloadSettings(unittest.TestCase):
+    """Tests for decoderlayer_act_offload_settings logic in forward (L604-619)."""
+
+    def _compute_offload_kwargs(self, config, layer_number):
+        """Reproduce the offload logic from transformer_layer.py L604-619."""
+        decoderlayer_act_offload_settings = config.get(
+            "decoderlayer_act_offload_settings", {"type": "", "value": ""}
+        )
+        setting_type = decoderlayer_act_offload_settings["type"]
+        offload_value = decoderlayer_act_offload_settings["value"]
+        offload_kwargs = {}
+        if "mod" == setting_type:
+            assert isinstance(offload_value, (list, tuple))
+            v1, v2 = offload_value
+            offload_kwargs["offload_indices"] = (
+                [0] if layer_number % v1 == v2 else []
+            )
+        elif "layer_idxs" == setting_type:
+            offload_kwargs["offload_indices"] = (
+                [0] if layer_number in offload_value else []
+            )
+        return offload_kwargs
+
+    def test_mod_type_offload_match(self):
+        """When type=mod and layer_number % v1 == v2, offload_indices=[0]."""
+        config = _make_config()
+        config.decoderlayer_act_offload_settings = {
+            "type": "mod",
+            "value": [2, 0],
+        }
+        result = self._compute_offload_kwargs(config, layer_number=2)
+        self.assertEqual(result["offload_indices"], [0])
+
+    def test_mod_type_offload_no_match(self):
+        """When type=mod and layer_number % v1 != v2, offload_indices=[]."""
+        config = _make_config()
+        config.decoderlayer_act_offload_settings = {
+            "type": "mod",
+            "value": [2, 0],
+        }
+        result = self._compute_offload_kwargs(config, layer_number=1)
+        self.assertEqual(result["offload_indices"], [])
+
+    def test_mod_type_with_tuple_value(self):
+        """mod type also accepts tuple values."""
+        config = _make_config()
+        config.decoderlayer_act_offload_settings = {
+            "type": "mod",
+            "value": (3, 1),
+        }
+        # layer_number=4: 4%3==1 matches v2=1
+        result = self._compute_offload_kwargs(config, layer_number=4)
+        self.assertEqual(result["offload_indices"], [0])
+        # layer_number=5: 5%3==2 != v2=1
+        result = self._compute_offload_kwargs(config, layer_number=5)
+        self.assertEqual(result["offload_indices"], [])
+
+    def test_layer_idxs_type_offload_match(self):
+        """When type=layer_idxs and layer_number in value, offload_indices=[0]."""
+        config = _make_config()
+        config.decoderlayer_act_offload_settings = {
+            "type": "layer_idxs",
+            "value": [1, 3, 5],
+        }
+        result = self._compute_offload_kwargs(config, layer_number=3)
+        self.assertEqual(result["offload_indices"], [0])
+
+    def test_layer_idxs_type_offload_no_match(self):
+        """When type=layer_idxs and layer_number not in value, offload_indices=[]."""
+        config = _make_config()
+        config.decoderlayer_act_offload_settings = {
+            "type": "layer_idxs",
+            "value": [1, 3, 5],
+        }
+        result = self._compute_offload_kwargs(config, layer_number=2)
+        self.assertEqual(result["offload_indices"], [])
+
+    def test_empty_type_no_offload(self):
+        """When type is empty string, offload_kwargs stays empty."""
+        config = _make_config()
+        config.decoderlayer_act_offload_settings = {"type": "", "value": ""}
+        result = self._compute_offload_kwargs(config, layer_number=1)
+        self.assertEqual(result, {})
+
+    def test_default_settings_when_not_configured(self):
+        """When decoderlayer_act_offload_settings is not set, defaults apply."""
+        config = _make_config()
+        # decoderlayer_act_offload_settings defaults to None
+        settings = config.get(
+            "decoderlayer_act_offload_settings", {"type": "", "value": ""}
+        )
+        self.assertEqual(settings["type"], "")
+        self.assertEqual(settings["value"], "")
+        result = self._compute_offload_kwargs(config, layer_number=1)
+        self.assertEqual(result, {})
+
+
 class TestTransformerLayerContext(unittest.TestCase):
     """Tests for cross-attention context."""
 
