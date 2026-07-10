@@ -874,6 +874,20 @@ class TransformerConfig(ModelParallelConfig):
         kernel.
     """
 
+    index_topk_pattern: str | None = None
+    """Optional IndexCache training pattern over ratio=4 CSA indexer layers.
+
+    Each character corresponds to one ratio=4 layer in execution order:
+      - "F": run the learned indexer and cache its top-k indices
+      - "S": skip the local indexer and reuse the previous cached top-k indices
+    """
+
+    indexcache_multi_layer_distill: bool = False
+    """Train retained IndexCache indexers with targets from all served layers.
+
+    CP training is supported only for no-MTP, no-recompute TileLang CSA.
+    """
+
     use_fast_hadamard: bool = False
     """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
 
@@ -930,6 +944,8 @@ class TransformerConfig(ModelParallelConfig):
         "csa_dense_mode": "csa_dense_mode",
         "csa_indexer_backend": "csa_indexer_backend",
         "csa_sparse_attn_backend": "csa_sparse_attn_backend",
+        "index_topk_pattern": "index_topk_pattern",
+        "indexcache_multi_layer_distill": "indexcache_multi_layer_distill",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -1187,6 +1203,67 @@ class TransformerConfig(ModelParallelConfig):
                     raise ValueError(
                         f"csa_compress_ratios[{i}]={r} is invalid. "
                         f"Must be one of {valid_ratios}."
+                    )
+
+            if self.index_topk_pattern is not None:
+                pattern = str(self.index_topk_pattern).strip().upper()
+                if not pattern:
+                    self.index_topk_pattern = None
+                else:
+                    invalid_chars = sorted(set(pattern) - {"F", "S"})
+                    if invalid_chars:
+                        raise ValueError(
+                            "index_topk_pattern may only contain 'F' and 'S', "
+                            f"got invalid chars: {invalid_chars}."
+                        )
+                    if pattern[0] != "F":
+                        raise ValueError(
+                            "index_topk_pattern must start with 'F' so there "
+                            "is a producer before any reused top-k indices."
+                        )
+                    if self.csa_dense_mode:
+                        raise ValueError(
+                            "index_topk_pattern requires csa_dense_mode=False."
+                        )
+                    c4_layer_count = sum(
+                        1 for ratio in self.csa_compress_ratios if ratio == 4
+                    )
+                    if len(pattern) != c4_layer_count:
+                        raise ValueError(
+                            "index_topk_pattern length must equal the number "
+                            f"of ratio=4 CSA layers ({c4_layer_count}), got "
+                            f"{len(pattern)}."
+                        )
+                    self.index_topk_pattern = pattern
+
+            if self.indexcache_multi_layer_distill:
+                if not self.index_topk_pattern:
+                    raise ValueError(
+                        "indexcache_multi_layer_distill=True requires a "
+                        "non-empty index_topk_pattern."
+                    )
+                if self.context_parallel_size > 1 and (
+                    self.num_nextn_predict_layers is not None
+                    and self.num_nextn_predict_layers > 0
+                ):
+                    raise NotImplementedError(
+                        "indexcache_multi_layer_distill currently supports "
+                        "CP training only when num_nextn_predict_layers=0."
+                    )
+                if self.context_parallel_size > 1 and self.recompute_granularity:
+                    raise NotImplementedError(
+                        "indexcache_multi_layer_distill currently supports "
+                        "CP training only with recompute disabled."
+                    )
+                if self.csa_indexer_backend != "tilelang":
+                    raise NotImplementedError(
+                        "indexcache_multi_layer_distill currently supports "
+                        "only csa_indexer_backend='tilelang'."
+                    )
+                if self.csa_sparse_attn_backend != "tilelang":
+                    raise NotImplementedError(
+                        "indexcache_multi_layer_distill currently supports "
+                        "only csa_sparse_attn_backend='tilelang'."
                     )
 
             if (
