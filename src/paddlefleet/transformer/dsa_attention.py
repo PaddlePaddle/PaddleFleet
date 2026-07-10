@@ -1095,9 +1095,10 @@ class DSAIndexerLossLoggingHelper:
 
     @staticmethod
     def register_total_num_layers(config):
-        DSAIndexerLossLoggingHelper.num_layers = (
-            DSAIndexerLossLoggingHelper.get_total_num_layers(config)
-        )
+        num_layers = DSAIndexerLossLoggingHelper.get_total_num_layers(config)
+        if DSAIndexerLossLoggingHelper.num_layers != num_layers:
+            DSAIndexerLossLoggingHelper.tracker.clear()
+        DSAIndexerLossLoggingHelper.num_layers = num_layers
 
     @staticmethod
     def save_loss_to_tracker(
