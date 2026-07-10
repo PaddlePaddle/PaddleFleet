@@ -1481,6 +1481,39 @@ class MoELayer(nn.Layer):
                         quant_transpose=quant_transpose,
                     )
 
+    def clear_fp8_quant_weight(self):
+        """Clear cached FP8 quantized weights to release memory."""
+
+        logger.info(
+            "Clearing FP8 quantized weights in MoE layer: "
+            "[fp8_weight_stacked, fp8_scale_stacked, "
+            "fp8_weight_stacked_transpose, fp8_scale_stacked_transpose]"
+        )
+
+        if not (self.moe_use_fusion_node and self.fp8):
+            return
+
+        fp8_attrs = (
+            "fp8_weight_stacked",
+            "fp8_scale_stacked",
+            "fp8_weight_stacked_transpose",
+            "fp8_scale_stacked_transpose",
+        )
+
+        def _clear_attrs(weight_obj):
+            for attr in fp8_attrs:
+                if hasattr(weight_obj, attr):
+                    delattr(weight_obj, attr)
+
+        if hasattr(self, "grouped_gemm_experts"):
+            _clear_attrs(self.grouped_gemm_experts.weight1)
+            _clear_attrs(self.grouped_gemm_experts.weight2)
+        else:
+            for expert in self.experts:
+                if expert is not None:
+                    _clear_attrs(expert.up_gate_proj.weight)
+                    _clear_attrs(expert.down_proj.weight)
+
     def use_fp8(self):
         if self.moe_use_fusion_node and self.fp8:
             return True

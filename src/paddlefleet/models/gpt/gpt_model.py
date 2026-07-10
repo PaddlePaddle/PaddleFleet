@@ -769,6 +769,21 @@ class GPTModel(PipelineLayer):
                         batch_mode=batch_mode, quant_transpose=quant_transpose
                     )
 
+    def clear_fp8_quant_weight(self):
+        if self._num_virtual_pipeline_stages > 1:
+            for idx, chunk in enumerate(self._model_chunks):
+                for idx, layer in enumerate(chunk):
+                    if isinstance(layer, TransformerLayer):
+                        layer.clear_fp8_quant_weight()
+                    elif isinstance(layer, MultiTokenPredictionLayer):
+                        layer.transformer_layer.clear_fp8_quant_weight()
+        else:
+            for idx, layer in enumerate(self.run_function):
+                if isinstance(layer, TransformerLayer):
+                    layer.clear_fp8_quant_weight()
+                elif isinstance(layer, MultiTokenPredictionLayer):
+                    layer.transformer_layer.clear_fp8_quant_weight()
+
     def use_fp8(self):
         if self._num_virtual_pipeline_stages > 1:
             for idx, chunk in enumerate(self._model_chunks):

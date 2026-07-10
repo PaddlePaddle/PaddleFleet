@@ -1119,6 +1119,10 @@ class TransformerLayer(nn.Layer):
                 batch_mode=batch_mode, quant_transpose=quant_transpose
             )
 
+    def clear_fp8_quant_weight(self):
+        if isinstance(self.mlp, MoELayer):
+            self.mlp.clear_fp8_quant_weight()
+
     def use_fp8(self):
         if isinstance(self.mlp, MoELayer):
             return self.mlp.use_fp8()
