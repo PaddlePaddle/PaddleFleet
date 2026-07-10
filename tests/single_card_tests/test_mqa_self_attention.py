@@ -161,13 +161,13 @@ class TestMQASelfAttention(unittest.TestCase):
         full_layer = paddle.amp.decorate(
             full_layer, level="O2", dtype="bfloat16"
         )
+        full_layer.full_recompute = True
 
         swa_layer = HySparseTransformerLayer(
             self.config, layer_spec, layer_number=1
         )
         swa_layer.self_attn.attn_mask_type = AttnMaskType.causal
         swa_layer = paddle.amp.decorate(swa_layer, level="O2", dtype="bfloat16")
-        swa_layer.full_recompute = True
 
         hidden_states = paddle.randn(
             [self.batch_size, self.seq_len, self.config.hidden_size],

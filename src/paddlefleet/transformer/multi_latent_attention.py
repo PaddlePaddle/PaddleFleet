@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dataclasses
 import math
 import os
 from dataclasses import dataclass
@@ -472,6 +471,7 @@ class MultiLatentAttention(Attention):
         packed_seq_params=None,
         in_recompute: bool = False,
         position_ids=None,
+        shared_kv: list[Tensor] | None = None,
         **kwargs,
     ):
         """Forward pass for multi-latent attention"""
@@ -591,6 +591,14 @@ class MultiLatentAttention(Attention):
             )
 
         _log(core_attn_out, "core_attn_out", layer_num)
+
+        if self.config.enable_hy_sparse_attention and shared_kv is not None:
+            shared_key = paddle.concat(
+                [kv_compressed.unsqueeze(2), k_pos_emb], axis=-1
+            )
+            shared_kv.append(shared_key)
+            block_indices = paddle.empty([0])  # TODO: from full attention
+            shared_kv.append(block_indices)
 
         # =================
         # Output. [b, sq, h]
@@ -1283,24 +1291,22 @@ class MQASelfAttention(MLASelfAttention):
             "MQA does not support rope fusion."
         )
 
-        # Adjust absorbed kv channels for core attention
-        k_channels = self.config.kv_lora_rank + self.qk_rope_head_dim
-        v_channels = self.config.kv_lora_rank
+        # Use MQA only when HySparse is enabled and this is an SWA layer.
+        # Otherwise, use its parent's forward method (MLA).
+        self.is_mqa = config.enable_hy_sparse_attention and self.is_swa
 
-        self.core_attention.hidden_size_per_partition = (
-            k_channels * self.num_attention_heads_per_partition
-        )
-        self.core_attention.k_channels = k_channels
-        self.core_attention.v_channels = v_channels
+        if self.is_mqa:
+            # Adjust absorbed kv channels for core attention
+            k_channels = self.config.kv_lora_rank + self.qk_rope_head_dim
+            v_channels = self.config.kv_lora_rank
 
-        if k_channels > 256:
-            self.core_attention.config = dataclasses.replace(
-                self.core_attention.config,
-                _attn_implementation="eager",
+            self.core_attention.hidden_size_per_partition = (
+                k_channels * self.num_attention_heads_per_partition
             )
+            self.core_attention.k_channels = k_channels
+            self.core_attention.v_channels = v_channels
 
-        # Create sparse core attention and sparse gate
-        if config.enable_hy_sparse_attention and self.is_swa:
+            # Block sparse attention
             self.sparse_core_attention = build_spec_layer(
                 sublayers_spec.core_attention,
                 config=self.core_attention.config,
@@ -1317,6 +1323,8 @@ class MQASelfAttention(MLASelfAttention):
                 cp_comm_type=cp_comm_type,
                 pg_collection=self.pg_collection,
             )
+
+            # Gate for block sparse attention
             if self.gated_attention:
                 self.sparse_gate_proj = build_spec_layer(
                     sublayers_spec.gate_proj,
@@ -1368,6 +1376,19 @@ class MQASelfAttention(MLASelfAttention):
         assert get_pg_size(self.pg_collection.tp) == 1, (
             "MQA does not support tensor parallel."
         )
+
+        if not self.is_mqa:
+            return super().forward(
+                hidden_states,
+                attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                key_value_states=key_value_states,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                position_ids=position_ids,
+                shared_kv=shared_kv,
+                **kwargs,
+            )
 
         # =====================
         # Query, Key, and Value
@@ -1422,11 +1443,6 @@ class MQASelfAttention(MLASelfAttention):
 
         _log(core_attn_out, "core_attn_out", layer_num)
 
-        if shared_kv is not None and not self.is_swa:
-            shared_kv.append(key)
-            block_indices = paddle.empty([0])  # TODO: from full attention
-            shared_kv.append(block_indices)
-
         # =================
         # Absorb value. [b, sq, num_heads * v_head_dim]
         # =================
@@ -1456,22 +1472,21 @@ class MQASelfAttention(MLASelfAttention):
         # Sparse attention computation
         # =================
 
-        if self.config.enable_hy_sparse_attention and self.is_swa:
-            shared_key, shared_block_indices = shared_kv
-            shared_value = shared_key[:, :, :, :kv_lora_rank].contiguous()
+        shared_key, shared_block_indices = shared_kv
+        shared_value = shared_key[:, :, :, :kv_lora_rank].contiguous()
 
-            sparse_core_attn_out = self.sparse_core_attention(
-                query,
-                shared_key,
-                shared_value,
-                attention_mask,
-                attn_mask_startend_row_indices,
-                attn_mask_type=attn_mask_type,
-                attention_bias=attention_bias,
-                layer_idx=layer_idx,
-            )
+        sparse_core_attn_out = self.sparse_core_attention(
+            query,
+            shared_key,
+            shared_value,
+            attention_mask,
+            attn_mask_startend_row_indices,
+            attn_mask_type=attn_mask_type,
+            attention_bias=attention_bias,
+            layer_idx=layer_idx,
+        )
 
-            sparse_core_attn_out = compute_absorbed_v(sparse_core_attn_out)
+        sparse_core_attn_out = compute_absorbed_v(sparse_core_attn_out)
 
         # =================
         # Output. [b, sq, h]
@@ -1486,13 +1501,12 @@ class MQASelfAttention(MLASelfAttention):
             core_attn_out = self._gate(gate_source, core_attn_out)
 
         # Add sparse attention output
-        if self.config.enable_hy_sparse_attention and self.is_swa:
-            if self.gated_attention:
-                gate, _ = self.sparse_gate_proj(gate_source)
-                sparse_core_attn_out = (
-                    sparse_core_attn_out * paddle.nn.functional.sigmoid(gate)
-                )
-            core_attn_out += sparse_core_attn_out
+        if self.gated_attention:
+            gate, _ = self.sparse_gate_proj(gate_source)
+            sparse_core_attn_out = (
+                sparse_core_attn_out * paddle.nn.functional.sigmoid(gate)
+            )
+        core_attn_out += sparse_core_attn_out
 
         output, bias = self.o_proj(core_attn_out)
 
@@ -1510,6 +1524,14 @@ class MQASelfAttention(MLASelfAttention):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`.
         """
+        if not self.is_mqa:
+            return super().get_query_key_value_tensors(
+                hidden_states,
+                key_value_states=key_value_states,
+                position_ids=position_ids,
+                packed_seq_params=packed_seq_params,
+            )
+
         # b = batch size, s = sequence length, h = hidden size, n = num attention heads
         # Attention heads [b, s, n*h]
         assert hidden_states.ndim == 3, (

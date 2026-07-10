@@ -1403,9 +1403,6 @@ class HySparseTransformerLayer(TransformerLayer):
             is_mtp  # Suppress MD5 probes for MTP passes
         )
 
-        if self.config.block_attention_residuals and "blocks" not in dict_args:
-            dict_args["blocks"] = []
-
         if self.full_recompute:
 
             def dict_args_get_clone(key):
