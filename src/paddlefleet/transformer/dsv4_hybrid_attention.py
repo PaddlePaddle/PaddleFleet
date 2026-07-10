@@ -258,7 +258,7 @@ class DSv4HybridAttention(Attention):
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=config,
-            layer_number=layer_number,
+            layer_number=layer_number if is_mtp_layer else layer_idx + 1,
             attn_mask_type=attn_mask_type,
             attention_type=attention_type,
             attention_dropout=None,

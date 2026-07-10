@@ -1767,12 +1767,6 @@ class CompressedSparseAttention(FleetLayer):
         self.layer_number = layer_number
         if is_mtp_layer:
             self.layer_number += self.config.num_hidden_layers + 1
-        else:
-            self.layer_number = (
-                layer_number
-                - getattr(self.config, "num_empty_layers_add_in_head", 0)
-                + 1
-            )
         self.pg_collection = pg_collection
         tp_size = int(getattr(config, "tensor_model_parallel_size", 1))
         if pg_collection is not None and pg_collection.tp is not None:
