@@ -16,7 +16,7 @@ case_name=$1
 base_name=$2
 update_baseline=${3:-"false"}
 
-if [[ $BRANCH == "develop" ]]; then
+if [[ "$BRANCH" == "develop" ]]; then
     base_name="${base_name}_develop"
 fi
 case_gt_file=${base_name}_${case_name}_gt.txt
@@ -26,17 +26,10 @@ if [[ ! -f "${case_name}.txt" && "$case_name" == *glm* ]]; then
 fi
 
 if [[ "$update_baseline" == "true" ]]; then
-    python -c "
-import sys
-sys.path.insert(0, 'PaddleFormers/tests/integration_test')
-from check_loss import parse_log_file
-d = parse_log_file('${case_name}.txt')
-if not d:
-    sys.exit('No step/loss extracted from ${case_name}.txt')
-with open('${case_gt_file}', 'w') as f:
-    for s in sorted(d):
-        f.write(f'{s} {d[s]}\n')
-"
+    python PaddleFormers/tests/integration_test/check_loss.py \
+        --log_file ${case_name}.txt \
+        --log_loss_file ${case_gt_file} \
+        --extract_loss_only
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo "Failed to extract baseline from ${case_name}.txt"
