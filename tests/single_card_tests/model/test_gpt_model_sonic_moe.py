@@ -21,6 +21,7 @@ import paddle
 import paddle.nn.functional as F
 import paddlefleet_ops
 from paddle.distributed import fleet
+from paddle.distributed.fleet.utils import mix_precision_utils
 from paddlefleet_ops.utils import get_cuda_version
 
 # from tests.unit_tests.test_utilities import Utils
@@ -115,7 +116,7 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
         self.seed = 46
-        self.hidden_size = 2048
+        self.hidden_size = 512
         self.n_routed_experts = 8
         self.acc_steps = 1
 
@@ -176,6 +177,12 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
             transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
             self.pg_collection,
         )
+
+        mix_precision_utils.MixPrecisionLayer(moe_layer, dtype="bfloat16")
+
+        for param in moe_layer.parameters():
+            if hasattr(param, "main_grad") and param.main_grad is None:
+                param.main_grad = paddle.zeros_like(param, dtype=paddle.float32)
 
         return moe_layer
 

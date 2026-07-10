@@ -920,10 +920,6 @@ class MoELayer(nn.Layer):
                 self.num_experts_per_tok,
                 tokens_per_expert,
             )
-        dispatched_indices = (
-            self.token_dispatcher._comm_manager.dispatched_indices
-        )
-        dispatched_probs = self.token_dispatcher._comm_manager.dispatched_probs
         fp8_combine_grad_handle = {} if self.fp8_dispatch_bwd else None
         # fp8_combine_grad_handle = None
 

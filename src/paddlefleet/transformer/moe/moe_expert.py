@@ -49,6 +49,18 @@ except (ImportError, RuntimeError):
     pass
 
 
+try:
+    from paddlefleet_ops.sonicmoe.ernie_compat.weight_layout_fusion import (
+        fused_grouped_w1_to_sonic,
+        fused_sonic_w1_to_grouped,
+        fused_transpose_w2_layout,
+    )
+except (ImportError, RuntimeError):
+    fused_grouped_w1_to_sonic = None
+    fused_sonic_w1_to_grouped = None
+    fused_transpose_w2_layout = None
+
+
 class BMMFunction(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, x, y, batch_sizes, trans_y=False):
@@ -462,25 +474,34 @@ class SonicMoEExpert(GroupedMLPExpert):
 
     @staticmethod
     def _grouped_w1_to_sonic(weight):
-        target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
-        gate, up = paddle.chunk(weight, 2, axis=-1)
-        gate = gate.transpose([0, 2, 1])
-        up = up.transpose([0, 2, 1])
-        return paddle.stack([gate, up], axis=2).reshape(target_shape)
+        if fused_grouped_w1_to_sonic is not None:
+            return fused_grouped_w1_to_sonic(weight)
+        else:
+            target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
+            gate, up = paddle.chunk(weight, 2, axis=-1)
+            gate = gate.transpose([0, 2, 1])
+            up = up.transpose([0, 2, 1])
+            return paddle.stack([gate, up], axis=2).reshape(target_shape)
 
     @staticmethod
     def _sonic_w1_to_grouped(weight):
-        target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
-        weight = weight.reshape([weight.shape[0], -1, 2, weight.shape[2]])
-        gate = weight[:, :, 0, :].transpose([0, 2, 1])
-        up = weight[:, :, 1, :].transpose([0, 2, 1])
-        return paddle.concat([gate, up], axis=-1)
+        if fused_sonic_w1_to_grouped is not None:
+            return fused_sonic_w1_to_grouped(weight)
+        else:
+            target_shape = [weight.shape[0], weight.shape[2], weight.shape[1]]
+            weight = weight.reshape([weight.shape[0], -1, 2, weight.shape[2]])
+            gate = weight[:, :, 0, :].transpose([0, 2, 1])
+            up = weight[:, :, 1, :].transpose([0, 2, 1])
+            return paddle.concat([gate, up], axis=-1)
 
     @staticmethod
     def _transpose_w2_layout(weight):
         # if not SonicMoEExpert._is_tensor_initialized(weight):
         #     return weight
-        return weight.transpose([0, 2, 1])
+        if fused_transpose_w2_layout is not None:
+            return fused_transpose_w2_layout(weight)
+        else:
+            return weight.transpose([0, 2, 1])
 
     @staticmethod
     def _assign_tensor(tensor, value):
@@ -520,9 +541,9 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.sonic_moe_config.fuse_y1_quant = True
         self.sonic_moe_config.fuse_y1_bf16_trunc = True
 
-    def _convert_grad_layout(self, param, converter):
+    def _convert_grad_layout(self, param, converter, convert_main_grad=True):
         main_grad = getattr(param, "main_grad", None)
-        if main_grad is not None:
+        if convert_main_grad and main_grad is not None:
             self._assign_tensor(main_grad, converter(main_grad))
         if param.grad is not None and (
             main_grad is None or param.grad.data_ptr() != main_grad.data_ptr()
@@ -544,7 +565,15 @@ class SonicMoEExpert(GroupedMLPExpert):
                     param.get_tensor()._set_dims([shape[0], shape[2], shape[1]])
                 else:
                     self._assign_tensor(param, converter(param))
-                self._convert_grad_layout(param, converter)
+                # weight2's main_grad stays in the original grouped layout
+                # ([E, I, H]); its grouped->sonic->grouped transpose is elided and
+                # the down-proj bf16/fp8 wgrad accumulates into it via a permute
+                # view. weight1's main_grad must still be converted because the
+                # grouped->sonic conversion also interleaves gate/up (a perfect
+                # shuffle the wgrad kernel does not undo).
+                self._convert_grad_layout(
+                    param, converter, convert_main_grad=(param is self.weight1)
+                )
         self._weights_layout = target_layout
 
     def convert_weights_to_sonic_layout(self):
@@ -572,15 +601,15 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.convert_weights_to_sonic_layout()
 
         payload = quantize_native_fp8_weights(
-            self.weight1.permute([1, 2, 0]),
-            self.weight2.permute([1, 2, 0]),
+            self.weight1,
+            self.weight2,
         )
         assert payload["format"] == "1x32", (
             f"quant strategy {payload.get('format')} is not supported."
         )
         w1_fp8, w1_scale, w1t_fp8, w1t_scale = payload["w1"]
         w2_fp8, w2_scale, w2t_fp8, w2t_scale = payload["w2"]
-        self.weight1.fp8 = (w1_fp8.mT, w1_scale)
+        self.weight1.fp8 = (w1_fp8, w1_scale)
         self.weight1.transposed_fp8 = (w1t_fp8, w1t_scale)
         self.weight2.fp8 = (w2_fp8, w2_scale)
         self.weight2.transposed_fp8 = (w2t_fp8, w2t_scale)

@@ -264,11 +264,16 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             transformer_config,
             num_experts=self.n_routed_experts,
         )
-        return MoELayer(
+        moe_layer = MoELayer(
             transformer_config,
             transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
             pg_collection or self.pg_collection,
         )
+        mix_precision_utils.MixPrecisionLayer(moe_layer, dtype="bfloat16")
+        for param in moe_layer.parameters():
+            if hasattr(param, "main_grad") and param.main_grad is None:
+                param.main_grad = paddle.zeros_like(param, dtype=paddle.float32)
+        return moe_layer
 
     @staticmethod
     def _expert_slice_for_rank(tensor, ep_rank, ep_size):
@@ -352,7 +357,7 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             master_grad=True,
             master_weight=True,
         )
-        mix_precision_utils.MixPrecisionLayer(moe_layer, dtype="bfloat16")
+        # mix_precision_utils.MixPrecisionLayer(moe_layer, dtype="bfloat16")
         hidden_states = input_data.detach().clone()
         hidden_states.stop_gradient = False
         with paddle.amp.auto_cast(level="O2", dtype="bfloat16"):

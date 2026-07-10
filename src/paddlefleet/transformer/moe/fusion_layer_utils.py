@@ -32,10 +32,12 @@ from .vmm_utils import (
     tokens_zip_unique_add_with_subbatch,
 )
 
+_scatter_router_scores_i32 = None
 if paddlefleet_ops.is_sonic_moe_available():
     from paddlefleet_ops.sonicmoe.enums import ActivationType
     from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
         deepep_topk_to_sonic_metadata,
+        deepep_topk_to_sonic_metadata_with_scales,
     )
     from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
         _differentiable_router_scores,
@@ -45,6 +47,13 @@ if paddlefleet_ops.is_sonic_moe_available():
         _UpProjection,
     )
     from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+
+    try:
+        from paddlefleet_ops.sonicmoe.quack_utils.blockscaled_fp8_gemm import (
+            _scatter_router_scores_i32,
+        )
+    except (ImportError, RuntimeError):
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +88,57 @@ class _SonicFP8WeightCarrier(paddle.autograd.PyLayer):
 
 def _make_sonic_fp8_weight_carrier(weight):
     return _SonicFP8WeightCarrier.apply(weight)
+
+
+class _SonicRouterScoresFromMetadata(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, topk_scores, metadata_scores, score_src_idx):
+        if len(topk_scores.shape) != 2:
+            raise ValueError(
+                f"topk_scores: expected rank 2, got shape {topk_scores.shape}"
+            )
+        if len(metadata_scores.shape) != 1:
+            raise ValueError(
+                "metadata_scores: expected rank 1, got shape "
+                f"{metadata_scores.shape}"
+            )
+        if len(score_src_idx.shape) != 1:
+            raise ValueError(
+                f"score_src_idx: expected rank 1, got shape {score_src_idx.shape}"
+            )
+        if metadata_scores.shape[0] < score_src_idx.shape[0]:
+            raise ValueError(
+                "metadata_scores must include every real score referenced by "
+                f"score_src_idx; got {metadata_scores.shape[0]} scores and "
+                f"{score_src_idx.shape[0]} indices"
+            )
+        if "int32" not in str(score_src_idx.dtype):
+            raise ValueError(
+                f"score_src_idx: expected int32, got {score_src_idx.dtype}"
+            )
+        metadata_scores.stop_gradient = True
+        score_src_idx.stop_gradient = True
+        ctx.save_for_backward(score_src_idx)
+        ctx.input_shape = list(topk_scores.shape)
+        ctx.n_total = int(topk_scores.shape[0]) * int(topk_scores.shape[1])
+        scores = metadata_scores.clone()
+        scores.stop_gradient = topk_scores.stop_gradient
+        return scores
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (score_src_idx,) = ctx.saved_tensor()
+        if _scatter_router_scores_i32 is None:
+            raise RuntimeError(
+                "SonicMoE metadata router score backward requires "
+                "paddlefleet_ops.sonicmoe.quack_utils.blockscaled_fp8_gemm."
+                "_scatter_router_scores_i32; update paddlefleet_ops or use "
+                "the differentiable router-score fallback."
+            )
+        grad_flat = _scatter_router_scores_i32(
+            grad_out.contiguous(), score_src_idx, ctx.n_total
+        )
+        return grad_flat.reshape(ctx.input_shape), None, None
 
 
 class UnZipNode:
@@ -3198,51 +3258,75 @@ def run_sonic_moe(
             paddle.int32
         )
 
-    # paddle.cast is not a no-op for matching dtype (it allocates + copies),
-    # so cast once with a guard instead of twice below. Allgather feeds int32
-    # (zero copies); deepep feeds int64 (one copy instead of two).
-    topk_indices_i32 = (
-        topk_indices
-        if topk_indices.dtype == paddle.int32
-        else topk_indices.cast(paddle.int32)
-    )
-
-    (
-        expert_frequency_offset,
-        x_gather_idx,
-        s_scatter_idx,
-        s_reverse_scatter_idx,
-        num_activated_expert_per_token_offset,
-        _router_scores,
-        TK_padded,
-        total_pad_rows,
-        _N_recv,
-        _score_src_idx,
-    ) = deepep_topk_to_sonic_metadata(
-        topk_indices_i32,
-        topk_scores,
-        tokens_per_expert,
-        E,
-        block=128 if fp8 else 1,
-    )
+    fp8_scale_packed = None
+    if fp8 and fp8_scale is not None:
+        (
+            expert_frequency_offset,
+            x_gather_idx,
+            s_scatter_idx,
+            s_reverse_scatter_idx,
+            num_activated_expert_per_token_offset,
+            _router_scores,
+            TK_padded,
+            total_pad_rows,
+            _N_recv,
+            _score_src_idx,
+            fp8_scale_packed,
+        ) = deepep_topk_to_sonic_metadata_with_scales(
+            topk_indices.cast(paddle.int32),
+            topk_scores,
+            tokens_per_expert,
+            E,
+            fp8_scale,
+            int(hidden_states.shape[1]),
+            block=128,
+        )
+    else:
+        (
+            expert_frequency_offset,
+            x_gather_idx,
+            s_scatter_idx,
+            s_reverse_scatter_idx,
+            num_activated_expert_per_token_offset,
+            _router_scores,
+            TK_padded,
+            total_pad_rows,
+            _N_recv,
+            _score_src_idx,
+        ) = deepep_topk_to_sonic_metadata(
+            topk_indices.cast(paddle.int32),
+            topk_scores,
+            tokens_per_expert,
+            E,
+            block=128 if fp8 else 1,
+        )
 
     s_scatter_idx.stop_gradient = True
     activation_type = ActivationType("swiglu")
 
     total_expert_freq = TK_padded
-    scores_for_down = _differentiable_router_scores(
-        topk_scores,
-        topk_indices_i32,
-        num_activated_expert_per_token_offset,
-        TK_padded - total_pad_rows,
-        TK_padded,
-        E,
-        score_src_idx=_score_src_idx,
-    )
+    if _score_src_idx is not None and _scatter_router_scores_i32 is not None:
+        scores_for_down = _SonicRouterScoresFromMetadata.apply(
+            topk_scores, _router_scores, _score_src_idx
+        )
+    else:
+        scores_for_down = _differentiable_router_scores(
+            topk_scores,
+            topk_indices.cast(paddle.int32),
+            num_activated_expert_per_token_offset,
+            TK_padded - total_pad_rows,
+            TK_padded,
+            E,
+            score_src_idx=_score_src_idx,
+        )
 
     fp8_hidden_states = None
     if fp8_scale is not None:
-        fp8_hidden_states = (hidden_states, fp8_scale)
+        fp8_hidden_states = (
+            (hidden_states, fp8_scale, fp8_scale_packed)
+            if fp8_scale_packed is not None
+            else (hidden_states, fp8_scale)
+        )
 
     # if fp8:
     #     w1_sonic = _make_sonic_fp8_weight_carrier(w1)
