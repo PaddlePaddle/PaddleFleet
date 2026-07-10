@@ -28,6 +28,15 @@ from .block_score_attn_mha import block_score_mha_attn_fwd
 from .block_score_attn_mha_bwd import block_score_mha_bwd_interface
 from .block_sparse_attn_mqa import block_sparse_mqa_attn_fwd
 from .block_sparse_attn_mqa_bwd import block_sparse_mqa_bwd_interface
+from .differentiable_ops import (
+    BlockScoreMHAAttn,
+    BlockScoreMQAAttn,
+    BlockSparseMQAAttn,
+    block_score_mha_attention,
+    block_score_mqa_attention,
+    block_sparse_mqa_attention,
+    hysparse_mqa_attention,
+)
 from .pipeline import (
     hysparse_forward_mqa,
     select_topk_blocks,
@@ -44,6 +53,13 @@ __all__ = [
     "block_score_mha_bwd_interface",
     "block_sparse_mqa_attn_fwd",
     "block_sparse_mqa_bwd_interface",
+    "BlockScoreMQAAttn",
+    "BlockScoreMHAAttn",
+    "BlockSparseMQAAttn",
+    "block_score_mqa_attention",
+    "block_score_mha_attention",
+    "block_sparse_mqa_attention",
+    "hysparse_mqa_attention",
     "hysparse_forward_mqa",
     "select_topk_blocks",
     "sliding_window_mqa_attention",

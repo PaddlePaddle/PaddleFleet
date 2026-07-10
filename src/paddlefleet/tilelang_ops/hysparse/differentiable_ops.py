@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Autograd (``paddle.autograd.PyLayer``) wrappers for the HySparse MQA block
+"""Autograd (``paddle.autograd.PyLayer``) wrappers for the HySparse block
 attention operators, combining the separate TileLang forward and backward
 kernels into differentiable ops usable inside a training network.
 
-Two ops, both with a single shared K/V head:
+MQA (single shared K/V head):
 
 * :class:`BlockScoreMQAAttn` -- full block-score attention. Returns the
   attention output (differentiable) plus ``lse`` and per-block ``block_logit``
@@ -24,6 +24,12 @@ Two ops, both with a single shared K/V head:
 * :class:`BlockSparseMQAAttn` -- block-sparse gather attention over a
   per-query-token selection of key blocks. Returns output (differentiable) and
   ``lse`` (non-differentiable).
+
+MHA (per-head K/V, decompressed-MLA layout):
+
+* :class:`BlockScoreMHAAttn` -- full block-score attention with a K/V head per
+  query head. Same differentiable / non-differentiable split as the MQA
+  variant.
 
 The convenience :func:`hysparse_mqa_attention` chains score -> TopK -> sparse:
 the TopK sits between the two PyLayers and carries no gradient, exactly as in
@@ -34,6 +40,8 @@ import paddle
 
 from .block_score_attn import block_score_mqa_attn_fwd
 from .block_score_attn_bwd import block_score_mqa_bwd_interface
+from .block_score_attn_mha import block_score_mha_attn_fwd
+from .block_score_attn_mha_bwd import block_score_mha_bwd_interface
 from .block_sparse_attn_mqa import block_sparse_mqa_attn_fwd
 from .block_sparse_attn_mqa_bwd import block_sparse_mqa_bwd_interface
 from .pipeline import select_topk_blocks
@@ -143,6 +151,55 @@ class BlockSparseMQAAttn(paddle.autograd.PyLayer):
         )
 
 
+class BlockScoreMHAAttn(paddle.autograd.PyLayer):
+    """Differentiable MHA block-score attention (per-head K/V).
+
+    forward inputs: q [B,S,H,D], k [B,S_kv,H,D], v [B,S_kv,H,Dv],
+    valid_range [B,S,2] int32, plus scalar ``sm_scale`` and ``block_B``.
+    outputs: out [B,S,H,Dv] (differentiable), lse [B,S,H] and
+    block_logit [B,H,S,num_blocks] (both non-differentiable).
+    """
+
+    @staticmethod
+    def forward(ctx, q, k, v, valid_range, sm_scale, block_B):
+        out, lse, block_logit = block_score_mha_attn_fwd(
+            q, k, v, valid_range, sm_scale=sm_scale, block_B=block_B
+        )
+        ctx.save_for_backward(q, k, v, out, lse, valid_range)
+        ctx.sm_scale = sm_scale
+        ctx.block_B = block_B
+        ctx.needs_grad = (
+            not q.stop_gradient,
+            not k.stop_gradient,
+            not v.stop_gradient,
+        )
+        ctx.mark_non_differentiable(lse, block_logit)
+        return out, lse, block_logit
+
+    @staticmethod
+    def backward(ctx, grad_out, *_):
+        q, k, v, out, lse, valid_range = ctx.saved_tensor()
+        dq, dk, dv = block_score_mha_bwd_interface(
+            q,
+            k,
+            v,
+            out,
+            grad_out.contiguous(),
+            lse,
+            valid_range,
+            sm_scale=ctx.sm_scale,
+            block_B=ctx.block_B,
+        )
+        gq, gk, gv = ctx.needs_grad
+        # one entry per Tensor input: q, k, v, valid_range (no grad on range).
+        return (
+            dq if gq else None,
+            dk if gk else None,
+            dv if gv else None,
+            None,
+        )
+
+
 def block_score_mqa_attention(q, k, v, valid_range, sm_scale=None, block_B=64):
     """Differentiable block-score attention (see :class:`BlockScoreMQAAttn`).
 
@@ -166,6 +223,19 @@ def block_sparse_mqa_attention(
         sm_scale = q.shape[-1] ** -0.5
     return BlockSparseMQAAttn.apply(
         q, k, v, indices, valid_range, float(sm_scale), block_B
+    )
+
+
+def block_score_mha_attention(q, k, v, valid_range, sm_scale=None, block_B=64):
+    """Differentiable MHA block-score attention (see :class:`BlockScoreMHAAttn`).
+
+    Per-head K/V; returns ``(out, lse, block_logit)``; only ``out`` carries
+    gradient.
+    """
+    if sm_scale is None:
+        sm_scale = q.shape[-1] ** -0.5
+    return BlockScoreMHAAttn.apply(
+        q, k, v, valid_range, float(sm_scale), block_B
     )
 
 
