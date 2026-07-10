@@ -1764,7 +1764,9 @@ class CompressedSparseAttention(FleetLayer):
         super().__init__(config)
         DSAIndexerLossLoggingHelper.register_total_num_layers(config)
         self.config = config
-        self.layer_number = layer_number
+        self.layer_number = layer_number - (
+            0 if is_mtp_layer else self.config.num_empty_layers_add_in_head
+        )
         if is_mtp_layer:
             self.layer_number += self.config.num_hidden_layers + 1
         self.pg_collection = pg_collection
