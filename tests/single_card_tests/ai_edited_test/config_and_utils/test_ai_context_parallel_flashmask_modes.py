@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
 import os
 import sys
+import types
 import unittest
 from unittest.mock import patch
 
@@ -59,8 +61,94 @@ class FakeTask:
         pass
 
 
+class FakeFlashMaskInfoPaddle:
+    def __init__(self, startend_row_indices, is_causal=False):
+        self.startend_row_indices = startend_row_indices
+        self.is_causal = is_causal
+
+
+def fake_bshd_slice_contiguous_kv(
+    key_grad_tensor, value_grad_tensor, start, length
+):
+    end = start + length
+    return (
+        key_grad_tensor[:, start:end, :, :].contiguous(),
+        value_grad_tensor[:, start:end, :, :].contiguous(),
+    )
+
+
 def assert_tensor_equal(testcase, actual, expected):
     testcase.assertTrue(bool((actual == expected).all().item()))
+
+
+class TestFlashMaskImportPath(unittest.TestCase):
+    def test_sm100_imports_vendored_flashmask_utils(self):
+        def fake_flash_attn_fwd(*args, **kwargs):
+            return None
+
+        def fake_flash_attn_bwd(*args, **kwargs):
+            return None
+
+        def fake_slice(*args, **kwargs):
+            return None
+
+        def fake_module(name, is_package=False):
+            module = types.ModuleType(name)
+            if is_package:
+                module.__path__ = []
+            return module
+
+        fake_modules = {
+            "paddlefleet_ops.flash_mask": fake_module(
+                "paddlefleet_ops.flash_mask", is_package=True
+            ),
+            "paddlefleet_ops.flash_mask.cute": fake_module(
+                "paddlefleet_ops.flash_mask.cute", is_package=True
+            ),
+            "paddlefleet_ops.flash_mask.cute.flashmask_utils": fake_module(
+                "paddlefleet_ops.flash_mask.cute.flashmask_utils"
+            ),
+            "paddlefleet_ops.flash_mask.cute.interface": fake_module(
+                "paddlefleet_ops.flash_mask.cute.interface"
+            ),
+            "paddlefleet_ops.flash_mask.utils": fake_module(
+                "paddlefleet_ops.flash_mask.utils", is_package=True
+            ),
+        }
+        fake_modules[
+            "paddlefleet_ops.flash_mask.cute.flashmask_utils"
+        ].FlashMaskInfoPaddle = FakeFlashMaskInfoPaddle
+        fake_modules[
+            "paddlefleet_ops.flash_mask.cute.interface"
+        ]._flash_attn_fwd = fake_flash_attn_fwd
+        fake_modules[
+            "paddlefleet_ops.flash_mask.cute.interface"
+        ]._flash_attn_bwd = fake_flash_attn_bwd
+        fake_modules[
+            "paddlefleet_ops.flash_mask.utils"
+        ].bshd_slice_contiguous_kv = fake_slice
+
+        module_path = os.path.join(
+            REPO_ROOT, "src", "paddlefleet", "context_parallel_utils.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "_test_context_parallel_utils_sm100", module_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        with (
+            patch.dict(sys.modules, fake_modules),
+            patch.object(paddle.cuda, "is_available", return_value=True),
+            patch.object(
+                paddle.cuda, "get_device_capability", return_value=(10, 0)
+            ),
+        ):
+            spec.loader.exec_module(module)
+
+        self.assertTrue(module._flash_mask_available)
+        self.assertIs(module.FlashMaskInfoPaddle, FakeFlashMaskInfoPaddle)
+        self.assertIs(module._flash_attn_fwd, fake_flash_attn_fwd)
+        self.assertIs(module._flash_attn_bwd, fake_flash_attn_bwd)
+        self.assertIs(module.bshd_slice_contiguous_kv, fake_slice)
 
 
 class TestFlashMaskAllGatherModes(unittest.TestCase):
@@ -510,6 +598,45 @@ class TestFlashMaskSwaP2PHelpers(unittest.TestCase):
         self.assertIs(key_grad, key_grad_tensor)
         self.assertIs(value_grad, value_grad_tensor)
 
+    def test_send_window_grad_back_uses_bshd_slice_op_for_local_grad(self):
+        group = FakeGroup(rank=1, world_size=2)
+        key_grad_tensor = paddle.arange(8, dtype="float32").reshape(
+            [1, 8, 1, 1]
+        )
+        value_grad_tensor = key_grad_tensor + 100
+        key = paddle.zeros([1, 4, 1, 1], dtype="float32")
+        value = paddle.zeros([1, 4, 1, 1], dtype="float32")
+        sliced_key = paddle.full([1, 4, 1, 1], 7.0, dtype="float32")
+        sliced_value = paddle.full([1, 4, 1, 1], 8.0, dtype="float32")
+        captured = {}
+
+        def fake_slice(key_grad_arg, value_grad_arg, start, length):
+            captured["key_grad_tensor"] = key_grad_arg
+            captured["value_grad_tensor"] = value_grad_arg
+            captured["start"] = start
+            captured["length"] = length
+            return sliced_key, sliced_value
+
+        with (
+            patch.object(cp_utils.dist, "P2POp", lambda *args: object()),
+            patch.object(
+                cp_utils.dist, "batch_isend_irecv", lambda ops: [FakeTask()]
+            ),
+            patch.object(
+                cp_utils, "bshd_slice_contiguous_kv", fake_slice, create=True
+            ),
+        ):
+            key_grad, value_grad = cp_utils._send_window_grad_back(
+                key_grad_tensor, value_grad_tensor, key, value, group, 2
+            )
+
+        self.assertIs(captured["key_grad_tensor"], key_grad_tensor)
+        self.assertIs(captured["value_grad_tensor"], value_grad_tensor)
+        self.assertEqual(captured["start"], 4)
+        self.assertEqual(captured["length"], 4)
+        self.assertIs(key_grad, sliced_key)
+        self.assertIs(value_grad, sliced_value)
+
     def test_send_window_grad_back_accumulates_received_tail_grad(self):
         group = FakeGroup(rank=0, world_size=2)
         key_grad_tensor = paddle.arange(256, dtype="float32").reshape(
@@ -535,6 +662,12 @@ class TestFlashMaskSwaP2PHelpers(unittest.TestCase):
             patch.object(cp_utils.dist, "P2POp", lambda *args: object()),
             patch.object(
                 cp_utils.dist, "batch_isend_irecv", lambda ops: [FakeTask()]
+            ),
+            patch.object(
+                cp_utils,
+                "bshd_slice_contiguous_kv",
+                fake_bshd_slice_contiguous_kv,
+                create=True,
             ),
         ):
             key_grad, value_grad = cp_utils._send_window_grad_back(
@@ -567,6 +700,12 @@ class TestFlashMaskSwaP2PHelpers(unittest.TestCase):
             patch.object(cp_utils.dist, "P2POp", fake_p2p_op),
             patch.object(
                 cp_utils.dist, "batch_isend_irecv", lambda ops: [FakeTask()]
+            ),
+            patch.object(
+                cp_utils,
+                "bshd_slice_contiguous_kv",
+                fake_bshd_slice_contiguous_kv,
+                create=True,
             ),
         ):
             key_grad, value_grad = cp_utils._send_window_grad_back(
@@ -714,10 +853,13 @@ class TestFlashMaskSwaP2PPath(unittest.TestCase):
             captured["output"] = out
             captured["output_grad"] = dout
             captured["lse"] = lse_arg
-            captured["indices"] = kwargs["flashmask_info"]
+            captured["flashmask_info"] = kwargs["flashmask_info"]
             captured["learnable_sink"] = kwargs["learnable_sink"]
+            captured["causal"] = kwargs["causal"]
             captured["softmax_scale"] = kwargs["softmax_scale"]
             captured["deterministic"] = kwargs["deterministic"]
+            captured["kv_postprocess_start"] = kwargs["kv_postprocess_start"]
+            captured["kv_postprocess_end"] = kwargs["kv_postprocess_end"]
             return query_grad, key_grad, value_grad, None
 
         with (
@@ -734,6 +876,12 @@ class TestFlashMaskSwaP2PPath(unittest.TestCase):
             ),
             patch.object(
                 cp_utils, "_flash_attn_bwd", fake_flash_bwd, create=True
+            ),
+            patch.object(
+                cp_utils,
+                "FlashMaskInfoPaddle",
+                FakeFlashMaskInfoPaddle,
+                create=True,
             ),
         ):
             qg, kg, vg, grad_sink = cp_utils.cp_flashmask_swa_p2p_backward(
@@ -761,10 +909,93 @@ class TestFlashMaskSwaP2PPath(unittest.TestCase):
         self.assertIs(captured["output"], output)
         self.assertIs(captured["output_grad"], output_grad)
         self.assertIs(captured["lse"], lse)
-        self.assertIs(captured["indices"], self.indices)
+        self.assertIs(
+            captured["flashmask_info"].startend_row_indices, self.indices
+        )
+        self.assertFalse(captured["flashmask_info"].is_causal)
         self.assertIsNone(captured["learnable_sink"])
+        self.assertFalse(captured["causal"])
         self.assertEqual(captured["softmax_scale"], 0.5)
         self.assertFalse(captured["deterministic"])
+        self.assertEqual(captured["kv_postprocess_start"], 0)
+        self.assertEqual(captured["kv_postprocess_end"], 128)
+        self.assertIsNone(grad_sink)
+
+    def test_p2p_backward_sets_nonzero_rank_kv_postprocess_range(self):
+        group = FakeGroup(rank=1, world_size=2)
+        output = paddle.full([1, 128, 1, 1], 3.0, dtype="float32")
+        lse = paddle.full([1, 1, 128], 4.0, dtype="float32")
+        output_grad = paddle.ones([1, 128, 1, 1], dtype="float32")
+        recv_key = paddle.zeros([1, 128, 1, 1], dtype="float32")
+        recv_value = paddle.zeros([1, 128, 1, 1], dtype="float32")
+        query_grad = self.query + 1
+        key_grad_tensor = paddle.zeros([1, 256, 1, 1], dtype="float32")
+        value_grad_tensor = paddle.ones([1, 256, 1, 1], dtype="float32")
+        captured = {}
+
+        def fake_flash_bwd(*args, **kwargs):
+            captured["kv_postprocess_start"] = kwargs["kv_postprocess_start"]
+            captured["kv_postprocess_end"] = kwargs["kv_postprocess_end"]
+            captured["flashmask_info"] = kwargs["flashmask_info"]
+            captured["causal"] = kwargs["causal"]
+            return query_grad, key_grad_tensor, value_grad_tensor, None
+
+        with (
+            patch.object(
+                cp_utils.paddle.base.core, "nvprof_nvtx_push", lambda _: None
+            ),
+            patch.object(
+                cp_utils.paddle.base.core, "nvprof_nvtx_pop", lambda: None
+            ),
+            patch.object(
+                cp_utils.paddle,
+                "get_flags",
+                lambda _: {"FLAGS_cudnn_deterministic": False},
+            ),
+            patch.object(
+                cp_utils, "_flash_attn_bwd", fake_flash_bwd, create=True
+            ),
+            patch.object(
+                cp_utils,
+                "FlashMaskInfoPaddle",
+                FakeFlashMaskInfoPaddle,
+                create=True,
+            ),
+            patch.object(cp_utils.dist, "P2POp", lambda *args: object()),
+            patch.object(
+                cp_utils.dist, "batch_isend_irecv", lambda ops: [FakeTask()]
+            ),
+            patch.object(
+                cp_utils,
+                "bshd_slice_contiguous_kv",
+                fake_bshd_slice_contiguous_kv,
+                create=True,
+            ),
+        ):
+            qg, kg, vg, grad_sink = cp_utils.cp_flashmask_swa_p2p_backward(
+                self.query,
+                self.key,
+                self.value,
+                recv_key,
+                recv_value,
+                self.indices,
+                output,
+                lse,
+                output_grad,
+                None,
+                group,
+                causal=True,
+                softmax_scale=None,
+                window_size=64,
+            )
+
+        assert_tensor_equal(self, qg, query_grad)
+        assert_tensor_equal(self, kg, key_grad_tensor[:, 128:256, :, :])
+        assert_tensor_equal(self, vg, value_grad_tensor[:, 128:256, :, :])
+        self.assertEqual(captured["kv_postprocess_start"], 64)
+        self.assertEqual(captured["kv_postprocess_end"], 256)
+        self.assertTrue(captured["flashmask_info"].is_causal)
+        self.assertTrue(captured["causal"])
         self.assertIsNone(grad_sink)
 
     def test_pylayer_forward_saves_tensors_and_backward_uses_saved_context(

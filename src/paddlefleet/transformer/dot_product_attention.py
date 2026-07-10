@@ -165,9 +165,7 @@ def scaled_dot_product_attention_with_softmax_offset(
     sink = softmax_offset.reshape([1, -1, 1, 1]).cast("float32")
     row_max = paddle.maximum(scores.max(axis=-1, keepdim=True), sink)
     exp_s = paddle.exp(scores - row_max)  # [B, H, Q, K]
-    row_sum = exp_s.sum(axis=-1, keepdim=True) + paddle.exp(
-        sink - row_max
-    )
+    row_sum = exp_s.sum(axis=-1, keepdim=True) + paddle.exp(sink - row_max)
 
     weights = exp_s / row_sum  # [B, Hq, Q, K]
     if dropout_p > 0.0:

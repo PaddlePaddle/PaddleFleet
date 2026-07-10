@@ -160,11 +160,17 @@ class TestSDPASoftmaxOffsetBranch(unittest.TestCase):
         self.assertIn("is_causal", kwargs)
         self.assertIn("softmax_offset", kwargs)
         self.assertIn("q_head_dim", kwargs)
+        self.assertIn("dropout_p", kwargs)
+        self.assertIn("training", kwargs)
         self.assertIs(kwargs["softmax_offset"], attn.softmax_offset)
         self.assertEqual(kwargs["q_head_dim"], 32)
         # training path: is_causal=True, attention_mask=None -> attn_mask_kv=None
         self.assertTrue(kwargs["is_causal"])
         self.assertIsNone(kwargs["attn_mask_kv"])
+        # dropout_p is sourced from config.attention_dropout (0.0 in _make_config)
+        self.assertEqual(kwargs["dropout_p"], 0.0)
+        # training reflects the module's Layer.training flag (True by default)
+        self.assertEqual(kwargs["training"], attn.training)
 
     @patch(
         "paddlefleet.transformer.dot_product_attention.scaled_dot_product_attention_with_softmax_offset"
@@ -242,6 +248,231 @@ class TestSDPASoftmaxOffsetBranch(unittest.TestCase):
         mock_offset_fn.assert_called_once()
         kwargs = mock_offset_fn.call_args.kwargs
         self.assertIs(kwargs["softmax_offset"], attn.softmax_offset)
+
+
+class TestSoftmaxOffsetFnDropoutTraining(unittest.TestCase):
+    """
+    Directly exercises scaled_dot_product_attention_with_softmax_offset to
+    guard the dropout_p / training branch (regression test: previously used
+    an undefined `self.training`).
+    """
+
+    @unittest.skipUnless(
+        _HAS_SDPA_SOFTMAX_OFFSET_FN,
+        "scaled_dot_product_attention_with_softmax_offset not available.",
+    )
+    def test_dropout_uses_training_argument_no_nameerror(self):
+        from paddlefleet.transformer.dot_product_attention import (
+            scaled_dot_product_attention_with_softmax_offset,
+        )
+
+        # small tensors, MHA path (groups == 1)
+        q = paddle.randn([1, 4, 2, 8]).astype("float32")
+        k = paddle.randn([1, 4, 2, 8]).astype("float32")
+        v = paddle.randn([1, 4, 2, 8]).astype("float32")
+        offset = paddle.zeros([2], dtype="float32")
+
+        # training=False + dropout_p>0: dropout is a no-op, must not raise.
+        out_eval = scaled_dot_product_attention_with_softmax_offset(
+            q,
+            k,
+            v,
+            softmax_offset=offset,
+            q_head_dim=8,
+            is_causal=True,
+            dropout_p=0.5,
+            training=False,
+        )
+        self.assertEqual(out_eval.shape, [1, 4, 2, 8])
+
+        # training=True + dropout_p>0: dropout path executed, must not raise.
+        out_train = scaled_dot_product_attention_with_softmax_offset(
+            q,
+            k,
+            v,
+            softmax_offset=offset,
+            q_head_dim=8,
+            is_causal=True,
+            dropout_p=0.5,
+            training=True,
+        )
+        self.assertEqual(out_train.shape, [1, 4, 2, 8])
+
+
+@unittest.skipUnless(
+    _HAS_SDPA_SOFTMAX_OFFSET_FN,
+    "scaled_dot_product_attention_with_softmax_offset not available.",
+)
+class TestSoftmaxOffsetFnMaskBranches(unittest.TestCase):
+    """
+    Exercises the two attn_mask_kv branches in
+    scaled_dot_product_attention_with_softmax_offset:
+
+      if attn_mask_kv.dtype == paddle.bool:
+          scores = paddle.where(attn_mask_kv, -inf, scores)   # bool: True = masked
+      else:
+          scores = scores + attn_mask_kv.cast("float32")     # additive
+    """
+
+    def _run(self, mask):
+        from paddlefleet.transformer.dot_product_attention import (
+            scaled_dot_product_attention_with_softmax_offset,
+        )
+
+        paddle.seed(0)
+        q = paddle.randn([1, 2, 1, 4]).astype("float32")  # [B, Q, Hq, dq]
+        k = paddle.randn([1, 3, 1, 4]).astype("float32")  # [B, K, Hkv, dk]
+        v = paddle.randn([1, 3, 1, 4]).astype("float32")  # [B, K, Hkv, dv]
+        offset = paddle.full([1], -1e9, dtype="float32")  # neutralize sink
+
+        out = scaled_dot_product_attention_with_softmax_offset(
+            q,
+            k,
+            v,
+            attn_mask_kv=mask,
+            is_causal=False,
+            softmax_offset=offset,
+            q_head_dim=4,
+        )
+        return out, v
+
+    def test_bool_mask_zeros_out_masked_positions(self):
+        """
+        With a bool mask that masks all but one key position, the attention
+        output must equal V at that unmasked position (softmax collapses to
+        a one-hot).
+        """
+        # mask shape [B, H, Q, K] = [1,1,2,3]. True = masked (per code).
+        mask = paddle.to_tensor(
+            [[[[True, True, False], [False, True, True]]]], dtype="bool"
+        )
+        out, v = self._run(mask)
+
+        # For Q=0: only key 2 is unmasked -> out[0, 0, 0] == v[0, 2, 0]
+        # For Q=1: only key 0 is unmasked -> out[0, 1, 0] == v[0, 0, 0]
+        expected = paddle.stack([v[0, 2, 0], v[0, 0, 0]], axis=0)
+        actual = out[0, :, 0]  # [Q=2, dv=4]
+
+        self.assertTrue(
+            paddle.allclose(actual, expected, atol=1e-5).item(),
+            msg=f"bool-mask path collapsed weights incorrectly: {actual} vs {expected}",
+        )
+
+    def test_additive_mask_uses_same_path_as_before(self):
+        """
+        A float additive mask that assigns -inf to a position must zero out
+        that position's contribution, same as the bool mask would.
+        """
+        neg_inf = float("-inf")
+        # mask everything except key 2 for Q=0 and everything except key 0 for Q=1
+        mask = paddle.to_tensor(
+            [[[[neg_inf, neg_inf, 0.0], [0.0, neg_inf, neg_inf]]]],
+            dtype="float32",
+        )
+        out, v = self._run(mask)
+
+        expected = paddle.stack([v[0, 2, 0], v[0, 0, 0]], axis=0)
+        actual = out[0, :, 0]
+
+        self.assertTrue(
+            paddle.allclose(actual, expected, atol=1e-5).item(),
+            msg=f"additive-mask path collapsed weights incorrectly: {actual} vs {expected}",
+        )
+
+    def test_bool_and_additive_mask_produce_same_output(self):
+        """Bool mask and its equivalent additive (-inf) mask must match."""
+        bool_mask = paddle.to_tensor(
+            [[[[True, False, True], [False, False, True]]]], dtype="bool"
+        )
+        neg_inf = float("-inf")
+        add_mask = paddle.to_tensor(
+            [[[[neg_inf, 0.0, neg_inf], [0.0, 0.0, neg_inf]]]],
+            dtype="float32",
+        )
+        out_bool, _ = self._run(bool_mask)
+        out_add, _ = self._run(add_mask)
+
+        self.assertTrue(
+            paddle.allclose(out_bool, out_add, atol=1e-5).item(),
+            msg="bool and additive masks should produce the same output",
+        )
+
+
+@unittest.skipUnless(
+    _HAS_SDPA_SOFTMAX_OFFSET_FN,
+    "scaled_dot_product_attention_with_softmax_offset not available.",
+)
+class TestSoftmaxOffsetFnRowMaxWithSink(unittest.TestCase):
+    """
+    Guards the numerical-stability change:
+        row_max = paddle.maximum(scores.max(axis=-1, keepdim=True), sink)
+
+    When the sink far exceeds all scores, the softmax weights on real keys
+    must approach zero (all mass absorbed by the virtual sink token).
+    """
+
+    def test_large_sink_dominates_weights(self):
+        from paddlefleet.transformer.dot_product_attention import (
+            scaled_dot_product_attention_with_softmax_offset,
+        )
+
+        paddle.seed(0)
+        q = paddle.randn([1, 2, 1, 4]).astype("float32")
+        k = paddle.randn([1, 3, 1, 4]).astype("float32")
+        v = paddle.randn([1, 3, 1, 4]).astype("float32")
+
+        # Sink much larger than any score -> exp(sink - row_max) dominates
+        # and all attention weights on real tokens approach zero, so the
+        # output approaches zero.
+        offset = paddle.full([1], 50.0, dtype="float32")
+
+        out = scaled_dot_product_attention_with_softmax_offset(
+            q,
+            k,
+            v,
+            softmax_offset=offset,
+            q_head_dim=4,
+        )
+
+        self.assertTrue(
+            paddle.all(paddle.abs(out) < 1e-6).item(),
+            msg=f"large sink should absorb all weight; got out={out}",
+        )
+
+    def test_small_sink_matches_plain_softmax(self):
+        """With a very negative sink, output must equal plain softmax(QK)V."""
+        from paddlefleet.transformer.dot_product_attention import (
+            scaled_dot_product_attention_with_softmax_offset,
+        )
+
+        paddle.seed(0)
+        q = paddle.randn([1, 2, 1, 4]).astype("float32")
+        k = paddle.randn([1, 3, 1, 4]).astype("float32")
+        v = paddle.randn([1, 3, 1, 4]).astype("float32")
+
+        offset = paddle.full([1], -1e9, dtype="float32")
+        out = scaled_dot_product_attention_with_softmax_offset(
+            q,
+            k,
+            v,
+            softmax_offset=offset,
+            q_head_dim=4,
+        )
+
+        # Manual reference: plain softmax(QK^T / sqrt(d)) @ V (no sink).
+        # q,k,v are [B, Q, H, D]; transpose to [B, H, Q, D] to matmul.
+        qh = q.transpose([0, 2, 1, 3])
+        kh = k.transpose([0, 2, 1, 3])
+        vh = v.transpose([0, 2, 1, 3])
+        scale = 4**-0.5
+        scores = paddle.matmul(qh, kh.transpose([0, 1, 3, 2])) * scale
+        weights = paddle.nn.functional.softmax(scores, axis=-1)
+        ref = paddle.matmul(weights, vh).transpose([0, 2, 1, 3])
+
+        self.assertTrue(
+            paddle.allclose(out, ref, atol=1e-5).item(),
+            msg=f"small sink should reduce to plain softmax; out={out} ref={ref}",
+        )
 
 
 if __name__ == "__main__":

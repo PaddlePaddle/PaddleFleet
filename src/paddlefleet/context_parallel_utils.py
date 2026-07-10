@@ -35,6 +35,7 @@ try:
             _flash_attn_bwd,
             _flash_attn_fwd,
         )
+        from paddlefleet_ops.flash_mask.utils import bshd_slice_contiguous_kv
 
         _flash_mask_available = True
 except (ImportError, AttributeError):
@@ -1300,14 +1301,13 @@ def _send_window_grad_back(
     cp_size = group.world_size
     local_seqlen = key.shape[1]
     local_start = rank * local_seqlen
-    local_end = local_start + local_seqlen
 
     if cp_size == 1:
         return key_grad_tensor, value_grad_tensor
 
-    # TODO(heqianyue): the following can be optimized via cudaMemcpyAsync2D (3ms -> 0.7ms)
-    key_grad = key_grad_tensor[:, local_start:local_end, :, :].contiguous()
-    value_grad = value_grad_tensor[:, local_start:local_end, :, :].contiguous()
+    key_grad, value_grad = bshd_slice_contiguous_kv(
+        key_grad_tensor, value_grad_tensor, local_start, local_seqlen
+    )
 
     recv_grad_window = paddle.empty(
         [2, key.shape[0], window_size, key.shape[2], key.shape[3]],
@@ -1409,6 +1409,20 @@ def cp_flashmask_swa_p2p_backward(
         key, value, recv_key, recv_value, group
     )
 
+    flashmask_info = None
+    if startend_row_indices is not None:
+        flashmask_info = FlashMaskInfoPaddle(
+            startend_row_indices=startend_row_indices,
+            is_causal=causal,
+        )
+
+    local_seqlen = key.shape[1]
+    local_start = group.rank * local_seqlen
+    local_end = local_start + local_seqlen
+    kv_postprocess_start = (
+        local_start if group.rank == 0 else local_start - window_size
+    )
+
     query_grad, key_grad_tensor, value_grad_tensor, grad_sink = _flash_attn_bwd(
         query,
         key_tensor,
@@ -1416,13 +1430,15 @@ def cp_flashmask_swa_p2p_backward(
         output,
         output_grad,
         log_sum_exp,
-        flashmask_info=startend_row_indices,
+        flashmask_info=flashmask_info,
         learnable_sink=learnable_sink,
         causal=causal,
         softmax_scale=softmax_scale,
         deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
             "FLAGS_cudnn_deterministic"
         ],
+        kv_postprocess_start=kv_postprocess_start,
+        kv_postprocess_end=local_end,
     )
 
     key_grad, value_grad = _send_window_grad_back(
