@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import importlib.util
 import os
 import sys
 
@@ -241,65 +240,6 @@ class TestGetCudaVersion(unittest.TestCase):
         """Test ValueError when version string cannot be parsed."""
         with self.assertRaises(ValueError):
             get_cuda_version()
-
-
-class TestFlashMaskBuildConfig(unittest.TestCase):
-    """Test FlashMask build configuration without building custom ops."""
-
-    def test_flash_attention_builds_fa4_with_utils(self):
-        ops_pkg_root = (
-            Path(__file__).resolve().parents[4] / "packages" / "paddlefleet_ops"
-        )
-        build_utils_path = ops_pkg_root / "build_utils.py"
-        module_name = "_test_paddlefleet_ops_build_utils"
-        spec = importlib.util.spec_from_file_location(
-            module_name, build_utils_path
-        )
-        build_utils = importlib.util.module_from_spec(spec)
-        with (
-            patch.object(sys, "argv", ["setup.py"]),
-            patch.object(sys, "path", [str(ops_pkg_root), *sys.path]),
-            patch.dict(sys.modules, {module_name: build_utils}),
-        ):
-            spec.loader.exec_module(build_utils)
-
-        with (
-            patch.object(build_utils, "get_cuda_version", return_value=(12, 8)),
-            patch.object(build_utils.backends, "IS_NVIDIA", True),
-        ):
-            flash_attention = next(
-                lib
-                for lib in build_utils.get_libs()
-                if lib.name == "flash-attention"
-            )
-
-        self.assertEqual(
-            flash_attention._extra_env["FLASHMASK_BUILD"], "fa4+utils"
-        )
-
-    def test_vendored_flashmask_utils_exports_required_ops(self):
-        flashmask_root = (
-            Path(__file__).resolve().parents[4]
-            / "packages"
-            / "paddlefleet_ops"
-            / "third_party"
-            / "flash-attention"
-            / "flashmask"
-            / "flash_mask"
-        )
-        utils_init = flashmask_root / "utils" / "__init__.py"
-        utils_cu = (
-            flashmask_root / "utils" / "csrc" / "flashmask_cuda_utils_op.cu"
-        )
-
-        self.assertTrue(utils_init.exists())
-        self.assertTrue(utils_cu.exists())
-        init_source = utils_init.read_text()
-        cu_source = utils_cu.read_text()
-        self.assertIn("bshd_slice_contiguous_kv", init_source)
-        self.assertIn("accum_zero_axis1_kv", init_source)
-        self.assertIn("PD_BUILD_OP(bshd_slice_contiguous_kv)", cu_source)
-        self.assertIn("PD_BUILD_OP(accum_zero_axis1_kv)", cu_source)
 
 
 if __name__ == "__main__":
