@@ -19,7 +19,7 @@ description = "Fleet Core - Core Functional Library for Large Scale Distributed 
 requires-python = ">=3.10"
 dependencies = [
     "colorlog>=6.10.1",
-    "paddlepaddle-gpu==3.4.0.post20260703+8fa672f4106",
+    "paddlepaddle-gpu==3.4.0.post20260710+af44bbcdf39",
     "tilelang-paddle",
 ]
 license = { text = "Apache 2.0" }
