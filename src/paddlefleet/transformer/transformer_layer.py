@@ -420,6 +420,26 @@ class TransformerLayer(nn.Layer):
                 in_mlp_recompute=self.recompute_mlp,
             )
 
+    def _compute_act_offload_kwargs(self):
+        """Compute activation offload kwargs based on decoderlayer_act_offload_settings."""
+        decoderlayer_act_offload_settings = self.config.get(
+            "decoderlayer_act_offload_settings", {"type": "", "value": ""}
+        ) or {"type": "", "value": ""}
+        setting_type = decoderlayer_act_offload_settings["type"]
+        offload_value = decoderlayer_act_offload_settings["value"]
+        offload_kwargs = {}
+        if "mod" == setting_type:
+            assert isinstance(offload_value, (list, tuple))
+            v1, v2 = offload_value
+            offload_kwargs["offload_indices"] = (
+                [0] if self.layer_number % v1 == v2 else []
+            )
+        elif "layer_idxs" == setting_type:
+            offload_kwargs["offload_indices"] = (
+                [0] if self.layer_number in offload_value else []
+            )
+        return offload_kwargs
+
     def build_schedule_node(self):
         return TransformerLayerNode(
             self,
@@ -595,6 +615,9 @@ class TransformerLayer(nn.Layer):
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
             input_ids = dict_args.get("input_ids", None)
+
+            offload_kwargs = self._compute_act_offload_kwargs()
+
             outputs = recompute(
                 self._forward_impl,
                 hidden_states=hidden_states,
@@ -628,6 +651,7 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
+                **offload_kwargs,
             )
         else:
             outputs = self._forward_impl(**dict_args)
