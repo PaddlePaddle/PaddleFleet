@@ -1764,11 +1764,12 @@ class CompressedSparseAttention(FleetLayer):
         super().__init__(config)
         DSAIndexerLossLoggingHelper.register_total_num_layers(config)
         self.config = config
-        self.layer_number = layer_number - (
-            0 if is_mtp_layer else self.config.num_empty_layers_add_in_head
-        )
         if is_mtp_layer:
-            self.layer_number += self.config.num_hidden_layers + 1
+            self.layer_number = layer_number + self.config.num_hidden_layers + 1
+        else:
+            self.layer_number = (
+                layer_number - self.config.num_empty_layers_add_in_head + 1
+            )
         self.pg_collection = pg_collection
         tp_size = int(getattr(config, "tensor_model_parallel_size", 1))
         if pg_collection is not None and pg_collection.tp is not None:
