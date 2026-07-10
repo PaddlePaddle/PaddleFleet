@@ -1812,9 +1812,9 @@ class AllGatherTokenDispatcher(nn.Layer):
         if _idx_task is not None:
             _idx_task.wait()
         # Build padding mask and zero corresponding weights.
-        self._padding_mask = self._global_topk_indices < 0
+        padding_mask = self._global_topk_indices < 0
         self._global_topk_weights = paddle.where(
-            self._padding_mask,
+            padding_mask,
             paddle.zeros_like(self._global_topk_weights),
             self._global_topk_weights,
         )

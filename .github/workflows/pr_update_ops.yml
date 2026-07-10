@@ -38,6 +38,9 @@ jobs:
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "packages_changed=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.created }}" == "true" ]]; then
+            # Newly created branch (e.g. release/**): force build ops
+            echo "packages_changed=true" >> $GITHUB_OUTPUT
           else
             if git diff --name-only HEAD~1 HEAD -- packages/ | grep -q .; then
               echo "packages_changed=true" >> $GITHUB_OUTPUT

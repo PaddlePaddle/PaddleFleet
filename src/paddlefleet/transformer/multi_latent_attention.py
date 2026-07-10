@@ -259,18 +259,34 @@ class MultiLatentAttention(Attention):
 
         self.out_projection_size = self.v_head_dim * self.num_attention_heads
 
-        self.q_head_dim = (
-            self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
-        )
+        if (
+            self.is_swa
+            and getattr(self.config, "swa_qk_nope_head_dim", None) is not None
+        ):
+            self.qk_nope_head_dim = self.config.swa_qk_nope_head_dim
+        else:
+            self.qk_nope_head_dim = self.config.qk_nope_head_dim
+
+        if (
+            self.is_swa
+            and getattr(self.config, "swa_qk_rope_head_dim", None) is not None
+        ):
+            self.qk_rope_head_dim = self.config.swa_qk_rope_head_dim
+        else:
+            self.qk_rope_head_dim = self.config.qk_rope_head_dim
+
+        self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         mscale = _yarn_get_mscale(
             self.config.rotary_scaling_factor, self.config.mscale_all_dim
         )
         self.softmax_scale = mscale * mscale / math.sqrt(self.q_head_dim)
+        # mscale == 1.0 means softmax_scale equals default 1/sqrt(d), no need to pass explicitly
+        self._softmax_scale_arg = None if mscale == 1.0 else self.softmax_scale
 
         if self.config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
-                self.config.qk_rope_head_dim,
+                self.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=1.0,
                 rotary_base=self.rope_theta,
@@ -281,7 +297,7 @@ class MultiLatentAttention(Attention):
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
-                self.config.qk_rope_head_dim,
+                self.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_base=self.rope_theta,
                 scaling_factor=self.config.rotary_scaling_factor,
@@ -309,7 +325,7 @@ class MultiLatentAttention(Attention):
             attention_type=self.attention_type,
             is_mtp_layer=self.is_mtp_layer,
             is_swa=self.is_swa,
-            softmax_scale=self.softmax_scale,
+            softmax_scale=self._softmax_scale_arg,
             k_channels=self.q_head_dim,
             v_channels=self.v_head_dim,
             num_attention_heads=self.num_attention_heads,
@@ -335,10 +351,22 @@ class MultiLatentAttention(Attention):
 
         # Gated attention
         self.gated_attention = getattr(self.config, "gated_attention", False)
+        self.gated_attn_use_q_lora = getattr(
+            self.config, "gated_attn_use_q_lora", False
+        )
         if self.gated_attention and sublayers_spec.gate_proj is not None:
+            # Gate input source: q_compressed (post q_a_layernorm, dim=q_lora_rank) when
+            # gated_attn_use_q_lora is set, otherwise the full hidden_states.
+            if self.gated_attn_use_q_lora:
+                assert self.config.q_lora_rank is not None, (
+                    "gated_attn_use_q_lora=True requires q_lora_rank is not None"
+                )
+                gate_in_dim = self.config.q_lora_rank
+            else:
+                gate_in_dim = self.config.hidden_size
             self.gate_proj = build_spec_layer(
                 sublayers_spec.gate_proj,
-                self.config.hidden_size,
+                gate_in_dim,
                 self.out_projection_size,
                 config=self.config,
                 init_method=self.config.init_method,
@@ -348,6 +376,16 @@ class MultiLatentAttention(Attention):
                 is_expert=False,
                 tp_comm_buffer_name="mla_gate",
                 tp_group=self.pg_collection.tp,
+            )
+            print(
+                f"[GatedAttnCheck][init] layer={getattr(self, 'layer_number', -1)} "
+                f"gated_attention={self.gated_attention} "
+                f"gated_attn_use_q_lora={self.gated_attn_use_q_lora} "
+                f"q_lora_rank={self.config.q_lora_rank} "
+                f"hidden_size={self.config.hidden_size} "
+                f"gate_in_dim={gate_in_dim} "
+                f"gate_out_dim={self.out_projection_size}",
+                flush=True,
             )
         else:
             self.gated_attention = False
@@ -376,8 +414,8 @@ class MultiLatentAttention(Attention):
             q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
             wv_b: [heads, kv_lora_rank, v_head_dim]
         """
-        qk_nope_head_dim = self.config.qk_nope_head_dim
-        qk_rope_head_dim = self.config.qk_rope_head_dim
+        qk_nope_head_dim = self.qk_nope_head_dim
+        qk_rope_head_dim = self.qk_rope_head_dim
         kv_lora_rank = self.config.kv_lora_rank
         v_head_dim = self.v_head_dim
         num_heads = self.num_attention_heads_per_partition
@@ -561,17 +599,36 @@ class MultiLatentAttention(Attention):
 
         # Apply gated attention
         if self.gated_attention:
+            # Gate input source: q_compressed (post q_a_layernorm, dim=q_lora_rank) when
+            # gated_attn_use_q_lora is set, otherwise hidden_states.
+            gate_source = (
+                q_compressed if self.gated_attn_use_q_lora else hidden_states
+            )
+            # [GatedAttnCheck][forward] debug print (kept commented for on-demand use):
+            # if not getattr(self, "_gated_attn_fwd_logged", False):
+            #     self._gated_attn_fwd_logged = True
+            #     _src_is_qc = gate_source is q_compressed
+            #     print(
+            #         f"[GatedAttnCheck][forward] layer={getattr(self, 'layer_number', -1)} "
+            #         f"gated_attn_use_q_lora={self.gated_attn_use_q_lora} "
+            #         f"gate_source_is_q_compressed={_src_is_qc} "
+            #         f"gate_source.shape={list(gate_source.shape)} "
+            #         f"q_compressed.shape={list(q_compressed.shape)} "
+            #         f"hidden_states.shape={list(hidden_states.shape)} "
+            #         f"recompute_gated_attn={self.recompute_gated_attn}",
+            #         flush=True,
+            #     )
             if self.recompute_gated_attn:
                 gate_recompute = RecomputeWithoutOutput()
                 core_attn_out = gate_recompute.recompute(
                     self._gate,
-                    hidden_states,
+                    gate_source,
                     core_attn_out,
                     preserve_rng_state=False,
                     share_grad_holder=True,
                 )
             else:
-                core_attn_out = self._gate(hidden_states, core_attn_out)
+                core_attn_out = self._gate(gate_source, core_attn_out)
 
         if getattr(self.config, "dw_p2p_overlap", False) and not getattr(
             self.config, "use_bias", False
@@ -588,8 +645,8 @@ class MultiLatentAttention(Attention):
 
         return output, bias
 
-    def _gate(self, hidden_states, core_attn_out):
-        gate, _ = self.gate_proj(hidden_states)
+    def _gate(self, gate_source, core_attn_out):
+        gate, _ = self.gate_proj(gate_source)
         if self.config.sigmoid_gate_fusion:
             from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
@@ -677,7 +734,7 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_a_proj_with_mqa = build_spec_layer(
             sublayers_spec.kv_a_proj_with_mqa,
             self.config.hidden_size,
-            self.config.kv_lora_rank + self.config.qk_rope_head_dim,
+            self.config.kv_lora_rank + self.qk_rope_head_dim,
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -692,7 +749,7 @@ class MLASelfAttention(MultiLatentAttention):
             sublayers_spec.kv_b_proj,
             self.config.kv_lora_rank,
             self.num_attention_heads
-            * (self.config.qk_nope_head_dim + self.v_head_dim),
+            * (self.qk_nope_head_dim + self.v_head_dim),
             config=self.config,
             init_method=self.config.init_method,
             gather_output=False,
@@ -794,6 +851,68 @@ class MLASelfAttention(MultiLatentAttention):
                 # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
                 # mscale = 1.0
 
+        cp_size = get_context_parallel_world_size()
+        if cp_size > 1:
+            # Keep RoPE inputs local to the current CP rank before the fused
+            # and non-fused apply paths consume them.
+            if packed_seq_params is not None:
+                raise ValueError(
+                    "Context parallel RoPE scatter in MLA does not support "
+                    "packed_seq_params yet."
+                )
+            if self.config.sequence_parallel:
+                local_seq_len = (
+                    hidden_states.shape[0]
+                    * self.config.tensor_model_parallel_size
+                )
+            else:
+                local_seq_len = hidden_states.shape[1]
+            expected_rotary_seq_len = cp_size * local_seq_len
+            if rotary_seq_len != expected_rotary_seq_len:
+                raise ValueError(
+                    "Context parallel requires rotary_seq_len to be the global "
+                    f"sequence length, got rotary_seq_len={rotary_seq_len}, "
+                    f"expected={expected_rotary_seq_len}, cp_size={cp_size}, "
+                    f"local_seq_len={local_seq_len}, "
+                    f"sequence_parallel={self.config.sequence_parallel}, "
+                    f"tensor_model_parallel_size="
+                    f"{self.config.tensor_model_parallel_size}."
+                )
+            if rotary_pos_cos is not None and rotary_pos_sin is not None:
+                if (
+                    rotary_pos_cos.shape[1] != rotary_seq_len
+                    or rotary_pos_sin.shape[1] != rotary_seq_len
+                ):
+                    raise ValueError(
+                        "Context parallel requires rotary_pos_cos/sin sequence "
+                        f"length to match rotary_seq_len, got "
+                        f"cos={rotary_pos_cos.shape}, "
+                        f"sin={rotary_pos_sin.shape}, "
+                        f"rotary_seq_len={rotary_seq_len}."
+                    )
+                rotary_pos_cos = ContextParallelScatterOp.apply(
+                    rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
+                ).contiguous()
+                rotary_pos_sin = ContextParallelScatterOp.apply(
+                    rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
+                ).contiguous()
+            elif rotary_pos_emb is not None:
+                if rotary_pos_emb.shape[1] != rotary_seq_len:
+                    raise ValueError(
+                        "Context parallel requires rotary_pos_emb sequence "
+                        f"length to match rotary_seq_len, got "
+                        f"rotary_pos_emb={rotary_pos_emb.shape}, "
+                        f"rotary_seq_len={rotary_seq_len}."
+                    )
+                rotary_pos_emb = ContextParallelScatterOp.apply(
+                    rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
+                )
+            else:
+                raise ValueError(
+                    "Context parallel requires rotary_pos_emb or rotary_pos_cos/sin "
+                    "to be prepared before applying MLA RoPE."
+                )
+
         if (
             packed_seq_params is not None
             and packed_seq_params.qkv_format == "thd"
@@ -836,14 +955,14 @@ class MLASelfAttention(MultiLatentAttention):
         kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
         if (
             kv_combined.size(-1)
-            != self.config.kv_lora_rank + self.config.qk_rope_head_dim
+            != self.config.kv_lora_rank + self.qk_rope_head_dim
         ):
             # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
             # kv_compressed:[b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
-                [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
+                [self.config.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
             if self.config.sequence_parallel:
@@ -855,7 +974,7 @@ class MLASelfAttention(MultiLatentAttention):
             # kv_compressed:[b, s / TP, kv_lora_rank], k_pos_emb: [b, s / TP, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
-                [self.config.kv_lora_rank, self.config.qk_rope_head_dim],
+                [self.config.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
             if (
@@ -939,7 +1058,7 @@ class MLASelfAttention(MultiLatentAttention):
             kv = kv.view(
                 *kv.size()[:-1],
                 self.num_attention_heads_per_partition,
-                self.config.qk_nope_head_dim + self.v_head_dim,
+                self.qk_nope_head_dim + self.v_head_dim,
             )
 
             # if self.layer_number == 0:
@@ -978,12 +1097,18 @@ class MLASelfAttention(MultiLatentAttention):
                 else:
                     cos = rotary_pos_cos
                     sin = rotary_pos_sin
+                if cos.shape[1] != q_len or sin.shape[1] != q_len:
+                    raise ValueError(
+                        "Fused MLA RoPE requires local cos/sin sequence "
+                        f"length to match q_len, got cos={cos.shape}, "
+                        f"sin={sin.shape}, q_len={q_len}."
+                    )
                 query = fused_apply_mla_rope_for_q(
                     q,
                     cos,
                     sin,
-                    self.config.qk_nope_head_dim,
-                    self.config.qk_rope_head_dim,
+                    self.qk_nope_head_dim,
+                    self.qk_rope_head_dim,
                     cu_seqlens_q,
                     cp_rank,
                     cp_size,
@@ -993,8 +1118,8 @@ class MLASelfAttention(MultiLatentAttention):
                     k_pos_emb,
                     cos,
                     sin,
-                    self.config.qk_rope_head_dim,
-                    self.config.qk_nope_head_dim,
+                    self.qk_rope_head_dim,
+                    self.qk_nope_head_dim,
                     self.v_head_dim,
                     cu_seqlens_kv,
                     cp_rank,
@@ -1029,13 +1154,7 @@ class MLASelfAttention(MultiLatentAttention):
                     if position_ids.numel() == q_len:
                         start_pos = int(position_ids.flatten()[0].item())
 
-                if get_context_parallel_world_size() > 1:
-                    # In EB dataflow and CP size > 1, rotary_pos_emb is [1, s, 1, d];
-                    # we need to scatter it to [1, s/cp, 1, d] here.
-                    rotary_pos_emb = ContextParallelScatterOp.apply(
-                        rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
-                    )
-                elif (
+                if get_context_parallel_world_size() == 1 and (
                     packed_seq_params is None
                     or self.config.context_parallel_size == 1
                 ):
@@ -1070,15 +1189,32 @@ class MLASelfAttention(MultiLatentAttention):
                                 else position_ids,
                             )
 
+                if packed_seq_params is not None:
+                    raise ValueError(
+                        "MLA qkv_up_proj_and_rope_apply does not support "
+                        "packed_seq_params yet."
+                    )
+                expected_rotary_pos_emb_len = q_len
+                if rotary_pos_emb.shape[1] != expected_rotary_pos_emb_len:
+                    raise ValueError(
+                        "MLA RoPE requires local rotary_pos_emb sequence "
+                        f"length to match expected length, got "
+                        f"rotary_pos_emb={rotary_pos_emb.shape}, "
+                        f"expected={expected_rotary_pos_emb_len}, q_len={q_len}, "
+                        f"sequence_parallel={self.config.sequence_parallel}, "
+                        f"tensor_model_parallel_size="
+                        f"{self.config.tensor_model_parallel_size}."
+                    )
+
                 # Replace paddle.split with zero-copy slice views.
-                q_no_pe = q[..., : self.config.qk_nope_head_dim]
-                q_pos_emb = q[..., self.config.qk_nope_head_dim :]
+                q_no_pe = q[..., : self.qk_nope_head_dim]
+                q_pos_emb = q[..., self.qk_nope_head_dim :]
 
                 # k_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # value: [num_tokens, n, v_head_dim]
                 k_no_pe, value = paddle.split(
                     kv,
-                    [self.config.qk_nope_head_dim, self.v_head_dim],
+                    [self.qk_nope_head_dim, self.v_head_dim],
                     axis=-1,
                 )
 

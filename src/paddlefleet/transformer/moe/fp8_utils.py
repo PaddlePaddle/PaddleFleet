@@ -451,6 +451,7 @@ class ExpertsGroupGemmContiguousNode:
         dw_p2p_overlap=False,
         moe_expert_fusion=False,
         clamp_value=None,
+        activation_type="swiglu",
         use_accuracy_compatible=False,
     ):
         """
@@ -461,6 +462,7 @@ class ExpertsGroupGemmContiguousNode:
             recompute_moe_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
+            activation_type (str, optional): Activation function type. "swiglu" or "geglu". Defaults to "swiglu".
         """
         if moe_deep_gemm and expert_id is not None:
             # Per-expert node for deep_gemm: slice stacked weight to [1, K, N]
@@ -519,6 +521,7 @@ class ExpertsGroupGemmContiguousNode:
         self.dw_p2p_overlap = dw_p2p_overlap
         self.moe_expert_fusion = moe_expert_fusion
         self.clamp_value = clamp_value
+        self.activation_type = activation_type
         self.use_accuracy_compatible = use_accuracy_compatible
 
     def cached_tensors(self):
@@ -756,7 +759,13 @@ class ExpertsGroupGemmContiguousNode:
         fwd_down_bf16
         """
 
-        if self.clamp_value is not None and self.clamp_value > 0:
+        if self.activation_type == "geglu":
+            # GeGLU: gelu_tanh(gate) * up, then scale by probs
+            # F.gelu promotes bf16 to float32, cast back to bf16 for downstream ops
+            gate, up = paddle.chunk(o1, 2, dim=-1)
+            o2 = F.gelu(gate, approximate=True) * up
+            o2 = (o2 * unzipped_probs.unsqueeze(-1)).cast(o1.dtype)
+        elif self.clamp_value is not None and self.clamp_value > 0:
             o2 = fused_swiglu_scale_forward(
                 o1, unzipped_probs, self.clamp_value
             )
@@ -813,6 +822,12 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
+            assert self.activation_type != "geglu", (
+                "FP8 MoE path does not support activation_type='geglu' yet. "
+                "The fwd_down_fp8 branch uses fused SwiGLU FP8 kernels which are "
+                "incompatible with GeGLU. Please disable fp8 for Gemma4 MoE or "
+                "implement a GeGLU FP8 kernel."
+            )
             return self.fwd_down_fp8(
                 o1, unzipped_probs, expert_w2, num_expert, o3, clear_o1
             )
@@ -959,7 +974,51 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        if self.clamp_value is not None and self.clamp_value > 0:
+        if self.activation_type == "geglu":
+            # GeGLU forward recompute (needed for backward weight computation)
+            gate, up = paddle.chunk(o1, 2, dim=-1)
+            gate_act = F.gelu(gate, approximate=True)
+            o2_s_no_scale = gate_act * up
+            o2_s = (o2_s_no_scale * unzipped_probs).cast(o1.dtype)
+
+            # probs_grad: d(loss)/d(probs) = do2_s * o2_no_scale, summed over hidden dim
+            probs_grad = (
+                do2_s.cast(paddle.float32) * o2_s_no_scale.cast(paddle.float32)
+            ).sum(-1, keepdim=True)
+
+            # Propagate gradient through probs scaling (aligned with Megatron):
+            # do2 = do2_s * probs  (chain rule through o2_s = o2_no_scale * probs)
+            do2 = do2_s * unzipped_probs
+
+            # GeGLU backward through activation
+            # d_up = do2 * gelu(gate)
+            d_up = do2 * gate_act.cast(do2.dtype)
+            # d_gate = do2 * up * gelu'(gate)  (tanh-approximate gelu derivative)
+            import math
+
+            kAlpha = math.sqrt(2.0 / math.pi)
+            inner = kAlpha * (
+                gate.cast(paddle.float32)
+                + 0.044715 * paddle.pow(gate.cast(paddle.float32), 3)
+            )
+            tanh_inner = paddle.tanh(inner)
+            d_gate = (
+                do2
+                * up.cast(do2.dtype)
+                * (
+                    0.5 * (1.0 + tanh_inner)
+                    + 0.5
+                    * gate.cast(paddle.float32)
+                    * (1.0 - tanh_inner * tanh_inner)
+                    * kAlpha
+                    * (
+                        1.0
+                        + 0.134145 * paddle.pow(gate.cast(paddle.float32), 2)
+                    )
+                ).cast(do2.dtype)
+            )
+            do1 = paddle.concat([d_gate, d_up], dim=-1).cast(o1.dtype)
+        elif self.clamp_value is not None and self.clamp_value > 0:
             do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
                 o1, unzipped_probs, do2_s, float(self.clamp_value)
             )

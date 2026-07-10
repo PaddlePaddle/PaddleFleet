@@ -232,6 +232,64 @@ def _build_valid_range_from_doc_bounds(
     return paddle.stack([range_start, range_end], axis=-1).cast("int32")
 
 
+class LinearBF16FP32Func(paddle.autograd.PyLayer):
+    """BF16 activation x BF16 weight -> FP32 output autograd function.
+
+    Forward matches SGLang's default DeepSeek-V4 compressor path
+    (`sglang.jit_kernel.deepseek_v4.linear_bf16_fp32`, cublas backend).
+    BF16 activation x BF16 weight -> FP32 output. This keeps Megatron's
+    compressor log-prob computation aligned with SGLang rollout. Backward is
+    only needed for training, so keep its gradient matmuls in FP32.
+    """
+
+    @staticmethod
+    def forward(ctx, x: Tensor, weight: Tensor) -> Tensor:
+        """Forward pass: BF16 matmul with FP32 output."""
+        x_bf16 = x.cast(paddle.bfloat16)
+        weight_bf16 = weight.cast(paddle.bfloat16)
+        ctx.save_for_backward(x_bf16, weight_bf16)
+        ctx.input_shape = x.shape
+        ctx.input_dtype = x.dtype
+        ctx.weight_dtype = weight.dtype
+        # Paddle PyLayer requires None for stop_gradient inputs; record here.
+        ctx.x_needs_grad = not x.stop_gradient
+        ctx.weight_needs_grad = not weight.stop_gradient
+
+        x_2d = x_bf16.reshape([-1, x_bf16.shape[-1]])
+        out = paddle.mm(x_2d, weight_bf16, out_dtype=paddle.float32)
+        return out.view(*x.shape[:-1], weight_bf16.shape[1])
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        """Backward pass: compute gradients for x and weight."""
+        x_bf16, weight_bf16 = ctx.saved_tensor()
+        grad_output_2d = grad_output.reshape([-1, grad_output.shape[-1]]).cast(
+            paddle.float32
+        )
+
+        grad_x = None
+        if ctx.x_needs_grad:
+            grad_x = grad_output_2d.matmul(weight_bf16.cast(paddle.float32).t())
+            grad_x = grad_x.view(ctx.input_shape).cast(ctx.input_dtype)
+
+        grad_weight = None
+        if ctx.weight_needs_grad:
+            x_2d = x_bf16.reshape([-1, x_bf16.shape[-1]])
+            grad_weight = (
+                x_2d.cast(paddle.float32)
+                .t()
+                .matmul(grad_output_2d)
+                .cast(ctx.weight_dtype)
+            )
+
+        return grad_x, grad_weight
+
+
+def linear_bf16_fp32(x: Tensor, weight: Tensor) -> Tensor:
+    """BF16 matmul with FP32 output wrapper function."""
+    return LinearBF16FP32Func.apply(x, weight)
+
+
 # ---------------------------------------------------------------------------
 # Helper functions for index computation
 # ---------------------------------------------------------------------------
@@ -669,6 +727,7 @@ def _apply_rope(
     doc_lens_cutoff: Tensor | None = None,  # for token compressed, such as kv
     doc_lens: Tensor | None = None,  # for token not compressed, such as q
     position_offset: int = 0,
+    high_precision_rope: bool = False,
 ) -> Tensor:
     """Apply RoPE to the last pos_dim dims, leaving first nope_dim unchanged.
 
@@ -780,6 +839,7 @@ def _apply_rope(
         rotary_interleaved=False,
         multi_latent_attention=True,
         mla_output_remove_interleaving=True,
+        high_precision_rope=high_precision_rope,
     )
 
     out = paddle.concat([x_nope, x_pe], axis=-1)
@@ -1242,6 +1302,10 @@ class Compressor(nn.Layer):
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
         self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
+        self.swa_high_precision_norm = getattr(
+            config, "swa_high_precision_norm", False
+        )
+        self.high_precision_rope = getattr(config, "high_precision_rope", False)
 
     def _overlap_transform(
         self,
@@ -1310,9 +1374,16 @@ class Compressor(nn.Layer):
 
         if sq < ratio:
             return None
-
-        kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
-        score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
+        if self.swa_high_precision_norm:
+            kv = linear_bf16_fp32(
+                x, self.linear_wkv.weight
+            )  # [b, sq, coff * head_dim]
+            score = linear_bf16_fp32(
+                x, self.linear_wgate.weight
+            )  # [b, sq, coff * head_dim]
+        else:
+            kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
+            score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
 
         # CP: gather projected KV globally before pooling (Miles pattern).
         # This lets the compressor pool across the full sequence while keeping
@@ -1373,7 +1444,14 @@ class Compressor(nn.Layer):
             kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
             # kv: [b, actual_n_compressed, head_dim]
 
-            kv = self.norm(kv.cast(x.dtype))
+            if self.swa_high_precision_norm:
+                kv = self.norm(
+                    kv,
+                    high_precision_norm=True,
+                    return_high_precision_norm=True,
+                )
+            else:
+                kv = self.norm(kv.cast(x.dtype))
 
             # Pad to n_compressed before RoPE
             if actual_n_compressed < n_compressed:
@@ -1399,11 +1477,14 @@ class Compressor(nn.Layer):
                     n_compressed,
                     ratio=ratio,
                     doc_lens_cutoff=doc_lens_cutoff,
+                    high_precision_rope=self.high_precision_rope,
                 )
 
             if self.rotate:
                 kv = rotate_activation(
-                    kv, use_fast_hadamard=self.use_fast_hadamard
+                    kv,
+                    use_fast_hadamard=self.use_fast_hadamard,
+                    high_precision_hadamard=self.swa_high_precision_norm,
                 )
                 if self.use_fp8_qat:
                     kv = fp8_simulate_qat(kv, 128)
@@ -1414,6 +1495,8 @@ class Compressor(nn.Layer):
                         kv[..., :nope_dim], 64
                     )
 
+            if self.swa_high_precision_norm:
+                kv = kv.cast(x.dtype)
             return kv  # [b, n_compressed, head_dim]
         else:
             # Original simple cutoff logic

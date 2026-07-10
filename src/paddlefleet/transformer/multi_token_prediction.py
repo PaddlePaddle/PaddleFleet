@@ -902,15 +902,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 dict_args["hidden_states"] = hidden_states
             dict_args["decoder_input"] = decoder_input
 
-            if self.config.recompute_granularity == "full" and self.training:
-                hidden_states = self._checkpointed_forward(
-                    self._proj_and_transformer_layer,
-                    **dict_args,
-                )
-            else:
-                hidden_states = self._proj_and_transformer_layer(
-                    **dict_args,
-                )
+            hidden_states = self._proj_and_transformer_layer(
+                **dict_args,
+            )
 
             # mHC: contract multi-stream output to single-stream for loss computation
             if self.mhc_enabled and mhc_multistream is not None:
@@ -1064,18 +1058,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 else:
                     dict_args.pop("input_ids", None)
 
-                if (
-                    self.config.recompute_granularity == "full"
-                    and self.training
-                ):
-                    hidden_states = self._checkpointed_forward(
-                        self._proj_and_transformer_layer,
-                        **dict_args,
-                    )
-                else:
-                    hidden_states = self._proj_and_transformer_layer(
-                        **dict_args,
-                    )
+                hidden_states = self._proj_and_transformer_layer(
+                    **dict_args,
+                )
 
                 if mhc_chunks is not None:
                     # mHC: hidden_states is multi-stream, store for next depth
@@ -1134,15 +1119,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             else:
                 dict_args.pop("input_ids", None)
 
-            if self.config.recompute_granularity == "full" and self.training:
-                hidden_states = self._checkpointed_forward(
-                    self._proj_and_transformer_layer,
-                    **dict_args,
-                )
-            else:
-                hidden_states = self._proj_and_transformer_layer(
-                    **dict_args,
-                )
+            hidden_states = self._proj_and_transformer_layer(
+                **dict_args,
+            )
 
             if mhc_chunks is not None:
                 # mHC: hidden_states is multi-stream, store for next depth

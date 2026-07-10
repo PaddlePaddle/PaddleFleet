@@ -55,7 +55,7 @@ class TestRefinedRcomputeFlashMaskAttentionForward(unittest.TestCase):
     """Tests for RefinedRcomputeFlashMaskAttention.forward."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=2,
     )
     @patch(
@@ -135,7 +135,7 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV4(unittest.TestCase):
     """Tests for _first_fwd with version 4."""
 
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=4,
     )
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
@@ -193,6 +193,7 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
         causal = False
 
         hold_tensors = {
+            "mode": "dualchunk_allgather",
             "result_attention": result_attn,
             "softmax_lse": softmax_lse,
             "startend_row_indices": startend,
@@ -201,7 +202,7 @@ class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
             "causal": causal,
         }
 
-        result = FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
+        result = FlashMaskAttnCpFunctor.apply(q, k, v, None, hold_tensors)
         self.assertEqual(result.shape, result_attn.shape)
 
 
@@ -217,6 +218,7 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
+            None,  # sink_grad
         )
 
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
@@ -229,6 +231,7 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
         causal = False
 
         hold_tensors = {
+            "mode": "dualchunk_allgather",
             "result_attention": result_attn,
             "softmax_lse": softmax_lse,
             "startend_row_indices": startend,
@@ -237,7 +240,7 @@ class TestFlashMaskAttnCpFunctorBackward(unittest.TestCase):
             "causal": causal,
         }
 
-        FlashMaskAttnCpFunctor.apply(q, k, v, hold_tensors)
+        FlashMaskAttnCpFunctor.apply(q, k, v, None, hold_tensors)
         mock_cp_backward.assert_not_called()  # Not called in forward
 
 

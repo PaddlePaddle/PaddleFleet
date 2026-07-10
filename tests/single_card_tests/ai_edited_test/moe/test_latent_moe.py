@@ -546,6 +546,14 @@ class TestForwardLatent(unittest.TestCase):
         stub.moe_use_fusion_node = False
         stub.training = False
         stub.router_aux_loss_coef = 0.0
+        stub.moe_token_dispatcher_type = "alltoall"
+        stub.moe_allgather_gate_overlap = False
+
+        # _prepare_gate_input / _prepare_expert_input must return real tensors
+        stub._prepare_gate_input = lambda h, r: h
+        stub._prepare_expert_input = lambda h, r: h
+        stub._post_routed_output = lambda x: x
+        stub._post_shared_output = lambda x: x
 
         # gate returns: (capacity, topk_weights, topk_indices, gates_masked, mask,
         #                priorities, aux_loss, z_loss)

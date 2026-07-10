@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -29,10 +30,13 @@ from ..utils import (
     get_magic_init_method,
     init_method_normal,
     scaled_init_method_normal,
+    truncated_init_method_normal,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -251,6 +255,12 @@ class TransformerConfig(ModelParallelConfig):
     swa_rope_theta: float | None = None
     """The base period of the RoPE embeddings for sliding window attention layers. Defaults to rope_theta."""
 
+    swa_qk_nope_head_dim: int = None
+    """Dimension of the nope part of QK heads for SWA layers. If None, falls back to qk_nope_head_dim."""
+
+    swa_qk_rope_head_dim: int = None
+    """Dimension of the rope part of QK heads for SWA layers. If None, falls back to qk_rope_head_dim."""
+
     head_wise_swa_ratio: float = 0.0
     """Ratio of KV heads that use sliding window attention within an SWA layer.
     0.0 means all heads use SWA; values between 0 and 1 create a mix where
@@ -324,6 +334,12 @@ class TransformerConfig(ModelParallelConfig):
     attention output before the output projection. The gate is produced alongside the query
     from the fused QKV projection (doubling the query projection size). This allows the model
     to dynamically control the information flow from attention. See Qwen3.5 for reference."""
+
+    gated_attn_use_q_lora: bool = False
+    """If True, the gated attention gate uses the q_a_proj output (q_compressed, post
+    q_a_layernorm, dim = q_lora_rank) as the gate input instead of hidden_states. This is a
+    low-rank gate input for MLA networks that also reduces the gate projection parameter count.
+    Requires q_lora_rank is not None. Only applies when gated_attention is True."""
 
     ####################
     # block attention residuals
@@ -426,6 +442,23 @@ class TransformerConfig(ModelParallelConfig):
     dict: keys contains all submodule need recompute, value means submodule in which layers need recompute
     """
 
+    decoderlayer_act_offload_settings: dict = None
+    """Settings for decoder layer activation offloading to CPU.
+
+    A dict with two keys:
+      - "type": str, the offload strategy type. Supported values:
+          - "mod": offload layers where (layer_number % value[0] == value[1]).
+                   "value" should be a list/tuple of two ints [divisor, remainder].
+          - "layer_idxs": offload specific layers by index.
+                   "value" should be a list of layer indices to offload.
+      - "value": the strategy parameter, format depends on "type".
+
+    Example:
+        {"type": "mod", "value": [1, 0]}       # offload all layers (every layer % 1 == 0)
+        {"type": "mod", "value": [2, 0]}       # offload even-numbered layers
+        {"type": "layer_idxs", "value": [0, 5, 10]}  # offload layers 0, 5, 10
+    """
+
     ####################
     # MoE related
     ####################
@@ -455,7 +488,7 @@ class TransformerConfig(ModelParallelConfig):
     """The type of token dispatcher to use. The default is 'deepep'.
     Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
-    moe_allgather_gate_overlap: bool = False
+    moe_allgather_gate_overlap: bool = True
     """Whether to issue the AllGather before the gate so it overlaps with gate
     compute. Only honoured when ``moe_token_dispatcher_type='allgather'`` and
     ``expert_model_parallel_size > 1``; ignored otherwise."""
@@ -546,6 +579,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
 
+    moe_split_feature_routing: bool = False
+    """Enable multi-view (split-feature) MoE routing. When True, the router
+    scores each expert with the sum of two independent views: the existing
+    ``self.weight`` gate plus a new ``self.weight_1`` projection, i.e.
+    ``score_func(logits_0) + score_func(logits_1)`` instead of a single gate
+    projection. The expert FFN compute path is unchanged. Disabled by default;
+    has no effect on hash-routing layers (moe_n_hash_layers), which keep using
+    the original single gate."""
+
     moe_n_hash_layers: int = 0
     """Number of leading transformer layers that use hash-based MoE routing.
     Layers with layer_number < moe_n_hash_layers (0-indexed) use a pre-computed
@@ -588,6 +630,7 @@ class TransformerConfig(ModelParallelConfig):
     """Context parallel scatter/gather layout mode.
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
+    "contiguous_a2a".
     """
 
     ####################
@@ -914,6 +957,17 @@ class TransformerConfig(ModelParallelConfig):
     magic_init: bool = False
     """Use the magic initialization method."""
 
+    use_truncated_normal_init: bool = False
+    """Use truncated normal init N(0, sigma^2) clipped to
+    [-truncated_normal_init_factor*sigma, truncated_normal_init_factor*sigma].
+    Sigma prefers init_method_std, falling back to 0.5/sqrt(hidden_size)
+    when init_method_std is None. Independent switch; takes precedence over
+    magic_init when enabled."""
+
+    truncated_normal_init_factor: float = 3.0
+    """Truncation factor for use_truncated_normal_init: clip range is
+    [-factor*sigma, factor*sigma]."""
+
     ####################
     # Ernie Trainer Configs
     ####################
@@ -1083,7 +1137,31 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if self.magic_init:
+        if self.use_truncated_normal_init:
+            if self.truncated_normal_init_factor <= 0:
+                raise ValueError(
+                    "truncated_normal_init_factor must be positive when use_truncated_normal_init is True."
+                )
+            if self.init_method_std is None and self.hidden_size == 0:
+                raise ValueError(
+                    "hidden_size must be non-zero when init_method_std is None "
+                    "and use_truncated_normal_init is True."
+                )
+            sigma = (
+                self.init_method_std
+                if self.init_method_std is not None
+                else 0.5 / math.sqrt(self.hidden_size)
+            )
+            self.init_method = truncated_init_method_normal(
+                sigma, truncate_factor=self.truncated_normal_init_factor
+            )
+            self.init_method_std = sigma
+            logger.info(
+                f"[init] use_truncated_normal_init=True: TruncNormal(0, sigma^2) clipped to "
+                f"[-{self.truncated_normal_init_factor}*sigma, {self.truncated_normal_init_factor}*sigma], "
+                f"sigma={sigma}"
+            )
+        elif self.magic_init:
             if self.hidden_size == 0:
                 raise ValueError(
                     "hidden_size must be non-zero when magic_init is True."
@@ -1148,7 +1226,7 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.magic_init:
+        if self.use_truncated_normal_init or self.magic_init:
             self.output_layer_init_method = self.init_method
         elif self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
@@ -1162,7 +1240,7 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.magic_init:
+        if self.use_truncated_normal_init or self.magic_init:
             self.embedding_init_method = self.init_method
             self.embedding_init_method_std = self.init_method_std
         elif self.embedding_init_method is None:
@@ -1416,3 +1494,13 @@ class TransformerConfig(ModelParallelConfig):
                     "lm_head modulation will take effect."
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
+
+        if self.cp_balance_mode not in {
+            "dualchunk_allgather",
+            "contiguous_allgather",
+            "contiguous_a2a",
+        }:
+            raise ValueError(
+                f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
+                "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
+            )
