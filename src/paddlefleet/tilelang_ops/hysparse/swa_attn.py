@@ -49,6 +49,12 @@ class _SlidingWindowMQAAttn(paddle.autograd.PyLayer):
         ctx.save_for_backward(q, k, v, out, lse, valid_range)
         ctx.sm_scale = sm_scale
         ctx.block_B = block_B
+        # PyLayer contract: backward returns None for stop_gradient inputs.
+        ctx.needs_grad = (
+            not q.stop_gradient,
+            not k.stop_gradient,
+            not v.stop_gradient,
+        )
         ctx.mark_non_differentiable(lse)
         return out, lse
 
@@ -60,13 +66,20 @@ class _SlidingWindowMQAAttn(paddle.autograd.PyLayer):
             k,
             v,
             out,
-            dout,
+            dout.contiguous(),
             lse,
             valid_range,
             sm_scale=ctx.sm_scale,
             block_B=ctx.block_B,
         )
-        return dq, dk, dv, None
+        gq, gk, gv = ctx.needs_grad
+        # one entry per Tensor input: q, k, v, valid_range (no grad on range).
+        return (
+            dq if gq else None,
+            dk if gk else None,
+            dv if gv else None,
+            None,
+        )
 
 
 def sliding_window_mqa_attention(

@@ -182,5 +182,62 @@ class TestSlidingWindowMQA(unittest.TestCase):
         self.assertGreater(_cos(v.grad, vf.grad), 0.999)
 
 
+class TestSlidingWindowMQAAutograd(unittest.TestCase):
+    """PyLayer contract for the SWA MQA wrapper: stop_gradient handling and
+    non-contiguous upstream gradients."""
+
+    B, S, H, D, W = 2, 128, 4, 64, 32
+
+    def _leaves(self, freeze=(), seed=11):
+        paddle.seed(seed)
+        q = paddle.randn([self.B, self.S, self.H, self.D], dtype="bfloat16")
+        k = paddle.randn([self.B, self.S, self.D], dtype="bfloat16")
+        v = paddle.randn([self.B, self.S, self.D], dtype="bfloat16")
+        for name, t in (("q", q), ("k", k), ("v", v)):
+            t.stop_gradient = name in freeze
+        vr = make_sliding_window_valid_range(self.S, self.W, batch=self.B)
+        return q, k, v, vr
+
+    def _check_grads(self, q, k, v, freeze):
+        for name, t in (("q", q), ("k", k), ("v", v)):
+            if name in freeze:
+                self.assertIsNone(t.grad, f"{name} frozen -> grad None")
+            else:
+                self.assertIsNotNone(t.grad, f"{name} trainable -> grad exists")
+
+    def test_all_trainable(self):
+        _cuda_or_skip(self)
+        q, k, v, vr = self._leaves()
+        out, _ = sliding_window_mqa_attention(q, k, v, vr)
+        out.sum().backward()
+        self._check_grads(q, k, v, ())
+
+    def test_freeze_q(self):
+        _cuda_or_skip(self)
+        q, k, v, vr = self._leaves(freeze=("q",))
+        out, _ = sliding_window_mqa_attention(q, k, v, vr)
+        out.sum().backward()
+        self._check_grads(q, k, v, ("q",))
+
+    def test_freeze_kv(self):
+        _cuda_or_skip(self)
+        q, k, v, vr = self._leaves(freeze=("k", "v"))
+        out, _ = sliding_window_mqa_attention(q, k, v, vr)
+        out.sum().backward()
+        self._check_grads(q, k, v, ("k", "v"))
+
+    def test_non_contiguous_grad(self):
+        # Transposed output -> non-contiguous grad into the PyLayer output.
+        _cuda_or_skip(self)
+        q, k, v, vr = self._leaves(seed=12)
+        out, _ = sliding_window_mqa_attention(q, k, v, vr)
+        t = out.transpose([0, 2, 1, 3])
+        self.assertFalse(t.is_contiguous())
+        t.sum().backward()
+        self.assertIsNotNone(q.grad)
+        self.assertIsNotNone(k.grad)
+        self.assertIsNotNone(v.grad)
+
+
 if __name__ == "__main__":
     unittest.main()

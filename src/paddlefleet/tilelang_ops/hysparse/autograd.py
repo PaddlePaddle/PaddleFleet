@@ -56,6 +56,13 @@ class BlockScoreMQAAttn(paddle.autograd.PyLayer):
         ctx.save_for_backward(q, k, v, out, lse, valid_range)
         ctx.sm_scale = sm_scale
         ctx.block_B = block_B
+        # PyLayer contract: backward must return None for any input whose
+        # stop_gradient=True (frozen / detached), a Tensor otherwise.
+        ctx.needs_grad = (
+            not q.stop_gradient,
+            not k.stop_gradient,
+            not v.stop_gradient,
+        )
         # lse / block_logit feed a non-differentiable TopK -> no gradient.
         ctx.mark_non_differentiable(lse, block_logit)
         return out, lse, block_logit
@@ -74,7 +81,14 @@ class BlockScoreMQAAttn(paddle.autograd.PyLayer):
             sm_scale=ctx.sm_scale,
             block_B=ctx.block_B,
         )
-        return dq, dk, dv
+        gq, gk, gv = ctx.needs_grad
+        # one entry per Tensor input: q, k, v, valid_range (last has no grad).
+        return (
+            dq if gq else None,
+            dk if gk else None,
+            dv if gv else None,
+            None,
+        )
 
 
 class BlockSparseMQAAttn(paddle.autograd.PyLayer):
@@ -94,6 +108,11 @@ class BlockSparseMQAAttn(paddle.autograd.PyLayer):
         ctx.save_for_backward(q, k, v, out, lse, indices, valid_range)
         ctx.sm_scale = sm_scale
         ctx.block_B = block_B
+        ctx.needs_grad = (
+            not q.stop_gradient,
+            not k.stop_gradient,
+            not v.stop_gradient,
+        )
         ctx.mark_non_differentiable(lse)
         return out, lse
 
@@ -112,7 +131,16 @@ class BlockSparseMQAAttn(paddle.autograd.PyLayer):
             sm_scale=ctx.sm_scale,
             block_B=ctx.block_B,
         )
-        return dq, dk, dv
+        gq, gk, gv = ctx.needs_grad
+        # one entry per Tensor input: q, k, v, indices, valid_range
+        # (indices and valid_range never carry gradient).
+        return (
+            dq if gq else None,
+            dk if gk else None,
+            dv if gv else None,
+            None,
+            None,
+        )
 
 
 def block_score_mqa_attention(q, k, v, valid_range, sm_scale=None, block_B=64):
