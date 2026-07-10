@@ -16,7 +16,7 @@ case_name=$1
 base_name=$2
 update_baseline=${3:-"false"}
 
-if [[ "$formers_branch" == "develop" ]]; then
+if [[ $BRANCH == "develop" ]]; then
     base_name="${base_name}_develop"
 fi
 case_gt_file=${base_name}_${case_name}_gt.txt
