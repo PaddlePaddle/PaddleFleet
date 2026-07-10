@@ -143,7 +143,8 @@ def scaled_dot_product_attention_with_softmax_offset(
     if is_causal and query.shape[1] > 1:
         q_len_cur, kv_len_cur = query.shape[1], key.shape[1]
         causal_mask = paddle.tril(
-            paddle.ones([q_len_cur, kv_len_cur], dtype="float32")
+            paddle.ones([q_len_cur, kv_len_cur], dtype="float32"),
+            diagonal=kv_len_cur - q_len_cur,
         )
         neg_inf_mask = paddle.where(
             causal_mask.unsqueeze(0).unsqueeze(0) == 0,
