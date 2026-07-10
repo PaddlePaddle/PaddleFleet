@@ -593,7 +593,8 @@ jobs:
         run: |
           set -e
           python -m pip install requests
-          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          rm -rf notify_paddle_link.py*
+          wget -O notify_paddle_link.py https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
           WHEEL_FILE=$(cat "${{ matrix.flavor.name_key }}")
           echo "Notify paddletest for ${WHEEL_FILE} (${{ matrix.flavor.bos_CUDA }})"
           python notify_paddle_link.py ${{ matrix.flavor.bos_CUDA }} ${WHEEL_FILE} paddlefleet-ops
