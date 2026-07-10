@@ -83,6 +83,18 @@ def _rand_qkv_mqa(b, s, h, d, seed=0):
     return q, k, v
 
 
+def _rand_qkv_mqa_dv(b, s, h, dk, dv, seed=0):
+    """Asymmetric absorbed-MLA layout: query/key head dim ``dk`` (e.g. 576),
+    value/output head dim ``dv`` (e.g. 512). Q [B,S,H,Dk]; K [B,S,Dk] and
+    V [B,S,Dv] a single shared head each.
+    """
+    paddle.seed(seed)
+    q = paddle.randn([b, s, h, dk], dtype="bfloat16")
+    k = paddle.randn([b, s, dk], dtype="bfloat16")
+    v = paddle.randn([b, s, dv], dtype="bfloat16")
+    return q, k, v
+
+
 def _grad_ref_qkv(q, k, v):
     """float32 leaf copies of q/k/v for autograd reference gradients."""
     qf = q.astype("float32")
@@ -564,6 +576,86 @@ class TestHeadDim576MQA(unittest.TestCase):
             sm_scale=sm_scale,
             block_B=block_B,
         )
+        self.assertGreater(_cos(dq, qf.grad), 0.999)
+        self.assertGreater(_cos(dk, kf.grad), 0.999)
+        self.assertGreater(_cos(dv, vf.grad), 0.999)
+
+
+class TestAsymmetricDkDvMQA(unittest.TestCase):
+    """Absorbed-MLA asymmetric head dims: query/key Dk=576, value/output
+    Dv=512. Exercises the Dk!=Dv generalization of both ops (fwd + bwd).
+    Gradients checked by cosine (absolute errors grow with magnitude at D=576).
+    """
+
+    def test_score_fwd_bwd(self):
+        _cuda_or_skip(self)
+        B, S, H, Dk, Dv = 1, 192, 8, 576, 512
+        block_B = 64
+        q, k, v = _rand_qkv_mqa_dv(B, S, H, Dk, Dv, seed=41)
+        vr = make_causal_valid_range(S, batch=B)
+        sm_scale = Dk**-0.5
+
+        qf, kf, vf = _grad_ref_qkv(q, k, v)
+        ref_out, ref_lse, ref_sblk = ref_block_score_attn_mqa(
+            qf, kf, vf, vr, sm_scale=sm_scale, block_B=block_B
+        )
+        out, lse, block_logit = block_score_mqa_attn_fwd(
+            q, k, v, vr, sm_scale=sm_scale, block_B=block_B
+        )
+        self.assertEqual(list(out.shape), [B, S, H, Dv])
+        sblk = block_scores_from_logit(block_logit, lse, sm_scale)
+        self.assertLess(_maxerr(out, ref_out), OUT_ATOL)
+        self.assertLess(_maxerr(lse, ref_lse), LSE_ATOL)
+        self.assertLess(_maxerr(sblk, ref_sblk), 1e-3)
+
+        do = paddle.randn([B, S, H, Dv], dtype="bfloat16")
+        (ref_out * do.astype("float32")).sum().backward()
+        dq, dk, dv = block_score_mqa_bwd_interface(
+            q, k, v, out, do, lse, vr, sm_scale=sm_scale, block_B=block_B
+        )
+        self.assertEqual(list(dq.shape), [B, S, H, Dk])
+        self.assertEqual(list(dk.shape), [B, S, Dk])
+        self.assertEqual(list(dv.shape), [B, S, Dv])
+        self.assertGreater(_cos(dq, qf.grad), 0.999)
+        self.assertGreater(_cos(dk, kf.grad), 0.999)
+        self.assertGreater(_cos(dv, vf.grad), 0.999)
+
+    def test_sparse_fwd_bwd(self):
+        _cuda_or_skip(self)
+        B, S, H, Dk, Dv = 1, 192, 8, 576, 512
+        block_B, topk = 64, 2
+        q, k, v = _rand_qkv_mqa_dv(B, S, H, Dk, Dv, seed=42)
+        vr = make_causal_valid_range(S, batch=B)
+        sm_scale = Dk**-0.5
+
+        # derive selection from the block-score branch (shares the Dv path)
+        _, lse, block_logit = block_score_mqa_attn_fwd(
+            q, k, v, vr, sm_scale=sm_scale, block_B=block_B
+        )
+        from paddlefleet.tilelang_ops.hysparse.pipeline import (
+            select_topk_blocks,
+        )
+
+        idx = select_topk_blocks(
+            block_logit, lse, vr, sm_scale, topk, block_B, head_agg="max"
+        )
+
+        qf, kf, vf = _grad_ref_qkv(q, k, v)
+        ref_out, _ = ref_block_sparse_attn_mqa(
+            qf, kf, vf, idx, vr, sm_scale=sm_scale, block_B=block_B
+        )
+        out, slse = block_sparse_mqa_attn_fwd(
+            q, k, v, idx, vr, sm_scale=sm_scale, block_B=block_B
+        )
+        self.assertEqual(list(out.shape), [B, S, H, Dv])
+        self.assertLess(_maxerr(out, ref_out), OUT_ATOL)
+
+        do = paddle.randn([B, S, H, Dv], dtype="bfloat16")
+        (ref_out * do.astype("float32")).sum().backward()
+        dq, dk, dv = block_sparse_mqa_bwd_interface(
+            q, k, v, out, do, slse, idx, vr, sm_scale=sm_scale, block_B=block_B
+        )
+        self.assertEqual(list(dv.shape), [B, S, Dv])
         self.assertGreater(_cos(dq, qf.grad), 0.999)
         self.assertGreater(_cos(dk, kf.grad), 0.999)
         self.assertGreater(_cos(dv, vf.grad), 0.999)

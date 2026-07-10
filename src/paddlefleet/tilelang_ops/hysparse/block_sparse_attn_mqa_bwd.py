@@ -39,13 +39,19 @@ def block_sparse_mqa_bwd(
     D,
     nsel,
     sm_scale,
+    D_v=None,
     block_B=64,
     block_H=None,
     num_stages=1,
     threads=128,
 ):
+    if D_v is None:
+        D_v = D
     assert D % 16 == 0, (
         f"D must be a multiple of 16 (tensor-core k-tile), got {D}"
+    )
+    assert D_v % 16 == 0, (
+        f"D_v must be a multiple of 16 (tensor-core k-tile), got {D_v}"
     )
     assert H <= 128, "this kernel supports up to 128 query heads"
 
@@ -55,6 +61,8 @@ def block_sparse_mqa_bwd(
 
     q_shape = [batch, seq_len, H, D]
     kv_shape = [batch, seq_len_kv, D]
+    v_shape = [batch, seq_len_kv, D_v]
+    do_shape = [batch, seq_len, H, D_v]
     idx_shape = [batch, seq_len, nsel]
     vr_shape = [batch, seq_len, 2]
     lse_shape = [batch, seq_len, H]
@@ -74,22 +82,22 @@ def block_sparse_mqa_bwd(
     def main(
         Q: T.Tensor(q_shape, dtype),
         K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
-        dO: T.Tensor(q_shape, dtype),
+        V: T.Tensor(v_shape, dtype),
+        dO: T.Tensor(do_shape, dtype),
         Lse: T.Tensor(lse_shape, accum_dtype),
         Delta: T.Tensor(lse_shape, accum_dtype),
         Indices: T.Tensor(idx_shape, idx_dtype),
         ValidRange: T.Tensor(vr_shape, idx_dtype),
         dK: T.Tensor(kv_shape, accum_dtype),
-        dV: T.Tensor(kv_shape, accum_dtype),
+        dV: T.Tensor(v_shape, accum_dtype),
         dQ: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(num_hg, seq_len, batch, threads=threads) as (hg, bs, bb):
             h0 = hg * BH
             Q_shared = T.alloc_shared([PH, D], dtype)
-            dO_shared = T.alloc_shared([PH, D], dtype)
+            dO_shared = T.alloc_shared([PH, D_v], dtype)
             K_shared = T.alloc_shared([BB, D], dtype)
-            V_shared = T.alloc_shared([BB, D], dtype)
+            V_shared = T.alloc_shared([BB, D_v], dtype)
             P_shared = T.alloc_shared([PH, BB], dtype)
             dS_shared = T.alloc_shared([PH, BB], dtype)
             dQ_shared = T.alloc_shared([PH, D], dtype)
@@ -99,7 +107,7 @@ def block_sparse_mqa_bwd(
             acc_dp = T.alloc_fragment([PH, BB], accum_dtype)
             acc_dq = T.alloc_fragment([PH, D], accum_dtype)
             acc_dk = T.alloc_fragment([BB, D], accum_dtype)
-            acc_dv = T.alloc_fragment([BB, D], accum_dtype)
+            acc_dv = T.alloc_fragment([BB, D_v], accum_dtype)
             lse_f = T.alloc_fragment([PH], accum_dtype)
             delta_f = T.alloc_fragment([PH], accum_dtype)
 
@@ -113,6 +121,10 @@ def block_sparse_mqa_bwd(
                 Q_shared[h, d] = T.if_then_else(
                     use, Q[bb, bs, sh, d], T.cast(0, dtype)
                 )
+            for h, d in T.Parallel(PH, D_v):
+                gh = h0 + h
+                use = (h < BH) and (gh < H)
+                sh = T.if_then_else(use, gh, 0)
                 dO_shared[h, d] = T.if_then_else(
                     use, dO[bb, bs, sh, d], T.cast(0, dtype)
                 )
@@ -140,6 +152,10 @@ def block_sparse_mqa_bwd(
                     K_shared[c, d] = T.if_then_else(
                         in_bounds, K[bb, safe_col, d], T.cast(0, dtype)
                     )
+                for c, d in T.Parallel(BB, D_v):
+                    col = bos + safe_blk * BB + c
+                    in_bounds = col < seq_len_kv
+                    safe_col = T.if_then_else(in_bounds, col, 0)
                     V_shared[c, d] = T.if_then_else(
                         in_bounds, V[bb, safe_col, d], T.cast(0, dtype)
                     )
@@ -208,8 +224,11 @@ def block_sparse_mqa_bwd(
                 for c, d in T.Parallel(BB, D):
                     col = bos + safe_blk * BB + c
                     if valid_blk and (col < seq_len_kv):
-                        T.atomic_add(dV[bb, col, d], acc_dv[c, d])
                         T.atomic_add(dK[bb, col, d], acc_dk[c, d])
+                for c, d in T.Parallel(BB, D_v):
+                    col = bos + safe_blk * BB + c
+                    if valid_blk and (col < seq_len_kv):
+                        T.atomic_add(dV[bb, col, d], acc_dv[c, d])
 
             T.copy(acc_dq, dQ_shared)
             for h, d in T.Parallel(PH, D):
@@ -241,16 +260,21 @@ def _cast_bf16_kv(D, block_N=64, threads=128):
     return main
 
 
-def _fit_block_h(H, D, block_B, cap_bytes=200000):
+def _fit_block_h(H, D, block_B, D_v=None, cap_bytes=200000):
     """Largest head-group (a divisor-ish of H) whose per-token backward shared
-    buffers fit. Q/dO/dQ ``[PH, D]`` + K/V ``[BB, D]`` + P/dS ``[PH, BB]`` in
-    bf16; for large D (MLA 576) all H=64 heads on M overflow, so tile them.
+    buffers fit. Q/dQ ``[PH, D]`` + dO ``[PH, D_v]`` + K ``[BB, D]`` + V
+    ``[BB, D_v]`` + P/dS ``[PH, BB]`` in bf16; for large D (MLA 576) all H=64
+    heads on M overflow, so tile them.
     """
+    if D_v is None:
+        D_v = D
     for bh in (H, 64, 32, 16):
         if bh > H:
             continue
         ph = max(tilelang.math.next_power_of_2(bh), 16)
-        shared = 6 * ph * D + 4 * block_B * D + 4 * ph * block_B
+        shared = 2 * (
+            ph * (2 * D + D_v) + block_B * (D + D_v) + 2 * ph * block_B
+        )
         if shared <= cap_bytes:
             return bh
     return min(H, 16)
@@ -278,6 +302,7 @@ def block_sparse_mqa_bwd_interface(
     assert q.is_contiguous() and do.is_contiguous() and lse.is_contiguous()
     b, s, h, d = q.shape
     s_kv = k.shape[1]
+    d_v = v.shape[-1]
     if sm_scale is None:
         sm_scale = d**-0.5
     if valid_range.dtype != paddle.int32:
@@ -299,21 +324,21 @@ def block_sparse_mqa_bwd_interface(
 
     delta = (o.astype("float32") * do.astype("float32")).sum(-1).contiguous()
     dk = paddle.zeros([b, s_kv_pad, d], dtype="float32")
-    dv = paddle.zeros([b, s_kv_pad, d], dtype="float32")
+    dv = paddle.zeros([b, s_kv_pad, d_v], dtype="float32")
 
     bwd = block_sparse_mqa_bwd(
         h,
         d,
         indices.shape[-1],
         float(sm_scale),
+        D_v=d_v,
         block_B=block_B,
-        block_H=_fit_block_h(h, d, block_B),
+        block_H=_fit_block_h(h, d, block_B, d_v),
     )
     dq = bwd(q, k, v, do, lse, delta, indices, valid_range, dk, dv)
 
-    cast = _cast_bf16_kv(d)
-    dk_bf = cast(dk)
-    dv_bf = cast(dv)
+    dk_bf = _cast_bf16_kv(d)(dk)
+    dv_bf = _cast_bf16_kv(d_v)(dv)
     if pad > 0:
         dk_bf = dk_bf[:, :s_kv, :].contiguous()
         dv_bf = dv_bf[:, :s_kv, :].contiguous()

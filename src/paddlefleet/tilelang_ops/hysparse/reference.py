@@ -72,13 +72,14 @@ def ref_block_score_attn_mqa(q, k, v, valid_range, sm_scale=None, block_B=64):
     """
     b, s, h, d = q.shape
     s_kv = k.shape[1]
+    d_v = v.shape[-1]
     if sm_scale is None:
         sm_scale = d**-0.5
 
     qb = _to_bhsd(q).astype("float32")  # [B, H, S, D]
     # broadcast the single shared K/V head across all query heads
     kb = k.astype("float32").unsqueeze(1)  # [B, 1, S_kv, D]
-    vb = v.astype("float32").unsqueeze(1)  # [B, 1, S_kv, D]
+    vb = v.astype("float32").unsqueeze(1)  # [B, 1, S_kv, D_v]
 
     logits = paddle.matmul(qb, kb, transpose_y=True) * sm_scale  # [B,H,S,S_kv]
     mask = _range_mask(valid_range, s_kv)  # [B,1,S,S_kv]
@@ -93,7 +94,7 @@ def ref_block_score_attn_mqa(q, k, v, valid_range, sm_scale=None, block_B=64):
     probs = paddle.where(
         row_has_key.expand_as(probs), probs, paddle.zeros_like(probs)
     )
-    out = paddle.matmul(probs, vb.expand([b, h, s_kv, d]))  # [B,H,S,D]
+    out = paddle.matmul(probs, vb.expand([b, h, s_kv, d_v]))  # [B,H,S,D_v]
 
     # Block-max probability with **document-relative** block coordinates: block j
     # of a query spans key columns [bos + j*block_B, bos + (j+1)*block_B), i.e.
@@ -115,6 +116,71 @@ def ref_block_score_attn_mqa(q, k, v, valid_range, sm_scale=None, block_B=64):
     s_block = paddle.stack(s_block_list, axis=-1)  # [B,H,S,num_blocks]
 
     out = out.transpose([0, 2, 1, 3])  # back to [B,S,H,D]
+    lse = lse.transpose([0, 2, 1])  # [B,S,H]
+    return out.astype(q.dtype), lse, s_block
+
+
+def ref_block_score_attn_mha(q, k, v, valid_range, sm_scale=None, block_B=64):
+    """Block-score attention reference (MHA): full attention with **per-head**
+    K/V plus block-max probability scores (eq. 3).
+
+    Sibling of :func:`ref_block_score_attn_mqa` but K/V carry a head axis and
+    are *not* broadcast: ``logits = einsum(q[B,H,S,D], k[B,H,S_kv,D])``. Block
+    coordinates are **absolute** (``col // block_B``), matching
+    :mod:`block_score_attn_mha`; the causal single-document tests use
+    ``bos == 0`` so absolute == document-relative.
+
+    Args:
+        q:           [B, S, H, D] query (H heads).
+        k:           [B, S_kv, H, D] per-head key.
+        v:           [B, S_kv, H, D_v] per-head value.
+        valid_range: [B, S, 2] int, per-query [bos, eos) valid key columns.
+        sm_scale:    softmax scale; defaults to D**-0.5.
+        block_B:     key block size for the emitted block scores.
+
+    Returns:
+        out:     [B, S, H, D_v] attention output.
+        lse:     [B, S, H] natural-log-sum-exp of the masked logits.
+        s_block: [B, H, S, num_blocks] block-max softmax probability (eq. 3),
+                 num_blocks = ceil(S_kv / block_B). Fully-masked blocks -> 0.
+    """
+    b, s, h, d = q.shape
+    s_kv = k.shape[1]
+    if sm_scale is None:
+        sm_scale = d**-0.5
+
+    qb = _to_bhsd(q).astype("float32")  # [B, H, S, D]
+    kb = _to_bhsd(k).astype("float32")  # [B, H, S_kv, D]
+    vb = _to_bhsd(v).astype("float32")  # [B, H, S_kv, D_v]
+
+    logits = paddle.matmul(qb, kb, transpose_y=True) * sm_scale  # [B,H,S,S_kv]
+    mask = _range_mask(valid_range, s_kv)  # [B,1,S,S_kv]
+    neg = paddle.full_like(logits, NEG_INF)
+    logits = paddle.where(mask, logits, neg)
+
+    row_has_key = mask.any(axis=-1, keepdim=True)  # [B,1,S,1]
+    lse = paddle.logsumexp(logits, axis=-1)  # [B,H,S]
+    probs = F.softmax(logits, axis=-1)  # [B,H,S,S_kv]
+    probs = paddle.where(
+        row_has_key.expand_as(probs), probs, paddle.zeros_like(probs)
+    )
+    out = paddle.matmul(probs, vb)  # [B,H,S,D_v]
+
+    # Block-max probability with **absolute** block coordinates: block j spans
+    # key columns [j*block_B, (j+1)*block_B).
+    num_blocks = (s_kv + block_B - 1) // block_B
+    col = paddle.arange(s_kv, dtype="int64").reshape([1, 1, 1, s_kv])
+    abs_id = col // block_B  # [1,1,1,S_kv] absolute block id per key column
+    s_block_list = []
+    for j in range(num_blocks):
+        hit = abs_id == j  # [1,1,1,S_kv]
+        masked = paddle.where(
+            hit.expand_as(probs), probs, paddle.zeros_like(probs)
+        )
+        s_block_list.append(masked.max(axis=-1))  # [B, H, S]
+    s_block = paddle.stack(s_block_list, axis=-1)  # [B,H,S,num_blocks]
+
+    out = out.transpose([0, 2, 1, 3])  # back to [B,S,H,D_v]
     lse = lse.transpose([0, 2, 1])  # [B,S,H]
     return out.astype(q.dtype), lse, s_block
 
@@ -167,13 +233,14 @@ def ref_block_sparse_attn_mqa(
     """
     b, s, h, d = q.shape
     s_kv = k.shape[1]
+    d_v = v.shape[-1]
     if sm_scale is None:
         sm_scale = d**-0.5
 
     qb = _to_bhsd(q).astype("float32")  # [B, H, S, D]
     # broadcast the single shared KV head across all query heads
     kb = k.astype("float32").unsqueeze(1)  # [B, 1, S_kv, D]
-    vb = v.astype("float32").unsqueeze(1)  # [B, 1, S_kv, D]
+    vb = v.astype("float32").unsqueeze(1)  # [B, 1, S_kv, D_v]
 
     logits = paddle.matmul(qb, kb, transpose_y=True) * sm_scale  # [B,H,S,S_kv]
 
@@ -194,7 +261,7 @@ def ref_block_sparse_attn_mqa(
     probs = paddle.where(
         row_has_key.expand_as(probs), probs, paddle.zeros_like(probs)
     )
-    out = paddle.matmul(probs, vb.expand([b, h, s_kv, d]))  # [B,H,S,D]
+    out = paddle.matmul(probs, vb.expand([b, h, s_kv, d_v]))  # [B,H,S,D_v]
 
     out = out.transpose([0, 2, 1, 3])
     lse = lse.transpose([0, 2, 1])
@@ -226,5 +293,47 @@ def make_causal_valid_range(seq_len, batch=1, doc_lengths=None):
             starts += [cur] * dl
             cur += dl
         bos = paddle.to_tensor(starts, dtype="int32")
+    vr = paddle.stack([bos, eos], axis=-1)  # [S, 2]
+    return vr.unsqueeze(0).expand([batch, seq_len, 2]).contiguous()
+
+
+def make_sliding_window_valid_range(
+    seq_len, window_size, batch=1, doc_lengths=None
+):
+    """Helper: build valid_range [B, S, 2] for a causal **sliding window**.
+
+    Each query token ``t`` attends to key columns
+    ``[max(doc_start, t - window_size + 1), t + 1)`` -- i.e. the last
+    ``window_size`` keys (inclusive of self), clamped to the token's document
+    start. This is the standard causal sliding-window (SWA) mask, expressed
+    through the same half-open ``valid_range`` used by the block-attention
+    kernels, so a full-attention kernel fed this range computes SWA (and its
+    ``eos - bos`` early-exit naturally bounds the work to the window).
+
+    Args:
+        seq_len:     total sequence length S (== S_kv).
+        window_size: sliding window width W (number of keys each query sees).
+        batch:       batch size B.
+        doc_lengths: optional packed document lengths; each token's window is
+                     clamped to its own document start.
+
+    Returns:
+        valid_range: [B, S, 2] int32.
+    """
+    assert window_size >= 1
+    pos = paddle.arange(seq_len, dtype="int32")
+    eos = pos + 1  # causal upper bound (inclusive of self)
+    if doc_lengths is None:
+        doc_start = paddle.zeros([seq_len], dtype="int32")
+    else:
+        assert sum(doc_lengths) == seq_len
+        starts = []
+        cur = 0
+        for dl in doc_lengths:
+            starts += [cur] * dl
+            cur += dl
+        doc_start = paddle.to_tensor(starts, dtype="int32")
+    win_start = pos - window_size + 1  # earliest key in the window
+    bos = paddle.maximum(win_start, doc_start).cast("int32")
     vr = paddle.stack([bos, eos], axis=-1)  # [S, 2]
     return vr.unsqueeze(0).expand([batch, seq_len, 2]).contiguous()

@@ -24,19 +24,27 @@ from .block_score_attn import (
     block_scores_from_logit,
 )
 from .block_score_attn_bwd import block_score_mqa_bwd_interface
+from .block_score_attn_mha import block_score_mha_attn_fwd
+from .block_score_attn_mha_bwd import block_score_mha_bwd_interface
 from .block_sparse_attn_mqa import block_sparse_mqa_attn_fwd
 from .block_sparse_attn_mqa_bwd import block_sparse_mqa_bwd_interface
 from .pipeline import (
     hysparse_forward_mqa,
     select_topk_blocks,
 )
+from .swa_attn import (
+    sliding_window_mqa_attention,
+)
 
 __all__ = [
     "block_score_mqa_attn_fwd",
     "block_scores_from_logit",
     "block_score_mqa_bwd_interface",
+    "block_score_mha_attn_fwd",
+    "block_score_mha_bwd_interface",
     "block_sparse_mqa_attn_fwd",
     "block_sparse_mqa_bwd_interface",
     "hysparse_forward_mqa",
     "select_topk_blocks",
+    "sliding_window_mqa_attention",
 ]

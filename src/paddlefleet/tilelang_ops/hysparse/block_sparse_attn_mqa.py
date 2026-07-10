@@ -53,12 +53,18 @@ def block_sparse_mqa_fwd(
     D,
     nsel,
     sm_scale,
+    D_v=None,
     block_B=64,
     num_stages=2,
     threads=128,
 ):
+    if D_v is None:
+        D_v = D
     assert D % 16 == 0, (
         f"D must be a multiple of 16 (tensor-core k-tile), got {D}"
+    )
+    assert D_v % 16 == 0, (
+        f"D_v must be a multiple of 16 (tensor-core k-tile), got {D_v}"
     )
     assert H <= 128, "this kernel supports up to 128 query heads"
     scale_log2 = sm_scale * 1.44269504
@@ -69,7 +75,8 @@ def block_sparse_mqa_fwd(
 
     q_shape = [batch, seq_len, H, D]
     kv_shape = [batch, seq_len_kv, D]
-    o_shape = [batch, seq_len, H, D]
+    v_shape = [batch, seq_len_kv, D_v]
+    o_shape = [batch, seq_len, H, D_v]
     idx_shape = [batch, seq_len, nsel]
     vr_shape = [batch, seq_len, 2]
     lse_shape = [batch, seq_len, H]
@@ -84,7 +91,7 @@ def block_sparse_mqa_fwd(
     def main(
         Q: T.Tensor(q_shape, dtype),
         K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
+        V: T.Tensor(v_shape, dtype),
         Indices: T.Tensor(idx_shape, idx_dtype),
         ValidRange: T.Tensor(vr_shape, idx_dtype),
         Output: T.Tensor(o_shape, dtype),
@@ -93,10 +100,10 @@ def block_sparse_mqa_fwd(
         with T.Kernel(seq_len, batch, threads=threads) as (bs, bb):
             Q_shared = T.alloc_shared([PH, D], dtype)
             K_shared = T.alloc_shared([BB, D], dtype)
-            V_shared = T.alloc_shared([BB, D], dtype)
+            V_shared = T.alloc_shared([BB, D_v], dtype)
             P_shared = T.alloc_shared([PH, BB], dtype)
 
-            acc_o = T.alloc_fragment([PH, D], accum_dtype)
+            acc_o = T.alloc_fragment([PH, D_v], accum_dtype)
             acc_s = T.alloc_fragment([PH, BB], accum_dtype)
             row_max = T.alloc_fragment([PH], accum_dtype)
             m_i = T.alloc_fragment([PH], accum_dtype)
@@ -135,6 +142,10 @@ def block_sparse_mqa_fwd(
                     K_shared[c, d] = T.if_then_else(
                         in_bounds, K[bb, safe_col, d], T.cast(0, dtype)
                     )
+                for c, d in T.Parallel(BB, D_v):
+                    col = bos + safe_blk * BB + c
+                    in_bounds = col < seq_len_kv
+                    safe_col = T.if_then_else(in_bounds, col, 0)
                     V_shared[c, d] = T.if_then_else(
                         in_bounds, V[bb, safe_col, d], T.cast(0, dtype)
                     )
@@ -172,7 +183,7 @@ def block_sparse_mqa_fwd(
                 T.reduce_sum(acc_s, l_new, dim=1)
                 for h in T.Parallel(PH):
                     l_i[h] = l_i[h] * alpha[h] + l_new[h]
-                for h, d in T.Parallel(PH, D):
+                for h, d in T.Parallel(PH, D_v):
                     acc_o[h, d] = acc_o[h, d] * alpha[h]
                 T.copy(acc_s, P_shared)
                 T.gemm(
@@ -180,11 +191,11 @@ def block_sparse_mqa_fwd(
                 )
 
             # normalize; empty rows (no selected valid key) -> 0 out / -inf lse
-            for h, d in T.Parallel(PH, D):
+            for h, d in T.Parallel(PH, D_v):
                 acc_o[h, d] = T.if_then_else(
                     l_i[h] > 0, acc_o[h, d] / l_i[h], 0.0
                 )
-            for h, d in T.Parallel(PH, D):
+            for h, d in T.Parallel(PH, D_v):
                 if h < H:
                     Output[bb, bs, h, d] = acc_o[h, d]
             for h in T.Parallel(PH):
@@ -217,14 +228,15 @@ def block_sparse_mqa_attn_fwd(
     assert q.is_contiguous()
     b, s, h, d = q.shape
     s_kv = k.shape[1]
+    d_v = v.shape[-1]
     nsel = indices.shape[-1]
     # lightweight host-side shape checks (no device sync) so mismatched inputs
     # fail early and clearly instead of causing undefined kernel behaviour.
-    assert len(k.shape) == 3 and list(k.shape) == list(v.shape), (
-        f"k/v must be [B, S_kv, D] and match; got {k.shape} vs {v.shape}"
+    assert len(k.shape) == 3 and k.shape[0] == b and k.shape[2] == d, (
+        f"k must be [B, S_kv, D] matching q; got k {k.shape}, q {q.shape}"
     )
-    assert k.shape[0] == b and k.shape[2] == d, (
-        f"k/v batch/head_dim must match q; got k {k.shape}, q {q.shape}"
+    assert len(v.shape) == 3 and list(v.shape[:2]) == [b, s_kv], (
+        f"v must be [B, S_kv, D_v] matching k seqlen; got {v.shape}, k {k.shape}"
     )
     assert list(indices.shape[:2]) == [b, s], (
         f"indices must be [B, S, nsel] matching q; got {indices.shape}"
@@ -250,6 +262,8 @@ def block_sparse_mqa_attn_fwd(
     valid_range = valid_range.contiguous()
     indices = indices.contiguous()
 
-    kernel = block_sparse_mqa_fwd(h, d, nsel, float(sm_scale), block_B=block_B)
+    kernel = block_sparse_mqa_fwd(
+        h, d, nsel, float(sm_scale), D_v=d_v, block_B=block_B
+    )
     out, lse = kernel(q, k, v, indices, valid_range)
     return out, lse

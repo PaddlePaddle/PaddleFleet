@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Backward for the MQA block-score attention: flash-attention backward
-(dQ, dK, dV) for full attention with a single shared K/V head and causal +
+"""Backward for the MHA (per-head K/V) block-score attention: flash-attention
+backward (dQ, dK, dV) for full attention with per-head K/V and causal +
 document masking.
 
-K/V are one shared head ``[B, S_kv, D]``; dK/dV from every query head are
-scattered into that single head via ``atomic_add``. The block-score output of
-the forward is consumed by a non-differentiable TopK and therefore contributes
-no gradient here.
+Mirrors :mod:`block_score_attn_bwd` (MQA) but K/V carry a head index and dK/dV
+are scattered per head. Within a head, different query tiles still overlap the
+same key columns, so ``atomic_add`` is retained for dK/dV; across heads there is
+no conflict (each head owns its own K/V slice).
 """
 
 import paddle
@@ -36,7 +36,7 @@ from .block_sparse_attn_mqa_bwd import _cast_bf16_kv
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     },
 )
-def block_score_mqa_bwd(
+def block_score_mha_bwd(
     H,
     D,
     sm_scale,
@@ -63,8 +63,8 @@ def block_score_mqa_bwd(
     num_bm = T.dynamic("num_bm")
 
     q_shape = [batch, seq_len, H, D]
-    kv_shape = [batch, seq_len_kv, D]
-    v_shape = [batch, seq_len_kv, D_v]
+    k_shape = [batch, seq_len_kv, H, D]
+    v_shape = [batch, seq_len_kv, H, D_v]
     do_shape = [batch, seq_len, H, D_v]
     lse_shape = [batch, seq_len, H]
     vr_shape = [batch, seq_len, 2]
@@ -82,14 +82,14 @@ def block_score_mqa_bwd(
     @T.prim_func
     def main(
         Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(kv_shape, dtype),
+        K: T.Tensor(k_shape, dtype),
         V: T.Tensor(v_shape, dtype),
         dO: T.Tensor(do_shape, dtype),
         Lse: T.Tensor(lse_shape, accum_dtype),
         Delta: T.Tensor(lse_shape, accum_dtype),
         ValidRange: T.Tensor(vr_shape, idx_dtype),
         BlockRange: T.Tensor(br_shape, idx_dtype),
-        dK: T.Tensor(kv_shape, accum_dtype),
+        dK: T.Tensor(k_shape, accum_dtype),
         dV: T.Tensor(v_shape, accum_dtype),
         dQ: T.Tensor(q_shape, dtype),
     ):
@@ -128,24 +128,16 @@ def block_score_mqa_bwd(
             T.copy(dO[bb, bm * BM : (bm + 1) * BM, bh, :], dO_shared)
             T.clear(acc_dq)
 
-            # document-tight early-exit: the host precomputes, per query tile,
-            # the block-B key window [jl, jh) actually reachable by this tile's
-            # rows -- jl = min_i(bos_i) // block_B skips leading blocks before
-            # the tile's document start; jh = ceil(max_i(eos_i) / block_B) skips
-            # blocks past the (causal) end. Every skipped block is fully masked
-            # (col < bos_i or col >= eos_i) for all rows, so dQ/dK/dV are
-            # unchanged. The window is in block_B units; we iterate it in
-            # ``block_N`` sub-tiles (``ratio`` per block) so the K/V/P/dS shared
-            # buffers stay small enough to fit a full block_M=64 query tile at
-            # large head dims (D=576) -- bigger M matches the forward's
-            # tensor-core utilisation and K/V amortisation.
+            # document-tight key-block window [jl, jh) (block_B units), iterated
+            # in block_N sub-tiles (ratio per block). Same early-exit as MQA;
+            # every skipped sub-tile is fully masked for all rows.
             jl = BlockRange[bb, bm, 0]
             jh = BlockRange[bb, bm, 1]
             for nn in T.Pipelined((jh - jl) * ratio, num_stages=num_stages):
                 col0 = (jl * ratio + nn) * BN
-                # single shared K/V head -> no head index
-                T.copy(K[bb, col0 : col0 + BN, :], K_shared)
-                T.copy(V[bb, col0 : col0 + BN, :], V_shared)
+                # per-head K/V slice
+                T.copy(K[bb, col0 : col0 + BN, bh, :], K_shared)
+                T.copy(V[bb, col0 : col0 + BN, bh, :], V_shared)
 
                 # P = softmax prob = exp(raw*sm_scale - lse); masked -> 0
                 T.clear(acc_s)
@@ -191,7 +183,7 @@ def block_score_mqa_bwd(
                     acc_dq,
                     policy=T.GemmWarpPolicy.FullRow,
                 )
-                # dV += P^T @ dO ; dK += dS^T @ Q  (scattered to shared KV)
+                # dV += P^T @ dO ; dK += dS^T @ Q  (scattered per head)
                 T.clear(acc_dv)
                 T.gemm(
                     P_shared,
@@ -209,13 +201,11 @@ def block_score_mqa_bwd(
                     policy=T.GemmWarpPolicy.FullRow,
                 )
                 for c, d in T.Parallel(BN, D):
-                    T.atomic_add(dK[bb, col0 + c, d], acc_dk[c, d])
+                    T.atomic_add(dK[bb, col0 + c, bh, d], acc_dk[c, d])
                 for c, d in T.Parallel(BN, D_v):
-                    T.atomic_add(dV[bb, col0 + c, d], acc_dv[c, d])
+                    T.atomic_add(dV[bb, col0 + c, bh, d], acc_dv[c, d])
 
-            # write dQ straight from the accumulator fragment (no shared-memory
-            # staging) -- one fewer [BM, D] bf16 buffer lets the shared budget
-            # fit a larger query tile (bigger M -> better tensor-core use).
+            # write dQ straight from the accumulator fragment
             for i, d in T.Parallel(BM, D):
                 if bm * BM + i < seq_len:
                     dQ[bb, bm * BM + i, bh, d] = acc_dq[i, d]
@@ -226,14 +216,10 @@ def block_score_mqa_bwd(
 def _fit_block_mn(D, block_B, D_v=None, cap_bytes=230000):
     """Pick (block_M, block_N) maximising the query tile then the key sub-tile.
 
-    The backward holds Q ``[block_M, D]`` + dO ``[block_M, D_v]`` + K
-    ``[block_N, D]`` + V ``[block_N, D_v]`` + P/dS ``[block_M, block_N]`` in
-    bf16 shared memory (dQ writes straight from its accumulator). Prefer the
-    largest ``block_M`` (<=64) -- big M matches the forward's tensor-core
-    utilisation and K/V amortisation -- and, for that M, the largest
-    ``block_N`` (dividing ``block_B``) that fits. At MLA D=576 a full
-    block_M=64 needs block_N=32 to fit Blackwell's ~227 KB; small dims (D=64)
-    keep block_N=block_B (single-tile fast path).
+    Same budget model as the MQA backward: Q ``[block_M, D]`` + dO
+    ``[block_M, D_v]`` + K ``[block_N, D]`` + V ``[block_N, D_v]`` + P/dS
+    ``[block_M, block_N]`` in bf16 shared memory. At the decompressed-MLA dim
+    D=D_v=256 a full block_M=block_N=64 fits comfortably.
     """
     if D_v is None:
         D_v = D
@@ -247,7 +233,7 @@ def _fit_block_mn(D, block_B, D_v=None, cap_bytes=230000):
     return 16, min(16, block_B)
 
 
-def block_score_mqa_bwd_interface(
+def block_score_mha_bwd_interface(
     q,
     k,
     v,
@@ -260,25 +246,23 @@ def block_score_mqa_bwd_interface(
     block_M=None,
     block_N=None,
 ):
-    """Backward interface for the MQA block-score attention.
+    """Backward interface for the MHA block-score attention.
 
     Args:
         q:           [B, S, H, D] bf16 forward query.
-        k, v:        [B, S_kv, D] bf16 single shared key/value head.
-        o:           [B, S, H, D] bf16 forward output.
-        do:          [B, S, H, D] bf16 grad of output.
+        k:           [B, S_kv, H, D] bf16 per-head key.
+        v:           [B, S_kv, H, D_v] bf16 per-head value.
+        o:           [B, S, H, D_v] bf16 forward output.
+        do:          [B, S, H, D_v] bf16 grad of output.
         lse:         [B, S, H] fp32 natural-log LSE from forward.
         valid_range: [B, S, 2] int32.
         sm_scale:    softmax scale; defaults to D**-0.5.
         block_B:     key block size.
-        block_M:     query tile size on the GEMM M dim; ``None`` auto-fits the
-                     largest tile that fits shared memory (:func:`_fit_block_mn`).
-        block_N:     key sub-tile size (must divide ``block_B``); ``None``
-                     auto-fits. Overrides are for tuning/testing the tiling; the
-                     result is mathematically identical for any valid choice.
+        block_M:     query tile size (auto-fit if None).
+        block_N:     key sub-tile size, must divide block_B (auto-fit if None).
 
     Returns:
-        dq [B,S,H,D] bf16, dk/dv [B,S_kv,D] bf16.
+        dq [B,S,H,D] bf16, dk [B,S_kv,H,D] bf16, dv [B,S_kv,H,D_v] bf16.
     """
     assert q.is_contiguous() and do.is_contiguous() and lse.is_contiguous()
     b, s, h, d = q.shape
@@ -290,19 +274,19 @@ def block_score_mqa_bwd_interface(
         valid_range = valid_range.cast("int32")
 
     # kernel reads whole block_B blocks; pad K/V (and dK/dV) so the last block
-    # is addressable.
+    # is addressable. Pad along the sequence axis (axis 1).
     pad = (block_B - s_kv % block_B) % block_B
     s_kv_pad = s_kv + pad
     if pad > 0:
-        k = paddle.nn.functional.pad(k, [0, 0, 0, pad])
-        v = paddle.nn.functional.pad(v, [0, 0, 0, pad])
+        k = paddle.nn.functional.pad(k, [0, 0, 0, 0, 0, pad])
+        v = paddle.nn.functional.pad(v, [0, 0, 0, 0, 0, pad])
     k = k.contiguous()
     v = v.contiguous()
     valid_range = valid_range.contiguous()
 
     delta = (o.astype("float32") * do.astype("float32")).sum(-1).contiguous()
-    dk = paddle.zeros([b, s_kv_pad, d], dtype="float32")
-    dv = paddle.zeros([b, s_kv_pad, d_v], dtype="float32")
+    dk = paddle.zeros([b, s_kv_pad, h, d], dtype="float32")
+    dv = paddle.zeros([b, s_kv_pad, h, d_v], dtype="float32")
 
     fit_m, fit_n = _fit_block_mn(d, block_B, d_v)
     if block_M is None:
@@ -311,10 +295,7 @@ def block_score_mqa_bwd_interface(
         block_N = fit_n
     num_kv_blocks = s_kv_pad // block_B
 
-    # Per query-tile key-block window [jl, jh): jl skips leading blocks before
-    # the tile's document start, jh caps at the tile's (causal) reach. Rows are
-    # grouped into tiles of ``block_M``; padded rows get bos=+big / eos=0 so
-    # they never widen a tile's window.
+    # Per query-tile key-block window [jl, jh) in block_B units.
     num_bm = (s + block_M - 1) // block_M
     pad_rows = num_bm * block_M - s
     bos = valid_range[:, :, 0]
@@ -329,7 +310,7 @@ def block_score_mqa_bwd_interface(
     jh = paddle.maximum(jh, jl)
     block_range = paddle.stack([jl, jh], axis=-1).astype("int32").contiguous()
 
-    bwd = block_score_mqa_bwd(
+    bwd = block_score_mha_bwd(
         h,
         d,
         float(sm_scale),
@@ -340,9 +321,15 @@ def block_score_mqa_bwd_interface(
     )
     dq = bwd(q, k, v, do, lse, delta, valid_range, block_range, dk, dv)
 
-    dk_bf = _cast_bf16_kv(d)(dk)
-    dv_bf = _cast_bf16_kv(d_v)(dv)
+    # _cast_bf16_kv is a [B, S_kv, D] kernel; merge the (head, dim) axes so it
+    # covers the per-head [B, S_kv, H, D(_v)] accumulator, then restore shape.
+    dk_bf = _cast_bf16_kv(h * d)(dk.reshape([b, s_kv_pad, h * d])).reshape(
+        [b, s_kv_pad, h, d]
+    )
+    dv_bf = _cast_bf16_kv(h * d_v)(dv.reshape([b, s_kv_pad, h * d_v])).reshape(
+        [b, s_kv_pad, h, d_v]
+    )
     if pad > 0:
-        dk_bf = dk_bf[:, :s_kv, :].contiguous()
-        dv_bf = dv_bf[:, :s_kv, :].contiguous()
+        dk_bf = dk_bf[:, :s_kv, :, :].contiguous()
+        dv_bf = dv_bf[:, :s_kv, :, :].contiguous()
     return dq, dk_bf, dv_bf
