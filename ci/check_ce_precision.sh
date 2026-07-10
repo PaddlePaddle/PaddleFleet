@@ -16,7 +16,7 @@ case_name=$1
 base_name=$2
 update_baseline=${3:-"false"}
 
-if [[ $BRANCH == "develop" ]]; then
+if [[ "$BRANCH" == "develop" ]]; then
     base_name="${base_name}_develop"
 fi
 case_gt_file=${base_name}_${case_name}_gt.txt
@@ -26,7 +26,15 @@ if [[ ! -f "${case_name}.txt" && "$case_name" == *glm* ]]; then
 fi
 
 if [[ "$update_baseline" == "true" ]]; then
-    cp ${case_name}.txt ${case_gt_file}
+    python PaddleFormers/tests/integration_test/check_loss.py \
+        --log_file ${case_name}.txt \
+        --log_loss_file ${case_gt_file} \
+        --extract_loss_only
+    exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo "Failed to extract baseline from ${case_name}.txt"
+        exit $exit_code
+    fi
     echo "Update baseline: ${case_gt_file}"
     wget -q --no-proxy --no-check-certificate \
         https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddlePaddle/PaddleTest/tools/bos_tools.py \
