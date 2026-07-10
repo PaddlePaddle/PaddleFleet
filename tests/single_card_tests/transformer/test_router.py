@@ -60,8 +60,6 @@ class MockTransformerConfig:
         self.tensor_model_parallel_size = 1
         self.context_parallel_size = 1
         self.sequence_parallel = False
-        self.moe_n_hash_layers = 0
-        self.num_empty_layers_add_in_head = 0
 
         # Experimental version flag
         self.gpt_model_use_experimental_version = False

@@ -983,11 +983,12 @@ class StandardMoERouter(nn.Layer):
         - Disables expert-bias state (e_score_correction_bias / expert_usage)
           on hash layers.
         """
-        n_hash = self.config.moe_n_hash_layers
+        n_hash = getattr(self.config, "moe_n_hash_layers", 0)
+        head_empty_layers = getattr(
+            self.config, "num_empty_layers_add_in_head", 0
+        )
         logical_layer_number = (
-            None
-            if layer_number is None
-            else layer_number - self.config.num_empty_layers_add_in_head
+            None if layer_number is None else layer_number - head_empty_layers
         )
         self.is_hash_layer = (
             not is_mtp_layer
