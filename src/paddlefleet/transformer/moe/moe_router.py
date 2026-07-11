@@ -974,7 +974,7 @@ class StandardMoERouter(nn.Layer):
         # inference checkpoint; no public initialization recipe is documented.
         # Round-robin is used here only as a placeholder so the layer is
         # runnable from scratch.
-        ids = paddle.arange(vocab_size, dtype=paddle.int64)
+        ids = paddle.arange(vocab_size, dtype=paddle.int32)
         tid2eid = paddle.stack(
             [
                 (ids + k) % self.num_experts

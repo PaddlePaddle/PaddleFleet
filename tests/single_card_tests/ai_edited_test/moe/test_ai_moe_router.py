@@ -548,6 +548,7 @@ class TestHashRouter(unittest.TestCase):
         self.assertTrue(router.is_hash_layer)
         self.assertIsNotNone(router.tid2eid)
         self.assertEqual(list(router.tid2eid.shape), [16, 2])
+        self.assertEqual(router.tid2eid.dtype, paddle.int32)
         # Round-robin placeholder: tid2eid[i, k] = (i + k) % num_experts.
         ids = np.arange(16)
         expected = np.stack([(ids + k) % 4 for k in range(2)], axis=1)
