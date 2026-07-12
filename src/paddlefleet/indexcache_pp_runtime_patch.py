@@ -204,6 +204,34 @@ def _dict_to_tuple_helper(output_tensor):
     return output_tensor
 
 
+def _collect_input_gradients(inputs):
+    gradients = []
+    zero_filled_keys = []
+    for tensor in inputs:
+        if not isinstance(tensor, paddle.Tensor) or tensor.stop_gradient:
+            continue
+        grad = tensor.grad
+        if grad is None:
+            key = getattr(tensor, "key", None)
+            if not _is_indexcache_key(key):
+                raise RuntimeError(
+                    "Pipeline input is missing a gradient outside IndexCache "
+                    f"state: key={key!r}, shape={list(tensor.shape)}, "
+                    f"dtype={tensor.dtype}."
+                )
+            grad = paddle.zeros_like(tensor)
+            grad.stop_gradient = False
+            zero_filled_keys.append(key)
+        gradients.append(grad)
+    if _debug_enabled() and zero_filled_keys:
+        print(
+            "[INDEXCACHE_PP_GRAD] zero_filled_keys="
+            f"{zero_filled_keys}",
+            flush=True,
+        )
+    return tuple(gradients)
+
+
 def _schedule_node_backward(self, output_grad=None, scaler=None):
     if output_grad is None:
         if isinstance(self.outputs, (tuple, list)):
@@ -245,11 +273,7 @@ def _schedule_node_backward(self, output_grad=None, scaler=None):
     inputs = _dict_to_tuple_helper(self.inputs)
     if not isinstance(inputs, (tuple, list)):
         inputs = (inputs,)
-    grad = tuple(
-        tensor.grad
-        for tensor in inputs
-        if isinstance(tensor, paddle.Tensor) and not tensor.stop_gradient
-    )
+    grad = _collect_input_gradients(inputs)
     self._reset_states()
     return grad
 
