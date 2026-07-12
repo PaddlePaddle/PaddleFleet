@@ -16,6 +16,7 @@ from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
 import paddlefleet  # noqa: F401 - installs the IndexCache pipeline patch
 from paddlefleet.indexcache_pp_runtime_patch import (
     _dict_to_tuple_helper,
+    _get_pipeline_key,
     _normalize_pipeline_input_gradients,
     _tuple_to_dict_helper,
 )
@@ -137,6 +138,51 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
         )
 
         self.assertIs(normalized, input_grads)
+
+    def test_outer_pipeline_boundary_handles_released_state(self):
+        pipeline_inputs = _dict_to_tuple_helper(
+            {
+                "hidden_states": paddle.to_tensor(
+                    [4.0], stop_gradient=False
+                ),
+                "indexcache_state": _make_distill_state(0),
+            }
+        )
+        _tuple_to_dict_helper(pipeline_inputs)
+        released_inputs = [
+            tensor
+            for tensor in pipeline_inputs
+            if _get_pipeline_key(tensor)
+            in {
+                "indexcache_state 1",
+                "indexcache_state 2",
+                "indexcache_state 3",
+            }
+        ]
+        expected_metadata = [
+            (list(tensor.shape), tensor.dtype) for tensor in released_inputs
+        ]
+        for tensor in released_inputs:
+            tensor._clear_dataptr()
+
+        hidden_grad = paddle.ones_like(pipeline_inputs[0])
+        hidden_grad.stop_gradient = False
+        input_grads = _normalize_pipeline_input_gradients(
+            pipeline_inputs,
+            (hidden_grad, None, None, None),
+        )
+
+        self.assertEqual(len(released_inputs), 3)
+        self.assertEqual(len(input_grads), 4)
+        for grad, (shape, dtype) in zip(input_grads[1:], expected_metadata):
+            self.assertEqual(list(grad.shape), shape)
+            self.assertEqual(grad.dtype, dtype)
+            self.assertFalse(grad.stop_gradient)
+            self.assertEqual(float(grad.sum().item()), 0.0)
+
+        meta = SendRecvMeta()
+        meta.set_send_message(input_grads)
+        self.assertEqual(len(meta.send_shape_message), 4)
 
     def test_outer_pipeline_boundary_rejects_missing_hidden_gradient(self):
         pipeline_inputs = _dict_to_tuple_helper(

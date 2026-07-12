@@ -23,6 +23,8 @@ import paddle
 _PATCH_FLAG = "_indexcache_pp_runtime_patch_applied"
 _INDEXCACHE_STATE_KEY = "indexcache_state"
 _PIPELINE_KEY_ATTR = "_paddlefleet_pipeline_key"
+_PIPELINE_SHAPE_ATTR = "_paddlefleet_pipeline_shape"
+_PIPELINE_DTYPE_ATTR = "_paddlefleet_pipeline_dtype"
 
 
 def _debug_enabled() -> bool:
@@ -38,6 +40,12 @@ def _get_pipeline_key(tensor):
     if key is None:
         key = getattr(tensor, _PIPELINE_KEY_ATTR, None)
     return key
+
+
+def _save_pipeline_metadata(tensor, key):
+    setattr(tensor, _PIPELINE_KEY_ATTR, key)
+    setattr(tensor, _PIPELINE_SHAPE_ATTR, tuple(tensor.shape))
+    setattr(tensor, _PIPELINE_DTYPE_ATTR, tensor.dtype)
 
 
 def _has_indexcache_key(tensors) -> bool:
@@ -139,7 +147,7 @@ def _convert_tensor_dict_to_tuple(output_tensor_dict):
                         f"or None, but {key}[{idx}] is {type(item).__name__}."
                     )
                 item.key = f"{key} {idx}"
-                setattr(item, _PIPELINE_KEY_ATTR, item.key)
+                _save_pipeline_metadata(item, item.key)
                 output_tensor.append(item)
         else:
             if not isinstance(tensor, paddle.Tensor):
@@ -148,7 +156,7 @@ def _convert_tensor_dict_to_tuple(output_tensor_dict):
                     f"tuple/list, but {key} is {type(tensor).__name__}."
                 )
             tensor.key = key
-            setattr(tensor, _PIPELINE_KEY_ATTR, key)
+            _save_pipeline_metadata(tensor, key)
             output_tensor.append(tensor)
 
     output_tensor = tuple(output_tensor)
@@ -167,7 +175,7 @@ def _convert_tensor_tuple_to_dict(input_tensor_tuple):
         input_tensor_tuple = (input_tensor_tuple,)
     for tensor in input_tensor_tuple:
         key = tensor.key
-        setattr(tensor, _PIPELINE_KEY_ATTR, key)
+        _save_pipeline_metadata(tensor, key)
         if " " in key:
             real_key, suffix = key.rsplit(" ", 1)
             if suffix.isdigit():
@@ -244,6 +252,22 @@ def _collect_input_gradients(inputs):
     return tuple(gradients)
 
 
+def _zeros_from_tensor_metadata(tensor):
+    shape = getattr(tensor, _PIPELINE_SHAPE_ATTR, None)
+    dtype = getattr(tensor, _PIPELINE_DTYPE_ATTR, None)
+    if shape is None or dtype is None:
+        raise RuntimeError(
+            "IndexCache pipeline tensor lacks preserved shape/dtype metadata: "
+            f"key={_get_pipeline_key(tensor)!r}."
+        )
+    grad = paddle.zeros(
+        shape=list(shape),
+        dtype=dtype,
+    )
+    grad.stop_gradient = False
+    return grad
+
+
 def _normalize_pipeline_input_gradients(input_tensor, input_tensor_grad):
     if input_tensor is None:
         return input_tensor_grad
@@ -284,8 +308,7 @@ def _normalize_pipeline_input_gradients(input_tensor, input_tensor_grad):
                     f"state: key={key!r}, shape={list(tensor.shape)}, "
                     f"dtype={tensor.dtype}."
                 )
-            grad = paddle.zeros_like(tensor)
-            grad.stop_gradient = False
+            grad = _zeros_from_tensor_metadata(tensor)
             gradients[idx] = grad
             zero_filled_keys.append(key)
         elif not isinstance(grad, paddle.Tensor):
