@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 
 import paddle
@@ -21,6 +22,7 @@ import paddle
 
 _PATCH_FLAG = "_indexcache_pp_runtime_patch_applied"
 _INDEXCACHE_STATE_KEY = "indexcache_state"
+_PIPELINE_KEY_ATTR = "_paddlefleet_pipeline_key"
 
 
 def _debug_enabled() -> bool:
@@ -31,10 +33,17 @@ def _is_indexcache_key(key) -> bool:
     return isinstance(key, str) and key.startswith(_INDEXCACHE_STATE_KEY)
 
 
+def _get_pipeline_key(tensor):
+    key = getattr(tensor, "key", None)
+    if key is None:
+        key = getattr(tensor, _PIPELINE_KEY_ATTR, None)
+    return key
+
+
 def _has_indexcache_key(tensors) -> bool:
     if not isinstance(tensors, (tuple, list)):
         tensors = (tensors,)
-    return any(_is_indexcache_key(getattr(tensor, "key", None)) for tensor in tensors)
+    return any(_is_indexcache_key(_get_pipeline_key(tensor)) for tensor in tensors)
 
 
 def _mark_indexcache_state_stop_gradient(value):
@@ -59,7 +68,7 @@ def _describe_tensor_keys(tensors):
             continue
         desc.append(
             {
-                "key": getattr(tensor, "key", None),
+                "key": _get_pipeline_key(tensor),
                 "shape": list(tensor.shape),
                 "dtype": str(tensor.dtype),
                 "stop_gradient": bool(tensor.stop_gradient),
@@ -130,6 +139,7 @@ def _convert_tensor_dict_to_tuple(output_tensor_dict):
                         f"or None, but {key}[{idx}] is {type(item).__name__}."
                     )
                 item.key = f"{key} {idx}"
+                setattr(item, _PIPELINE_KEY_ATTR, item.key)
                 output_tensor.append(item)
         else:
             if not isinstance(tensor, paddle.Tensor):
@@ -138,6 +148,7 @@ def _convert_tensor_dict_to_tuple(output_tensor_dict):
                     f"tuple/list, but {key} is {type(tensor).__name__}."
                 )
             tensor.key = key
+            setattr(tensor, _PIPELINE_KEY_ATTR, key)
             output_tensor.append(tensor)
 
     output_tensor = tuple(output_tensor)
@@ -156,6 +167,7 @@ def _convert_tensor_tuple_to_dict(input_tensor_tuple):
         input_tensor_tuple = (input_tensor_tuple,)
     for tensor in input_tensor_tuple:
         key = tensor.key
+        setattr(tensor, _PIPELINE_KEY_ATTR, key)
         if " " in key:
             real_key, suffix = key.rsplit(" ", 1)
             if suffix.isdigit():
@@ -212,7 +224,7 @@ def _collect_input_gradients(inputs):
             continue
         grad = tensor.grad
         if grad is None:
-            key = getattr(tensor, "key", None)
+            key = _get_pipeline_key(tensor)
             if not _is_indexcache_key(key):
                 raise RuntimeError(
                     "Pipeline input is missing a gradient outside IndexCache "
@@ -230,6 +242,82 @@ def _collect_input_gradients(inputs):
             flush=True,
         )
     return tuple(gradients)
+
+
+def _normalize_pipeline_input_gradients(input_tensor, input_tensor_grad):
+    if input_tensor is None:
+        return input_tensor_grad
+
+    is_tuple_input = isinstance(input_tensor, tuple)
+    inputs = input_tensor if is_tuple_input else (input_tensor,)
+    if not _has_indexcache_key(inputs):
+        return input_tensor_grad
+
+    differentiable_inputs = [
+        tensor
+        for tensor in inputs
+        if isinstance(tensor, paddle.Tensor) and not tensor.stop_gradient
+    ]
+    if is_tuple_input:
+        if not isinstance(input_tensor_grad, (tuple, list)):
+            raise RuntimeError(
+                "IndexCache pipeline input gradients must preserve tuple "
+                f"structure, but got {type(input_tensor_grad).__name__}."
+            )
+        gradients = list(input_tensor_grad)
+    else:
+        gradients = [input_tensor_grad]
+
+    if len(gradients) != len(differentiable_inputs):
+        raise RuntimeError(
+            "IndexCache pipeline input gradient arity mismatch: "
+            f"inputs={len(differentiable_inputs)}, gradients={len(gradients)}."
+        )
+
+    zero_filled_keys = []
+    for idx, (tensor, grad) in enumerate(zip(differentiable_inputs, gradients)):
+        key = _get_pipeline_key(tensor)
+        if grad is None:
+            if not _is_indexcache_key(key):
+                raise RuntimeError(
+                    "Pipeline input is missing a gradient outside IndexCache "
+                    f"state: key={key!r}, shape={list(tensor.shape)}, "
+                    f"dtype={tensor.dtype}."
+                )
+            grad = paddle.zeros_like(tensor)
+            grad.stop_gradient = False
+            gradients[idx] = grad
+            zero_filled_keys.append(key)
+        elif not isinstance(grad, paddle.Tensor):
+            raise TypeError(
+                "Pipeline input gradients must be paddle.Tensor or None, "
+                f"but key={key!r} has {type(grad).__name__}."
+            )
+
+    if _debug_enabled() and zero_filled_keys:
+        print(
+            "[INDEXCACHE_PP_GRAD] boundary=pipeline zero_filled_keys="
+            f"{zero_filled_keys}",
+            flush=True,
+        )
+    return tuple(gradients) if is_tuple_input else gradients[0]
+
+
+def _wrap_pipeline_backward_step(original_backward_step):
+    @functools.wraps(original_backward_step)
+    def backward_step(self, input_tensor, *args, **kwargs):
+        input_tensor_grad = original_backward_step(
+            self,
+            input_tensor,
+            *args,
+            **kwargs,
+        )
+        return _normalize_pipeline_input_gradients(
+            input_tensor,
+            input_tensor_grad,
+        )
+
+    return backward_step
 
 
 def _schedule_node_backward(self, output_grad=None, scaler=None):
@@ -280,6 +368,7 @@ def _schedule_node_backward(self, output_grad=None, scaler=None):
 
 def apply_indexcache_pp_runtime_patch() -> None:
     import paddle.distributed.fleet.meta_parallel as meta_parallel
+    import paddle.distributed.fleet.meta_parallel.pipeline_parallel as pipeline_parallel
     import paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils as fbo
     import paddle.distributed.fleet.meta_parallel.pp_utils.utils as pp_utils
 
@@ -306,3 +395,10 @@ def apply_indexcache_pp_runtime_patch() -> None:
     fbo.clone_and_clear_dataptr = clone_and_clear_dataptr
     fbo.ScheduleNode.backward = _schedule_node_backward
     setattr(fbo, _PATCH_FLAG, True)
+
+    pipeline_parallel.PipelineParallel._backward_step = (
+        _wrap_pipeline_backward_step(
+            pipeline_parallel.PipelineParallel._backward_step
+        )
+    )
+    setattr(pipeline_parallel, _PATCH_FLAG, True)

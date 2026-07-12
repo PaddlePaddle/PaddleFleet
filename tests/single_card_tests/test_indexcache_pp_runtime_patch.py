@@ -14,7 +14,11 @@ from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
 )
 
 import paddlefleet  # noqa: F401 - installs the IndexCache pipeline patch
-from paddlefleet.indexcache_pp_runtime_patch import _dict_to_tuple_helper
+from paddlefleet.indexcache_pp_runtime_patch import (
+    _dict_to_tuple_helper,
+    _normalize_pipeline_input_gradients,
+    _tuple_to_dict_helper,
+)
 
 
 def _make_distill_state(offset):
@@ -88,6 +92,71 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             "missing a gradient outside IndexCache state",
         ):
             node.backward(output_grads)
+
+    def test_outer_pipeline_boundary_uses_sendable_zero_gradients(self):
+        pipeline_inputs = _dict_to_tuple_helper(
+            {
+                "hidden_states": paddle.to_tensor(
+                    [4.0], stop_gradient=False
+                ),
+                "indexcache_state": _make_distill_state(0),
+            }
+        )
+        converted_inputs, use_dict = _tuple_to_dict_helper(pipeline_inputs)
+
+        self.assertTrue(use_dict)
+        self.assertIn("indexcache_state", converted_inputs)
+        self.assertTrue(all(not hasattr(tensor, "key") for tensor in pipeline_inputs))
+
+        hidden_grad = paddle.ones_like(pipeline_inputs[0])
+        hidden_grad.stop_gradient = False
+        input_grads = _normalize_pipeline_input_gradients(
+            pipeline_inputs,
+            (hidden_grad, None, None, None),
+        )
+
+        self.assertEqual(len(input_grads), 4)
+        self.assertTrue(all(isinstance(grad, paddle.Tensor) for grad in input_grads))
+        self.assertTrue(all(not grad.stop_gradient for grad in input_grads))
+        self.assertEqual(input_grads[0].item(), 1.0)
+        for grad in input_grads[1:]:
+            self.assertEqual(grad.item(), 0.0)
+
+        meta = SendRecvMeta()
+        meta.set_send_message(input_grads)
+        self.assertEqual(len(meta.send_shape_message), 4)
+
+    def test_outer_pipeline_boundary_preserves_baseline_none_gradient(self):
+        hidden = paddle.to_tensor([4.0], stop_gradient=False)
+        unused = paddle.to_tensor([5.0], stop_gradient=False)
+        input_grads = (paddle.ones_like(hidden), None)
+
+        normalized = _normalize_pipeline_input_gradients(
+            (hidden, unused),
+            input_grads,
+        )
+
+        self.assertIs(normalized, input_grads)
+
+    def test_outer_pipeline_boundary_rejects_missing_hidden_gradient(self):
+        pipeline_inputs = _dict_to_tuple_helper(
+            {
+                "hidden_states": paddle.to_tensor(
+                    [4.0], stop_gradient=False
+                ),
+                "indexcache_state": _make_distill_state(0),
+            }
+        )
+        _tuple_to_dict_helper(pipeline_inputs)
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "missing a gradient outside IndexCache state",
+        ):
+            _normalize_pipeline_input_gradients(
+                pipeline_inputs,
+                (None, None, None, None),
+            )
 
 
 if __name__ == "__main__":
