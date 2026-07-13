@@ -499,7 +499,7 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             self.assertEqual(int(tensor.item()), 3)
             self.assertEqual(op, paddle.distributed.ReduceOp.MAX)
             self.assertIs(group, manager.group)
-            tensor.set_value(paddle.to_tensor([65], dtype="int64"))
+            tensor.set_value(paddle.to_tensor([129], dtype="int64"))
 
         with patch(
             "paddle.distributed.all_reduce", side_effect=fake_all_reduce
