@@ -63,8 +63,9 @@ else:
 _buffer = None
 _hybrid_ep_buffer = None
 
-# HybridEP dispatch/combine kernels use 64-token chunks for public APIs.
-HYBRIDEP_TOKEN_ALIGNMENT = 64
+# HybridEP dispatch/combine kernels use 128-token chunks to align with default
+# NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API and NUM_OF_TOKENS_PER_CHUNK_COMBINE_API
+HYBRIDEP_TOKEN_ALIGNMENT = 128
 
 
 def barrier_ep(ep_group):
