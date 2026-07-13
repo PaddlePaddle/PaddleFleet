@@ -895,10 +895,12 @@ class TransformerConfig(ModelParallelConfig):
 
     csa_compress_ratios: list | None = None
     """Per-layer compression ratios for CSA. Length must equal num_hidden_layers.
-    Each value must be one of {0, 4, 128}:
+    Each value must be one of {0, 4, 8, 128}:
       - 0: window-only attention (no compression)
-      - 4: overlapping compression with learned CSAIndexer
-      - 128: non-overlapping compression, attend to all compressed positions
+      - 4: CSA layer — overlapping compression (coff=2) with learned Lightning Indexer
+      - 8: CSA layer — overlapping compression (coff=2) with learned Lightning Indexer,
+            compresses 8x instead of 4x
+      - 128: HCA layer — non-overlapping compression, attend to all compressed positions
     """
 
     csa_compress_rotary_base: float = 40000.0
@@ -907,7 +909,7 @@ class TransformerConfig(ModelParallelConfig):
     """
 
     csa_dense_mode: bool = False
-    """If True, skip CSAIndexer for ratio==4 layers and attend to all compressed positions.
+    """If True, skip CSAIndexer for CSA layers (ratio 4 or 8) and attend to all compressed positions.
     Useful for debugging or ablation studies.
     """
 
@@ -1288,7 +1290,7 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
                     f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
-            valid_ratios = {0, 4, 128}
+            valid_ratios = {0, 4, 8, 128}
             for i, r in enumerate(self.csa_compress_ratios):
                 if r not in valid_ratios:
                     raise ValueError(

@@ -188,6 +188,11 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[2])
 
+    def test_csa_compress_ratios_accepts_4_8_128(self):
+        # {0, 4, 8, 128} is the full accepted set; ratio 8 is a CSA layer.
+        cfg = _make_config(num_layers=4, csa_compress_ratios=[0, 4, 8, 128])
+        self.assertEqual(cfg.csa_compress_ratios, [0, 4, 8, 128])
+
     def test_csa_indexer_backend_validation(self):
         for backend in ("unfused", "tilelang", "cudnn"):
             cfg = _make_config(csa_indexer_backend=backend)
@@ -1136,6 +1141,54 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         self.assertTrue(hasattr(attn, "core_attention"))
         self.assertTrue(hasattr(attn, "q_layernorm"))
         self.assertTrue(hasattr(attn, "kv_layernorm"))
+
+    def test_csa_ratio8_builds_and_forward(self):
+        paddle.seed(_SEED)
+        config = _make_config(num_layers=1, csa_compress_ratios=[8])
+        attn = _build_attention(config, layer_number=0)
+        attn.eval()
+
+        # CSA-8 must build a compressor with overlap and a Lightning Indexer.
+        self.assertIsNotNone(attn.core_attention.compressor)
+        self.assertTrue(attn.core_attention.compressor.overlap)
+        self.assertEqual(
+            attn.core_attention.compressor.coff, 2
+        )  # overlap -> coff = 1 + 1
+        self.assertIsNotNone(attn.core_attention.indexer)
+
+        batch_size = 1
+        seq_len = 32  # divisible by 8
+        hidden = paddle.randn(
+            [batch_size, seq_len, config.hidden_size], dtype="bfloat16"
+        )
+        with paddle.no_grad():
+            output, _ = attn(hidden_states=hidden, attention_mask=None)
+
+        self.assertEqual(
+            list(output.shape),
+            [batch_size, seq_len, config.hidden_size],
+        )
+        self.assertTrue(paddle.isfinite(output.cast("float32")).all().item())
+
+    def test_csa_ratio8_indexer_count(self):
+        # A [4, 8, 128] config must produce 2 indexer layers (CSA-4 and CSA-8),
+        # matching dsa_attention.py track_indexer_metrics.
+        paddle.seed(_SEED)
+        ratios = [4, 8, 128]
+        config = _make_config(num_layers=3, csa_compress_ratios=ratios)
+
+        num_indexer = 0
+        for layer_number, ratio in enumerate(ratios):
+            attn = _build_attention(config, layer_number=layer_number)
+            core = attn.core_attention
+            self.assertEqual(core.compress_ratio, ratio)
+            if ratio in (4, 8):
+                self.assertIsNotNone(core.indexer)
+                num_indexer += 1
+            else:
+                self.assertIsNone(core.indexer)
+
+        self.assertEqual(num_indexer, 2)
 
     def test_q_head_dim_equals_v_head_dim(self):
         paddle.seed(_SEED)

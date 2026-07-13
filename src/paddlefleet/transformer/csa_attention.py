@@ -1249,7 +1249,9 @@ class Compressor(nn.Layer):
         self.config = config
         self.compress_ratio = compress_ratio
         self.head_dim = head_dim
-        self.overlap = compress_ratio == 4
+        # CSA layers (ratio 4 or 8) use overlapping compression (coff=2);
+        # HCA (ratio 128) and window-only (ratio 0) do not overlap.
+        self.overlap = compress_ratio in (4, 8)
         self.coff = 1 + int(self.overlap)
         self.rotate = rotate
         self.qk_pos_emb_head_dim = config.qk_pos_emb_head_dim or 0
@@ -1817,8 +1819,10 @@ class CompressedSparseAttention(FleetLayer):
         else:
             self.compressor = None
 
-        # Conditionally build Indexer (ratio == 4 and not dense_mode)
-        if self.compress_ratio == 4 and not config.csa_dense_mode:
+        # Conditionally build Indexer for CSA layers (ratio 4 or 8) and not dense_mode.
+        # ratio 128 (HCA) intentionally falls through to the attend-to-all path.
+        # Keep this in sync with dsa_attention.py indexer-layer count.
+        if self.compress_ratio in (4, 8) and not config.csa_dense_mode:
             self.indexer = build_spec_layer(
                 sublayers_spec.indexer,
                 config=config,
