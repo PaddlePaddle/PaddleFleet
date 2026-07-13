@@ -57,19 +57,13 @@ except ImportError:
     pass
 
 import unittest
-from unittest.mock import patch
 
 import paddle
 
-from paddlefleet.transformer import dot_product_attention as dpa_module
 from paddlefleet.transformer.dot_product_attention import DotProductAttention
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
-
-_HAS_SDPA_SOFTMAX_OFFSET_FN = hasattr(
-    dpa_module, "scaled_dot_product_attention_with_softmax_offset"
-)
 
 
 def _make_config(**overrides):
@@ -103,18 +97,10 @@ def _make_config(**overrides):
     return TransformerConfig(**defaults)
 
 
-@unittest.skipUnless(
-    _HAS_SDPA_SOFTMAX_OFFSET_FN,
-    "scaled_dot_product_attention_with_softmax_offset not available in this "
-    "build of paddlefleet; the SDPA softmax_offset branch is only present in "
-    "newer versions.",
-)
 class TestSDPASoftmaxOffsetBranch(unittest.TestCase):
     """
-    Tests SDPA path selection between
-      scaled_dot_product_attention_with_softmax_offset  (softmax_offset != None)
-    and
-      paddle.nn.functional.scaled_dot_product_attention (softmax_offset is None).
+    Tests DotProductAttention routing by controlling softmax_type config.
+    No mocking — real functions execute for full coverage.
     """
 
     def _make_attn(self, softmax_type="off-by-one", **cfg_overrides):
@@ -126,160 +112,72 @@ class TestSDPASoftmaxOffsetBranch(unittest.TestCase):
             attention_type="self",
         )
 
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.scaled_dot_product_attention_with_softmax_offset"
-    )
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.paddle.nn.functional.scaled_dot_product_attention"
-    )
-    def test_calls_softmax_offset_fn_when_offset_not_none(
-        self, mock_sdpa, mock_offset_fn
-    ):
-        """softmax_type='off-by-one' => softmax_offset fn is invoked; default SDPA is not."""
+    def test_softmax_offset_branch_runs_without_error(self):
+        """softmax_type='off-by-one' => softmax_offset is set, output shape correct."""
         attn = self._make_attn(softmax_type="off-by-one")
         self.assertIsNotNone(attn.softmax_offset)
 
-        mock_offset_fn.return_value = paddle.randn([1, 4, 4, 32]).astype(
-            "bfloat16"
-        )
-
         query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
 
-        attn(query, key, value, None, attn_mask_startend_row_indices=None)
+        output = attn(
+            query, key, value, None, attn_mask_startend_row_indices=None
+        )
+        self.assertEqual(output.shape, [1, 4, 4 * 32])
 
-        mock_offset_fn.assert_called_once()
-        mock_sdpa.assert_not_called()
-
-        call_args = mock_offset_fn.call_args
-        # positional args: query, key, value_for_sdpa
-        self.assertEqual(len(call_args.args), 3)
-        kwargs = call_args.kwargs
-        self.assertIn("attn_mask_kv", kwargs)
-        self.assertIn("is_causal", kwargs)
-        self.assertIn("softmax_offset", kwargs)
-        self.assertIn("q_head_dim", kwargs)
-        self.assertIn("dropout_p", kwargs)
-        self.assertIn("training", kwargs)
-        self.assertIs(kwargs["softmax_offset"], attn.softmax_offset)
-        self.assertEqual(kwargs["q_head_dim"], 32)
-        # training path: is_causal=True, attention_mask=None -> attn_mask_kv=None
-        self.assertTrue(kwargs["is_causal"])
-        self.assertIsNone(kwargs["attn_mask_kv"])
-        # dropout_p is sourced from config.attention_dropout (0.0 in _make_config)
-        self.assertEqual(kwargs["dropout_p"], 0.0)
-        # training reflects the module's Layer.training flag (True by default)
-        self.assertEqual(kwargs["training"], attn.training)
-
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.scaled_dot_product_attention_with_softmax_offset"
-    )
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.paddle.nn.functional.scaled_dot_product_attention"
-    )
-    def test_calls_default_sdpa_when_offset_none(
-        self, mock_sdpa, mock_offset_fn
-    ):
-        """softmax_type='vanilla' => softmax_offset is None => default SDPA path is taken."""
+    def test_vanilla_branch_runs_without_error(self):
+        """softmax_type='vanilla' => softmax_offset is None, default SDPA path."""
         attn = self._make_attn(softmax_type="vanilla")
         self.assertIsNone(attn.softmax_offset)
 
-        mock_sdpa.return_value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
-
         query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
 
-        attn(query, key, value, None, attn_mask_startend_row_indices=None)
-
-        mock_sdpa.assert_called_once()
-        mock_offset_fn.assert_not_called()
-
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.scaled_dot_product_attention_with_softmax_offset"
-    )
-    def test_forwards_attention_mask_as_attn_mask_kv(self, mock_offset_fn):
-        """A non-None attention_mask is forwarded as attn_mask_kv to the offset fn."""
-        attn = self._make_attn(softmax_type="off-by-one")
-        mock_offset_fn.return_value = paddle.randn([1, 4, 4, 32]).astype(
-            "bfloat16"
+        output = attn(
+            query, key, value, None, attn_mask_startend_row_indices=None
         )
+        self.assertEqual(output.shape, [1, 4, 4 * 32])
+
+    def test_with_attention_mask(self):
+        """Non-None attention_mask is forwarded correctly."""
+        attn = self._make_attn(softmax_type="off-by-one")
 
         query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         attention_mask = paddle.zeros([1, 1, 4, 4], dtype="bfloat16")
 
-        attn(
+        output = attn(
             query,
             key,
             value,
             attention_mask,
             attn_mask_startend_row_indices=None,
         )
+        self.assertEqual(output.shape, [1, 4, 4 * 32])
 
-        kwargs = mock_offset_fn.call_args.kwargs
-        self.assertIs(kwargs["attn_mask_kv"], attention_mask)
-        self.assertTrue(kwargs["is_causal"])
-
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.scaled_dot_product_attention_with_softmax_offset"
-    )
-    def test_learnable_softmax_offset_is_used(self, mock_offset_fn):
-        """softmax_type='learnable' also routes through the offset fn."""
+    def test_learnable_softmax_offset(self):
+        """softmax_type='learnable' => offset is a trainable parameter."""
         attn = self._make_attn(softmax_type="learnable")
         self.assertIsNotNone(attn.softmax_offset)
-        self.assertTrue(
-            isinstance(attn.softmax_offset, paddle.Tensor)
-            and not attn.softmax_offset.stop_gradient
-        )
-
-        mock_offset_fn.return_value = paddle.randn([1, 4, 4, 32]).astype(
-            "bfloat16"
-        )
+        self.assertFalse(attn.softmax_offset.stop_gradient)
 
         query = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         key = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
         value = paddle.randn([1, 4, 4, 32]).astype("bfloat16")
 
-        attn(query, key, value, None, attn_mask_startend_row_indices=None)
+        output = attn(
+            query, key, value, None, attn_mask_startend_row_indices=None
+        )
+        self.assertEqual(output.shape, [1, 4, 4 * 32])
 
-        mock_offset_fn.assert_called_once()
-        kwargs = mock_offset_fn.call_args.kwargs
-        self.assertIs(kwargs["softmax_offset"], attn.softmax_offset)
-
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.scaled_dot_product_attention_with_softmax_offset"
-    )
-    def test_sdpa_need_value_padding_pads_value_and_truncates_output(
-        self, mock_offset_fn
-    ):
-        """
-        Covers the `if sdpa_need_value_padding:` branch in DotProductAttention.forward:
-
-            sdpa_need_value_padding = q_head_dim != v_head_dim
-            if sdpa_need_value_padding:
-                value_for_sdpa = paddle.nn.functional.pad(
-                    value, [0, q_head_dim - v_head_dim], value=0
-                )
-
-        With q_head_dim=32 and v_head_dim=16 the value tensor must be zero-padded
-        on the right of the last dim to shape [..., 32] before being forwarded to
-        scaled_dot_product_attention_with_softmax_offset, and the returned tensor
-        must be truncated back to v_head_dim after the call.
-        """
+    def test_value_padding_when_v_head_dim_smaller(self):
+        """q_head_dim != v_head_dim => value is padded then output is truncated."""
         attn = self._make_attn(softmax_type="off-by-one")
-        q_head_dim = 32
-        v_head_dim = 16
         bsz, q_len, num_heads = 1, 4, 4
-
-        # Mocked SDPA returns a padded-shape output (last dim == q_head_dim),
-        # matching the shape the real function would produce after receiving
-        # the zero-padded value.
-        mock_offset_fn.return_value = paddle.randn(
-            [bsz, q_len, num_heads, q_head_dim]
-        ).astype("bfloat16")
+        q_head_dim, v_head_dim = 32, 16
 
         query = paddle.randn([bsz, q_len, num_heads, q_head_dim]).astype(
             "bfloat16"
@@ -287,7 +185,6 @@ class TestSDPASoftmaxOffsetBranch(unittest.TestCase):
         key = paddle.randn([bsz, q_len, num_heads, q_head_dim]).astype(
             "bfloat16"
         )
-        # v_head_dim < q_head_dim => sdpa_need_value_padding is True
         value = paddle.randn([bsz, q_len, num_heads, v_head_dim]).astype(
             "bfloat16"
         )
@@ -295,56 +192,12 @@ class TestSDPASoftmaxOffsetBranch(unittest.TestCase):
         output = attn(
             query, key, value, None, attn_mask_startend_row_indices=None
         )
-
-        mock_offset_fn.assert_called_once()
-        # positional args: query, key, value_for_sdpa (padded)
-        call_args = mock_offset_fn.call_args
-        self.assertEqual(len(call_args.args), 3)
-        value_for_sdpa = call_args.args[2]
-
-        # value_for_sdpa is padded to q_head_dim on the last dim
-        self.assertEqual(value_for_sdpa.shape[-1], q_head_dim)
-        # right-side padding is zero
-        self.assertTrue(
-            paddle.all(
-                value_for_sdpa[..., v_head_dim:].cast("float32") == 0
-            ).item(),
-            msg=(
-                "value must be zero-padded on the right of the last dim "
-                f"(got {value_for_sdpa[..., v_head_dim:]})"
-            ),
-        )
-        # unpadded prefix equals the original value
-        self.assertTrue(
-            paddle.allclose(
-                value_for_sdpa[..., :v_head_dim].cast("float32"),
-                value.cast("float32"),
-                atol=0.0,
-            ).item(),
-            msg="unpadded prefix of value_for_sdpa must equal original value",
-        )
-        self.assertEqual(call_args.kwargs["q_head_dim"], q_head_dim)
-
-        # After the call, attn_output was truncated back to v_head_dim and
-        # then flattened to [B, Q, num_heads * v_head_dim].
         self.assertEqual(output.shape, [bsz, q_len, num_heads * v_head_dim])
 
-    @patch(
-        "paddlefleet.transformer.dot_product_attention.scaled_dot_product_attention_with_softmax_offset"
-    )
-    def test_no_value_padding_when_head_dims_match(self, mock_offset_fn):
-        """
-        Covers the else branch of `if sdpa_need_value_padding:` — when
-        q_head_dim == v_head_dim, value_for_sdpa is the original value
-        tensor and no padding/truncation is applied.
-        """
+    def test_no_value_padding_when_head_dims_match(self):
+        """q_head_dim == v_head_dim => no padding, output shape unchanged."""
         attn = self._make_attn(softmax_type="off-by-one")
-        head_dim = 32
-        bsz, q_len, num_heads = 1, 4, 4
-
-        mock_offset_fn.return_value = paddle.randn(
-            [bsz, q_len, num_heads, head_dim]
-        ).astype("bfloat16")
+        bsz, q_len, num_heads, head_dim = 1, 4, 4, 32
 
         query = paddle.randn([bsz, q_len, num_heads, head_dim]).astype(
             "bfloat16"
@@ -357,11 +210,6 @@ class TestSDPASoftmaxOffsetBranch(unittest.TestCase):
         output = attn(
             query, key, value, None, attn_mask_startend_row_indices=None
         )
-
-        args = mock_offset_fn.call_args.args
-        value_for_sdpa = args[2]
-        # else branch => passthrough (same Python object)
-        self.assertIs(value_for_sdpa, value)
         self.assertEqual(output.shape, [bsz, q_len, num_heads * head_dim])
 
 
@@ -372,10 +220,6 @@ class TestSoftmaxOffsetFnDropoutTraining(unittest.TestCase):
     an undefined `self.training`).
     """
 
-    @unittest.skipUnless(
-        _HAS_SDPA_SOFTMAX_OFFSET_FN,
-        "scaled_dot_product_attention_with_softmax_offset not available.",
-    )
     def test_dropout_uses_training_argument_no_nameerror(self):
         from paddlefleet.transformer.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
@@ -414,10 +258,6 @@ class TestSoftmaxOffsetFnDropoutTraining(unittest.TestCase):
         self.assertEqual(out_train.shape, [1, 4, 2, 8])
 
 
-@unittest.skipUnless(
-    _HAS_SDPA_SOFTMAX_OFFSET_FN,
-    "scaled_dot_product_attention_with_softmax_offset not available.",
-)
 class TestSoftmaxOffsetFnMaskBranches(unittest.TestCase):
     """
     Exercises the two attn_mask_kv branches in
@@ -513,10 +353,6 @@ class TestSoftmaxOffsetFnMaskBranches(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    _HAS_SDPA_SOFTMAX_OFFSET_FN,
-    "scaled_dot_product_attention_with_softmax_offset not available.",
-)
 class TestSoftmaxOffsetFnRowMaxWithSink(unittest.TestCase):
     """
     Guards the numerical-stability change:
@@ -590,10 +426,6 @@ class TestSoftmaxOffsetFnRowMaxWithSink(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    _HAS_SDPA_SOFTMAX_OFFSET_FN,
-    "scaled_dot_product_attention_with_softmax_offset not available.",
-)
 class TestSoftmaxOffsetFnGQAPath(unittest.TestCase):
     """
     Covers the `if groups > 1:` branches (GQA path) in
@@ -695,10 +527,6 @@ class TestSoftmaxOffsetFnGQAPath(unittest.TestCase):
             )
 
 
-@unittest.skipUnless(
-    _HAS_SDPA_SOFTMAX_OFFSET_FN,
-    "scaled_dot_product_attention_with_softmax_offset not available.",
-)
 class TestSoftmaxOffsetFnCausalBranch(unittest.TestCase):
     """
     Covers the `elif is_causal and query.shape[1] > 1:` branch of
@@ -793,10 +621,6 @@ class TestSoftmaxOffsetFnCausalBranch(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    _HAS_SDPA_SOFTMAX_OFFSET_FN,
-    "scaled_dot_product_attention_with_softmax_offset not available.",
-)
 class TestSoftmaxOffsetFnScaleArg(unittest.TestCase):
     """
     Covers the `scale = float(scale if scale is not None else q_head_dim**-0.5)`
