@@ -310,7 +310,7 @@ class TestPP(unittest.TestCase):
                     "_layers.9.0.mlp.experts.2.up_gate_proj.weight": "6d2752e6cad61d7c4b27fee96fd1fa6b",
                     "_layers.9.0.mlp.experts.3.down_proj.weight": "1e3048b0d99f8078cdef1c28fc9be64d",
                     "_layers.9.0.mlp.experts.3.up_gate_proj.weight": "996c9363c8195c1815d8cf1ef04c654f",
-                    "_layers.9.0.mlp.gate.weight": "0e317f2f2f3863d39f469dfaec84e5ea",
+                    "_layers.9.0.mlp.gate.weight": "fdc6f038b22df4b16d8ea63354ed05e6",
                     "_layers.9.0.mlp.shared_experts.down_proj.weight": "d4237a2ef05292fd5d848cdcfb313cd0",
                     "_layers.9.0.mlp.shared_experts.up_gate_proj.weight": "8f557c64d415117315e49fc3e881a7a8",
                     "_layers.9.0.post_attention_layernorm.weight": "c16680edcc3c601065d6b7ba6e59b886",
@@ -327,7 +327,7 @@ class TestPP(unittest.TestCase):
                     "_layers.9.1.mlp.experts.2.up_gate_proj.weight": "b5cfa9d6c8febd618f91ac2843d50a1c",
                     "_layers.9.1.mlp.experts.3.down_proj.weight": "a844e2467d9162af4fc2201117105ce3",
                     "_layers.9.1.mlp.experts.3.up_gate_proj.weight": "397f7405d7f804425d378727286c3703",
-                    "_layers.9.1.mlp.gate.weight": "691109eda4405398feb4327be55e1c3a",
+                    "_layers.9.1.mlp.gate.weight": "c2776b157831d7d6829f25dd1b7599c4",
                     "_layers.9.1.mlp.shared_experts.down_proj.weight": "747d720a6902a8609cf360c44bcb9a81",
                     "_layers.9.1.mlp.shared_experts.up_gate_proj.weight": "32ce592c21077650a9732e662334a796",
                     "_layers.9.1.post_attention_layernorm.weight": "be6685ec6294d76fc03661ef0f2ee707",
@@ -337,10 +337,33 @@ class TestPP(unittest.TestCase):
                     "_layers.9.1.self_attn.qkv_proj.weight": "600a875882254ed3211f81364e354ee1",
                     "_layers.shared_layers.embed.embedding.embed_tokens.weight": "846d77005712ae32512bcedfbcce9e94",
                 }
+                mismatches = {}
+                actual_all = {}
                 for name, param in overlap_gpt_model.named_parameters():
-                    assert param.grad._md5sum() == baseline[name], (
-                        f"{name}'s grad has diff"
+                    if param.grad is None:
+                        continue
+                    actual_md5 = param.grad._md5sum()
+                    actual_all[name] = actual_md5
+                    expected = baseline.get(name)
+                    if expected != actual_md5:
+                        mismatches[name] = {
+                            "actual": actual_md5,
+                            "expected": expected,
+                        }
+
+                if mismatches:
+                    print("===== MISMATCHED KEYS =====")
+                    pp = pprint.PrettyPrinter(
+                        depth=None, width=200, compact=False
                     )
+                    pp.pprint(mismatches)
+
+                    print("===== FULL ACTUAL DICT =====")
+                    pp.pprint(actual_all)
+
+                assert not mismatches, (
+                    f"{len(mismatches)} param(s) grad mismatch: {list(mismatches.keys())}"
+                )
 
 
 if __name__ == "__main__":

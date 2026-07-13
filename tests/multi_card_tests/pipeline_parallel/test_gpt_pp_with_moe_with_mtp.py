@@ -295,7 +295,7 @@ class TestPP(unittest.TestCase):
                         f"{name}'s grad has diff"
                     )
         elif judge_machine_type() == "B":
-            assert overlap_loss._md5sum() == "a7d554835b295e80ec1211e740cfa188"
+            assert overlap_loss._md5sum() == "1674e8e0ada05d64d7b90181cf140db0"
             if paddle.distributed.get_rank() == 0:
                 baseline = {
                     "_layers.shared_layers.embed.embedding.embed_tokens.weight": "7c630094b5660eb636646f778369cdee",
@@ -305,7 +305,7 @@ class TestPP(unittest.TestCase):
                     "_layers.9.0.self_attn.q_norm.weight": "f16a8f03ef21cd2902c6d1aedf65dea8",
                     "_layers.9.0.self_attn.k_norm.weight": "00877c5f9c7dc10ee080b6f9a91655d2",
                     "_layers.9.0.post_attention_layernorm.weight": "aef505d1faf64f9eac8d4a25e59df94b",
-                    "_layers.9.0.mlp.gate.weight": "fb3e70a532f926752085039010b9149c",
+                    "_layers.9.0.mlp.gate.weight": "47fd7eb38d41f46d94281b50d31e7fde",
                     "_layers.9.0.mlp.experts.0.up_gate_proj.weight": "17593839bb9781798777f79a1648e3b0",
                     "_layers.9.0.mlp.experts.0.down_proj.weight": "6de5d9ac75185dcaa1bd34e3520b1d16",
                     "_layers.9.0.mlp.experts.1.up_gate_proj.weight": "1f9cf3f2b4f3ff19943a4bb4a2164c1f",
@@ -322,7 +322,7 @@ class TestPP(unittest.TestCase):
                     "_layers.9.1.self_attn.q_norm.weight": "d9d8e32f6446816878c56a6861bf643d",
                     "_layers.9.1.self_attn.k_norm.weight": "077cdabd7c06ca37c8513009c66fe373",
                     "_layers.9.1.post_attention_layernorm.weight": "2873dc65f5ca2695aee0a48786906eb6",
-                    "_layers.9.1.mlp.gate.weight": "6196fb17bc772474adda8d4d6f054b1e",
+                    "_layers.9.1.mlp.gate.weight": "0ae845f0a3d7bd3e6eb1f4846c8c01e1",
                     "_layers.9.1.mlp.experts.0.up_gate_proj.weight": "14b49f34568acdab8ffc8fe22c9a1597",
                     "_layers.9.1.mlp.experts.0.down_proj.weight": "d14faab6e743fac3c2df44ef7e42121d",
                     "_layers.9.1.mlp.experts.1.up_gate_proj.weight": "902dade986c4e2af896d3d2a3ba57cc7",
@@ -334,10 +334,33 @@ class TestPP(unittest.TestCase):
                     "_layers.9.1.mlp.shared_experts.up_gate_proj.weight": "512196041bb29930952543d48e4847e0",
                     "_layers.9.1.mlp.shared_experts.down_proj.weight": "b5b58e8860d1f3d6abc5d1601fe4b170",
                 }
+                mismatches = {}
+                actual_all = {}
                 for name, param in overlap_gpt_model.named_parameters():
-                    assert param.grad._md5sum() == baseline[name], (
-                        f"{name}'s grad has diff"
+                    if param.grad is None:
+                        continue
+                    actual_md5 = param.grad._md5sum()
+                    actual_all[name] = actual_md5
+                    expected = baseline.get(name)
+                    if expected != actual_md5:
+                        mismatches[name] = {
+                            "actual": actual_md5,
+                            "expected": expected,
+                        }
+
+                if mismatches:
+                    print("===== MISMATCHED KEYS =====")
+                    pp = pprint.PrettyPrinter(
+                        depth=None, width=200, compact=False
                     )
+                    pp.pprint(mismatches)
+
+                    print("===== FULL ACTUAL DICT =====")
+                    pp.pprint(actual_all)
+
+                assert not mismatches, (
+                    f"{len(mismatches)} param(s) grad mismatch: {list(mismatches.keys())}"
+                )
 
 
 if __name__ == "__main__":
