@@ -720,7 +720,7 @@ class TestCalZLoss(unittest.TestCase):
         self.assertAlmostEqual(loss_ids.item(), expected.item(), places=5)
 
     def test_experimental_version_adds_mtp_denom(self):
-        """gpt_model_use_experimental_version=True uses denom + num_nextn_predict_layers * batch."""
+        """gpt_model_use_experimental_version=True with origin_input_ids uses full origin denom."""
         self.config.gpt_model_use_experimental_version = True
         self.config.num_nextn_predict_layers = 2
         router = TopKRouter(self.config)
@@ -731,14 +731,21 @@ class TestCalZLoss(unittest.TestCase):
             [batch_size * seq_len, self.config.n_routed_experts]
         )
         input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+        # origin_input_ids is the full un-scattered ids that already includes
+        # the mtp-shifted tokens (seq_len + num_nextn_predict_layers per row).
+        origin_input_ids = paddle.to_tensor(
+            [[1, 2, 0, 0, 6, 7], [3, 4, 5, 0, 8, 9]]
+        )
 
-        loss = router._cal_z_loss(logits, input_ids)
+        loss = router._cal_z_loss(
+            logits, input_ids, origin_input_ids=origin_input_ids
+        )
         self.assertEqual(loss.shape, [])
 
-        # Manually compute expected
-        origin_mask = (input_ids != 0).astype(paddle.float32)
-        loss_mask = origin_mask.reshape([-1])
-        denom = origin_mask.sum() + origin_mask.shape[0] * 2
+        # Manually compute expected: denom uses origin_input_ids valid count only.
+        origin_mask = (origin_input_ids != 0).astype(paddle.float32)
+        loss_mask = (input_ids != 0).astype(paddle.float32).reshape([-1])
+        denom = origin_mask.sum()
         expected = (
             logits.logsumexp(1).square() * loss_mask
         ).sum() / paddle.clip(denom, min=1e-6)

@@ -443,7 +443,14 @@ class StandardMoERouter(nn.Layer):
         return aux_loss
 
     def _cal_seq_aux_loss(
-        self, probs, top_k, routing_map, seq_len, batch_size, input_ids=None
+        self,
+        probs,
+        top_k,
+        routing_map,
+        seq_len,
+        batch_size,
+        input_ids=None,
+        origin_input_ids=None,
     ):
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
@@ -538,10 +545,21 @@ class StandardMoERouter(nn.Layer):
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
-                token_count_per_line = (
-                    origin_valid_mask.sum(axis=-1, keepdim=True)
-                    + self.config.num_nextn_predict_layers
-                )
+                if origin_input_ids is not None:
+                    # origin_input_ids is the full un-scattered ids (already
+                    # includes MTP-shifted tokens); no AllGather/CP gather and
+                    # no additional num_nextn_predict_layers offset.
+                    _origin_ids = origin_input_ids
+                    if _origin_ids.ndim == 1:
+                        _origin_ids = _origin_ids.unsqueeze(axis=0)
+                    origin_valid_mask_for_count = (
+                        _origin_ids != pad_token_id
+                    ).astype(paddle.float32)
+                    token_count_per_line = origin_valid_mask_for_count.sum(
+                        axis=-1, keepdim=True
+                    )
+                else:
+                    token_count_per_line = origin_valid_mask.sum()
             else:
                 token_count_per_line = origin_valid_mask.sum(
                     axis=-1, keepdim=True
@@ -582,7 +600,9 @@ class StandardMoERouter(nn.Layer):
             )
         return seq_aux_loss
 
-    def _cal_z_loss(self, logits, input_ids=None) -> paddle.Tensor:
+    def _cal_z_loss(
+        self, logits, input_ids=None, origin_input_ids=None
+    ) -> paddle.Tensor:
         """
         Calculate the z loss.
 
@@ -594,44 +614,42 @@ class StandardMoERouter(nn.Layer):
             paddle.Tensor: The z loss value.
         """
         if input_ids is not None:
-            origin_input_ids = input_ids
+            gathered_input_ids = input_ids
             if (
                 self.config.sequence_parallel
                 and self.config.experimental_dataflow
             ):
                 # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
                 b, s = input_ids.shape
-                origin_input_ids = AllGatherOp.apply(
-                    origin_input_ids.reshape([-1])
+                gathered_input_ids = AllGatherOp.apply(
+                    gathered_input_ids.reshape([-1])
                 ).reshape([b, -1])
             if (
                 get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
             ):
                 # In EB data flow, we need to gather input_ids here to get right denom.
-                origin_input_ids = ContextParallelGatherOp.apply(
-                    origin_input_ids, axis=1, mode=self.config.cp_balance_mode
+                gathered_input_ids = ContextParallelGatherOp.apply(
+                    gathered_input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
 
             pad_token_id = getattr(self.config, "pad_token_id", 0)
             if pad_token_id is None:
                 pad_token_id = 0
-            origin_loss_mask = (origin_input_ids != pad_token_id).astype(
-                paddle.float32
-            )
-            loss_mask = (input_ids != pad_token_id).astype(paddle.float32)
-            loss_mask = loss_mask.reshape([-1])
+
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
-            ):
-                # Align to EC, which also consider mtp token
-                denom = (
-                    origin_loss_mask.sum()
-                    + origin_loss_mask.shape[0]
-                    * self.config.num_nextn_predict_layers
+            ) and (origin_input_ids is not None):
+                origin_loss_mask = (origin_input_ids != pad_token_id).astype(
+                    paddle.float32
                 )
             else:
-                denom = origin_loss_mask.sum()
+                origin_loss_mask = (gathered_input_ids != pad_token_id).astype(
+                    paddle.float32
+                )
+            loss_mask = (input_ids != pad_token_id).astype(paddle.float32)
+            loss_mask = loss_mask.reshape([-1])
+            denom = origin_loss_mask.sum()
 
             l_zloss = (
                 logits.logsumexp(1).square() * loss_mask
@@ -1067,7 +1085,7 @@ class TopKRouter(StandardMoERouter):
         self.layer_number = layer_number
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
-    def forward(self, input, input_ids=None):
+    def forward(self, input, input_ids=None, origin_input_ids=None):
         if len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
@@ -1356,7 +1374,7 @@ class TopKRouter(StandardMoERouter):
         # z-loss
         if self.config.router_z_loss_coef:
             l_zloss = (
-                self._cal_z_loss(logits, input_ids)
+                self._cal_z_loss(logits, input_ids, origin_input_ids)
                 * self.config.router_z_loss_coef
             )
         else:
@@ -1427,6 +1445,7 @@ class TopKRouter(StandardMoERouter):
                     seq_len,
                     batch_size,
                     input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
                 )
 
             else:
