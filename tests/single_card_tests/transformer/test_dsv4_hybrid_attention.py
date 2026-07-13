@@ -227,7 +227,7 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             tensor_model_parallel_size=2,
         )
         with self.assertRaisesRegex(
-            NotImplementedError, "tensor parallel size > 1"
+            NotImplementedError, "does not support tensor parallelism > 1"
         ):
             _build_attention(cfg, layer_number=0)
 

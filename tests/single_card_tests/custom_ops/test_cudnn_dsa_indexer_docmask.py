@@ -343,6 +343,88 @@ class TestShiftScoresToLocalWindow(unittest.TestCase):
             )
 
 
+def _spec_docmask_inputs(doc_lens, ratio, packed_sk=None):
+    """Build expected docmask metadata directly from document lengths.
+
+    This oracle intentionally does not call PaddleFleet docmask metadata or
+    range helpers, keeping expected values independent of the implementation.
+    """
+    ratio = int(ratio)
+    doc_lens = [int(length) for length in doc_lens]
+    sq = sum(doc_lens)
+    real_widths = [length // ratio for length in doc_lens]
+    real_sk = sum(real_widths)
+    if packed_sk is None:
+        packed_sk = real_sk
+    if packed_sk < real_sk:
+        raise ValueError(f"packed_sk={packed_sk} is smaller than real_sk={real_sk}")
+
+    ends = []
+    ranges = []
+    token_start = 0
+    col_start = 0
+    for doc_len, width in zip(doc_lens, real_widths):
+        doc_end = token_start + doc_len
+        for pos_in_doc in range(doc_len):
+            ends.append(doc_end)
+            available = min((pos_in_doc + 1) // ratio, width)
+            ranges.append([col_start, col_start + available])
+        token_start = doc_end
+        col_start += width
+
+    startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
+    valid_range = paddle.to_tensor(ranges, dtype="int32").reshape([1, sq, 2])
+    return startend, valid_range, real_sk, int(packed_sk)
+
+
+def _spec_indexer_topk(index_q, index_k, weights, doc_lens, ratio, topk):
+    """Compute expected global top-k ids with an independent reference."""
+    _, valid_range, real_sk, packed_sk = _spec_docmask_inputs(
+        doc_lens, ratio, int(index_k.shape[1])
+    )
+    if packed_sk != int(index_k.shape[1]):
+        raise AssertionError("oracle packed width must match index_k")
+
+    q = index_q.cast("float32")
+    k = index_k.cast("float32")
+    w = weights.cast("float32")
+    scale = float(index_q.shape[-1]) ** -0.5
+    scores = paddle.einsum("bshd,btd->bsht", q, k) * scale
+    scores = paddle.nn.functional.relu(scores)
+    scores = (scores * w.unsqueeze(-1)).sum(axis=2)
+
+    ranges = valid_range.numpy()[0]
+    score_np = scores.numpy()[0]
+    expected = []
+    lengths = []
+    for query, (start, end) in enumerate(ranges):
+        start, end = int(start), min(int(end), real_sk)
+        count = min(int(topk), max(end - start, 0))
+        lengths.append(count)
+        if count == 0:
+            row = []
+        else:
+            local_order = score_np[query, start:end].argsort()[::-1][:count]
+            row = [start + int(index) for index in local_order]
+        expected.append(row + [-1] * (int(topk) - count))
+    return (
+        paddle.to_tensor(expected, dtype="int32").unsqueeze(0),
+        paddle.to_tensor(lengths, dtype="int32").unsqueeze(0),
+        valid_range,
+    )
+
+
+def _assert_topk_sets_equal(testcase, actual, expected, message):
+    actual_np = actual.numpy()[0]
+    expected_np = expected.numpy()[0]
+    for query in range(actual_np.shape[0]):
+        testcase.assertEqual(
+            {int(index) for index in actual_np[query] if index >= 0},
+            {int(index) for index in expected_np[query] if index >= 0},
+            f"{message}, query={query}: actual={actual_np[query]}, expected={expected_np[query]}",
+        )
+
+
 @unittest.skipIf(
     not paddle.device.is_compiled_with_cuda()
     or paddle.device.cuda.get_device_capability()[0] != 10,
@@ -474,30 +556,26 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
         idx_b, _ = cudnn_indexer_topk(scores, sq, ratio, topk)
         self.assertTrue(paddle.equal_all(idx_a, idx_b).item())
 
-    def test_thd_docmask_matches_bshd_docmask_for_aligned_docs(self):
-        """THD fast path must match the existing packed-BSHD docmask path."""
+    def _run_spec_case(self, doc_lens, ratio, topk, seed, packed_sk=None):
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk_fwd,
         )
-        from paddlefleet.transformer.csa_attention import get_valid_range
 
-        paddle.seed(17)
-        ratio, topk, h, d = 4, 8, 64, 128
-        doc_lens = [16, 24, 8]
+        paddle.seed(seed)
+        h, d = 64, 128
+        startend, valid_range, real_sk, sk = _spec_docmask_inputs(
+            doc_lens, ratio, packed_sk
+        )
         sq = sum(doc_lens)
-        sk = sum(length // ratio for length in doc_lens)
-        ends = []
-        offset = 0
-        for length in doc_lens:
-            offset += length
-            ends.extend([offset] * length)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
-        valid_range = get_valid_range(ratio, 1, sq, startend)
         index_q = paddle.randn([1, sq, h, d]).astype("bfloat16")
         index_k = paddle.randn([1, sk, d]).astype("bfloat16")
         weights = paddle.randn([1, sq, h]).astype("bfloat16")
+        expected_idx, expected_len, expected_range = _spec_indexer_topk(
+            index_q, index_k, weights, doc_lens, ratio, topk
+        )
+        self.assertTrue(paddle.equal_all(valid_range, expected_range).item())
 
-        thd_idx, thd_len, _ = cudnn_indexer_topk_fwd(
+        actual_idx, actual_len, _ = cudnn_indexer_topk_fwd(
             index_q,
             index_k,
             weights,
@@ -505,143 +583,92 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
             topk_effective=topk,
             valid_range=valid_range,
             startend_row_indices=startend,
-            return_topk_scores=True,
-        )
-        bshd_idx, bshd_len, _ = cudnn_indexer_topk_fwd(
-            index_q,
-            index_k,
-            weights,
-            ratio=ratio,
-            topk_effective=topk,
-            valid_range=valid_range,
+            doc_lens=doc_lens,
             return_topk_scores=True,
         )
 
-        self.assertTrue(paddle.equal_all(thd_len, bshd_len).item())
-        thd_np = thd_idx.numpy()[0]
-        bshd_np = bshd_idx.numpy()[0]
-        for q in range(sq):
-            self.assertEqual(
-                {int(x) for x in thd_np[q] if x >= 0},
-                {int(x) for x in bshd_np[q] if x >= 0},
-                f"query {q}: THD {thd_np[q]} != BSHD {bshd_np[q]}",
-            )
+        self.assertTrue(
+            paddle.equal_all(actual_len, expected_len).item(),
+            f"topk lengths mismatch: actual={actual_len.numpy()}, expected={expected_len.numpy()}",
+        )
+        _assert_topk_sets_equal(
+            self, actual_idx, expected_idx, f"doc_lens={doc_lens}, real_sk={real_sk}"
+        )
+        return actual_idx, actual_len, expected_range, real_sk
 
-    def test_non_ratio_aligned_docs_fall_back_without_dropping_query_tails(
-        self,
-    ):
-        """Non-ratio-aligned docs must use fallback and keep tail queries valid."""
+    def test_aligned_docs_match_independent_spec(self):
+        """Aligned documents exercise THD while expectations come from the spec."""
+        self._run_spec_case([16, 24, 8], ratio=4, topk=8, seed=17)
+
+    def test_non_ratio_aligned_docs_match_independent_spec(self):
+        """Tail queries remain valid and cannot cross document boundaries."""
+        _, lengths, valid_range, _ = self._run_spec_case(
+            [23, 9], ratio=4, topk=8, seed=19, packed_sk=8
+        )
+        ranges = valid_range.numpy()[0]
+        self.assertEqual(ranges[22].tolist(), [0, 5])
+        self.assertEqual(ranges[31].tolist(), [5, 7])
+        self.assertEqual(int(lengths.numpy()[0, 22]), 5)
+        self.assertEqual(int(lengths.numpy()[0, 31]), 2)
+
+    def test_short_document_matches_independent_spec(self):
+        """A one-column document remains isolated when execution falls back."""
+        indices, lengths, valid_range, _ = self._run_spec_case(
+            [4, 12], ratio=4, topk=8, seed=23
+        )
+        ranges = valid_range.numpy()[0]
+        self.assertEqual(ranges[3].tolist(), [0, 1])
+        self.assertEqual(ranges[7].tolist(), [1, 2])
+        self.assertEqual(int(lengths.numpy()[0, 3]), 1)
+        self.assertEqual({int(x) for x in indices.numpy()[0, 3] if x >= 0}, {0})
+
+    def test_packed_padding_is_never_selected(self):
+        """Extra physical KV columns are padding, not another document."""
+        indices, _, _, real_sk = self._run_spec_case(
+            [16, 8], ratio=4, topk=8, seed=29, packed_sk=9
+        )
+        selected = [int(x) for x in indices.numpy().reshape([-1]) if x >= 0]
+        self.assertTrue(selected)
+        self.assertTrue(all(index < real_sk for index in selected))
+
+    def test_cp_local_query_slice_matches_global_spec(self):
+        """A CP-style local Q slice preserves global docmask semantics."""
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk_fwd,
         )
-        from paddlefleet.transformer.csa_attention import get_valid_range
 
-        paddle.seed(19)
-        ratio, topk, h, d = 4, 8, 64, 128
-        doc_lens = [23, 9]
+        paddle.seed(31)
+        doc_lens, ratio, topk, h, d = [16, 24], 4, 8, 64, 128
         sq = sum(doc_lens)
-        sk = max(
-            (sq + ratio - 1) // ratio,
-            sum(length // ratio for length in doc_lens),
-        )
-        ends = []
-        offset = 0
-        for length in doc_lens:
-            offset += length
-            ends.extend([offset] * length)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
-        valid_range = get_valid_range(ratio, 1, sq, startend)
+        startend, valid_range, _, sk = _spec_docmask_inputs(doc_lens, ratio)
         index_q = paddle.randn([1, sq, h, d]).astype("bfloat16")
         index_k = paddle.randn([1, sk, d]).astype("bfloat16")
         weights = paddle.randn([1, sq, h]).astype("bfloat16")
+        expected_idx, expected_len, _ = _spec_indexer_topk(
+            index_q, index_k, weights, doc_lens, ratio, topk
+        )
 
-        thd_idx, thd_len, _ = cudnn_indexer_topk_fwd(
-            index_q,
+        offset, local_sq = 20, 12
+        actual_idx, actual_len = cudnn_indexer_topk_fwd(
+            index_q[:, offset : offset + local_sq],
             index_k,
-            weights,
+            weights[:, offset : offset + local_sq],
             ratio=ratio,
             topk_effective=topk,
-            valid_range=valid_range,
+            valid_range=valid_range[:, offset : offset + local_sq],
             startend_row_indices=startend,
-            return_topk_scores=True,
+            doc_lens=doc_lens,
+            seq_offset=offset,
         )
-        bshd_idx, bshd_len, _ = cudnn_indexer_topk_fwd(
-            index_q,
-            index_k,
-            weights,
-            ratio=ratio,
-            topk_effective=topk,
-            valid_range=valid_range,
-            return_topk_scores=True,
+        expected_slice = expected_idx[:, offset : offset + local_sq]
+        self.assertTrue(
+            paddle.equal_all(
+                actual_len, expected_len[:, offset : offset + local_sq]
+            ).item()
         )
-
-        self.assertTrue(paddle.equal_all(thd_len, bshd_len).item())
-        vr_np = valid_range.numpy()[0]
-        self.assertGreater(int(vr_np[22, 1] - vr_np[22, 0]), 0)
-        self.assertGreater(int(vr_np[31, 1] - vr_np[31, 0]), 0)
-        self.assertGreater(int(thd_len.numpy()[0, 22]), 0)
-        self.assertGreater(int(thd_len.numpy()[0, 31]), 0)
-        thd_np = thd_idx.numpy()[0]
-        bshd_np = bshd_idx.numpy()[0]
-        for q in range(sq):
-            self.assertEqual(
-                {int(x) for x in thd_np[q] if x >= 0},
-                {int(x) for x in bshd_np[q] if x >= 0},
-                f"query {q}: THD/fallback {thd_np[q]} != BSHD {bshd_np[q]}",
-            )
-
-    def test_short_document_falls_back_without_thd_kernel_error(self):
-        """Documents with fewer than two compressed cols must skip THD."""
-        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
-            cudnn_indexer_topk_fwd,
+        _assert_topk_sets_equal(
+            self, actual_idx, expected_slice, "CP local query slice"
         )
-        from paddlefleet.transformer.csa_attention import get_valid_range
-
-        paddle.seed(23)
-        ratio, topk, h, d = 4, 8, 64, 128
-        doc_lens = [4, 12]
-        sq = sum(doc_lens)
-        sk = sum(length // ratio for length in doc_lens)
-        ends = []
-        offset = 0
-        for length in doc_lens:
-            offset += length
-            ends.extend([offset] * length)
-        startend = paddle.to_tensor(ends, dtype="int32").reshape([1, 1, sq, 1])
-        valid_range = get_valid_range(ratio, 1, sq, startend)
-        index_q = paddle.randn([1, sq, h, d]).astype("bfloat16")
-        index_k = paddle.randn([1, sk, d]).astype("bfloat16")
-        weights = paddle.randn([1, sq, h]).astype("bfloat16")
-
-        thd_idx, thd_len, _ = cudnn_indexer_topk_fwd(
-            index_q,
-            index_k,
-            weights,
-            ratio=ratio,
-            topk_effective=topk,
-            valid_range=valid_range,
-            startend_row_indices=startend,
-            return_topk_scores=True,
-        )
-        bshd_idx, bshd_len, _ = cudnn_indexer_topk_fwd(
-            index_q,
-            index_k,
-            weights,
-            ratio=ratio,
-            topk_effective=topk,
-            valid_range=valid_range,
-            return_topk_scores=True,
-        )
-
-        self.assertTrue(paddle.equal_all(thd_len, bshd_len).item())
-        thd_np = thd_idx.numpy()[0]
-        bshd_np = bshd_idx.numpy()[0]
-        for q in range(sq):
-            self.assertEqual(
-                {int(x) for x in thd_np[q] if x >= 0},
-                {int(x) for x in bshd_np[q] if x >= 0},
-                f"query {q}: short-doc fallback {thd_np[q]} != BSHD {bshd_np[q]}",
-            )
 
 
 def _bwd_inputs(b, sq, sk, h, d, topk, seed):
@@ -978,11 +1005,11 @@ def _flash_mla_available():
     try:
         import paddlefleet_ops
 
-        from paddlefleet.tilelang_ops.attn import sparse_mqa
+        from paddlefleet.cudnn_ops.attn import csa_sparse_attn_fwd_cudnn
 
         return (
             paddlefleet_ops.is_flash_mla_available()
-            and sparse_mqa._flash_mla_sparse_fwd is not None
+            and csa_sparse_attn_fwd_cudnn._flash_mla_sparse_fwd is not None
         )
     except (ImportError, RuntimeError, AttributeError):
         return False
@@ -996,10 +1023,10 @@ def _flash_mla_available():
 class TestDocmaskSparseFwdCompat(unittest.TestCase):
     """docmask topk -> window concat -> sparse attention forward.
 
-    The CSA sparse-attention forward is always FlashMLA (or TileLang / pure
-    Paddle); there is **no cuDNN forward**. The ``backend="cudnn"`` option on
-    ``csa_sparse_attn`` only selects the cuDNN *backward*; its forward still
-    runs FlashMLA. These tests therefore exercise the FlashMLA forward both
+    The ``backend="cudnn"`` path combines FlashMLA forward with cuDNN
+    backward, while the TileLang backend uses its own forward and backward.
+    These tests exercise the production FlashMLA wrapper directly and through
+    the ``csa_sparse_attn`` PyLayer entry point, checking
     directly and through the ``csa_sparse_attn`` PyLayer entry point, checking
     that docmask-produced topk_idxs (window + compressed, kv_full-local, -1
     padding) feed cleanly in, that real (non-padding) query rows produce finite
@@ -1044,13 +1071,15 @@ class TestDocmaskSparseFwdCompat(unittest.TestCase):
 
     @unittest.skipUnless(_flash_mla_available(), "flash_mla not available")
     def test_flash_mla_fwd_docmask(self):
-        from paddlefleet.tilelang_ops.attn import sparse_mqa
+        from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
+            flash_mla_sparse_attn,
+        )
 
         # doc lens not multiples of ratio to exercise padding query rows.
         query, kv_full, attn_sink, topk_idxs, sm_scale, doc_row_valid = (
             self._build([23, 9], seed=1)
         )
-        out, lse, _ = sparse_mqa.flash_mla_sparse_attn(
+        out, lse, _ = flash_mla_sparse_attn(
             query, kv_full, attn_sink, topk_idxs, sm_scale=sm_scale
         )
         self.assertEqual(out.shape[1], query.shape[1])
@@ -1064,7 +1093,7 @@ class TestDocmaskSparseFwdCompat(unittest.TestCase):
         query, kv_full, attn_sink, topk_idxs, sm_scale, doc_row_valid = (
             self._build([23, 9], seed=2)
         )
-        # backend="cudnn" picks the cuDNN *backward*; the forward is FlashMLA.
+        # backend="cudnn" runs FlashMLA forward and cuDNN backward.
         try:
             out = csa_sparse_attn(
                 query, kv_full, attn_sink, topk_idxs, sm_scale, backend="cudnn"
@@ -1087,7 +1116,9 @@ class TestDocmaskSparseFwdCompat(unittest.TestCase):
         doc0 occupies a clean prefix [0, d0) of raw KV and [sq, sq+d0//ratio)
         of compressed KV, making the standalone slice exact.
         """
-        from paddlefleet.tilelang_ops.attn import sparse_mqa
+        from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
+            flash_mla_sparse_attn,
+        )
 
         ratio, window, topk = 4, 8, 128
         d0, d1 = 64, 64
@@ -1109,7 +1140,7 @@ class TestDocmaskSparseFwdCompat(unittest.TestCase):
         attn_sink = paddle.randn([self.NUM_HEADS], dtype=paddle.float32)
         sm_scale = self.HEAD_DIM**-0.5
 
-        out_packed, _, _ = sparse_mqa.flash_mla_sparse_attn(
+        out_packed, _, _ = flash_mla_sparse_attn(
             query, kv_full, attn_sink, topk_idxs, sm_scale=sm_scale
         )
 
@@ -1127,7 +1158,7 @@ class TestDocmaskSparseFwdCompat(unittest.TestCase):
         remap[comp_mask] = idx0[comp_mask] - sq + d0
         idx0_remapped = paddle.to_tensor(remap, dtype="int32")
 
-        out_doc0, _, _ = sparse_mqa.flash_mla_sparse_attn(
+        out_doc0, _, _ = flash_mla_sparse_attn(
             q0, kv0, attn_sink, idx0_remapped, sm_scale=sm_scale
         )
 
@@ -1153,7 +1184,9 @@ class TestDocmaskSparseFwdCompat(unittest.TestCase):
         property that lets padding rows pass through the sparse fwd without
         contaminating downstream tensors.
         """
-        from paddlefleet.tilelang_ops.attn import sparse_mqa
+        from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
+            flash_mla_sparse_attn,
+        )
 
         h, d, sq, skv, topk = self.NUM_HEADS, self.HEAD_DIM, 8, 16, 128
         paddle.seed(7)
@@ -1168,7 +1201,7 @@ class TestDocmaskSparseFwdCompat(unittest.TestCase):
                 idx[0, r, j] = j
         topk_idxs = paddle.to_tensor(idx)
 
-        out, _, _ = sparse_mqa.flash_mla_sparse_attn(
+        out, _, _ = flash_mla_sparse_attn(
             q, kv, sink, topk_idxs, sm_scale=d**-0.5
         )
         out_f = out.reshape([sq, -1]).cast("float32")
