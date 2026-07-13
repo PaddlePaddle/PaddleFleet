@@ -910,6 +910,25 @@ class TestTileLangIndexerKernelCP(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # cuDNN indexer CP: docmask metadata propagation
 # ---------------------------------------------------------------------------
+def _cudnn_indexer_available():
+    if not paddle.device.is_compiled_with_cuda():
+        return False
+    if paddle.device.cuda.device_count() == 0:
+        return False
+    if paddle.device.cuda.get_device_capability()[0] != 10:
+        return False
+    try:
+        from paddlefleet_ops import is_cudnn_frontend_available
+
+        return is_cudnn_frontend_available()
+    except (ImportError, RuntimeError):
+        return False
+
+
+@unittest.skipUnless(
+    _cudnn_indexer_available(),
+    "cuDNN indexer CP requires the cuDNN frontend on Blackwell (SM100)",
+)
 class TestCudnnIndexerDocmaskCP(unittest.TestCase):
     """Regression coverage for CP docmask arguments sent to cuDNN indexer."""
 
