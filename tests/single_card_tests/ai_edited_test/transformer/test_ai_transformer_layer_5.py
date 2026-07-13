@@ -90,8 +90,8 @@ class FakeMoEForMlp(MoELayer):
         paddle.nn.Layer.__init__(self)
         self.calls = []
 
-    def forward(self, x, input_ids=None):
-        self.calls.append(input_ids)
+    def forward(self, x, input_ids=None, origin_input_ids=None):
+        self.calls.append((input_ids, origin_input_ids))
         return x + 2.0, paddle.ones_like(x)
 
 

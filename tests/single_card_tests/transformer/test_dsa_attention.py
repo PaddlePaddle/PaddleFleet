@@ -981,6 +981,16 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
             DSAIndexerLossLoggingHelper.get_total_num_layers(config), 4
         )
 
+    def test_register_total_num_layers_clears_stale_tracker(self):
+        DSAIndexerLossLoggingHelper.num_layers = 1
+        DSAIndexerLossLoggingHelper.tracker["values"] = paddle.zeros([1])
+        config = SimpleNamespace(num_hidden_layers=4, mtp_num_layers=0)
+
+        DSAIndexerLossLoggingHelper.register_total_num_layers(config)
+
+        self.assertEqual(DSAIndexerLossLoggingHelper.num_layers, 4)
+        self.assertEqual(DSAIndexerLossLoggingHelper.tracker, {})
+
     @patch("paddlefleet.transformer.dsa_attention.parallel_state")
     def test_reduce_empty_tracker_with_num_layers_joins_pp_reduce(
         self, mock_ps

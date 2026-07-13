@@ -48,8 +48,8 @@ class Gate:
         self.calls = []
         self.layer_number = None
 
-    def __call__(self, hidden_states, input_ids=None):
-        self.calls.append((hidden_states, input_ids))
+    def __call__(self, hidden_states, input_ids=None, origin_input_ids=None):
+        self.calls.append((hidden_states, input_ids, origin_input_ids))
         return "gate-output"
 
     def set_layer_number(self, layer_number, is_mtp_layer=False):

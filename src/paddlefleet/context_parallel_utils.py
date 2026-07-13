@@ -20,6 +20,7 @@ from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
+from paddlefleet_ops.flash_mask_facade import get_fa_version
 
 _flash_mask_available = False
 try:
@@ -34,6 +35,7 @@ try:
             _flash_attn_bwd,
             _flash_attn_fwd,
         )
+        from paddlefleet_ops.flash_mask.utils import bshd_slice_contiguous_kv
 
         _flash_mask_available = True
 except (ImportError, AttributeError):
@@ -720,22 +722,9 @@ def cp_flashmask_allgatherkv_balance_forward(
     else:
         raise ValueError(f"Unsupported FlashMask context parallel mode: {mode}")
 
-    # Perform flashmask attention with startend_row_indices
-    fa_version = paddle.base.framework.get_flags(["FLAGS_flash_attn_version"])[
-        "FLAGS_flash_attn_version"
-    ]
-    # Apply deterministic override here so forward and backward use the same
-    # effective fa_version (mirrors backward's previous logic and the
-    # framework flashmask_attention's internal deterministic fallback).
-    deterministic = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
-        "FLAGS_cudnn_deterministic"
-    ]
-    if fa_version == 3:
-        if "block_mask" in inspect.signature(flashmask_attention).parameters:
-            if deterministic and query.shape[-1] > 128:
-                fa_version = 2
-        elif deterministic:
-            fa_version = 2
+    q_head_dim = query.shape[-1]
+    v_head_dim = value_gathered.shape[-1]
+    fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
 
     if fa_version == 4 and _flash_mask_available:
         output, log_sum_exp = _flash_attn_fwd(
@@ -1312,14 +1301,13 @@ def _send_window_grad_back(
     cp_size = group.world_size
     local_seqlen = key.shape[1]
     local_start = rank * local_seqlen
-    local_end = local_start + local_seqlen
 
     if cp_size == 1:
         return key_grad_tensor, value_grad_tensor
 
-    # TODO(heqianyue): the following can be optimized via cudaMemcpyAsync2D (3ms -> 0.7ms)
-    key_grad = key_grad_tensor[:, local_start:local_end, :, :].contiguous()
-    value_grad = value_grad_tensor[:, local_start:local_end, :, :].contiguous()
+    key_grad, value_grad = bshd_slice_contiguous_kv(
+        key_grad_tensor, value_grad_tensor, local_start, local_seqlen
+    )
 
     recv_grad_window = paddle.empty(
         [2, key.shape[0], window_size, key.shape[2], key.shape[3]],
@@ -1421,6 +1409,20 @@ def cp_flashmask_swa_p2p_backward(
         key, value, recv_key, recv_value, group
     )
 
+    flashmask_info = None
+    if startend_row_indices is not None:
+        flashmask_info = FlashMaskInfoPaddle(
+            startend_row_indices=startend_row_indices,
+            is_causal=causal,
+        )
+
+    local_seqlen = key.shape[1]
+    local_start = group.rank * local_seqlen
+    local_end = local_start + local_seqlen
+    kv_postprocess_start = (
+        local_start if group.rank == 0 else local_start - window_size
+    )
+
     query_grad, key_grad_tensor, value_grad_tensor, grad_sink = _flash_attn_bwd(
         query,
         key_tensor,
@@ -1428,13 +1430,15 @@ def cp_flashmask_swa_p2p_backward(
         output,
         output_grad,
         log_sum_exp,
-        flashmask_info=startend_row_indices,
+        flashmask_info=flashmask_info,
         learnable_sink=learnable_sink,
         causal=causal,
         softmax_scale=softmax_scale,
         deterministic=paddle.get_flags(["FLAGS_cudnn_deterministic"])[
             "FLAGS_cudnn_deterministic"
         ],
+        kv_postprocess_start=kv_postprocess_start,
+        kv_postprocess_end=local_end,
     )
 
     key_grad, value_grad = _send_window_grad_back(
@@ -1695,12 +1699,69 @@ def _ulysses_single_all_to_all(
     return output
 
 
+# ---------------------------------------------------------------------------
+# Fused Ulysses all-to-all permute (Triton).
+#
+# For the production path (batch_dim_idx=0), the pre/post reshape+transpose+
+# .contiguous() around the all-to-all are pure data movement whose cost (two
+# physical copies) rivals the communication itself. A single Triton kernel
+# fuses reshape+transpose+contiguous into one coalesced copy, and the post
+# output reuses the send buffer for a lower peak. The kernels live in
+# paddlefleet.triton_ops.ulysses_alltoall_fused; the thin wrappers below keep
+# stable module-level names. A cheap non-Triton guard runs first so that
+# unsupported layouts, CPU/non-CUDA inputs, or Triton-less environments fall
+# back to the reference _ulysses_single_all_to_all path; the Triton import is
+# deferred to call time and is itself guarded.
+# ---------------------------------------------------------------------------
+def _ulysses_fused_supported(scatter_idx, batch_dim_idx, input):
+    """Whether the fused Triton path can handle this call.
+
+    Only batch_dim_idx=0 with a 4-D CUDA input is fused. Everything else
+    (other layouts, CPU/non-CUDA inputs, or an environment where the Triton
+    op cannot be imported) returns False so the caller keeps using the
+    reference reshape/permute all-to-all.
+    """
+    if (
+        batch_dim_idx != 0
+        or len(input.shape) != 4
+        or not paddle.is_compiled_with_cuda()
+        or not input.place.is_gpu_place()
+    ):
+        return False
+
+    try:
+        from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+            ulysses_alltoall_fused_supported,
+        )
+    except (ImportError, OSError):
+        # ImportError: Triton not installed. OSError: Triton present but its
+        # binary deps fail to load (e.g. shared library errors). Either way,
+        # fall back to the reference reshape/permute path.
+        return False
+
+    return ulysses_alltoall_fused_supported(scatter_idx, batch_dim_idx, input)
+
+
+def _ulysses_single_all_to_all_fused(input, scatter_idx, group):
+    """Fused seq<->head all-to-all for batch_dim_idx=0 (bit-exact, 2x peak)."""
+    from paddlefleet.triton_ops.ulysses_alltoall_fused import (
+        ulysses_single_all_to_all_fused,
+    )
+
+    return ulysses_single_all_to_all_fused(input, scatter_idx, group)
+
+
 class UlyssesAlltoAll(PyLayer):
     """
     Ulysses All-to-All for sequence parallelism.
 
     Forward performs all-to-all with the given scatter/gather indices.
     Backward performs the inverse all-to-all (swap scatter and gather indices).
+
+    When the layout matches the production path (batch_dim_idx=0, 4-D input), a
+    fused Triton kernel replaces the reshape+transpose+.contiguous() permutes
+    for lower latency and peak memory. Otherwise it falls back to the reference
+    reshape/permute path. Both are bit-exact.
     """
 
     @staticmethod
@@ -1709,12 +1770,22 @@ class UlyssesAlltoAll(PyLayer):
         ctx.gather_idx = gather_idx
         ctx.batch_dim_idx = batch_dim_idx
         ctx.group = group
+        if _ulysses_fused_supported(scatter_idx, batch_dim_idx, input):
+            return _ulysses_single_all_to_all_fused(input, scatter_idx, group)
         return _ulysses_single_all_to_all(
             input, scatter_idx, gather_idx, batch_dim_idx, group
         )
 
     @staticmethod
     def backward(ctx, grad_output):
+        # Inverse a2a swaps scatter/gather; the fused check uses the backward
+        # scatter index (ctx.gather_idx).
+        if _ulysses_fused_supported(
+            ctx.gather_idx, ctx.batch_dim_idx, grad_output
+        ):
+            return _ulysses_single_all_to_all_fused(
+                grad_output, ctx.gather_idx, ctx.group
+            )
         return _ulysses_single_all_to_all(
             grad_output,
             ctx.gather_idx,

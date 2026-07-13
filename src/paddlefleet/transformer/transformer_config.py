@@ -442,6 +442,23 @@ class TransformerConfig(ModelParallelConfig):
     dict: keys contains all submodule need recompute, value means submodule in which layers need recompute
     """
 
+    decoderlayer_act_offload_settings: dict = None
+    """Settings for decoder layer activation offloading to CPU.
+
+    A dict with two keys:
+      - "type": str, the offload strategy type. Supported values:
+          - "mod": offload layers where (layer_number % value[0] == value[1]).
+                   "value" should be a list/tuple of two ints [divisor, remainder].
+          - "layer_idxs": offload specific layers by index.
+                   "value" should be a list of layer indices to offload.
+      - "value": the strategy parameter, format depends on "type".
+
+    Example:
+        {"type": "mod", "value": [1, 0]}       # offload all layers (every layer % 1 == 0)
+        {"type": "mod", "value": [2, 0]}       # offload even-numbered layers
+        {"type": "layer_idxs", "value": [0, 5, 10]}  # offload layers 0, 5, 10
+    """
+
     ####################
     # MoE related
     ####################
@@ -471,7 +488,7 @@ class TransformerConfig(ModelParallelConfig):
     """The type of token dispatcher to use. The default is 'deepep'.
     Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
-    moe_allgather_gate_overlap: bool = False
+    moe_allgather_gate_overlap: bool = True
     """Whether to issue the AllGather before the gate so it overlaps with gate
     compute. Only honoured when ``moe_token_dispatcher_type='allgather'`` and
     ``expert_model_parallel_size > 1``; ignored otherwise."""
@@ -555,6 +572,15 @@ class TransformerConfig(ModelParallelConfig):
     moe_subbatch_diag: bool = False
     """When True, print auto_subbatch diagnostic info (path, subbatch_rows, zip_unzip_fusion)
     after each forward/backward pass. Useful for debugging memory behavior."""
+
+    auto_subbatch_mode: str | None = None
+    """Auto-subbatch splitting strategy. This only selects the strategy when
+    use_auto_subbatch=True; it does not enable auto-subbatch by itself.
+    - None: use the default "post_permute" strategy.
+    - "post_permute": run full moe_permute first, then subbatch in permuted space.
+    - "pre_permute": split chunks in dispatched space first, then run
+      permute→compute→unpermute independently for each chunk.
+    """
 
     router_z_loss_coef: float = None
     """Scaling coefficient for z-loss. Default is None."""

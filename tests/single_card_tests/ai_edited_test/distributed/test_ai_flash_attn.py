@@ -184,7 +184,7 @@ class TestRefinedRecomputeFirstFwdDispatch(unittest.TestCase):
         create=True,
     )
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._get_fa_version",
+        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
     @patch("paddlefleet.refined_recompute.flash_attn.inspect.signature")

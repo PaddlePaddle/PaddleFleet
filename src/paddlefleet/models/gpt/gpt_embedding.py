@@ -656,6 +656,11 @@ class GPTEmbedding(FleetLayer):
             "labels": labels,
             "input_ids": input_ids_for_moe_mask,
             "mtp_input_ids_for_moe_mask": mtp_input_ids_for_moe_mask,
+            "origin_input_ids": (
+                input_ids
+                if self.config.gpt_model_use_experimental_version
+                else None
+            ),
         }
         # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
         # through dict_args to MTP layer. They must both be present or both be absent.

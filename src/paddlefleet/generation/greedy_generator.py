@@ -39,6 +39,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import paddle
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
     from paddlefleet.models.gpt.gpt_model import GPTModel
 
 logger = logging.getLogger(__name__)
+_DEBUG = os.environ.get("GREEDY_DEBUG", "0") == "1"
 
 
 def _apply_repetition_penalty(
@@ -230,7 +232,7 @@ class GreedyGenerator:
                         sliding_window, window_attn_skip_freq, real_i
                     )
                 )
-        window_size = (
+        self.window_size = (
             sliding_window[0]
             if sliding_window and sliding_window[0] > 0
             else None
@@ -247,7 +249,7 @@ class GreedyGenerator:
         self.cache = DynamicKVCache(
             num_layers=total_layers,
             swa_layers=swa_layers,
-            window_size=window_size,
+            window_size=self.window_size,
         )
 
     @paddle.no_grad()
@@ -280,6 +282,12 @@ class GreedyGenerator:
         bsz, prompt_len = input_ids.shape
         generated = input_ids.clone()
 
+        _r = (
+            paddle.distributed.get_rank()
+            if paddle.distributed.is_initialized()
+            else 0
+        )
+
         with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
             # ---- Prefill ----
             position_ids = (
@@ -287,14 +295,19 @@ class GreedyGenerator:
                 .unsqueeze(0)
                 .expand([bsz, prompt_len])
             )
-            # Build startend_row_indices for flashmask causal attention.
-            # causal=True, K=1: LTS[i] = document end boundary (exclusive).
-            # full(prompt_len) = standard causal (no cross-doc masking).
-            # SWA is applied inside DotProductAttention via
-            # startend_row_indices_add_sliding_window.
-            prefill_startend = paddle.full(
-                [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
-            )
+            if _DEBUG and _r == 0:
+                logger.info(
+                    "[fwd-debug][prefill] input_ids=%s position_ids=%s",
+                    input_ids.tolist(),
+                    position_ids.tolist(),
+                )
+
+            if self.cache.window_size and any(self.cache.swa_layers):
+                prefill_startend = paddle.full(
+                    [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
+                )
+            else:
+                prefill_startend = None
             logits = self.model(
                 {
                     "input_ids": input_ids,
@@ -304,6 +317,35 @@ class GreedyGenerator:
                     "attn_mask_startend_row_indices": prefill_startend,
                 }
             )
+            if _DEBUG and _r == 0:
+                _last = logits[:, -1].cast("float32")
+                logger.info(
+                    "[logits-debug][prefill] shape=%s dtype=%s",
+                    list(logits.shape),
+                    logits.dtype,
+                )
+                logger.info(
+                    "[logits-debug][prefill] min=%.4f max=%.4f mean=%.4f",
+                    float(_last.min()),
+                    float(_last.max()),
+                    float(_last.mean()),
+                )
+                _topk_val, _topk_idx = paddle.topk(_last[0], k=10)
+                logger.info(
+                    "[logits-debug][prefill] top-10 ids=%s vals=%s",
+                    _topk_idx.tolist(),
+                    [round(v, 3) for v in _topk_val.tolist()],
+                )
+                _kv_lens = [
+                    self.cache._seq_len[i]
+                    for i in range(min(3, len(self.cache._seq_len)))
+                    if self.cache._seq_len[i] > 0
+                ]
+                logger.info(
+                    "[kv-debug][prefill] cache seq_lens (first 3 non-zero layers): %s",
+                    _kv_lens,
+                )
+
             # Apply repetition penalty to prefill output
             logits = _apply_repetition_penalty(
                 logits, generated, repetition_penalty
@@ -316,6 +358,14 @@ class GreedyGenerator:
             for step in range(max_new_tokens - 1):
                 cur_len = self.cache.get_seq_len()
                 position_ids = paddle.full([bsz, 1], cur_len, dtype="int64")
+                if _DEBUG and _r == 0 and step < 3:
+                    logger.info(
+                        "[fwd-debug][decode step=%d] next_tok=%s position_ids=%s cache_seq_len=%d",
+                        step,
+                        next_tok.tolist(),
+                        position_ids.tolist(),
+                        cur_len,
+                    )
                 logits = self.model(
                     {
                         "input_ids": next_tok,
@@ -324,6 +374,15 @@ class GreedyGenerator:
                         "use_cache": True,
                     }
                 )
+                if _DEBUG and _r == 0 and step < 3:
+                    _d = logits[:, -1].cast("float32")
+                    _tv, _ti = paddle.topk(_d[0], k=5)
+                    logger.info(
+                        "[logits-debug][decode step=%d] top-5 ids=%s vals=%s",
+                        step,
+                        _ti.tolist(),
+                        [round(v, 3) for v in _tv.tolist()],
+                    )
                 # Apply repetition penalty
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty

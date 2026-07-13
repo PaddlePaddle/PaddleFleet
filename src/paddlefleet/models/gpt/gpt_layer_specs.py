@@ -338,10 +338,24 @@ def get_attention_spec(
                 kv_layernorm=qk_norm,
             ),
         )
+    elif attention_layer_type == "gemma4":
+        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+
+        return LayerSpec(
+            layer=Gemma4SelfAttention,
+            sublayers_spec=SelfAttentionSublayersSpec(
+                qkv_proj=backend.column_parallel_linear(),
+                core_attention=backend.core_attention(),
+                o_proj=backend.row_parallel_linear(),
+                q_norm=qk_norm_standard,
+                k_norm=qk_norm_standard,
+            ),
+        )
     else:
         raise ValueError(
             f"Unknown attention_layer_type: {attention_layer_type!r}. "
-            f"Expected 'self_attention' or 'gated_delta_net'."
+            f"Expected 'self_attention', 'gated_delta_net', 'multi_latent_attention', "
+            f"'dsv4_hybrid_attention', or 'gemma4'."
         )
 
 
@@ -462,9 +476,40 @@ def get_gpt_layer_local_spec(
         self_attention_hc_spec = LayerSpec(layer=HyperConnectionModule)
         mlp_hc_spec = LayerSpec(layer=HyperConnectionModule)
 
-    return LayerSpec(
-        layer=transformer_cls,
-        sublayers_spec=TransformerLayerSublayersSpec(
+    # Gemma4: use extended sublayer spec with extra norms and custom MoE
+    if attention_layer_type == "gemma4":
+        from paddlefleet.transformer.moe.moe_layer import (
+            Gemma4MoELayer,
+            MoESublayers,
+        )
+        from paddlefleet.transformer.transformer_layer import (
+            Gemma4TransformerLayerSublayersSpec,
+        )
+
+        gemma4_moe_spec = LayerSpec(
+            layer=Gemma4MoELayer,
+            extra_kwargs={
+                "sublayers": MoESublayers(
+                    mlp_spec=MLPSublayersSpec(
+                        up_gate_proj=backend.column_parallel_linear(),
+                        down_proj=backend.row_parallel_linear(),
+                        hidden_act=backend.hidden_act(),
+                    ),
+                )
+            },
+        )
+
+        sublayers_spec = Gemma4TransformerLayerSublayersSpec(
+            input_layernorm=layer_norm,
+            self_attn=self_attn_spec,
+            post_self_attn_layernorm=layer_norm,
+            post_attention_layernorm=IdentityOp,
+            pre_mlp_layernorm=layer_norm,
+            mlp=gemma4_moe_spec,
+            post_mlp_layernorm=layer_norm,
+        )
+    else:
+        sublayers_spec = TransformerLayerSublayersSpec(
             input_layernorm=layer_norm,
             self_attention_hyper_connection=self_attention_hc_spec,
             self_attn=self_attn_spec,
@@ -478,7 +523,11 @@ def get_gpt_layer_local_spec(
                 "input_layernorm.": "self_attn.qkv_proj.layer_norm_",
                 "post_attention_layernorm.": "mlp.up_gate_proj.layer_norm_",
             },
-        ),
+        )
+
+    return LayerSpec(
+        layer=transformer_cls,
+        sublayers_spec=sublayers_spec,
         extra_kwargs={
             "config": config,
             "layer_number": layer_number,

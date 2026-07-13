@@ -20,7 +20,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import paddle
-from paddle import framework, nn
+from paddle import nn
 
 if TYPE_CHECKING:
     from paddle.distributed.communication.group import Group
@@ -716,13 +716,12 @@ class _DeepEPManager(_DispatchManager):
             fp8_dispatch=fp8_dispatch,
             combine_grad_handle=combine_grad_handle,
         )
-        # Release the handle after combine operation
+        # Release the handle and token_indices after combine operation
         self.handle = None
-        if framework._dygraph_tracer()._has_grad:
-            self.token_indices = None
-            self.token_probs = None
-            self.dispatched_probs = None
-            self.dispatched_indices = None
+        self.token_indices = None
+        self.token_probs = None
+        self.dispatched_probs = None
+        self.dispatched_indices = None
         return hidden_states
 
     def get_permuted_hidden_states_by_experts(
@@ -1813,9 +1812,9 @@ class AllGatherTokenDispatcher(nn.Layer):
         if _idx_task is not None:
             _idx_task.wait()
         # Build padding mask and zero corresponding weights.
-        self._padding_mask = self._global_topk_indices < 0
+        padding_mask = self._global_topk_indices < 0
         self._global_topk_weights = paddle.where(
-            self._padding_mask,
+            padding_mask,
             paddle.zeros_like(self._global_topk_weights),
             self._global_topk_weights,
         )

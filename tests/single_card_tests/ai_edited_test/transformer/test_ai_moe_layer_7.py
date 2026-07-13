@@ -286,6 +286,7 @@ class TestMoELayerDispatchPermuteUnpermute(unittest.TestCase):
         layer.use_rr_deepep_combine = False
         layer.fp8_dispatch = False
         layer.using_sonic_moe = False
+        layer.fp8_dispatch_bwd = False
         hidden = paddle.randn([4, 64])
         layer.token_dispatcher._comm_manager.combine.return_value = hidden
         result = layer.combine(hidden)
