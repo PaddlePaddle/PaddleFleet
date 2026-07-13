@@ -263,10 +263,13 @@ def _mock_sonic_metadata(with_gated_outputs, packed_scale=True):
     return tuple(values)
 
 
-def _run_sonic_with_mocks(has_bridge, packed_scale=True):
+def _run_sonic_with_mocks(
+    has_bridge, packed_scale=True, scores_stop_gradient=False
+):
     hidden_states = MagicMock(shape=(4, 256), dtype=paddle.float8_e4m3fn)
     topk_indices = MagicMock(dtype=paddle.int32)
     topk_scores = MagicMock()
+    topk_scores.stop_gradient = scores_stop_gradient
     w1 = MagicMock(shape=(2, 512, 256))
     w2 = MagicMock()
     fp8_scale = MagicMock()
@@ -359,6 +362,17 @@ def test_run_sonic_moe_uses_preallocated_outputs_and_fused_router_edge():
     down_args = down_projection.apply.call_args.args
     assert down_args[-2] is not None
     assert down_args[-1] is metadata[9]
+    assert carrier is None
+
+
+def test_run_sonic_moe_does_not_attach_stopped_router_score_edge():
+    metadata, down_projection, attach_outputs, carrier = _run_sonic_with_mocks(
+        True, scores_stop_gradient=True
+    )
+
+    attach_outputs.assert_called_once_with(metadata[10], metadata[11:])
+    assert down_projection.apply.call_args.kwargs.keys() == {"fp8_config"}
+    assert metadata[5].stop_gradient is True
     assert carrier is None
 
 

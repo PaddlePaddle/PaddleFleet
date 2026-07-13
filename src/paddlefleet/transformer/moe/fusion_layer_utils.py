@@ -3364,7 +3364,16 @@ def run_sonic_moe(
     total_expert_freq = TK_padded
     router_score_source = None
     router_score_src_idx = None
-    if _score_src_idx is not None and _HAS_SONIC_METADATA_LAUNCH_BRIDGE:
+    router_scores_need_grad = (
+        hasattr(topk_scores, "stop_gradient") and not topk_scores.stop_gradient
+    )
+    if not router_scores_need_grad:
+        # Read stop_gradient before entering a PyLayer. Paddle detaches tensor
+        # inputs inside .apply(), so the original caller intent is unavailable
+        # to _DownProjection.forward. Metadata scores are forward-only here.
+        _router_scores.stop_gradient = True
+        scores_for_down = _router_scores
+    elif _score_src_idx is not None and _HAS_SONIC_METADATA_LAUNCH_BRIDGE:
         # DownProjection already computes metadata-order ds. Attach the source
         # edge there instead of scheduling a separate per-microbatch carrier.
         scores_for_down = _router_scores
