@@ -14,10 +14,10 @@
 
 name: Bot Approval Required
 
-# 合入门禁：满足以下任一条件本检查即通过——
-#   1) AI review 机器人 risemeup1111 对本 PR 提交了 APPROVED 评审；或
-#   2) sneaxiy 或 From00 任意一个账号对本 PR 提交了 APPROVED 评审。
-# 评审提交/修改/撤销或推送新 commit 时自动复检。
+# 合入门禁：满足以下任一条件本检查即通过（仅统计【当前 head commit】上的评审）——
+#   1) AI review 机器人 risemeup1111 对当前 head commit 提交了 APPROVED 评审；或
+#   2) sneaxiy 或 From00 任意一个账号对当前 head commit 提交了 APPROVED 评审。
+# 评审提交/修改/撤销或推送新 commit 时自动复检；旧 commit 上的审批在 push 新提交后自动失效。
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -45,18 +45,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           echo "AI review 机器人账号: ${REQUIRED_BOT_LOGIN}"
 
-          reviews=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100")
+          # 分页读取全部 reviews，避免超过 100 条时漏掉后续页面上的评审。
+          reviews=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" | jq -s 'add')
 
-          # 取指定 login 的最新一条“决定性”评审状态。
+          # 取指定 login 在【当前 PR head commit】上的最新一条“决定性”评审状态。
+          # 仅统计 commit_id == 当前 head 的评审，避免旧 commit 上的审批放行未复审的新代码。
           # COMMENT / PENDING 不影响审批结论。
           latest_state() {
-            echo "${reviews}" | jq -r --arg u "$1" '
+            echo "${reviews}" | jq -r --arg u "$1" --arg head "${HEAD_SHA}" '
               [ .[]
                 | select(.user.login == $u)
+                | select(.commit_id == $head)
                 | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")
               ]
               | sort_by(.submitted_at)
