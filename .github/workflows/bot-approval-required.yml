@@ -85,7 +85,7 @@ jobs:
 
           echo "==================================================================="
           echo "本PR 尚未通过AI review机器人approve。"
-          echo "请研发同学按AI review机器人的review 意见修改代码并提交新的commit；或联系 ${HUMAN_APPROVER_1} 和 ${HUMAN_APPROVER_2} 进行 approve。"
+          echo "请研发同学按AI review机器人的review 意见修改代码并提交新的commit；或联系 ${HUMAN_APPROVER_1} 或 ${HUMAN_APPROVER_2} 进行 approve。"
           echo ""
           echo "评审意见处理要求（按优先级）："
           echo "  - P0（阻塞）：必须修复问题并提交新的 commit，仅回复不算解决。"
@@ -93,5 +93,5 @@ jobs:
           echo "  - P2（中）：需针对评论进行回复（同意并已修改回复 Done，不同意请给出理由）。"
           echo "  - P3（低）：需针对评论进行回复（同意并已修改回复 Done，不同意请给出理由）。"
           echo "==================================================================="
-          echo "::error::本PR 尚未通过AI review机器人approve。请研发同学按AI review机器人的review 意见修改代码并提交新的commit（P0/P1 必须修复并提交新 commit；P2/P3 需针对评论回复）；或联系 ${HUMAN_APPROVER_1} 和 ${HUMAN_APPROVER_2} 进行 approve。"
+          echo "::error::本PR 尚未通过AI review机器人approve。请研发同学按AI review机器人的review 意见修改代码并提交新的commit（P0/P1 必须修复并提交新 commit；P2/P3 需针对评论回复）；或联系 ${HUMAN_APPROVER_1} 或 ${HUMAN_APPROVER_2} 进行 approve。"
           exit 1
