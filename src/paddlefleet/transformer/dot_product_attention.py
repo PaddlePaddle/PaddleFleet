@@ -652,44 +652,6 @@ class DotProductAttention(FleetLayer):
                 sdpa_kwargs = {}
                 if self._has_custom_softmax_scale:
                     sdpa_kwargs["scale"] = self.softmax_scale
-                use_fa3_sink, sink_startend_row_indices = (
-                    prepare_fa3_sink_attention(
-                        query,
-                        key,
-                        value_for_sdpa,
-                        self.softmax_offset,
-                        attention_mask=attn_mask_kv,
-                        causal=is_causal,
-                        context_parallel_size=self.context_parallel_size,
-                        use_rr_flash_attention=use_rr_flash_attention,
-                        flashmask_use_varlen=self.config.flashmask_use_varlen,
-                    )
-                )
-                if use_fa3_sink:
-                    attn_output = sink_attention_forward(
-                        query.astype(value_for_sdpa.dtype),
-                        key.astype(value_for_sdpa.dtype),
-                        value_for_sdpa.astype(value_for_sdpa.dtype),
-                        sink=self.softmax_offset,
-                        startend_row_indices=sink_startend_row_indices,
-                        attention_mask=None,
-                        dropout_p=self.config.attention_dropout,
-                        softmax_scale=self.softmax_scale,
-                        causal=is_causal,
-                        training=self.training,
-                    )
-                else:
-                    attn_output = (
-                        paddle.nn.functional.scaled_dot_product_attention(
-                            query,
-                            key,
-                            value_for_sdpa,
-                            attn_mask_kv,
-                            self.config.attention_dropout,
-                            is_causal=is_causal,
-                            **sdpa_kwargs,
-                        )
-                    )
 
             if sdpa_need_value_padding:
                 attn_output = attn_output[..., :v_head_dim]
