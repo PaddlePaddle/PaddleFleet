@@ -45,6 +45,22 @@ def _make_node(use_accuracy_compatible):
     )
 
 
+def _make_node_activation(use_accuracy_compatible, activation_type):
+    from paddlefleet.transformer.moe.fp8_utils import (
+        ExpertsGroupGemmContiguousNode,
+    )
+
+    custom_map = MagicMock()
+    custom_map.experts = [MagicMock()]
+    return ExpertsGroupGemmContiguousNode(
+        custom_map,
+        use_fp8_mlp=False,
+        moe_expert_fusion=False,
+        use_accuracy_compatible=use_accuracy_compatible,
+        activation_type=activation_type,
+    )
+
+
 class TestExpertsGroupGemmUseAccuracyCompatibleInit(unittest.TestCase):
     """The flag must be stored on the node and default to False."""
 
@@ -213,6 +229,47 @@ class TestBwdDownInputBf16UseAccuracyCompatible(unittest.TestCase):
         ref = paddle.concat([ref0, ref1], axis=0)
         np.testing.assert_array_equal(
             do2s.astype("float32").numpy(), ref.astype("float32").numpy()
+        )
+
+
+class TestGeGLUAccuracyCompatibleActivation(unittest.TestCase):
+    """use_accuracy_compatible must NOT force the SwiGLU (silu) formula onto
+    GeGLU experts; GeGLU must keep using gelu even when the flag is set."""
+
+    def test_geglu_uses_gelu_not_silu(self):
+        import paddle.nn.functional as F
+
+        paddle.seed(7)
+        tokens, hidden = 3, 4
+        # o1 last dim = 2 * hidden so chunk halves are [tokens, hidden];
+        # identity down-proj weight makes o3 == o2 (the activation output).
+        o1 = paddle.randn([tokens, 2 * hidden], dtype=paddle.bfloat16)
+        probs = paddle.rand([tokens, 1], dtype=paddle.bfloat16)
+        expert_w2 = [paddle.eye(hidden, dtype=paddle.bfloat16)]
+
+        node = _make_node_activation(True, "geglu")
+        node.tokens_per_expert = [tokens]
+        o3 = node.fwd_down_bf16(o1, probs, expert_w2)
+
+        gate, up = paddle.chunk(o1, 2, axis=-1)
+        gelu_ref = ((F.gelu(gate, approximate=True) * up) * probs).cast(
+            o1.dtype
+        )
+        silu_ref = (
+            F.silu(gate.astype("float32"))
+            * up.astype("float32")
+            * probs.astype("float32")
+        ).astype(o1.dtype)
+
+        np.testing.assert_array_equal(
+            o3.astype("float32").numpy(), gelu_ref.astype("float32").numpy()
+        )
+        # gelu and silu differ, so the fix must not collapse to silu.
+        self.assertFalse(
+            np.array_equal(
+                o3.astype("float32").numpy(),
+                silu_ref.astype("float32").numpy(),
+            )
         )
 
 

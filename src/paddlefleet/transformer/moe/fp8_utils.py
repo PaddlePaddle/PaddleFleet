@@ -786,8 +786,11 @@ class ExpertsGroupGemmContiguousNode:
         #   equivalent by hand -- promote both SwiGLU and the per-token router
         #   scale to fp32, then cast back to the original dtype once, replicating
         #   MG's "compute in fp32, round once"; otherwise keep the fused kernel.
+        # NOTE: this fp32 path hard-codes the SwiGLU (silu) formula, so it must
+        #   NOT be taken for GeGLU experts -- GeGLU falls through to its own
+        #   branch below, which uses gelu.
         # ==================================================================
-        if self.use_accuracy_compatible:
+        if self.use_accuracy_compatible and self.activation_type != "geglu":
             x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
             probs = unzipped_probs
             if len(probs.shape) == 1:
@@ -1023,9 +1026,13 @@ class ExpertsGroupGemmContiguousNode:
         #   expression as the forward (F.silu(gate) * val * scale) and let autograd
         #   run the backward, so forward and backward share one fp32 math path;
         #   otherwise keep the original fused kernel (preserve existing behavior).
+        # NOTE: this fp32 path hard-codes the SwiGLU (silu) formula, so it must
+        #   NOT be taken for GeGLU experts -- GeGLU falls through to its own
+        #   branch below, which uses gelu.
         # ==================================================================
         if (
             self.use_accuracy_compatible
+            and self.activation_type != "geglu"
             and self.is_split_group_gemm
             and numpy.prod(unzipped_grad.shape) != 0
         ):
@@ -1048,9 +1055,9 @@ class ExpertsGroupGemmContiguousNode:
                 )
                 d_gate_f32 = gate_g.grad
                 d_up_f32 = val_g.grad
-                d_scale_f32 = scale_g.grad.reshape(
-                    unzipped_probs.shape
-                ).astype("float32")
+                d_scale_f32 = scale_g.grad.reshape(unzipped_probs.shape).astype(
+                    "float32"
+                )
 
             do1 = paddle.concat([d_gate_f32, d_up_f32], axis=-1).astype(
                 o1.dtype
