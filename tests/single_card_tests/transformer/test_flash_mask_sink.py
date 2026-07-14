@@ -26,6 +26,7 @@ Covers PR "Support FA4 sink." (ab8c450) on the non-CP paths:
      through ``recompute`` to force both forward passes, vs the non-rr path.
 """
 
+import contextlib
 import math
 import unittest
 
@@ -33,11 +34,23 @@ import numpy as np
 import paddle
 from paddlefleet_ops import is_flash_mask_available
 
-# Force FA4 (cute) backend for the whole module: sink only exists there.
+# Force FA4 (cute) backend by default for the existing FA4 cases. FA3 cases
+# switch the flag locally and restore it after each run.
 paddle.set_flags({"FLAGS_flash_attn_version": 4})
 
 DTYPE = paddle.bfloat16
 SEED = 2026
+
+
+def _is_sm100_or_newer():
+    try:
+        return (
+            paddle.cuda.is_available()
+            and paddle.cuda.get_device_capability()[0] >= 10
+        )
+    except (AttributeError, RuntimeError, ValueError):
+        return False
+
 
 # FA4 attention-sink lives only in the cute backend, which is built solely for
 # compute capability >= 10 (sm100/Blackwell). Elsewhere the cute kernels are
@@ -46,6 +59,26 @@ _SINK_AVAILABLE = is_flash_mask_available()
 _SKIP_REASON = (
     "FA4 attention-sink requires the cute backend (sm100, capability >= 10)"
 )
+_IS_SM100_OR_NEWER = _is_sm100_or_newer()
+_FA3_SINK_AVAILABLE = (
+    not _IS_SM100_OR_NEWER
+    and hasattr(paddle.base.libpaddle.pir.ops, "flash_attn_v3")
+    and hasattr(paddle.base.libpaddle.pir.ops, "flash_attn_v3_grad")
+    and hasattr(paddle.base.libpaddle.pir.ops, "flashmask_attention_v2_grad")
+)
+_FA3_SKIP_REASON = "FA3 sink attention requires FA3 flash attention ops and is disabled on sm100+"
+
+
+@contextlib.contextmanager
+def _flash_attn_version(version):
+    old = paddle.get_flags(["FLAGS_flash_attn_version"])[
+        "FLAGS_flash_attn_version"
+    ]
+    paddle.set_flags({"FLAGS_flash_attn_version": version})
+    try:
+        yield
+    finally:
+        paddle.set_flags({"FLAGS_flash_attn_version": old})
 
 
 def _startend_row_indices(batch_size, seq_len, causal):
@@ -337,6 +370,140 @@ class TestCuteFlashmaskSink(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(_FA3_SINK_AVAILABLE, _FA3_SKIP_REASON)
+class TestFA3SinkAttention(unittest.TestCase):
+    """FA3 sink_attention_forward numerical correctness with sink."""
+
+    def _run(
+        self,
+        batch_size,
+        seq_len,
+        nheads,
+        nheads_kv,
+        d,
+        causal,
+        use_startend=True,
+    ):
+        from paddlefleet.transformer.sink_impl import sink_attention_forward
+
+        with _flash_attn_version(3):
+            paddle.seed(SEED)
+            np.random.seed(SEED)
+
+            q_ref = paddle.randn([batch_size, seq_len, nheads, d], dtype=DTYPE)
+            k_ref = paddle.randn(
+                [batch_size, seq_len, nheads_kv, d], dtype=DTYPE
+            )
+            v_ref = paddle.randn(
+                [batch_size, seq_len, nheads_kv, d], dtype=DTYPE
+            )
+            for t in (q_ref, k_ref, v_ref):
+                t.stop_gradient = False
+
+            q, k, v = [x.detach().clone() for x in (q_ref, k_ref, v_ref)]
+            for t in (q, k, v):
+                t.stop_gradient = False
+
+            sink_ref = paddle.randn([nheads], dtype=DTYPE)
+            sink_ref.stop_gradient = False
+            sink = sink_ref.detach().clone()
+            sink.stop_gradient = False
+
+            startend_row_indices = None
+            if use_startend:
+                startend_row_indices = _startend_row_indices(
+                    batch_size, seq_len, causal
+                )
+                attn_bias = _attn_bias_from_indices(
+                    startend_row_indices, seq_len, nheads, causal
+                )
+            elif causal:
+                causal_mask = np.triu(
+                    np.ones((seq_len, seq_len), dtype=bool), k=1
+                )
+                attn_bias = paddle.to_tensor(
+                    np.where(causal_mask, -np.inf, 0.0).astype("float32")
+                ).reshape([1, 1, seq_len, seq_len])
+            else:
+                attn_bias = paddle.zeros(
+                    [1, 1, seq_len, seq_len], dtype=paddle.float32
+                )
+
+            out_ref = attention_ref_with_sink(
+                q_ref, k_ref, v_ref, attn_bias, sink_ref
+            )
+            out = sink_attention_forward(
+                q,
+                k,
+                v,
+                sink=sink,
+                startend_row_indices=startend_row_indices,
+                causal=causal,
+            )
+
+            fwd_atol = 2 * (out_ref + 0.3 - 0.3 - out_ref).abs().max().item()
+            max_diff = (out - out_ref).abs().max().item()
+            self.assertLessEqual(
+                max_diff,
+                2e-2 + fwd_atol,
+                f"fwd max diff {max_diff} too large (atol={fwd_atol})",
+            )
+
+            g = paddle.randn(out.shape, dtype=out.dtype)
+            out.backward(g.clone())
+            out_ref.backward(g.clone())
+
+            for name, a, b in (
+                ("dq", q.grad, q_ref.grad),
+                ("dk", k.grad, k_ref.grad),
+                ("dv", v.grad, v_ref.grad),
+            ):
+                atol = 2 * (b + 0.3 - 0.3 - b).abs().max().item()
+                diff = (a - b).abs().max().item()
+                self.assertLessEqual(
+                    diff, 5e-2 + atol, f"{name} max diff {diff} too large"
+                )
+
+            self.assertIsNotNone(sink.grad)
+            self.assertEqual(list(sink.grad.shape), [nheads])
+
+    def test_causal_with_trainable_sink(self):
+        self._run(2, 256, 4, 4, 128, causal=True)
+
+    def test_noncausal_with_trainable_sink(self):
+        self._run(2, 256, 4, 4, 128, causal=False)
+
+    def test_dense_causal_with_trainable_sink(self):
+        self._run(2, 256, 4, 4, 128, causal=True, use_startend=False)
+
+    def test_gqa_with_sink(self):
+        self._run(2, 256, 8, 2, 128, causal=True)
+
+    def test_small_head_dim_sink(self):
+        self._run(2, 128, 4, 4, 64, causal=False)
+
+    def test_fixed_sink_backward_no_dsink(self):
+        from paddlefleet.transformer.sink_impl import sink_attention_forward
+
+        with _flash_attn_version(3):
+            paddle.seed(SEED)
+            b, s, h, d = 2, 256, 4, 128
+            q = paddle.randn([b, s, h, d], dtype=DTYPE)
+            k = paddle.randn([b, s, h, d], dtype=DTYPE)
+            v = paddle.randn([b, s, h, d], dtype=DTYPE)
+            for t in (q, k, v):
+                t.stop_gradient = False
+            sink = paddle.zeros([h], dtype=DTYPE)
+            sink.stop_gradient = True
+            idx = _startend_row_indices(b, s, causal=True)
+            out = sink_attention_forward(
+                q, k, v, sink=sink, startend_row_indices=idx, causal=True
+            )
+            out.backward(paddle.randn(out.shape, dtype=out.dtype))
+            self.assertIsNone(sink.grad)
+            self.assertIsNotNone(q.grad)
+
+
 @unittest.skipUnless(_SINK_AVAILABLE, _SKIP_REASON)
 class TestFacadeFlashmaskSink(unittest.TestCase):
     """paddlefleet_ops.flash_mask_facade.flashmask_attention sink forwarding.
@@ -553,6 +720,228 @@ class TestDotProductAttentionSinkForward(unittest.TestCase):
         # so this path is expected to raise on the fa4 sink branch.
         with self.assertRaises(AssertionError):
             self._run("off-by-one")
+
+
+@unittest.skipUnless(_FA3_SINK_AVAILABLE, _FA3_SKIP_REASON)
+class TestDotProductAttentionFA3SinkForward(unittest.TestCase):
+    """Full fwd/bwd through the FA3 sink branch of DotProductAttention."""
+
+    def _run(self, softmax_type, use_startend=True, **cfg_kwargs):
+        from paddlefleet.transformer.dot_product_attention import (
+            DotProductAttention,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+
+        with _flash_attn_version(3):
+            paddle.seed(SEED)
+            config = _make_config(softmax_type=softmax_type, **cfg_kwargs)
+            attn = DotProductAttention(
+                config=config,
+                layer_number=1,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+            )
+
+            b, s = 2, 64
+            h = config.num_attention_heads
+            d = config.head_dim
+            q = paddle.randn([b, s, h, d], dtype=DTYPE)
+            k = paddle.randn([b, s, h, d], dtype=DTYPE)
+            v = paddle.randn([b, s, h, d], dtype=DTYPE)
+            for t in (q, k, v):
+                t.stop_gradient = False
+
+            idx = (
+                _startend_row_indices(b, s, causal=True)
+                if use_startend
+                else None
+            )
+            out = attn(
+                query=q,
+                key=k,
+                value=v,
+                attention_mask=None,
+                attn_mask_startend_row_indices=idx,
+                attn_mask_type=AttnMaskType.causal,
+            )
+            self.assertEqual(list(out.shape), [b, s, h * d])
+
+            out.sum().backward()
+            self.assertIsNotNone(q.grad)
+            self.assertIsNotNone(k.grad)
+            self.assertIsNotNone(v.grad)
+
+            if softmax_type == "learnable":
+                self.assertIsNotNone(attn.softmax_offset.grad)
+                self.assertEqual(
+                    attn.softmax_offset.grad.dtype, paddle.bfloat16
+                )
+            elif softmax_type == "off-by-one":
+                self.assertIsNone(attn.softmax_offset.grad)
+
+    def test_forward_vanilla(self):
+        self._run("vanilla")
+
+    def test_forward_learnable_sink(self):
+        self._run("learnable")
+
+    def test_forward_learnable_sink_dense_causal(self):
+        self._run("learnable", use_startend=False)
+
+    def test_forward_learnable_sink_additive_dense_mask(self):
+        from paddlefleet.transformer.dot_product_attention import (
+            DotProductAttention,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+
+        with _flash_attn_version(3):
+            paddle.seed(SEED)
+            config = _make_config(softmax_type="learnable")
+            attn = DotProductAttention(
+                config=config,
+                layer_number=1,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+            )
+
+            b, s = 2, 64
+            h = config.num_attention_heads
+            d = config.head_dim
+            q = paddle.randn([b, s, h, d], dtype=DTYPE)
+            k = paddle.randn([b, s, h, d], dtype=DTYPE)
+            v = paddle.randn([b, s, h, d], dtype=DTYPE)
+            for t in (q, k, v):
+                t.stop_gradient = False
+
+            causal_mask = np.triu(np.ones((s, s), dtype=bool), k=1)
+            attention_mask = paddle.to_tensor(
+                np.where(causal_mask, -1e6, 0.0).astype("float32")
+            ).reshape([1, 1, s, s])
+            out = attn(
+                query=q,
+                key=k,
+                value=v,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=None,
+                attn_mask_type=AttnMaskType.causal,
+            )
+            self.assertEqual(list(out.shape), [b, s, h * d])
+
+            out.sum().backward()
+            self.assertIsNotNone(q.grad)
+            self.assertIsNotNone(k.grad)
+            self.assertIsNotNone(v.grad)
+            self.assertIsNotNone(attn.softmax_offset.grad)
+            self.assertEqual(attn.softmax_offset.grad.dtype, paddle.bfloat16)
+
+    def test_forward_learnable_sink_value_head_dim_padding(self):
+        from paddlefleet.transformer.dot_product_attention import (
+            DotProductAttention,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+
+        with _flash_attn_version(3):
+            paddle.seed(SEED)
+            b, s, h = 2, 64, 4
+            qk_dim, v_dim = 192, 128
+            config = _make_config(
+                softmax_type="learnable",
+                num_attention_heads=h,
+                head_dim=qk_dim,
+                hidden_size=h * qk_dim,
+            )
+            attn = DotProductAttention(
+                config=config,
+                layer_number=1,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+                k_channels=qk_dim,
+                v_channels=v_dim,
+            )
+
+            q = paddle.randn([b, s, h, qk_dim], dtype=DTYPE)
+            k = paddle.randn([b, s, h, qk_dim], dtype=DTYPE)
+            v = paddle.randn([b, s, h, v_dim], dtype=DTYPE)
+            for t in (q, k, v):
+                t.stop_gradient = False
+
+            out = attn(
+                query=q,
+                key=k,
+                value=v,
+                attention_mask=None,
+                attn_mask_startend_row_indices=None,
+                attn_mask_type=AttnMaskType.causal,
+            )
+            self.assertEqual(list(out.shape), [b, s, h * v_dim])
+
+            out.sum().backward()
+            self.assertIsNotNone(q.grad)
+            self.assertIsNotNone(k.grad)
+            self.assertIsNotNone(v.grad)
+            self.assertIsNotNone(attn.softmax_offset.grad)
+            self.assertEqual(attn.softmax_offset.grad.dtype, paddle.bfloat16)
+
+    def test_forward_learnable_sink_value_head_dim_larger_raises(self):
+        from paddlefleet.transformer.dot_product_attention import (
+            DotProductAttention,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+
+        with _flash_attn_version(3):
+            paddle.seed(SEED)
+            b, s, h = 2, 64, 4
+            qk_dim, v_dim = 128, 192
+            config = _make_config(
+                softmax_type="learnable",
+                num_attention_heads=h,
+                head_dim=qk_dim,
+                hidden_size=h * qk_dim,
+            )
+            attn = DotProductAttention(
+                config=config,
+                layer_number=1,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+                k_channels=qk_dim,
+                v_channels=v_dim,
+            )
+
+            q = paddle.randn([b, s, h, qk_dim], dtype=DTYPE)
+            k = paddle.randn([b, s, h, qk_dim], dtype=DTYPE)
+            v = paddle.randn([b, s, h, v_dim], dtype=DTYPE)
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires value head_dim to match query/key head_dim",
+            ):
+                attn(
+                    query=q,
+                    key=k,
+                    value=v,
+                    attention_mask=None,
+                    attn_mask_startend_row_indices=None,
+                    attn_mask_type=AttnMaskType.causal,
+                )
+
+    def test_decode_shape_raises_for_fa3_sink(self):
+        from paddlefleet.transformer.sink_impl import prepare_fa3_sink_attention
+
+        with _flash_attn_version(3):
+            b, h, d = 2, 4, 128
+            q = paddle.randn([b, 1, h, d], dtype=DTYPE)
+            k = paddle.randn([b, 8, h, d], dtype=DTYPE)
+            v = paddle.randn([b, 8, h, d], dtype=DTYPE)
+            sink = paddle.randn([h], dtype=DTYPE)
+            with self.assertRaisesRegex(
+                NotImplementedError,
+                "does not support KV-cache decode with unequal q/k/v sequence lengths",
+            ):
+                prepare_fa3_sink_attention(
+                    q, k, v, sink, attention_mask=None, causal=False
+                )
+
+    def test_forward_offbyone(self):
+        self._run("off-by-one")
 
 
 @unittest.skipUnless(_SINK_AVAILABLE, _SKIP_REASON)
