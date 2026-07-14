@@ -16,7 +16,7 @@ name: Bot Approval Required
 
 # 合入门禁：满足以下任一条件本检查即通过——
 #   1) AI review 机器人 risemeup1111 对本 PR 提交了 APPROVED 评审；或
-#   2) GitHub 账号 jinle 或 ruibiao 任意一个对本 PR 提交了 APPROVED 评审。
+#   2) sneaxiy 或 From00 任意一个账号对本 PR 提交了 APPROVED 评审。
 # 评审提交/修改/撤销或推送新 commit 时自动复检。
 on:
   pull_request:
@@ -31,9 +31,9 @@ permissions:
 env:
   # AI review 机器人的 GitHub login。
   REQUIRED_BOT_LOGIN: risemeup1111
-  # 机器人未 approve 时，任意一个 GitHub 账号 approve 即可放行的审批账号。
-  HUMAN_APPROVER_1: jinle
-  HUMAN_APPROVER_2: ruibiao
+  # 机器人未 approve 时，任意一个账号 approve 即可放行的审批账号。
+  HUMAN_APPROVER_1: sneaxiy
+  HUMAN_APPROVER_2: From00
 
 jobs:
   check-bot-approval:
@@ -48,7 +48,6 @@ jobs:
         run: |
           set -euo pipefail
           echo "AI review 机器人账号: ${REQUIRED_BOT_LOGIN}"
-          echo "Pull request: ${REPO}#${PR_NUMBER}"
 
           reviews=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100")
 
@@ -70,17 +69,13 @@ jobs:
           approver1_state=$(latest_state "${HUMAN_APPROVER_1}")
           approver2_state=$(latest_state "${HUMAN_APPROVER_2}")
 
-          echo "AI review 机器人账号 ${REQUIRED_BOT_LOGIN} 最新评审状态: ${bot_state}"
-          echo "GitHub 账号 ${HUMAN_APPROVER_1} 最新评审状态: ${approver1_state}"
-          echo "GitHub 账号 ${HUMAN_APPROVER_2} 最新评审状态: ${approver2_state}"
-
           if [ "${bot_state}" = "APPROVED" ]; then
             echo "::notice::AI review 机器人 ${REQUIRED_BOT_LOGIN} 已 approve，本 PR 通过审批门禁。"
             exit 0
           fi
 
           if [ "${approver1_state}" = "APPROVED" ] || [ "${approver2_state}" = "APPROVED" ]; then
-            echo "::notice::GitHub 账号 ${HUMAN_APPROVER_1} / ${HUMAN_APPROVER_2} 中已有账号 approve，本 PR 通过审批门禁。"
+            echo "::notice::${HUMAN_APPROVER_1} / ${HUMAN_APPROVER_2} 中已有账号 approve，本 PR 通过审批门禁。"
             exit 0
           fi
 
