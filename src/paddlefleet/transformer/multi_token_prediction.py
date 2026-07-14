@@ -900,25 +900,6 @@ class MultiTokenPredictionLayer(FleetLayer):
                 :, (depth + 1) : (depth + 1 + seq_len)
             ].contiguous()
 
-            # Scatter input_ids to match decoder_input's local shape (CP/SP)
-            if cp_world_size > 1 and self.config.experimental_dataflow:
-                # ContextParallelScatterOp expects 3D; unsqueeze then squeeze
-                mtp_input_ids_local = ContextParallelScatterOp.apply(
-                    mtp_input_ids_local.unsqueeze(-1),
-                    axis=1,
-                    mode=self.config.cp_balance_mode,
-                ).squeeze(-1)
-            if self.config.sequence_parallel:
-                # [B, S] -> [B, S/tp]: flatten, scatter, reshape back
-                B_local = mtp_input_ids_local.shape[0]
-                mtp_input_ids_local = mtp_input_ids_local.reshape(
-                    [-1]
-                ).unsqueeze(-1)
-                mtp_input_ids_local = ScatterOp.apply(mtp_input_ids_local)
-                mtp_input_ids_local = mtp_input_ids_local.squeeze(-1).reshape(
-                    [B_local, -1]
-                )
-
             # Trim rotary embeddings to seq_len (once; seq_len is constant across depths)
             _rotary_keys = (
                 "rotary_pos_emb",

@@ -513,7 +513,9 @@ class TestMTPLayerForward(unittest.TestCase):
                     "labels": paddle.randint(0, 100, [B, S_global]),
                 }
             )
-        self.assertEqual(cnt[0], 2)  # decoder_input + mtp_input_ids_local
+        self.assertEqual(
+            cnt[0], 1
+        )  # decoder_input only (mtp_input_ids_local is NOT scattered here; router does it)
         self.assertEqual(list(captured["di"].shape), [S_local, B, H])
 
     def test_cp_scatter(self):
