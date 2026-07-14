@@ -27,6 +27,7 @@ Covers the pure-Paddle helpers in
 These run on any device (CPU/GPU) -- no GPU kernel dependency.
 """
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -357,7 +358,9 @@ def _spec_docmask_inputs(doc_lens, ratio, packed_sk=None):
     if packed_sk is None:
         packed_sk = real_sk
     if packed_sk < real_sk:
-        raise ValueError(f"packed_sk={packed_sk} is smaller than real_sk={real_sk}")
+        raise ValueError(
+            f"packed_sk={packed_sk} is smaller than real_sk={real_sk}"
+        )
 
     ends = []
     ranges = []
@@ -592,7 +595,10 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
             f"topk lengths mismatch: actual={actual_len.numpy()}, expected={expected_len.numpy()}",
         )
         _assert_topk_sets_equal(
-            self, actual_idx, expected_idx, f"doc_lens={doc_lens}, real_sk={real_sk}"
+            self,
+            actual_idx,
+            expected_idx,
+            f"doc_lens={doc_lens}, real_sk={real_sk}",
         )
         return actual_idx, actual_len, expected_range, real_sk
 
@@ -1431,6 +1437,121 @@ class TestCudnnVsTilelangIndexerBwdDocmask(unittest.TestCase):
             self._check([23, 9], seed=7)
         finally:
             paddle.set_flags({"FLAGS_cudnn_deterministic": old})
+
+
+class TestCudnnIndexerQueryTiling(unittest.TestCase):
+    """Query-dim tiling of the packed-global fallback.
+
+    Runs on CPU by stubbing the two cuDNN kernels; verifies the tiling
+    heuristic and that tiled forward+top-k reproduces the single-shot result
+    with correct per-tile ``seq_offset`` and concatenation order.
+    """
+
+    def test_resolve_query_tile_heuristic_and_override(self):
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+            _resolve_indexer_query_tile,
+        )
+
+        # tile*S_k bounded by 64Mi score elems: S_k=32768 -> tile=2048.
+        self.assertEqual(_resolve_indexer_query_tile(131072, 32768), 2048)
+        # Heuristic never exceeds S_q.
+        self.assertEqual(_resolve_indexer_query_tile(1024, 32768), 1024)
+
+        with patch.dict(os.environ, {"CUDNN_INDEXER_QUERY_TILE": "512"}):
+            self.assertEqual(_resolve_indexer_query_tile(131072, 32768), 512)
+        with patch.dict(os.environ, {"CUDNN_INDEXER_QUERY_TILE": "0"}):
+            # <=0 disables tiling (single-shot over the full query length).
+            self.assertEqual(_resolve_indexer_query_tile(131072, 32768), 131072)
+
+    def _run_impl(self, mod, sq, sk, topk, tile_env, return_topk_scores):
+        seen_offsets = []
+
+        def fake_forward(
+            index_q, index_k_comp, weights, ratio, sm_scale, seq_offset
+        ):
+            m = int(index_q.shape[1])
+            seen_offsets.append(int(seq_offset))
+            rows = (
+                paddle.arange(seq_offset, seq_offset + m, dtype="float32")
+                .reshape([1, m, 1])
+                .tile([1, 1, sk])
+            )
+            cols = paddle.arange(sk, dtype="float32").reshape([1, 1, sk])
+            return rows * sk + cols  # [1, m, sk], encodes global row & col
+
+        def fake_topk(scores, sq_local, ratio, topk_, valid_range, seq_offset):
+            m = int(scores.shape[1])
+            gid = paddle.arange(
+                seq_offset, seq_offset + m, dtype="int32"
+            ).reshape([1, m, 1])
+            pad = paddle.full([1, m, topk_ - 1], -1, dtype="int32")
+            indices = paddle.concat([gid, pad], axis=-1)
+            length = paddle.ones([1, m], dtype="int32")
+            return indices, length
+
+        index_q = paddle.zeros([1, sq, 32, 128], dtype="bfloat16")
+        index_k_comp = paddle.zeros([1, sk, 128], dtype="bfloat16")
+        weights = paddle.zeros([1, sq, 32], dtype="bfloat16")
+
+        with (
+            patch.object(
+                mod, "cudnn_indexer_forward", side_effect=fake_forward
+            ),
+            patch.object(mod, "cudnn_indexer_topk", side_effect=fake_topk),
+            patch.dict(os.environ, {"CUDNN_INDEXER_QUERY_TILE": tile_env}),
+        ):
+            out = mod._cudnn_indexer_topk_fwd_impl(
+                index_q,
+                index_k_comp,
+                weights,
+                ratio=4,
+                topk_effective=topk,
+                valid_range=None,
+                startend_row_indices=None,
+                return_topk_scores=return_topk_scores,
+            )
+        return out, seen_offsets
+
+    def test_tiled_matches_single_shot(self):
+        from paddlefleet.cudnn_ops.indexer import csa_indexer_fwd_cudnn as mod
+
+        sq, sk, topk = 10, 16, 2
+
+        (single_idx, single_len), single_offsets = self._run_impl(
+            mod, sq, sk, topk, tile_env="0", return_topk_scores=False
+        )
+        (tiled_idx, tiled_len), tiled_offsets = self._run_impl(
+            mod, sq, sk, topk, tile_env="3", return_topk_scores=False
+        )
+
+        # Slot 0 carries the global query id; tiling must preserve row order.
+        expected_ids = paddle.arange(sq, dtype="int32")
+        self.assertEqual(single_idx[0, :, 0].tolist(), expected_ids.tolist())
+        self.assertEqual(tiled_idx[0, :, 0].tolist(), expected_ids.tolist())
+        self.assertEqual(tiled_idx.tolist(), single_idx.tolist())
+        self.assertEqual(tiled_len.tolist(), single_len.tolist())
+        # Single-shot issues one forward at offset 0; tile=3 issues 4 chunks.
+        self.assertEqual(single_offsets, [0])
+        self.assertEqual(tiled_offsets, [0, 3, 6, 9])
+
+    def test_tiled_matches_single_shot_with_scores(self):
+        from paddlefleet.cudnn_ops.indexer import csa_indexer_fwd_cudnn as mod
+
+        sq, sk, topk = 10, 16, 2
+
+        (single_idx, _, single_scores), _ = self._run_impl(
+            mod, sq, sk, topk, tile_env="0", return_topk_scores=True
+        )
+        (tiled_idx, _, tiled_scores), _ = self._run_impl(
+            mod, sq, sk, topk, tile_env="4", return_topk_scores=True
+        )
+
+        self.assertEqual(tiled_idx.tolist(), single_idx.tolist())
+        self.assertEqual(tiled_scores.tolist(), single_scores.tolist())
+        # Slot 0 gathers score[row, id=row] = row*sk + row; slot 1 is masked.
+        for i in range(sq):
+            self.assertEqual(single_scores[0, i, 0].item(), float(i * sk + i))
+            self.assertEqual(single_scores[0, i, 1].item(), float("-inf"))
 
 
 if __name__ == "__main__":

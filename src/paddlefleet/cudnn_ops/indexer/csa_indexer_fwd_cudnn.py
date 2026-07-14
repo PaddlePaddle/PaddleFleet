@@ -23,8 +23,36 @@ Returns selected compressed KV indices and per-row valid counts.
 
 from __future__ import annotations
 
+import os
+
 import paddle
 from paddlefleet_ops import CUDNN_FRONTEND_HINT, is_cudnn_frontend_available
+
+# Packed-global fallback materializes a dense ``[B, S_q, S_k]`` fp32 score
+# matrix plus left-align gather buffers. At 128K with CP that peaks at tens of
+# GiB (e.g. S_q=S_k=32768 => 4GiB scores + ~16GiB int64 gather indices). Tiling
+# the query dimension bounds the peak to ``O(tile * S_k)`` without changing the
+# result: the indexer forward and radix top-k are both per-query-row
+# independent, so a tile's output equals the matching slice of the full run.
+# Default target keeps one fp32 score tile near 256MiB (tile*S_k <= 64Mi elems).
+_DEFAULT_QUERY_TILE_ELEMS = 1 << 26
+
+
+def _resolve_indexer_query_tile(sq: int, sk: int) -> int:
+    """Query-dim tile size bounding the dense score matrix per kernel call.
+
+    ``CUDNN_INDEXER_QUERY_TILE`` overrides the heuristic; ``<= 0`` disables
+    tiling (single-shot, legacy behavior).
+    """
+    sq = int(sq)
+    override = os.environ.get("CUDNN_INDEXER_QUERY_TILE")
+    if override is not None:
+        tile = int(override)
+        return sq if tile <= 0 else min(tile, sq)
+    if sk <= 0:
+        return sq
+    tile = max(1, _DEFAULT_QUERY_TILE_ELEMS // int(sk))
+    return min(tile, sq)
 
 
 def _require_cudnn_frontend():
@@ -549,12 +577,76 @@ def _cudnn_indexer_topk_fwd_impl(
         if thd_result is not None:
             return thd_result
 
+    sq_total = int(index_q.shape[1])
+    sk = int(index_k_comp.shape[1])
+    query_tile = _resolve_indexer_query_tile(sq_total, sk)
+
+    if query_tile >= sq_total:
+        return _dense_indexer_topk_single(
+            index_q,
+            index_k_comp,
+            weights,
+            ratio,
+            topk_effective,
+            _sm,
+            valid_range,
+            seq_offset,
+            return_topk_scores,
+        )
+
+    # Tile the query dimension: each tile's forward + top-k is independent of
+    # the others, so concatenating tile outputs reproduces the single-shot
+    # result byte-for-byte while capping peak memory at ``O(query_tile * S_k)``.
+    idx_parts = []
+    len_parts = []
+    score_parts = [] if return_topk_scores else None
+    for start in range(0, sq_total, query_tile):
+        end = min(start + query_tile, sq_total)
+        vr_chunk = None if valid_range is None else valid_range[:, start:end]
+        chunk = _dense_indexer_topk_single(
+            index_q[:, start:end],
+            index_k_comp,
+            weights[:, start:end],
+            ratio,
+            topk_effective,
+            _sm,
+            vr_chunk,
+            seq_offset + start,
+            return_topk_scores,
+        )
+        if return_topk_scores:
+            idx_chunk, len_chunk, score_chunk = chunk
+            score_parts.append(score_chunk)
+        else:
+            idx_chunk, len_chunk = chunk
+        idx_parts.append(idx_chunk)
+        len_parts.append(len_chunk)
+
+    topk_indices = paddle.concat(idx_parts, axis=1)
+    topk_length = paddle.concat(len_parts, axis=1)
+    if return_topk_scores:
+        return topk_indices, topk_length, paddle.concat(score_parts, axis=1)
+    return topk_indices, topk_length
+
+
+def _dense_indexer_topk_single(
+    index_q,
+    index_k_comp,
+    weights,
+    ratio,
+    topk_effective,
+    sm_scale,
+    valid_range,
+    seq_offset,
+    return_topk_scores,
+):
+    """Single-shot packed-global forward + top-k over the full query slice."""
     scores = cudnn_indexer_forward(
         index_q,
         index_k_comp,
         weights,
         ratio=ratio,
-        sm_scale=_sm,
+        sm_scale=sm_scale,
         seq_offset=seq_offset,
     )
     topk_indices, topk_length = cudnn_indexer_topk(

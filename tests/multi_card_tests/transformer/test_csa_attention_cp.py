@@ -42,11 +42,11 @@ from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
 from paddlefleet.transformer.csa_attention import (
-    CSADocMaskMetadata,
     CompressedSparseAttention,
     CompressedSparseAttentionSublayersSpec,
     Compressor,
     CompressorSublayersSpec,
+    CSADocMaskMetadata,
     CSAIndexer,
     CSAIndexerSublayersSpec,
 )
@@ -1012,7 +1012,9 @@ class TestCudnnIndexerDocmaskCP(unittest.TestCase):
         import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as cudnn_indexer_module
 
         original = cudnn_indexer_module.cudnn_indexer_topk_fwd
-        cudnn_indexer_module.cudnn_indexer_topk_fwd = fake_cudnn_indexer_topk_fwd
+        cudnn_indexer_module.cudnn_indexer_topk_fwd = (
+            fake_cudnn_indexer_topk_fwd
+        )
         try:
             with paddle.no_grad():
                 out = csa_cp.forward(
@@ -1034,7 +1036,9 @@ class TestCudnnIndexerDocmaskCP(unittest.TestCase):
         self.assertEqual(captured["q_shape"][1], sq_local)
         self.assertEqual(list(captured["valid_range"].shape), [b, sq_local, 2])
         self.assertTrue(
-            paddle.equal_all(captured["valid_range"], expected_valid_range).item()
+            paddle.equal_all(
+                captured["valid_range"], expected_valid_range
+            ).item()
         )
         self.assertIs(captured["startend_row_indices"], startend_row_indices)
         self.assertEqual(captured["doc_lens"], docmask_meta.doc_lens_list)
