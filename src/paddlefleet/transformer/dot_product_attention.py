@@ -652,6 +652,15 @@ class DotProductAttention(FleetLayer):
                 sdpa_kwargs = {}
                 if self._has_custom_softmax_scale:
                     sdpa_kwargs["scale"] = self.softmax_scale
+                attn_output = paddle.nn.functional.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value_for_sdpa,
+                    attn_mask_kv,
+                    self.config.attention_dropout,
+                    is_causal=is_causal,
+                    **sdpa_kwargs,
+                )
 
             if sdpa_need_value_padding:
                 attn_output = attn_output[..., :v_head_dim]
