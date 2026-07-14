@@ -1287,19 +1287,23 @@ class TestDSAIndexerLossLoggingHelperTrackMetrics(unittest.TestCase):
 
     @patch.object(DSAIndexerLossLoggingHelper, "reduce_loss_in_tracker")
     def test_track_metrics_averages_over_csa_indexer_layers(self, mock_reduce):
-        """CSA logging should average over layers with ratio == 4."""
+        """CSA logging should average over layers with 1 < ratio < 128 (CSA layers)."""
+        # [0, 4, 16, 128, 4] -> three CSA layers (4, 16, 4) own an indexer;
+        # window (0) and HCA (128) do not. Count = 3.
+        ratios = [0, 4, 16, 128, 4]
         DSAIndexerLossLoggingHelper.tracker["values"] = paddle.to_tensor(
-            [0.0, 2.0, 0.0, 4.0], dtype="float32"
+            [0.0, 2.0, 0.0, 0.0, 4.0], dtype="float32"
         )
         total_loss_dict = {}
         DSAIndexerLossLoggingHelper.track_indexer_metrics(
             loss_scale=1.0,
             iteration=1,
             total_loss_dict=total_loss_dict,
-            csa_compress_ratios=[0, 4, 128, 4],
+            csa_compress_ratios=ratios,
         )
+        # (2.0 + 0.0 + 4.0) / 3 = 2.0
         self.assertAlmostEqual(
-            total_loss_dict["indexer loss"].item(), 3.0, places=4
+            total_loss_dict["indexer loss"].item(), 2.0, places=4
         )
 
     @patch.object(DSAIndexerLossLoggingHelper, "reduce_loss_in_tracker")
