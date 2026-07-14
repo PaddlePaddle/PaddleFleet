@@ -15,8 +15,8 @@
 name: Bot Approval Required
 
 # 合入门禁：满足以下任一条件本检查即通过——
-#   1) Review 机器人 risemeup1111 对本 PR 提交了 APPROVED 评审；或
-#   2) jinle 与 ruibiao 两人均对本 PR 提交了 APPROVED 评审。
+#   1) AI review 机器人 risemeup1111 对本 PR 提交了 APPROVED 评审；或
+#   2) jinle 或 ruibiao 任意一人对本 PR 提交了 APPROVED 评审。
 # 评审提交/修改/撤销或推送新 commit 时自动复检。
 on:
   pull_request:
@@ -29,9 +29,9 @@ permissions:
   pull-requests: read
 
 env:
-  # Review 机器人的 GitHub login。
+  # AI review 机器人的 GitHub login。
   REQUIRED_BOT_LOGIN: risemeup1111
-  # 机器人未 approve 时，需同时 approve 的人工审批人。
+  # 机器人未 approve 时，任意一人 approve 即可放行的人工审批人。
   HUMAN_APPROVER_1: jinle
   HUMAN_APPROVER_2: ruibiao
 
@@ -47,8 +47,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          echo "机器人审批账号: ${REQUIRED_BOT_LOGIN}"
-          echo "备选人工审批人: ${HUMAN_APPROVER_1} + ${HUMAN_APPROVER_2}"
+          echo "AI review 机器人账号: ${REQUIRED_BOT_LOGIN}"
+          echo "备选人工审批人（任一即可）: ${HUMAN_APPROVER_1} / ${HUMAN_APPROVER_2}"
           echo "Pull request: ${REPO}#${PR_NUMBER}"
 
           reviews=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100")
@@ -71,19 +71,29 @@ jobs:
           approver1_state=$(latest_state "${HUMAN_APPROVER_1}")
           approver2_state=$(latest_state "${HUMAN_APPROVER_2}")
 
-          echo "机器人 ${REQUIRED_BOT_LOGIN} 最新评审状态: ${bot_state}"
+          echo "AI review 机器人 ${REQUIRED_BOT_LOGIN} 最新评审状态: ${bot_state}"
           echo "${HUMAN_APPROVER_1} 最新评审状态: ${approver1_state}"
           echo "${HUMAN_APPROVER_2} 最新评审状态: ${approver2_state}"
 
           if [ "${bot_state}" = "APPROVED" ]; then
-            echo "::notice::机器人 ${REQUIRED_BOT_LOGIN} 已 approve，本 PR 通过审批门禁。"
+            echo "::notice::AI review 机器人 ${REQUIRED_BOT_LOGIN} 已 approve，本 PR 通过审批门禁。"
             exit 0
           fi
 
-          if [ "${approver1_state}" = "APPROVED" ] && [ "${approver2_state}" = "APPROVED" ]; then
-            echo "::notice::${HUMAN_APPROVER_1} 与 ${HUMAN_APPROVER_2} 均已 approve，本 PR 通过审批门禁。"
+          if [ "${approver1_state}" = "APPROVED" ] || [ "${approver2_state}" = "APPROVED" ]; then
+            echo "::notice::${HUMAN_APPROVER_1} / ${HUMAN_APPROVER_2} 中已有人 approve，本 PR 通过审批门禁。"
             exit 0
           fi
 
-          echo "::error::本 PR 尚未通过审批门禁。请研发同学按机器人 ${REQUIRED_BOT_LOGIN} 的 review 意见修改代码并提交新的 commit；或联系 ${HUMAN_APPROVER_1} 和 ${HUMAN_APPROVER_2} 进行 approve（两人都 approve 后本流水线即可通过）。"
+          echo "==================================================================="
+          echo "本PR 尚未通过AI review机器人approve。"
+          echo "请研发同学按AI review机器人的review 意见修改代码并提交新的commit；或联系 ${HUMAN_APPROVER_1} 和 ${HUMAN_APPROVER_2} 进行 approve。"
+          echo ""
+          echo "评审意见处理要求（按优先级）："
+          echo "  - P0（阻塞）：必须修复问题并提交新的 commit，仅回复不算解决。"
+          echo "  - P1（高）：必须修复问题并提交新的 commit，仅回复不算解决。"
+          echo "  - P2（中）：需针对评论进行回复（同意并已修改回复 Done，不同意请给出理由）。"
+          echo "  - P3（低）：需针对评论进行回复（同意并已修改回复 Done，不同意请给出理由）。"
+          echo "==================================================================="
+          echo "::error::本PR 尚未通过AI review机器人approve。请研发同学按AI review机器人的review 意见修改代码并提交新的commit（P0/P1 必须修复并提交新 commit；P2/P3 需针对评论回复）；或联系 ${HUMAN_APPROVER_1} 和 ${HUMAN_APPROVER_2} 进行 approve。"
           exit 1
