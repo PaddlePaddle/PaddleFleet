@@ -25,6 +25,7 @@ sys.path.insert(
 
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -74,3 +75,40 @@ class TestMoeExpert(unittest.TestCase):
         self.assertIsNotNone(expert.weight1)
         self.assertIsNotNone(expert.weight2)
         self.assertEqual(expert.weight1.shape[0], 2)
+
+    def test_sonic_moe_expert_inherits_activation_clamp(self):
+        """Test SonicMoE uses the shared activation clamp configuration."""
+        from paddlefleet.transformer.moe import moe_expert
+
+        for clamp_value, expected in ((7.5, 7.5), (None, 0.0)):
+            with self.subTest(clamp_value=clamp_value):
+                config = _make_expert_config(
+                    activation_func_clamp_value=clamp_value
+                )
+                runtime_config = SimpleNamespace()
+                with (
+                    patch.object(
+                        moe_expert.GroupedMLPExpert,
+                        "__init__",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        moe_expert.SonicMoEExpert,
+                        "config",
+                        config,
+                        create=True,
+                    ),
+                    patch.object(
+                        moe_expert,
+                        "_refresh_fp8_config",
+                        return_value=runtime_config,
+                        create=True,
+                    ),
+                ):
+                    moe_expert.SonicMoEExpert(
+                        num_local_experts=2,
+                        topk=2,
+                        config=config,
+                    )
+
+                self.assertEqual(runtime_config.swiglu_clamp_value, expected)
