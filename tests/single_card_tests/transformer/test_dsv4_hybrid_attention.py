@@ -185,8 +185,21 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must equal num_hidden_layers"):
             _make_config(num_layers=2, csa_compress_ratios=[0])
 
+        # ratio 1 is ambiguous (no compression yet not window) and rejected.
         with self.assertRaisesRegex(ValueError, "is invalid"):
-            _make_config(num_layers=1, csa_compress_ratios=[2])
+            _make_config(num_layers=1, csa_compress_ratios=[1])
+
+        # ratio 129 is above HCA (128) and rejected.
+        with self.assertRaisesRegex(ValueError, "is invalid"):
+            _make_config(num_layers=1, csa_compress_ratios=[129])
+
+    def test_csa_compress_ratios_accepts_general_set(self):
+        # window (0), CSA over the full [2, 127] range (including non-power-of-2
+        # 3 and the boundary 127), and HCA (128) must all be accepted and
+        # round-trip through the config.
+        ratios = [0, 2, 3, 4, 8, 16, 32, 64, 127, 128]
+        cfg = _make_config(num_layers=len(ratios), csa_compress_ratios=ratios)
+        self.assertEqual(cfg.csa_compress_ratios, ratios)
 
     def test_csa_indexer_backend_validation(self):
         for backend in ("unfused", "tilelang", "cudnn"):
@@ -1136,6 +1149,83 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         self.assertTrue(hasattr(attn, "core_attention"))
         self.assertTrue(hasattr(attn, "q_layernorm"))
         self.assertTrue(hasattr(attn, "kv_layernorm"))
+
+    def test_csa_ratio_builds_and_forward(self):
+        # CSA layers accept any integer compress ratio in [2, 127]. Cover small
+        # and large powers of two as well as a non-power-of-2 ratio (3).
+        ratios = [2, 4, 8, 16, 64, 3]
+        for ratio in ratios:
+            with self.subTest(ratio=ratio):
+                paddle.seed(_SEED)
+                config = _make_config(num_layers=1, csa_compress_ratios=[ratio])
+                attn = _build_attention(config, layer_number=0)
+                attn.eval()
+
+                # Every CSA layer must build a compressor with overlap (coff=2)
+                # and a Lightning Indexer.
+                self.assertIsNotNone(attn.core_attention.compressor)
+                self.assertTrue(attn.core_attention.compressor.overlap)
+                self.assertEqual(attn.core_attention.compressor.coff, 2)
+                self.assertIsNotNone(attn.core_attention.indexer)
+
+                batch_size = 1
+                seq_len = 64  # divisible by every ratio above
+                hidden = paddle.randn(
+                    [batch_size, seq_len, config.hidden_size],
+                    dtype="bfloat16",
+                )
+                with paddle.no_grad():
+                    output, _ = attn(hidden_states=hidden, attention_mask=None)
+
+                self.assertEqual(
+                    list(output.shape),
+                    [batch_size, seq_len, config.hidden_size],
+                )
+                self.assertTrue(
+                    paddle.isfinite(output.cast("float32")).all().item()
+                )
+
+    def test_csa_indexer_count_general(self):
+        # A [0, 4, 8, 16, 128] config must produce exactly 3 indexer layers
+        # (CSA-4, CSA-8, CSA-16); window (0) and HCA (128) have indexer=None.
+        # Matches dsa_attention.py track_indexer_metrics.
+        paddle.seed(_SEED)
+        ratios = [0, 4, 8, 16, 128]
+        config = _make_config(
+            num_layers=len(ratios), csa_compress_ratios=ratios
+        )
+
+        num_indexer = 0
+        for layer_number, ratio in enumerate(ratios):
+            attn = _build_attention(config, layer_number=layer_number)
+            core = attn.core_attention
+            self.assertEqual(core.compress_ratio, ratio)
+            if 1 < ratio < 128:
+                self.assertIsNotNone(core.indexer)
+                num_indexer += 1
+            else:
+                self.assertIsNone(core.indexer)
+
+        self.assertEqual(num_indexer, 3)
+
+    def test_csa_ratio_boundaries(self):
+        # ratio 127 (the upper CSA boundary) builds a CSA layer with overlap
+        # and a Lightning Indexer.
+        paddle.seed(_SEED)
+        config = _make_config(num_layers=1, csa_compress_ratios=[127])
+        attn = _build_attention(config, layer_number=0)
+        attn.eval()
+        self.assertIsNotNone(attn.core_attention.compressor)
+        self.assertTrue(attn.core_attention.compressor.overlap)
+        self.assertIsNotNone(attn.core_attention.indexer)
+
+        # ratio 1 is ambiguous (no compression yet not window) -> rejected.
+        with self.assertRaisesRegex(ValueError, "is invalid"):
+            _make_config(num_layers=1, csa_compress_ratios=[1])
+
+        # ratio 129 is above HCA (128) -> rejected.
+        with self.assertRaisesRegex(ValueError, "is invalid"):
+            _make_config(num_layers=1, csa_compress_ratios=[129])
 
     def test_q_head_dim_equals_v_head_dim(self):
         paddle.seed(_SEED)

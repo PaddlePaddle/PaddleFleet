@@ -894,11 +894,18 @@ class TransformerConfig(ModelParallelConfig):
     """
 
     csa_compress_ratios: list | None = None
-    """Per-layer compression ratios for CSA. Length must equal num_hidden_layers.
-    Each value must be one of {0, 4, 128}:
+    """Per-layer attention-kind assignment for the DSv4 hybrid attention stack.
+    Length must equal num_hidden_layers (+ mtp_num_layers if present).
+    Each entry encodes the layer kind via its integer ratio value:
       - 0: window-only attention (no compression)
-      - 4: overlapping compression with learned CSAIndexer
-      - 128: non-overlapping compression, attend to all compressed positions
+      - 2..127: CSA layer — overlapping compression (coff=2) with learned
+        Lightning Indexer. The compression rate is a free parameter of CSA;
+        any integer in [2, 127] is accepted (e.g. 4, 8, 16, ...), including
+        non-power-of-2 values such as 3 or 6. The overlap pooling window
+        becomes 2 * ratio tokens.
+      - 128: HCA layer — non-overlapping compression, attend to all
+        compressed positions
+    Value 1 is rejected (ambiguous: no compression yet not window).
     """
 
     csa_compress_rotary_base: float = 40000.0
@@ -907,8 +914,8 @@ class TransformerConfig(ModelParallelConfig):
     """
 
     csa_dense_mode: bool = False
-    """If True, skip CSAIndexer for ratio==4 layers and attend to all compressed positions.
-    Useful for debugging or ablation studies.
+    """If True, skip CSAIndexer for CSA layers (1 < ratio < 128) and attend to all
+    compressed positions.
     """
 
     csa_indexer_backend: str = "tilelang"
@@ -1288,12 +1295,12 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
                     f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
-            valid_ratios = {0, 4, 128}
             for i, r in enumerate(self.csa_compress_ratios):
-                if r not in valid_ratios:
+                if not (isinstance(r, int) and (r == 0 or 2 <= r <= 128)):
                     raise ValueError(
                         f"csa_compress_ratios[{i}]={r} is invalid. "
-                        f"Must be one of {valid_ratios}."
+                        f"Each value must be 0 (window), an integer in [2, 127] "
+                        f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
 
             if (
