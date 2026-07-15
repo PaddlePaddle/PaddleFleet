@@ -400,6 +400,7 @@ class MultiLatentAttention(Attention):
         self.recompute_qkv_up_porj_and_rope = (
             self.config.recompute_granularity == "selective"
             and "mla_qkv_recompute" in self.config.recompute_modules
+            and self.training
         )
 
     def _compute_absorbed_q(self, query):
