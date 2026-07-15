@@ -247,6 +247,14 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             self.vocab_end_index - self.vocab_start_index
         )
         self.deterministic_mode = config.deterministic_mode
+        # 【embedding wgrad 对齐】use_accuracy_compatible 下也强制走 indexing
+        # (self.weight[masked_input]) 反向路径：它的 wgrad 是可确定的 scatter_add 累加顺序，
+        # 与 MG VocabParallelEmbedding deterministic_mode=True 一致。否则 F.embedding 反向
+        # scatter_add 累加顺序不确定，step1 embedding wgrad 逐位分叉 → 权重更新分叉 →
+        # step2 命中被更新行的 microbatch 前向分叉（见 known-diffs 4.1）。
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
         self.world_size = get_pg_size(self.tp_group)
 
         # Allocate weights and initialize.
@@ -299,7 +307,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         else:
             masked_input = input_
         # Get the embeddings.
-        if self.deterministic_mode:
+        if self.deterministic_mode or self.use_accuracy_compatible:
             output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
