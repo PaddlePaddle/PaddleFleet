@@ -13,9 +13,11 @@
 # limitations under the License.
 
 
+import os
 from contextlib import nullcontext
 from copy import deepcopy
 
+import numpy as np
 import paddle
 import paddle.nn.functional as F
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
@@ -59,6 +61,10 @@ except (ImportError, RuntimeError):
     fused_grouped_w1_to_sonic = None
     fused_sonic_w1_to_grouped = None
     fused_transpose_w2_layout = None
+
+g_shard_bypass_dygraph_optimizer = int(
+    os.environ.get("FLAGS_shard_bypass_dygraph_optimizer", 0)
+)
 
 
 class BMMFunction(paddle.autograd.PyLayer):
@@ -462,6 +468,18 @@ class GroupedMLPExpert(FleetLayer):
         return sharded_dict
 
 
+def _log_stage_memory(stage: str) -> None:
+    paddle.cuda.synchronize()
+    mib = 1024**2
+    print(
+        f"[stage-memory] {stage}: "
+        f"alloc_mib={paddle.cuda.memory_allocated() / mib:.2f}, "
+        f"reserved_mib={paddle.cuda.memory_reserved() / mib:.2f}, "
+        f"peak_alloc_mib={paddle.cuda.max_memory_allocated() / mib:.2f}, "
+        f"peak_reserved_mib={paddle.cuda.max_memory_reserved() / mib:.2f}"
+    )
+
+
 class SonicMoEExpert(GroupedMLPExpert):
     _GROUPED_LAYOUT = "grouped"
     _SONIC_LAYOUT = "sonic"
@@ -541,6 +559,52 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.sonic_moe_config.fuse_y1_quant = True
         self.sonic_moe_config.fuse_y1_bf16_trunc = True
 
+        # Micro batch tracking for fp8 weight memory optimization.
+        # _num_micro_batches: total forward passes per step for this layer.
+        # _forward_counter: auto-increments in forward(); reset in quant_weight().
+        self._forward_counter = 0
+        self._num_micro_batches = 1
+
+    def set_num_micro_batches(self, num_micro_batches):
+        """Set total number of forward passes (micro batches) per training step.
+
+        This should be called once (e.g. in a callback's on_step_begin) to
+        inform the layer how many forward passes will occur before the next
+        quant_weight(). On the last forward pass, fp8 weights are released to
+        save memory, keeping only transposed_fp8 for backward.
+
+        For pipeline parallel with VPP, num_micro_batches = accumulate_steps.
+        Each virtual chunk shares the same SonicMoEExpert instance, so the
+        layer sees accumulate_steps forward calls per step.
+        """
+        self._num_micro_batches = num_micro_batches
+
+    def set_micro_batch_info(self, micro_batch_id, num_micro_batches):
+        """Legacy API: set current micro batch id and total number.
+
+        Prefer set_num_micro_batches() which works with auto-incrementing counter.
+        """
+        self._forward_counter = micro_batch_id
+        self._num_micro_batches = num_micro_batches
+
+    @property
+    def _is_last_micro_batch(self):
+        return self._forward_counter >= self._num_micro_batches - 1
+
+    def _release_fp8_weights(self):
+        """Release fp8 weight (non-transposed) to save memory.
+
+        Only transposed_fp8 is needed for backward (activation gradient GEMM).
+        """
+        _log_stage_memory("before release fp8")
+        for weight in (self.weight1, self.weight2):
+            print(
+                f"===== releasing weight shape:{weight.shape}, dtype:{weight.dtype}, mem:{np.prod(weight.shape) / 1024 / 1024} MB"
+            )
+            if hasattr(weight, "fp8") and weight.fp8 is not None:
+                weight.fp8 = None
+        _log_stage_memory("after release fp8")
+
     def _convert_grad_layout(self, param, converter, convert_main_grad=True):
         main_grad = getattr(param, "main_grad", None)
         if convert_main_grad and main_grad is not None:
@@ -599,6 +663,7 @@ class SonicMoEExpert(GroupedMLPExpert):
     @paddle.no_grad()
     def quant_weight(self):
         self.convert_weights_to_sonic_layout()
+        self.clear_fp8_weights()
 
         payload = quantize_native_fp8_weights(
             self.weight1,
@@ -613,6 +678,8 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.weight1.transposed_fp8 = (w1t_fp8, w1t_scale)
         self.weight2.fp8 = (w2_fp8, w2_scale)
         self.weight2.transposed_fp8 = (w2t_fp8, w2t_scale)
+        # Reset forward counter for the new step.
+        self._forward_counter = 0
 
     def clear_fp8_weights(self):
         clear_all_fp8_weight_caches()
@@ -641,6 +708,13 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.convert_weights_to_sonic_layout()
         if self.sonic_moe_config.enabled is True and self.need_quant_weight():
             self.quant_weight()
+
+        release_fp8_weight_after_fwd = (
+            self._is_last_micro_batch and not g_shard_bypass_dygraph_optimizer
+        )
+        print(
+            f"==== forward_counter: {self._forward_counter}, num_micro_batches: {self._num_micro_batches}, release_fp8_weight_after_fwd: {release_fp8_weight_after_fwd} ===="
+        )
         hidden_states = run_sonic_moe(
             hidden_states,
             topk_indices,
@@ -654,7 +728,13 @@ class SonicMoEExpert(GroupedMLPExpert):
             fp8_scale=fp8_scale,
             fp8_combine_grad_handle=fp8_combine_grad_handle,
             fp8_config=self.sonic_moe_config,
+            release_fp8_weights=release_fp8_weight_after_fwd,
         )
+        # Release fp8 weights on last micro batch to save memory.
+        # Only transposed_fp8 is kept for backward computation.
+        if release_fp8_weight_after_fwd:
+            self._release_fp8_weights()
+        self._forward_counter += 1
         return hidden_states
 
     def sharded_state_dict(

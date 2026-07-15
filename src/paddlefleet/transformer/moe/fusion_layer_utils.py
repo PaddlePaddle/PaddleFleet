@@ -73,6 +73,18 @@ if paddlefleet_ops.is_sonic_moe_available():
 logger = logging.getLogger(__name__)
 
 
+def _log_stage_memory(stage: str) -> None:
+    paddle.cuda.synchronize()
+    mib = 1024**2
+    print(
+        f"[stage-memory] {stage}: "
+        f"alloc_mib={paddle.cuda.memory_allocated() / mib:.2f}, "
+        f"reserved_mib={paddle.cuda.memory_reserved() / mib:.2f}, "
+        f"peak_alloc_mib={paddle.cuda.max_memory_allocated() / mib:.2f}, "
+        f"peak_reserved_mib={paddle.cuda.max_memory_reserved() / mib:.2f}"
+    )
+
+
 def _copy_sonic_fp8_weight_attrs(src, dst):
     for attr_name in ("fp8", "transposed_fp8"):
         attr = getattr(src, attr_name, None)
@@ -2829,6 +2841,9 @@ class MlpNode:
             fill_output=fill_output,
             padding_alignment=self.moe_permute_padding_alignment,
         )
+        _log_stage_memory(
+            f"In forward, after local dispatch, unzipped_output shape:{unzipped_tokens.shape}, dtype: {unzipped_tokens.dtype}"
+        )
         fwd_path = "unknown"
         if (
             not self.moe_expert_fusion
@@ -2929,6 +2944,9 @@ class MlpNode:
                 num_experts=num_experts,
             )
 
+        _log_stage_memory(
+            f"In forward, after local combine, expert_out shape:{expert_out.shape}, dtype: {expert_out.dtype}"
+        )
         self.dispatched_probs = dispatched_probs
         expert_out.stop_gradient = False
 
@@ -2982,6 +3000,9 @@ class MlpNode:
             tokens_per_expert=self.tokens_per_expert,
             fill_output=fill_output,
             padding_alignment=self.moe_permute_padding_alignment,
+        )
+        _log_stage_memory(
+            f"In backward, after local combine backward, unzipped_grad shape: {unzipped_grad.shape}, dtype: {unzipped_grad.dtype}"
         )
         hidden_states_out_grad._record_stream()
         bwd_path = "unknown"
@@ -3081,6 +3102,9 @@ class MlpNode:
                     num_experts=len(self.tokens_per_expert),
                 )
             )
+            _log_stage_memory(
+                f"In backward, after local dispatch backward, hs_fp8_dispatched_grad shape: {hs_fp8_dispatched_grad.shape}, dtype: {hs_fp8_dispatched_grad.dtype}"
+            )
         self.reset_state()
 
         if self.moe_subbatch_diag:
@@ -3139,6 +3163,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         Returns:
             tensor: 前向传播的结果张量。
         """
+        _log_stage_memory("MoE expert compute forward start")
         if activation_type is None:
             activation_type = getattr(custom_map, "_activation_type", "swiglu")
         ctx.node = MlpNode(
@@ -3185,6 +3210,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             cached_tensors = ctx.node.cached_tensors()
             ctx.save_for_backward(cached_tensors)
             ctx.node.clear_cached_tensors()
+        _log_stage_memory("MoE expert compute forward end")
         return out
 
     @staticmethod
@@ -3200,6 +3226,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
                                             第三个为None，表示没有需要传递给更前向节点的梯度。
 
         """
+        _log_stage_memory("MoE expert compute backward start")
         (cached_tensors,) = ctx.saved_tensor()
         ctx.node.set_cached_tensors(cached_tensors)
 
@@ -3208,6 +3235,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         hidden_states_grad, dispatched_probs_grad = ctx.node.backward(
             output_grad
         )
+        _log_stage_memory("MoE expert compute backward end")
         return hidden_states_grad, dispatched_probs_grad, None
 
 
@@ -3372,7 +3400,9 @@ def run_sonic_moe(
     fp8_scale=None,
     fp8_combine_grad_handle=None,
     fp8_config=None,
+    release_fp8_weights=False,
 ):
+    _log_stage_memory("MoE expert compute forward start")
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
 
@@ -3481,6 +3511,10 @@ def run_sonic_moe(
             prequant_activation_payload=fp8_hidden_states,
             fp8_config=fp8_config,
         )
+        if release_fp8_weights:
+            w1.fp8[0]._clear_to_zero_allocation()
+            w1.fp8[1]._clear_to_zero_allocation()
+
         hidden_states = _DownProjection.apply(
             y1,
             z,
@@ -3502,5 +3536,10 @@ def run_sonic_moe(
             fp8_combine_grad_handle,
             fp8_config=fp8_config,
         )
+        if release_fp8_weights:
+            w2.fp8[0]._clear_to_zero_allocation()
+            w2.fp8[1]._clear_to_zero_allocation()
+
+    _log_stage_memory("MoE expert compute forward end")
 
     return hidden_states
