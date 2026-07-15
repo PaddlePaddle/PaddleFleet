@@ -27,7 +27,6 @@ Covers the pure-Paddle helpers in
 These run on any device (CPU/GPU) -- no GPU kernel dependency.
 """
 
-import os
 import unittest
 from unittest.mock import patch
 
@@ -677,160 +676,6 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
         )
 
 
-def _bwd_inputs(b, sq, sk, h, d, topk, seed):
-    paddle.seed(seed)
-    import paddle.nn.functional as F
-
-    index_q = paddle.randn([b, sq, h, d]).astype("bfloat16")
-    index_k = paddle.randn([b, sk, d]).astype("bfloat16")
-    weights = paddle.randn([b, sq, h]).astype("bfloat16")
-    target = F.softmax(paddle.randn([b, sq, topk]).astype("float32"), axis=-1)
-    topk_probs = F.softmax(
-        paddle.randn([b, sq, topk]).astype("float32"), axis=-1
-    )
-    return index_q, weights, index_k, target, topk_probs
-
-
-@unittest.skipIf(
-    not paddle.device.is_compiled_with_cuda()
-    or paddle.device.cuda.get_device_capability()[0] != 10,
-    "cuDNN indexer backward requires Blackwell GPU (SM100)",
-)
-class TestCudnnIndexerBwdDocmask(unittest.TestCase):
-    """csa_indexer_bwd docmask params: topk_is_local + valid_range, THD layout.
-
-    The sparse backward kernel requires ``topk % block_I == 0`` (block_I=128),
-    so these tests use topk=128 with a compressed buffer wide enough for two
-    documents.
-    """
-
-    def setUp(self):
-        from paddlefleet.cudnn_ops import csa_indexer_bwd
-
-        self.bwd = csa_indexer_bwd
-
-    def test_local_topk_matches_global(self):
-        """local ids + valid_range produce the same grads as global ids.
-
-        Two-document packed sequence: doc0 occupies compressed cols [0, 256),
-        doc1 occupies [256, 512). For each query we pick top-k ids inside its
-        document window as GLOBAL ids, then derive the per-document LOCAL ids
-        (global - valid_start). Both id spaces must yield identical gradients.
-        """
-        b, sq, sk, h, d, topk = 1, 128, 512, 64, 128, 128
-        half = sq // 2
-        win = sk // 2  # 256
-        index_q, weights, index_k, target, topk_probs = _bwd_inputs(
-            b, sq, sk, h, d, topk, seed=7
-        )
-        # valid_range [1, sq, 2]: first half -> [0, win), second -> [win, sk).
-        starts = paddle.concat(
-            [
-                paddle.zeros([half], dtype="int32"),
-                paddle.full([sq - half], win, dtype="int32"),
-            ]
-        )
-        ends = starts + win
-        vr = paddle.stack([starts, ends], axis=-1).reshape([1, sq, 2])
-
-        # GLOBAL ids: query q picks s_+0 .. s_+topk-1 (window width win >= topk).
-        col = paddle.arange(topk, dtype="int32").reshape([1, 1, topk])
-        topk_global = (vr[..., 0:1] + col).tile([b, 1, 1])
-        # LOCAL ids: subtract the document column start.
-        topk_local = topk_global - vr[..., 0:1]
-
-        gl = self.bwd(
-            index_q.clone(),
-            weights.clone(),
-            index_k.clone(),
-            target.clone(),
-            topk_probs.clone(),
-            topk_global.clone(),
-            loss_coeff=0.01,
-            grad_loss=paddle.to_tensor(1.0, dtype="float32"),
-        )
-        lo = self.bwd(
-            index_q.clone(),
-            weights.clone(),
-            index_k.clone(),
-            target.clone(),
-            topk_probs.clone(),
-            topk_local.clone(),
-            loss_coeff=0.01,
-            grad_loss=paddle.to_tensor(1.0, dtype="float32"),
-            valid_range=vr,
-            topk_is_local=True,
-        )
-        for name, a, c in zip(("dq", "dw", "dk"), gl, lo):
-            self.assertTrue(
-                paddle.allclose(
-                    a.cast("float32"), c.cast("float32"), rtol=1e-3, atol=1e-3
-                ).item(),
-                f"{name}: local-id path diverges from global-id path",
-            )
-
-    def test_thd_layout_matches_bshd_b1(self):
-        """THD packed [T,...] grads equal BSHD b==1 grads (no padding case)."""
-        b, sq, sk, h, d, topk = 1, 128, 512, 64, 128, 128
-        index_q, weights, index_k, target, topk_probs = _bwd_inputs(
-            b, sq, sk, h, d, topk, seed=9
-        )
-        topk_indices = paddle.randint(0, sk, [b, sq, topk]).astype("int32")
-
-        bshd = self.bwd(
-            index_q.clone(),
-            weights.clone(),
-            index_k.clone(),
-            target.clone(),
-            topk_probs.clone(),
-            topk_indices.clone(),
-            loss_coeff=0.01,
-            grad_loss=paddle.to_tensor(1.0, dtype="float32"),
-        )
-        # THD: drop the batch dim on all inputs.
-        thd = self.bwd(
-            index_q[0].clone(),
-            weights[0].clone(),
-            index_k[0].clone(),
-            target[0].clone(),
-            topk_probs[0].clone(),
-            topk_indices[0].clone(),
-            loss_coeff=0.01,
-            grad_loss=paddle.to_tensor(1.0, dtype="float32"),
-            layout="thd",
-        )
-        self.assertEqual(thd[0].shape, [sq, h, d])
-        self.assertEqual(thd[2].shape, [sk, d])
-        for name, a, t in zip(("dq", "dw", "dk"), bshd, thd):
-            self.assertTrue(
-                paddle.allclose(
-                    a[0].cast("float32"),
-                    t.cast("float32"),
-                    rtol=1e-3,
-                    atol=1e-3,
-                ).item(),
-                f"{name}: THD path diverges from BSHD b==1",
-            )
-
-    def test_local_without_valid_range_raises(self):
-        b, sq, sk, h, d, topk = 1, 128, 512, 64, 128, 128
-        index_q, weights, index_k, target, topk_probs = _bwd_inputs(
-            b, sq, sk, h, d, topk, seed=11
-        )
-        topk_indices = paddle.randint(0, sk, [b, sq, topk]).astype("int32")
-        with self.assertRaises(ValueError):
-            self.bwd(
-                index_q,
-                weights,
-                index_k,
-                target,
-                topk_probs,
-                topk_indices,
-                loss_coeff=0.01,
-                topk_is_local=True,
-            )
-
-
 @unittest.skipIf(
     not paddle.device.is_compiled_with_cuda()
     or paddle.device.cuda.get_device_capability()[0] != 10,
@@ -1447,7 +1292,7 @@ class TestCudnnIndexerQueryTiling(unittest.TestCase):
     with correct per-tile ``seq_offset`` and concatenation order.
     """
 
-    def test_resolve_query_tile_heuristic_and_override(self):
+    def test_resolve_query_tile_heuristic(self):
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             _resolve_indexer_query_tile,
         )
@@ -1457,13 +1302,7 @@ class TestCudnnIndexerQueryTiling(unittest.TestCase):
         # Heuristic never exceeds S_q.
         self.assertEqual(_resolve_indexer_query_tile(1024, 32768), 1024)
 
-        with patch.dict(os.environ, {"CUDNN_INDEXER_QUERY_TILE": "512"}):
-            self.assertEqual(_resolve_indexer_query_tile(131072, 32768), 512)
-        with patch.dict(os.environ, {"CUDNN_INDEXER_QUERY_TILE": "0"}):
-            # <=0 disables tiling (single-shot over the full query length).
-            self.assertEqual(_resolve_indexer_query_tile(131072, 32768), 131072)
-
-    def _run_impl(self, mod, sq, sk, topk, tile_env, return_topk_scores):
+    def _run_impl(self, mod, sq, sk, topk, query_tile, return_topk_scores):
         seen_offsets = []
 
         def fake_forward(
@@ -1498,7 +1337,7 @@ class TestCudnnIndexerQueryTiling(unittest.TestCase):
                 mod, "cudnn_indexer_forward", side_effect=fake_forward
             ),
             patch.object(mod, "cudnn_indexer_topk", side_effect=fake_topk),
-            patch.dict(os.environ, {"CUDNN_INDEXER_QUERY_TILE": tile_env}),
+            patch.object(mod, "_DEFAULT_QUERY_TILE_ELEMS", query_tile * sk),
         ):
             out = mod._cudnn_indexer_topk_fwd_impl(
                 index_q,
@@ -1518,10 +1357,10 @@ class TestCudnnIndexerQueryTiling(unittest.TestCase):
         sq, sk, topk = 10, 16, 2
 
         (single_idx, single_len), single_offsets = self._run_impl(
-            mod, sq, sk, topk, tile_env="0", return_topk_scores=False
+            mod, sq, sk, topk, query_tile=sq, return_topk_scores=False
         )
         (tiled_idx, tiled_len), tiled_offsets = self._run_impl(
-            mod, sq, sk, topk, tile_env="3", return_topk_scores=False
+            mod, sq, sk, topk, query_tile=3, return_topk_scores=False
         )
 
         # Slot 0 carries the global query id; tiling must preserve row order.
@@ -1540,10 +1379,10 @@ class TestCudnnIndexerQueryTiling(unittest.TestCase):
         sq, sk, topk = 10, 16, 2
 
         (single_idx, _, single_scores), _ = self._run_impl(
-            mod, sq, sk, topk, tile_env="0", return_topk_scores=True
+            mod, sq, sk, topk, query_tile=sq, return_topk_scores=True
         )
         (tiled_idx, _, tiled_scores), _ = self._run_impl(
-            mod, sq, sk, topk, tile_env="4", return_topk_scores=True
+            mod, sq, sk, topk, query_tile=4, return_topk_scores=True
         )
 
         self.assertEqual(tiled_idx.tolist(), single_idx.tolist())

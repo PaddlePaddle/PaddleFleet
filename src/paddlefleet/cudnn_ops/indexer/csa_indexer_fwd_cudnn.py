@@ -23,8 +23,6 @@ Returns selected compressed KV indices and per-row valid counts.
 
 from __future__ import annotations
 
-import os
-
 import paddle
 from paddlefleet_ops import CUDNN_FRONTEND_HINT, is_cudnn_frontend_available
 
@@ -39,16 +37,8 @@ _DEFAULT_QUERY_TILE_ELEMS = 1 << 26
 
 
 def _resolve_indexer_query_tile(sq: int, sk: int) -> int:
-    """Query-dim tile size bounding the dense score matrix per kernel call.
-
-    ``CUDNN_INDEXER_QUERY_TILE`` overrides the heuristic; ``<= 0`` disables
-    tiling (single-shot, legacy behavior).
-    """
+    """Query-dim tile size bounding the dense score matrix per kernel call."""
     sq = int(sq)
-    override = os.environ.get("CUDNN_INDEXER_QUERY_TILE")
-    if override is not None:
-        tile = int(override)
-        return sq if tile <= 0 else min(tile, sq)
     if sk <= 0:
         return sq
     tile = max(1, _DEFAULT_QUERY_TILE_ELEMS // int(sk))
