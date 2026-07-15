@@ -400,7 +400,6 @@ class MultiLatentAttention(Attention):
         self.recompute_qkv_up_porj_and_rope = (
             self.config.recompute_granularity == "selective"
             and "mla_qkv_recompute" in self.config.recompute_modules
-            and self.training
         )
 
     def _compute_absorbed_q(self, query):
@@ -595,7 +594,7 @@ class MultiLatentAttention(Attention):
                 v_b_proj_weight=wv_b,
             )
 
-        if self.recompute_qkv_up_porj_and_rope:
+        if self.recompute_qkv_up_porj_and_rope and self.training:
             assert getattr(self, "_qkv_recompute", None) is not None
             self._qkv_recompute.discard_output_and_register_recompute(
                 core_attn_out
@@ -1310,7 +1309,7 @@ class MLASelfAttention(MultiLatentAttention):
 
             return query, key, value, k_pe
 
-        if self.recompute_qkv_up_porj_and_rope:
+        if self.recompute_qkv_up_porj_and_rope and self.training:
             self._qkv_recompute = RecomputeWithoutOutput()
             query, key, value, k_pos_emb = self._qkv_recompute.recompute(
                 qkv_up_proj_and_rope_apply,
