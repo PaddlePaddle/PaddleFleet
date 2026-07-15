@@ -814,6 +814,34 @@ class TransformerConfig(ModelParallelConfig):
     with num_chunks=N. Only compatible with tensor_model_parallel_size == 1
     (or parallel_output disabled)."""
 
+    enable_hy_sparse_attention: bool = False
+    """Enable the HySparse Attention variant.
+
+    HySparse has the following features: (1) adding a Block Sparse Attention in SWA
+    layers. (2) KV sharing between full attention and Block Sparse Attention. (3) using
+    MQA instead of MLA.
+    """
+
+    hy_sparse_block_size: int = 64
+    """HySparse key block size (``block_B``) used by the TileLang block-score /
+    block-sparse attention operators. Key columns are grouped into contiguous
+    blocks of this size (document-relative) for scoring and sparse selection.
+
+    Default 64 follows the HySparse paper (arXiv:2602.03560, Table 1: "Sparse
+    Attn Block Size = 64" for all 7B/80B configurations)."""
+
+    hy_sparse_topk: int = 16
+    """Number of key *blocks* selected per query token in the HySparse block-sparse
+    branch (the ``topk`` fed to :func:`select_topk_blocks`). The full attention
+    layer scores all blocks and the top-``hy_sparse_topk`` (shared across the
+    query group by group-wise max) are attended by the SWA layers' block-sparse
+    branch.
+
+    Default 16 follows the HySparse paper (arXiv:2602.03560): the paper reports
+    selection in *tokens* (k = 1024, "Sparse Attn TopK Tokens = 1024"), which maps
+    to k / block_size = 1024 / 64 = 16 blocks. This field counts blocks, so 16 is
+    the block-space equivalent of the paper's 1024-token budget."""
+
     # cache_mla_latents: bool = False
 
     ####################
@@ -1446,6 +1474,28 @@ class TransformerConfig(ModelParallelConfig):
                     f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
                     f"must equal num_hidden_layers + num_nextn_predict_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
                 )
+            # HySparse: MTP layers must be FULL attention layers, never SWA.
+            # An SWA layer consumes shared_kv (compressed KV latent + block
+            # indices) produced by an upstream full layer. The MTP boundary
+            # (MultiTokenPredictionLayer._proj_and_transformer_layer) rebuilds a
+            # fresh input_dict and does NOT forward shared_key/shared_block_indices
+            # from the backbone, so an SWA MTP layer would receive shared_kv=[None,
+            # None] and crash at shared_key.squeeze(2) in the block-sparse branch.
+            # Fail fast here with a clear message instead.
+            if self.enable_hy_sparse_attention:
+                mtp_window_flags = self.window_attn_skip_freq[
+                    self.num_hidden_layers :
+                ]
+                if any(flag != 0 for flag in mtp_window_flags):
+                    raise ValueError(
+                        "When enable_hy_sparse_attention is True, the MTP portion "
+                        f"of window_attn_skip_freq (indices "
+                        f"[{self.num_hidden_layers}:], i.e. {mtp_window_flags}) "
+                        "must be all 0 (full attention layers). MTP layers cannot "
+                        "be sliding-window (SWA) layers because they do not receive "
+                        "the shared KV latent from the backbone across the MTP "
+                        "boundary. Set the MTP entries to 0."
+                    )
 
         if (
             self.num_nextn_predict_layers == 0

@@ -14,29 +14,39 @@
 
 """HySparse block-attention TileLang operators (paper arXiv 2602.03560).
 
-MQA/MLA variant: K/V are a single shared head, block selection is aggregated
-across the query group by a group-wise maximum, and the sparse branch gathers
-only the selected blocks.
+MQA/MLA variant: K/V are a single shared head; block selection is aggregated
+across the query group by a group-wise maximum; the sparse branch gathers only
+the selected blocks.
+
+Public entry points (enable_hy_sparse_attention=True):
+* full layers -> block_score_fa4_attn_fwd (FA4-fused block scoring) +
+                 select_topk_blocks
+* SWA layers  -> sliding_window_mqa_attention (windowed MQA main path);
+                 the sparse gather branch runs on the cuDNN DSA op
+                 (paddlefleet.cudnn_ops.block_sparse_mqa_attention_dsa).
 """
 
-from .block_score_attn import (
-    block_score_mqa_attn_fwd,
-    block_scores_from_logit,
-)
-from .block_score_attn_bwd import block_score_mqa_bwd_interface
-from .block_sparse_attn_mqa import block_sparse_mqa_attn_fwd
-from .block_sparse_attn_mqa_bwd import block_sparse_mqa_bwd_interface
-from .pipeline import (
-    hysparse_forward_mqa,
-    select_topk_blocks,
-)
+from .pipeline import select_topk_blocks
+from .swa_attn import sliding_window_mqa_attention
+
+
+def block_score_fa4_attn_fwd(*args, **kwargs):
+    """Lazy wrapper for the FA4-fused block scorer.
+
+    ``block_score_fa4`` imports ``paddlefleet_ops.flash_mask.cute.*``, which is
+    only available on SM10/Blackwell (guarded by ``is_flash_mask_available()``).
+    Importing it eagerly at package init would break ``from ... import
+    sliding_window_mqa_attention`` / ``select_topk_blocks`` on non-Blackwell
+    hardware (H20/A100), even for callers that never touch the FA4 full path.
+    Defer the FA4-only import to the actual call site.
+    """
+    from .block_score_fa4 import block_score_fa4_attn_fwd as _impl
+
+    return _impl(*args, **kwargs)
+
 
 __all__ = [
-    "block_score_mqa_attn_fwd",
-    "block_scores_from_logit",
-    "block_score_mqa_bwd_interface",
-    "block_sparse_mqa_attn_fwd",
-    "block_sparse_mqa_bwd_interface",
-    "hysparse_forward_mqa",
+    "block_score_fa4_attn_fwd",
     "select_topk_blocks",
+    "sliding_window_mqa_attention",
 ]

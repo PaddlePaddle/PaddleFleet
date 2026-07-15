@@ -12,33 +12,45 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HySparse forward pipeline: chain block-score attention, block-TopK, and
-block-sparse attention.
+"""HySparse block-TopK selection.
 
-All stages share a single K/V head (MQA/MLA sparse branch):
-
-1. **Block-score attention** (:func:`block_score_mqa_attn_fwd`): full attention
-   with the shared K/V head that also emits per-(query, key-block) max raw
-   logits ``BlockLogit``.
-2. **Block TopK selection** (:func:`select_topk_blocks`): recover eq.(3) block
-   scores, aggregate them across heads by a group-wise **maximum** (shared
-   block selection), mask blocks that hold no causal/document-valid key, and
-   TopK to per-query block indices.
-3. **Block-sparse attention** (:func:`block_sparse_mqa_attn_fwd`): MQA
-   block-sparse attention that gathers only the selected blocks, so its cost
-   scales with ``topk`` rather than the sequence length.
-
-The block scores feed a non-differentiable TopK, so only the two attention
-operators carry gradient.
+:func:`select_topk_blocks` recovers eq.(3) block scores from the scaled
+per-block max logits emitted by the block-score attention forward, aggregates
+them across heads by a group-wise **maximum** (shared block selection), masks
+blocks that hold no causal/document-valid key, and TopK-selects per-query block
+indices. The block scores feed a non-differentiable TopK, so no autograd graph
+is built for the selection.
 """
 
 import paddle
 
-from .block_score_attn import (
-    block_score_mqa_attn_fwd,
-    block_scores_from_logit,
-)
-from .block_sparse_attn_mqa import block_sparse_mqa_attn_fwd
+
+def block_scores_from_logit(block_logit, lse):
+    """Recover eq.(3) block-max probability scores on the host.
+
+    The block-score attention forward (FA4-fused, :mod:`block_score_fa4`) emits
+    the **scaled** per-block max logit (``softmax_scale * q.k``, the exact value
+    fed into softmax); this turns it into the eq.(3) softmax probability
+    ``exp(block_logit - lse)``. The scale already lives inside ``block_logit``,
+    so no ``sm_scale`` multiply is applied here.
+
+    Args:
+        block_logit: [B, H, S, num_blocks] scaled per-block max logit (-inf if
+            fully masked), as returned by the forward.
+        lse:         [B, S, H] natural-log LSE from the forward.
+
+    Returns:
+        [B, H, S, num_blocks] block-max softmax probabilities in [0, 1];
+        fully-masked blocks are 0.
+    """
+    lse_bhs = lse.transpose([0, 2, 1]).unsqueeze(-1)  # [B,H,S,1]
+    scaled = block_logit.astype("float32") - lse_bhs
+    scores = paddle.exp(scaled)
+    # exp(-inf) already 0, but guard any nan from (-inf)-(-inf) style edge.
+    scores = paddle.where(
+        paddle.isfinite(scores), scores, paddle.zeros_like(scores)
+    )
+    return scores
 
 
 def _valid_block_mask(valid_range, num_blocks, block_B):
@@ -57,15 +69,14 @@ def _valid_block_mask(valid_range, num_blocks, block_B):
 
 
 def select_topk_blocks(
-    block_logit, lse, valid_range, sm_scale, topk, block_B, head_agg="max"
+    block_logit, lse, valid_range, topk, block_B, head_agg="max"
 ):
     """Select per-query TopK key blocks from block-score attention outputs.
 
     Args:
-        block_logit: [B, H, S, num_blocks] raw per-block max logit.
+        block_logit: [B, H, S, num_blocks] scaled per-block max logit.
         lse:         [B, S, H] natural-log LSE from block-score attention.
         valid_range: [B, S, 2] int, per-query [bos, eos) valid key columns.
-        sm_scale:    softmax scale.
         topk:        number of blocks to select per query token.
         block_B:     key block size.
         head_agg:    how to aggregate block scores across heads so the whole
@@ -81,7 +92,14 @@ def select_topk_blocks(
     if topk <= 0:
         raise ValueError(f"topk must be positive, got {topk}")
     b, h, s, num_blocks = block_logit.shape
-    scores = block_scores_from_logit(block_logit, lse, sm_scale)  # [B,H,S,nb]
+    # Block selection is a hard, non-differentiable TopK. Detach the score
+    # inputs so no autograd graph is built for it: block_logit / lse come out of
+    # the differentiable attention PyLayer, and without detaching they drag topk
+    # into backward, where topk_grad dereferences the (int) index gradient and
+    # segfaults.
+    block_logit = block_logit.detach()
+    lse = lse.detach()
+    scores = block_scores_from_logit(block_logit, lse)  # [B,H,S,nb]
     # aggregate across heads (block selection shared across the query group)
     if head_agg == "max":
         agg = scores.max(axis=1)  # [B, S, num_blocks]
@@ -106,57 +124,3 @@ def select_topk_blocks(
         pad = paddle.full([b, s, topk - k], -1, dtype="int32")
         top_idx = paddle.concat([top_idx, pad], axis=-1)
     return top_idx.contiguous()
-
-
-def hysparse_forward_mqa(q, k, v, valid_range, topk, sm_scale=None, block_B=64):
-    """HySparse forward with a single shared K/V head (MQA/MLA sparse branch).
-
-    Three stages (block-score -> TopK -> block-sparse) with K/V as one shared
-    head
-    ``[B, S_kv, D]``: the block selection is aggregated across the whole query
-    group by a group-wise **maximum** (paper eq. 3) so all heads share indices,
-    and the sparse branch uses the MQA gather kernel
-    (:func:`block_sparse_mqa_attn_fwd`) whose cost scales with ``topk`` rather
-    than the sequence length.
-
-    Both stages keep K/V as a single shared head: block-score attention uses
-    the MQA scoring kernel (:func:`block_score_mqa_attn_fwd`, no head broadcast)
-    and the sparse branch uses the MQA gather kernel.
-
-    Args:
-        q:           [B, S, H, D] bf16 query (H heads).
-        k, v:        [B, S_kv, D] bf16 single shared key/value head.
-        valid_range: [B, S, 2] int32 causal + document valid key range.
-        topk:        number of blocks selected per query token.
-        sm_scale:    softmax scale; defaults to D**-0.5.
-        block_B:     key block size.
-
-    Returns:
-        sparse_out:  [B, S, H, D] MQA block-sparse attention output.
-        sparse_lse:  [B, S, H] natural-log LSE of the sparse branch.
-        indices:     [B, S, topk] selected block ids (int32, -1 padding).
-        full_out:    [B, S, H, D] full attention output (block-score).
-        full_lse:    [B, S, H] natural-log LSE of block-score attention.
-    """
-    b, s, h, d = q.shape
-    if sm_scale is None:
-        sm_scale = d**-0.5
-
-    # block-score attention with the single shared K/V head -- no broadcast.
-    full_out, full_lse, block_logit = block_score_mqa_attn_fwd(
-        q, k, v, valid_range, sm_scale=sm_scale, block_B=block_B
-    )
-    indices = select_topk_blocks(
-        block_logit,
-        full_lse,
-        valid_range,
-        sm_scale,
-        topk,
-        block_B,
-        head_agg="max",
-    )
-    # sparse branch uses the shared single-head K/V gather kernel
-    sparse_out, sparse_lse = block_sparse_mqa_attn_fwd(
-        q, k, v, indices, valid_range, sm_scale=sm_scale, block_B=block_B
-    )
-    return sparse_out, sparse_lse, indices, full_out, full_lse

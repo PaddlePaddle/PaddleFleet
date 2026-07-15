@@ -86,12 +86,14 @@ from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
+    MQASelfAttention,
 )
 from paddlefleet.transformer.multi_token_prediction import (
     get_mtp_layer_spec_for_backend,
 )
 from paddlefleet.transformer.paddle_norm import L2Norm
 from paddlefleet.transformer.transformer_layer import (
+    HySparseTransformerLayer,
     TransformerLayer,
     TransformerLayerSublayersSpec,
     TransformerLayerWithOverlap,
@@ -231,6 +233,10 @@ def get_attention_spec(
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
         # Decide attention class: always MLASelfAttention (DSA is a pluggable core_attention)
         attn_cls = MLASelfAttention
+
+        if config is not None and config.enable_hy_sparse_attention:
+            attn_cls = MQASelfAttention
+
         # Gated attention
         gated_attention = getattr(config, "gated_attention", False)
 
@@ -422,6 +428,41 @@ def get_gpt_layer_local_spec(
         )
 
         transformer_cls = HyperConnectionTransformerLayer
+
+    if config is not None and config.enable_hy_sparse_attention:
+        # HySparse is only implemented for the MLA-absorbed MQA attention path
+        # (MQASelfAttention). HySparseTransformerLayer passes a ``shared_kv``
+        # kwarg into the attention forward; a plain SelfAttention.forward has no
+        # such parameter and would raise TypeError. Require MLA here so the
+        # attention class is MQASelfAttention (see get_attention_spec).
+        is_mla = (
+            multi_latent_attention
+            or attention_layer_type == "multi_latent_attention"
+        )
+        if not is_mla:
+            raise ValueError(
+                "enable_hy_sparse_attention requires multi-latent attention "
+                "(the MLA-absorbed MQA path); set multi_latent_attention=True "
+                "(or attention_layer_type='multi_latent_attention'). HySparse "
+                "is not supported with standard self-attention."
+            )
+        # HySparseTransformerLayer does not implement the hyper-connection or
+        # block-attention-residual dataflows. Overriding transformer_cls here
+        # would silently drop those layers instead of applying them, so reject
+        # the unsupported combinations explicitly rather than downgrading.
+        if config.enable_hyper_connections:
+            raise ValueError(
+                "enable_hy_sparse_attention is incompatible with "
+                "enable_hyper_connections: HySparseTransformerLayer does not "
+                "implement the hyper-connection dataflow."
+            )
+        if config.block_attention_residuals:
+            raise ValueError(
+                "enable_hy_sparse_attention is incompatible with "
+                "block_attention_residuals: HySparseTransformerLayer does not "
+                "implement the block-attention-residual dataflow."
+            )
+        transformer_cls = HySparseTransformerLayer
 
     if paddle.distributed.is_initialized():
         try:
