@@ -232,11 +232,12 @@ class GreedyGenerator:
                         sliding_window, window_attn_skip_freq, real_i
                     )
                 )
-        self.window_size = (
-            sliding_window[0]
-            if sliding_window and sliding_window[0] > 0
-            else None
-        )
+        if isinstance(sliding_window, int):
+            self.window_size = sliding_window if sliding_window > 0 else None
+        elif sliding_window and sliding_window[0] > 0:
+            self.window_size = sliding_window[0]
+        else:
+            self.window_size = None
         # head_wise_swa_ratio > 0 means some heads in SWA layers use full
         # attention; per-layer KV truncation would break those heads.
         head_wise_swa_ratio = getattr(cfg, "head_wise_swa_ratio", 0.0)
@@ -387,6 +388,18 @@ class GreedyGenerator:
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty
                 )
+                if _DEBUG and _r == 0 and step < 3:
+                    _logprobs = paddle.nn.functional.log_softmax(
+                        logits[:, -1].cast("float32"), axis=-1
+                    )
+                    _next_tok_tmp = logits[:, -1].argmax(axis=-1, keepdim=True)
+                    _tok_logprob = _logprobs[0, _next_tok_tmp[0, 0]].item()
+                    logger.info(
+                        "[logprob-debug][decode step=%d] next_tok=%d logprob=%.4f",
+                        step,
+                        _next_tok_tmp[0, 0].item(),
+                        _tok_logprob,
+                    )
                 next_tok = logits[:, -1].argmax(axis=-1, keepdim=True)
                 generated = paddle.concat([generated, next_tok], axis=1)
                 if eos_token_id is not None:

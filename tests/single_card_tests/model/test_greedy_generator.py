@@ -226,6 +226,25 @@ class TestSWACacheInit(unittest.TestCase):
         self.assertEqual(len(gen.cache.swa_layers), 4)
         self.assertEqual(len(gen.cache.k), 4)
 
+    def test_sliding_window_int_value(self):
+        """sliding_window as int (not list): window_size should be the int directly."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4,
+            sliding_window=1024,
+            window_attn_skip_freq=None,
+        )
+        self.assertEqual(gen.cache.window_size, 1024)
+        self.assertTrue(all(gen.cache.swa_layers))
+
+    def test_sliding_window_int_zero(self):
+        """sliding_window=0 (int, not positive): window_size should be None."""
+        gen = self._make_generator_with_cfg(
+            num_hidden_layers=4,
+            sliding_window=0,
+            window_attn_skip_freq=None,
+        )
+        self.assertIsNone(gen.cache.window_size)
+
     def _make_generator_with_head_wise_swa(self, head_wise_swa_ratio):
         from unittest.mock import MagicMock
 
