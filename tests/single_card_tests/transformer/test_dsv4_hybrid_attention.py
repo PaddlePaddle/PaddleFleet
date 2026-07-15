@@ -1661,6 +1661,35 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         )
         self.assertTrue(paddle.isfinite(output.float()).all().item())
 
+    def test_gated_attention(self):
+        batch_size = 2
+        seq_len = 64
+        model_parallel_cuda_manual_seed(_SEED)
+
+        for use_q_lora in [False, True]:
+            config = _make_config(dsa_indexer_loss_coeff=1.0)
+            config.gated_attention = True
+            config.gated_attn_use_q_lora = use_q_lora
+            attn = _build_attention(config, layer_number=1)
+            attn.recompute_gated_attn = not use_q_lora
+            attn.config.sigmoid_gate_fusion = use_q_lora
+
+            self.assertTrue(attn.gated_attention)
+            self.assertEqual(attn.gated_attn_use_q_lora, use_q_lora)
+            self.assertIsNotNone(attn.gate_proj)
+
+            hidden = paddle.randn(
+                [batch_size, seq_len, config.hidden_size],
+                dtype=paddle.bfloat16,
+            )
+            output, bias = attn(hidden_states=hidden, attention_mask=None)
+
+            self.assertEqual(
+                list(output.shape),
+                [batch_size, seq_len, config.hidden_size],
+            )
+            self.assertTrue(paddle.isfinite(output.float()).all().item())
+
 
 class TestDSv4HybridQKV(unittest.TestCase):
     def setUp(self):

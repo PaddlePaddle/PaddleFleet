@@ -342,6 +342,9 @@ def get_attention_spec(
                 o_proj=backend.row_parallel_linear(),
                 q_layernorm=qk_norm,
                 kv_layernorm=qk_norm,
+                gate_proj=backend.column_parallel_linear()
+                if gated_attention
+                else None,
             ),
         )
     elif attention_layer_type == "gemma4":

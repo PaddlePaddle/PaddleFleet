@@ -42,6 +42,7 @@ from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
+from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
@@ -175,6 +176,7 @@ class DSv4HybridSelfAttentionSublayersSpec:
     o_proj: type | LayerSpec = None
     q_layernorm: type | LayerSpec = None
     kv_layernorm: type | LayerSpec = None
+    gate_proj: type | LayerSpec | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +306,44 @@ class DSv4HybridAttention(Attention):
             tp_group=self.pg_collection.tp,
         )
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
+
+        # Gated attention. For MQA the gate multiplies the output of the grouped
+        # low-rank projection (linear_o_group_proj), right before o_proj.
+        self.gated_attention = getattr(config, "gated_attention", False)
+        self.gated_attn_use_q_lora = getattr(
+            config, "gated_attn_use_q_lora", False
+        )
+        if self.gated_attention and sublayers_spec.gate_proj is not None:
+            # Gate input source: q_compressed (post q_layernorm, dim=q_lora_rank)
+            # when gated_attn_use_q_lora is set, otherwise the full hidden_states.
+            if self.gated_attn_use_q_lora:
+                assert config.q_lora_rank is not None, (
+                    "gated_attn_use_q_lora=True requires q_lora_rank is not None"
+                )
+                gate_in_dim = config.q_lora_rank
+            else:
+                gate_in_dim = config.hidden_size
+            self.gate_proj = build_spec_layer(
+                sublayers_spec.gate_proj,
+                gate_in_dim,
+                linear_proj_in_size,
+                config=config,
+                init_method=config.init_method,
+                gather_output=False,
+                bias=self.config.use_bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_group=self.pg_collection.tp,
+            )
+        else:
+            self.gated_attention = False
+            self.gate_proj = None
+
+        self.recompute_gated_attn = (
+            config.recompute_granularity == "selective"
+            and config.recompute_modules is not None
+            and "gated_attn" in config.recompute_modules
+        )
 
     def forward(
         self,
@@ -436,10 +476,42 @@ class DSv4HybridAttention(Attention):
         )
         core_attn_out = core_attn_out.reshape([b, sq, -1])
 
+        # Apply gated attention
+        if self.gated_attention:
+            # Gate input source: q_compressed (post q_layernorm, dim=q_lora_rank)
+            # when gated_attn_use_q_lora is set, otherwise hidden_states.
+            gate_source = (
+                q_compressed if self.gated_attn_use_q_lora else hidden_states
+            )
+            if self.recompute_gated_attn:
+                gate_recompute = RecomputeWithoutOutput()
+                core_attn_out = gate_recompute.recompute(
+                    self._gate,
+                    gate_source,
+                    core_attn_out,
+                    preserve_rng_state=False,
+                    share_grad_holder=True,
+                )
+            else:
+                core_attn_out = self._gate(gate_source, core_attn_out)
+
         # Output projection
         output, bias = self.o_proj(core_attn_out)
 
+        if self.gated_attention and self.recompute_gated_attn:
+            gate_recompute.discard_output_and_register_recompute(output)
+
         return output, bias
+
+    def _gate(self, gate_source: Tensor, core_attn_out: Tensor) -> Tensor:
+        gate, _ = self.gate_proj(gate_source)
+        if getattr(self.config, "sigmoid_gate_fusion", False):
+            from paddlefleet.triton_ops import SigmoidGateFusionTriton
+
+            core_attn_out = SigmoidGateFusionTriton.apply(core_attn_out, gate)
+        else:
+            core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
+        return core_attn_out
 
     def get_query_key_value_tensors(
         self,
