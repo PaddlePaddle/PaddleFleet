@@ -252,11 +252,11 @@ def split_group_gemm(
         if use_ue8m0:
             w_scale_tma_align = w_scale[i].T.contiguous().T
         else:
-            w_scale_tma_align = w_scale[i]
+            w_scale_tma_align = w_scale[i].contiguous()
 
         deep_gemm.fp8_gemm_nt(
             (x_i, x_scale_tma_align),
-            (w_fp8[i].contiguous(), w_scale_tma_align.contiguous()),
+            (w_fp8[i].contiguous(), w_scale_tma_align),
             gemm_out[start_idx:end_idx],
         )
 
