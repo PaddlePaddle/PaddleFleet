@@ -53,6 +53,65 @@ logger = logging.getLogger(__name__)
 _DEBUG = os.environ.get("GREEDY_DEBUG", "0") == "1"
 
 
+def _sample_next_token(
+    logits: paddle.Tensor,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+) -> paddle.Tensor:
+    """Sample next token from last-position logits ``[B, vocab]``.
+
+    Falls back to greedy (argmax) when temperature==0 or top_k==1.
+
+    Args:
+        logits: Shape ``[B, vocab_size]``, last-position logits.
+        temperature: Softmax temperature. 0 or negative means greedy.
+        top_k: Keep only top-k tokens before sampling. 0 = disabled.
+        top_p: Nucleus sampling threshold in (0, 1]. 0.0 = disabled.
+
+    Returns:
+        Shape ``[B, 1]`` sampled token ids.
+    """
+    # Greedy shortcut
+    if temperature <= 0.0 or top_k == 1:
+        return logits.argmax(axis=-1, keepdim=True)
+
+    logits = logits.cast("float32")
+
+    # Temperature scaling
+    if temperature != 1.0:
+        logits = logits / temperature
+
+    # Top-k filtering
+    if top_k > 0:
+        vocab_size = logits.shape[-1]
+        k = min(top_k, vocab_size)
+        # topk returns (values, indices); keep the k-th value as threshold
+        top_k_vals = paddle.topk(logits, k=k, axis=-1)[0]          # [B, k]
+        threshold = top_k_vals[:, -1].unsqueeze(-1)                 # [B, 1]
+        logits = paddle.where(logits < threshold,
+                              paddle.full_like(logits, float("-inf")),
+                              logits)
+
+    # Top-p (nucleus) filtering
+    if top_p > 0.0 and top_p < 1.0:
+        sorted_indices = paddle.argsort(logits, axis=-1, descending=True)
+        sorted_logits = paddle.take_along_axis(logits, sorted_indices, axis=1)
+        cumulative_probs = paddle.nn.functional.softmax(sorted_logits, axis=-1).cumsum(axis=-1)
+        # Remove tokens whose cumulative prob exceeds top_p (shift by 1 to keep first over-threshold)
+        sorted_mask = (cumulative_probs - paddle.nn.functional.softmax(sorted_logits, axis=-1)) >= top_p
+        sorted_logits = paddle.where(sorted_mask,
+                                     paddle.full_like(sorted_logits, float("-inf")),
+                                     sorted_logits)
+        # Scatter back to original order
+        original_order = paddle.argsort(sorted_indices, axis=-1)
+        logits = paddle.take_along_axis(sorted_logits, original_order, axis=1)
+
+    probs = paddle.nn.functional.softmax(logits, axis=-1)
+    next_tok = paddle.multinomial(probs, num_samples=1)             # [B, 1]
+    return next_tok
+
+
 def _apply_repetition_penalty(
     logits: paddle.Tensor, input_ids: paddle.Tensor, penalty: float
 ) -> paddle.Tensor:
@@ -259,8 +318,11 @@ class GreedyGenerator:
         max_new_tokens: int,
         eos_token_id: int | list[int] | None = None,
         repetition_penalty: float = 1.0,
+        temperature: float = 0.0,
+        top_k: int = 0,
+        top_p: float = 0.0,
     ) -> paddle.Tensor:
-        """Run greedy auto-regressive decoding.
+        """Run auto-regressive decoding with optional sampling.
 
         Args:
             input_ids: Token IDs with shape ``[B, L]``.
@@ -269,6 +331,14 @@ class GreedyGenerator:
                 batches must be done).
             repetition_penalty: Penalty for repeated tokens (1.0 = no penalty,
                 >1.0 = discourage repetition). Default: 1.0.
+            temperature: Softmax temperature for sampling. ``0`` (default) or
+                negative means greedy (argmax). Positive values enable sampling.
+            top_k: If > 0, only sample from the top-k most probable tokens.
+                Ignored when greedy. Default: 0 (disabled).
+            top_p: Nucleus sampling threshold in ``(0, 1]``. If 0.0 (default),
+                nucleus filtering is disabled. Cannot be combined with top_k > 0
+                at the same time as top_k; whichever is set takes effect first
+                (top_k then top_p are applied sequentially when both are set).
 
         Returns:
             Tensor of shape ``[B, L + num_generated]`` containing the
@@ -350,7 +420,7 @@ class GreedyGenerator:
             logits = _apply_repetition_penalty(
                 logits, generated, repetition_penalty
             )
-            next_tok = logits[:, -1].argmax(axis=-1, keepdim=True)
+            next_tok = _sample_next_token(logits[:, -1], temperature, top_k, top_p)
             generated = paddle.concat([generated, next_tok], axis=1)
 
             # ---- Decode ----
@@ -387,7 +457,7 @@ class GreedyGenerator:
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty
                 )
-                next_tok = logits[:, -1].argmax(axis=-1, keepdim=True)
+                next_tok = _sample_next_token(logits[:, -1], temperature, top_k, top_p)
                 generated = paddle.concat([generated, next_tok], axis=1)
                 if eos_token_id is not None:
                     if isinstance(eos_token_id, list):
