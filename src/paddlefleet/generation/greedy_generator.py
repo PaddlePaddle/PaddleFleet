@@ -87,28 +87,35 @@ def _sample_next_token(
         vocab_size = logits.shape[-1]
         k = min(top_k, vocab_size)
         # topk returns (values, indices); keep the k-th value as threshold
-        top_k_vals = paddle.topk(logits, k=k, axis=-1)[0]          # [B, k]
-        threshold = top_k_vals[:, -1].unsqueeze(-1)                 # [B, 1]
-        logits = paddle.where(logits < threshold,
-                              paddle.full_like(logits, float("-inf")),
-                              logits)
+        top_k_vals = paddle.topk(logits, k=k, axis=-1)[0]  # [B, k]
+        threshold = top_k_vals[:, -1].unsqueeze(-1)  # [B, 1]
+        logits = paddle.where(
+            logits < threshold, paddle.full_like(logits, float("-inf")), logits
+        )
 
     # Top-p (nucleus) filtering
     if top_p > 0.0 and top_p < 1.0:
         sorted_indices = paddle.argsort(logits, axis=-1, descending=True)
         sorted_logits = paddle.take_along_axis(logits, sorted_indices, axis=1)
-        cumulative_probs = paddle.nn.functional.softmax(sorted_logits, axis=-1).cumsum(axis=-1)
+        cumulative_probs = paddle.nn.functional.softmax(
+            sorted_logits, axis=-1
+        ).cumsum(axis=-1)
         # Remove tokens whose cumulative prob exceeds top_p (shift by 1 to keep first over-threshold)
-        sorted_mask = (cumulative_probs - paddle.nn.functional.softmax(sorted_logits, axis=-1)) >= top_p
-        sorted_logits = paddle.where(sorted_mask,
-                                     paddle.full_like(sorted_logits, float("-inf")),
-                                     sorted_logits)
+        sorted_mask = (
+            cumulative_probs
+            - paddle.nn.functional.softmax(sorted_logits, axis=-1)
+        ) >= top_p
+        sorted_logits = paddle.where(
+            sorted_mask,
+            paddle.full_like(sorted_logits, float("-inf")),
+            sorted_logits,
+        )
         # Scatter back to original order
         original_order = paddle.argsort(sorted_indices, axis=-1)
         logits = paddle.take_along_axis(sorted_logits, original_order, axis=1)
 
     probs = paddle.nn.functional.softmax(logits, axis=-1)
-    next_tok = paddle.multinomial(probs, num_samples=1)             # [B, 1]
+    next_tok = paddle.multinomial(probs, num_samples=1)  # [B, 1]
     return next_tok
 
 
@@ -420,7 +427,9 @@ class GreedyGenerator:
             logits = _apply_repetition_penalty(
                 logits, generated, repetition_penalty
             )
-            next_tok = _sample_next_token(logits[:, -1], temperature, top_k, top_p)
+            next_tok = _sample_next_token(
+                logits[:, -1], temperature, top_k, top_p
+            )
             generated = paddle.concat([generated, next_tok], axis=1)
 
             # ---- Decode ----
@@ -457,7 +466,9 @@ class GreedyGenerator:
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty
                 )
-                next_tok = _sample_next_token(logits[:, -1], temperature, top_k, top_p)
+                next_tok = _sample_next_token(
+                    logits[:, -1], temperature, top_k, top_p
+                )
                 generated = paddle.concat([generated, next_tok], axis=1)
                 if eos_token_id is not None:
                     if isinstance(eos_token_id, list):
