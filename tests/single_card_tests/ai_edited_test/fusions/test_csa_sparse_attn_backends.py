@@ -14,7 +14,11 @@
 
 """Verify TileLang and cuDNN CSA sparse attention backends agree."""
 
+import importlib.util
+import os
+import sys
 import unittest
+from unittest.mock import MagicMock, patch
 
 import paddle
 
@@ -189,3 +193,180 @@ class TestCSASparseAttentionBackends(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for import-time patches in csa_sparse_attn_bwd_cudnn.py
+# (No GPU kernel dependency — always runs regardless of cudnn availability)
+# ---------------------------------------------------------------------------
+
+# Load module under test from local source tree
+_BWD_CUDNN_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "../../../../src/paddlefleet/cudnn_ops/attn/csa_sparse_attn_bwd_cudnn.py",
+)
+_BWD_CUDNN_PATH = os.path.abspath(_BWD_CUDNN_PATH)
+
+_spec = importlib.util.spec_from_file_location("_bwd_cudnn_ut", _BWD_CUDNN_PATH)
+_bwd_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_bwd_mod)
+
+_patch_cutlass_nvgpu = _bwd_mod._patch_cutlass_nvgpu
+_patch_paddle_nvtx_range = _bwd_mod._patch_paddle_nvtx_range
+_patch_paddle_stream_cuda_stream = _bwd_mod._patch_paddle_stream_cuda_stream
+
+
+class TestMemoryFormatPatch(unittest.TestCase):
+    """Test _MemoryFormat sentinel objects (lines 42/45/48)."""
+
+    def test_repr(self):
+        fmt = paddle.contiguous_format
+        self.assertEqual(repr(fmt), "paddle.contiguous_format")
+
+    def test_hash(self):
+        fmt = paddle.contiguous_format
+        self.assertEqual(hash(fmt), hash("contiguous_format"))
+
+    def test_eq_identity(self):
+        fmt = paddle.contiguous_format
+        self.assertEqual(fmt, fmt)
+
+    def test_eq_different_object(self):
+        self.assertNotEqual(paddle.contiguous_format, paddle.preserve_format)
+
+    def test_all_formats_exist(self):
+        for name in (
+            "contiguous_format",
+            "preserve_format",
+            "channels_last",
+            "channels_last_3d",
+        ):
+            self.assertTrue(hasattr(paddle, name), f"paddle.{name} missing")
+
+
+class TestPatchCutlassNvgpuException(unittest.TestCase):
+    """Test _patch_cutlass_nvgpu exception path (lines 81-82)."""
+
+    def test_import_error_is_silenced(self):
+        with patch.dict(
+            sys.modules,
+            {
+                "cutlass": None,
+                "cutlass.cute": None,
+                "cutlass.cute.nvgpu": None,
+            },
+        ):
+            _patch_cutlass_nvgpu()
+
+    def test_attribute_error_is_silenced(self):
+        mock_nvgpu = MagicMock(spec=[])
+        mock_cute = MagicMock()
+        mock_cute.nvgpu = mock_nvgpu
+        mock_cutlass = MagicMock()
+        mock_cutlass.cute = mock_cute
+
+        with patch.dict(
+            sys.modules,
+            {
+                "cutlass": mock_cutlass,
+                "cutlass.cute": mock_cute,
+                "cutlass.cute.nvgpu": mock_nvgpu,
+                "cutlass.cute.nvgpu.warpgroup": None,
+            },
+        ):
+            _patch_cutlass_nvgpu()
+
+
+class TestPatchPaddleNvtxRange(unittest.TestCase):
+    """Test _patch_paddle_nvtx_range logic (lines 103/107-109/111)."""
+
+    def test_skip_when_range_exists(self):
+        class FakeNvtx:
+            range = staticmethod(lambda msg: None)
+            range_push = staticmethod(lambda msg: None)
+            range_pop = staticmethod(lambda: None)
+
+        original_range = FakeNvtx.range
+        with (
+            patch.object(paddle.device, "nvtx", FakeNvtx, create=True),
+            patch.object(paddle.cuda, "nvtx", None, create=True),
+        ):
+            _patch_paddle_nvtx_range()
+        self.assertIs(FakeNvtx.range, original_range)
+
+    def test_inject_range_formats_and_pushpop(self):
+        class FakeNvtx:
+            pushed = []
+            popped = 0
+
+            @staticmethod
+            def range_push(msg):
+                FakeNvtx.pushed.append(msg)
+
+            @staticmethod
+            def range_pop():
+                FakeNvtx.popped += 1
+
+        with (
+            patch.object(paddle.device, "nvtx", FakeNvtx, create=True),
+            patch.object(paddle.cuda, "nvtx", None, create=True),
+        ):
+            _patch_paddle_nvtx_range()
+
+        with FakeNvtx.range("layer_{}", 3):
+            pass
+
+        self.assertEqual(FakeNvtx.pushed, ["layer_3"])
+        self.assertEqual(FakeNvtx.popped, 1)
+
+    def test_range_pop_on_exception(self):
+        class FakeNvtx:
+            popped = 0
+
+            @staticmethod
+            def range_push(msg):
+                pass
+
+            @staticmethod
+            def range_pop():
+                FakeNvtx.popped += 1
+
+        with (
+            patch.object(paddle.device, "nvtx", FakeNvtx, create=True),
+            patch.object(paddle.cuda, "nvtx", None, create=True),
+        ):
+            _patch_paddle_nvtx_range()
+
+        with self.assertRaises(RuntimeError), FakeNvtx.range("test"):
+            raise RuntimeError("boom")
+
+        self.assertEqual(FakeNvtx.popped, 1)
+
+
+class TestPatchPaddleStreamCudaStream(unittest.TestCase):
+    """Test _patch_paddle_stream_cuda_stream assert guard (lines 136-140)."""
+
+    def test_cuda_stream_property_returns_int(self):
+        _patch_paddle_stream_cuda_stream()
+        s = paddle.device.Stream()
+        val = s.cuda_stream
+        self.assertIsInstance(val, int)
+
+    def test_non_cuda_stream_raises_assertion(self):
+        from paddle.base import core
+
+        _patch_paddle_stream_cuda_stream()
+        s = paddle.device.Stream()
+
+        mock_base = MagicMock(spec=[])
+        self.assertNotIsInstance(mock_base, core.CUDAStream)
+
+        with patch.object(
+            type(s),
+            "stream_base",
+            new=property(lambda self: mock_base),
+            create=True,
+        ):
+            with self.assertRaises(AssertionError) as ctx:
+                _ = s.cuda_stream
+            self.assertIn("only available for CUDA streams", str(ctx.exception))

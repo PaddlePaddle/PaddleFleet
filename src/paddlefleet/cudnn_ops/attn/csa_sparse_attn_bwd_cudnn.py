@@ -104,7 +104,7 @@ def _patch_paddle_nvtx_range():
 
         @contextmanager
         def _nvtx_range(msg: str, *args, **kwargs):
-            nvtx_cls.range_push(msg)
+            nvtx_cls.range_push(msg.format(*args, **kwargs))
             try:
                 yield
             finally:
@@ -128,10 +128,18 @@ def _patch_paddle_stream_cuda_stream():
     resolve_stream() pick up Paddle's current stream on both SM90 and SM100.
     """
     import paddle
+    from paddle.base import core
 
     S = paddle.device.Stream
     if not hasattr(S, "cuda_stream"):
-        S.cuda_stream = property(lambda self: self.stream_base.cuda_stream)
+
+        def _cuda_stream(self):
+            assert isinstance(self.stream_base, core.CUDAStream), (
+                "cuda_stream is only available for CUDA streams"
+            )
+            return self.stream_base.cuda_stream
+
+        S.cuda_stream = property(_cuda_stream)
 
 
 _patch_paddle_stream_cuda_stream()
