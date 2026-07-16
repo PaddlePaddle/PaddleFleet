@@ -940,6 +940,11 @@ class TransformerConfig(ModelParallelConfig):
         kernel.
     """
 
+    stage1_overlap: bool = False
+    """
+    overlap backward with sharding gradient reduce for non-pipeline parallelism
+    """
+
     use_fast_hadamard: bool = False
     """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
 

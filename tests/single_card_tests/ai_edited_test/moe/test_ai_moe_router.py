@@ -2106,6 +2106,8 @@ class TestMoELayerSetLayerNumberForwardsIsMtp(unittest.TestCase):
         moe = MoELayer.__new__(MoELayer)
         moe.gate = MagicMock()
         moe.layer_number = None
+        # set_layer_number now colors expert params; EP=1 makes that a no-op.
+        moe.expert_model_parallel_size = 1
         return moe
 
     def test_forwards_is_mtp_layer_true(self):

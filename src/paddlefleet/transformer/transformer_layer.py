@@ -62,6 +62,45 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def is_mtp_shared_last_layer(config, layer_number, is_mtp_layer):
+    """Whether this transformer layer is the MTP-shared backbone last layer.
+
+    When ``mtp_shared_last_layer`` is enabled, the backbone's last transformer
+    layer shares (aliases) its weights with the MTP layer. Those shared params
+    must use dedicated "no_hook" colors so the sharding-stage1 optimizer places
+    them in their own comm buffers and reduces them synchronously instead of via
+    the per-param overlap hook (which would fire from multiple detached autograd
+    graphs and break the comm buffer bookkeeping). See MuonShardingOptimizer.
+
+    Returns False when sharing is off, when sharding stage1 comm-overlap is
+    disabled, when MTP is absent, for the MTP layer itself (its params are
+    aliases owned by the backbone), or for non-last layers.
+    """
+    if not getattr(config, "mtp_shared_last_layer", False):
+        return False
+    # The no-hook color only exists to keep the sharding-stage1 comm-overlap
+    # per-param backward hook from double-firing on the aliased shared params.
+    # With stage1 overlap off there is no such hook, so no re-coloring is needed.
+    if not getattr(config, "stage1_overlap", False):
+        return False
+    # Only re-color when MTP is actually present in the model.
+    mtp_num_layers = (
+        config.mtp_num_layers
+        if getattr(config, "mtp_num_layers", 0)
+        else (getattr(config, "num_nextn_predict_layers", 0) or 0)
+    )
+    if mtp_num_layers <= 0:
+        return False
+    if is_mtp_layer:
+        return False
+    last_layer_number = (
+        config.num_hidden_layers
+        - 1
+        + getattr(config, "num_empty_layers_add_in_head", 0)
+    )
+    return layer_number == last_layer_number
+
+
 def tensors_clone(outputs):
     """
     The tensors required for recompute_forward need to be cloned to prevent them from being released prematurely and becoming inaccessible.
@@ -423,6 +462,8 @@ class TransformerLayer(nn.Layer):
                 in_mlp_recompute=self.recompute_mlp,
             )
 
+        self._mark_shared_no_hook_params()
+
     def _compute_act_offload_kwargs(self):
         """Compute activation offload kwargs based on decoderlayer_act_offload_settings."""
         decoderlayer_act_offload_settings = self.config.get(
@@ -442,6 +483,38 @@ class TransformerLayer(nn.Layer):
                 [0] if self.layer_number in offload_value else []
             )
         return offload_kwargs
+
+    def _mark_shared_no_hook_params(self):
+        """Tag the MTP-shared transformer layer's dense params with a no-hook color.
+
+        When ``mtp_shared_last_layer`` is enabled, the backbone's last
+        transformer layer shares its weights with the MTP layer: the very same
+        parameter tensors are reused in a second, detached autograd graph. Under
+        sharding stage1 comm-overlap, the per-param backward hook that drives
+        gradient communication would then fire from multiple graphs (e.g. under
+        FP8 manual backward or recompute), breaking the comm buffer's check-in
+        bookkeeping (``add_grad`` assert / duplicate reduce).
+
+        To avoid this, the shared params live in dedicated "no_hook" color
+        groups. MoE expert params are colored at creation time in
+        ``MoELayer.set_layer_number`` (Paddle forbids reassigning ``color``), so
+        here we only color the remaining plain dense params, which carry no
+        color yet, with ``dense_weight_no_hook`` (default sharding group, same as
+        plain dense params with color=None).
+        """
+        if not is_mtp_shared_last_layer(
+            self.config, self.layer_number, self.is_mtp_layer
+        ):
+            return
+
+        for p in self.parameters():
+            color = getattr(p, "color", None)
+            # MoE experts are already colored (moe_weight_no_hook) at creation
+            # and Paddle forbids reassigning color, so skip anything already
+            # colored; only uncolored dense params need the dense no-hook color.
+            if isinstance(color, dict) or color not in (None, -1):
+                continue
+            p.color = {"color": "dense_weight_no_hook"}
 
     def build_schedule_node(self):
         return TransformerLayerNode(
@@ -1223,6 +1296,14 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             config=self.config,
             layer_number=self.layer_number,
         )
+
+        # The hyper-connection submodules are created after super().__init__()
+        # (which already ran _mark_shared_no_hook_params on the base params), so
+        # their params (mapping_proj.weight, alpha_pre/post/res, bias, ...) are
+        # still uncolored. Under mtp_shared_last_layer these params are also
+        # aliased into the MTP layer, so re-run the no-hook coloring now. It is
+        # idempotent: already-colored base params are skipped.
+        self._mark_shared_no_hook_params()
 
     def _forward_attention(
         self,
