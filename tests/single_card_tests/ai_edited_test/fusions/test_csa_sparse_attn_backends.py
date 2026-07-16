@@ -207,15 +207,22 @@ _BWD_CUDNN_PATH = os.path.join(
 )
 _BWD_CUDNN_PATH = os.path.abspath(_BWD_CUDNN_PATH)
 
-_spec = importlib.util.spec_from_file_location("_bwd_cudnn_ut", _BWD_CUDNN_PATH)
-_bwd_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_bwd_mod)
+try:
+    _spec = importlib.util.spec_from_file_location("_bwd_cudnn_ut", _BWD_CUDNN_PATH)
+    _bwd_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_bwd_mod)
+    _patch_cutlass_nvgpu = _bwd_mod._patch_cutlass_nvgpu
+    _patch_paddle_nvtx_range = _bwd_mod._patch_paddle_nvtx_range
+    _patch_paddle_stream_cuda_stream = _bwd_mod._patch_paddle_stream_cuda_stream
+    _HAS_BWD_CUDNN_MODULE = True
+except (ImportError, RuntimeError, AttributeError, ModuleNotFoundError):
+    _HAS_BWD_CUDNN_MODULE = False
+    _patch_cutlass_nvgpu = None
+    _patch_paddle_nvtx_range = None
+    _patch_paddle_stream_cuda_stream = None
 
-_patch_cutlass_nvgpu = _bwd_mod._patch_cutlass_nvgpu
-_patch_paddle_nvtx_range = _bwd_mod._patch_paddle_nvtx_range
-_patch_paddle_stream_cuda_stream = _bwd_mod._patch_paddle_stream_cuda_stream
 
-
+@unittest.skipUnless(_HAS_BWD_CUDNN_MODULE, "csa_sparse_attn_bwd_cudnn module unavailable")
 class TestMemoryFormatPatch(unittest.TestCase):
     """Test _MemoryFormat sentinel objects (lines 42/45/48)."""
 
@@ -244,6 +251,7 @@ class TestMemoryFormatPatch(unittest.TestCase):
             self.assertTrue(hasattr(paddle, name), f"paddle.{name} missing")
 
 
+@unittest.skipUnless(_HAS_BWD_CUDNN_MODULE, "csa_sparse_attn_bwd_cudnn module unavailable")
 class TestPatchCutlassNvgpuException(unittest.TestCase):
     """Test _patch_cutlass_nvgpu exception path (lines 81-82)."""
 
@@ -277,6 +285,7 @@ class TestPatchCutlassNvgpuException(unittest.TestCase):
             _patch_cutlass_nvgpu()
 
 
+@unittest.skipUnless(_HAS_BWD_CUDNN_MODULE, "csa_sparse_attn_bwd_cudnn module unavailable")
 class TestPatchPaddleNvtxRange(unittest.TestCase):
     """Test _patch_paddle_nvtx_range logic (lines 103/107-109/111)."""
 
@@ -343,6 +352,7 @@ class TestPatchPaddleNvtxRange(unittest.TestCase):
         self.assertEqual(FakeNvtx.popped, 1)
 
 
+@unittest.skipUnless(_HAS_BWD_CUDNN_MODULE, "csa_sparse_attn_bwd_cudnn module unavailable")
 class TestPatchPaddleStreamCudaStream(unittest.TestCase):
     """Test _patch_paddle_stream_cuda_stream assert guard (lines 136-140)."""
 
