@@ -272,9 +272,11 @@ class TransformerConfig(ModelParallelConfig):
     heterogeneous_block_specs: bool = False
     """Whether to use heterogeneous block specs (nemotron-nas architecture)."""
 
-    sliding_window: tuple[int, int] = None
+    sliding_window: int | tuple[int, int] = None
     """If not None, then will use sliding window attention. The size of the window is specified by
-    the numbers inside the tuple; -1 is special value meaning "infinite window size"."""
+    the numbers inside the tuple; -1 is special value meaning "infinite window size".
+    Accepts a scalar int (HF-compatible causal one-sided semantics) or a (left, right) tuple
+    (Fleet native two-sided semantics); `-1` means infinite window size."""
 
     window_attn_skip_freq: int | list[int] = None
     """Frequency of full attention layers among sliding window attention layers. Accepts either:

@@ -33,6 +33,7 @@ from paddlefleet.transformer.utils import (
     get_default_causal_mask,
     get_sliding_window_causal_mask,
     is_layer_window_attention,
+    startend_row_indices_add_sliding_window,
 )
 
 
@@ -95,6 +96,43 @@ class TestGetSlidingWindowCausalMask(unittest.TestCase):
     def test_non_square_mask(self):
         mask = get_sliding_window_causal_mask(2, 8, (3, 3))
         self.assertEqual(mask.shape, [2, 8])
+
+    def test_int_equivalent_to_tuple_left_zero(self):
+        """The int W branch should produce a mask equivalent to the tuple (W, 0)
+        two-sided branch (HF causal one-sided semantics)."""
+        mask_int = get_sliding_window_causal_mask(128, 128, 32)
+        mask_tuple = get_sliding_window_causal_mask(128, 128, (32, 0))
+        self.assertTrue(paddle.equal_all(mask_int, mask_tuple).item())
+
+    def test_int_branch_shape(self):
+        mask = get_sliding_window_causal_mask(4, 4, 3)
+        self.assertEqual(mask.shape, [4, 4])
+        self.assertEqual(mask.dtype, paddle.bool)
+
+
+class TestStartendRowIndicesAddSlidingWindow(unittest.TestCase):
+    """Smoke tests for startend_row_indices_add_sliding_window int/tuple branches."""
+
+    def _make_indices(self, bsz=1, heads=1, seq=8, num_vec=1):
+        return paddle.full(
+            [bsz, heads, seq, num_vec], fill_value=seq, dtype=paddle.int32
+        )
+
+    def test_int_and_tuple_equivalent(self):
+        indices_int = self._make_indices()
+        indices_tuple = self._make_indices()
+        out_int = startend_row_indices_add_sliding_window(
+            indices_int, 4, 0.0, 2
+        )
+        out_tuple = startend_row_indices_add_sliding_window(
+            indices_tuple, (4, 0), 0.0, 2
+        )
+        self.assertTrue(paddle.equal_all(out_int, out_tuple).item())
+
+    def test_int_none_passthrough(self):
+        indices = self._make_indices()
+        out = startend_row_indices_add_sliding_window(indices, None, 0.0, 2)
+        self.assertTrue(paddle.equal_all(out, indices).item())
 
 
 class TestAttentionMaskFunc(unittest.TestCase):

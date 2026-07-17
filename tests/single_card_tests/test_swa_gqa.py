@@ -133,6 +133,31 @@ class TestIsLayerWindowAttention(unittest.TestCase):
         with self.assertRaises(ValueError):
             is_layer_window_attention((4096, 0), "invalid", 0)
 
+    # ---- int sliding_window branch (HF causal one-sided) ----
+    # int W is truthy exactly like tuple (W, 0), so all skip_freq logic below
+    # must match the corresponding tuple cases above.
+
+    def test_int_no_skip_freq_returns_true(self):
+        """int sliding_window with no skip_freq: all layers are SWA."""
+        self.assertTrue(is_layer_window_attention(4096, None, 0))
+        self.assertTrue(is_layer_window_attention(4096, None, 10))
+
+    def test_int_zero_returns_false(self):
+        """int sliding_window == 0 is falsy: never SWA (window closed)."""
+        self.assertFalse(is_layer_window_attention(0, None, 0))
+        self.assertFalse(is_layer_window_attention(0, 4, 3))
+
+    def test_int_equivalent_to_tuple_left_zero(self):
+        """int W and tuple (W, 0) must give identical is_swa decisions."""
+        for skip_freq in (None, 4, [1, 1, 0, 1, 0]):
+            n = 5 if isinstance(skip_freq, list) else 6
+            for layer in range(n):
+                self.assertEqual(
+                    is_layer_window_attention(4096, skip_freq, layer),
+                    is_layer_window_attention((4096, 0), skip_freq, layer),
+                    f"int vs tuple mismatch: skip_freq={skip_freq}, layer={layer}",
+                )
+
 
 # ============================================================================
 # Test: startend_row_indices_add_sliding_window
@@ -280,6 +305,55 @@ class TestStartendRowIndicesAddSlidingWindow(unittest.TestCase):
             "All heads should be SWA-clipped when ratio=0",
         )
 
+    # ---- int sliding_window branch (window_size = int, right ignored) ----
+    # int W must be interpreted with window_size = W, identical to tuple (W, 0).
+
+    def test_int_clips_values(self):
+        """int sliding_window should clip start indices exactly like tuple (W, 0)."""
+        bsz, seq, kv_num_heads = 1, 8, 1
+        window_size = 3
+        indices = paddle.ones([bsz, 1, seq, 1], dtype=paddle.int32) * 10000
+
+        result = startend_row_indices_add_sliding_window(
+            indices, window_size, 0.0, kv_num_heads
+        )
+
+        expected = paddle.arange(
+            window_size, seq + window_size, dtype=paddle.int32
+        ).reshape([1, 1, seq, 1])
+        self.assertTrue(
+            paddle.equal_all(result, expected).item(),
+            f"Expected {expected.numpy()}, got {result.numpy()}",
+        )
+
+    def test_int_equivalent_to_tuple_left_zero(self):
+        """int W output must equal tuple (W, 0) output across representative cases."""
+        bsz, seq, kv_num_heads = 1, 8, 4
+        window_size = 3
+        for ratio in (0.0, 0.5):
+            indices_int = (
+                paddle.ones([bsz, 1, seq, 1], dtype=paddle.int32) * 10000
+            )
+            indices_tuple = (
+                paddle.ones([bsz, 1, seq, 1], dtype=paddle.int32) * 10000
+            )
+            out_int = startend_row_indices_add_sliding_window(
+                indices_int, window_size, ratio, kv_num_heads
+            )
+            out_tuple = startend_row_indices_add_sliding_window(
+                indices_tuple, (window_size, 0), ratio, kv_num_heads
+            )
+            self.assertTrue(
+                paddle.equal_all(out_int, out_tuple).item(),
+                f"int vs tuple mismatch at ratio={ratio}",
+            )
+
+    def test_int_zero_returns_unchanged(self):
+        """int sliding_window == 0 is falsy: returns input unchanged."""
+        indices = paddle.ones([2, 1, 8, 1], dtype=paddle.int32) * 100
+        result = startend_row_indices_add_sliding_window(indices, 0, 0.0, 4)
+        self.assertTrue(paddle.equal_all(result, indices).item())
+
 
 # ============================================================================
 # Test: TransformerConfig SWA fields and validation
@@ -425,6 +499,32 @@ class TestTransformerConfigSWAValidation(unittest.TestCase):
                 sliding_window=(4096, 0),
                 head_wise_swa_ratio=-0.1,
             )
+
+    def test_int_sliding_window_accepted(self):
+        """int sliding_window should be accepted and stored as-is (no tuple coercion)."""
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            sliding_window=4096,
+            window_attn_skip_freq=4,
+        )
+        self.assertEqual(config.sliding_window, 4096)
+
+    def test_int_sliding_window_mtp_validation(self):
+        """int sliding_window with MTP still enforces list window_attn_skip_freq."""
+        with self.assertRaises(TypeError):
+            TransformerConfig(
+                num_hidden_layers=4,
+                num_nextn_predict_layers=1,
+                sliding_window=4096,
+                window_attn_skip_freq=3,  # int should fail under MTP
+            )
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            sliding_window=4096,
+            window_attn_skip_freq=[1, 1, 0, 1, 1],
+        )
+        self.assertEqual(config.sliding_window, 4096)
 
 
 # ============================================================================
