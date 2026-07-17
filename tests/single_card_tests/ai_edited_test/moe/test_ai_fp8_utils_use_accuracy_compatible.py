@@ -553,5 +553,124 @@ class TestGeGLUBwdDownInputBf16AccuracyCompatible(unittest.TestCase):
         )
 
 
+class TestSwiGLUAccuracyCompatibleClamp(unittest.TestCase):
+    """The accuracy-compatible SwiGLU fp32 forward/backward (split-group) must
+    honor activation_func_clamp_value with the same semantics as the fused
+    kernel: clamp gate to max=clamp_value, value to [-clamp_value, clamp_value]
+    before silu. Otherwise forward/backward diverge from the clamped fused path."""
+
+    def _make_clamp_node(self, clamp_value):
+        from paddlefleet.transformer.moe.fp8_utils import (
+            ExpertsGroupGemmContiguousNode,
+        )
+
+        custom_map = MagicMock()
+        custom_map.experts = [MagicMock()]
+        node = ExpertsGroupGemmContiguousNode(
+            custom_map,
+            use_fp8_mlp=False,
+            moe_expert_fusion=False,
+            use_accuracy_compatible=True,
+            activation_type="swiglu",
+            clamp_value=clamp_value,
+        )
+        node.tokens_per_expert = [3]
+        return node
+
+    def _inputs(self):
+        paddle.seed(2)
+        tokens, hidden = 3, 4
+        # scale up so some entries saturate the clamp bound.
+        o1 = paddle.randn([tokens, 2 * hidden], dtype=paddle.bfloat16) * 3
+        probs = paddle.rand([tokens, 1], dtype=paddle.bfloat16)
+        expert_w2 = [paddle.eye(hidden, dtype=paddle.bfloat16)]
+        return tokens, hidden, o1, probs, expert_w2
+
+    def test_forward_applies_clamp(self):
+        import paddle.nn.functional as F
+
+        cv = 1.0
+        tokens, hidden, o1, probs, expert_w2 = self._inputs()
+        node = self._make_clamp_node(cv)
+        o3 = node.fwd_down_bf16(o1, probs, expert_w2)
+
+        gate = o1.astype("float32")[..., :hidden]
+        val = o1.astype("float32")[..., hidden:]
+        # round-once clamped reference (fp32 math, cast to bf16 once).
+        clamp_ref = (
+            F.silu(paddle.clip(gate, max=cv))
+            * paddle.clip(val, min=-cv, max=cv)
+            * probs.astype("float32")
+        ).astype(o1.dtype)
+        unclamped_ref = (F.silu(gate) * val * probs.astype("float32")).astype(
+            o1.dtype
+        )
+
+        np.testing.assert_array_equal(
+            o3.astype("float32").numpy(), clamp_ref.astype("float32").numpy()
+        )
+        # clamp must actually change the result for these saturated inputs.
+        self.assertFalse(
+            np.array_equal(
+                o3.astype("float32").numpy(),
+                unclamped_ref.astype("float32").numpy(),
+            )
+        )
+
+    def test_backward_applies_clamp(self):
+        import paddle.nn.functional as F
+
+        cv = 1.0
+        tokens, hidden, o1, probs, expert_w2 = self._inputs()
+        node = self._make_clamp_node(cv)
+
+        unzipped_grad = paddle.randn([tokens, hidden], dtype=paddle.bfloat16)
+        do1, _o2_s, probs_grad = node.bwd_down_input_bf16(
+            expert_w2, unzipped_grad, o1, probs
+        )
+
+        # accuracy-compatible split-group backward computes do2_s via matmul.
+        do2_s = paddle.matmul(unzipped_grad, expert_w2[0].T.contiguous())
+
+        def grads(clamp):
+            gate = o1.astype("float32")[..., :hidden].detach()
+            val = o1.astype("float32")[..., hidden:].detach()
+            scale = probs.astype("float32").detach()
+            for t in (gate, val, scale):
+                t.stop_gradient = False
+            if clamp:
+                o2 = (
+                    F.silu(paddle.clip(gate, max=cv))
+                    * paddle.clip(val, min=-cv, max=cv)
+                    * scale
+                )
+            else:
+                o2 = F.silu(gate) * val * scale
+            paddle.autograd.backward([o2], [do2_s.astype("float32").detach()])
+            d1 = paddle.concat([gate.grad, val.grad], axis=-1).astype(o1.dtype)
+            dp = scale.grad.reshape(probs.shape).astype(probs.dtype)
+            return d1, dp
+
+        do1_clamp, pg_clamp = grads(True)
+        do1_unclamp, _ = grads(False)
+
+        np.testing.assert_array_equal(
+            do1.astype("float32").numpy(),
+            do1_clamp.astype("float32").numpy(),
+        )
+        np.testing.assert_array_equal(
+            probs_grad.astype("float32").numpy(),
+            pg_clamp.astype("float32").numpy(),
+        )
+        # saturated gate/value gradients are masked by the clamp, so the
+        # unclamped gradient must differ.
+        self.assertFalse(
+            np.array_equal(
+                do1.astype("float32").numpy(),
+                do1_unclamp.astype("float32").numpy(),
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
