@@ -815,11 +815,19 @@ class ExpertsGroupGemmContiguousNode:
                     (F.gelu(x_glu, approximate=True) * x_linear) * probs
                 ).cast(o1.dtype)
             else:
-                o2 = (
-                    F.silu(x_glu.astype("float32"))
-                    * x_linear.astype("float32")
-                    * probs.astype("float32")
-                ).astype(o1.dtype)
+                # SwiGLU: promote to fp32 and round once. Apply the same
+                # activation_func_clamp_value semantics as the fused kernel
+                # (clamp gate to max, value to [-clamp, clamp]) so this fp32
+                # path matches fused_swiglu_scale_forward when clamp is set.
+                gate_f = x_glu.astype("float32")
+                val_f = x_linear.astype("float32")
+                if self.clamp_value is not None and self.clamp_value > 0:
+                    cv = float(self.clamp_value)
+                    gate_f = paddle.clip(gate_f, max=cv)
+                    val_f = paddle.clip(val_f, min=-cv, max=cv)
+                o2 = (F.silu(gate_f) * val_f * probs.astype("float32")).astype(
+                    o1.dtype
+                )
         else:
             if self.activation_type == "geglu":
                 # GeGLU: gelu_tanh(gate) * up, then scale by probs
@@ -1070,7 +1078,18 @@ class ExpertsGroupGemmContiguousNode:
                 gate_g.stop_gradient = False
                 val_g.stop_gradient = False
                 scale_g.stop_gradient = False
-                o2_f32 = F.silu(gate_g) * val_g * scale_g
+                # Apply the same activation_func_clamp_value semantics as the
+                # forward / fused kernel (clamp gate to max, value to
+                # [-clamp, clamp]). autograd through paddle.clip masks the
+                # gradient where saturated, matching fused_swiglu_weighted_clamp_bwd.
+                if self.clamp_value is not None and self.clamp_value > 0:
+                    cv = float(self.clamp_value)
+                    gate_c = paddle.clip(gate_g, max=cv)
+                    val_c = paddle.clip(val_g, min=-cv, max=cv)
+                else:
+                    gate_c = gate_g
+                    val_c = val_g
+                o2_f32 = F.silu(gate_c) * val_c * scale_g
                 paddle.autograd.backward(
                     [o2_f32], [do2_s.astype("float32").detach()]
                 )
