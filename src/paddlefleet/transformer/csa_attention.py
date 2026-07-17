@@ -948,19 +948,24 @@ def _apply_rope(
     if squeeze_head:
         x = x.unsqueeze(2)  # [b, s, 1, dim]
 
-    x_nope = x[..., :nope_dim]
-    x_pe = x[..., nope_dim:]
-    x_pe = _apply_rotary_pos_emb_bshd(
-        x_pe,
-        freqs,
-        mscale=mscale,
-        rotary_interleaved=False,
-        multi_latent_attention=True,
-        mla_output_remove_interleaving=True,
-        high_precision_rope=high_precision_rope,
-    )
+    if getattr(config, "apply_rope_fusion", False) and not high_precision_rope:
+        from paddlefleet.triton_ops import fused_apply_mla_rope_inplace
 
-    out = paddle.concat([x_nope, x_pe], axis=-1)
+        out = fused_apply_mla_rope_inplace(x, freqs, nope_dim, mscale)
+    else:
+        x_nope = x[..., :nope_dim]
+        x_pe = x[..., nope_dim:]
+        x_pe = _apply_rotary_pos_emb_bshd(
+            x_pe,
+            freqs,
+            mscale=mscale,
+            rotary_interleaved=False,
+            multi_latent_attention=True,
+            mla_output_remove_interleaving=True,
+            high_precision_rope=high_precision_rope,
+        )
+        out = paddle.concat([x_nope, x_pe], axis=-1)
+
     if squeeze_head:
         out = out.squeeze(2)
     return out

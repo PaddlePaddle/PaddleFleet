@@ -711,26 +711,35 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
                 query = paddle.concat([q_nope, q_pe], axis=-1)
 
             # KV RoPE: split nope/pe, apply RoPE to pe part
-            kv_nope = kv[..., :nope_dim]
-            kv_pe = kv[..., nope_dim:]
-            # Add head dim for RoPE: [b, sq, pos_dim] -> [b, sq, 1, pos_dim]
-            kv_pe = kv_pe.unsqueeze(2)
-            kv_pe = _apply_rotary_pos_emb_bshd(
-                kv_pe,
-                freqs,
-                mscale=mscale,
-                rotary_interleaved=False,
-                multi_latent_attention=True,
-                mla_output_remove_interleaving=True,
-                high_precision_rope=self.config.high_precision_rope,
-            )
-            kv_pe = kv_pe.squeeze(2)
+            if (
+                self.config.apply_rope_fusion
+                and not self.config.high_precision_rope
+                and not self.use_fp8_qat
+            ):
+                kv = kv.unsqueeze(2)
+                kv = fused_apply_mla_rope_inplace(kv, freqs, nope_dim, mscale)
+                kv = kv.squeeze(2)
+            else:
+                kv_nope = kv[..., :nope_dim]
+                kv_pe = kv[..., nope_dim:]
+                # Add head dim for RoPE: [b, sq, pos_dim] -> [b, sq, 1, pos_dim]
+                kv_pe = kv_pe.unsqueeze(2)
+                kv_pe = _apply_rotary_pos_emb_bshd(
+                    kv_pe,
+                    freqs,
+                    mscale=mscale,
+                    rotary_interleaved=False,
+                    multi_latent_attention=True,
+                    mla_output_remove_interleaving=True,
+                    high_precision_rope=self.config.high_precision_rope,
+                )
+                kv_pe = kv_pe.squeeze(2)
 
-            # KV QAT:
-            #   kv_nope: bf16 -> fp32 -> fp8e4m3 ->fp32 -> bf16
-            if self.use_fp8_qat:
-                kv_nope = fp8_simulate_qat(kv_nope, 64)
-            kv = paddle.concat([kv_nope, kv_pe], axis=-1)
+                # KV QAT:
+                #   kv_nope: bf16 -> fp32 -> fp8e4m3 ->fp32 -> bf16
+                if self.use_fp8_qat:
+                    kv_nope = fp8_simulate_qat(kv_nope, 64)
+                kv = paddle.concat([kv_nope, kv_pe], axis=-1)
         else:
             query = q
 
