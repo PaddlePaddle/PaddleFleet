@@ -215,7 +215,9 @@ _BWD_MODULE_NAME = "paddlefleet.cudnn_ops.attn.csa_sparse_attn_bwd_cudnn"
 
 def _load_bwd_module():
     """Load the bwd_cudnn module, mocking paddlefleet_ops if needed."""
-    spec = importlib.util.spec_from_file_location(_BWD_MODULE_NAME, _BWD_CUDNN_PATH)
+    spec = importlib.util.spec_from_file_location(
+        _BWD_MODULE_NAME, _BWD_CUDNN_PATH
+    )
     mod = importlib.util.module_from_spec(spec)
     sys.modules[_BWD_MODULE_NAME] = mod
     spec.loader.exec_module(mod)
@@ -425,11 +427,13 @@ class TestCsaSparseAttnBwdCudnnFunction(unittest.TestCase):
     def test_raises_when_cudnn_unavailable(self):
         """Cover _require_cudnn_frontend raising ImportError (line 159-160)."""
         csa_fn = _bwd_mod.csa_sparse_attn_bwd_cudnn
-        with patch.object(
-            _bwd_mod, "is_cudnn_frontend_available", return_value=False
+        with (
+            patch.object(
+                _bwd_mod, "is_cudnn_frontend_available", return_value=False
+            ),
+            self.assertRaises(ImportError),
         ):
-            with self.assertRaises(ImportError):
-                csa_fn(None, None, None, None, None, None, None)
+            csa_fn(None, None, None, None, None, None, None)
 
     def test_calls_wrapper_and_returns_tuple(self):
         """Cover the import + call + return path (lines 160-176)."""
@@ -456,8 +460,15 @@ class TestCsaSparseAttnBwdCudnnFunction(unittest.TestCase):
             ),
         ):
             dq, dkv, d_sink = csa_fn(
-                "q", "kv", "out", "dout", "lse", "attn_sink", "topk",
-                softmax_scale=0.1, topk_length=64,
+                "q",
+                "kv",
+                "out",
+                "dout",
+                "lse",
+                "attn_sink",
+                "topk",
+                softmax_scale=0.1,
+                topk_length=64,
             )
 
         self.assertEqual(dq, "mock_dq")
