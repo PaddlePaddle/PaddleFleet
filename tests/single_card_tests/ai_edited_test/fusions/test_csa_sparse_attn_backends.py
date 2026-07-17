@@ -200,24 +200,48 @@ if __name__ == "__main__":
 # (No GPU kernel dependency — always runs regardless of cudnn availability)
 # ---------------------------------------------------------------------------
 
-# Load module under test from local source tree
+# Load module under test from source tree.
+# CI does editable install so coverage tracks the source file automatically.
+# We use spec_from_file_location + register in sys.modules so coverage
+# (source=paddlefleet) recognizes the executed file path.
+_bwd_mod = None
 _BWD_CUDNN_PATH = os.path.join(
     os.path.dirname(__file__),
     "../../../../src/paddlefleet/cudnn_ops/attn/csa_sparse_attn_bwd_cudnn.py",
 )
 _BWD_CUDNN_PATH = os.path.abspath(_BWD_CUDNN_PATH)
+_BWD_MODULE_NAME = "paddlefleet.cudnn_ops.attn.csa_sparse_attn_bwd_cudnn"
+
+
+def _load_bwd_module():
+    """Load the bwd_cudnn module, mocking paddlefleet_ops if needed."""
+    spec = importlib.util.spec_from_file_location(_BWD_MODULE_NAME, _BWD_CUDNN_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[_BWD_MODULE_NAME] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
 
 try:
-    _spec = importlib.util.spec_from_file_location(
-        "_bwd_cudnn_ut", _BWD_CUDNN_PATH
-    )
-    _bwd_mod = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_bwd_mod)
+    _bwd_mod = _load_bwd_module()
+except ImportError:
+    try:
+        _mock_pflops = MagicMock()
+        _mock_pflops.CUDNN_FRONTEND_HINT = "cudnn frontend not available"
+        _mock_pflops.is_cudnn_frontend_available = MagicMock(return_value=False)
+        with patch.dict(sys.modules, {"paddlefleet_ops": _mock_pflops}):
+            _bwd_mod = _load_bwd_module()
+    except (RuntimeError, AttributeError, ModuleNotFoundError, ImportError):
+        _bwd_mod = None
+except (RuntimeError, AttributeError, ModuleNotFoundError):
+    _bwd_mod = None
+
+if _bwd_mod is not None:
     _patch_cutlass_nvgpu = _bwd_mod._patch_cutlass_nvgpu
     _patch_paddle_nvtx_range = _bwd_mod._patch_paddle_nvtx_range
     _patch_paddle_stream_cuda_stream = _bwd_mod._patch_paddle_stream_cuda_stream
     _HAS_BWD_CUDNN_MODULE = True
-except (ImportError, RuntimeError, AttributeError, ModuleNotFoundError):
+else:
     _HAS_BWD_CUDNN_MODULE = False
     _patch_cutlass_nvgpu = None
     _patch_paddle_nvtx_range = None
@@ -390,3 +414,52 @@ class TestPatchPaddleStreamCudaStream(unittest.TestCase):
             with self.assertRaises(AssertionError) as ctx:
                 _ = s.cuda_stream
             self.assertIn("only available for CUDA streams", str(ctx.exception))
+
+
+@unittest.skipUnless(
+    _HAS_BWD_CUDNN_MODULE, "csa_sparse_attn_bwd_cudnn module unavailable"
+)
+class TestCsaSparseAttnBwdCudnnFunction(unittest.TestCase):
+    """Test csa_sparse_attn_bwd_cudnn function body (lines 148-176)."""
+
+    def test_raises_when_cudnn_unavailable(self):
+        """Cover _require_cudnn_frontend raising ImportError (line 159-160)."""
+        csa_fn = _bwd_mod.csa_sparse_attn_bwd_cudnn
+        with patch.object(
+            _bwd_mod, "is_cudnn_frontend_available", return_value=False
+        ):
+            with self.assertRaises(ImportError):
+                csa_fn(None, None, None, None, None, None, None)
+
+    def test_calls_wrapper_and_returns_tuple(self):
+        """Cover the import + call + return path (lines 160-176)."""
+        fake_result = {
+            "dq": "mock_dq",
+            "dkv": "mock_dkv",
+            "d_sink": "mock_d_sink",
+        }
+        csa_fn = _bwd_mod.csa_sparse_attn_bwd_cudnn
+
+        with (
+            patch.object(
+                _bwd_mod, "is_cudnn_frontend_available", return_value=True
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "paddlefleet_ops.cudnn.deepseek_sparse_attention.sparse_attention_backward.api": MagicMock(
+                        sparse_attention_backward_wrapper=MagicMock(
+                            return_value=fake_result
+                        )
+                    ),
+                },
+            ),
+        ):
+            dq, dkv, d_sink = csa_fn(
+                "q", "kv", "out", "dout", "lse", "attn_sink", "topk",
+                softmax_scale=0.1, topk_length=64,
+            )
+
+        self.assertEqual(dq, "mock_dq")
+        self.assertEqual(dkv, "mock_dkv")
+        self.assertEqual(d_sink, "mock_d_sink")
