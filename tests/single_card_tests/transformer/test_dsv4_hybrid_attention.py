@@ -102,6 +102,8 @@ def _make_config(
     num_nextn_predict_layers=0,
     csa_indexer_backend="unfused",
     csa_sparse_attn_backend="unfused",
+    tensor_model_parallel_size=1,
+    context_parallel_size=1,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -144,6 +146,8 @@ def _make_config(
         softmax_type="vanilla",
         csa_indexer_backend=csa_indexer_backend,
         csa_sparse_attn_backend=csa_sparse_attn_backend,
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        context_parallel_size=context_parallel_size,
     )
 
 
@@ -220,6 +224,25 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             ValueError, "csa_sparse_attn_backend='paddle' is invalid"
         ):
             _make_config(csa_sparse_attn_backend="paddle")
+
+    def test_csa_cudnn_indexer_allows_config_with_cp(self):
+        cfg = _make_config(csa_indexer_backend="cudnn", context_parallel_size=2)
+        self.assertEqual(cfg.csa_indexer_backend, "cudnn")
+        self.assertEqual(cfg.context_parallel_size, 2)
+
+    def test_csa_rejects_tensor_parallel_gt_one(self):
+        cfg = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[4],
+            num_attention_heads=2,
+            dsa_index_n_heads=32,
+            dsa_index_head_dim=128,
+            tensor_model_parallel_size=2,
+        )
+        with self.assertRaisesRegex(
+            NotImplementedError, "does not support tensor parallelism > 1"
+        ):
+            _build_attention(cfg, layer_number=0)
 
     def test_removed_tilelang_switches_raise(self):
         removed_switches = (
@@ -372,6 +395,8 @@ class TestCSADocMaskMetadata(unittest.TestCase):
         self.assertIsNotNone(meta)
         self.assertEqual(meta.actual_n_compressed, 2)
         self.assertEqual(meta.doc_lens.numpy().tolist(), [5, 7])
+        self.assertEqual(meta.doc_lens_list, [5, 7])
+        self.assertIs(meta.doc_lens_list, meta.doc_lens_list)
         self.assertEqual(meta.doc_starts.numpy().tolist(), [0, 5])
         self.assertEqual(meta.doc_lens_cutoff.numpy().tolist(), [4, 4])
         self.assertEqual(meta.doc_starts_cutoff.numpy().tolist(), [0, 4])
@@ -1132,6 +1157,116 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
 
         self.assertGreaterEqual(mocked.call_count, 1)
         self.assertEqual(mocked.call_args_list[0].args[0], 1)
+
+    def test_cudnn_indexer_document_mask_matches_separate_documents(self):
+        """Main-path integration: csa_indexer_backend='cudnn' packed-vs-separate.
+
+        Realistic shapes: packed seq_len 4096, sliding window 128, indexer
+        top-k 512. Exercises the production wiring in
+        CompressedSparseAttention._compute_indexer_compressed_topk_idxs where
+        cudnn_indexer_topk_fwd(valid_range=...) overrides the topk producer
+        (csa_attention.py). In eval mode the cuDNN indexer selects the
+        compressed top-k under document-mask; the pure-Paddle sparse attention
+        gathers it. doc0 / doc1 outputs sliced from the packed run must equal
+        each document run alone — any cross-document leakage in the cuDNN
+        docmask topk (wrong valid_range window or bad local->global remap)
+        would break the equality.
+
+        cuDNN indexer constraints force dsa_index_n_heads in {32,64} and
+        dsa_index_head_dim=128. Document lengths are kept >= 8 (n_compressed
+        >= 2 at ratio 4); the cuDNN indexer forward kernel crashes at
+        n_compressed == 1, a pre-existing limitation unrelated to docmask.
+        """
+        paddle.seed(_SEED)
+        ratio = 4  # indexer only exists for ratio == 4
+        config = _make_config(
+            hidden_size=256,
+            num_attention_heads=2,
+            v_head_dim=128,
+            qk_pos_emb_head_dim=64,
+            q_lora_rank=128,
+            o_groups=2,
+            o_lora_rank=64,
+            csa_window_size=128,
+            dsa_index_n_heads=32,  # cuDNN requires {32, 64}
+            dsa_index_head_dim=128,  # cuDNN requires 128
+            dsa_index_topk=512,
+            dsa_indexer_loss_coeff=0.0,
+            csa_compress_ratios=[ratio],
+            num_layers=1,
+            csa_indexer_backend="cudnn",
+        )
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(config, layer_number=0)
+        attn.eval()
+
+        seq_len = 4096
+        # Two documents + trailing padding (the realistic packed layout).
+        # doc1 2000 -> cutoff2000 -> 500 compressed cols
+        # doc2 1500 -> cutoff1500 -> 375 compressed cols
+        # padding 596. Each doc's n_compressed >= 2 (avoids the n_comp==1 crash).
+        doc1_len, doc2_len = 2000, 1500
+        padding_len = seq_len - doc1_len - doc2_len
+
+        doc1 = paddle.randn([1, doc1_len, config.hidden_size], dtype="bfloat16")
+        doc2 = paddle.randn([1, doc2_len, config.hidden_size], dtype="bfloat16")
+        padding = paddle.randn(
+            [1, padding_len, config.hidden_size], dtype="bfloat16"
+        )
+        packed = paddle.concat([doc1, doc2, padding], axis=1)
+
+        startend_row_indices = paddle.to_tensor(
+            [doc1_len] * doc1_len
+            + [doc1_len + doc2_len] * (doc2_len + padding_len),
+            dtype="int32",
+        ).reshape([1, 1, seq_len, 1])
+        doc1_startend = paddle.to_tensor(
+            [doc1_len] * doc1_len, dtype="int32"
+        ).reshape([1, 1, doc1_len, 1])
+        doc2_startend = paddle.to_tensor(
+            [doc2_len] * doc2_len, dtype="int32"
+        ).reshape([1, 1, doc2_len, 1])
+
+        with paddle.no_grad():
+            packed_out, _ = attn(
+                hidden_states=packed,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
+            doc1_out, _ = attn(
+                hidden_states=doc1,
+                attention_mask=None,
+                attn_mask_startend_row_indices=doc1_startend,
+            )
+            doc2_out, _ = attn(
+                hidden_states=doc2,
+                attention_mask=None,
+                attn_mask_startend_row_indices=doc2_startend,
+            )
+
+        # Sliced packed doc outputs must match standalone doc runs. allclose
+        # (not equal_all): cuDNN radix topk tie order + bf16 reductions admit
+        # tiny deviations even on identical per-doc inputs.
+        self.assertTrue(
+            paddle.allclose(
+                packed_out[:, :doc1_len, :].cast("float32"),
+                doc1_out.cast("float32"),
+                rtol=1e-2,
+                atol=1e-2,
+            ).item(),
+            "cuDNN-indexer docmask: packed doc0 != doc0 alone",
+        )
+        self.assertTrue(
+            paddle.allclose(
+                packed_out[:, doc1_len : doc1_len + doc2_len, :].cast(
+                    "float32"
+                ),
+                doc2_out.cast("float32"),
+                rtol=1e-2,
+                atol=1e-2,
+            ).item(),
+            "cuDNN-indexer docmask: packed doc1 != doc1 alone",
+        )
 
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):

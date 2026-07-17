@@ -706,7 +706,7 @@ class TestTileLangCSAIndexerLossAutoScalerCudnn(unittest.TestCase):
         if hasattr(self, "DSAScaler"):
             self.DSAScaler._main_loss_backward_scale = self._orig_scale
 
-    def _run_with_scale(self, scale):
+    def _run_with_scale(self, scale, with_loss_mask=False):
         import paddlefleet.cudnn_ops as cudnn_ops_mod
 
         captured = {}
@@ -761,9 +761,16 @@ class TestTileLangCSAIndexerLossAutoScalerCudnn(unittest.TestCase):
             )
             ctx.loss_coeff = 0.01
             ctx.indexer_backend = "cudnn"
+            ctx.loss_mask = (
+                paddle.ones([b, sq], dtype="float32")
+                if with_loss_mask
+                else None
+            )
+            if with_loss_mask:
+                ctx.num_rows = float(b * sq)
 
             grad_output = paddle.ones_like(weights)
-            self.AutoScaler.backward(ctx, grad_output)
+            captured["grads"] = self.AutoScaler.backward(ctx, grad_output)
         finally:
             if orig is not None:
                 cudnn_ops_mod.csa_indexer_bwd = orig
@@ -774,6 +781,14 @@ class TestTileLangCSAIndexerLossAutoScalerCudnn(unittest.TestCase):
     def test_scale_none(self):
         captured = self._run_with_scale(None)
         self.assertIsNone(captured["grad_loss"])
+
+    def test_backward_returns_one_grad_per_tensor_forward_input(self):
+        captured = self._run_with_scale(None)
+        self.assertEqual(len(captured["grads"]), 7)
+
+    def test_backward_returns_loss_mask_grad_when_tensor_input_present(self):
+        captured = self._run_with_scale(None, with_loss_mask=True)
+        self.assertEqual(len(captured["grads"]), 8)
 
     def test_scale_paddle_tensor(self):
         scale_t = paddle.to_tensor(2.5, dtype="float32")
