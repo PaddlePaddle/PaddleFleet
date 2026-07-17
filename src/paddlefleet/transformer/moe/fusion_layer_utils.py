@@ -3166,6 +3166,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         is_first_fwd=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_ue8m0=False,
         use_accuracy_compatible=False,
     ):
         node = ExpertsGroupGemmContiguousNode(
@@ -3176,6 +3177,7 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             use_fp8_mlp=use_fp8_mlp,
             moe_deep_gemm=moe_deep_gemm,
             moe_expert_fusion=moe_expert_fusion,
+            use_ue8m0=use_ue8m0,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
             activation_type=getattr(custom_map, "_activation_type", "swiglu"),

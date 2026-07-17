@@ -1014,6 +1014,7 @@ class MoELayer(nn.Layer):
             use_fp8_mlp=self.fp8,
             moe_deep_gemm=self.moe_deep_gemm,
             moe_expert_fusion=self.moe_expert_fusion,
+            use_ue8m0=self.use_ue8m0,
             recompute_moe_gate_up=self.recompute_moe_gate_up,
             use_bf16_gemm_weight_grad=not self.fp8_wgrad,
             fp8_dispatched_handle=fp8_dispatched_handle,
