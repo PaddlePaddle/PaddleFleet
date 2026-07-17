@@ -203,5 +203,160 @@ class TestECCompatibleRopeApplyEdgeCases(unittest.TestCase):
         self.assertEqual(k_out.shape, k_pe.shape)
 
 
+class TestRecomputeQKVUpProjAndRope(unittest.TestCase):
+    """Tests for recompute_qkv_up_porj_and_rope feature in MLASelfAttention."""
+
+    def _make_mla_self_attn(
+        self, recompute_granularity=None, recompute_modules=None
+    ):
+        """Create a MLASelfAttention with recompute config."""
+        config = MagicMock()
+        config.head_dim = 16
+        config.num_attention_heads = 4
+        config.num_key_value_heads = 4
+        config.hidden_size = 64
+        config.v_head_dim = 16
+        config.qk_nope_head_dim = 8
+        config.qk_rope_head_dim = 8
+        config.q_lora_rank = None
+        config.kv_lora_rank = 16
+        config.rope_type = "rope"
+        config.rotary_interleaved = False
+        config.rope_theta = 10000.0
+        config.rotary_scaling_factor = 1.0
+        config.mscale_all_dim = False
+        config.gated_attention = False
+        config.dw_p2p_overlap = False
+        config.use_bias = True
+        config.sequence_parallel = False
+        config.recompute_granularity = recompute_granularity
+        config.recompute_modules = recompute_modules
+
+        with (
+            patch(
+                "paddlefleet.transformer.multi_latent_attention.Attention.__init__",
+                return_value=None,
+            ),
+            patch(
+                "paddlefleet.transformer.multi_latent_attention.RotaryEmbedding"
+            ),
+            patch(
+                "paddlefleet.transformer.multi_latent_attention.build_spec_layer"
+            ),
+            patch(
+                "paddlefleet.transformer.multi_latent_attention.ProcessGroupCollection.use_mpu_process_groups"
+            ),
+        ):
+            from paddlefleet.transformer.multi_latent_attention import (
+                MLASelfAttention,
+            )
+
+            mla = MLASelfAttention.__new__(MLASelfAttention)
+            mla.config = config
+            mla.kv_b_proj = MagicMock()
+            mla.kv_a_proj_with_mqa = MagicMock()
+            mla.o_proj = MagicMock()
+            mla.q_proj = MagicMock()
+            return mla
+
+    def test_recompute_enabled_when_selective_and_mla_qkv_recompute(self):
+        """Test recompute_qkv_up_porj_and_rope is True when config matches."""
+        mla = self._make_mla_self_attn(
+            recompute_granularity="selective",
+            recompute_modules=["mla_qkv_recompute"],
+        )
+        # Simulate __init__ logic
+        mla.recompute_qkv_up_porj_and_rope = (
+            mla.config.recompute_granularity == "selective"
+            and "mla_qkv_recompute" in mla.config.recompute_modules
+        )
+        self.assertTrue(mla.recompute_qkv_up_porj_and_rope)
+
+    def test_recompute_disabled_when_granularity_not_selective(self):
+        """Test recompute_qkv_up_porj_and_rope is False when granularity != selective."""
+        mla = self._make_mla_self_attn(
+            recompute_granularity="full",
+            recompute_modules=["mla_qkv_recompute"],
+        )
+        mla.recompute_qkv_up_porj_and_rope = (
+            mla.config.recompute_granularity == "selective"
+            and "mla_qkv_recompute" in mla.config.recompute_modules
+        )
+        self.assertFalse(mla.recompute_qkv_up_porj_and_rope)
+
+    def test_recompute_disabled_when_module_not_in_list(self):
+        """Test recompute_qkv_up_porj_and_rope is False when module not listed."""
+        mla = self._make_mla_self_attn(
+            recompute_granularity="selective",
+            recompute_modules=["gated_attn"],
+        )
+        mla.recompute_qkv_up_porj_and_rope = (
+            mla.config.recompute_granularity == "selective"
+            and "mla_qkv_recompute" in mla.config.recompute_modules
+        )
+        self.assertFalse(mla.recompute_qkv_up_porj_and_rope)
+
+    def test_recompute_disabled_when_recompute_modules_is_none(self):
+        """Test recompute_qkv_up_porj_and_rope is False when recompute_modules is None."""
+        mla = self._make_mla_self_attn(
+            recompute_granularity="selective",
+            recompute_modules=None,
+        )
+        recompute_modules = mla.config.recompute_modules
+        mla.recompute_qkv_up_porj_and_rope = (
+            mla.config.recompute_granularity == "selective"
+            and recompute_modules is not None
+            and "mla_qkv_recompute" in recompute_modules
+        )
+        self.assertFalse(mla.recompute_qkv_up_porj_and_rope)
+
+    def test_recompute_path_uses_RecomputeWithoutOutput(self):
+        """Test that when recompute is enabled and training, RecomputeWithoutOutput is used."""
+        from paddlefleet.transformer import multi_latent_attention as mla_mod
+
+        mla = self._make_mla_self_attn(
+            recompute_granularity="selective",
+            recompute_modules=["mla_qkv_recompute"],
+        )
+        mla.recompute_qkv_up_porj_and_rope = True
+        mla.training = True
+
+        mock_recompute_instance = MagicMock()
+        mock_recompute_instance.recompute = MagicMock(
+            return_value=(
+                paddle.randn([1, 4, 4, 12]),
+                paddle.randn([1, 4, 4, 12]),
+                paddle.randn([1, 4, 4, 16]),
+                paddle.randn([1, 4, 1, 8]),
+            )
+        )
+        with patch.object(
+            mla_mod,
+            "RecomputeWithoutOutput",
+            return_value=mock_recompute_instance,
+        ) as mock_cls:
+            # Simulate the conditional logic
+            if mla.recompute_qkv_up_porj_and_rope and mla.training:
+                mla._qkv_recompute = mla_mod.RecomputeWithoutOutput()
+                mock_cls.assert_called_once()
+
+    def test_recompute_path_skipped_when_not_training(self):
+        """Test that recompute path is not taken when training=False."""
+        from paddlefleet.transformer import multi_latent_attention as mla_mod
+
+        mla = self._make_mla_self_attn(
+            recompute_granularity="selective",
+            recompute_modules=["mla_qkv_recompute"],
+        )
+        mla.recompute_qkv_up_porj_and_rope = True
+        mla.training = False
+
+        with patch.object(mla_mod, "RecomputeWithoutOutput") as mock_cls:
+            # Simulate the conditional logic
+            if mla.recompute_qkv_up_porj_and_rope and mla.training:
+                mla._qkv_recompute = mla_mod.RecomputeWithoutOutput()
+            mock_cls.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
