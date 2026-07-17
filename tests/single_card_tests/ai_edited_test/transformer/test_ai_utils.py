@@ -25,6 +25,7 @@ sys.path.insert(
 
 
 import unittest
+from types import SimpleNamespace
 
 import paddle
 
@@ -32,6 +33,7 @@ from paddlefleet.transformer.utils import (
     attention_mask_func,
     get_default_causal_mask,
     get_sliding_window_causal_mask,
+    get_sliding_window_left_size,
     is_layer_window_attention,
     startend_row_indices_add_sliding_window,
 )
@@ -109,6 +111,42 @@ class TestGetSlidingWindowCausalMask(unittest.TestCase):
         self.assertEqual(mask.shape, [4, 4])
         self.assertEqual(mask.dtype, paddle.bool)
 
+    def test_int_negative_is_infinite_causal_mask(self):
+        """int `-1` (infinite window) should degrade to a plain causal mask."""
+        mask = get_sliding_window_causal_mask(4, 4, -1)
+        causal = get_default_causal_mask(4)
+        self.assertTrue(paddle.equal_all(mask, causal).item())
+
+    def test_int_negative_not_all_masked(self):
+        """Regression: `-1` must not mask out every position."""
+        mask = get_sliding_window_causal_mask(4, 4, -1)
+        # diagonal (self-attention) must stay visible (not masked)
+        self.assertFalse(mask[0, 0].item())
+        self.assertFalse(mask[3, 3].item())
+
+    def test_tuple_negative_left_is_causal(self):
+        """A negative left in tuple form also means infinite past window."""
+        mask = get_sliding_window_causal_mask(4, 4, (-1, 0))
+        causal = get_default_causal_mask(4)
+        self.assertTrue(paddle.equal_all(mask, causal).item())
+
+
+class TestGetSlidingWindowLeftSize(unittest.TestCase):
+    """Tests for get_sliding_window_left_size (shared window-size helper)."""
+
+    def test_int(self):
+        self.assertEqual(get_sliding_window_left_size(512), 512)
+
+    def test_tuple(self):
+        self.assertEqual(get_sliding_window_left_size((128, 0)), 128)
+        self.assertEqual(get_sliding_window_left_size((256, 64)), 256)
+
+    def test_negative_int(self):
+        self.assertEqual(get_sliding_window_left_size(-1), -1)
+
+    def test_negative_tuple(self):
+        self.assertEqual(get_sliding_window_left_size((-1, 0)), -1)
+
 
 class TestStartendRowIndicesAddSlidingWindow(unittest.TestCase):
     """Smoke tests for startend_row_indices_add_sliding_window int/tuple branches."""
@@ -133,6 +171,55 @@ class TestStartendRowIndicesAddSlidingWindow(unittest.TestCase):
         indices = self._make_indices()
         out = startend_row_indices_add_sliding_window(indices, None, 0.0, 2)
         self.assertTrue(paddle.equal_all(out, indices).item())
+
+    def test_int_negative_passthrough(self):
+        """`-1` (infinite window) must not truncate the row indices."""
+        indices = self._make_indices()
+        out = startend_row_indices_add_sliding_window(indices, -1, 0.0, 2)
+        self.assertTrue(paddle.equal_all(out, indices).item())
+
+
+class TestGreedyGeneratorWindowSize(unittest.TestCase):
+    """Regression: GreedyGenerator must accept int sliding_window without
+    hitting `TypeError: 'int' object is not subscriptable`."""
+
+    def _make_model(self, sliding_window, window_attn_skip_freq=None):
+        cfg = SimpleNamespace(
+            num_hidden_layers=4,
+            sliding_window=sliding_window,
+            window_attn_skip_freq=window_attn_skip_freq,
+            head_wise_swa_ratio=0.0,
+            sequence_parallel=False,
+            apply_rope_fusion=False,
+            recompute_granularity=None,
+        )
+        return SimpleNamespace(config=cfg)
+
+    def test_int_sliding_window_inits_cache(self):
+        from paddlefleet.generation.greedy_generator import GreedyGenerator
+
+        gen = GreedyGenerator(self._make_model(512))
+        self.assertEqual(gen.window_size, 512)
+        self.assertEqual(gen.cache.window_size, 512)
+        self.assertTrue(all(gen.cache.swa_layers))
+
+    def test_tuple_sliding_window_inits_cache(self):
+        from paddlefleet.generation.greedy_generator import GreedyGenerator
+
+        gen = GreedyGenerator(self._make_model((512, 0)))
+        self.assertEqual(gen.window_size, 512)
+
+    def test_infinite_window_disables_truncation(self):
+        from paddlefleet.generation.greedy_generator import GreedyGenerator
+
+        gen = GreedyGenerator(self._make_model(-1))
+        self.assertIsNone(gen.window_size)
+
+    def test_no_sliding_window(self):
+        from paddlefleet.generation.greedy_generator import GreedyGenerator
+
+        gen = GreedyGenerator(self._make_model(None))
+        self.assertIsNone(gen.window_size)
 
 
 class TestAttentionMaskFunc(unittest.TestCase):

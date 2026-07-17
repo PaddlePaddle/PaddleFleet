@@ -49,6 +49,7 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.utils import (
     attention_mask_func,
+    get_sliding_window_left_size,
     startend_row_indices_add_sliding_window,
 )
 from paddlefleet.utils import divide
@@ -707,7 +708,9 @@ class DotProductAttention(FleetLayer):
                         )
                     if self.is_swa and use_mla:
                         extra_kwargs["mode"] = "contiguous_swap2p"
-                        extra_kwargs["window_size"] = self.sliding_window[0]
+                        extra_kwargs["window_size"] = (
+                            get_sliding_window_left_size(self.sliding_window)
+                        )
                         is_causal = False  # only support non-causal for flashmask_attention_cp
                         assert attn_mask_startend_row_indices.shape[-1] == 2
                 else:

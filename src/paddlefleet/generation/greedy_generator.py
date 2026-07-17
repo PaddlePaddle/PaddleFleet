@@ -44,7 +44,10 @@ from typing import TYPE_CHECKING
 
 import paddle
 
-from paddlefleet.transformer.utils import is_layer_window_attention
+from paddlefleet.transformer.utils import (
+    get_sliding_window_left_size,
+    is_layer_window_attention,
+)
 
 if TYPE_CHECKING:
     from paddlefleet.models.gpt.gpt_model import GPTModel
@@ -232,11 +235,14 @@ class GreedyGenerator:
                         sliding_window, window_attn_skip_freq, real_i
                     )
                 )
-        self.window_size = (
-            sliding_window[0]
-            if sliding_window and sliding_window[0] > 0
-            else None
-        )
+        # Extract the left (past) window size, supporting both int and tuple
+        # forms; a non-positive size (e.g. -1 "infinite window") disables
+        # KV-cache truncation.
+        self.window_size = None
+        if sliding_window:
+            left_window = get_sliding_window_left_size(sliding_window)
+            if left_window > 0:
+                self.window_size = left_window
         # head_wise_swa_ratio > 0 means some heads in SWA layers use full
         # attention; per-layer KV truncation would break those heads.
         head_wise_swa_ratio = getattr(cfg, "head_wise_swa_ratio", 0.0)

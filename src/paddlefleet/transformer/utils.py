@@ -30,19 +30,39 @@ def get_default_causal_mask(sq: int) -> paddle.Tensor:
     return paddle.triu(paddle.ones(sq, sq), diagonal=1).bool()
 
 
+def get_sliding_window_left_size(
+    sliding_window: int | tuple[int, int],
+) -> int:
+    """Return the left (past) window size for both accepted forms.
+
+    - int W          -> W          (HF causal one-sided semantics)
+    - (left, right)  -> left       (Fleet native two-sided semantics)
+
+    The caller decides how to treat non-positive results (`0` / `-1`), which
+    denote "no finite left window" (i.e. `-1` = infinite window).
+    """
+    if isinstance(sliding_window, int):
+        return sliding_window
+    return sliding_window[0]
+
+
 @lru_cache(maxsize=32)
 def get_sliding_window_causal_mask(sq, skv, sliding_window):
     """Create the equivalent attention mask for SWA in [sq, skv] shape.
 
     sliding_window: when int, use causal one-sided semantics (left=W, right=0);
                     when tuple, use native (left, right) two-sided semantics.
+    A negative left window (e.g. `-1`) denotes an infinite past window, which is
+    a plain causal mask (no left truncation).
     """
     m = paddle.ones(sq, skv, dtype=paddle.bool)
     if isinstance(sliding_window, int):
         left, right = sliding_window, 0
     else:
         left, right = sliding_window[0], sliding_window[1]
-    mu = paddle.triu(m, diagonal=skv - sq - left)
+    # left < 0 => infinite window: skip the upper-triangular (left) truncation
+    # so every query can attend to all past keys, yielding a causal mask.
+    mu = m if left < 0 else paddle.triu(m, diagonal=skv - sq - left)
     ml = paddle.tril(mu, diagonal=skv - sq + right)
     ml = ~ml
 
@@ -106,6 +126,10 @@ def startend_row_indices_add_sliding_window(
     """
     if not sliding_window:
         return startend_row_indices
+    window_size = get_sliding_window_left_size(sliding_window)
+    if window_size <= 0:
+        # -1 (infinite window) / 0 => no sliding-window truncation.
+        return startend_row_indices
     # construct sliding window mask
     bsz, heads, seq, num_vec = startend_row_indices.shape
     if num_vec not in [1, 2]:
@@ -119,9 +143,6 @@ def startend_row_indices_add_sliding_window(
             [1, kv_num_heads, 1, 1]
         )  # 扩展到多头，方便后续对每个头做不同的操作
 
-    window_size = (
-        sliding_window if isinstance(sliding_window, int) else sliding_window[0]
-    )
     LTS_SWA = (
         paddle.arange(window_size, seq + window_size, dtype=paddle.int32)
         .unsqueeze([0, 1])
