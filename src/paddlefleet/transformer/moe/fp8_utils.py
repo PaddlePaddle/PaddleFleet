@@ -786,32 +786,53 @@ class ExpertsGroupGemmContiguousNode:
         #   equivalent by hand -- promote both SwiGLU and the per-token router
         #   scale to fp32, then cast back to the original dtype once, replicating
         #   MG's "compute in fp32, round once"; otherwise keep the fused kernel.
-        # NOTE: this fp32 path hard-codes the SwiGLU (silu) formula, so it must
-        #   NOT be taken for GeGLU experts -- GeGLU falls through to its own
-        #   branch below, which uses gelu.
+        # NOTE: the fp32 path hard-codes the SwiGLU (silu) formula, so GeGLU
+        #   experts must NOT take it -- they use a dedicated gelu branch inside
+        #   the accuracy-compatible block (kept consistent with the non-
+        #   accuracy-compatible GeGLU branch below).
+        # NOTE: the SwiGLU fp32 path is additionally gated on is_split_group_gemm
+        #   to stay paired with the backward: bwd_down_input_bf16's fp32-autograd
+        #   branch also requires is_split_group_gemm, so grouped-gemm
+        #   (moe_expert_fusion=True) must keep the fused forward/backward pair
+        #   here -- otherwise forward would be fp32 round-once while backward
+        #   stays on the fused-kernel precision path. GeGLU is unaffected: its
+        #   forward is gelu on both paths and pairs with the analytic GeGLU
+        #   backward, which is not gated on is_split_group_gemm.
         # ==================================================================
-        if self.use_accuracy_compatible and self.activation_type != "geglu":
+        if self.use_accuracy_compatible and (
+            self.activation_type == "geglu" or self.is_split_group_gemm
+        ):
             x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
             probs = unzipped_probs
             if len(probs.shape) == 1:
                 probs = probs.unsqueeze(-1)
-            o2 = (
-                F.silu(x_glu.astype("float32"))
-                * x_linear.astype("float32")
-                * probs.astype("float32")
-            ).astype(o1.dtype)
-        elif self.activation_type == "geglu":
-            # GeGLU: gelu_tanh(gate) * up, then scale by probs
-            # F.gelu promotes bf16 to float32, cast back to bf16 for downstream ops
-            gate, up = paddle.chunk(o1, 2, dim=-1)
-            o2 = F.gelu(gate, approximate=True) * up
-            o2 = (o2 * unzipped_probs.unsqueeze(-1)).cast(o1.dtype)
-        elif self.clamp_value is not None and self.clamp_value > 0:
-            o2 = fused_swiglu_scale_forward(
-                o1, unzipped_probs, self.clamp_value
-            )
+            if self.activation_type == "geglu":
+                # GeGLU: gelu_tanh(gate) * up, then scale by probs. Keep the
+                # gelu math identical to the non-accuracy-compatible GeGLU
+                # branch below (and to bwd_down_input_bf16's GeGLU recompute)
+                # so forward and backward share one activation path.
+                o2 = (
+                    (F.gelu(x_glu, approximate=True) * x_linear) * probs
+                ).cast(o1.dtype)
+            else:
+                o2 = (
+                    F.silu(x_glu.astype("float32"))
+                    * x_linear.astype("float32")
+                    * probs.astype("float32")
+                ).astype(o1.dtype)
         else:
-            o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
+            if self.activation_type == "geglu":
+                # GeGLU: gelu_tanh(gate) * up, then scale by probs
+                # F.gelu promotes bf16 to float32, cast back to bf16 for downstream ops
+                gate, up = paddle.chunk(o1, 2, dim=-1)
+                o2 = F.gelu(gate, approximate=True) * up
+                o2 = (o2 * unzipped_probs.unsqueeze(-1)).cast(o1.dtype)
+            elif self.clamp_value is not None and self.clamp_value > 0:
+                o2 = fused_swiglu_scale_forward(
+                    o1, unzipped_probs, self.clamp_value
+                )
+            else:
+                o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
 
         if clear_o1:
             o1._clear_to_zero_allocation()
@@ -1064,7 +1085,9 @@ class ExpertsGroupGemmContiguousNode:
             )
             o2_s = o2_f32.detach().astype(o1.dtype)
             probs_grad = d_scale_f32.astype(unzipped_probs.dtype)
-        elif self.activation_type == "geglu":
+            return do1, o2_s, probs_grad
+
+        if self.activation_type == "geglu":
             # GeGLU forward recompute (needed for backward weight computation)
             gate, up = paddle.chunk(o1, 2, dim=-1)
             gate_act = F.gelu(gate, approximate=True)
