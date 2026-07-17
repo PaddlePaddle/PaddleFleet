@@ -1084,6 +1084,14 @@ class ExpertsGroupGemmContiguousNode:
                 bw_w2_scale.contiguous().transpose([0, 2, 1]).contiguous()
             )
 
+        # Pre-allocate do2_s before fp8 quant to avoid fragmentation:
+        # do2_s (long-lived, inplace becomes o2_s) should be at lower address,
+        # so that the short-lived unzipped_grad_fp8 is freed at the tail.
+        do2_s = paddle.empty(
+            [unzipped_grad.shape[0], bw_w2_quant.shape[1]],
+            dtype=unzipped_grad.dtype,
+        )
+
         # compute gemm
         if self.use_ue8m0 and self.moe_expert_fusion:
             unzipped_grad_fp8, unzipped_grad_scale = (
@@ -1107,10 +1115,6 @@ class ExpertsGroupGemmContiguousNode:
                 )
             )
 
-        do2_s = paddle.empty(
-            [unzipped_grad_fp8.shape[0], bw_w2_quant.shape[1]],
-            dtype=unzipped_grad.dtype,
-        )
         if numpy.prod(unzipped_grad_fp8.shape) != 0:
             if not self.moe_expert_fusion:
                 split_group_gemm(

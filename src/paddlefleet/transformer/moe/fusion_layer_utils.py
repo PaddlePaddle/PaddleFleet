@@ -895,6 +895,138 @@ class MlpNode:
                         getattr(pw, grad_attr)._slice(lid, lid + 1),
                     )
 
+    def _gate_up_out_dim(self, hidden_size):
+        """Return the gate_up projection output width
+        Two expert layouts, both with the output width as the last weight dim:
+          - per-expert (non-fused): up_gate_proj.weight [H, 2*inter]
+          - grouped deep_gemm:      grouped_gemm_experts.weight1 [E, H, 2*inter]
+        Falls back to 2 * hidden_size if the weight cannot be resolved.
+        """
+        # per-expert (non-fused) path
+        if self.experts is not None:
+            for expert in self.experts:
+                if expert is None:
+                    continue
+                w = getattr(
+                    getattr(expert, "up_gate_proj", None), "weight", None
+                )
+                if w is not None and len(w.shape) >= 1:
+                    return int(w.shape[-1])
+
+        # grouped deep_gemm path (stacked weight1)
+        nodes = self.experts_group_gemm_node
+        node = nodes[0] if isinstance(nodes, list) else nodes
+        parent = getattr(node, "grouped_gemm_experts", None)
+        w1 = getattr(parent, "weight1", None) if parent is not None else None
+        if w1 is not None and len(w1.shape) >= 1:
+            return int(w1.shape[-1])
+
+        return hidden_size * 2
+
+    def _bwd_pre_permute_feature_sizes(
+        self, hidden_size, gate_up_out_dim, inter_dim
+    ):
+        """Byte-size of each concurrent backward buffer per FP8_ALIGN unzipped
+        tokens, for find_max_concurrent_subbatch_size.
+        """
+        gemm_node = self.experts_group_gemm_node
+        if isinstance(gemm_node, list):
+            gemm_node = gemm_node[0] if gemm_node else None
+        use_bf16_wgrad = getattr(gemm_node, "use_bf16_gemm_weight_grad", False)
+        # Mirror the actual swiglu-bwd op dispatch (see bwd_down_input_fp8):
+        #   clamp_value>0          -> fused_swiglu_weighted_clamp_bwd (out-of-place,
+        #                             do1 = empty_like(o1), a separate buffer)
+        #   USE_INPLACE_SWIGLU_BWD -> _fused_swiglu_probs_bwd inplace (do1 reuses o1)
+        #   otherwise              -> fused_swiglu_weighted_bwd (out-of-place)
+        # so clamp forces the out-of-place peak even when USE_INPLACE_SWIGLU_BWD.
+        clamp_value = getattr(gemm_node, "clamp_value", None)
+        clamp_active = clamp_value is not None and clamp_value > 0
+        used_inplace = USE_INPLACE_SWIGLU_BWD and not clamp_active
+
+        if use_bf16_wgrad:
+            if used_inplace:
+                # do1 reuses o1 buffer (inplace), peak at dw1 dequant:
+                #   out_grad(H*2) + o1/do1(inter*2*2) + o2_s(inter*2)
+                #   + input_fp8(H) + dequant_x(H*2)
+                return [
+                    FP8_ALIGN
+                    * hidden_size
+                    * 2,  # out_grad (permuted_grad) [N,H] bf16
+                    FP8_ALIGN
+                    * gate_up_out_dim
+                    * 2,  # o1/do1 [N,inter*2] bf16 (inplace)
+                    FP8_ALIGN
+                    * inter_dim
+                    * 2,  # o2_s [N,inter] bf16 (held for dw2)
+                    FP8_ALIGN
+                    * hidden_size,  # permuted_input [N,H] fp8 (alive at dw1)
+                    FP8_ALIGN
+                    * hidden_size
+                    * 2,  # dw1 dequant x [N,H] bf16 (the peak)
+                ]
+            else:
+                # do1 is a separate buffer (out-of-place), o1 stays alive:
+                #   out_grad(H*2) + o1(inter*2*2) + do1(inter*2*2) + o2_s(inter*2)
+                #   + input_fp8(H) + dequant_x(H*2)
+                return [
+                    FP8_ALIGN
+                    * hidden_size
+                    * 2,  # out_grad (permuted_grad) [N,H] bf16
+                    FP8_ALIGN * gate_up_out_dim * 2,  # o1 [N,inter*2] bf16
+                    FP8_ALIGN
+                    * gate_up_out_dim
+                    * 2,  # do1 [N,inter*2] bf16 (out-of-place)
+                    FP8_ALIGN
+                    * inter_dim
+                    * 2,  # o2_s [N,inter] bf16 (held for dw2)
+                    FP8_ALIGN
+                    * hidden_size,  # permuted_input [N,H] fp8 (alive at dw1)
+                    FP8_ALIGN
+                    * hidden_size
+                    * 2,  # dw1 dequant x [N,H] bf16 (the peak)
+                ]
+
+        # fp8 wgrad path
+        if used_inplace:
+            return [
+                FP8_ALIGN
+                * hidden_size
+                * 2,  # out_grad (permuted_grad) [N,H] bf16
+                FP8_ALIGN
+                * gate_up_out_dim
+                * 2,  # o1/do1 [N,inter*2] bf16 (inplace)
+                FP8_ALIGN * inter_dim * 2,  # o2_s [N,inter] bf16
+                FP8_ALIGN * hidden_size,  # input_x_t_fp8 [N,H] fp8
+                FP8_ALIGN * gate_up_out_dim,  # do1_t_fp8 [N,inter*2] fp8
+            ]
+        else:
+            return [
+                FP8_ALIGN
+                * hidden_size
+                * 2,  # out_grad (permuted_grad) [N,H] bf16
+                FP8_ALIGN * gate_up_out_dim * 2,  # o1 [N,inter*2] bf16
+                FP8_ALIGN
+                * gate_up_out_dim
+                * 2,  # do1 [N,inter*2] bf16 (out-of-place)
+                FP8_ALIGN * inter_dim * 2,  # o2_s [N,inter] bf16
+                FP8_ALIGN * hidden_size,  # input_x_t_fp8 [N,H] fp8
+                FP8_ALIGN * gate_up_out_dim,  # do1_t_fp8 [N,inter*2] fp8
+            ]
+
+    def _fwd_pre_permute_feature_sizes(
+        self, hidden_size, gate_up_out_dim, inter_dim, unpermute_tmp_per_N
+    ):
+        """Byte-size of each concurrent forward buffer per FP8_ALIGN unzipped
+        tokens, for find_max_concurrent_subbatch_size.
+        """
+        return [
+            # max(o1 [N,2*inter], o3 [N,H]) bf16 (not concurrent: clear_o1)
+            FP8_ALIGN * max(gate_up_out_dim * 2, hidden_size * 2),
+            FP8_ALIGN * hidden_size,  # permuted_input [N,H] fp8
+            FP8_ALIGN * inter_dim,  # o2_fp8 [N,inter] fp8
+            FP8_ALIGN * unpermute_tmp_per_N,  # unpermute tmp (per-N 折算)
+        ]
+
     def fallback_to_no_expert_fusion(self):
         """
         Fallback from expert_fusion=True to per-expert mode, splitting the fused
@@ -1549,30 +1681,19 @@ class MlpNode:
         final_output = paddle.empty([S, hidden_size], dtype=output_dtype)
 
         # Determine chunk_size based on VMM free memory
-        #
-        # FWD per-unzipped-token peak memory (实测验证):
-        #   permuted_input [N,H] fp8:       H      (始终活着直到 chunk 结束)
-        #   o1 [N, inter*2] bf16:           2H     (gate_up 输出，clear_o1 后释放)
-        #   o2_fp8 [N, inter] fp8:          H/2    (swiglu+quant 输出)
-        #   o3 [N,H] bf16:                  2H     (down proj 输出)
-        #   unpermute tmp [chunk_size,H] bf16: 2H/ratio  (折算到 per-N-token)
-        # 并存峰值在 unpermute 时: input(H) + o3(2H) + unpermute_tmp(2H/ratio)
-        # o1 和 o3 不并存(clear_o1)，取 max(o1,o3) = 2H
-        # 实测: 不切分时 ~4.5H，切分后因 unpermute tmp 占比增大可达 ~5-6H
-        #
-        # unpermute tmp 折算: chunk_size = N_chunk / global_ratio
+        # unpermute tmp: chunk_size = N_chunk / global_ratio
         # → unpermute_tmp per N token = H * 2 / global_ratio (bytes)
+        gate_up_out_dim = self._gate_up_out_dim(hidden_size)  # == inter*2
+        inter_dim = max(gate_up_out_dim // 2, 1)
         _unpermute_tmp_per_N = (
             int(hidden_size * 2 / global_ratio) if global_ratio > 0 else 0
         )
+        fwd_feature_sizes = self._fwd_pre_permute_feature_sizes(
+            hidden_size, gate_up_out_dim, inter_dim, _unpermute_tmp_per_N
+        )
         max_N_chunk = (
             find_max_concurrent_subbatch_size(
-                [
-                    FP8_ALIGN * hidden_size * 2,  # o1 或 o3 [N, 2H] bf16
-                    FP8_ALIGN * hidden_size,  # permuted_input [N, H] fp8
-                    FP8_ALIGN * hidden_size // 2,  # o2_fp8 [N, inter] fp8
-                    FP8_ALIGN * _unpermute_tmp_per_N,  # unpermute tmp 折算
-                ],
+                fwd_feature_sizes,
                 upper=N_total // FP8_ALIGN if N_total > 0 else 1,
             )
             * FP8_ALIGN
@@ -1601,6 +1722,15 @@ class MlpNode:
         initial_chunk_size = chunk_size
         single_chunk = chunk_size >= S
         num_chunks = 0
+
+        # Capture decision-time memory state for diagnostics
+        if not single_chunk:
+            _decision_free = _allocator_total_free
+            _decision_top5_mb = sorted(
+                (s / 1024 / 1024 for s, _ in _free_blocks_now),
+                reverse=True,
+            )[:5]
+
         while sb_start < S:
             sb_end = min(sb_start + chunk_size, S)
 
@@ -1646,13 +1776,7 @@ class MlpNode:
             if N_chunk > 0 and not single_chunk:
                 max_N_now = (
                     find_max_concurrent_subbatch_size(
-                        [
-                            FP8_ALIGN * hidden_size * 2,  # o1 或 o3
-                            FP8_ALIGN * hidden_size,  # permuted_input
-                            FP8_ALIGN * hidden_size // 2,  # o2_fp8
-                            FP8_ALIGN
-                            * _unpermute_tmp_per_N,  # unpermute tmp 折算
-                        ],
+                        fwd_feature_sizes,
                         upper=N_chunk // FP8_ALIGN,
                     )
                     * FP8_ALIGN
@@ -1704,31 +1828,9 @@ class MlpNode:
                 gemm_node.input_fp8 = permuted_tokens
                 gemm_node.input_scale = permuted_scale
 
-                if self.moe_subbatch_diag:
-                    paddle.device.synchronize()
-                    _gemm_free_before = sum(
-                        s for s, _ in allocator_free_block_info()
-                    )
-
                 expert_out = gemm_node.forward(
                     None, permuted_probs, padded_chunk_tpe
                 )
-
-                if self.moe_subbatch_diag:
-                    paddle.device.synchronize()
-                    _gemm_free_after = sum(
-                        s for s, _ in allocator_free_block_info()
-                    )
-                    _gemm_net = _gemm_free_before - _gemm_free_after
-                    _N_chunk = sum(padded_chunk_tpe)
-                    logger.info(
-                        "[GEMM_NET_FWD] S_chunk=%d, N_chunk=%d, "
-                        "net_consumed_mb=%.1f, net_per_token_bytes=%d",
-                        sb_end - sb_start,
-                        _N_chunk,
-                        _gemm_net / 1048576,
-                        _gemm_net // max(_N_chunk, 1),
-                    )
 
                 # Cleanup gemm node state
                 gemm_node.input_fp8 = None
@@ -1758,31 +1860,9 @@ class MlpNode:
                 # Group gemm (BF16 path): pass input directly
                 gemm_node = self.experts_group_gemm_node
 
-                if self.moe_subbatch_diag:
-                    paddle.device.synchronize()
-                    _gemm_free_before = sum(
-                        s for s, _ in allocator_free_block_info()
-                    )
-
                 expert_out = gemm_node.forward(
                     permuted_tokens, permuted_probs, padded_chunk_tpe
                 )
-
-                if self.moe_subbatch_diag:
-                    paddle.device.synchronize()
-                    _gemm_free_after = sum(
-                        s for s, _ in allocator_free_block_info()
-                    )
-                    _gemm_net = _gemm_free_before - _gemm_free_after
-                    _N_chunk = sum(padded_chunk_tpe)
-                    logger.info(
-                        "[GEMM_NET_FWD] S_chunk=%d, N_chunk=%d, "
-                        "net_consumed_mb=%.1f, net_per_token_bytes=%d",
-                        sb_end - sb_start,
-                        _N_chunk,
-                        _gemm_net / 1048576,
-                        _gemm_net // max(_N_chunk, 1),
-                    )
 
                 # Cleanup gemm node state
                 gemm_node.input_fp8 = None
@@ -1808,6 +1888,21 @@ class MlpNode:
                     (permuted_tokens.detach(), permuted_scale, chunk_rowmap)
                 )
                 self._pre_permute_chunk_bounds.append((sb_start, sb_end))
+
+            # Per-chunk diagnostic
+            if not single_chunk:
+                logger.info(
+                    "[AutoSubbatch PRE_PERMUTE FWD] chunk %d/%d done: "
+                    "sb=[%d,%d), N_chunk=%d, decision_free_mb=%.1f, "
+                    "decision_top5_mb=[%s]",
+                    num_chunks + 1,
+                    (S + initial_chunk_size - 1) // initial_chunk_size,
+                    sb_start,
+                    sb_end,
+                    N_chunk,
+                    _decision_free / 1024 / 1024,
+                    ", ".join(f"{b:.1f}" for b in _decision_top5_mb),
+                )
 
             # Advance
             sb_start = sb_end
@@ -2205,23 +2300,6 @@ class MlpNode:
             self._pre_permute_cached_chunks is not None
             and len(self._pre_permute_cached_chunks) > 0
         )
-
-        # Determine backward peak per token (bytes per unzipped token in permuted space)
-        #
-        # BWD per-unzipped-token peak memory (实测验证，稳定 ~4H):
-        #   recompute o1 [N, inter*2] bf16:   2H   (或 cached o1，同样大小)
-        #   unzipped_grad_fp8 [N,H] fp8:      H    (out_grad quant 后)
-        #   swiglu_bwd 临时 (o2_s) [N,inter] bf16: H  (峰值时刻)
-        # 峰值在 swiglu_bwd 执行时: o1(2H) + grad_fp8(H) + swiglu_tmp(H) = 4H
-        # inplace swiglu 让 do1 复用 o1 buffer，不额外分配
-        # 加 overhead (scales, padding) 取 5H 作为保守估计
-        if USE_INPLACE_SWIGLU_BWD:
-            bwd_peak_per_token = hidden_size * 5  # 实测 ~4H，保守取 5H
-        else:
-            bwd_peak_per_token = (
-                hidden_size * 7
-            )  # out-of-place: do1 单独分配 +2H
-
         # Pre-allocate final grads as zeros so cached backward leaves
         # all-empty chunks with correct zero gradients.
         final_input_grad = paddle.zeros(
@@ -2231,24 +2309,36 @@ class MlpNode:
             [S, self.router_topk], dtype=paddle.float32
         )
 
+        # Backward per-unzipped-token peak buffers (bytes per FP8_ALIGN tokens),
+        gate_up_out_dim = self._gate_up_out_dim(hidden_size)  # == inter*2
+        inter_dim = max(gate_up_out_dim // 2, 1)
+        bwd_feature_sizes = self._bwd_pre_permute_feature_sizes(
+            hidden_size, gate_up_out_dim, inter_dim
+        )
+
         if use_cached:
-            # Check if backward peak fits in current free memory;
-            # if not, discard cache and fall back to recompute path
+            # Check if backward peak fits in current free memory (fragmentation
+            # aware); if not, discard cache and fall back to recompute path
             # which can independently decide smaller chunk boundaries.
             max_chunk_S = max(
                 sb_end - sb_start
                 for sb_start, sb_end in self._pre_permute_chunk_bounds
             )
             max_N_estimate = int(max_chunk_S * global_ratio)
-            need_bytes = max_N_estimate * bwd_peak_per_token
-            free_bytes = sum(s for s, _ in allocator_free_block_info())
-            if need_bytes > free_bytes:
+            max_N_fit = (
+                find_max_concurrent_subbatch_size(
+                    bwd_feature_sizes,
+                    upper=max(max_N_estimate // FP8_ALIGN, 1),
+                )
+                * FP8_ALIGN
+            )
+            if max_N_fit < max_N_estimate:
                 logger.info(
                     "[AutoSubbatch PRE_PERMUTE BWD] cached path memory "
-                    "insufficient (need_mb=%.1f, free_mb=%.1f), "
+                    "insufficient (need_N=%d, fit_N=%d), "
                     "falling back to recompute path",
-                    need_bytes / 1024 / 1024,
-                    free_bytes / 1024 / 1024,
+                    max_N_estimate,
+                    max_N_fit,
                 )
                 self._pre_permute_cached_chunks = None
                 self._pre_permute_chunk_bounds = None
@@ -2361,41 +2451,16 @@ class MlpNode:
             )
             _effective_free = _free_before_chunk_calc
 
-            # BWD recompute path: per-unzipped-token peak (实测验证 ~4H)
-            #
-            # 峰值在 swiglu_bwd 时刻并存的 buffers:
-            #   recompute o1 [N, inter*2] bf16:    2H
-            #   unzipped_grad_fp8 [N,H] fp8:       H
-            #   swiglu_bwd 临时 (o2_s/do2_s):      H  (inplace) / 3H (out-of-place)
-            # inplace total = 4H, out-of-place = 6H
-            # 保守 +1H 余量 → 5H / 7H
-            if USE_INPLACE_SWIGLU_BWD:
-                bwd_feature_sizes = [
-                    FP8_ALIGN
-                    * hidden_size
-                    * 2,  # o1 [N, inter*2] bf16 (最大 buffer)
-                    FP8_ALIGN * hidden_size,  # unzipped_grad_fp8 [N,H] fp8
-                    FP8_ALIGN * hidden_size,  # swiglu_bwd 临时 [N, inter] bf16
-                    FP8_ALIGN
-                    * hidden_size,  # permuted_input [N,H] fp8 (recompute 需要)
-                ]
-            else:
-                bwd_feature_sizes = [
-                    FP8_ALIGN * hidden_size * 2,  # o1 [N, inter*2] bf16
-                    FP8_ALIGN
-                    * hidden_size
-                    * 2,  # do1 [N, inter*2] bf16 (单独分配)
-                    FP8_ALIGN * hidden_size,  # unzipped_grad_fp8 [N,H] fp8
-                    FP8_ALIGN * hidden_size,  # swiglu_bwd 临时
-                    FP8_ALIGN * hidden_size,  # permuted_input [N,H] fp8
-                ]
-            _bytes_per_unit = sum(bwd_feature_sizes)
-            if _effective_free > 0 and _bytes_per_unit > 0:
-                max_N_chunk = (
-                    int(_effective_free // _bytes_per_unit) * FP8_ALIGN
+            # BWD recompute path chunk sizing: fragmentation-aware, using the
+            # shared bwd_feature_sizes (real gate_up/inter widths + dx output),
+            # mirroring the forward path's find_max_concurrent_subbatch_size.
+            max_N_chunk = (
+                find_max_concurrent_subbatch_size(
+                    bwd_feature_sizes,
+                    upper=N_total // FP8_ALIGN if N_total > 0 else 1,
                 )
-            else:
-                max_N_chunk = 0
+                * FP8_ALIGN
+            )
             if max_N_chunk > 0 and global_ratio > 0:
                 chunk_size = int(max_N_chunk / global_ratio)
             else:
@@ -2421,18 +2486,13 @@ class MlpNode:
             single_chunk = chunk_size >= S
             num_chunks = 0
 
-            logger.info(
-                "[AutoSubbatch PRE_PERMUTE BWD] recompute path start: "
-                "S=%d, N_total=%d, chunk_size=%d, free_mb=%.1f, "
-                "effective_free_mb=%.1f, "
-                "num_free_blocks=%d",
-                S,
-                N_total,
-                chunk_size,
-                _free_before_chunk_calc / 1024 / 1024,
-                _effective_free / 1024 / 1024,
-                len(_free_before_chunk_blocks),
-            )
+            # Capture decision-time memory state for diagnostics
+            if not single_chunk:
+                _decision_free = _free_before_chunk_calc
+                _decision_top5_mb = sorted(
+                    (s / 1024 / 1024 for s, _ in _free_before_chunk_blocks),
+                    reverse=True,
+                )[:5]
 
             while sb_start < S:
                 sb_end = min(sb_start + chunk_size, S)
@@ -2464,15 +2524,22 @@ class MlpNode:
                 ]
                 N_chunk = sum(padded_chunk_tpe)
 
-                # Memory check: skip when single_chunk (initial estimate covers it)
+                # Memory recheck: fragmentation-aware, mirroring the forward
+                # path. Skip when single_chunk (the initial fragmentation-aware
+                # estimate already covers the whole-S case).
                 if N_chunk > 0 and not single_chunk:
-                    need_bytes = N_chunk * bwd_peak_per_token
-                    free_bytes = sum(s for s, _ in allocator_free_block_info())
+                    max_N_now = (
+                        find_max_concurrent_subbatch_size(
+                            bwd_feature_sizes,
+                            upper=N_chunk // FP8_ALIGN,
+                        )
+                        * FP8_ALIGN
+                    )
                     if (
-                        need_bytes > free_bytes
+                        max_N_now < N_chunk
                         and chunk_size > num_experts * FP8_ALIGN
                     ):
-                        shrink_factor = free_bytes / need_bytes * 0.85
+                        shrink_factor = max_N_now / N_chunk * 0.85
                         chunk_size = int(chunk_size * shrink_factor)
                         chunk_size = (chunk_size // FP8_ALIGN) * FP8_ALIGN
                         chunk_size = max(chunk_size, num_experts * FP8_ALIGN)
@@ -2536,6 +2603,15 @@ class MlpNode:
                             do_gather=True,
                             using_ue8m0_scale=recompute_ue8m0,
                         )
+                    # Last/only chunk: the un-permuted dispatched source is now
+                    # fully consumed. Release it before gemm_node.backward so the
+                    # dw1 fused_act_dequant peak no longer holds both the source
+                    # [S,H] fp8 and the freshly-permuted permuted_input [N,H] fp8
+                    # (single-chunk otherwise pays an extra 1H).
+                    if sb_end >= S:
+                        del chunk_input_fp8, chunk_input_scale
+                        self.hs_2d_dispatched_fp8 = None
+                        self.hs_2d_dispatched_scale = None
                 else:
                     # BF16 path: re-permute BF16 input
                     chunk_input_bf16 = self.hs_2d_dispatched_bf16[
@@ -2559,6 +2635,11 @@ class MlpNode:
                             using_ue8m0_scale=False,
                         )
                     permuted_input_scale = None
+                    # Last/only chunk: release the un-permuted BF16 source before
+                    # gemm backward (mirrors the fp8 branch).
+                    if sb_end >= S:
+                        del chunk_input_bf16
+                        self.hs_2d_dispatched_bf16 = None
 
                 # Step 3: Group gemm backward (all experts in one call)
                 gemm_node = self.experts_group_gemm_node
@@ -2598,24 +2679,25 @@ class MlpNode:
                 final_input_grad[sb_start:sb_end] = chunk_input_grad
                 dispatched_probs_grad[sb_start:sb_end] = chunk_probs_grad
 
+                # Per-chunk diagnostic
+                if not single_chunk:
+                    logger.info(
+                        "[AutoSubbatch PRE_PERMUTE BWD] chunk %d/%d done: "
+                        "sb=[%d,%d), N_chunk=%d, decision_free_mb=%.1f, "
+                        "decision_top5_mb=[%s]",
+                        num_chunks + 1,
+                        (S + chunk_size - 1) // chunk_size,
+                        sb_start,
+                        sb_end,
+                        N_chunk,
+                        _decision_free / 1024 / 1024,
+                        ", ".join(f"{b:.1f}" for b in _decision_top5_mb),
+                    )
+
                 # Advance
                 sb_start = sb_end
                 chunk_size = initial_chunk_size
                 num_chunks += 1
-
-                # Per-chunk diagnostic
-                _chunk_free_blocks = allocator_free_block_info()
-                _chunk_free = sum(s for s, _ in _chunk_free_blocks)
-                logger.info(
-                    "[AutoSubbatch PRE_PERMUTE BWD] chunk %d done: "
-                    "sb_end=%d, N_chunk=%d, free_mb=%.1f, "
-                    "num_free_blocks=%d",
-                    num_chunks,
-                    sb_end,
-                    N_chunk,
-                    _chunk_free / 1024 / 1024,
-                    len(_chunk_free_blocks),
-                )
 
                 # Cleanup
                 del (
