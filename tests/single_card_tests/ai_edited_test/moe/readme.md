@@ -1,40 +1,22 @@
-# AI-Edited MoE Unit Tests
+# MoE Tests / 混合专家模块测试
 
-This directory contains unit tests for the MoE (Mixture of Experts) and related transformer modules in PaddleFleet.
+Unit tests for PaddleFleet Mixture of Experts layer, router, expert, token dispatcher, and related utilities.
+PaddleFleet 混合专家层、路由器、专家、Token 调度器及相关工具的单元测试。
 
 ## Test Files
 
-| Test File | Source File | Description |
-|-----------|-----------|-------------|
-| `test_ai_fp8_utils.py` | `src/paddlefleet/transformer/moe/fp8_utils.py` | FP8 utilities for MoE expert computation |
-| `test_ai_moe_layer.py` | `src/paddlefleet/transformer/moe/moe_layer.py` | MoE layer orchestration |
-| `test_ai_moe_router.py` | `src/paddlefleet/transformer/moe/moe_router.py` | MoE token routing logic |
-| `test_ai_moe_utils.py` | `src/paddlefleet/transformer/moe/moe_utils.py` | MoE utility functions (permute, unpermute, etc.) |
-| `test_ai_moe_expert.py` | `src/paddlefleet/transformer/moe/moe_expert.py` | Grouped and standard MLP expert implementations |
-| `test_ai_token_dispatcher.py` | `src/paddlefleet/transformer/moe/token_dispatcher.py` | Token dispatch/combine for expert parallelism |
-| `test_ai_fused_a2a.py` | `src/paddlefleet/transformer/moe/fused_a2a.py` | Fused all-to-all communication kernels |
-| `test_ai_fusion_layer_utils.py` | `src/paddlefleet/transformer/moe/fusion_layer_utils.py` | Fusion layer utilities (zip/unzip nodes) |
-| `test_ai_multi_token_prediction.py` | `src/paddlefleet/transformer/multi_token_prediction.py` | Multi-Token Prediction (MTP) layer |
-| `test_ai_multi_latent_attention.py` | `src/paddlefleet/transformer/multi_latent_attention.py` | Multi-Latent Attention (MLA) layer |
-| `test_ai_block_attn_res.py` | `src/paddlefleet/transformer/block_attn_res.py` | Block Attention Residuals |
-
-## Running Tests
-
-```bash
-# Run all tests in this directory
-python -m pytest tests/single_card_tests/ai_edited_test/moe/ -v
-
-# Run a single test file
-python -m pytest tests/single_card_tests/ai_edited_test/moe/test_ai_fp8_utils.py -v
-
-# Run with unittest
-python -m unittest tests.single_card_tests.ai_edited_test.moe.test_ai_fp8_utils
-```
-
-## Design Principles
-
-- **unittest.TestCase style** with standard Python unittest framework
-- **Distributed operations mocked** to allow single-card testing
-- **No CUDA required** for most tests (distributed/CUDA-dependent paths are mocked)
-- **English-only comments** in test files
-- **PaddlePaddle Apache 2.0 License** header in each file
+| File | Description / 描述 |
+|------|-------------------|
+| `test_ai_block_attn_res.py` | Unit tests for block_attn_res module / 测试 block attention residual 模块 |
+| `test_ai_fused_a2a.py` | Unit tests for fused_a2a module / 测试融合 All-to-All 通信模块 |
+| `test_ai_fusion_layer_utils.py` | Unit tests for fusion_layer_utils module / 测试融合层工具模块 |
+| `test_ai_moe_expert.py` | Unit tests for moe_expert module / 测试 MoE 专家模块 |
+| `test_ai_moe_fp8_utils.py` | Unit tests for fp8_utils module / 测试 MoE FP8 工具模块 |
+| `test_ai_moe_layer.py` | Unit tests for moe_layer module / 测试 MoE 层模块 |
+| `test_ai_moe_layer_extra.py` | Extra tests for MoELayer expert parallel initialization / MoE 层专家并行初始化额外测试 |
+| `test_ai_moe_router.py` | Unit tests for moe_router module / 测试 MoE 路由器模块 |
+| `test_ai_moe_utils.py` | Unit tests for moe_utils module / 测试 MoE 工具模块 |
+| `test_ai_multi_token_prediction.py` | Unit tests for multi_token_prediction module / 测试多 Token 预测模块 |
+| `test_ai_token_dispatcher.py` | Unit tests for token_dispatcher module / 测试 Token 调度器模块 |
+| `test_kgroupgemm.py` | Tests for k-grouped gemm code paths including fp8+deep_gemm / 测试 k-grouped GEMM 代码路径 |
+| `test_latent_moe.py` | Tests for latent MoE config field defaults and validation / 测试潜在 MoE 配置默认值与校验 |

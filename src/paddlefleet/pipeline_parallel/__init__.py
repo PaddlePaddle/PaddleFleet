@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from paddle.distributed.fleet.meta_parallel.parallel_layers.pp_layers import (
+    PipelineLayer,
+)
+
 from .pp_utils.forward_backward_overlap_utils import (
     ScheduleChunk,
     ScheduleNode,

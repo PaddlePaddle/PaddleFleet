@@ -18,8 +18,7 @@ import unittest
 import numpy as np
 import paddle
 from paddle.nn.functional import moe_permute
-
-from paddlefleet.ops import tokens_unzip_gather
+from paddlefleet_ops import tokens_unzip_gather
 
 
 def fabricate_dispatch_result(

@@ -255,6 +255,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         self.use_accuracy_compatible = getattr(
             config, "use_accuracy_compatible", False
         )
+        self.config = config
         self.world_size = get_pg_size(self.tp_group)
 
         # Allocate weights and initialize.
@@ -296,6 +297,15 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         Args:
             input_ (paddle.Tensor): Input tensor.
         """
+        if getattr(self.config, "gpt_model_use_experimental_version", False):
+            return vocab_parallel_embedding(
+                input_,
+                self.weight,
+                vocab_start_index=self.vocab_start_index,
+                num_embeddings=self.num_embeddings,
+                mp_group=self.tp_group,
+            )
+
         if get_pg_size(self.tp_group) > 1:
             # Build the mask.
             input_mask = (input_ < self.vocab_start_index) | (
@@ -387,6 +397,7 @@ def linear_with_frozen_weight(
     grad_output_buffer: list[paddle.Tensor] | None = None,
     wgrad_deferral_limit: None = None,
     async_grad_allreduce: bool | None = None,
+    use_accuracy_compatible: bool = False,
 ) -> paddle.Tensor:
     """Linear layer execution with weight.requires_grad == False.
 
@@ -494,6 +505,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
+        # Cache input.stop_gradient: ``_new_shared_tensor()`` does not
+        # necessarily preserve this flag, and Paddle's PyLayer contract
+        # requires backward to return None at position 0 iff the original
+        # forward input had stop_gradient=True.
+        ctx.input_stop_gradient = bool(input.stop_gradient)
 
         if sequence_parallel:
             dim_size = list(input.shape)
@@ -527,6 +543,16 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         handle = None
         tp_group = ctx.tp_group
 
+        # Paddle PyLayer contract: when a forward Tensor input has
+        # stop_gradient=True, the corresponding backward return slot MUST be
+        # None. The "input" position (0) is the only one that can carry
+        # stop_gradient=True in normal usage (weight/bias are trainable);
+        # callers that intentionally feed a detached tensor (e.g. for
+        # gradient isolation) rely on this. We must skip grad_input compute
+        # and any input-side collective (all_reduce / reduce_scatter) in
+        # that case, while still computing grad_weight / grad_bias.
+        input_needs_grad = not ctx.input_stop_gradient
+
         if ctx.gradient_accumulation_fusion:
             weight.main_grad = main_grad
 
@@ -556,7 +582,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 total_input = all_gather_buffer
             else:
                 total_input = input
-        grad_input = grad_output.matmul(weight.t())
+        if input_needs_grad:
+            grad_input = grad_output.matmul(weight.t())
+        else:
+            grad_input = None
 
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
@@ -567,7 +596,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 grad_output, total_input
             )
 
-        if ctx.allreduce_dgrad:
+        if ctx.allreduce_dgrad and input_needs_grad:
             # Asynchronous all-reduce
             handle = dist.all_reduce(grad_input, group=tp_group, sync_op=False)
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
@@ -575,16 +604,19 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         if ctx.sequence_parallel:
             assert not ctx.allreduce_dgrad
-            dim_size = list(input.shape)
-            sub_grad_input = paddle.empty(
-                dim_size, dtype=input.dtype, requires_grad=False
-            )
-            # reduce_scatter
-            handle = _reduce_scatter_base(
-                sub_grad_input, grad_input, group=tp_group, sync_op=False
-            )
-            # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
-            # reduce scatter is scheduled before the weight gradient computation
+            if input_needs_grad:
+                dim_size = list(input.shape)
+                sub_grad_input = paddle.empty(
+                    dim_size, dtype=input.dtype, requires_grad=False
+                )
+                # reduce_scatter
+                handle = _reduce_scatter_base(
+                    sub_grad_input, grad_input, group=tp_group, sync_op=False
+                )
+                # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
+                # reduce scatter is scheduled before the weight gradient computation
+            else:
+                sub_grad_input = None
 
         if ctx.gradient_accumulation_fusion:
             if wgrad_compute:
@@ -629,7 +661,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
-            handle.wait()
+            if input_needs_grad:
+                handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
             if use_bias:
@@ -637,7 +670,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 return sub_grad_input, grad_weight
 
-        if ctx.allreduce_dgrad:
+        if ctx.allreduce_dgrad and input_needs_grad:
             handle.wait()
 
         # PyLayer requires the number of output in backward
@@ -1028,6 +1061,128 @@ class Linear(paddle.nn.Layer):
         )
 
 
+def column_sequence_parallel_linear(
+    x,
+    weight,
+    bias=None,
+    mp_group=None,
+):
+    """Functional version of ColumnSequenceParallelLinear using fused_linear.
+
+    Forward: all-gather input along seq dim -> fused_linear.
+    Input shape: [seq/mp, batch, hidden], output shape: [seq, batch, hidden/mp].
+
+    Args:
+        x: Input tensor (sequence-parallel partitioned).
+        weight: Weight tensor, shape [in_features, out_features_per_partition].
+        bias: Bias tensor, shape [out_features_per_partition], or None.
+        mp_group: Tensor parallel process group.
+
+    Returns:
+        Output tensor.
+    """
+    from paddle.incubate.nn.functional import fused_linear
+
+    from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
+        AllGatherOpLegacy,
+    )
+
+    is_mp = mp_group is not None and mp_group.nranks > 1
+
+    if is_mp:
+        input_parallel = AllGatherOpLegacy.apply(x, 0, mp_group)
+    else:
+        input_parallel = x
+
+    output = fused_linear(input_parallel, weight, bias)
+    return output
+
+
+def row_sequence_parallel_linear(
+    x,
+    weight,
+    bias=None,
+    mp_group=None,
+):
+    """Functional version of RowSequenceParallelLinear using fused_linear.
+
+    Forward: fused_linear -> reduce-scatter along seq dim.
+    Input shape: [seq, batch, hidden/mp], output shape: [seq/mp, batch, hidden].
+
+    Args:
+        x: Input tensor (already column-parallel partitioned).
+        weight: Weight tensor, shape [in_features_per_partition, out_features].
+        bias: Bias tensor, shape [out_features], or None.
+        mp_group: Tensor parallel process group.
+
+    Returns:
+        Output tensor.
+    """
+    from paddle.incubate.nn.functional import fused_linear
+
+    from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
+        ReduceScatterOpLegacy,
+    )
+
+    is_mp = mp_group is not None and mp_group.nranks > 1
+
+    if is_mp:
+        output_parallel = fused_linear(x, weight, None)
+        output_ = ReduceScatterOpLegacy.apply(output_parallel, mp_group)
+        if bias is not None:
+            output = output_ + bias
+        else:
+            output = output_
+    else:
+        output = fused_linear(x, weight, bias)
+
+    return output
+
+
+def vocab_parallel_embedding(
+    input_,
+    weight,
+    vocab_start_index,
+    num_embeddings,
+    mp_group=None,
+):
+    """Functional version of VocabParallelEmbedding.
+
+    Uses _c_lookup_table + _mp_allreduce (same as paddle fleet mp_layers).
+
+    Args:
+        input_: Input token ids tensor.
+        weight: Embedding weight, shape [num_embeddings_per_partition, embedding_dim].
+        vocab_start_index: Start index of the vocab partition on this rank.
+        num_embeddings: Total vocabulary size.
+        mp_group: Tensor parallel process group.
+
+    Returns:
+        Output embedding tensor.
+    """
+    from paddle.distributed.fleet.layers.mpu import mp_ops
+
+    is_mp = mp_group is not None and mp_group.nranks > 1
+
+    if is_mp:
+        output_parallel = mp_ops._c_lookup_table(
+            weight,
+            input_,
+            start_index=vocab_start_index,
+            vocab_size=num_embeddings,
+        )
+        output = mp_ops._mp_allreduce(
+            output_parallel,
+            group=mp_group,
+            use_calc_stream=True,
+            use_model_parallel=True,
+        )
+    else:
+        output = F.embedding(input_, weight=weight)
+
+    return output
+
+
 class ColumnParallelLinear(paddle.nn.Layer):
     """Linear layer with column parallelism.
 
@@ -1254,6 +1409,12 @@ class ColumnParallelLinear(paddle.nn.Layer):
                 )
 
         bias = self.bias if not self.skip_bias_add else None
+
+        if getattr(self.config, "gpt_model_use_experimental_version", False):
+            output = column_sequence_parallel_linear(
+                input_, weight, self.bias, mp_group=self.tp_group
+            )
+            return output, None
 
         if (
             self.allreduce_dgrad
@@ -1533,6 +1694,12 @@ class RowParallelLinear(paddle.nn.Layer):
             - output
             - bias
         """
+
+        if getattr(self.config, "gpt_model_use_experimental_version", False):
+            output = row_sequence_parallel_linear(
+                input_, self.weight, self.bias, mp_group=self.tp_group
+            )
+            return output, None
 
         # Set up backprop all-reduce.
         if (

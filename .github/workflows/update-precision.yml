@@ -9,10 +9,14 @@ jobs:
   determine-whether-update:
     name: Determine whether to update
     if: github.repository == 'PaddlePaddle/PaddleFleet'
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     outputs:
       need_change: ${{ steps.determine.outputs.need_change }}
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Determine whether to update
         id: determine
         run: |
@@ -36,8 +40,12 @@ jobs:
     name: Update precision fleet
     needs: determine-whether-update
     if: needs.determine-whether-update.outputs.need_change == 'true'
-    runs-on: ubuntu-latest
+    runs-on:
+      group: APPROVAL
     steps:
+      - name: Cleanup
+        run: |
+          rm -rf * .[^.]*
       - name: Setup python3.10
         uses: actions/setup-python@v6
         with:

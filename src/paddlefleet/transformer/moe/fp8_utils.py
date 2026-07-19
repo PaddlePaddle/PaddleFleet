@@ -25,26 +25,34 @@ from paddlefleet.fusions.fused_swiglu_scale import (
 )
 
 try:
-    from paddlefleet.ops import (
+    from paddlefleet_ops import (
         deep_gemm as paddlefleet_deep_gemm,
         fuse_stack_fp8_quant,
         fuse_stack_transpose_fp8_quant,
         fuse_weighted_swiglu_fp8_quant,
+        fuse_weighted_swiglu_fp8_quant_clamp,
+        fused_swiglu_weighted_clamp_bwd,
     )
 except (ImportError, RuntimeError):
     pass
 
-# 优先使用 FusedQuantOps.fused_swiglu_probs_bwd（inplace，行为对齐）。
-# 若环境中没有 FusedQuantOps，则回退到 paddle.incubate 的 out-of-place 实现。
-# TODO: 迁移fused_swiglu_probs_bwd至paddlefleet.ops
+# 优先从 paddlefleet_ops 导入（算子已重命名为 paddlefleet_fused_swiglu_probs_bwd 避免冲突），
+# 仅在 paddlefleet_ops 中不存在时回退到旧的 FusedQuantOps。
 try:
-    import FusedQuantOps as _FQO
+    from paddlefleet_ops import (
+        fused_swiglu_probs_bwd as _fused_swiglu_probs_bwd,
+    )
 
-    _fused_swiglu_probs_bwd = _FQO.fused_swiglu_probs_bwd
     USE_INPLACE_SWIGLU_BWD = True
-except (ImportError, AttributeError):
-    _fused_swiglu_probs_bwd = None
-    USE_INPLACE_SWIGLU_BWD = False
+except (ImportError, AttributeError, RuntimeError):
+    try:
+        import FusedQuantOps as _FQO
+
+        _fused_swiglu_probs_bwd = _FQO.fused_swiglu_probs_bwd
+        USE_INPLACE_SWIGLU_BWD = True
+    except (ImportError, AttributeError):
+        _fused_swiglu_probs_bwd = None
+        USE_INPLACE_SWIGLU_BWD = False
 
 try:
     from paddle.nn.functional import swiglu
@@ -73,7 +81,7 @@ except ImportError:
 
 
 try:
-    from paddlefleet.ops import deep_gemm
+    from paddlefleet_ops import deep_gemm
 except:
     pass
 
@@ -81,6 +89,12 @@ try:
     from paddle.incubate.nn.functional import fused_transpose_wlch_split_quant
 except ImportError:
     fused_transpose_wlch_split_quant = None
+
+from functools import partial
+
+from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+    WeightGradStore,
+)
 
 __all__ = [
     "ExpertsGroupGemmContiguousNode",
@@ -93,17 +107,20 @@ FP8_ALIGN = 128
 def moe_token_padding_alignment(
     *, use_fp8_mlp: bool, moe_grouped_gemm: bool, use_accuracy_compatible: bool
 ) -> int:
-    # == 【MG 精度对齐 diff · 参考 PF PR#968】per-expert token padding 对齐 ==
-    # 仅在 use_accuracy_compatible=True 且纯 bf16 非 grouped_gemm 路径下不做
-    #   padding（返回 1），使每个 expert 的 GEMM M 维 == 真实 token 数，cuBLAS
-    #   选到与 MG SequentialMLP 相同算法；其余情况（含未开启 accuracy
-    #   compatible）按 FP8_ALIGN 对齐，保持原有行为。
+    # == [MG accuracy-alignment diff] per-expert token padding alignment ==
+    # Only when use_accuracy_compatible=True and on the pure-bf16 non-grouped_gemm
+    #   path do we skip padding (return 1), so each expert's GEMM M dim == the real
+    #   token count and cuBLAS picks the same algorithm as MG SequentialMLP. In all
+    #   other cases (including when accuracy compatible is off) align to FP8_ALIGN
+    #   to preserve the original behavior.
     if use_accuracy_compatible and not use_fp8_mlp and not moe_grouped_gemm:
         return 1
     return FP8_ALIGN
 
 
-def _get_fp8_weight_and_scale(weight, transpose=False):
+def _get_fp8_weight_and_scale(
+    weight, transpose=False, num_expert=None, use_ue8m0=None
+):
     """_get_fp8_weight_and_scale"""
     fp8_weight, fp8_scale = (
         weight.fp8_weight_stacked,
@@ -121,7 +138,10 @@ def _get_fp8_weight_and_scale(weight, transpose=False):
             # 只有非转置版，on-the-fly reshape+transpose
             assert fp8_weight.shape[0] % weight.shape[0] == 0
             assert fp8_weight.ndim == 2
-            expert_num = fp8_weight.shape[0] // weight.shape[0]
+            if num_expert:
+                expert_num = num_expert
+            else:
+                expert_num = fp8_weight.shape[0] // weight.shape[0]
 
             def transpose_tensor(tensor):
                 assert tensor.ndim == 2
@@ -135,9 +155,14 @@ def _get_fp8_weight_and_scale(weight, transpose=False):
                     .contiguous()
                 )
 
+            transpose_scale = (
+                weight.fp8_scale_stacked_transpose
+                if use_ue8m0
+                else transpose_tensor(fp8_scale)
+            )
             fp8_weight, fp8_scale = (
                 transpose_tensor(fp8_weight),
-                transpose_tensor(fp8_scale),
+                transpose_scale,
             )
 
     return fp8_weight, fp8_scale
@@ -166,14 +191,19 @@ def fused_stack_quant_without_cache(
         )
 
     if use_ue8m0:
-        scale = scale.T
+        scale = scale.T.contiguous()
     return w, scale
 
 
-def fused_stack_quant(expert_weight_list, transpose=False, use_ue8m0=False):
+def fused_stack_quant(
+    expert_weight_list, transpose=False, use_ue8m0=False, num_expert=None
+):
     if hasattr(expert_weight_list[0], "fp8_weight_stacked"):
         w, scale = _get_fp8_weight_and_scale(
-            expert_weight_list[0], transpose=transpose
+            expert_weight_list[0],
+            transpose=transpose,
+            num_expert=num_expert,
+            use_ue8m0=use_ue8m0,
         )
     else:
         w, scale = fused_stack_quant_without_cache(
@@ -207,7 +237,7 @@ def tilewise_quant(x):
 
 
 def split_group_gemm(
-    x_fp8, x_scale, w_fp8, w_scale, tokens_per_expert, gemm_out
+    x_fp8, x_scale, w_fp8, w_scale, tokens_per_expert, gemm_out, use_ue8m0=False
 ):
     """
     将输入的张量分割成多个小的矩阵乘
@@ -219,6 +249,7 @@ def split_group_gemm(
         w_scale (List[paddle.Tensor], length=6): 与w_fp8对应的缩放因子。
         tokens_per_expert (List[int], length=6): 每个专家处理的token数量。
         gemm_out (paddle.Tensor, shape=(N, T)): 存储结果的张量。
+        use_ue8m0 (bool): Whether to use UE8M0 format scales (TMA aligned).
 
     Returns:
         paddle.Tensor, shape=(N, T): 返回计算结果存储在gemm_out中的张量。
@@ -232,9 +263,14 @@ def split_group_gemm(
         x_i = x_fp8[start_idx:end_idx]
         x_scale_tma_align = x_scale[start_idx:end_idx].T.contiguous().T
 
+        if use_ue8m0:
+            w_scale_tma_align = w_scale[i].T.contiguous().T
+        else:
+            w_scale_tma_align = w_scale[i].contiguous()
+
         deep_gemm.fp8_gemm_nt(
             (x_i, x_scale_tma_align),
-            (w_fp8[i].contiguous(), w_scale[i].contiguous()),
+            (w_fp8[i].contiguous(), w_scale_tma_align),
             gemm_out[start_idx:end_idx],
         )
 
@@ -304,6 +340,112 @@ def kitchen_gemm(
     return y
 
 
+class _PerExpertWeightView:
+    """A lightweight view into a single expert's slice of the stacked fp8 weight.
+
+    After offline fp8 quant, the original bf16 weight storage is cleared.
+    This view provides the same interface that ``_get_fp8_weight_and_scale``
+    expects (``fp8_weight_stacked``, ``fp8_scale_stacked``, etc.) by slicing
+    the parent's stacked fp8 tensors for a single expert.
+
+    The ``shape`` property reports ``[1, K, N]`` so that downstream code
+    (e.g., ``_get_fp8_weight_and_scale``) correctly infers ``num_expert = 1``.
+    """
+
+    def __init__(self, parent_weight, local_id, num_experts):
+        self._parent = parent_weight
+        self._local_id = local_id
+        self._num_experts = num_experts
+        self._shape = [1, *list(parent_weight.shape[1:])]
+
+    def _slice_stacked(self, attr_name):
+        """Slice a 2D stacked tensor [E*rows, cols] to this expert's rows."""
+        t = getattr(self._parent, attr_name, None)
+        if t is None:
+            return None
+        rows_per_expert = t.shape[0] // self._num_experts
+        start = self._local_id * rows_per_expert
+        return t._slice(start, start + rows_per_expert)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    def __len__(self):
+        return self._shape[0]
+
+    @property
+    def dtype(self):
+        return self._parent.dtype
+
+    @property
+    def fp8_weight_stacked(self):
+        return self._slice_stacked("fp8_weight_stacked")
+
+    @property
+    def fp8_scale_stacked(self):
+        return self._slice_stacked("fp8_scale_stacked")
+
+    @property
+    def fp8_weight_stacked_transpose(self):
+        return self._slice_stacked("fp8_weight_stacked_transpose")
+
+    @property
+    def fp8_scale_stacked_transpose(self):
+        return self._slice_stacked("fp8_scale_stacked_transpose")
+
+    @property
+    def main_grad(self):
+        mg = getattr(self._parent, "main_grad", None)
+        if mg is None:
+            return None
+        return mg._slice(self._local_id, self._local_id + 1)
+
+    @main_grad.setter
+    def main_grad(self, value):
+        # When backward tries to allocate main_grad, ensure parent has it
+        if getattr(self._parent, "main_grad", None) is None:
+            self._parent.main_grad = paddle.zeros(
+                self._parent.shape, dtype=paddle.float32
+            )
+
+    @property
+    def grad(self):
+        g = self._parent.grad
+        if g is None:
+            return None
+        return g._slice(self._local_id, self._local_id + 1)
+
+    @grad.setter
+    def grad(self, value):
+        pass
+
+    def _apply_backward_hook(self):
+        if hasattr(self._parent, "_apply_backward_hook"):
+            self._parent._apply_backward_hook()
+
+    @property
+    def stop_gradient(self):
+        return self._parent.stop_gradient
+
+
+class _PerExpertWeightProxy:
+    """Proxy for grouped_gemm_experts that provides per-expert weight views.
+
+    Holds ``weight1`` and ``weight2`` as ``_PerExpertWeightView`` instances
+    that lazily slice from the parent's fp8 stacked weights.
+    """
+
+    def __init__(self, parent, local_id):
+        num_experts = parent.weight1.shape[0]
+        self.weight1 = _PerExpertWeightView(
+            parent.weight1, local_id, num_experts
+        )
+        self.weight2 = _PerExpertWeightView(
+            parent.weight2, local_id, num_experts
+        )
+
+
 class ExpertsGroupGemmContiguousNode:
     """ExpertsGroupGemmContiguousNode"""
 
@@ -318,8 +460,12 @@ class ExpertsGroupGemmContiguousNode:
         moe_subbatch_token_num_after_dispatch=None,
         use_bf16_gemm_weight_grad=False,
         use_fp8_mlp=True,
-        moe_deep_gemm=True,
-        moe_grouped_gemm=False,
+        moe_deep_gemm=False,
+        use_ue8m0=False,
+        dw_p2p_overlap=False,
+        moe_expert_fusion=False,
+        clamp_value=None,
+        activation_type="swiglu",
         use_accuracy_compatible=False,
     ):
         """
@@ -330,8 +476,32 @@ class ExpertsGroupGemmContiguousNode:
             recompute_moe_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
+            activation_type (str, optional): Activation function type. "swiglu" or "geglu". Defaults to "swiglu".
         """
-        if not moe_grouped_gemm or use_fp8_mlp:
+        if moe_deep_gemm and expert_id is not None:
+            # Per-expert node for deep_gemm: slice stacked weight to [1, K, N]
+            parent = custom_map.grouped_gemm_experts
+            moe_rank = getattr(custom_map, "moe_rank", 0)
+            num_experts_per_device = getattr(
+                custom_map, "num_experts_per_device", parent.weight1.shape[0]
+            )
+            local_id = expert_id - moe_rank * num_experts_per_device
+            if hasattr(parent.weight1, "fp8_weight_stacked"):
+                # Offline quant: bf16 weight may have been cleared, use proxy
+                self.grouped_gemm_experts = _PerExpertWeightProxy(
+                    parent, local_id
+                )
+            else:
+                # Normal: bf16 weight is valid, slice directly
+                sliced = type("_SlicedGroupedExpert", (), {})()
+                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
+                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
+                sliced._parent = parent
+                sliced._local_id = local_id
+                self.grouped_gemm_experts = sliced
+            self.experts = None
+            moe_expert_fusion = True
+        elif not moe_expert_fusion or (use_fp8_mlp and not moe_deep_gemm):
             if expert_id is None:
                 self.experts = custom_map.experts
             else:
@@ -360,12 +530,16 @@ class ExpertsGroupGemmContiguousNode:
         self.use_bf16_gemm_weight_grad = use_bf16_gemm_weight_grad
         self.use_fp8_mlp = use_fp8_mlp
         self.moe_deep_gemm = moe_deep_gemm
-        self.moe_grouped_gemm = moe_grouped_gemm
-        self.is_split_group_gemm = not moe_grouped_gemm
+        self.use_ue8m0 = use_ue8m0
+        self.is_split_group_gemm = not moe_expert_fusion
+        self.dw_p2p_overlap = dw_p2p_overlap
+        self.moe_expert_fusion = moe_expert_fusion
+        self.clamp_value = clamp_value
+        self.activation_type = activation_type
         self.use_accuracy_compatible = use_accuracy_compatible
         self.token_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
-            moe_grouped_gemm=moe_grouped_gemm,
+            moe_grouped_gemm=not self.is_split_group_gemm,
             use_accuracy_compatible=use_accuracy_compatible,
         )
 
@@ -422,11 +596,16 @@ class ExpertsGroupGemmContiguousNode:
         """
         generate m indices
         """
-        tokens = []
-        for i in range(len(tokens_per_expert)):
-            tokens.append(paddle.full([tokens_per_expert[i]], i, dtype="int32"))
-        out = paddle.concat(tokens, axis=0)
-        return out
+        if isinstance(tokens_per_expert, paddle.Tensor):
+            counts = tokens_per_expert.cast("int32")
+        else:
+            counts = paddle.to_tensor(tokens_per_expert, dtype="int32")
+        if counts.shape[0] == 0:
+            return paddle.empty([0], dtype="int32")
+        return paddle.repeat_interleave(
+            paddle.arange(counts.shape[0], dtype="int32"),
+            counts,
+        )
 
     def fwd_gate_up_bf16(self, x, expert_w1):
         """
@@ -437,7 +616,7 @@ class ExpertsGroupGemmContiguousNode:
             assert self.input is not None
             x = self.input
         if numpy.prod(x.shape) != 0:
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 if self.moe_deep_gemm:
                     o1 = paddle.zeros(
                         [x.shape[0], expert_w1.shape[2]], dtype="bfloat16"
@@ -446,7 +625,7 @@ class ExpertsGroupGemmContiguousNode:
                         x,
                         expert_w1,
                         o1,
-                        self.tokens_per_expert_indices,
+                        self.m_indices,
                     )
                 else:
                     o1 = paddle.incubate.nn.functional.batched_gemm(
@@ -469,7 +648,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 o1 = paddle.concat(expert_output_list, axis=0)
         else:
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 o1 = paddle.empty(
                     [x.shape[0], expert_w1.shape[2]], dtype=expert_w1[0].dtype
                 )
@@ -485,11 +664,10 @@ class ExpertsGroupGemmContiguousNode:
         self, x, expert_w1, num_expert, tokens_per_expert, scale=None
     ):
         self.tokens_per_expert = tokens_per_expert
-        if self.moe_deep_gemm:
-            self.tokens_per_expert_indices = paddle.repeat_interleave(
-                paddle.arange(len(self.tokens_per_expert)),
-                paddle.to_tensor(self.tokens_per_expert),
-            ).cast("int32")
+        if self.moe_deep_gemm or self.moe_expert_fusion:
+            self.m_indices = self.gen_m_indices(self.tokens_per_expert)
+        else:
+            self.m_indices = None
         if not self.use_fp8_mlp:
             return self.fwd_gate_up_bf16(x, expert_w1)
         else:
@@ -504,11 +682,29 @@ class ExpertsGroupGemmContiguousNode:
         o1 = x * w1
         [m_sum, n] = [m_sum, k] * [num_groups, k, n] (m_sum = sum(tokens_per_expert))
         """
-
-        if self.moe_grouped_gemm:
-            self.m_indices = self.gen_m_indices(tokens_per_expert)
         # concat w1, shape is [num_groups, n, k]
-        w1_t_quant, w1_t_scale = fused_stack_quant(expert_w1, transpose=True)
+
+        if hasattr(self, "grouped_gemm_experts"):
+            offline_quant = hasattr(
+                self.grouped_gemm_experts.weight1,
+                "fp8_weight_stacked_transpose",
+            ) or hasattr(
+                self.grouped_gemm_experts.weight1, "fp8_weight_stacked"
+            )
+            if not offline_quant:
+                local_expert_num = expert_w1.shape[0]
+                expert_w1 = [
+                    expert_w1[i, :, :] for i in range(local_expert_num)
+                ]
+            else:
+                expert_w1 = [expert_w1]
+
+        w1_t_quant, w1_t_scale = fused_stack_quant(
+            expert_w1,
+            transpose=True,
+            num_expert=num_expert,
+            use_ue8m0=self.use_ue8m0,
+        )
         w1_t_quant = w1_t_quant.reshape([num_expert, -1, w1_t_quant.shape[-1]])
         w1_t_scale = w1_t_scale.reshape([num_expert, -1, w1_t_scale.shape[-1]])
 
@@ -533,6 +729,7 @@ class ExpertsGroupGemmContiguousNode:
                 output_scale_transpose=True,
                 quant_method="1x128",
                 input_transpose=False,
+                using_ue8m0_scale=self.use_ue8m0,
             )
             x_scale = x_scale.T
 
@@ -541,7 +738,7 @@ class ExpertsGroupGemmContiguousNode:
             [x_fp8.shape[0], w1_t_quant.shape[1]], dtype=expert_w1[0].dtype
         )
         if numpy.prod(x_fp8.shape) != 0:
-            if not self.moe_grouped_gemm:
+            if not self.moe_expert_fusion:
                 split_group_gemm(
                     x_fp8,
                     x_scale,
@@ -549,8 +746,15 @@ class ExpertsGroupGemmContiguousNode:
                     w1_t_scale,
                     tokens_per_expert,
                     o1,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
+                if self.use_ue8m0:
+                    w1_t_scale = (
+                        w1_t_scale.transpose([0, 2, 1])
+                        .contiguous()
+                        .transpose([0, 2, 1])
+                    )
                 paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (x_fp8, x_scale),
                     (w1_t_quant, w1_t_scale),
@@ -573,34 +777,77 @@ class ExpertsGroupGemmContiguousNode:
         """
         fwd_down_bf16
         """
-
-        # == 【MG 精度对齐 diff · 参考 PF PR#968 · 前向 SwiGLU×probs】==
-        # 原始实现：`o2 = fused_swiglu_scale_forward(o1, unzipped_probs)`，
-        #   融合 kernel 内部按自己的精度路径算 SwiGLU 与 probs 相乘，与 MG
-        #   SequentialMLP 的数值路径不同，post-swiglu-scale 输出末位对不齐。
-        # 改动（仅 use_accuracy_compatible=True 生效）：手写等价计算——把 SwiGLU
-        #   与 per-token router scale 都提到 fp32 计算，最后一次性 cast 回原
-        #   dtype，复刻 MG 的「fp32 计算、单次 round」；否则走原融合 kernel。
-        # ==============================================================
-        if self.use_accuracy_compatible:
+        # == [MG accuracy-alignment diff · fwd SwiGLU×probs] ==
+        # Original impl: `o2 = fused_swiglu_scale_forward(o1, unzipped_probs)`.
+        #   The fused kernel computes SwiGLU and the probs multiply along its own
+        #   precision path, which differs from MG SequentialMLP and leaves the
+        #   post-swiglu-scale output misaligned in the last bits.
+        # Change (only active when use_accuracy_compatible=True): compute the
+        #   equivalent by hand -- promote both SwiGLU and the per-token router
+        #   scale to fp32, then cast back to the original dtype once, replicating
+        #   MG's "compute in fp32, round once"; otherwise keep the fused kernel.
+        # NOTE: the fp32 path hard-codes the SwiGLU (silu) formula, so GeGLU
+        #   experts must NOT take it -- they use a dedicated gelu branch inside
+        #   the accuracy-compatible block (kept consistent with the non-
+        #   accuracy-compatible GeGLU branch below).
+        # NOTE: the SwiGLU fp32 path is additionally gated on is_split_group_gemm
+        #   to stay paired with the backward: bwd_down_input_bf16's fp32-autograd
+        #   branch also requires is_split_group_gemm, so grouped-gemm
+        #   (moe_expert_fusion=True) must keep the fused forward/backward pair
+        #   here -- otherwise forward would be fp32 round-once while backward
+        #   stays on the fused-kernel precision path. GeGLU is unaffected: its
+        #   forward is gelu on both paths and pairs with the analytic GeGLU
+        #   backward, which is not gated on is_split_group_gemm.
+        # ==================================================================
+        if self.use_accuracy_compatible and (
+            self.activation_type == "geglu" or self.is_split_group_gemm
+        ):
             x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
             probs = unzipped_probs
             if len(probs.shape) == 1:
                 probs = probs.unsqueeze(-1)
-            o2 = (
-                F.silu(x_glu.astype("float32"))
-                * x_linear.astype("float32")
-                * probs.astype("float32")
-            ).astype(o1.dtype)
+            if self.activation_type == "geglu":
+                # GeGLU: gelu_tanh(gate) * up, then scale by probs. Keep the
+                # gelu math identical to the non-accuracy-compatible GeGLU
+                # branch below (and to bwd_down_input_bf16's GeGLU recompute)
+                # so forward and backward share one activation path.
+                o2 = (
+                    (F.gelu(x_glu, approximate=True) * x_linear) * probs
+                ).cast(o1.dtype)
+            else:
+                # SwiGLU: promote to fp32 and round once. Apply the same
+                # activation_func_clamp_value semantics as the fused kernel
+                # (clamp gate to max, value to [-clamp, clamp]) so this fp32
+                # path matches fused_swiglu_scale_forward when clamp is set.
+                gate_f = x_glu.astype("float32")
+                val_f = x_linear.astype("float32")
+                if self.clamp_value is not None and self.clamp_value > 0:
+                    cv = float(self.clamp_value)
+                    gate_f = paddle.clip(gate_f, max=cv)
+                    val_f = paddle.clip(val_f, min=-cv, max=cv)
+                o2 = (F.silu(gate_f) * val_f * probs.astype("float32")).astype(
+                    o1.dtype
+                )
         else:
-            o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
+            if self.activation_type == "geglu":
+                # GeGLU: gelu_tanh(gate) * up, then scale by probs
+                # F.gelu promotes bf16 to float32, cast back to bf16 for downstream ops
+                gate, up = paddle.chunk(o1, 2, dim=-1)
+                o2 = F.gelu(gate, approximate=True) * up
+                o2 = (o2 * unzipped_probs.unsqueeze(-1)).cast(o1.dtype)
+            elif self.clamp_value is not None and self.clamp_value > 0:
+                o2 = fused_swiglu_scale_forward(
+                    o1, unzipped_probs, self.clamp_value
+                )
+            else:
+                o2 = fused_swiglu_scale_forward(o1, unzipped_probs)
 
         if clear_o1:
             o1._clear_to_zero_allocation()
 
         # down proj
         if numpy.prod(o2.shape) != 0:
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 if self.moe_deep_gemm:
                     o3 = paddle.zeros(
                         [o2.shape[0], expert_w2.shape[2]], dtype="bfloat16"
@@ -609,7 +856,7 @@ class ExpertsGroupGemmContiguousNode:
                         o2,
                         expert_w2,
                         o3,
-                        self.tokens_per_expert_indices,
+                        self.m_indices,
                     )
                 else:
                     o3 = paddle.incubate.nn.functional.batched_gemm(
@@ -632,7 +879,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 o3 = paddle.concat(expert_output_list, axis=0)
         else:
-            if self.moe_grouped_gemm:
+            if self.moe_expert_fusion:
                 o3_shape = [o2.shape[0], expert_w2.shape[2]]
             else:
                 o3_shape = [o2.shape[0], expert_w2[0].shape[1]]
@@ -645,6 +892,12 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
+            assert self.activation_type != "geglu", (
+                "FP8 MoE path does not support activation_type='geglu' yet. "
+                "The fwd_down_fp8 branch uses fused SwiGLU FP8 kernels which are "
+                "incompatible with GeGLU. Please disable fp8 for Gemma4 MoE or "
+                "implement a GeGLU FP8 kernel."
+            )
             return self.fwd_down_fp8(
                 o1, unzipped_probs, expert_w2, num_expert, o3, clear_o1
             )
@@ -657,14 +910,49 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
         # concat and transpose w2
-        w2_quant, w2_scale = fused_stack_quant(expert_w2, transpose=True)
+
+        if (
+            hasattr(self, "grouped_gemm_experts")
+            and self.grouped_gemm_experts is not None
+        ):
+            offline_quant = hasattr(
+                self.grouped_gemm_experts.weight2,
+                "fp8_weight_stacked_transpose",
+            ) or hasattr(
+                self.grouped_gemm_experts.weight2, "fp8_weight_stacked"
+            )
+            if not offline_quant:
+                local_expert_num = expert_w2.shape[0]
+                expert_w2 = [
+                    expert_w2[i, :, :] for i in range(local_expert_num)
+                ]
+            else:
+                expert_w2 = [expert_w2]
+
+        w2_quant, w2_scale = fused_stack_quant(
+            expert_w2,
+            transpose=True,
+            num_expert=num_expert,
+            use_ue8m0=self.use_ue8m0,
+        )
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
-        # TODO:support ue8m0 on SM100
-        o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant(
-            o1, unzipped_probs, using_pow2_scaling=True, use_ue8m0=False
-        )
+        if self.clamp_value is not None and self.clamp_value > 0:
+            o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant_clamp(
+                o1,
+                unzipped_probs,
+                using_pow2_scaling=True,
+                use_ue8m0=self.use_ue8m0,
+                clamp_value=float(self.clamp_value),
+            )
+        else:
+            o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant(
+                o1,
+                unzipped_probs,
+                using_pow2_scaling=True,
+                use_ue8m0=self.use_ue8m0,
+            )
         o2_scale = paddle.transpose(
             paddle.transpose(o2_scale, [1, 0]).contiguous(), [1, 0]
         )
@@ -679,7 +967,7 @@ class ExpertsGroupGemmContiguousNode:
         else:
             o3 = paddle.empty(o3_shape, dtype=o1.dtype)
         if numpy.prod(o2_fp8.shape) != 0:
-            if not self.moe_grouped_gemm:
+            if not self.moe_expert_fusion:
                 split_group_gemm(
                     o2_fp8,
                     o2_scale,
@@ -687,8 +975,15 @@ class ExpertsGroupGemmContiguousNode:
                     w2_scale,
                     self.tokens_per_expert,
                     o3,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
+                if self.use_ue8m0:
+                    w2_scale = (
+                        w2_scale.transpose([0, 2, 1])
+                        .contiguous()
+                        .transpose([0, 2, 1])
+                    )
                 paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (o2_fp8, o2_scale),
                     (w2_quant, w2_scale),
@@ -702,7 +997,7 @@ class ExpertsGroupGemmContiguousNode:
         bwd_down_input_bf16
         """
         if numpy.prod(unzipped_grad.shape) != 0:
-            if self.moe_grouped_gemm and not self.use_fp8_mlp:
+            if self.moe_expert_fusion and not self.use_fp8_mlp:
                 if self.moe_deep_gemm:
                     do2_s = paddle.zeros(
                         [unzipped_grad.shape[0], expert_w2.shape[1]],
@@ -712,7 +1007,7 @@ class ExpertsGroupGemmContiguousNode:
                         unzipped_grad,
                         expert_w2,
                         do2_s,
-                        self.tokens_per_expert_indices,
+                        self.m_indices,
                     )
                 else:
                     do2_s = paddle.incubate.nn.functional.batched_gemm(
@@ -743,24 +1038,31 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 do2_s = paddle.concat(do2_s_list, axis=0)
         else:
-            if self.moe_grouped_gemm and not self.use_fp8_mlp:
+            if self.moe_expert_fusion and not self.use_fp8_mlp:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2.shape[1]]
             else:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        # == 【MG 精度对齐 diff · 参考 PF PR#968 · 反向 SwiGLU×probs】==
-        # 原始实现：`fused_swiglu_scale_forward` + `fused_swiglu_scale_backward`
-        #   这对融合 kernel 复算 o2_s 并求 do1 / probs_grad，反向数值路径与前向
-        #   手写 fp32 路径（fwd_down_bf16）不一致，backward 梯度末位对不齐 MG。
-        # 改动（仅 use_accuracy_compatible=True 且非 grouped_gemm、非空 grad 时）：
-        #   用与前向完全相同的 fp32 表达式（F.silu(gate) * val * scale）重建计算
-        #   图交给 autograd 反向，前后向共用一套 fp32 数学；其余情况仍走原融合
-        #   kernel（保持原有行为）。
-        # ==============================================================
+        # == [MG accuracy-alignment diff · bwd SwiGLU×probs] ==
+        # Original impl: `fused_swiglu_scale_forward` + `fused_swiglu_scale_backward`.
+        #   This fused-kernel pair recomputes o2_s and derives do1 / probs_grad, but
+        #   its backward precision path differs from the forward hand-written fp32
+        #   path (fwd_down_bf16), leaving backward gradients misaligned with MG in
+        #   the last bits.
+        # Change (only when use_accuracy_compatible=True and non-grouped_gemm and
+        #   non-empty grad): rebuild the compute graph with the exact same fp32
+        #   expression as the forward (F.silu(gate) * val * scale) and let autograd
+        #   run the backward, so forward and backward share one fp32 math path;
+        #   otherwise keep the original fused kernel (preserve existing behavior).
+        # NOTE: this fp32 path hard-codes the SwiGLU (silu) formula, so it must
+        #   NOT be taken for GeGLU experts -- GeGLU falls through to its own
+        #   branch below, which uses gelu.
+        # ==================================================================
         if (
             self.use_accuracy_compatible
-            and not self.moe_grouped_gemm
+            and self.activation_type != "geglu"
+            and self.is_split_group_gemm
             and numpy.prod(unzipped_grad.shape) != 0
         ):
             x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
@@ -776,21 +1078,82 @@ class ExpertsGroupGemmContiguousNode:
                 gate_g.stop_gradient = False
                 val_g.stop_gradient = False
                 scale_g.stop_gradient = False
-                o2_f32 = F.silu(gate_g) * val_g * scale_g
+                # Apply the same activation_func_clamp_value semantics as the
+                # forward / fused kernel (clamp gate to max, value to
+                # [-clamp, clamp]). autograd through paddle.clip masks the
+                # gradient where saturated, matching fused_swiglu_weighted_clamp_bwd.
+                if self.clamp_value is not None and self.clamp_value > 0:
+                    cv = float(self.clamp_value)
+                    gate_c = paddle.clip(gate_g, max=cv)
+                    val_c = paddle.clip(val_g, min=-cv, max=cv)
+                else:
+                    gate_c = gate_g
+                    val_c = val_g
+                o2_f32 = F.silu(gate_c) * val_c * scale_g
                 paddle.autograd.backward(
                     [o2_f32], [do2_s.astype("float32").detach()]
                 )
                 d_gate_f32 = gate_g.grad
                 d_up_f32 = val_g.grad
-                d_scale_f32 = scale_g.grad.reshape(
-                    unzipped_probs.shape
-                ).astype("float32")
+                d_scale_f32 = scale_g.grad.reshape(unzipped_probs.shape).astype(
+                    "float32"
+                )
 
             do1 = paddle.concat([d_gate_f32, d_up_f32], axis=-1).astype(
                 o1.dtype
             )
             o2_s = o2_f32.detach().astype(o1.dtype)
             probs_grad = d_scale_f32.astype(unzipped_probs.dtype)
+            return do1, o2_s, probs_grad
+
+        if self.activation_type == "geglu":
+            # GeGLU forward recompute (needed for backward weight computation)
+            gate, up = paddle.chunk(o1, 2, dim=-1)
+            gate_act = F.gelu(gate, approximate=True)
+            o2_s_no_scale = gate_act * up
+            o2_s = (o2_s_no_scale * unzipped_probs).cast(o1.dtype)
+
+            # probs_grad: d(loss)/d(probs) = do2_s * o2_no_scale, summed over hidden dim
+            probs_grad = (
+                do2_s.cast(paddle.float32) * o2_s_no_scale.cast(paddle.float32)
+            ).sum(-1, keepdim=True)
+
+            # Propagate gradient through probs scaling (aligned with Megatron):
+            # do2 = do2_s * probs  (chain rule through o2_s = o2_no_scale * probs)
+            do2 = do2_s * unzipped_probs
+
+            # GeGLU backward through activation
+            # d_up = do2 * gelu(gate)
+            d_up = do2 * gate_act.cast(do2.dtype)
+            # d_gate = do2 * up * gelu'(gate)  (tanh-approximate gelu derivative)
+            import math
+
+            kAlpha = math.sqrt(2.0 / math.pi)
+            inner = kAlpha * (
+                gate.cast(paddle.float32)
+                + 0.044715 * paddle.pow(gate.cast(paddle.float32), 3)
+            )
+            tanh_inner = paddle.tanh(inner)
+            d_gate = (
+                do2
+                * up.cast(do2.dtype)
+                * (
+                    0.5 * (1.0 + tanh_inner)
+                    + 0.5
+                    * gate.cast(paddle.float32)
+                    * (1.0 - tanh_inner * tanh_inner)
+                    * kAlpha
+                    * (
+                        1.0
+                        + 0.134145 * paddle.pow(gate.cast(paddle.float32), 2)
+                    )
+                ).cast(do2.dtype)
+            )
+            do1 = paddle.concat([d_gate, d_up], dim=-1).cast(o1.dtype)
+        elif self.clamp_value is not None and self.clamp_value > 0:
+            do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
+                o1, unzipped_probs, do2_s, float(self.clamp_value)
+            )
         else:
             o2_s = fused_swiglu_scale_forward(o1, unzipped_probs)
             do1, probs_grad = fused_swiglu_scale_backward(
@@ -812,13 +1175,36 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, n] = [m_sum, k] * [num_groups, k, n]
         """
         # recompute concated_w2_2d
+
+        if hasattr(self, "grouped_gemm_experts"):
+            offline_quant = hasattr(
+                self.grouped_gemm_experts.weight2,
+                "fp8_weight_stacked_transpose",
+            ) or hasattr(
+                self.grouped_gemm_experts.weight2, "fp8_weight_stacked"
+            )
+            local_expert_num = expert_w2.shape[0]
+            if not offline_quant:
+                expert_w2 = [
+                    expert_w2[i, :, :] for i in range(local_expert_num)
+                ]
+            else:
+                expert_w2 = [expert_w2]
+        else:
+            local_expert_num = len(expert_w2)
+
         # fp8_gemm_nt(do3[m,k], w2[n,k]) = do3 @ w2^T = do3 @ [k,n]
-        bw_w2_quant, bw_w2_scale = fused_stack_quant(expert_w2, transpose=False)
+        bw_w2_quant, bw_w2_scale = fused_stack_quant(
+            expert_w2,
+            transpose=False,
+            num_expert=local_expert_num,
+            use_ue8m0=self.use_ue8m0,
+        )
         bw_w2_quant = bw_w2_quant.reshape(
-            [len(expert_w2), -1, bw_w2_quant.shape[-1]]
+            [local_expert_num, -1, bw_w2_quant.shape[-1]]
         )
         bw_w2_scale = bw_w2_scale.reshape(
-            [len(expert_w2), -1, bw_w2_scale.shape[-1]]
+            [local_expert_num, -1, bw_w2_scale.shape[-1]]
         )
         if hasattr(
             expert_w2[0], "fp8_weight_stacked_transpose"
@@ -830,22 +1216,39 @@ class ExpertsGroupGemmContiguousNode:
                 bw_w2_scale.contiguous().transpose([0, 2, 1]).contiguous()
             )
 
-        # compute gemm
-        unzipped_grad_fp8, unzipped_grad_scale = (
-            paddle.incubate.nn.functional.fp8_quant_blockwise(
-                unzipped_grad,
-                output_scale_transpose=False,
-                quant_method="1x128",
-                input_transpose=False,
-            )
-        )
-
+        # Pre-allocate do2_s before fp8 quant to avoid fragmentation:
+        # do2_s (long-lived, inplace becomes o2_s) should be at lower address,
+        # so that the short-lived unzipped_grad_fp8 is freed at the tail.
         do2_s = paddle.empty(
-            [unzipped_grad_fp8.shape[0], bw_w2_quant.shape[1]],
+            [unzipped_grad.shape[0], bw_w2_quant.shape[1]],
             dtype=unzipped_grad.dtype,
         )
+
+        # compute gemm
+        if self.use_ue8m0 and self.moe_expert_fusion:
+            unzipped_grad_fp8, unzipped_grad_scale = (
+                paddle.incubate.nn.functional.fp8_quant_blockwise(
+                    unzipped_grad,
+                    output_scale_transpose=True,
+                    quant_method="1x128",
+                    input_transpose=False,
+                    using_ue8m0_scale=True,
+                )
+            )
+            unzipped_grad_scale = unzipped_grad_scale.T
+        else:
+            unzipped_grad_fp8, unzipped_grad_scale = (
+                paddle.incubate.nn.functional.fp8_quant_blockwise(
+                    unzipped_grad,
+                    output_scale_transpose=False,
+                    quant_method="1x128",
+                    input_transpose=False,
+                    using_ue8m0_scale=self.use_ue8m0,
+                )
+            )
+
         if numpy.prod(unzipped_grad_fp8.shape) != 0:
-            if not self.moe_grouped_gemm:
+            if not self.moe_expert_fusion:
                 split_group_gemm(
                     unzipped_grad_fp8,
                     unzipped_grad_scale,
@@ -853,8 +1256,15 @@ class ExpertsGroupGemmContiguousNode:
                     bw_w2_scale,
                     self.tokens_per_expert,
                     do2_s,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
+                if self.use_ue8m0:
+                    bw_w2_scale = (
+                        bw_w2_scale.transpose([0, 2, 1])
+                        .contiguous()
+                        .transpose([0, 2, 1])
+                    )
                 paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (unzipped_grad_fp8, unzipped_grad_scale),
                     (bw_w2_quant, bw_w2_scale),
@@ -863,7 +1273,14 @@ class ExpertsGroupGemmContiguousNode:
                 )
 
         with paddle.amp.auto_cast(False):
-            if USE_INPLACE_SWIGLU_BWD:
+            if self.clamp_value is not None and self.clamp_value > 0:
+                do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
+                    o1,
+                    unzipped_probs,
+                    do2_s,
+                    float(self.clamp_value),
+                )
+            elif USE_INPLACE_SWIGLU_BWD:
                 # inplace，do1 复用 o1 的 GPU buffer（data_ptr 相同）。
                 # del o1 后 do1 仍持有引用，refcount 不归零，物理页不会被 VMM 提前回收。
                 # 显存峰值：o1/do1(2H) + do2_s(H) + o2_s(H) = 4H（C 点），
@@ -894,7 +1311,7 @@ class ExpertsGroupGemmContiguousNode:
         bwd_gate_up_input_bf16
         """
         if numpy.prod(do1.shape) != 0:
-            if self.moe_grouped_gemm and not self.use_fp8_mlp:
+            if self.moe_expert_fusion and not self.use_fp8_mlp:
                 if self.moe_deep_gemm:
                     dx = paddle.zeros(
                         [do1.shape[0], expert_w1.shape[1]],
@@ -904,7 +1321,7 @@ class ExpertsGroupGemmContiguousNode:
                         do1,
                         expert_w1,
                         dx,
-                        self.tokens_per_expert_indices,
+                        self.m_indices,
                     )
                 else:
                     dx = paddle.incubate.nn.functional.batched_gemm(
@@ -929,7 +1346,7 @@ class ExpertsGroupGemmContiguousNode:
                     start_idx = end_idx
                 dx = paddle.concat(dx_list, axis=0)
         else:
-            if self.moe_grouped_gemm and not self.use_fp8_mlp:
+            if self.moe_expert_fusion and not self.use_fp8_mlp:
                 dx_shape = [do1.shape[0], expert_w1.shape[1]]
             else:
                 dx_shape = [do1.shape[0], expert_w1[0].shape[0]]
@@ -942,21 +1359,59 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
         # recompute concated_w1_t
-        bw_w1_quant, bw_w1_scale = fused_stack_quant(expert_w1, transpose=False)
+
+        if hasattr(self, "grouped_gemm_experts"):
+            offline_quant = hasattr(
+                self.grouped_gemm_experts.weight1,
+                "fp8_weight_stacked_transpose",
+            ) or hasattr(
+                self.grouped_gemm_experts.weight1, "fp8_weight_stacked"
+            )
+            local_expert_num = expert_w1.shape[0]
+            if not offline_quant:
+                expert_w1 = [
+                    expert_w1[i, :, :] for i in range(local_expert_num)
+                ]
+            else:
+                expert_w1 = [expert_w1]
+        else:
+            local_expert_num = len(expert_w1)
+
+        bw_w1_quant, bw_w1_scale = fused_stack_quant(
+            expert_w1,
+            transpose=False,
+            num_expert=local_expert_num,
+            use_ue8m0=self.use_ue8m0,
+        )
         bw_w1_quant = bw_w1_quant.reshape(
-            [len(expert_w1), -1, bw_w1_quant.shape[-1]]
+            [local_expert_num, -1, bw_w1_quant.shape[-1]]
         )
         bw_w1_scale = bw_w1_scale.reshape(
-            [len(expert_w1), -1, bw_w1_scale.shape[-1]]
+            [local_expert_num, -1, bw_w1_scale.shape[-1]]
         )
 
         # quant do1
-        do1_fp8, do1_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
-            do1,
-            output_scale_transpose=False,
-            quant_method="1x128",
-            input_transpose=False,
-        )
+        if self.use_ue8m0 and self.moe_expert_fusion:
+            do1_fp8, do1_scale = (
+                paddle.incubate.nn.functional.fp8_quant_blockwise(
+                    do1,
+                    output_scale_transpose=True,
+                    quant_method="1x128",
+                    input_transpose=False,
+                    using_ue8m0_scale=True,
+                )
+            )
+            do1_scale = do1_scale.T
+        else:
+            do1_fp8, do1_scale = (
+                paddle.incubate.nn.functional.fp8_quant_blockwise(
+                    do1,
+                    output_scale_transpose=False,
+                    quant_method="1x128",
+                    input_transpose=False,
+                    using_ue8m0_scale=self.use_ue8m0,
+                )
+            )
 
         # compute gemm
         dx_shape = [do1_fp8.shape[0], bw_w1_quant.shape[1]]
@@ -966,7 +1421,7 @@ class ExpertsGroupGemmContiguousNode:
             assert dx.shape == dx_shape, f"{dx.shape} vs {dx_shape}"
             dx.zero_()
         if numpy.prod(do1_fp8.shape) != 0:
-            if not self.moe_grouped_gemm:
+            if not self.moe_expert_fusion:
                 split_group_gemm(
                     do1_fp8,
                     do1_scale,
@@ -974,8 +1429,15 @@ class ExpertsGroupGemmContiguousNode:
                     bw_w1_scale,
                     self.tokens_per_expert,
                     dx,
+                    use_ue8m0=self.use_ue8m0,
                 )
             else:
+                if self.use_ue8m0:
+                    bw_w1_scale = (
+                        bw_w1_scale.transpose([0, 2, 1])
+                        .contiguous()
+                        .transpose([0, 2, 1])
+                    )
                 paddlefleet_deep_gemm.m_grouped_fp8_gemm_nt_contiguous(
                     (do1_fp8, do1_scale),
                     (bw_w1_quant, bw_w1_scale),
@@ -1011,31 +1473,47 @@ class ExpertsGroupGemmContiguousNode:
                     expert_w2[i].main_grad = paddle.zeros(
                         shape=expert_w2[i].shape, dtype=paddle.float32
                     )
-                kitchen_gemm(
-                    o2_t_fp8[i],
-                    o2_t_scale[i],
-                    do3_t_fp8[i],
-                    do3_t_scale[i],
-                    True,
-                    True,
-                    expert_w2[i].main_grad,
-                    paddle.float32,
-                )
+                if self.use_ue8m0:
+                    deep_gemm.fp8_gemm_nt(
+                        (o2_t_fp8[i], o2_t_scale[i].T),
+                        (do3_t_fp8[i], do3_t_scale[i].T),
+                        expert_w2[i].main_grad,
+                        expert_w2[i].main_grad,
+                    )
+                else:
+                    kitchen_gemm(
+                        o2_t_fp8[i],
+                        o2_t_scale[i],
+                        do3_t_fp8[i],
+                        do3_t_scale[i],
+                        True,
+                        True,
+                        expert_w2[i].main_grad,
+                        paddle.float32,
+                    )
             else:
                 if expert_w2[i].grad is None:
                     expert_w2[i].grad = paddle.zeros(
                         shape=expert_w2[i].shape, dtype=paddle.float32
                     )
-                kitchen_gemm(
-                    o2_t_fp8[i],
-                    o2_t_scale[i],
-                    do3_t_fp8[i],
-                    do3_t_scale[i],
-                    True,
-                    True,
-                    expert_w2[i].grad,
-                    paddle.float32,
-                )
+                if self.use_ue8m0:
+                    deep_gemm.fp8_gemm_nt(
+                        (o2_t_fp8[i], o2_t_scale[i].T),
+                        (do3_t_fp8[i], do3_t_scale[i].T),
+                        expert_w2[i].grad,
+                        expert_w2[i].grad,
+                    )
+                else:
+                    kitchen_gemm(
+                        o2_t_fp8[i],
+                        o2_t_scale[i],
+                        do3_t_fp8[i],
+                        do3_t_scale[i],
+                        True,
+                        True,
+                        expert_w2[i].grad,
+                        paddle.float32,
+                    )
             if (
                 hasattr(expert_w2[i], "_apply_backward_hook")
                 and not expert_w2[i].stop_gradient
@@ -1077,37 +1555,54 @@ class ExpertsGroupGemmContiguousNode:
         do1_t_fp8, do1_t_scale = self.fused_transpose_split_quant(
             do1, None, self.tokens_per_expert, True
         )
+
         for i in range(len(expert_w1)):
             if hasattr(expert_w1[i], "main_grad"):
                 if expert_w1[i].main_grad is None:
                     expert_w1[i].main_grad = paddle.zeros(
                         shape=expert_w1[i].shape, dtype=paddle.float32
                     )
-                kitchen_gemm(
-                    input_x_t_fp8[i],
-                    input_x_t_scale[i],
-                    do1_t_fp8[i],
-                    do1_t_scale[i],
-                    True,
-                    True,
-                    expert_w1[i].main_grad,
-                    paddle.float32,
-                )
+                if self.use_ue8m0:
+                    deep_gemm.fp8_gemm_nt(
+                        (input_x_t_fp8[i], input_x_t_scale[i].T),
+                        (do1_t_fp8[i], do1_t_scale[i].T),
+                        expert_w1[i].main_grad,
+                        expert_w1[i].main_grad,
+                    )
+                else:
+                    kitchen_gemm(
+                        input_x_t_fp8[i],
+                        input_x_t_scale[i],
+                        do1_t_fp8[i],
+                        do1_t_scale[i],
+                        True,
+                        True,
+                        expert_w1[i].main_grad,
+                        paddle.float32,
+                    )
             else:
                 if expert_w1[i].grad is None:
                     expert_w1[i].grad = paddle.zeros(
                         shape=expert_w1[i].shape, dtype=paddle.float32
                     )
-                kitchen_gemm(
-                    input_x_t_fp8[i],
-                    input_x_t_scale[i],
-                    do1_t_fp8[i],
-                    do1_t_scale[i],
-                    True,
-                    True,
-                    expert_w1[i].grad,
-                    paddle.float32,
-                )
+                if self.use_ue8m0:
+                    deep_gemm.fp8_gemm_nt(
+                        (input_x_t_fp8[i], input_x_t_scale[i].T),
+                        (do1_t_fp8[i], do1_t_scale[i].T),
+                        expert_w1[i].grad,
+                        expert_w1[i].grad,
+                    )
+                else:
+                    kitchen_gemm(
+                        input_x_t_fp8[i],
+                        input_x_t_scale[i],
+                        do1_t_fp8[i],
+                        do1_t_scale[i],
+                        True,
+                        True,
+                        expert_w1[i].grad,
+                        paddle.float32,
+                    )
             if (
                 hasattr(expert_w1[i], "_apply_backward_hook")
                 and not expert_w1[i].stop_gradient
@@ -1120,12 +1615,10 @@ class ExpertsGroupGemmContiguousNode:
         hs_out,
         unzipped_probs,
         tokens_per_expert,
-        origin_token_per_experts,
         output=None,
         scale=None,
     ):
         """如果传入了scale, 说明在a2a之前就做了quant, 这里的hs_out就是fp8。否则, hs_out是bf16"""
-        self.origin_token_per_experts = origin_token_per_experts
         if hs_out is None:
             assert self.input_fp8 is not None
             assert self.input_scale is not None
@@ -1142,7 +1635,9 @@ class ExpertsGroupGemmContiguousNode:
             o3 = paddle.zeros(shape, dtype=dtype)
             return o3
         # get w1/w2
-        if self.moe_grouped_gemm and not self.use_fp8_mlp:
+        if self.moe_expert_fusion and (
+            not self.use_fp8_mlp or self.moe_deep_gemm
+        ):
             expert_w1 = self.grouped_gemm_experts.weight1
             expert_w2 = self.grouped_gemm_experts.weight2
         else:
@@ -1205,7 +1700,10 @@ class ExpertsGroupGemmContiguousNode:
             dx = paddle.zeros_like(out_grad)
             probs_grad = paddle.zeros_like(unzipped_probs)
 
-            if not self.moe_grouped_gemm or self.use_fp8_mlp:
+            if not (
+                self.moe_expert_fusion
+                and (not self.use_fp8_mlp or self.moe_deep_gemm)
+            ):
                 for expert in self.experts:
                     if expert is None:
                         continue
@@ -1273,6 +1771,9 @@ class ExpertsGroupGemmContiguousNode:
 
         subbatch_rows = self.moe_subbatch_token_num_after_dispatch
         if subbatch_rows is None:
+            self.tokens_per_expert_tensor = paddle.to_tensor(
+                self.tokens_per_expert, dtype="int32"
+            )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
             )
@@ -1285,6 +1786,9 @@ class ExpertsGroupGemmContiguousNode:
         rows, _ = out_grad.shape
         nparts = (rows + subbatch_rows - 1) // subbatch_rows
         if nparts <= 1:
+            self.tokens_per_expert_tensor = paddle.to_tensor(
+                self.tokens_per_expert, dtype="int32"
+            )
             return self.backward_impl(
                 out_grad, unzipped_probs, a2a_async_fn=a2a_async_fn
             )
@@ -1309,11 +1813,11 @@ class ExpertsGroupGemmContiguousNode:
             if o1 is not None:
                 self.o1 = o1._slice(s_idx, e_idx)
             self.tokens_per_expert = [e_idx - s_idx]
+            self.tokens_per_expert_tensor = paddle.to_tensor(
+                self.tokens_per_expert, dtype="int32"
+            )
             if self.moe_deep_gemm:
-                self.tokens_per_expert_indices = paddle.repeat_interleave(
-                    paddle.arange(len(self.tokens_per_expert)),
-                    paddle.to_tensor(self.tokens_per_expert),
-                ).cast("int32")
+                self.m_indices = self.gen_m_indices(self.tokens_per_expert)
 
             tmp_out_grad = out_grad._slice(s_idx, e_idx)
             tmp_unzipped_probs = unzipped_probs._slice(s_idx, e_idx)
@@ -1336,10 +1840,7 @@ class ExpertsGroupGemmContiguousNode:
 
         self.tokens_per_expert = tokens_per_expert
         if self.moe_deep_gemm:
-            self.tokens_per_expert_indices = paddle.repeat_interleave(
-                paddle.arange(len(self.tokens_per_expert)),
-                paddle.to_tensor(self.tokens_per_expert),
-            ).cast("int32")
+            self.m_indices = self.gen_m_indices(self.tokens_per_expert)
         probs_grad = paddle.concat(probs_grad, axis=0)
         return out_grad, probs_grad
 
@@ -1408,7 +1909,7 @@ class ExpertsGroupGemmContiguousNode:
         # Detect LoRA on grouped_gemm_experts
         _ge = (
             getattr(self, "grouped_gemm_experts", None)
-            if self.moe_grouped_gemm
+            if self.moe_expert_fusion
             else None
         )
         _has_lora = (
@@ -1418,7 +1919,7 @@ class ExpertsGroupGemmContiguousNode:
             and not getattr(_ge, "merged", False)
         )
 
-        if self.moe_grouped_gemm and not self.use_fp8_mlp:
+        if self.moe_expert_fusion and not self.use_fp8_mlp:
             if _has_lora:
                 expert_w1 = _ge.weight1 + _ge.get_delta_weight(
                     _ge.weight1_lora_A, _ge.weight1_lora_B
@@ -1450,7 +1951,7 @@ class ExpertsGroupGemmContiguousNode:
         self.o1 = None
 
         # dw1 / lora grads for w1
-        if _has_lora and self.moe_grouped_gemm:
+        if _has_lora and self.moe_expert_fusion:
             # compute dw_eff into a temporary tensor instead of accumulating to frozen weight
             if self.input is not None:
                 _input = self.input
@@ -1473,7 +1974,7 @@ class ExpertsGroupGemmContiguousNode:
             self.input = None
 
         # dw2 / lora grads for w2
-        if _has_lora and self.moe_grouped_gemm:
+        if _has_lora and self.moe_expert_fusion:
             if o2_s is not None and o2_s.shape[0] > 0:
                 dw2 = paddle.incubate.nn.functional.batched_gemm(
                     o2_s, out_grad, self.tokens_per_expert, trans_lhs=True
@@ -1504,15 +2005,23 @@ class ExpertsGroupGemmContiguousNode:
         """
         backward_impl
         """
-        # recompute expert_w2 and expert_w1
-        expert_w2 = [x.down_proj.weight for x in self.experts if x is not None]
-        expert_w1 = [
-            x.up_gate_proj.weight for x in self.experts if x is not None
-        ]
+        if hasattr(self, "grouped_gemm_experts"):
+            expert_w1 = self.grouped_gemm_experts.weight1
+            expert_w2 = self.grouped_gemm_experts.weight2
+            num_expert = expert_w1.shape[0]
+        else:
+            # recompute expert_w2 and expert_w1
+            expert_w2 = [
+                x.down_proj.weight for x in self.experts if x is not None
+            ]
+            expert_w1 = [
+                x.up_gate_proj.weight for x in self.experts if x is not None
+            ]
+            num_expert = len(expert_w1)
 
         if self.recompute_moe_gate_up:
             o1 = self.fwd_gate_up(
-                None, expert_w1, len(expert_w1), self.tokens_per_expert
+                None, expert_w1, num_expert, self.tokens_per_expert
             )
         else:
             o1 = self.o1
@@ -1522,18 +2031,22 @@ class ExpertsGroupGemmContiguousNode:
             expert_w2, out_grad, o1, unzipped_probs, inplace_swiglu_prob=True
         )
         # del o1 时机：
-        #   inplace（USE_INPLACE_SWIGLU_BWD=True）：do1 与 o1 共用 buffer，refcount
-        #     不归零，立即 del 安全。
-        #   out-of-place（USE_INPLACE_SWIGLU_BWD=False）：do1 是独立 buffer，GPU 异步
-        #     kernel 仍在读 o1，必须等 bwd_gate_up_input_fp8 的 synchronize 后再 del。
-        if USE_INPLACE_SWIGLU_BWD:
+        #   inplace（USE_INPLACE_SWIGLU_BWD=True 且无 clamp）：do1 与 o1 共用 buffer，
+        #     refcount 不归零，立即 del 安全。
+        #   out-of-place（USE_INPLACE_SWIGLU_BWD=False 或 clamp_value 已设置）：
+        #     do1 是独立 buffer，GPU 异步 kernel 仍在读 o1，
+        #     必须等 bwd_gate_up_input_fp8 的 synchronize 后再 del。
+        used_inplace_swiglu = (
+            USE_INPLACE_SWIGLU_BWD and self.clamp_value is None
+        )
+        if used_inplace_swiglu:
             del o1
         self.o1 = None
 
         if a2a_async_fn is None:
             # dw1
             if self.use_bf16_gemm_weight_grad:
-                self.bf16_weight_grad(do1, None, expert_w1)
+                self.bf16_weight_grad(do1, None, expert_w1, self.dw_p2p_overlap)
             else:
                 self.bwd_gate_up_weight(do1, None, expert_w1, clear_input=True)
             # 不调用 _record_stream，直接 None。
@@ -1555,7 +2068,7 @@ class ExpertsGroupGemmContiguousNode:
             # out-of-place 路径下 fused_swiglu_weighted_bwd 异步读 o1，但此时
             # 中间已经执行了 dw1、dw2 等多个 GEMM kernel（同一 stream 顺序入队），
             # 到达此处时 o1 的读取早已完成，del 安全。
-            if not USE_INPLACE_SWIGLU_BWD:
+            if not used_inplace_swiglu:
                 del o1
             del do1
         else:
@@ -1584,13 +2097,13 @@ class ExpertsGroupGemmContiguousNode:
             task.wait()
             # task.wait() 后所有异步 kernel（含 out-of-place 路径下
             # fused_swiglu_weighted_bwd 对 o1 的读取）已完成，安全释放。
-            if not USE_INPLACE_SWIGLU_BWD:
+            if not used_inplace_swiglu:
                 del o1
 
         self.reset_state()
         return dx, probs_grad
 
-    def bf16_weight_grad(self, dy, x, weights):
+    def bf16_weight_grad(self, dy, x, weights, p2p_overlap=False):
         """
         BF16 GEMM for weight grad
         """
@@ -1602,24 +2115,86 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 x = self.input
 
-        if self.moe_grouped_gemm and not self.use_fp8_mlp:
+        # grouped path: weights 是 stacked tensor，用 grouped/batched gemm 计算 weight_grad
+        # 条件须与 __init__ 一致，否则 split path 下 weights 是 list 会报错
+        # TODO: auto_subbatch 支持 grouped 模式后应该优化判断条件
+        if self.moe_expert_fusion and (
+            not self.use_fp8_mlp or self.moe_deep_gemm
+        ):
+
+            def _compute_weight_grad(
+                x,
+                dy,
+                weights,
+                weight_grad,
+                tokens_per_expert,
+                tokens_per_expert_tensor,
+                overlap_gemm,
+            ):
+                if overlap_gemm:
+                    deep_gemm.set_num_sms(118)
+                    deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+                        x,
+                        dy,
+                        weight_grad,
+                        tokens_per_expert,
+                        tokens_per_expert_tensor,
+                        weight_grad,
+                    )
+                    deep_gemm.set_num_sms(0)
+                else:
+                    deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
+                        x,
+                        dy,
+                        weight_grad,
+                        tokens_per_expert,
+                        tokens_per_expert_tensor,
+                        weight_grad,
+                    )
+
+                if (
+                    hasattr(weights, "_apply_backward_hook")
+                    and not weights.stop_gradient
+                ):
+                    weights._apply_backward_hook()
+
             if hasattr(weights, "main_grad"):
                 if weights.main_grad is None:
                     weights.main_grad = paddle.zeros(
                         weights.shape, dtype=paddle.float32
                     )
                 if self.moe_deep_gemm:
-                    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
-                        a=x,
-                        b=dy,
-                        d=weights.main_grad,
-                        ks=self.tokens_per_expert,
-                        ks_tensor=paddle.to_tensor(
-                            self.tokens_per_expert, dtype="int32"
-                        ),
-                        c=weights.main_grad,
-                    )
+                    # Use WeightGradStore for deferred execution to overlap with P2P communication
+                    if p2p_overlap:
+                        WeightGradStore.enabled = True
+                        WeightGradStore.put(
+                            partial(
+                                _compute_weight_grad,
+                                x,
+                                dy,
+                                weights,
+                                weights.main_grad,
+                                self.tokens_per_expert,
+                                self.tokens_per_expert_tensor,
+                                p2p_overlap,
+                            )
+                        )
+                        WeightGradStore.enabled = False
+                    else:
+                        _compute_weight_grad(
+                            x,
+                            dy,
+                            weights,
+                            weights.main_grad,
+                            self.tokens_per_expert,
+                            self.tokens_per_expert_tensor,
+                            p2p_overlap,
+                        )
+
                 else:
+                    assert not self.use_fp8_mlp, (
+                        "batched_gemm is not supported when use_fp8_mlp=True"
+                    )
                     weights_res = paddle.incubate.nn.functional.batched_gemm(
                         x,
                         dy,
@@ -1629,23 +2204,49 @@ class ExpertsGroupGemmContiguousNode:
                     weights.main_grad.add_(
                         weights_res.cast(weights.main_grad.dtype)
                     )
+
+                    if (
+                        hasattr(weights, "_apply_backward_hook")
+                        and not weights.stop_gradient
+                    ):
+                        weights._apply_backward_hook()
+
             else:
                 if weights.grad is None:
                     weights.grad = paddle.zeros(
                         weights.shape, dtype=paddle.float32
                     )
                 if self.moe_deep_gemm:
-                    paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
-                        a=x,
-                        b=dy,
-                        d=weights.grad,
-                        ks=self.tokens_per_expert,
-                        ks_tensor=paddle.to_tensor(
-                            self.tokens_per_expert, dtype="int32"
-                        ),
-                        c=weights.grad,
-                    )
+                    # Use WeightGradStore for deferred execution to overlap with P2P communication
+                    if p2p_overlap:
+                        WeightGradStore.enabled = True
+                        WeightGradStore.put(
+                            partial(
+                                _compute_weight_grad,
+                                x,
+                                dy,
+                                weights,
+                                weights.grad,
+                                self.tokens_per_expert,
+                                self.tokens_per_expert_tensor,
+                                p2p_overlap,
+                            )
+                        )
+                        WeightGradStore.enabled = False
+                    else:
+                        _compute_weight_grad(
+                            x,
+                            dy,
+                            weights,
+                            weights.grad,
+                            self.tokens_per_expert,
+                            self.tokens_per_expert_tensor,
+                            p2p_overlap,
+                        )
                 else:
+                    assert not self.use_fp8_mlp, (
+                        "batched_gemm is not supported when use_fp8_mlp=True"
+                    )
                     weights_res = paddle.incubate.nn.functional.batched_gemm(
                         x,
                         dy,
@@ -1653,12 +2254,14 @@ class ExpertsGroupGemmContiguousNode:
                         trans_lhs=True,
                     )
                     weights.grad.add_(weights_res.cast(weights.grad.dtype))
-            if (
-                hasattr(weights, "_apply_backward_hook")
-                and not weights.stop_gradient
-            ):
-                weights._apply_backward_hook()
+
+                    if (
+                        hasattr(weights, "_apply_backward_hook")
+                        and not weights.stop_gradient
+                    ):
+                        weights._apply_backward_hook()
         else:
+            # split path: weights 是 list，逐专家计算 weight_grad (支持 auto_subbatch fallback)
             start_idx = 0
             for i, n in enumerate(self.tokens_per_expert):
                 if hasattr(weights[i], "main_grad"):
@@ -1675,46 +2278,27 @@ class ExpertsGroupGemmContiguousNode:
                     grad_attr = weights[i].grad
 
                 if n > 0:
-                    # == 【MG 精度对齐 diff · 参考 PF PR#968 · expert wgrad】==
-                    # 仅 use_accuracy_compatible=True 生效：padding 用
-                    #   self.token_padding_alignment（非 fp8/非 grouped_gemm 时
-                    #   为 1，即真实 token 数）替代固定 FP8_ALIGN，且非 fp8 路径
-                    #   把 x/dy 分片先 astype fp32 再累加，对齐 MG SequentialMLP
-                    #   的 fp32 expert wgrad。否则保持原有行为（FP8_ALIGN 对齐 +
-                    #   直接 fused_linear_param_grad_add）。
-                    # ==========================================================
-                    if self.use_accuracy_compatible:
-                        n = (
-                            (n + self.token_padding_alignment - 1)
-                            // self.token_padding_alignment
-                            * self.token_padding_alignment
+                    end_idx = start_idx + n
+                    # == [MG accuracy-alignment diff · expert wgrad] ==
+                    # Only active when use_accuracy_compatible=True: on the non-fp8
+                    #   path, cast the x/dy slices to fp32 before accumulating via
+                    #   fused_linear_param_grad_add, matching MG SequentialMLP's fp32
+                    #   expert wgrad. Otherwise keep the original direct accumulation.
+                    # Note: this local tree already pre-pads tokens_per_expert
+                    #   upstream (padding_token_per_experts, which is alignment-aware),
+                    #   so the FP8_ALIGN re-padding from the upstream PR is a no-op
+                    #   here and is intentionally omitted.
+                    # ============================================================
+                    if self.use_accuracy_compatible and not self.use_fp8_mlp:
+                        paddle._C_ops.fused_linear_param_grad_add(
+                            x._slice(start_idx, end_idx).astype("float32"),
+                            dy._slice(start_idx, end_idx).astype("float32"),
+                            grad_attr,
+                            None,
+                            True,
+                            False,
                         )
-                        end_idx = start_idx + n
-                        if self.use_fp8_mlp:
-                            paddle._C_ops.fused_linear_param_grad_add(
-                                x._slice(start_idx, end_idx),
-                                dy._slice(start_idx, end_idx),
-                                grad_attr,
-                                None,
-                                True,
-                                False,
-                            )
-                        else:
-                            paddle._C_ops.fused_linear_param_grad_add(
-                                x._slice(start_idx, end_idx).astype(
-                                    "float32"
-                                ),
-                                dy._slice(start_idx, end_idx).astype(
-                                    "float32"
-                                ),
-                                grad_attr,
-                                None,
-                                True,
-                                False,
-                            )
                     else:
-                        n = (n + FP8_ALIGN - 1) // FP8_ALIGN * FP8_ALIGN
-                        end_idx = start_idx + n
                         paddle._C_ops.fused_linear_param_grad_add(
                             x._slice(start_idx, end_idx),
                             dy._slice(start_idx, end_idx),

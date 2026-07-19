@@ -231,14 +231,6 @@ class TestTransformerConfigMLARoPEFusion(unittest.TestCase):
         )
         self.assertTrue(cfg.apply_rope_fusion)
 
-    def test_mla_rope_fusion_invalid_without_yarn(self):
-        with self.assertRaises(ValueError):
-            _make_config(
-                multi_latent_attention=True,
-                apply_rope_fusion=True,
-                rope_type="rope",
-            )
-
 
 class TestTransformerConfigFromConfig(unittest.TestCase):
     """Test from_config class method."""

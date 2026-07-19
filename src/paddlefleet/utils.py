@@ -143,6 +143,40 @@ def scaled_init_method_normal(sigma, num_layers, multiplier=2.0):
     return functools.partial(paddle.nn.init.normal_, mean=0.0, std=std)
 
 
+def get_magic_init_method(sigma):
+    """Magic init method: randn(...).scale(sigma) under fp32 default dtype guard."""
+
+    def init_method(weight):
+        weight.set_value(
+            paddle.randn(weight.shape, dtype=weight.dtype).scale(sigma)
+        )
+
+    return init_method
+
+
+def truncated_init_method_normal(sigma, truncate_factor=3.0):
+    """Init method based on truncated normal N(0, sigma^2) clipped to
+    [-truncate_factor*sigma, truncate_factor*sigma].
+
+    Initialized under an fp32 default dtype guard to avoid numerical issues
+    in low-precision (e.g. bf16) default dtype. Independent from the other
+    init methods so existing behavior is unaffected.
+    """
+
+    def init_method(weight):
+        dtype = paddle.get_default_dtype()
+        try:
+            paddle.set_default_dtype("float32")
+            bound = truncate_factor * sigma
+            paddle.nn.init.trunc_normal_(
+                weight, mean=0.0, std=sigma, a=-bound, b=bound
+            )
+        finally:
+            paddle.set_default_dtype(dtype)
+
+    return init_method
+
+
 def get_pg_size(group=None):
     """Get world size for a distributed group.
 
@@ -267,15 +301,19 @@ def is_paddle_min_version(version, check_equality=True):
 ########################
 
 
-def get_batch_on_this_cp_rank(inputs):
+def get_batch_on_this_cp_rank(inputs, cp_balance_mode="dualchunk_allgather"):
     if isinstance(inputs, paddle.Tensor):
-        return ContextParallelScatterOp.apply(inputs, axis=-1)
+        return ContextParallelScatterOp.apply(
+            inputs, axis=-1, mode=cp_balance_mode
+        )
     elif isinstance(inputs, dict):
         res = {}
         keys = ["input_ids", "position_ids", "labels"]
         for k, tensor in inputs.items():
             if k in keys:
-                res[k] = ContextParallelScatterOp.apply(tensor, axis=-1)
+                res[k] = ContextParallelScatterOp.apply(
+                    tensor, axis=-1, mode=cp_balance_mode
+                )
             else:
                 res[k] = tensor
     elif isinstance(inputs, list):

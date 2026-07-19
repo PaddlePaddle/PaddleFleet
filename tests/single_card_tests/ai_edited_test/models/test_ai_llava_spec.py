@@ -151,11 +151,11 @@ class TestDecoderModelWithMoE(unittest.TestCase):
         mock_mlp.return_value = MagicMock()
 
         result = decoder_model_with_local_default_spec(
-            num_experts=8, moe_grouped_gemm=True
+            num_experts=8, moe_expert_fusion=True
         )
         self.assertIsNotNone(result)
         mock_mlp.assert_called_once_with(
-            use_te=False, num_experts=8, moe_grouped_gemm=True
+            use_te=False, num_experts=8, moe_expert_fusion=True
         )
 
 

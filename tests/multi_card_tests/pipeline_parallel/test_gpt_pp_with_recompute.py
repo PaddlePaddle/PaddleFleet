@@ -98,13 +98,16 @@ def single_device_baseline(seed, batch_size, seq_len, vocab_size, config):
     strategy = fleet.DistributedStrategy()
     gpt_pipe_model = NoPipelineParallel(gpt_model, strategy)
 
+    paddle.manual_seed(seed)
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
     )
     input_ids = data[:, :-1]
     labels = data[:, 1:]
-    position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
-        (batch_size, 1)
+    position_ids = (
+        paddle.arange(seq_len, dtype=paddle.int64)
+        .unsqueeze(0)
+        .expand([batch_size, -1])
     )
 
     inputs = (
@@ -161,13 +164,16 @@ def run_pp(
     )
     gpt_pipe_model = distributed_model(gpt_model)
 
+    paddle.manual_seed(seed)
     data = paddle.randint(
         low=0, high=vocab_size, shape=(batch_size, seq_len + 1)
     )
     input_ids = data[:, :-1]
     labels = data[:, 1:]
-    position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat(
-        (batch_size, 1)
+    position_ids = (
+        paddle.arange(seq_len, dtype=paddle.int64)
+        .unsqueeze(0)
+        .expand([batch_size, -1])
     )
 
     inputs = (

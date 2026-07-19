@@ -69,12 +69,10 @@ class TestBaseEmbedding(unittest.TestCase):
 class TestGPTEmbeddingFillFeatureBranch(unittest.TestCase):
     """Test fill_feature branch (lines 153-162) in GPTEmbedding.forward."""
 
-    def test_forward_zeros_padding_and_sets_moe_mask(self):
-        """Cover: fill_feature zeroes padding embeddings, input_ids_for_moe_mask is set."""
+    def _make_emb(self, pad_token_id):
         from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 
         B, S, H = 2, 4, 8
-        # Bypass __init__ to avoid heavy distributed dependencies
         emb = object.__new__(GPTEmbedding)
         emb.sequence_parallel = False
         emb.multimodal_embedding = False
@@ -90,7 +88,13 @@ class TestGPTEmbeddingFillFeatureBranch(unittest.TestCase):
         cfg.num_nextn_predict_layers = None
         cfg.mtp_load_weight_only = False
         cfg.sequence_parallel = False
+        cfg.pad_token_id = pad_token_id
         emb.config = cfg
+        return emb, B, S, H
+
+    def test_forward_zeros_padding_and_sets_moe_mask(self):
+        """Cover: fill_feature zeroes padding embeddings, input_ids_for_moe_mask is set."""
+        emb, B, S, H = self._make_emb(pad_token_id=0)
 
         input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 0, 5, 0]])
         result = emb.forward({"input_ids": input_ids})
@@ -108,6 +112,32 @@ class TestGPTEmbeddingFillFeatureBranch(unittest.TestCase):
         # input_ids_for_moe_mask is passed through as "input_ids"
         self.assertIn("input_ids", result)
         self.assertTrue(paddle.equal_all(result["input_ids"], input_ids).item())
+
+    def test_forward_uses_custom_pad_token_id(self):
+        """When pad_token_id != 0, only that id is treated as padding."""
+        emb, B, S, _ = self._make_emb(pad_token_id=42)
+        # id 0 must NOT be padding; id 42 must be padding.
+        input_ids = paddle.to_tensor([[1, 0, 42, 42], [3, 42, 5, 0]])
+        hidden = emb.forward({"input_ids": input_ids})["hidden_states"]
+        # id == 42 → zeroed
+        self.assertAlmostEqual(hidden[0, 2, 0].item(), 0.0)
+        self.assertAlmostEqual(hidden[0, 3, 0].item(), 0.0)
+        self.assertAlmostEqual(hidden[1, 1, 0].item(), 0.0)
+        # id == 0 → kept as 1.0
+        self.assertAlmostEqual(hidden[0, 1, 0].item(), 1.0)
+        self.assertAlmostEqual(hidden[1, 3, 0].item(), 1.0)
+
+    def test_forward_handles_none_pad_token_id(self):
+        """A runtime-None pad_token_id must fall back to 0 instead of crashing."""
+        emb, B, S, _ = self._make_emb(pad_token_id=None)
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 0, 5, 0]])
+        # If the defensive fallback is missing, `input_ids == None` returns
+        # a Python bool and the fill_feature path would raise AttributeError.
+        hidden = emb.forward({"input_ids": input_ids})["hidden_states"]
+        # id == 0 still treated as padding via fallback.
+        self.assertAlmostEqual(hidden[0, 2, 0].item(), 0.0)
+        self.assertAlmostEqual(hidden[1, 1, 0].item(), 0.0)
+        self.assertAlmostEqual(hidden[0, 0, 0].item(), 1.0)
 
 
 if __name__ == "__main__":

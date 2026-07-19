@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for fp8='e4m3' + fp8_wgrad=False with moe_grouped_gemm=True.
+"""Tests for fp8='e4m3' + fp8_wgrad=False with moe_expert_fusion=True.
 
-Covers the bug fix in commit 3352089: when moe_grouped_gemm=True and
+Covers the bug fix in commit 3352089: when moe_expert_fusion=True and
 use_fp8_mlp=True, the four backward branch guards must use the per-expert
 list path instead of grouped_gemm_experts.
 
@@ -80,7 +80,7 @@ def _make_node(use_fp8_mlp, use_bf16_gemm_weight_grad):
         custom_map=cm,
         use_fp8_mlp=use_fp8_mlp,
         use_bf16_gemm_weight_grad=use_bf16_gemm_weight_grad,
-        moe_grouped_gemm=True,
+        moe_expert_fusion=True,
         moe_deep_gemm=False,
     )
     return node, experts
@@ -88,14 +88,14 @@ def _make_node(use_fp8_mlp, use_bf16_gemm_weight_grad):
 
 class TestFp8E4m3WgradFalseBf16Backward(unittest.TestCase):
     """ExpertsGroupGemmContiguousNode: fp8=e4m3 (use_fp8_mlp=True) +
-    fp8_wgrad=False (use_bf16_gemm_weight_grad=True) + moe_grouped_gemm=True.
+    fp8_wgrad=False (use_bf16_gemm_weight_grad=True) + moe_expert_fusion=True.
 
     Before the fix, backward_impl_bf16 / bwd_down_input_bf16 /
     bwd_gate_up_input_bf16 / bf16_weight_grad all incorrectly entered the
-    grouped_gemm branch (guarded by `moe_grouped_gemm` alone) and tried to
+    grouped_gemm branch (guarded by `moe_expert_fusion` alone) and tried to
     access self.grouped_gemm_experts, which does not exist when use_fp8_mlp=True.
 
-    After the fix the guard is `moe_grouped_gemm and not use_fp8_mlp`, so these
+    After the fix the guard is `moe_expert_fusion and not use_fp8_mlp`, so these
     functions fall through to the per-expert list path.
     """
 
@@ -114,7 +114,7 @@ class TestFp8E4m3WgradFalseBf16Backward(unittest.TestCase):
         self.unzipped_probs = paddle.ones([total], dtype=paddle.bfloat16)
 
     def test_node_uses_per_expert_list(self):
-        """With use_fp8_mlp=True + moe_grouped_gemm=True the node must hold
+        """With use_fp8_mlp=True + moe_expert_fusion=True the node must hold
         self.experts, not self.grouped_gemm_experts."""
         self.assertTrue(hasattr(self.node, "experts"))
         self.assertFalse(hasattr(self.node, "grouped_gemm_experts"))
@@ -141,7 +141,7 @@ class TestFp8E4m3WgradFalseBf16Backward(unittest.TestCase):
         self.assertEqual(probs_grad.shape[0], self.total_tokens)
 
     def test_bwd_gate_up_input_bf16_does_not_raise(self):
-        """bwd_gate_up_input_bf16 with use_fp8_mlp=True + moe_grouped_gemm=True
+        """bwd_gate_up_input_bf16 with use_fp8_mlp=True + moe_expert_fusion=True
         must not raise (pre-fix: tried to access grouped_gemm_experts weight tensor)."""
         expert_w1 = [e.up_gate_proj.weight for e in self.node.experts]
         do1 = paddle.randn(

@@ -179,7 +179,7 @@ class Qwen3MoE30BConfig(GPTConfig):
     n_routed_experts: int = 128
     num_experts_per_tok: int = 8
     moe_intermediate_size: int = 768
-    moe_grouped_gemm: bool = True
+    moe_expert_fusion: bool = True
     tensor_model_parallel_size: int = 1
     pipeline_model_parallel_size: int = 1
     expert_model_parallel_size: int = 1

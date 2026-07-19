@@ -30,14 +30,19 @@ from paddle.distributed.fleet.meta_parallel import (
     build_spec_layer,
 )
 from paddle.distributed.fleet.utils import recompute
+from paddlefleet_ops import is_deep_ep_available
 
-from paddlefleet.ops import is_deep_ep_available
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+)
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
+    has_recovered,
     need_full_recompute,
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
+from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -46,7 +51,7 @@ from paddlefleet.utils import log_single_rank
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
-        from paddlefleet.ops import deep_ep
+        from paddlefleet_ops import deep_ep
     else:
         from paddle.distributed.communication import deep_ep
 
@@ -119,6 +124,7 @@ class TransformerLayerSublayersSpec:
     """
 
     input_layernorm: LayerSpec | type = IdentityOp
+    self_attention_hyper_connection: LayerSpec | type = IdentityOp
     self_attn: LayerSpec | type = IdentityOp
     self_attn_bda: LayerSpec | type = IdentityFuncOp
 
@@ -127,6 +133,7 @@ class TransformerLayerSublayersSpec:
     cross_attn_bda: LayerSpec | type = IdentityFuncOp
 
     post_attention_layernorm: LayerSpec | type = IdentityOp
+    mlp_hyper_connection: LayerSpec | type = IdentityOp
     mlp: LayerSpec | type = IdentityOp
     mlp_bda: LayerSpec | type = IdentityFuncOp
 
@@ -177,6 +184,7 @@ class TransformerLayer(nn.Layer):
         layer_number: int = 1,
         hidden_dropout_prob: float | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
     ):
         super().__init__()
 
@@ -189,6 +197,7 @@ class TransformerLayer(nn.Layer):
         )
 
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         self.hidden_dropout_prob = (
             config.hidden_dropout_prob
             if hidden_dropout_prob is None
@@ -268,7 +277,9 @@ class TransformerLayer(nn.Layer):
         # The conditional below is to make the logic explicit
         # if sublayers_spec.mlp is not a LayerSpec,we dont have to handle passing additional kwargs
         if isinstance(sublayers_spec.mlp, LayerSpec):
-            if sublayers_spec.mlp.layer == MoELayer:
+            if isinstance(sublayers_spec.mlp.layer, type) and issubclass(
+                sublayers_spec.mlp.layer, MoELayer
+            ):
                 additional_mlp_kwargs["pg_collection"] = pg_collection
             elif sublayers_spec.mlp.layer == MLP:
                 assert hasattr(pg_collection, "tp"), (
@@ -286,7 +297,9 @@ class TransformerLayer(nn.Layer):
             sublayers_spec.mlp, config=self.config, **additional_mlp_kwargs
         )
         if hasattr(self.mlp, "set_layer_number"):
-            self.mlp.set_layer_number(self.layer_number)
+            self.mlp.set_layer_number(
+                self.layer_number, is_mtp_layer=self.is_mtp_layer
+            )
 
         # [Layer 9: BiasDropoutFusion]
         self.mlp_bda = build_spec_layer(sublayers_spec.mlp_bda)
@@ -404,6 +417,32 @@ class TransformerLayer(nn.Layer):
             )
             self.attn_res_block_size = self.config.attn_res_block_size
 
+        if hasattr(self.mlp, "rr_recompute_update"):
+            self.mlp.rr_recompute_update(
+                in_full_recompute=self.full_recompute,
+                in_mlp_recompute=self.recompute_mlp,
+            )
+
+    def _compute_act_offload_kwargs(self):
+        """Compute activation offload kwargs based on decoderlayer_act_offload_settings."""
+        decoderlayer_act_offload_settings = self.config.get(
+            "decoderlayer_act_offload_settings", {"type": "", "value": ""}
+        ) or {"type": "", "value": ""}
+        setting_type = decoderlayer_act_offload_settings["type"]
+        offload_value = decoderlayer_act_offload_settings["value"]
+        offload_kwargs = {}
+        if "mod" == setting_type:
+            assert isinstance(offload_value, (list, tuple))
+            v1, v2 = offload_value
+            offload_kwargs["offload_indices"] = (
+                [0] if self.layer_number % v1 == v2 else []
+            )
+        elif "layer_idxs" == setting_type:
+            offload_kwargs["offload_indices"] = (
+                [0] if self.layer_number in offload_value else []
+            )
+        return offload_kwargs
+
     def build_schedule_node(self):
         return TransformerLayerNode(
             self,
@@ -411,6 +450,10 @@ class TransformerLayer(nn.Layer):
             name="TransformerLayerNode",
             layer_number=self.layer_number,
         )
+
+    @property
+    def transformer_layer_weights(self):
+        return self.named_parameters()
 
     def forward(
         self,
@@ -440,6 +483,7 @@ class TransformerLayer(nn.Layer):
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
             and not self.config.mtp_load_weight_only
+            and not self.config.enable_mtp_magic_send
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -451,15 +495,61 @@ class TransformerLayer(nn.Layer):
             dict_args["hidden_states"] = hidden_states
 
             # process position_ids
-            if "position_ids" in dict_args.keys():
-                position_ids = dict_args["position_ids"]
-                decoder_ids = position_ids[
-                    :, : -self.config.num_nextn_predict_layers
+            if not self.config.gpt_model_use_experimental_version:
+                if "position_ids" in dict_args.keys():
+                    position_ids = dict_args["position_ids"]
+                    decoder_ids = position_ids[
+                        :, : -self.config.num_nextn_predict_layers
+                    ]
+                    mtp_ids = position_ids[
+                        :, -self.config.num_nextn_predict_layers :
+                    ]
+                    dict_args["position_ids"] = decoder_ids
+
+            # process rotary_pos_emb: trim to main decoder sequence length
+            # With SP: rotary_pos_emb is [S, B, head_dim], seq is dim 0
+            # Without SP: rotary_pos_emb is [B, S, head_dim] or [1, S, 1, head_dim], seq is dim 1
+            # Compute main_seq_len from the split hidden_states (after AllGather for SP)
+            if self.config.sequence_parallel:
+                main_seq_len = (
+                    hidden_states.shape[0]
+                    * self.config.tensor_model_parallel_size
+                )
+            else:
+                main_seq_len = hidden_states.shape[1]
+            rotary_pos_emb_full = None
+            if (
+                "rotary_pos_emb" in dict_args.keys()
+                and dict_args["rotary_pos_emb"] is not None
+            ):
+                rotary_pos_emb_full = dict_args["rotary_pos_emb"]
+                if self.config.sequence_parallel:
+                    dict_args["rotary_pos_emb"] = rotary_pos_emb_full[
+                        :main_seq_len
+                    ]
+                else:
+                    dict_args["rotary_pos_emb"] = rotary_pos_emb_full[
+                        :, :main_seq_len
+                    ]
+            # rotary_pos_cos/sin are [B, S, head_dim] (not transposed)
+            rotary_pos_cos_full = None
+            if (
+                "rotary_pos_cos" in dict_args.keys()
+                and dict_args["rotary_pos_cos"] is not None
+            ):
+                rotary_pos_cos_full = dict_args["rotary_pos_cos"]
+                dict_args["rotary_pos_cos"] = rotary_pos_cos_full[
+                    :, :main_seq_len
                 ]
-                mtp_ids = position_ids[
-                    :, -self.config.num_nextn_predict_layers :
+            rotary_pos_sin_full = None
+            if (
+                "rotary_pos_sin" in dict_args.keys()
+                and dict_args["rotary_pos_sin"] is not None
+            ):
+                rotary_pos_sin_full = dict_args["rotary_pos_sin"]
+                dict_args["rotary_pos_sin"] = rotary_pos_sin_full[
+                    :, :main_seq_len
                 ]
-                dict_args["position_ids"] = decoder_ids
 
             # process input_ids (for MoE padding mask): split into main and mtp parts
             mtp_input_ids = None
@@ -468,12 +558,16 @@ class TransformerLayer(nn.Layer):
                 and dict_args["input_ids"] is not None
             ):
                 full_input_ids = dict_args["input_ids"]
-                if (
-                    full_input_ids.shape[-1]
-                    > hidden_states.shape[
-                        0 if self.config.sequence_parallel else 1
-                    ]
-                ):
+
+                # In EB dataflow and CP size > 1，shape of hidden_states is [b, s/cp, h]
+                # but input_ids' shape is [b, s], so we need to get full seq_len here
+                seq_lens = hidden_states.shape[
+                    0 if self.config.sequence_parallel else 1
+                ]
+                if get_context_parallel_world_size() > 1:
+                    seq_lens *= get_context_parallel_world_size()
+
+                if full_input_ids.shape[-1] > seq_lens:
                     decoder_input_ids = full_input_ids[
                         :, : -self.config.num_nextn_predict_layers
                     ].contiguous()
@@ -510,7 +604,7 @@ class TransformerLayer(nn.Layer):
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
 
-        if self.full_recompute:
+        if self.full_recompute or (not has_recovered()):
             hidden_states = dict_args["hidden_states"]
             attention_mask = dict_args.get("attention_mask", None)
             attn_mask_startend_row_indices = dict_args.get(
@@ -521,10 +615,16 @@ class TransformerLayer(nn.Layer):
             rotary_pos_emb = dict_args.get("rotary_pos_emb", None)
             rotary_pos_cos = dict_args.get("rotary_pos_cos", None)
             rotary_pos_sin = dict_args.get("rotary_pos_sin", None)
+            swa_rotary_pos_emb = dict_args.get("swa_rotary_pos_emb", None)
+            swa_rotary_pos_cos = dict_args.get("swa_rotary_pos_cos", None)
+            swa_rotary_pos_sin = dict_args.get("swa_rotary_pos_sin", None)
             position_ids = dict_args.get("position_ids", None)
             attention_bias = dict_args.get("attention_bias", None)
             packed_seq_params = dict_args.get("packed_seq_params", None)
             input_ids = dict_args.get("input_ids", None)
+            offload_kwargs = self._compute_act_offload_kwargs()
+            origin_input_ids = dict_args.get("origin_input_ids", None)
+
             outputs = recompute(
                 self._forward_impl,
                 hidden_states=hidden_states,
@@ -543,12 +643,23 @@ class TransformerLayer(nn.Layer):
                 rotary_pos_sin=rotary_pos_sin.clone()  # Clone is necessary!
                 if rotary_pos_sin is not None
                 else None,
+                swa_rotary_pos_emb=swa_rotary_pos_emb.clone()  # Clone is necessary!
+                if swa_rotary_pos_emb is not None
+                else None,
+                swa_rotary_pos_cos=swa_rotary_pos_cos.clone()  # Clone is necessary!
+                if swa_rotary_pos_cos is not None
+                else None,
+                swa_rotary_pos_sin=swa_rotary_pos_sin.clone()  # Clone is necessary!
+                if swa_rotary_pos_sin is not None
+                else None,
                 position_ids=position_ids.clone()  # Clone is necessary!
                 if position_ids is not None
                 else None,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
+                origin_input_ids=origin_input_ids,
+                **offload_kwargs,
             )
         else:
             outputs = self._forward_impl(**dict_args)
@@ -565,15 +676,24 @@ class TransformerLayer(nn.Layer):
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
             and not self.config.mtp_load_weight_only
+            and not self.config.enable_mtp_magic_send
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
+            if not self.config.gpt_model_use_experimental_version:
+                if "position_ids" in dict_args.keys():
+                    position_ids = paddle.concat(
+                        [dict_args["position_ids"], mtp_ids], axis=1
+                    )
+                    dict_args["position_ids"] = position_ids
 
-            if "position_ids" in dict_args.keys():
-                position_ids = paddle.concat(
-                    [dict_args["position_ids"], mtp_ids], axis=1
-                )
-                dict_args["position_ids"] = position_ids
+            # Restore rotary_pos_emb/cos/sin to full length for next layer
+            if rotary_pos_emb_full is not None:
+                dict_args["rotary_pos_emb"] = rotary_pos_emb_full
+            if rotary_pos_cos_full is not None:
+                dict_args["rotary_pos_cos"] = rotary_pos_cos_full
+            if rotary_pos_sin_full is not None:
+                dict_args["rotary_pos_sin"] = rotary_pos_sin_full
 
             # Restore input_ids: concatenate main and mtp parts back
             if mtp_input_ids is not None and "input_ids" in dict_args.keys():
@@ -598,6 +718,9 @@ class TransformerLayer(nn.Layer):
                     attn_mask_startend_row_indices = dict_args[
                         "attn_mask_startend_row_indices"
                     ]
+                dict_args["attn_mask_startend_row_indices"] = (
+                    attn_mask_startend_row_indices
+                )
 
             # New dataflow (experimental_dataflow=True): mtp_startend_row_indices_all passes through
             # dict_args unchanged and will be consumed by MTP layer directly
@@ -616,12 +739,42 @@ class TransformerLayer(nn.Layer):
         rotary_pos_emb: Tensor | None = None,
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
+        origin_input_ids: Tensor | None = None,
         **kwargs,
     ):
+        def need_do_attention():
+            # need_do_prefill = forward_meta.max_len_tensor_cpu[1] > 0
+            # need_do_decode = forward_meta.max_len_tensor_cpu[2] > 0
+            # in fastdeploy mode , not need_do_prefill and not need_do_decode,
+            # core_attention will return none, so pass self attention
+            if (
+                getattr(self, "training", True)
+                or not self.config.multi_latent_attention
+            ):
+                return True
+            if hasattr(self, "self_attn") and hasattr(
+                self.self_attn, "core_attention"
+            ):
+                core_attn = self.self_attn.core_attention
+                if hasattr(core_attn, "config") and hasattr(
+                    core_attn.config, "forward_meta"
+                ):
+                    fm = core_attn.config.forward_meta
+                    return not (
+                        fm.max_len_tensor_cpu[1] <= 0
+                        and fm.max_len_tensor_cpu[2] <= 0
+                    )
+                return True
+            else:
+                return True
+
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
         if self.config.block_attention_residuals:
             blocks = kwargs.get("blocks", [])
@@ -639,20 +792,27 @@ class TransformerLayer(nn.Layer):
 
             # Self-attention (skip internal bda residual)
             with profile("attn"):
-                hidden_states, context = self._forward_attention(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                    context=context,
-                    context_mask=context_mask,
-                    rotary_pos_emb=rotary_pos_emb,
-                    rotary_pos_cos=rotary_pos_cos,
-                    rotary_pos_sin=rotary_pos_sin,
-                    position_ids=position_ids,
-                    attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                    block_attention_residuals=True,
-                )
+                if need_do_attention():
+                    hidden_states, context = self._forward_attention(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                        context=context,
+                        context_mask=context_mask,
+                        rotary_pos_emb=rotary_pos_emb,
+                        rotary_pos_cos=rotary_pos_cos,
+                        rotary_pos_sin=rotary_pos_sin,
+                        swa_rotary_pos_emb=swa_rotary_pos_emb,
+                        swa_rotary_pos_cos=swa_rotary_pos_cos,
+                        swa_rotary_pos_sin=swa_rotary_pos_sin,
+                        position_ids=position_ids,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                        block_attention_residuals=True,
+                        in_recompute=self.full_recompute,
+                        input_ids=input_ids,
+                        **kwargs,
+                    )
 
             # Accumulate attn output into partial_block
             if (
@@ -677,6 +837,7 @@ class TransformerLayer(nn.Layer):
                     hidden_states,
                     block_attention_residuals=True,
                     input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
                 )
 
             # Accumulate mlp output into partial_block
@@ -684,25 +845,35 @@ class TransformerLayer(nn.Layer):
         else:
             self._log_md5(hidden_states, "input", self.layer_number)
             with profile("attn"):
-                hidden_states, context = self._forward_attention(
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                    context=context,
-                    context_mask=context_mask,
-                    rotary_pos_emb=rotary_pos_emb,
-                    rotary_pos_cos=rotary_pos_cos,
-                    rotary_pos_sin=rotary_pos_sin,
-                    position_ids=position_ids,
-                    attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                    in_recompute=self.full_recompute,
-                )
+                if need_do_attention():
+                    hidden_states, context = self._forward_attention(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                        context=context,
+                        context_mask=context_mask,
+                        rotary_pos_emb=rotary_pos_emb,
+                        rotary_pos_cos=rotary_pos_cos,
+                        rotary_pos_sin=rotary_pos_sin,
+                        swa_rotary_pos_emb=swa_rotary_pos_emb,
+                        swa_rotary_pos_cos=swa_rotary_pos_cos,
+                        swa_rotary_pos_sin=swa_rotary_pos_sin,
+                        position_ids=position_ids,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                        in_recompute=self.full_recompute,
+                        input_ids=input_ids,
+                        **kwargs,
+                    )
             self._log_md5(
                 hidden_states, "post_attn_residual", self.layer_number
             )
             with profile(timer_name):
-                output = self._forward_mlp(hidden_states, input_ids=input_ids)
+                output = self._forward_mlp(
+                    hidden_states,
+                    input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
+                )
             self._log_md5(output, "layer_output", self.layer_number)
         if context is not None:
             return output, context
@@ -719,12 +890,16 @@ class TransformerLayer(nn.Layer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         rope_freqs_cis: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
         in_recompute: bool = False,
         is_first_fwd: bool = False,
         block_attention_residuals: bool = False,
+        input_ids: Tensor | None = None,
         **kwargs,
     ):
         """
@@ -741,6 +916,9 @@ class TransformerLayer(nn.Layer):
             rotary_pos_cos (Tensor | None): Rotary embedding cosine.
             rotary_pos_sin (Tensor | None): Rotary embedding sine.
             rope_freqs_cis (Tensor | None): Rotary embedding frequency.
+            swa_rotary_pos_emb (Tensor | None): Sliding Window Rotary positional embeddings.
+            swa_rotary_pos_cos (Tensor | None): Sliding Window Rotary embedding cosine.
+            swa_rotary_pos_sin (Tensor | None): Sliding Window Rotary embedding sine.
             attention_bias (Tensor | None): Bias tensor for Q * K.T.
             packed_seq_params (object, optional): Parameters for packed sequence processing.
 
@@ -766,6 +944,12 @@ class TransformerLayer(nn.Layer):
             input_layernorm_output, "input_layernorm_out", self.layer_number
         )
 
+        extra_kwargs = {}
+        if input_ids is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["input_ids"] = input_ids
+
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
                 input_layernorm_output,
@@ -776,6 +960,10 @@ class TransformerLayer(nn.Layer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
             )
         else:
             attention_output_with_bias = self.self_attn(
@@ -785,10 +973,17 @@ class TransformerLayer(nn.Layer):
                 rotary_pos_emb=rotary_pos_emb,
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
+                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                swa_rotary_pos_sin=swa_rotary_pos_sin,
                 position_ids=position_ids,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
             )
 
         with paddle.enable_grad():
@@ -848,6 +1043,7 @@ class TransformerLayer(nn.Layer):
         is_first_fwd=False,
         block_attention_residuals=False,
         input_ids=None,
+        origin_input_ids=None,
         **kwargs,
     ):
         """
@@ -883,14 +1079,20 @@ class TransformerLayer(nn.Layer):
             _mlp_input_ids = (
                 input_ids if isinstance(self.mlp, MoELayer) else None
             )
+            _mlp_origin_input_ids = (
+                origin_input_ids if isinstance(self.mlp, MoELayer) else None
+            )
 
             def recompute_handler(
-                post_attention_layernorm_output, _mlp_input_ids=None
+                post_attention_layernorm_output,
+                _mlp_input_ids=None,
+                _mlp_origin_input_ids=None,
             ):
                 if _mlp_input_ids is not None:
                     mlp_output, bias = self.mlp(
                         post_attention_layernorm_output,
                         input_ids=_mlp_input_ids,
+                        origin_input_ids=_mlp_origin_input_ids,
                     )
                 else:
                     mlp_output, bias = self.mlp(post_attention_layernorm_output)
@@ -902,6 +1104,7 @@ class TransformerLayer(nn.Layer):
                 recompute_handler,
                 post_attention_layernorm_output,
                 _mlp_input_ids,
+                _mlp_origin_input_ids,
             )
             if not isinstance(mlp_output_with_bias, tuple):
                 mlp_output_with_bias = (
@@ -911,7 +1114,9 @@ class TransformerLayer(nn.Layer):
         else:
             if isinstance(self.mlp, MoELayer) and input_ids is not None:
                 mlp_output_with_bias = self.mlp(
-                    post_attention_layernorm_output, input_ids=input_ids
+                    post_attention_layernorm_output,
+                    input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
@@ -953,14 +1158,269 @@ class TransformerLayer(nn.Layer):
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         if isinstance(self.mlp, MoELayer):
-            logger.info(f"fp8 quant weight for mlp {type(self.mlp)}")
             self.mlp.fp8_quant_weight(
                 batch_mode=batch_mode, quant_transpose=quant_transpose
             )
 
+    def clear_fp8_quant_weight(self):
+        if isinstance(self.mlp, MoELayer):
+            self.mlp.clear_fp8_quant_weight()
+
     def use_fp8(self):
         if isinstance(self.mlp, MoELayer):
             return self.mlp.use_fp8()
+
+
+class HyperConnectionTransformerLayer(TransformerLayer):
+    """Transformer layer with Manifold-Constrained Hyper-Connections (mHC).
+
+    Replaces the single residual stream with n parallel residual streams,
+    using learned mappings H_pre, H_post, and H_res for aggregation,
+    expansion, and mixing respectively.
+
+    Input/output shape: [..., n*C] where n = num_residual_streams, C = hidden_size.
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers_spec: TransformerLayerSublayersSpec,
+        layer_number: int = 1,
+        hidden_dropout_prob: float | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
+    ):
+        super().__init__(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=layer_number,
+            hidden_dropout_prob=hidden_dropout_prob,
+            pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
+        )
+
+        assert (
+            sublayers_spec.self_attention_hyper_connection is not IdentityOp
+        ), (
+            "HyperConnectionTransformerLayer requires self_attention_hyper_connection. "
+            "Use TransformerLayer instead if hyper connections are not needed."
+        )
+        assert sublayers_spec.mlp_hyper_connection is not IdentityOp, (
+            "HyperConnectionTransformerLayer requires mlp_hyper_connection. "
+            "Use TransformerLayer instead if hyper connections are not needed."
+        )
+        assert not config.block_attention_residuals, (
+            "HyperConnectionTransformerLayer does not support block_attention_residuals."
+        )
+
+        self.self_attention_hyper_connection = build_spec_layer(
+            sublayers_spec.self_attention_hyper_connection,
+            config=self.config,
+            layer_number=self.layer_number,
+        )
+        self.mlp_hyper_connection = build_spec_layer(
+            sublayers_spec.mlp_hyper_connection,
+            config=self.config,
+            layer_number=self.layer_number,
+        )
+
+    def _forward_attention(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        rope_freqs_cis: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+        in_recompute: bool = False,
+        is_first_fwd: bool = False,
+        **kwargs,
+    ):
+        """mHC attention forward: aggregate → layernorm → attention → fused_h_res_h_post_bda."""
+        # Save n-stream residual for H_res mixing
+        original_residual = hidden_states
+        ori_dtype = hidden_states.dtype
+
+        # mHC: aggregate n-stream → 1-stream
+        aggregated, h_res, h_post = self.self_attention_hyper_connection(
+            hidden_states
+        )
+        aggregated = aggregated.to(ori_dtype)
+
+        # LayerNorm on aggregated single stream
+        if self.recompute_input_layernorm:
+            input_layernorm_output = recompute(self.input_layernorm, aggregated)
+        else:
+            input_layernorm_output = self.input_layernorm(aggregated)
+
+        self._log_md5(
+            input_layernorm_output, "input_layernorm_out", self.layer_number
+        )
+
+        # Self-attention
+        extra_kwargs = {}
+        if kwargs.get("input_ids") is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["input_ids"] = kwargs["input_ids"]
+
+        if rope_freqs_cis is not None:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rope_freqs_cis=rope_freqs_cis,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                **extra_kwargs,
+            )
+        else:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                **extra_kwargs,
+            )
+
+        # mHC: fused H_res + H_post + bias-dropout-add
+        hidden_states = (
+            self.self_attention_hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=attention_output_with_bias,
+                dropout_prob=self.hidden_dropout_prob,
+                training=self.training,
+                fused=self.config.bias_dropout_fusion,
+            )
+        )
+        hidden_states = hidden_states.to(ori_dtype)
+
+        # Cross attention (unchanged)
+        residual = hidden_states
+        pre_cross_attn_layernorm_output = self.pre_cross_attn_layernorm(
+            hidden_states
+        )
+        attention_output_with_bias = self.cross_attention(
+            pre_cross_attn_layernorm_output,
+            attention_mask=context_mask,
+            key_value_states=context,
+        )
+        if (
+            isinstance(attention_output_with_bias, dict)
+            and "context" in attention_output_with_bias
+        ):
+            context = attention_output_with_bias["context"]
+
+        with paddle.enable_grad():
+            residual.stop_gradient = False
+            hidden_states = self.cross_attn_bda(
+                self.training, self.config.bias_dropout_fusion
+            )(attention_output_with_bias, residual, self.hidden_dropout_prob)
+
+        if is_first_fwd:
+            hidden_states.stop_gradient = False
+
+        return hidden_states, context
+
+    def _forward_mlp(
+        self,
+        hidden_states,
+        is_first_fwd=False,
+        input_ids=None,
+        **kwargs,
+    ):
+        """mHC MLP forward: aggregate → layernorm → MLP → fused_h_res_h_post_bda."""
+        # Save n-stream residual for H_res mixing
+        original_residual = hidden_states
+        ori_dtype = hidden_states.dtype
+
+        # mHC: aggregate n-stream → 1-stream
+        aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
+        aggregated = aggregated.to(ori_dtype)
+
+        # LayerNorm on aggregated single stream
+        if self.recompute_post_attention_layernorm:
+            post_attention_layernorm_output = recompute(
+                self.post_attention_layernorm, aggregated
+            )
+        else:
+            post_attention_layernorm_output = self.post_attention_layernorm(
+                aggregated
+            )
+
+        self._log_md5(
+            post_attention_layernorm_output,
+            "post_attn_layernorm_out",
+            self.layer_number,
+        )
+
+        # MLP
+        if self.recompute_mlp:
+            _mlp_input_ids = (
+                input_ids if isinstance(self.mlp, MoELayer) else None
+            )
+
+            def recompute_handler(
+                post_attention_layernorm_output, _mlp_input_ids=None
+            ):
+                if _mlp_input_ids is not None:
+                    mlp_output, bias = self.mlp(
+                        post_attention_layernorm_output,
+                        input_ids=_mlp_input_ids,
+                    )
+                else:
+                    mlp_output, bias = self.mlp(post_attention_layernorm_output)
+                if bias is None:
+                    return mlp_output
+                return mlp_output, bias
+
+            mlp_output_with_bias = recompute(
+                recompute_handler,
+                post_attention_layernorm_output,
+                _mlp_input_ids,
+            )
+            if not isinstance(mlp_output_with_bias, tuple):
+                mlp_output_with_bias = (mlp_output_with_bias, None)
+        else:
+            if isinstance(self.mlp, MoELayer) and input_ids is not None:
+                mlp_output_with_bias = self.mlp(
+                    post_attention_layernorm_output, input_ids=input_ids
+                )
+            else:
+                mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+
+        # mHC: fused H_res + H_post + bias-dropout-add
+        hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
+            h_res=h_res,
+            original_residual=original_residual,
+            h_post=h_post,
+            layer_output_with_bias=mlp_output_with_bias,
+            dropout_prob=self.hidden_dropout_prob,
+            training=self.training,
+            fused=self.config.bias_dropout_fusion,
+        )
+        hidden_states = hidden_states.to(ori_dtype)
+
+        if is_first_fwd:
+            hidden_states.stop_gradient = False
+
+        return hidden_states
 
 
 class TransformerLayerWithOverlap(TransformerLayer):
@@ -976,9 +1436,22 @@ class TransformerLayerWithOverlap(TransformerLayer):
             assert self.mlp.expert_model_parallel_size > 1, (
                 "By enabling `forward_backward_overlap_scheduler`, you should use expert parallel."
             )
-            assert self.mlp.moe_token_dispatcher_type == "deepep", (
-                "By enabling `forward_backward_overlap_scheduler`, you should use deepep for dispatching tokens."
-            )
+            if self.mlp.moe_token_dispatcher_type not in (
+                "deepep",
+                "hybridep",
+            ):
+                raise ValueError(
+                    f"TransformerLayerWithOverlap "
+                    f"(forward_backward_overlap_scheduler) requires "
+                    f"moe_token_dispatcher_type='deepep' or 'hybridep', but "
+                    f"got '{self.mlp.moe_token_dispatcher_type}'. The "
+                    f"'{self.mlp.moe_token_dispatcher_type}' dispatcher does "
+                    f"not implement the overlap dataflow contract "
+                    f"(_comm_manager, token_dispatch_overlap, dispatched_* "
+                    f"metadata) required by the overlap scheduler. Please "
+                    f"either switch to deepep/hybridep or disable "
+                    f"forward_backward_overlap_scheduler."
+                )
 
     def compute_attention(self, dict_args, is_first_fwd=False):
         with profile("attn"):
@@ -1412,3 +1885,150 @@ class TransformerLayerOverlappedScheduleNode(ScheduleNode):
             rst = {**rst, **mtp_tmp_dict}
             output_grad = output_grad + tuple(mtp_tmp_grad)
         return rst, output_grad
+
+
+@dataclass
+class Gemma4TransformerLayerSublayersSpec(TransformerLayerSublayersSpec):
+    """Extended spec for Gemma4 norm structure.
+
+    Adds: post_self_attn_layernorm, pre_mlp_layernorm, post_mlp_layernorm.
+    MoELayer internally handles post_moe_layernorm, post_shared_expert_layernorm,
+    and pre_feedforward_layernorm_2.
+    """
+
+    post_self_attn_layernorm: LayerSpec | type = IdentityOp
+    pre_mlp_layernorm: LayerSpec | type = IdentityOp
+    post_mlp_layernorm: LayerSpec | type = IdentityOp
+
+
+class Gemma4TransformerLayer(TransformerLayer):
+    """Gemma4 transformer layer aligned with HF Gemma4TextDecoderLayer.
+
+    Note: This layer has a fundamentally different forward topology (5-norm +
+    layer_scalar) that cannot be parameterized into the base TransformerLayer.
+    It is kept as a standalone subclass and wired via attention_layer_type="gemma4"
+    through the standard get_gpt_layer_local_spec path.
+
+    Forward flow:
+        residual = x
+        x = input_layernorm(x)
+        x = self_attn(x)
+        x = post_self_attn_layernorm(x)
+        x = residual + x
+
+        residual = x
+        x = pre_mlp_layernorm(x)
+        x = moe(x, residual)
+        x = post_mlp_layernorm(x)
+        x = (residual + x) * layer_scalar
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers_spec: Gemma4TransformerLayerSublayersSpec,
+        layer_number: int = 1,
+        hidden_dropout_prob: float | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
+    ):
+        super().__init__(
+            config,
+            sublayers_spec,
+            layer_number,
+            hidden_dropout_prob,
+            pg_collection,
+            is_mtp_layer,
+        )
+
+        norm_input_parallel = (
+            self.config.sequence_parallel
+            and self.config.tensor_model_parallel_size > 1
+        )
+
+        self.post_self_attn_layernorm = build_spec_layer(
+            sublayers_spec.post_self_attn_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+            input_is_parallel=norm_input_parallel,
+        )
+        self.pre_mlp_layernorm = build_spec_layer(
+            sublayers_spec.pre_mlp_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+            input_is_parallel=norm_input_parallel,
+        )
+        self.post_mlp_layernorm = build_spec_layer(
+            sublayers_spec.post_mlp_layernorm,
+            config=self.config,
+            hidden_size=self.config.hidden_size,
+            eps=self.config.rms_norm_eps,
+            input_is_parallel=norm_input_parallel,
+        )
+
+        # Per-layer output scalar (Google checkpoint key: "skip_scale").
+        # Registered as a non-trainable buffer aligned with HF/Megatron: initialized
+        # to 1.0 (no-op) and overwritten when loading pretrained weights.
+        self.register_buffer("layer_scalar", paddle.ones([1], dtype="float32"))
+
+    def _forward_impl(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params=None,
+        input_ids: Tensor | None = None,
+        **kwargs,
+    ):
+        # === Attention block ===
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+
+        hidden_states, _ = self.self_attn(
+            hidden_states,
+            attention_mask=attention_mask,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            swa_rotary_pos_emb=swa_rotary_pos_emb,
+            swa_rotary_pos_cos=swa_rotary_pos_cos,
+            swa_rotary_pos_sin=swa_rotary_pos_sin,
+            position_ids=position_ids,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            in_recompute=getattr(self, "full_recompute", False),
+            past_key_values=kwargs.get("past_key_values"),
+            layer_idx=getattr(self, "layer_number", None),
+            use_cache=kwargs.get("use_cache", False),
+        )
+        hidden_states = self.post_self_attn_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+
+        # === MLP/MoE block ===
+        residual = hidden_states
+        hidden_states = self.pre_mlp_layernorm(hidden_states)
+
+        if isinstance(self.mlp, MoELayer):
+            hidden_states, _ = self.mlp(
+                hidden_states, input_ids=input_ids, residual=residual
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
+
+        hidden_states = self.post_mlp_layernorm(hidden_states)
+        hidden_states = (residual + hidden_states) * self.layer_scalar
+
+        return hidden_states

@@ -293,7 +293,8 @@ class TestGatedDeltaNetForward(unittest.TestCase):
             value_head_dim=8,
         )
         x = paddle.randn([2, 8, 68], dtype="float32")
-        mask = paddle.zeros([1, 1, 8, 8], dtype="float32")
+        # GatedDeltaNet expects 2D mask [batch, seq_len] (1=valid, 0=pad)
+        mask = paddle.ones([2, 8], dtype="float32")
         out, bias = gdn(x, mask)
         self.assertEqual(out.shape, [2, 8, 68])
 

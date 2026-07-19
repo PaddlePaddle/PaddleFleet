@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Re-export from Paddle for backward compatibility (PaddleFormers imports these from paddlefleet)
+
 from . import (
-    ops as ops,
     parallel_state as parallel_state,
     training as training,
     version as version,
@@ -35,7 +36,6 @@ from .timers import Timers
 mpu = parallel_state
 
 __all__ = [
-    "ops",
     "training",
     "parallel_state",
     "Timers",
@@ -48,6 +48,5 @@ __all__ = [
     "__license__",
     "__package_name__",
     "__repository_url__",
-    "__shortversion__",
     "__version__",
 ]

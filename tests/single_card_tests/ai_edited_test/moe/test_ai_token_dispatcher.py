@@ -243,9 +243,9 @@ class TestTokenDispatcher(unittest.TestCase):
         self.assertIsNotNone(result)
 
     def test_deepep_manager_no_deep_ep_raises(self):
-        """Test _DeepepManager raises ImportError when DeepEP unavailable."""
+        """Test _DeepEPManager raises ImportError when DeepEP unavailable."""
         from paddlefleet.transformer.moe.token_dispatcher import (
-            _DeepepManager,
+            _DeepEPManager,
         )
 
         mock_group = MagicMock()
@@ -262,7 +262,7 @@ class TestTokenDispatcher(unittest.TestCase):
             ),
             self.assertRaises(ImportError),
         ):
-            _DeepepManager(
+            _DeepEPManager(
                 group=mock_group,
                 router_topk=2,
                 num_experts=4,
@@ -270,9 +270,9 @@ class TestTokenDispatcher(unittest.TestCase):
             )
 
     def test_deepep_manager_init(self):
-        """Test _DeepepManager initialization."""
+        """Test _DeepEPManager initialization."""
         from paddlefleet.transformer.moe.token_dispatcher import (
-            _DeepepManager,
+            _DeepEPManager,
         )
 
         mock_group = MagicMock()
@@ -291,7 +291,7 @@ class TestTokenDispatcher(unittest.TestCase):
                 mock_fused_combine,
             ),
         ):
-            manager = _DeepepManager(
+            manager = _DeepEPManager(
                 group=mock_group,
                 router_topk=2,
                 num_experts=4,
@@ -302,9 +302,9 @@ class TestTokenDispatcher(unittest.TestCase):
             self.assertIsNone(manager.handle)
 
     def test_deepep_manager_setup_metadata(self):
-        """Test _DeepepManager.setup_metadata."""
+        """Test _DeepEPManager.setup_metadata."""
         from paddlefleet.transformer.moe.token_dispatcher import (
-            _DeepepManager,
+            _DeepEPManager,
         )
 
         mock_group = MagicMock()
@@ -320,7 +320,7 @@ class TestTokenDispatcher(unittest.TestCase):
                 MagicMock(),
             ),
         ):
-            manager = _DeepepManager(
+            manager = _DeepEPManager(
                 group=mock_group,
                 router_topk=2,
                 num_experts=4,
@@ -333,9 +333,9 @@ class TestTokenDispatcher(unittest.TestCase):
             self.assertIsNotNone(manager.token_indices)
 
     def test_deepep_manager_indices_to_multihot(self):
-        """Test _DeepepManager._indices_to_multihot."""
+        """Test _DeepEPManager._indices_to_multihot."""
         from paddlefleet.transformer.moe.token_dispatcher import (
-            _DeepepManager,
+            _DeepEPManager,
         )
 
         mock_group = MagicMock()
@@ -351,7 +351,7 @@ class TestTokenDispatcher(unittest.TestCase):
                 MagicMock(),
             ),
         ):
-            manager = _DeepepManager(
+            manager = _DeepEPManager(
                 group=mock_group,
                 router_topk=2,
                 num_experts=4,

@@ -12,23 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-if [ -z ${BRANCH} ]; then
+if [ -z "${BRANCH:-}" ]; then
     BRANCH="develop"
 fi
 
 PADDLE_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}")/../" && pwd )"
 # If you want to add monitoring file modifications, please perform the. github/CODEOWNERS operation
 
-approval_line=`curl -H "Authorization: token ${GITHUB_TOKEN}" https://api.github.com/repos/PaddlePaddle/PaddleFleet/pulls/${PR_ID}/reviews?per_page=10000`
-git_files=`git diff --numstat upstream/$BRANCH| wc -l`
-git_count=`git diff --numstat upstream/$BRANCH| awk '{sum+=$1}END{print sum}'`
+UPSTREAM_BRANCH="upstream/${BRANCH}"
+if ! DIFF_BASE=$(git merge-base HEAD "${UPSTREAM_BRANCH}"); then
+    echo "Unable to find merge base between HEAD and ${UPSTREAM_BRANCH}." >&2
+    exit 1
+fi
+
+approval_line=$(curl -H "Authorization: token ${GITHUB_TOKEN}" "https://api.github.com/repos/PaddlePaddle/PaddleFleet/pulls/${PR_ID}/reviews?per_page=10000")
+git_files=$(git diff --numstat "${DIFF_BASE}" HEAD -- | wc -l)
+git_count=$(git diff --numstat "${DIFF_BASE}" HEAD -- | awk '{sum+=$1}END{print sum}')
 failed_num=1
 echo_list=()
 
 
 function check_approval(){
-    person_num=`echo $@|awk '{for (i=2;i<=NF;i++)print $i}'`
-    APPROVALS=`echo ${approval_line}|python ${PADDLE_ROOT}/ci/check_pr_approval.py $1 $person_num`
+    APPROVALS=$(echo "${approval_line}" | python "${PADDLE_ROOT}/ci/check_pr_approval.py" "$@")
     if [[ "${APPROVALS}" == "FALSE" && "${echo_line}" != "" ]]; then
         add_failed "${failed_num}. ${echo_line}"
     fi
@@ -42,9 +47,9 @@ function add_failed(){
 
 function run_tools_test() {
     CUR_PWD=$(pwd)
-    cd ${PADDLE_ROOT}/tools
-    python $1
-    cd ${CUR_PWD}
+    cd "${PADDLE_ROOT}/tools"
+    python "$1"
+    cd "${CUR_PWD}"
 }
 
 
@@ -60,7 +65,7 @@ CODESTYLE_FILES=(
     "pyproject.toml"
 )
 for FILE in "${CODESTYLE_FILES[@]}"; do
-    HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "^${FILE}" || true)
+    HAS_MODIFIED=$(git diff --name-only "${DIFF_BASE}" HEAD -- | grep "^${FILE}" || true)
     if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
         echo_line="You must be approved by one of ${CODESTYLE_APPROVERS} for changes in ${FILE}.\n"
         APPROVER_LIST=(${CODESTYLE_APPROVERS})
@@ -69,46 +74,35 @@ for FILE in "${CODESTYLE_FILES[@]}"; do
 done
 
 
-CHECKTORCH_APPROVERS="risemeup1 swgu98"
-files=$(git diff --name-only upstream/$BRANCH)
-for file in $files; do
-    if [ -f "$file" ]; then
-        if git diff upstream/$BRANCH -- "$file" | grep -E '^\+[^\+]' | grep -q 'torch'; then
-            echo_line="You must be approved by one of ${CHECKTORCH_APPROVERS} for changes in ${file} which include \"torch\" in added lines.\n"
-            APPROVER_LIST=(${CHECKTORCH_APPROVERS})
-            check_approval 1 "${APPROVER_LIST[@]}"
-        fi
-    fi
-done
 
-MODELCONFIG_APPROVERS="sneaxiy From00 ForFishes Hz188 Waynezee"
+MODELCONFIG_APPROVERS="sneaxiy From00 ForFishes"
 MODELCONFIG_FILES=(
     "src/paddlefleet/model_parallel_config.py"
     "src/paddlefleet/transformer/transformer_config.py"
 )
 for FILE in "${MODELCONFIG_FILES[@]}"; do
-    HAS_MODIFIED=$(git diff --name-only upstream/$BRANCH | grep "^${FILE}" || true)
+    HAS_MODIFIED=$(git diff --name-only "${DIFF_BASE}" HEAD -- | grep "^${FILE}" || true)
     if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
-        echo_line="You must be approved by two of ${MODELCONFIG_APPROVERS} for changes in ${FILE}.\n"
+        echo_line="You must be approved by one of ${MODELCONFIG_APPROVERS} for changes in ${FILE}.\n"
         APPROVER_LIST=(${MODELCONFIG_APPROVERS})
-        check_approval 2 "${APPROVER_LIST[@]}"
+        check_approval 1 "${APPROVER_LIST[@]}"
     fi
 done
 
 
 CUSTOMOP_APPROVERS="risemeup1 From00"
-CUSTOMOP_DIR="src/paddlefleet/_extensions"
-HAS_MODIFIED_CUSTOMOP=$(git diff --name-only upstream/$BRANCH | grep "^${CUSTOMOP_DIR}/" || true)
+CUSTOMOP_DIR="packages/paddlefleet_ops/src/paddlefleet_ops/_extensions"
+HAS_MODIFIED_CUSTOMOP=$(git diff --name-only "${DIFF_BASE}" HEAD -- | grep "^${CUSTOMOP_DIR}/" || true)
 if [ "${HAS_MODIFIED_CUSTOMOP}" != "" ] && [ "${PR_ID}" != "" ]; then
-    echo_line="You must be approved by two of ${CUSTOMOP_APPROVERS} for changes in ${CUSTOMOP_DIR}.\n"
+    echo_line="You must be approved by one of ${CUSTOMOP_APPROVERS} for changes in ${CUSTOMOP_DIR}.\n"
     APPROVER_LIST=(${CUSTOMOP_APPROVERS})
-    check_approval 2 "${APPROVER_LIST[@]}"
+    check_approval 1 "${APPROVER_LIST[@]}"
 fi
 
 
 
 CHECKREQ_APPROVERS="risemeup1 swgu98"
-files=$(git diff --name-status upstream/$BRANCH)
+files=$(git diff --name-status "${DIFF_BASE}" HEAD --)
 while read -r status file; do
     if [[ "$status" == "A" ]] && [[ "$(basename "$file")" == "requirements.txt" ]]; then
         echo_line="You must be approved by one of ${CHECKREQ_APPROVERS} for newly added \"$file\".\n"
@@ -116,6 +110,37 @@ while read -r status file; do
         check_approval 1 "${APPROVER_LIST[@]}"
     fi
 done <<< "$files"
+
+
+PACKAGING_APPROVERS="risemeup1 SigureMo"
+PACKAGING_PATTERNS=(
+    "^packages/"
+    "^build_backend\.py$"
+    "^pyproject\.toml$"
+)
+for PATTERN in "${PACKAGING_PATTERNS[@]}"; do
+    HAS_MODIFIED=$(git diff --name-only "${DIFF_BASE}" HEAD -- | grep "${PATTERN}" || true)
+    if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
+        echo_line="You must be approved by one of ${PACKAGING_APPROVERS} for changes in packaging-related files (${PATTERN}).\n"
+        APPROVER_LIST=(${PACKAGING_APPROVERS})
+        check_approval 1 "${APPROVER_LIST[@]}"
+    fi
+done
+
+PACKAGES_APPROVERS="sneaxiy"
+PACKAGES_PATTERNS=(
+    "^packages/"
+    "^build_backend\.py$"
+    "^pyproject\.toml$"
+)
+for PATTERN in "${PACKAGES_PATTERNS[@]}"; do
+    HAS_MODIFIED=$(git diff --name-only "${DIFF_BASE}" HEAD -- | grep "${PATTERN}" || true)
+    if [ "${HAS_MODIFIED}" != "" ] && [ "${PR_ID}" != "" ]; then
+        echo_line="You must be approved by ${PACKAGES_APPROVERS} for changes in packaging-related files (${PATTERN}).\n"
+        APPROVER_LIST=(${PACKAGES_APPROVERS})
+        check_approval 1 "${APPROVER_LIST[@]}"
+    fi
+done
 
 
 if [ -n "${echo_list}" ];then

@@ -1,8 +1,6 @@
 name: CE-CUDA-CUDA-130-Dev
 
 on:
-  schedule:
-    - cron: '0 21 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
     inputs:
       use_release:
@@ -101,7 +99,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
@@ -180,7 +179,8 @@ jobs:
           git config pull.rebase false
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --force-reinstall --no-cache-dir
@@ -278,7 +278,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -360,10 +361,11 @@ jobs:
 
       - name: Qwen3-vl-8k-single-card
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
           '
 
       - name: Terminate and delete the container
@@ -426,7 +428,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -492,10 +495,11 @@ jobs:
 
       - name: GLM4.5 sft cp
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
           '
 
       - name: GLM4.5 lora
@@ -530,10 +534,11 @@ jobs:
 
       - name: GLM4.5 dpo_lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
           '
 
       - name: Integration test (GLM4.5 multi-card FP8)
@@ -568,10 +573,11 @@ jobs:
 
       - name: GLM4.5 pre-train (EP4)
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
           '
 
       - name: Qwen pre-train
@@ -600,34 +606,38 @@ jobs:
 
       - name: Qwen vl sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
       - name: Qwen vl lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
           '
 
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
           '
 
       - name: Qwen3-vl-8k-fsdp
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
           '
 
       - name: Terminate and delete the container
@@ -694,7 +704,8 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
-          python -m pip install --pre  paddlefleet --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m pip install --pre  paddlefleet-ops --index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install -e . --no-build-isolation
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -736,83 +747,93 @@ jobs:
 
       - name: GLM4.5 sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
           '
 
       - name: GLM4.5 lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
           '
 
       - name: GLM4.5 dpo
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
           glm45_exit_code=$?
           '
 
       - name: GLM4.5 dpo_lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
+          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
           '
 
       - name: Qwen pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
           '
 
       - name: Qwen sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
           '
 
       - name: Qwen lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
           '
 
       - name: Qwen vl sft
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
           '
 
       - name: Qwen vl lora
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 5m bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
           '
 
       - name: Qwen vl moe
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          timeout 10m bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
+          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
           '
 
 

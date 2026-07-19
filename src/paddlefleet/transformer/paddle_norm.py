@@ -72,17 +72,32 @@ class RMSNorm(paddle.nn.Layer):
         if input_is_parallel:
             self.enable_sequence_parallel()
 
-    def forward(self, hidden_states: Tensor):
+    def forward(
+        self,
+        hidden_states: Tensor,
+        high_precision_norm: bool = False,
+        return_high_precision_norm: bool = False,
+    ):
+        if high_precision_norm:
+            hidden_states = hidden_states.astype(paddle.float32)
+            weight = self.weight.astype(paddle.float32)
+        else:
+            if hidden_states.dtype != self.weight.dtype:
+                hidden_states = hidden_states.astype(self.weight.dtype)
+            weight = self.weight
         rms_norm_out = rms_norm(
             hidden_states,
             hidden_states.shape[-1:],
-            self.weight,
+            weight,
             self.variance_epsilon,
         )
+        return_dtype = self.weight.dtype
+        if return_high_precision_norm:
+            return_dtype = paddle.float32
         if isinstance(rms_norm_out, (tuple, list)):
-            return rms_norm_out[0].astype(self.weight.dtype)
+            return rms_norm_out[0].astype(return_dtype)
         else:
-            return rms_norm_out.astype(self.weight.dtype)
+            return rms_norm_out.astype(return_dtype)
 
     def enable_sequence_parallel(self):
         mark_as_sequence_parallel_parameter(self.weight)
@@ -125,13 +140,14 @@ class LayerNorm(paddle.nn.Layer):
             self.enable_sequence_parallel()
 
     def forward(self, hidden_states: Tensor):
-        return layer_norm(
+        output = layer_norm(
             hidden_states,
             normalized_shape=self.normalized_shape,
             weight=self.weight,
             bias=self.bias,
             epsilon=self.variance_epsilon,
         )
+        return output.astype(self.weight.dtype)
 
     def enable_sequence_parallel(self):
         mark_as_sequence_parallel_parameter(self.weight)
@@ -149,6 +165,44 @@ class FusedRMSNorm(RMSNorm):
             return rms_norm_out[0].astype(self.weight.dtype)
         else:
             return rms_norm_out.astype(self.weight.dtype)
+
+
+class RMSNormTriton(RMSNorm):
+    """Wrapper for triton RMSNorm, used for fused QK norm."""
+
+    def forward(self, hidden_states: Tensor):
+        from paddlefleet.triton_ops.rms_norm_fusion import (
+            RMSNormFusionTriton,
+        )
+
+        return RMSNormFusionTriton.apply(
+            hidden_states, self.weight, self.variance_epsilon
+        )
+
+
+class WrappedRMSNormTriton:
+    """Factory class for RMSNormTriton, handles parameter name conversion.
+
+    Converts build_spec_layer parameters (hidden_size, eps) to
+    RMSNorm parameters (normalized_shape, norm_eps).
+    """
+
+    def __new__(
+        cls,
+        config: TransformerConfig,
+        hidden_size: int,
+        eps: float = 1e-5,
+        input_is_parallel: bool | None = None,
+        **kwargs,
+    ):
+        return RMSNormTriton(
+            config=config,
+            normalized_shape=hidden_size,
+            norm_eps=eps,
+            input_is_parallel=input_is_parallel
+            if input_is_parallel is not None
+            else False,
+        )
 
 
 class WrappedPaddleNorm:
@@ -213,6 +267,10 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not self.config.mtp_load_weight_only
+            and not (
+                not self.config.gpt_model_use_experimental_version
+                and self.config.enable_mtp_magic_send
+            )
         ):
             hidden_states_concat = dict_args["hidden_states"]
             tensor_list = paddle.split(
@@ -227,7 +285,15 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not self.config.mtp_load_weight_only
+            and not (
+                not self.config.gpt_model_use_experimental_version
+                and self.config.enable_mtp_magic_send
+            )
         ):
+            # normalize MTP hidden_states
+            if self.config.gpt_model_use_experimental_version:
+                for i in range(1, len(tensor_list)):
+                    tensor_list[i] = self.norm(tensor_list[i])
             hidden_states_concat = paddle.concat(
                 [rst["hidden_states"], *tensor_list[1:]]
             )

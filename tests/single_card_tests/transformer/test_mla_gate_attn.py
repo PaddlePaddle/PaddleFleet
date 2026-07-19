@@ -181,6 +181,18 @@ class TestMLAGateConstruction(unittest.TestCase):
         self.assertEqual(in_features, expected_in)
         self.assertEqual(out_features, expected_out)
 
+    def test_gate_proj_input_dim_uses_q_lora_rank(self):
+        """When gated_attn_use_q_lora=True, gate_proj input dim is q_lora_rank."""
+        attn = _build_mla(gated_attention=True, gated_attn_use_q_lora=True)
+        self.assertTrue(attn.gated_attn_use_q_lora)
+        gate = attn.gate_proj
+        in_features = gate.linear.weight.shape[0]
+        out_features = gate.linear.weight.shape[1]
+        expected_in = 64  # q_lora_rank (not hidden_size=128)
+        expected_out = 4 * 32  # num_attention_heads * v_head_dim = 128
+        self.assertEqual(in_features, expected_in)
+        self.assertEqual(out_features, expected_out)
+
 
 class TestMLAGatedForward(unittest.TestCase):
     def test_forward_shape_with_gate(self):
@@ -192,6 +204,14 @@ class TestMLAGatedForward(unittest.TestCase):
 
     def test_forward_shape_without_gate(self):
         attn = _build_mla(gated_attention=False)
+        attn.eval()
+        x = paddle.randn([2, 4, 128])
+        out, bias = attn(x, attention_mask=None)
+        self.assertEqual(out.shape, [2, 4, 128])
+
+    def test_forward_shape_with_gate_q_lora(self):
+        """Forward with gated_attn_use_q_lora: gate consumes q_compressed."""
+        attn = _build_mla(gated_attention=True, gated_attn_use_q_lora=True)
         attn.eval()
         x = paddle.randn([2, 4, 128])
         out, bias = attn(x, attention_mask=None)
@@ -249,14 +269,51 @@ class TestMLAGatedForward(unittest.TestCase):
         for param in attn.gate_proj.parameters():
             self.assertIsNotNone(param.grad)
 
+    def test_forward_backward_with_gate_recompute(self):
+        attn = _build_mla(
+            gated_attention=True,
+            sigmoid_gate_fusion=True,
+            recompute_granularity="selective",
+            recompute_modules=["gated_attn"],
+        )
+        attn.train()
+        attn_ref = _build_mla(gated_attention=True)
+        attn_ref.train()
+
+        x = paddle.randn([2, 4, 128])
+        x.stop_gradient = False
+
+        mem0 = paddle.device.memory_allocated()
+        out, _ = attn(x, attention_mask=None)
+        mem1 = paddle.device.memory_allocated()
+        out_ref, _ = attn_ref(x, attention_mask=None)
+        mem2 = paddle.device.memory_allocated()
+
+        # Recomputing gate avoids storing sigmoid_out and mul_out, so the
+        # memory usage should be reduced by both sizes.
+        sigmoid_out_size = out.size * out.itemsize
+        mul_out_size = sigmoid_out_size
+        self.assertGreaterEqual(
+            (mem2 - mem1) - (mem1 - mem0),
+            sigmoid_out_size + mul_out_size,
+        )
+
+        loss = out.sum()
+        loss.backward()
+        self.assertIsNotNone(x.grad)
+        for param in attn.gate_proj.parameters():
+            self.assertIsNotNone(param.grad)
+
 
 class TestGetAttentionSpecGate(unittest.TestCase):
-    def _make_mock_config(self, gated=False):
+    def _make_mock_config(self, gated=False, align_mode=None):
         config = MagicMock()
         config.gated_attention = gated
         config.normalization = "RMSNorm"
         config.use_qk_norm = False
         config.qk_l2_norm = False
+        config.gpt_model_use_experimental_version = align_mode
+        config.use_vha_attention = False
         return config
 
     def test_mla_gated_has_gate_proj(self):
@@ -295,13 +352,15 @@ class TestGetAttentionSpecGate(unittest.TestCase):
 
     def test_self_attention_type_unaffected(self):
         from paddlefleet.models.gpt.gpt_layer_specs import get_attention_spec
+        from paddlefleet.transformer.identity_op import IdentityOp
 
         config = self._make_mock_config(gated=True)
         spec = get_attention_spec(
             config=config,
             attention_layer_type="self_attention",
         )
-        self.assertFalse(hasattr(spec.sublayers_spec, "gate_proj"))
+        # When align_mode is None, gate_proj should be IdentityOp (no-op)
+        self.assertEqual(spec.sublayers_spec.gate_proj, IdentityOp)
 
 
 if __name__ == "__main__":

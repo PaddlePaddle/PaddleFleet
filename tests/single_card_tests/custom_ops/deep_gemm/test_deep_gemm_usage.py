@@ -17,8 +17,7 @@
 import unittest
 
 import paddle
-
-from paddlefleet.ops import deep_gemm
+from paddlefleet_ops import deep_gemm
 
 
 class TestDeepGemmUsage(unittest.TestCase):

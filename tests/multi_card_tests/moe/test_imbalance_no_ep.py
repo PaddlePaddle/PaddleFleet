@@ -80,7 +80,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             gated_linear_unit=True,
             n_shared_experts=0,
             hidden_act=F.silu,
-            moe_grouped_gemm=True,
+            moe_expert_fusion=True,
             bias_activation_fusion=True,
         )
 
