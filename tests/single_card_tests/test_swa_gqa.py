@@ -2382,6 +2382,71 @@ class TestDotProductAttentionFlashMaskSWA(unittest.TestCase):
             output.shape, [batch_size, seq_len, num_heads * head_dim]
         )
 
+    def _make_cp_swap2p_attention(self, sliding_window):
+        """SWA + MLA + contiguous_a2a attention forced onto the CP path."""
+        attn = self._make_swa_dot_product_attention()
+        # Force the CP contiguous_swap2p SWA branch without a real CP group.
+        attn.context_parallel_size = 2
+        attn.config.multi_latent_attention = True
+        attn.config.cp_balance_mode = "contiguous_a2a"
+        # shape[-1] == 2 + experimental_dataflow avoids the .cuda() concat path
+        # inside expand_attn_mask_startend_row_indices_for_cp.
+        attn.config.experimental_dataflow = True
+        attn.sliding_window = sliding_window
+        return attn
+
+    def test_cp_swap2p_rejects_infinite_window(self):
+        """CP contiguous_swap2p SWA must reject an infinite (`-1`) window with a
+        clear ValueError instead of failing deep inside the flashmask kernel."""
+        attn = self._make_cp_swap2p_attention(-1)
+
+        batch_size, seq_len, num_heads, head_dim = 2, 8, 4, 64
+        query = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        key = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        value = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        row_indices = paddle.zeros([batch_size, 1, seq_len, 2], dtype="int32")
+
+        with self.assertRaises(ValueError) as ctx:
+            attn(
+                query,
+                key,
+                value,
+                attention_mask=None,
+                attn_mask_startend_row_indices=row_indices,
+            )
+        self.assertIn("positive sliding_window", str(ctx.exception))
+
+    def test_cp_swap2p_rejects_tuple_infinite_window(self):
+        """Tuple form `(-1, 0)` (infinite left window) is rejected the same way."""
+        attn = self._make_cp_swap2p_attention((-1, 0))
+
+        batch_size, seq_len, num_heads, head_dim = 2, 8, 4, 64
+        query = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        key = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        value = paddle.randn(
+            [batch_size, seq_len, num_heads, head_dim], dtype="bfloat16"
+        )
+        row_indices = paddle.zeros([batch_size, 1, seq_len, 2], dtype="int32")
+
+        with self.assertRaises(ValueError):
+            attn(
+                query,
+                key,
+                value,
+                attention_mask=None,
+                attn_mask_startend_row_indices=row_indices,
+            )
+
 
 class TestGPTEmbeddingSWA(unittest.TestCase):
     """Tests for GPTEmbedding SWA rotary pos embedding paths."""
