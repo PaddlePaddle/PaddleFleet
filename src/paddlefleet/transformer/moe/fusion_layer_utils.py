@@ -27,7 +27,6 @@ from .fp8_utils import (
     moe_token_padding_alignment,
     tilewise_quant,
 )
-
 from .moe_utils import get_auto_sb_history
 from .vmm_utils import (
     allocator_free_block_info,
@@ -526,16 +525,6 @@ class MlpNode:
         self.moe_permute_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
             moe_grouped_gemm=moe_expert_fusion,
-            use_accuracy_compatible=use_accuracy_compatible,
-        )
-        # == 【MG 精度对齐 diff · 参考 PF PR#968】per-expert padding 对齐 ==
-        # 仅 use_accuracy_compatible=True 且非 fp8/非 grouped_gemm 时
-        #   alignment=1（真实 token 数），使 permute 与 per-expert GEMM 的 M 维
-        #   等于真实 tokens_per_expert，cuBLAS 选到与 MG SequentialMLP 相同算法；
-        #   否则按 FP8_ALIGN（kernel 需求），保持原有行为。
-        self.moe_permute_padding_alignment = moe_token_padding_alignment(
-            use_fp8_mlp=use_fp8_mlp,
-            moe_grouped_gemm=moe_grouped_gemm,
             use_accuracy_compatible=use_accuracy_compatible,
         )
         self.padding_token_per_experts = [
