@@ -41,6 +41,10 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import (
+    need_recompute_in_block,
+    need_recompute_in_first_n,
+)
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
@@ -397,10 +401,39 @@ class MultiLatentAttention(Attention):
             and "gated_attn" in self.config.recompute_modules
         )
 
-        self.recompute_qkv_up_porj_and_rope = (
-            self.config.recompute_granularity == "selective"
-            and "mla_qkv_recompute" in self.config.recompute_modules
-        )
+        self.recompute_qkv_up_porj_and_rope = False
+        if self.config.recompute_granularity == "selective":
+            modules = self.config.recompute_modules
+            if isinstance(modules, list) and "mla_qkv_recompute" in modules:
+                self.recompute_qkv_up_porj_and_rope = (
+                    True
+                    if self.config.recompute_num_layers is None
+                    else (
+                        need_recompute_in_block(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_num_layers,
+                        )
+                        if self.config.recompute_method == "block"
+                        else need_recompute_in_first_n(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_num_layers,
+                        )
+                    )
+                )
+            elif isinstance(modules, dict) and "mla_qkv_recompute" in modules:
+                assert self.config.recompute_method in ["first_n", "block"]
+                num_layers = modules["mla_qkv_recompute"]
+                self.recompute_qkv_up_porj_and_rope = (
+                    need_recompute_in_block(
+                        self.layer_number, self.config, num_layers
+                    )
+                    if self.config.recompute_method == "block"
+                    else need_recompute_in_first_n(
+                        self.layer_number, self.config, num_layers
+                    )
+                )
 
     def _compute_absorbed_q(self, query):
         """

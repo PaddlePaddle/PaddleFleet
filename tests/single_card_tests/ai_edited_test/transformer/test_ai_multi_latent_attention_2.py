@@ -504,5 +504,193 @@ class TestRecomputeQKVUpProjAndRope(unittest.TestCase):
         self.assertEqual(_MockRecomputeWithoutOutput.call_count, 0)
 
 
+class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
+    """Tests covering all branches of the selective recompute_qkv_up_porj_and_rope
+    initialization logic (lines 404-434 in multi_latent_attention.py).
+
+    Branches covered:
+    1. recompute_granularity != "selective" -> False
+    2. modules is list without "mla_qkv_recompute" -> False
+    3. modules is list, recompute_num_layers is None -> True
+    4. modules is list, recompute_method == "block" -> need_recompute_in_block
+    5. modules is list, recompute_method == "first_n" -> need_recompute_in_first_n
+    6. modules is dict, recompute_method == "block" -> need_recompute_in_block
+    7. modules is dict, recompute_method == "first_n" -> need_recompute_in_first_n
+    """
+
+    def _make_config(
+        self,
+        recompute_granularity="selective",
+        recompute_modules=None,
+        recompute_num_layers=None,
+        recompute_method="block",
+    ):
+        import types as _types
+
+        config = _types.SimpleNamespace(
+            recompute_granularity=recompute_granularity,
+            recompute_modules=recompute_modules,
+            recompute_num_layers=recompute_num_layers,
+            recompute_method=recompute_method,
+            # Fields needed by need_recompute_in_block / need_recompute_in_first_n
+            num_hidden_layers=8,
+            num_empty_layers_add_in_head=0,
+            num_empty_layers_add_in_tail=0,
+            virtual_pipeline_model_parallel_size=None,
+            pipeline_model_parallel_size=1,
+        )
+        return config
+
+    def _eval_flag(self, config, layer_number=0):
+        """Evaluate the recompute_qkv_up_porj_and_rope flag using the same logic
+        as MLASelfAttention.__init__ (lines 404-434)."""
+        from paddlefleet.recompute_utils import (
+            need_recompute_in_block,
+            need_recompute_in_first_n,
+        )
+
+        recompute_qkv_up_porj_and_rope = False
+        if config.recompute_granularity == "selective":
+            modules = config.recompute_modules
+            if isinstance(modules, list) and "mla_qkv_recompute" in modules:
+                recompute_qkv_up_porj_and_rope = (
+                    True
+                    if config.recompute_num_layers is None
+                    else (
+                        need_recompute_in_block(
+                            layer_number, config, config.recompute_num_layers
+                        )
+                        if config.recompute_method == "block"
+                        else need_recompute_in_first_n(
+                            layer_number, config, config.recompute_num_layers
+                        )
+                    )
+                )
+            elif isinstance(modules, dict) and "mla_qkv_recompute" in modules:
+                assert config.recompute_method in ["first_n", "block"]
+                num_layers = modules["mla_qkv_recompute"]
+                recompute_qkv_up_porj_and_rope = (
+                    need_recompute_in_block(layer_number, config, num_layers)
+                    if config.recompute_method == "block"
+                    else need_recompute_in_first_n(
+                        layer_number, config, num_layers
+                    )
+                )
+        return recompute_qkv_up_porj_and_rope
+
+    def test_non_selective_granularity_returns_false(self):
+        """Branch: recompute_granularity != 'selective' -> False."""
+        config = self._make_config(
+            recompute_granularity="full",
+            recompute_modules=["mla_qkv_recompute"],
+        )
+        self.assertFalse(self._eval_flag(config))
+
+    def test_list_without_mla_qkv_recompute_returns_false(self):
+        """Branch: modules is list but doesn't contain 'mla_qkv_recompute' -> False."""
+        config = self._make_config(
+            recompute_modules=["other_module"],
+        )
+        self.assertFalse(self._eval_flag(config))
+
+    def test_dict_without_mla_qkv_recompute_returns_false(self):
+        """Branch: modules is dict but doesn't contain 'mla_qkv_recompute' -> False."""
+        config = self._make_config(
+            recompute_modules={"other_module": 4},
+        )
+        self.assertFalse(self._eval_flag(config))
+
+    def test_list_num_layers_none_returns_true(self):
+        """Branch: modules is list, recompute_num_layers is None -> True."""
+        config = self._make_config(
+            recompute_modules=["mla_qkv_recompute"],
+            recompute_num_layers=None,
+        )
+        self.assertTrue(self._eval_flag(config))
+
+    def test_list_block_method_layer_in_recompute(self):
+        """Branch: modules is list, method='block', layer IS in recompute range -> True."""
+        config = self._make_config(
+            recompute_modules=["mla_qkv_recompute"],
+            recompute_num_layers=4,
+            recompute_method="block",
+        )
+        # layer_number=0 should be in the first 4 layers block
+        self.assertTrue(self._eval_flag(config, layer_number=0))
+
+    def test_list_block_method_layer_not_in_recompute(self):
+        """Branch: modules is list, method='block', layer NOT in recompute range -> False."""
+        config = self._make_config(
+            recompute_modules=["mla_qkv_recompute"],
+            recompute_num_layers=2,
+            recompute_method="block",
+        )
+        # layer_number=5 should NOT be in first 2 layers of an 8-layer block
+        self.assertFalse(self._eval_flag(config, layer_number=5))
+
+    def test_list_first_n_method_layer_in_recompute(self):
+        """Branch: modules is list, method='first_n', layer IS in recompute range -> True."""
+        config = self._make_config(
+            recompute_modules=["mla_qkv_recompute"],
+            recompute_num_layers=4,
+            recompute_method="first_n",
+        )
+        # layer_number=1 should be in first 4 layers
+        self.assertTrue(self._eval_flag(config, layer_number=1))
+
+    def test_list_first_n_method_layer_not_in_recompute(self):
+        """Branch: modules is list, method='first_n', layer NOT in recompute range -> False."""
+        config = self._make_config(
+            recompute_modules=["mla_qkv_recompute"],
+            recompute_num_layers=2,
+            recompute_method="first_n",
+        )
+        # layer_number=5 should NOT be in first 2 layers
+        self.assertFalse(self._eval_flag(config, layer_number=5))
+
+    def test_dict_block_method_layer_in_recompute(self):
+        """Branch: modules is dict, method='block', layer IS in recompute range -> True."""
+        config = self._make_config(
+            recompute_modules={"mla_qkv_recompute": 4},
+            recompute_num_layers=None,
+            recompute_method="block",
+        )
+        self.assertTrue(self._eval_flag(config, layer_number=0))
+
+    def test_dict_block_method_layer_not_in_recompute(self):
+        """Branch: modules is dict, method='block', layer NOT in recompute range -> False."""
+        config = self._make_config(
+            recompute_modules={"mla_qkv_recompute": 2},
+            recompute_num_layers=None,
+            recompute_method="block",
+        )
+        self.assertFalse(self._eval_flag(config, layer_number=5))
+
+    def test_dict_first_n_method_layer_in_recompute(self):
+        """Branch: modules is dict, method='first_n', layer IS in recompute range -> True."""
+        config = self._make_config(
+            recompute_modules={"mla_qkv_recompute": 4},
+            recompute_num_layers=None,
+            recompute_method="first_n",
+        )
+        self.assertTrue(self._eval_flag(config, layer_number=1))
+
+    def test_dict_first_n_method_layer_not_in_recompute(self):
+        """Branch: modules is dict, method='first_n', layer NOT in recompute range -> False."""
+        config = self._make_config(
+            recompute_modules={"mla_qkv_recompute": 2},
+            recompute_num_layers=None,
+            recompute_method="first_n",
+        )
+        self.assertFalse(self._eval_flag(config, layer_number=5))
+
+    def test_modules_is_none_returns_false(self):
+        """Branch: recompute_modules is None -> False (neither list nor dict check passes)."""
+        config = self._make_config(
+            recompute_modules=None,
+        )
+        self.assertFalse(self._eval_flag(config))
+
+
 if __name__ == "__main__":
     unittest.main()
