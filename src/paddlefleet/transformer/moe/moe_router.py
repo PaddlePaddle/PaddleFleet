@@ -1434,10 +1434,10 @@ class TopKRouter(StandardMoERouter):
         # norm
         if self.norm_topk_prob:
             if not getattr(self.config, "moe_topk_fusion", False):
-                if True:
-                    # 全程 fp64 归一化（sum + 除法）对齐 MG：fp32 累加/除法末位 order paddle≠torch，
-                    # routing_map 一致但 router_output_0(probs) md5 会分叉；必须 sum 和除法都 fp64
-                    # 再 cast 回原 dtype（fp32 或仅 fp64-sum 前反向都无法逐位对齐）。
+                if self.use_accuracy_compatible:
+                    # Use fp64 for the full normalization path (sum + division) to align with MG: fp32 accumulation/division last-bit order differs between Paddle and torch,
+                    # so routing_map can match while router_output_0(probs) md5 diverges. Both the sum and division must be fp64
+                    # before casting back to the original dtype (neither fp32 nor fp64-sum-only can align bitwise in forward/backward).
                     _tg64 = top_gate.astype("float64")
                     top_gate = (
                         _tg64 / (_tg64.sum(axis=-1, keepdim=True) + 1e-20)

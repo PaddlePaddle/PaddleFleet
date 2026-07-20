@@ -78,8 +78,8 @@ class _EagerQKScoresFn(paddle.autograd.PyLayer):
     def backward(ctx, d_scores):
         query, key_t = ctx.saved_tensor()
         scale = ctx.scale
-        # 显式将 key_t 转置为 contiguous 的 key，用 NN-GEMM 计算 d_query，
-        # 对齐 Torch autograd 的 NN-GEMM 路径；直接 transpose_y=True 会走 TN-GEMM 丢 1 ULP。
+        # Explicitly transpose key_t into a contiguous key and compute d_query with NN-GEMM,
+        # matching Torch autograd's NN-GEMM path; using transpose_y=True directly takes the TN-GEMM path and loses 1 ULP.
         key = paddle.transpose(key_t, perm=[0, 2, 1]).contiguous()
         d_query = paddle.matmul(d_scores, key) * scale
         d_key_t = paddle.matmul(query, d_scores, transpose_x=True) * scale
