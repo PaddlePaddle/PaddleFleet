@@ -17,9 +17,9 @@ import os
 from contextlib import nullcontext
 from copy import deepcopy
 
-import numpy as np
 import paddle
 import paddle.nn.functional as F
+import paddlefleet_ops
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
     shard_weight,
@@ -35,7 +35,14 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from .fusion_layer_utils import run_sonic_moe
+if paddlefleet_ops.is_sonic_moe_available():
+    try:
+        from paddlefleet_ops.sonicmoe import run_sonic_moe
+    except ModuleNotFoundError as exc:
+        if exc.name != "paddlefleet_ops.sonicmoe.interface":
+            raise
+        from .fusion_layer_utils import run_sonic_moe
+
 from .moe_utils import (
     k_grouped_bf16_gemm_tn_contiguous_aligned,
 )
@@ -558,6 +565,7 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.sonic_moe_config.fp8_wgrad = self.config.fp8_wgrad
         self.sonic_moe_config.fuse_y1_quant = True
         self.sonic_moe_config.fuse_y1_bf16_trunc = True
+        self.sonic_moe_config.recompute_z = False
 
         # Micro batch tracking for fp8 weight memory optimization.
         # _num_micro_batches: total forward passes per step for this layer.
@@ -591,6 +599,17 @@ class SonicMoEExpert(GroupedMLPExpert):
     def _is_last_micro_batch(self):
         return self._forward_counter >= self._num_micro_batches - 1
 
+    def _release_fp8_weight_after_fwd(self, recompute_moe_gate_up):
+        release_fp8_weight_after_fwd = (
+            self._is_last_micro_batch
+            and not g_shard_bypass_dygraph_optimizer
+            and not recompute_moe_gate_up
+            and self.config.recompute_granularity != "full"
+            and hasattr(self.weight1, "fp8")
+            and hasattr(self.weight2, "fp8")
+        )
+        return release_fp8_weight_after_fwd
+
     def _release_fp8_weights(self):
         """Release fp8 weight (non-transposed) to save memory.
 
@@ -598,9 +617,6 @@ class SonicMoEExpert(GroupedMLPExpert):
         """
         _log_stage_memory("before release fp8")
         for weight in (self.weight1, self.weight2):
-            print(
-                f"===== releasing weight shape:{weight.shape}, dtype:{weight.dtype}, mem:{np.prod(weight.shape) / 1024 / 1024} MB"
-            )
             if hasattr(weight, "fp8") and weight.fp8 is not None:
                 weight.fp8 = None
         _log_stage_memory("after release fp8")
@@ -703,17 +719,16 @@ class SonicMoEExpert(GroupedMLPExpert):
         use_fp8=False,
         tokens_per_expert=None,
         fp8_scale=None,
+        recompute_moe_gate_up=False,
         fp8_combine_grad_handle=None,
     ):
         self.convert_weights_to_sonic_layout()
         if self.sonic_moe_config.enabled is True and self.need_quant_weight():
             self.quant_weight()
 
-        release_fp8_weight_after_fwd = (
-            self._is_last_micro_batch and not g_shard_bypass_dygraph_optimizer
-        )
-        print(
-            f"==== forward_counter: {self._forward_counter}, num_micro_batches: {self._num_micro_batches}, release_fp8_weight_after_fwd: {release_fp8_weight_after_fwd} ===="
+        self.sonic_moe_config.recompute_z = recompute_moe_gate_up
+        release_fp8_weight_after_fwd = self._release_fp8_weight_after_fwd(
+            recompute_moe_gate_up
         )
         hidden_states = run_sonic_moe(
             hidden_states,

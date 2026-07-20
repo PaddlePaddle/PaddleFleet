@@ -37,7 +37,6 @@ from .vmm_utils import (
     tokens_zip_unique_add_with_subbatch,
 )
 
-_scatter_router_scores_i32 = None
 if paddlefleet_ops.is_sonic_moe_available():
     from paddlefleet_ops.sonicmoe.enums import ActivationType
     from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
@@ -68,7 +67,14 @@ if paddlefleet_ops.is_sonic_moe_available():
             _scatter_router_scores_i32,
         )
     except (ImportError, RuntimeError):
-        pass
+        _scatter_router_scores_i32 = None
+
+    try:
+        from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
+            deepep_topk_to_sonic_metadata_with_scales,
+        )
+    except (ImportError, RuntimeError):
+        deepep_topk_to_sonic_metadata_with_scales = None
 
 logger = logging.getLogger(__name__)
 
@@ -3414,7 +3420,11 @@ def run_sonic_moe(
         )
 
     fp8_scale_packed = None
-    if fp8 and fp8_scale is not None:
+    if (
+        fp8
+        and fp8_scale is not None
+        and deepep_topk_to_sonic_metadata_with_scales is not None
+    ):
         (
             expert_frequency_offset,
             x_gather_idx,
@@ -3511,7 +3521,7 @@ def run_sonic_moe(
             prequant_activation_payload=fp8_hidden_states,
             fp8_config=fp8_config,
         )
-        if release_fp8_weights:
+        if release_fp8_weights and not fp8_config.recompute_z:
             w1.fp8[0]._clear_to_zero_allocation()
             w1.fp8[1]._clear_to_zero_allocation()
 
