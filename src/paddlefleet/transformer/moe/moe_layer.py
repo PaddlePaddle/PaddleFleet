@@ -526,16 +526,29 @@ class MoELayer(nn.Layer):
         if self.expert_model_parallel_size > 1:
             self.is_mp_moe = False
             self.is_ep_moe = True
+            # Color routed-expert params with the default "moe_expert" now,
+            # matching the historical construction-time behavior, UNLESS
+            # mtp_shared_last_layer is enabled. In the shared-MTP case the color
+            # (moe_expert vs the no-hook variant) depends on the layer number,
+            # which is unknown here, so coloring is deferred to
+            # set_layer_number()/_color_expert_params(). Paddle forbids
+            # reassigning a non-None color, so coloring must happen exactly once.
+            color_experts_now = not getattr(
+                self.config, "mtp_shared_last_layer", False
+            )
             fusion_experts = None
             if hasattr(self, "grouped_gemm_experts"):
                 fusion_experts = self.grouped_gemm_experts
             if fusion_experts is not None:
                 for p in fusion_experts.parameters():
                     p.is_moe_param = True
-                    p.color = {
-                        "color": "moe_expert",
-                        "group": self.moe_grad_group,
-                    }
+                    # Default color set here; deferred when mtp_shared_last_layer
+                    # is on (see set_layer_number/_color_expert_params).
+                    if color_experts_now:
+                        p.color = {
+                            "color": "moe_expert",
+                            "group": self.moe_grad_group,
+                        }
                     p.no_sync = not self.is_mp_moe
                     p.expert = not self.is_mp_moe
                     if self.is_mp_moe or self.is_ep_moe:
@@ -546,10 +559,13 @@ class MoELayer(nn.Layer):
                 )
                 for p in self.experts.parameters():
                     p.is_moe_param = True
-                    p.color = {
-                        "color": "moe_expert",
-                        "group": self.moe_grad_group,
-                    }
+                    # Default color set here; deferred when mtp_shared_last_layer
+                    # is on (see set_layer_number/_color_expert_params).
+                    if color_experts_now:
+                        p.color = {
+                            "color": "moe_expert",
+                            "group": self.moe_grad_group,
+                        }
                     p.no_sync = not self.is_mp_moe
                     p.expert = not self.is_mp_moe
                     if self.is_mp_moe or self.is_ep_moe:
@@ -1558,12 +1574,61 @@ class MoELayer(nn.Layer):
 
     def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
+        # Assign routed-expert 'color' now that the layer number is known. This
+        # is the single place color is set for experts (Paddle forbids
+        # reassigning it): the MTP-shared last layer uses the no-hook color.
+        self._color_expert_params()
         assert hasattr(self.gate, "set_layer_number"), (
             "expect gate has method 'set_layer_number'"
         )
         # Hash routing activation (moe_n_hash_layers) is decided by the router
         # itself based on layer_number. See TopKRouter._setup_hash_layer.
         self.gate.set_layer_number(layer_number, is_mtp_layer=is_mtp_layer)
+
+    def _color_expert_params(self):
+        """Set the sharding 'color' on routed-expert params (called once).
+
+        Only needed when ``mtp_shared_last_layer`` is enabled: in that case the
+        expert params were intentionally left uncolored at construction (the
+        moe_expert vs no-hook choice depends on the layer number). Picks
+        ``moe_weight_no_hook`` for the MTP-shared backbone last layer so the
+        sharding-stage1 optimizer reduces those shared params synchronously (no
+        overlap hook); otherwise the normal ``moe_expert`` color is used.
+
+        Params already colored at construction (the common, non-shared-MTP case)
+        are skipped: Paddle forbids reassigning a non-None color, and their
+        color would be ``moe_expert`` either way.
+        """
+        if self.expert_model_parallel_size <= 1:
+            return
+        # Lazy import to avoid a circular import: transformer_layer imports
+        # MoELayer from this module.
+        from paddlefleet.transformer.transformer_layer import (
+            is_mtp_shared_last_layer,
+        )
+
+        fusion_experts = getattr(self, "grouped_gemm_experts", None)
+        if fusion_experts is not None:
+            expert_params = fusion_experts.parameters()
+        else:
+            assert self.experts is not None, "experts should be initialized."
+            expert_params = self.experts.parameters()
+        color_key = (
+            "moe_weight_no_hook"
+            if is_mtp_shared_last_layer(
+                self.config, self.layer_number, self.is_mtp_layer
+            )
+            else "moe_expert"
+        )
+        for p in expert_params:
+            # Skip params already colored at construction (the non-shared-MTP
+            # case); Paddle forbids reassigning a non-None color. Uncolored
+            # params carry no color attribute (None) or the -1 sentinel.
+            color = getattr(p, "color", None)
+            if color not in (None, -1):
+                continue
+            p.color = {"color": color_key, "group": self.moe_grad_group}
 
 
 class Gemma4TopKRouter(TopKRouter):

@@ -241,6 +241,8 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
     def test_set_layer_number(self):
         layer = MoELayer.__new__(MoELayer)
         layer.gate = MagicMock()
+        # set_layer_number now colors expert params; EP=1 makes that a no-op.
+        layer.expert_model_parallel_size = 1
         layer.set_layer_number(5)
         self.assertEqual(layer.layer_number, 5)
         layer.gate.set_layer_number.assert_called_once_with(
@@ -250,6 +252,7 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
     def test_set_layer_number_no_set_method(self):
         layer = MoELayer.__new__(MoELayer)
         layer.gate = MagicMock()
+        layer.expert_model_parallel_size = 1
         del layer.gate.set_layer_number
         with self.assertRaises(AssertionError):
             layer.set_layer_number(5)
