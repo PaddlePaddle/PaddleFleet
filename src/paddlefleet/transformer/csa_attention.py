@@ -1432,6 +1432,34 @@ class Compressor(nn.Layer):
         )
         self.high_precision_rope = getattr(config, "high_precision_rope", False)
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice specs for the compressor (overlap/ratio-4 only).
+
+        Covers both the core-attention compressor (``self.head_dim`` == v_head_dim)
+        and the indexer compressor (``self.head_dim`` == dsa_index_head_dim); the
+        head_dim is read from ``self`` so the same method serves both.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+        if not self.overlap:
+            return {}
+
+        return {
+            "linear_wkv.weight": (
+                ortho_per_head,
+                {"head_sizes": [self.head_dim, self.head_dim]},
+            ),
+            "linear_wgate.weight": (
+                ortho_per_head,
+                {"head_sizes": [self.head_dim, self.head_dim]},
+            ),
+        }
+
     def _overlap_transform(
         self,
         tensor: Tensor,
@@ -1748,6 +1776,23 @@ class CSAIndexer(nn.Layer):
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
         self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
+
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the indexer q-up projection."""
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        return {
+            "linear_wq_b.weight": (
+                ortho_per_head,
+                {"heads": self.index_n_heads},
+            ),
+        }
 
     def forward_before_topk(
         self,
