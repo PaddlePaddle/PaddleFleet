@@ -328,7 +328,8 @@ class GreedyGenerator:
         temperature: float = 0.0,
         top_k: int = 0,
         top_p: float = 0.0,
-    ) -> paddle.Tensor:
+        return_log_probs: bool = False,
+    ) -> paddle.Tensor | tuple[paddle.Tensor, list[list[float]]]:
         """Run auto-regressive decoding with optional sampling.
 
         Args:
@@ -346,10 +347,19 @@ class GreedyGenerator:
                 nucleus filtering is disabled. Cannot be combined with top_k > 0
                 at the same time as top_k; whichever is set takes effect first
                 (top_k then top_p are applied sequentially when both are set).
+            return_log_probs: If True, also return the log-probabilities of
+                each generated token. Default: False.
 
         Returns:
-            Tensor of shape ``[B, L + num_generated]`` containing the
-            prompt plus generated tokens.
+            If ``return_log_probs=False``: Tensor of shape
+            ``[B, L + num_generated]`` containing the prompt plus generated
+            tokens.
+
+            If ``return_log_probs=True``: A tuple
+            ``(generated, output_log_probs)`` where ``generated`` is as above
+            and ``output_log_probs`` is a list of length ``B``, each element
+            being a list of per-step log-probs for the generated tokens only
+            (length = actual number of generated tokens for that sequence).
         """
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be [B, L]")
@@ -358,6 +368,11 @@ class GreedyGenerator:
 
         bsz, prompt_len = input_ids.shape
         generated = input_ids.clone()
+
+        # Per-batch list to accumulate generated-token log-probs
+        log_probs_per_batch: list[list[float]] | None = (
+            [[] for _ in range(bsz)] if return_log_probs else None
+        )
 
         _r = (
             paddle.distributed.get_rank()
@@ -427,9 +442,19 @@ class GreedyGenerator:
             logits = _apply_repetition_penalty(
                 logits, generated, repetition_penalty
             )
+            last_logits = logits[:, -1]  # [B, vocab]
             next_tok = _sample_next_token(
-                logits[:, -1], temperature, top_k, top_p
+                last_logits, temperature, top_k, top_p
             )
+            if return_log_probs and log_probs_per_batch is not None:
+                step_log_probs = paddle.nn.functional.log_softmax(
+                    last_logits.cast("float32"), axis=-1
+                )  # [B, vocab]
+                for b in range(bsz):
+                    tok_id = int(next_tok[b, 0].item())
+                    log_probs_per_batch[b].append(
+                        float(step_log_probs[b, tok_id].item())
+                    )
             generated = paddle.concat([generated, next_tok], axis=1)
 
             # ---- Decode ----
@@ -466,9 +491,21 @@ class GreedyGenerator:
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty
                 )
+                last_logits = logits[:, -1]  # [B, vocab]
                 next_tok = _sample_next_token(
-                    logits[:, -1], temperature, top_k, top_p
+                    last_logits, temperature, top_k, top_p
                 )
+                if return_log_probs and log_probs_per_batch is not None:
+                    step_log_probs = paddle.nn.functional.log_softmax(
+                        last_logits.cast("float32"), axis=-1
+                    )  # [B, vocab]
+                    for b in range(bsz):
+                        # Only collect for sequences not yet finished
+                        if not bool(done[b, 0].item()):
+                            tok_id = int(next_tok[b, 0].item())
+                            log_probs_per_batch[b].append(
+                                float(step_log_probs[b, tok_id].item())
+                            )
                 generated = paddle.concat([generated, next_tok], axis=1)
                 if eos_token_id is not None:
                     if isinstance(eos_token_id, list):
@@ -494,4 +531,6 @@ class GreedyGenerator:
                     if done.all().item():
                         break
 
+        if return_log_probs:
+            return generated, log_probs_per_batch
         return generated

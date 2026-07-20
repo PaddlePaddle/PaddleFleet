@@ -490,6 +490,196 @@ class TestGreedyGeneratorDebugMode(unittest.TestCase):
             _installed._DEBUG = orig
 
 
+class TestReturnLogProbs(unittest.TestCase):
+    """Unit tests for the return_log_probs feature in GreedyGenerator.generate."""
+
+    def _make_generator(self, token_sequence, batch_size=1, vocab_size=100):
+        """Create a GreedyGenerator backed by a fake model.
+
+        The fake model always emits logits such that argmax gives
+        ``token_sequence[call_idx]``.  Works for any batch_size (same token
+        for every batch element).
+        """
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        self._call_idx = 0
+        seq = token_sequence
+        bsz = batch_size
+
+        def fake_forward(inputs):
+            # logits shape: [B, seq_len, vocab]
+            logits = paddle.zeros([bsz, 1, vocab_size], dtype="float32")
+            tok_id = seq[min(self._call_idx, len(seq) - 1)]
+            logits[:, 0, tok_id] = 10.0
+            self._call_idx += 1
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    # ------------------------------------------------------------------
+    # Return-type tests
+    # ------------------------------------------------------------------
+
+    def test_return_type_without_log_probs(self):
+        """return_log_probs=False should return a plain Tensor."""
+        gen = self._make_generator([5, 6, 7])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(input_ids, max_new_tokens=3)
+        self.assertIsInstance(out, paddle.Tensor)
+
+    def test_return_type_with_log_probs(self):
+        """return_log_probs=True should return (Tensor, list)."""
+        gen = self._make_generator([5, 6, 7])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(input_ids, max_new_tokens=3, return_log_probs=True)
+        self.assertIsInstance(out, tuple)
+        self.assertEqual(len(out), 2)
+        generated, log_probs = out
+        self.assertIsInstance(generated, paddle.Tensor)
+        self.assertIsInstance(log_probs, list)
+
+    # ------------------------------------------------------------------
+    # Correctness tests
+    # ------------------------------------------------------------------
+
+    def test_log_probs_are_non_positive(self):
+        """Log-softmax values must be <= 0."""
+        gen = self._make_generator([5, 6, 7])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=3, return_log_probs=True
+        )
+        for lp in log_probs[0]:
+            self.assertLessEqual(lp, 0.0)
+
+    def test_log_probs_length_equals_generated_tokens(self):
+        """Number of log-probs == number of generated tokens (no eos)."""
+        max_new = 4
+        gen = self._make_generator([5, 6, 7, 8])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        generated, log_probs = gen.generate(
+            input_ids, max_new_tokens=max_new, return_log_probs=True
+        )
+        # generated shape: [1, prompt_len + max_new]
+        num_new = generated.shape[1] - input_ids.shape[1]
+        self.assertEqual(len(log_probs[0]), num_new)
+
+    def test_log_probs_length_with_eos(self):
+        """Log-probs stop accumulating after eos (inclusive of eos step)."""
+        # Sequence: 5, 3(eos), 6, 7 — generation stops after token 3
+        gen = self._make_generator([5, 3, 6, 7])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        generated, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=10,
+            eos_token_id=3,
+            return_log_probs=True,
+        )
+        # Tokens generated: 5, 3 → 2 tokens, 2 log-probs
+        num_new = generated.shape[1] - input_ids.shape[1]
+        self.assertEqual(num_new, 2)
+        self.assertEqual(len(log_probs[0]), 2)
+
+    def test_log_probs_dominant_token_is_high(self):
+        """The log-prob of the chosen (dominant) token should be close to 0."""
+        # logits: chosen token = 10.0, others = 0 → softmax ≈ 1 → log ≈ 0
+        gen = self._make_generator([42])
+        input_ids = paddle.to_tensor([[1]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=1, return_log_probs=True
+        )
+        # log_softmax of ~1 prob is close to 0
+        self.assertGreater(log_probs[0][0], -0.5)
+
+    # ------------------------------------------------------------------
+    # Batch tests
+    # ------------------------------------------------------------------
+
+    def test_batch_log_probs_shape(self):
+        """With batch_size=2 the outer list has 2 elements."""
+        gen = self._make_generator([5, 6, 7], batch_size=2)
+        input_ids = paddle.to_tensor([[1, 2], [3, 4]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=3, return_log_probs=True
+        )
+        self.assertEqual(len(log_probs), 2)
+
+    def test_batch_each_element_is_list_of_floats(self):
+        """Each per-batch log-prob collection must be a list of float."""
+        gen = self._make_generator([5, 6, 7], batch_size=2)
+        input_ids = paddle.to_tensor([[1, 2], [3, 4]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=3, return_log_probs=True
+        )
+        for per_seq in log_probs:
+            self.assertIsInstance(per_seq, list)
+            for lp in per_seq:
+                self.assertIsInstance(lp, float)
+
+    def test_batch_log_probs_not_collected_after_eos(self):
+        """After a sequence hits eos, no further log-probs are appended for it."""
+        # Both batch elements share the same fake forward (same token), so
+        # both hit eos=3 at step 2 (tokens: 5, 3).
+        gen = self._make_generator([5, 3, 6, 7], batch_size=2)
+        input_ids = paddle.to_tensor([[1, 2], [1, 2]], dtype="int64")
+        generated, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=10,
+            eos_token_id=3,
+            return_log_probs=True,
+        )
+        # Both sequences hit eos at step 2 → 2 log-probs each
+        for per_seq in log_probs:
+            self.assertEqual(len(per_seq), 2)
+
+    # ------------------------------------------------------------------
+    # Consistency: log-prob values match manual computation
+    # ------------------------------------------------------------------
+
+    def test_log_probs_value_consistency(self):
+        """log_probs[0][0] must equal log_softmax of the first-step logits."""
+        vocab_size = 100
+        chosen_tok = 42
+        logit_val = 10.0
+
+        gen = self._make_generator(
+            [chosen_tok], batch_size=1, vocab_size=vocab_size
+        )
+        input_ids = paddle.to_tensor([[1]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=1, return_log_probs=True
+        )
+
+        # Build the same logits and compute expected log-prob manually
+        manual_logits = paddle.zeros([vocab_size], dtype="float32")
+        manual_logits[chosen_tok] = logit_val
+        expected_lp = float(
+            paddle.nn.functional.log_softmax(manual_logits, axis=-1)[
+                chosen_tok
+            ].item()
+        )
+
+        self.assertAlmostEqual(log_probs[0][0], expected_lp, places=4)
+
+
 if __name__ == "__main__":
     print("Running greedy generator unit tests...")
     unittest.main(verbosity=2)
