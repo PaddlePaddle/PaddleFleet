@@ -100,15 +100,20 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, w, dw_p2p_overlap=False):
+    def forward(ctx, x, w, dw_p2p_overlap=False, use_accuracy_compatible=False):
         """
         forward
         """
         ctx.dw_p2p_overlap = dw_p2p_overlap
+        ctx.use_accuracy_compatible = use_accuracy_compatible
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
-        return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
+        if ctx.use_accuracy_compatible:
+            w_aligned = w.cast(paddle.bfloat16).cast(ctx.dtype)
+            return F.linear(x.cast(ctx.dtype), w_aligned)
+        else:
+            return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
     @staticmethod
     def backward(ctx, y_grad):
@@ -164,21 +169,28 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 WeightGradStore.enabled = False
                 return x_grad, None
         else:
-            w = w.T
-            x_g, w_g = matmul_grad(
-                x.cast(ctx.dtype),
-                w.cast(ctx.dtype),
-                y_grad,
-                False,
-                False,
-            )
+            if ctx.use_accuracy_compatible:
+                x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
+                w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                return x_grad, w_grad
+            else:
+                w = w.T
+                x_g, w_g = matmul_grad(
+                    x.cast(ctx.dtype),
+                    w.cast(ctx.dtype),
+                    y_grad,
+                    False,
+                    False,
+                )
 
-            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
-            w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
-            if w_grad is not None:
-                w_grad = w_grad.T
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                if w_grad is not None:
+                    w_grad = w_grad.T
 
-            return x_grad, w_grad
+                return x_grad, w_grad
 
 
 def gate_detach_matmul(
@@ -187,9 +199,12 @@ def gate_detach_matmul(
     use_fuse,
     moe_router_force_load_balancing=False,
     dw_p2p_overlap=False,
+    use_accuracy_compatible=False,
 ):
     if use_fuse:
-        score = FusedGateDetachMatmul.apply(x, weight, dw_p2p_overlap)
+        score = FusedGateDetachMatmul.apply(
+            x, weight, dw_p2p_overlap, use_accuracy_compatible
+        )
     else:
         x = x.cast(paddle.float32)
         score = F.linear(x, weight)
@@ -227,6 +242,9 @@ class StandardMoERouter(nn.Layer):
     ):
         super().__init__()
         self.config = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
 
         self.hidden_size = config.hidden_size
         self.num_experts = config.n_routed_experts
@@ -272,11 +290,18 @@ class StandardMoERouter(nn.Layer):
             )
 
         # Initialize gate weight with Normal distribution aligned with Megatron.
-        self.weight = paddle.create_parameter(
-            shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
-            default_initializer=paddle.nn.initializer.Constant(0.0),
-        )
+        if self.use_accuracy_compatible:
+            self.weight = paddle.create_parameter(
+                shape=[self.num_experts, self.hidden_size],
+                dtype=config.params_dtype,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+        else:
+            self.weight = paddle.create_parameter(
+                shape=[self.num_experts, self.hidden_size],
+                dtype="float32",
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
         config.init_method(self.weight)
 
         if (
@@ -1213,6 +1238,7 @@ class TopKRouter(StandardMoERouter):
                     True,
                     self.config.moe_router_force_load_balancing,
                     getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
                 )
                 logits_1 = gate_detach_matmul(
                     input,
@@ -1220,6 +1246,7 @@ class TopKRouter(StandardMoERouter):
                     True,
                     self.config.moe_router_force_load_balancing,
                     getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
                 )
                 # The two-view contract is sigmoid + sigmoid. scoring_func is
                 # guaranteed to be "sigmoid" here (validated above and in
@@ -1236,6 +1263,7 @@ class TopKRouter(StandardMoERouter):
                     True,
                     self.config.moe_router_force_load_balancing,
                     getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
                 )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
@@ -1406,8 +1434,17 @@ class TopKRouter(StandardMoERouter):
         # norm
         if self.norm_topk_prob:
             if not getattr(self.config, "moe_topk_fusion", False):
-                denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
-                top_gate = top_gate / denominator
+                if True:
+                    # 全程 fp64 归一化（sum + 除法）对齐 MG：fp32 累加/除法末位 order paddle≠torch，
+                    # routing_map 一致但 router_output_0(probs) md5 会分叉；必须 sum 和除法都 fp64
+                    # 再 cast 回原 dtype（fp32 或仅 fp64-sum 前反向都无法逐位对齐）。
+                    _tg64 = top_gate.astype("float64")
+                    top_gate = (
+                        _tg64 / (_tg64.sum(axis=-1, keepdim=True) + 1e-20)
+                    ).astype(top_gate.dtype)
+                else:
+                    denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+                    top_gate = top_gate / denominator
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
 
         if self.routed_scaling_factor_learnable:

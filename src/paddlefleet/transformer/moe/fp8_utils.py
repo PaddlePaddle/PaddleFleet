@@ -1095,9 +1095,19 @@ class ExpertsGroupGemmContiguousNode:
                 )
                 d_gate_f32 = gate_g.grad
                 d_up_f32 = val_g.grad
-                d_scale_f32 = scale_g.grad.reshape(unzipped_probs.shape).astype(
-                    "float32"
-                )
+
+                # This ffn-dimension reduction uses a different accumulation order in fp32 than MG(torch) -> dL/dprobs.
+                # The last-bit split causes a 1-ULP gate wgrad difference (isolated test: fp32 vs fp64 differs by ~3.5e-8).
+                # Summing only in fp64 removes the accumulation-order noise and makes both sides converge to the same value; do1 still follows the fp32 path above
+                # while autograd stays unchanged, keeping expert wgrad aligned.
+                probs_grad_fp64 = (
+                    F.silu(gate_g.detach().astype("float64"))
+                    * val_g.detach().astype("float64")
+                    * do2_s.astype("float64").detach()
+                ).sum(axis=-1, keepdim=True)
+                d_scale_f32 = probs_grad_fp64.reshape(
+                    unzipped_probs.shape
+                ).astype("float32")
 
             do1 = paddle.concat([d_gate_f32, d_up_f32], axis=-1).astype(
                 o1.dtype
