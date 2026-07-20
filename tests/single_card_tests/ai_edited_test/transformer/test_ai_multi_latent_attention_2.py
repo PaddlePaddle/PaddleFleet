@@ -506,16 +506,11 @@ class TestRecomputeQKVUpProjAndRope(unittest.TestCase):
 
 class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
     """Tests covering all branches of the selective recompute_qkv_up_porj_and_rope
-    initialization logic (lines 404-434 in multi_latent_attention.py).
+    initialization logic in MultiLatentAttention.__init__.
 
-    Branches covered:
-    1. recompute_granularity != "selective" -> False
-    2. modules is list without "mla_qkv_recompute" -> False
-    3. modules is list, recompute_num_layers is None -> True
-    4. modules is list, recompute_method == "block" -> need_recompute_in_block
-    5. modules is list, recompute_method == "first_n" -> need_recompute_in_first_n
-    6. modules is dict, recompute_method == "block" -> need_recompute_in_block
-    7. modules is dict, recompute_method == "first_n" -> need_recompute_in_first_n
+    These tests mock super().__init__ and build_spec_layer to bypass heavy
+    dependencies, then call MultiLatentAttention.__init__ directly so that
+    the actual recompute logic in the source code is exercised for coverage.
     """
 
     def _make_config(
@@ -524,7 +519,9 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
         recompute_modules=None,
         recompute_num_layers=None,
         recompute_method="block",
+        layer_number=0,
     ):
+        """Create a minimal config SimpleNamespace for MultiLatentAttention.__init__."""
         import types as _types
 
         config = _types.SimpleNamespace(
@@ -538,45 +535,92 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             num_empty_layers_add_in_tail=0,
             virtual_pipeline_model_parallel_size=None,
             pipeline_model_parallel_size=1,
+            # Fields needed by MultiLatentAttention.__init__
+            qk_nope_head_dim=8,
+            qk_rope_head_dim=8,
+            rotary_scaling_factor=1.0,
+            mscale_all_dim=0,
+            rope_type="rope",
+            rotary_interleaved=False,
+            hidden_size=64,
+            output_layer_init_method=None,
+            init_method=None,
+            rms_norm_eps=1e-6,
+            use_bias=False,
+            gated_attention=False,
+            gated_attn_use_q_lora=False,
+            q_lora_rank=None,
+            kv_lora_rank=16,
+            head_dim=16,
+            v_head_dim=16,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            rope_theta=10000.0,
+            sliding_window=None,
+            rotary_percent=1.0,
+            attention_value_scale=None,
+            sequence_parallel=False,
+            tensor_model_parallel_size=1,
+            context_parallel_size=1,
         )
         return config
 
-    def _eval_flag(self, config, layer_number=0):
-        """Evaluate the recompute_qkv_up_porj_and_rope flag using the same logic
-        as MLASelfAttention.__init__ (lines 404-434)."""
-        from paddlefleet.recompute_utils import (
-            need_recompute_in_block,
-            need_recompute_in_first_n,
+    def _build_mla_instance(self, config, layer_number=0):
+        """Instantiate MLASelfAttention with mocked base class init and build_spec_layer."""
+        from unittest.mock import patch as _patch
+
+        from paddlefleet.transformer.multi_latent_attention import (
+            MLASelfAttention,
         )
 
-        recompute_qkv_up_porj_and_rope = False
-        if config.recompute_granularity == "selective":
-            modules = config.recompute_modules
-            if isinstance(modules, list) and "mla_qkv_recompute" in modules:
-                recompute_qkv_up_porj_and_rope = (
-                    True
-                    if config.recompute_num_layers is None
-                    else (
-                        need_recompute_in_block(
-                            layer_number, config, config.recompute_num_layers
-                        )
-                        if config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            layer_number, config, config.recompute_num_layers
-                        )
-                    )
-                )
-            elif isinstance(modules, dict) and "mla_qkv_recompute" in modules:
-                assert config.recompute_method in ["first_n", "block"]
-                num_layers = modules["mla_qkv_recompute"]
-                recompute_qkv_up_porj_and_rope = (
-                    need_recompute_in_block(layer_number, config, num_layers)
-                    if config.recompute_method == "block"
-                    else need_recompute_in_first_n(
-                        layer_number, config, num_layers
-                    )
-                )
-        return recompute_qkv_up_porj_and_rope
+        # We need to bypass the heavy Attention.__init__ (paddle.nn.Layer, ProcessGroupCollection, etc.)
+        # but still run MultiLatentAttention.__init__ logic for the recompute block.
+        # Strategy: patch Attention.__init__ to just set the minimal attributes needed.
+        def _fake_attention_init(self_obj, *args, **kwargs):
+            self_obj.config = config
+            self_obj.layer_number = layer_number
+            self_obj.is_swa = False
+            self_obj.num_attention_heads = config.num_attention_heads
+            self_obj.v_head_dim = config.v_head_dim
+            self_obj.head_dim = config.head_dim
+            self_obj.qk_rope_head_dim = config.qk_rope_head_dim
+            self_obj.rope_theta = config.rope_theta
+            self_obj.pg_collection = MagicMock()
+            self_obj.attn_mask_type = MagicMock()
+            self_obj.attention_type = "self"
+            self_obj.is_mtp_layer = False
+
+        def _fake_build_spec_layer(*args, **kwargs):
+            return MagicMock()
+
+        with (
+            _patch(
+                "paddlefleet.transformer.multi_latent_attention.Attention.__init__",
+                _fake_attention_init,
+            ),
+            _patch(
+                "paddlefleet.transformer.multi_latent_attention.build_spec_layer",
+                _fake_build_spec_layer,
+            ),
+            _patch(
+                "paddlefleet.transformer.multi_latent_attention.RotaryEmbedding",
+                MagicMock,
+            ),
+            _patch(
+                "paddlefleet.transformer.multi_latent_attention.ProcessGroupCollection",
+                MagicMock,
+            ),
+        ):
+            instance = object.__new__(MLASelfAttention)
+            MLASelfAttention.__init__(
+                instance,
+                config=config,
+                sublayers_spec=MagicMock(gate_proj=None),
+                layer_number=layer_number,
+                attn_mask_type=MagicMock(),
+                pg_collection=MagicMock(),
+            )
+        return instance
 
     def test_non_selective_granularity_returns_false(self):
         """Branch: recompute_granularity != 'selective' -> False."""
@@ -584,21 +628,20 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             recompute_granularity="full",
             recompute_modules=["mla_qkv_recompute"],
         )
-        self.assertFalse(self._eval_flag(config))
+        inst = self._build_mla_instance(config)
+        self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
     def test_list_without_mla_qkv_recompute_returns_false(self):
         """Branch: modules is list but doesn't contain 'mla_qkv_recompute' -> False."""
-        config = self._make_config(
-            recompute_modules=["other_module"],
-        )
-        self.assertFalse(self._eval_flag(config))
+        config = self._make_config(recompute_modules=["other_module"])
+        inst = self._build_mla_instance(config)
+        self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
     def test_dict_without_mla_qkv_recompute_returns_false(self):
         """Branch: modules is dict but doesn't contain 'mla_qkv_recompute' -> False."""
-        config = self._make_config(
-            recompute_modules={"other_module": 4},
-        )
-        self.assertFalse(self._eval_flag(config))
+        config = self._make_config(recompute_modules={"other_module": 4})
+        inst = self._build_mla_instance(config)
+        self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
     def test_list_num_layers_none_returns_true(self):
         """Branch: modules is list, recompute_num_layers is None -> True."""
@@ -606,7 +649,8 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             recompute_modules=["mla_qkv_recompute"],
             recompute_num_layers=None,
         )
-        self.assertTrue(self._eval_flag(config))
+        inst = self._build_mla_instance(config)
+        self.assertTrue(inst.recompute_qkv_up_porj_and_rope)
 
     def test_list_block_method_layer_in_recompute(self):
         """Branch: modules is list, method='block', layer IS in recompute range -> True."""
@@ -615,8 +659,9 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             recompute_num_layers=4,
             recompute_method="block",
         )
-        # layer_number=0 should be in the first 4 layers block
-        self.assertTrue(self._eval_flag(config, layer_number=0))
+        # layer_number=0 is in the first 4-layer block
+        inst = self._build_mla_instance(config, layer_number=0)
+        self.assertTrue(inst.recompute_qkv_up_porj_and_rope)
 
     def test_list_block_method_layer_not_in_recompute(self):
         """Branch: modules is list, method='block', layer NOT in recompute range -> False."""
@@ -625,8 +670,9 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             recompute_num_layers=2,
             recompute_method="block",
         )
-        # layer_number=5 should NOT be in first 2 layers of an 8-layer block
-        self.assertFalse(self._eval_flag(config, layer_number=5))
+        # layer_number=5 is NOT in the first 2-layer block
+        inst = self._build_mla_instance(config, layer_number=5)
+        self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
     def test_list_first_n_method_layer_in_recompute(self):
         """Branch: modules is list, method='first_n', layer IS in recompute range -> True."""
@@ -635,8 +681,8 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             recompute_num_layers=4,
             recompute_method="first_n",
         )
-        # layer_number=1 should be in first 4 layers
-        self.assertTrue(self._eval_flag(config, layer_number=1))
+        inst = self._build_mla_instance(config, layer_number=1)
+        self.assertTrue(inst.recompute_qkv_up_porj_and_rope)
 
     def test_list_first_n_method_layer_not_in_recompute(self):
         """Branch: modules is list, method='first_n', layer NOT in recompute range -> False."""
@@ -645,51 +691,50 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             recompute_num_layers=2,
             recompute_method="first_n",
         )
-        # layer_number=5 should NOT be in first 2 layers
-        self.assertFalse(self._eval_flag(config, layer_number=5))
+        inst = self._build_mla_instance(config, layer_number=5)
+        self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
     def test_dict_block_method_layer_in_recompute(self):
         """Branch: modules is dict, method='block', layer IS in recompute range -> True."""
         config = self._make_config(
             recompute_modules={"mla_qkv_recompute": 4},
-            recompute_num_layers=None,
             recompute_method="block",
         )
-        self.assertTrue(self._eval_flag(config, layer_number=0))
+        inst = self._build_mla_instance(config, layer_number=0)
+        self.assertTrue(inst.recompute_qkv_up_porj_and_rope)
 
     def test_dict_block_method_layer_not_in_recompute(self):
         """Branch: modules is dict, method='block', layer NOT in recompute range -> False."""
         config = self._make_config(
             recompute_modules={"mla_qkv_recompute": 2},
-            recompute_num_layers=None,
             recompute_method="block",
         )
-        self.assertFalse(self._eval_flag(config, layer_number=5))
+        inst = self._build_mla_instance(config, layer_number=5)
+        self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
     def test_dict_first_n_method_layer_in_recompute(self):
         """Branch: modules is dict, method='first_n', layer IS in recompute range -> True."""
         config = self._make_config(
             recompute_modules={"mla_qkv_recompute": 4},
-            recompute_num_layers=None,
             recompute_method="first_n",
         )
-        self.assertTrue(self._eval_flag(config, layer_number=1))
+        inst = self._build_mla_instance(config, layer_number=1)
+        self.assertTrue(inst.recompute_qkv_up_porj_and_rope)
 
     def test_dict_first_n_method_layer_not_in_recompute(self):
         """Branch: modules is dict, method='first_n', layer NOT in recompute range -> False."""
         config = self._make_config(
             recompute_modules={"mla_qkv_recompute": 2},
-            recompute_num_layers=None,
             recompute_method="first_n",
         )
-        self.assertFalse(self._eval_flag(config, layer_number=5))
+        inst = self._build_mla_instance(config, layer_number=5)
+        self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
     def test_modules_is_none_returns_false(self):
-        """Branch: recompute_modules is None -> False (neither list nor dict check passes)."""
-        config = self._make_config(
-            recompute_modules=None,
-        )
-        self.assertFalse(self._eval_flag(config))
+        """Branch: recompute_modules is None -> False."""
+        config = self._make_config(recompute_modules=None)
+        inst = self._build_mla_instance(config)
+        self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
 
 if __name__ == "__main__":
