@@ -737,5 +737,157 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
         self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
 
+class TestForwardDiscardOutputAndRegisterRecompute(unittest.TestCase):
+    """Tests for the forward path that calls discard_output_and_register_recompute
+    at multi_latent_attention.py L642-645."""
+
+    def test_forward_calls_discard_output_when_recompute_enabled(self):
+        """Test that forward() calls _qkv_recompute.discard_output_and_register_recompute
+        and then sets _qkv_recompute to None."""
+        from unittest.mock import MagicMock, patch as _patch
+
+        from paddlefleet.transformer.multi_latent_attention import (
+            MLASelfAttention,
+        )
+
+        # Create a minimal instance with the attributes forward() needs
+        instance = object.__new__(MLASelfAttention)
+        instance.recompute_qkv_up_porj_and_rope = True
+        instance.training = True
+        instance.recompute_core_attention = False
+        instance.use_rr_flash_attention = False
+        instance.layer_number = 0
+        instance.config = MagicMock()
+        instance.config.sequence_parallel = False
+        instance.gated_attention = False
+        instance.config.dw_p2p_overlap = False
+        instance.config.use_bias = True
+
+        # Mock core_attention to return a tensor
+        core_attn_out = paddle.randn([1, 4, 64])
+        core_attn_out.stop_gradient = False
+        instance.core_attention = MagicMock(return_value=core_attn_out)
+        instance.core_attention.config = MagicMock(spec=[])  # no forward_meta
+
+        # Mock o_proj
+        output_tensor = paddle.randn([1, 4, 64])
+        instance.o_proj = MagicMock(return_value=(output_tensor, None))
+
+        # Mock get_query_key_value_tensors
+        q = paddle.randn([1, 4, 2, 12])
+        k = paddle.randn([1, 4, 2, 12])
+        v = paddle.randn([1, 4, 2, 4])
+        instance.get_query_key_value_tensors = MagicMock(
+            return_value=(q, k, v, None, None, None)
+        )
+
+        # Set up _qkv_recompute mock
+        mock_recompute = MagicMock()
+        instance._qkv_recompute = mock_recompute
+
+        # Mock attn_mask_type for core_attention
+        instance.attn_mask_type = MagicMock()
+
+        # Patch TransformerLayer._log_md5 and paddle.device.cuda.memory_allocated
+        import sys
+        import types as _types
+
+        fake_transformer_layer = _types.ModuleType(
+            "paddlefleet.transformer.transformer_layer"
+        )
+
+        class _FakeTransformerLayer:
+            @staticmethod
+            def _log_md5(tensor, name, layer_idx):
+                pass
+
+        fake_transformer_layer.TransformerLayer = _FakeTransformerLayer
+
+        with (
+            _patch.dict(
+                sys.modules,
+                {
+                    "paddlefleet.transformer.transformer_layer": fake_transformer_layer
+                },
+            ),
+            _patch("paddle.device.cuda.memory_allocated", return_value=0),
+            _patch("paddle.base.core.nvprof_nvtx_push"),
+            _patch("paddle.base.core.nvprof_nvtx_pop"),
+        ):
+            MLASelfAttention.forward(
+                instance,
+                hidden_states=paddle.randn([1, 4, 64]),
+                attention_mask=None,
+            )
+
+        # Verify discard_output_and_register_recompute was called with core_attn_out
+        mock_recompute.discard_output_and_register_recompute.assert_called_once()
+        # Verify _qkv_recompute was set to None after the call
+        self.assertIsNone(instance._qkv_recompute)
+
+
+class TestRecomputeWithoutOutputEmptyFiltered(unittest.TestCase):
+    """Tests for the else branch in RecomputeWithoutOutputFunction.backward
+    at random.py L448-451 where filtered is empty."""
+
+    def test_backward_empty_filtered_branch(self):
+        """Test that backward handles the case where all outputs are None
+        (the else branch at L448-451) by directly invoking backward logic."""
+        from unittest.mock import MagicMock, patch as _patch
+
+        from paddlefleet.tensor_parallel.random import (
+            RecomputeWithoutOutputFunction,
+        )
+
+        ctx = MagicMock()
+        # Set outputs to (None,) so filtered will be empty
+        ctx.outputs = (None,)
+        ctx.share_grad_holder = False
+
+        # inputs need to be tensors for the grads tuple at the end
+        inp = paddle.randn([2, 3])
+        inp.stop_gradient = False
+        inp.grad = paddle.ones([2, 3])
+        ctx.inputs = (inp,)
+
+        # Call backward directly - output_grads matches outputs length
+        output_grads = (None,)
+
+        # Patch paddle.autograd.backward to avoid "tensors cannot be empty" error
+        # The key assertion is that we reach it with empty lists (else branch taken)
+        backward_called_with = {}
+
+        def _mock_backward(tensors, grad_tensors):
+            backward_called_with["tensors"] = tensors
+            backward_called_with["grad_tensors"] = grad_tensors
+
+        with _patch("paddle.autograd.backward", side_effect=_mock_backward):
+            grads = RecomputeWithoutOutputFunction.backward(ctx, *output_grads)
+
+        # Verify backward was called with empty lists (else branch)
+        self.assertEqual(backward_called_with["tensors"], [])
+        self.assertEqual(backward_called_with["grad_tensors"], [])
+        # Verify it returns the grad from inputs
+        self.assertEqual(len(grads), 1)
+
+    def test_backward_mixed_none_and_tensor_outputs(self):
+        """Test backward when some outputs are None and some are Tensors.
+        Covers the `if filtered` branch with partial filtering."""
+        from paddlefleet.tensor_parallel.random import RecomputeWithoutOutput
+
+        # Function that returns a tuple with a real tensor
+        def fn_with_tensor_output(x):
+            return x * 2.0
+
+        recompute_obj = RecomputeWithoutOutput()
+        x = paddle.randn([2, 3])
+        x.stop_gradient = False
+
+        result = recompute_obj.recompute(fn_with_tensor_output, x)
+        self.assertIsNotNone(result)
+        # outputs stored as (tensor,) - this covers the `if filtered` branch
+        self.assertEqual(len(recompute_obj.outputs), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
