@@ -49,6 +49,7 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.utils import (
     attention_mask_func,
+    get_sliding_window_left_size,
     startend_row_indices_add_sliding_window,
 )
 from paddlefleet.utils import divide
@@ -566,7 +567,28 @@ class DotProductAttention(FleetLayer):
                         )
                     if self.is_swa and use_mla:
                         extra_kwargs["mode"] = "contiguous_swap2p"
-                        extra_kwargs["window_size"] = self.sliding_window[0]
+                        left_window = get_sliding_window_left_size(
+                            self.sliding_window
+                        )
+                        # The CP contiguous_swap2p SWA fast path requires a
+                        # finite positive left window (the flashmask P2P kernel
+                        # in refined_recompute.flash_attn asserts
+                        # window_size > 0). An infinite window (`-1`) or `0`
+                        # carries no SWA truncation and is not representable on
+                        # this path, so reject it up front with an actionable
+                        # message instead of failing deep inside the kernel.
+                        if left_window <= 0:
+                            raise ValueError(
+                                "Context-parallel SWA (cp_balance_mode="
+                                "'contiguous_a2a' with MLA) requires a finite "
+                                "positive sliding_window, but got "
+                                f"{self.sliding_window!r} (left window "
+                                f"{left_window}). An infinite window (-1) has "
+                                "no sliding-window truncation and is not "
+                                "supported on this path; disable SWA for this "
+                                "layer or configure a positive window size."
+                            )
+                        extra_kwargs["window_size"] = left_window
                         is_causal = False  # only support non-causal for flashmask_attention_cp
                         assert attn_mask_startend_row_indices.shape[-1] == 2
                 else:
