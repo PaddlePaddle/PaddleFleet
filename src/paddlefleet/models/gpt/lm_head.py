@@ -60,6 +60,7 @@
 #     produce identical math at step 0 (params init to zero -> SegLU = id).
 # =============================================================================
 
+import copy
 import warnings
 
 import paddle
@@ -123,6 +124,10 @@ def SegLU(x, ranges, ts):
 
 class GPTLMHead(ColumnParallelLinear):
     def __init__(self, **kwargs):
+        # Shallow-copy the config so that force-disabling FP8 on the LM head
+        # does not propagate to other layers sharing the same config object.
+        kwargs["config"] = copy.deepcopy(kwargs["config"])
+        kwargs["config"].fp8 = None
         self.config = kwargs["config"]
         self.skip_weight_param_allocation = kwargs[
             "skip_weight_param_allocation"
