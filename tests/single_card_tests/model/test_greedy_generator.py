@@ -723,13 +723,21 @@ class TestReturnLogProbs(unittest.TestCase):
         gen.cache = DynamicKVCache(num_layers=1)
 
         input_ids = paddle.to_tensor([[1]], dtype="int64")
-        _, log_probs = gen.generate(
-            input_ids,
-            max_new_tokens=1,
-            return_log_probs=True,
-            temperature=2.0,
-            top_k=5,
-        )
+        # Pin multinomial to always return chosen_tok so the test is
+        # deterministic even though temperature/top_k enable sampling.
+        # The entire temperature-scaling and top-k-filtering path still runs;
+        # only the final random draw is fixed.
+        with unittest.mock.patch(
+            "paddle.multinomial",
+            return_value=paddle.to_tensor([[chosen_tok]], dtype="int64"),
+        ):
+            _, log_probs = gen.generate(
+                input_ids,
+                max_new_tokens=1,
+                return_log_probs=True,
+                temperature=2.0,
+                top_k=5,
+            )
 
         # Expected: log_softmax over raw (pre-temperature) logits
         raw = raw_logits_snapshot[0].cast("float32")
