@@ -193,6 +193,7 @@ class _HybridEPManager(_DispatchManager):
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
         hybridep_buffer_configs: dict | None = None,
+        moe_deep_gemm: bool = False,
     ):
         if not HAVE_HYBRID_EP:
             raise ImportError("HybridEP runtime is not available.")
@@ -213,6 +214,7 @@ class _HybridEPManager(_DispatchManager):
         self.handle = None
         self._active_buffer = None
         self.hybridep_buffer_configs = hybridep_buffer_configs or {}
+        self.expert_padding_alignment = FP8_ALIGN if moe_deep_gemm else None
         self._num_unpadded_tokens = None
 
     def _get_max_num_tokens_per_rank(self, num_local_tokens: int, place) -> int:
@@ -424,7 +426,9 @@ class _HybridEPManager(_DispatchManager):
             num_of_experts_per_rank=self.num_local_experts,
             use_fp8=use_fp8,
             scaling_factor=scaling_factor,
-            pad_multiple=FP8_ALIGN if use_fp8 else None,
+            pad_multiple=(
+                FP8_ALIGN if use_fp8 else self.expert_padding_alignment
+            ),
             num_permuted_tokens=num_permuted_tokens,
             non_blocking=True,
         )
@@ -827,6 +831,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         moe_ep_barrier: bool = True,
         dispatcher_type: str | None = None,
         hybridep_buffer_configs: dict | None = None,
+        moe_deep_gemm: bool = False,
     ):
         super().__init__(ep_group)
 
@@ -846,6 +851,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         }
         if manager_cls is _HybridEPManager:
             manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
+            manager_kwargs["moe_deep_gemm"] = moe_deep_gemm
         self._comm_manager = manager_cls(**manager_kwargs)
 
     def dispatch_preprocess(
