@@ -1101,8 +1101,8 @@ class ExpertsGroupGemmContiguousNode:
                 # Summing only in fp64 removes the accumulation-order noise and makes both sides converge to the same value; do1 still follows the fp32 path above
                 # while autograd stays unchanged, keeping expert wgrad aligned.
                 probs_grad_fp64 = (
-                    F.silu(gate_g.detach().astype("float64"))
-                    * val_g.detach().astype("float64")
+                    F.silu(gate_c.detach().astype("float64"))
+                    * val_c.detach().astype("float64")
                     * do2_s.astype("float64").detach()
                 ).sum(axis=-1, keepdim=True)
                 d_scale_f32 = probs_grad_fp64.reshape(

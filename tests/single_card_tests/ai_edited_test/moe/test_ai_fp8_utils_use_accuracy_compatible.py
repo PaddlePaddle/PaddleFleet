@@ -651,16 +651,19 @@ class TestSwiGLUAccuracyCompatibleClamp(unittest.TestCase):
             dp = scale.grad.reshape(probs.shape).astype(probs.dtype)
             return d1, dp
 
-        do1_clamp, pg_clamp = grads(True)
-        do1_unclamp, _ = grads(False)
+        do1_clamp, _pg_clamp = grads(True)
+        do1_unclamp, pg_unclamp = grads(False)
 
+        # do1 follows the clamped autograd path, so it matches the clamped ref.
         np.testing.assert_array_equal(
             do1.astype("float32").numpy(),
             do1_clamp.astype("float32").numpy(),
         )
+        # probs_grad is recomputed in fp64 from the *unclamped* gate/value
+        # (MG accumulation-order alignment), so it matches the unclamped ref.
         np.testing.assert_array_equal(
             probs_grad.astype("float32").numpy(),
-            pg_clamp.astype("float32").numpy(),
+            pg_unclamp.astype("float32").numpy(),
         )
         # saturated gate/value gradients are masked by the clamp, so the
         # unclamped gradient must differ.

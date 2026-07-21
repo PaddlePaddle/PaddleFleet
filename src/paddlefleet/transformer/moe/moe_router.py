@@ -149,7 +149,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
 
         if ctx.dw_p2p_overlap:
             x_cast = x.cast(ctx.dtype)
-            w_cast = w.cast(ctx.dtype)
+            if ctx.use_accuracy_compatible:
+                # Match the forward's bf16-rounded effective weight for x_grad.
+                w_cast = w.cast(paddle.bfloat16).cast(ctx.dtype)
+            else:
+                w_cast = w.cast(ctx.dtype)
 
             x_g = paddle.matmul(y_grad, w_cast.T, transpose_y=True)
             x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
@@ -170,7 +174,12 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 return x_grad, None
         else:
             if ctx.use_accuracy_compatible:
-                x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
+                # Reuse the same effective weight as the forward (which rounds
+                # w through bf16 before the fp32 GEMM); using the raw fp32 w
+                # here would make x_grad inconsistent with the forward when the
+                # incoming weight is still fp32 (e.g. params_dtype=float32).
+                w_for_dx = w.cast(paddle.bfloat16).cast(ctx.dtype)
+                x_g = paddle.matmul(y_grad, w_for_dx)
                 w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
                 x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
                 w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
