@@ -434,6 +434,7 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         csa.cp_enabled = True
         csa.cp_size = 2
         csa.cp_rank = 0
+        csa.indexer = nn.Identity()  # mock indexer existence (never called)
 
         query = paddle.randn([b, sq, np_heads, hn], dtype="float32")
         key = paddle.randn([b, sq, 1, hn], dtype="float32")
@@ -505,6 +506,7 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         csa.cp_enabled = True
         csa.cp_size = 2
         csa.cp_rank = 0
+        csa.indexer = nn.Identity()  # mock indexer existence (never called)
 
         query = paddle.randn([b, sq, np_heads, hn], dtype="float32")
         key = paddle.randn([b, sq, 1, hn], dtype="float32")

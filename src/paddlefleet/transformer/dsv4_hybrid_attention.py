@@ -138,12 +138,12 @@ def _build_rope_freqs(
     startend_row_indices: Tensor | None = None,
 ):
     if docmask_meta is not None:
-        freqs, mscale = build_document_rope_freqs(
-            rotary_pos_emb,
-            sq,
-            position_offset=position_offset,
-            doc_lens=docmask_meta.doc_lens,
-        )
+        _rope_result = rotary_pos_emb(docmask_meta.seqlen, packed_seq=False)
+        if isinstance(_rope_result, tuple):
+            freqs, mscale = _rope_result
+        else:
+            freqs, mscale = _rope_result, 1.0
+        freqs = paddle.gather(freqs, docmask_meta.pos_in_doc, axis=1)
     elif startend_row_indices is not None:
         freqs, mscale = build_document_rope_freqs(
             rotary_pos_emb,
@@ -391,6 +391,7 @@ class DSv4HybridAttention(Attention):
                 b,
                 docmask_seqlen,
                 startend_row_indices,
+                dense_mode=self.config.csa_dense_mode,
             )
 
         query, key, value, q_compressed, kv_compressed = (
