@@ -262,9 +262,9 @@ class TestHybridEPBackendSelection(unittest.TestCase):
             moe_deep_gemm=True,
         )
 
+        dispatcher._comm_manager._set_dispatch_state(use_fp8=False)
         self.assertEqual(
-            dispatcher._comm_manager.get_pad_multiple(use_fp8=False),
-            FP8_ALIGN,
+            dispatcher._comm_manager._dispatch_pad_multiple, FP8_ALIGN
         )
 
 
@@ -1006,16 +1006,13 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
         handle = _make_hybrid_ep_handle(token_data_type="UINT8")
 
         class DispatchingManager:
-            @staticmethod
-            def get_pad_multiple(use_fp8):
-                return FP8_ALIGN if use_fp8 else None
-
             def _dispatch_with_permute_impl(
                 self, x, token_indices, token_probs, use_fp8
             ):
                 self._active_buffer = buffer
                 self.handle = handle
                 self.use_fp8 = use_fp8
+                self._dispatch_pad_multiple = FP8_ALIGN if use_fp8 else None
                 return (
                     x * 2,
                     token_probs.reshape([-1]),
@@ -1065,15 +1062,12 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
         handle = _make_hybrid_ep_handle(token_data_type="BF16")
 
         class DispatchingManager:
-            @staticmethod
-            def get_pad_multiple(use_fp8):
-                return FP8_ALIGN
-
             def _dispatch_with_permute_impl(
                 self, x, token_indices, token_probs, use_fp8
             ):
                 self._active_buffer = buffer
                 self.handle = handle
+                self._dispatch_pad_multiple = FP8_ALIGN
                 return x * 2, token_probs.reshape([-1]), None
 
         manager = DispatchingManager()
@@ -1129,6 +1123,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             ],
         )
         manager._active_buffer = buffer
+        manager._set_dispatch_state(use_fp8=False)
         x = paddle.zeros([2, 4], dtype="float32")
         x.stop_gradient = False
 
@@ -1177,6 +1172,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
         manager.padded_tokens_per_expert = paddle.to_tensor(
             [1, 1], dtype="int64"
         )
+        manager._set_dispatch_state(use_fp8=True)
         x = paddle.zeros([2, 4], dtype="float32")
         x.stop_gradient = False
 
@@ -1211,6 +1207,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             handle,
             grad_output,
             num_permuted_tokens=2,
+            use_fp8_dispatch=False,
             pad_multiple=None,
         )
 

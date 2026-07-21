@@ -916,7 +916,7 @@ class HybridEPDispatch(PyLayer):
         ctx.token_indices = token_indices
         ctx.num_unpadded_tokens = x.shape[0]
         ctx.hidden_dtype = x.dtype
-        ctx.pad_multiple = manager.get_pad_multiple(fp8_dispatch)
+        ctx.pad_multiple = manager._dispatch_pad_multiple
         ctx.set_grad_in_dtype_consistent(False)
         return recv_x, recv_token_probs, scale
 
@@ -952,10 +952,11 @@ def _replay_hybrid_ep_dispatch_backward(
     handle,
     grad_output,
     num_permuted_tokens,
+    use_fp8_dispatch,
     pad_multiple,
 ):
     replay_handle = handle
-    if "UINT8" in str(handle[7].token_data_type):
+    if use_fp8_dispatch:
         replay_config = buffer.update_template_config(
             hidden_dim=grad_output.shape[-1],
             num_of_tokens_per_rank=handle[6],
@@ -990,8 +991,8 @@ class HybridEPCombine(PyLayer):
             f"{x.shape[0]} rows but num_permuted_tokens is "
             f"{num_permuted_tokens}."
         )
-        use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
-        pad_multiple = manager.get_pad_multiple(use_fp8_dispatch)
+        use_fp8_dispatch = manager._dispatch_uses_fp8
+        pad_multiple = manager._dispatch_pad_multiple
         combined_x, _ = manager._active_buffer.combine_with_unpermute(
             hidden=x,
             handle=handle,
@@ -1000,6 +1001,7 @@ class HybridEPCombine(PyLayer):
         combined_x.stop_gradient = False
         ctx.buffer = manager._active_buffer
         ctx.handle = handle
+        ctx.use_fp8_dispatch = use_fp8_dispatch
         ctx.pad_multiple = pad_multiple
         ctx.num_permuted_tokens = num_permuted_tokens
         return combined_x
@@ -1011,6 +1013,7 @@ class HybridEPCombine(PyLayer):
             ctx.handle,
             grad_output,
             ctx.num_permuted_tokens,
+            use_fp8_dispatch=ctx.use_fp8_dispatch,
             pad_multiple=ctx.pad_multiple,
         )
         return grad_x
