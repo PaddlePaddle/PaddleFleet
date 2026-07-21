@@ -679,6 +679,79 @@ class TestReturnLogProbs(unittest.TestCase):
 
         self.assertAlmostEqual(log_probs[0][0], expected_lp, places=4)
 
+    def test_log_probs_are_pre_temperature_distribution(self):
+        """output_log_probs reflect the post-repetition-penalty raw distribution,
+        NOT the temperature/top-k/top-p sampling distribution.
+
+        Contract: with temperature=2.0 and top_k=5 the returned log-prob for
+        the chosen token must still equal log_softmax over the *un-scaled*
+        (pre-temperature) logits, not log_softmax over the temperature-divided
+        logits actually used for sampling.
+        """
+        vocab_size = 50
+        chosen_tok = 10
+        logit_val = 8.0
+
+        # Build a generator whose single call returns known logits
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        raw_logits_snapshot = []
+
+        def fake_forward(inputs):
+            logits = paddle.zeros([1, 1, vocab_size], dtype="float32")
+            logits[0, 0, chosen_tok] = logit_val
+            raw_logits_snapshot.append(logits[0, 0].clone())
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+
+        input_ids = paddle.to_tensor([[1]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=1,
+            return_log_probs=True,
+            temperature=2.0,
+            top_k=5,
+        )
+
+        # Expected: log_softmax over raw (pre-temperature) logits
+        raw = raw_logits_snapshot[0].cast("float32")
+        expected_pre_temp = float(
+            paddle.nn.functional.log_softmax(raw, axis=-1)[chosen_tok].item()
+        )
+        # Sanity: log_softmax over temperature-divided logits would differ
+        expected_post_temp = float(
+            paddle.nn.functional.log_softmax(raw / 2.0, axis=-1)[
+                chosen_tok
+            ].item()
+        )
+        actual = log_probs[0][0]
+
+        # The returned value matches the pre-temperature distribution
+        self.assertAlmostEqual(actual, expected_pre_temp, places=4)
+        # And it is *not* equal to the post-temperature distribution
+        # (they differ because temperature != 1; if somehow they are equal
+        # the test is vacuous, so we assert they differ first)
+        if abs(expected_pre_temp - expected_post_temp) > 1e-4:
+            self.assertNotAlmostEqual(actual, expected_post_temp, places=4)
+
 
 if __name__ == "__main__":
     print("Running greedy generator unit tests...")

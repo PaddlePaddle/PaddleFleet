@@ -350,6 +350,12 @@ class GreedyGenerator:
             return_log_probs: If True, also return the log-probabilities of
                 each generated token. Default: False.
 
+                **Semantics**: the log-prob at each step is computed as
+                ``log_softmax`` over the logits *after* repetition-penalty
+                but *before* temperature scaling / top-k / top-p filtering.
+                This is the model's raw (penalised) distribution, not the
+                actual sampling distribution used to draw the token.
+
         Returns:
             If ``return_log_probs=False``: Tensor of shape
             ``[B, L + num_generated]`` containing the prompt plus generated
