@@ -214,8 +214,11 @@ class _HybridEPManager(_DispatchManager):
         self.handle = None
         self._active_buffer = None
         self.hybridep_buffer_configs = hybridep_buffer_configs or {}
-        self.expert_padding_alignment = FP8_ALIGN if moe_deep_gemm else None
+        self._moe_deep_gemm = moe_deep_gemm
         self._num_unpadded_tokens = None
+
+    def get_pad_multiple(self, use_fp8: bool) -> int | None:
+        return FP8_ALIGN if use_fp8 or self._moe_deep_gemm else None
 
     def _get_max_num_tokens_per_rank(self, num_local_tokens: int, place) -> int:
         max_num_tokens = num_local_tokens
@@ -426,9 +429,7 @@ class _HybridEPManager(_DispatchManager):
             num_of_experts_per_rank=self.num_local_experts,
             use_fp8=use_fp8,
             scaling_factor=scaling_factor,
-            pad_multiple=(
-                FP8_ALIGN if use_fp8 else self.expert_padding_alignment
-            ),
+            pad_multiple=self.get_pad_multiple(use_fp8),
             num_permuted_tokens=num_permuted_tokens,
             non_blocking=True,
         )

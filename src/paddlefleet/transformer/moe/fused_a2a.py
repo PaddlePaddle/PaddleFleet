@@ -28,7 +28,6 @@ from paddlefleet_ops import (
 
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
-from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
 
 if is_deep_ep_available():
@@ -902,12 +901,6 @@ else:
     fused_combine = None
 
 
-def _get_hybrid_ep_pad_multiple(manager, use_fp8_dispatch):
-    if use_fp8_dispatch:
-        return FP8_ALIGN
-    return getattr(manager, "expert_padding_alignment", None)
-
-
 class HybridEPDispatch(PyLayer):
     """Fused HybridEP dispatch bridge for Paddle autograd."""
 
@@ -923,8 +916,7 @@ class HybridEPDispatch(PyLayer):
         ctx.token_indices = token_indices
         ctx.num_unpadded_tokens = x.shape[0]
         ctx.hidden_dtype = x.dtype
-        ctx.use_fp8_dispatch = fp8_dispatch
-        ctx.pad_multiple = _get_hybrid_ep_pad_multiple(manager, fp8_dispatch)
+        ctx.pad_multiple = manager.get_pad_multiple(fp8_dispatch)
         ctx.set_grad_in_dtype_consistent(False)
         return recv_x, recv_token_probs, scale
 
@@ -960,11 +952,10 @@ def _replay_hybrid_ep_dispatch_backward(
     handle,
     grad_output,
     num_permuted_tokens,
-    use_fp8_dispatch,
-    pad_multiple=None,
+    pad_multiple,
 ):
     replay_handle = handle
-    if use_fp8_dispatch:
+    if "UINT8" in str(handle[7].token_data_type):
         replay_config = buffer.update_template_config(
             hidden_dim=grad_output.shape[-1],
             num_of_tokens_per_rank=handle[6],
@@ -976,7 +967,6 @@ def _replay_hybrid_ep_dispatch_backward(
             replay_config,
             handle[8],
         )
-        pad_multiple = FP8_ALIGN
     grad_x, _, _, _, _ = buffer.dispatch_with_permute(
         hidden=grad_output.contiguous(),
         handle=replay_handle,
@@ -1001,7 +991,7 @@ class HybridEPCombine(PyLayer):
             f"{num_permuted_tokens}."
         )
         use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
-        pad_multiple = _get_hybrid_ep_pad_multiple(manager, use_fp8_dispatch)
+        pad_multiple = manager.get_pad_multiple(use_fp8_dispatch)
         combined_x, _ = manager._active_buffer.combine_with_unpermute(
             hidden=x,
             handle=handle,
@@ -1010,7 +1000,6 @@ class HybridEPCombine(PyLayer):
         combined_x.stop_gradient = False
         ctx.buffer = manager._active_buffer
         ctx.handle = handle
-        ctx.use_fp8_dispatch = use_fp8_dispatch
         ctx.pad_multiple = pad_multiple
         ctx.num_permuted_tokens = num_permuted_tokens
         return combined_x
@@ -1022,7 +1011,6 @@ class HybridEPCombine(PyLayer):
             ctx.handle,
             grad_output,
             ctx.num_permuted_tokens,
-            ctx.use_fp8_dispatch,
             pad_multiple=ctx.pad_multiple,
         )
         return grad_x

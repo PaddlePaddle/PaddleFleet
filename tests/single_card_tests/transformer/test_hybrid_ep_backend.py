@@ -263,7 +263,8 @@ class TestHybridEPBackendSelection(unittest.TestCase):
         )
 
         self.assertEqual(
-            dispatcher._comm_manager.expert_padding_alignment, FP8_ALIGN
+            dispatcher._comm_manager.get_pad_multiple(use_fp8=False),
+            FP8_ALIGN,
         )
 
 
@@ -1005,6 +1006,10 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
         handle = _make_hybrid_ep_handle(token_data_type="UINT8")
 
         class DispatchingManager:
+            @staticmethod
+            def get_pad_multiple(use_fp8):
+                return FP8_ALIGN if use_fp8 else None
+
             def _dispatch_with_permute_impl(
                 self, x, token_indices, token_probs, use_fp8
             ):
@@ -1046,7 +1051,9 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             buffer.combine_calls[-1]["probs"].dtype, paddle.float32
         )
 
-    def test_dispatch_pylayer_uses_deepgemm_alignment_in_backward(self):
+    def test_dispatch_pylayer_trims_padded_grad_and_keeps_alignment_without_dense_probs(
+        self,
+    ):
         grad_x = paddle.concat(
             [
                 paddle.full([2, 4], 5.0, dtype="float32"),
@@ -1058,7 +1065,9 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
         handle = _make_hybrid_ep_handle(token_data_type="BF16")
 
         class DispatchingManager:
-            expert_padding_alignment = FP8_ALIGN
+            @staticmethod
+            def get_pad_multiple(use_fp8):
+                return FP8_ALIGN
 
             def _dispatch_with_permute_impl(
                 self, x, token_indices, token_probs, use_fp8
@@ -1202,7 +1211,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             handle,
             grad_output,
             num_permuted_tokens=2,
-            use_fp8_dispatch=False,
+            pad_multiple=None,
         )
 
         self.assertEqual(
