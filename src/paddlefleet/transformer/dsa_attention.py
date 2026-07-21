@@ -24,7 +24,6 @@ This module provides:
 
 from __future__ import annotations
 
-import copy
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -277,6 +276,7 @@ class DSAIndexer(paddle.nn.Layer):
         sublayers_spec: DSAIndexerSublayersSpec,
         layer_number: int,
         pg_collection: ProcessGroupCollection | None = None,
+        save_original_input: bool | None = None,
     ):
         super().__init__()
         self.config = config
@@ -293,9 +293,16 @@ class DSAIndexer(paddle.nn.Layer):
         self.index_topk = config.dsa_index_topk
         self.softmax_scale = self.head_dim**-0.5
 
-        non_fp8_config = copy.copy(self.config)
-        non_fp8_config.fp8 = None
-        non_fp8_config.fp8_wgrad = False
+        self.fp8 = bool(getattr(self.config, "fp8", None))
+        self.fp8_wgrad = bool(getattr(self.config, "fp8_wgrad", False))
+        if save_original_input is None:
+            save_original_input = not (self.fp8 and self.fp8_wgrad)
+        self.save_original_input = bool(save_original_input)
+        if self.fp8:
+            tp_size = (
+                pg_collection.tp.nranks if pg_collection.tp is not None else 1
+            )
+            assert tp_size == 1, "FP8 in DSA Indexer requires TP=1"
 
         # wq_b: q_lora_rank -> n_heads * head_dim (duplicated)
         self.wq_b = build_spec_layer(
@@ -309,6 +316,9 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wq_b",
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            save_original_input=self.save_original_input,
         )
 
         # wk: hidden_size -> head_dim (single shared K, duplicated)
@@ -323,6 +333,9 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wk",
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            save_original_input=self.save_original_input,
         )
 
         # k_norm: LayerNorm (NOT RMSNorm) per reference
@@ -337,7 +350,7 @@ class DSAIndexer(paddle.nn.Layer):
             sublayers_spec.linear_weights_proj,
             config.hidden_size,
             self.n_heads,
-            config=non_fp8_config,
+            config=self.config,
             init_method=self.config.init_method,
             bias=False,
             skip_bias_add=False,

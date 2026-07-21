@@ -459,11 +459,7 @@ def linear_with_frozen_weight(
     wgrad_deferral_limit: None = None,
     async_grad_allreduce: bool | None = None,
     use_accuracy_compatible: bool = False,
-    fp8: bool = False,
-    fp8_wgrad: bool = False,
-    inp_quant_func=None,
-    weight_quant_func=None,
-    use_pow2_scale: bool = False,
+    **kwargs,
 ) -> paddle.Tensor:
     """Linear layer execution with weight.requires_grad == False.
 
@@ -697,13 +693,28 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         inp_quant_func=None,
         weight_quant_func=None,
         use_pow2_scale=False,
+        save_original_input=False,
     ):
         """Forward."""
         if gradient_accumulation_fusion and hasattr(weight, "main_grad"):
             main_grad = weight.main_grad
         else:
             main_grad = None
-        ctx.save_for_backward(input._new_shared_tensor(), weight)
+        # When fp8 is enabled we can skip saving the bf16 activation for
+        # backward and rely solely on the fp8-quantized activation stored on
+        # ctx (populated below from ``fp8_meta``). ``save_original_input``
+        # forces us to keep the bf16 activation (useful for debugging or when
+        # the caller wants bf16 wgrad).
+        skip_bf16_input_save = fp8 and not save_original_input
+        if skip_bf16_input_save:
+            ctx.save_for_backward(weight)
+        else:
+            ctx.save_for_backward(input._new_shared_tensor(), weight)
+        ctx.bf16_input_saved = not skip_bf16_input_save
+        # ``input.shape`` is still needed in backward for sequence-parallel
+        # collectives; save it as a plain tuple so we do not retain the tensor.
+        ctx.input_shape = tuple(input.shape)
+        ctx.input_dtype = input.dtype
         ctx.main_grad = main_grad
         ctx.use_bias = bias is not None
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
@@ -719,6 +730,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.inp_quant_func = inp_quant_func
         ctx.weight_quant_func = weight_quant_func
         ctx.use_pow2_scale = use_pow2_scale
+        ctx.save_original_input = save_original_input
 
         if sequence_parallel:
             dim_size = list(input.shape)
@@ -759,7 +771,16 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """Backward."""
-        input, weight = ctx.saved_tensor()
+        # When fp8=True and save_original_input=False the forward pass stores
+        # only the weight tensor via ``save_for_backward``. In that case the
+        # bf16 activation is not available and both dgrad/wgrad must run on
+        # the fp8-quantized tensors stashed on ctx.
+        saved = ctx.saved_tensor()
+        if ctx.bf16_input_saved:
+            input, weight = saved
+        else:
+            (weight,) = saved
+            input = None
         main_grad = ctx.main_grad
         use_bias = ctx.use_bias
         grad_output_buffer = ctx.grad_output_buffer
@@ -841,9 +862,21 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             handle.wait()
 
         if wgrad_compute:
-            grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
-                grad_output, total_input
-            )
+            if total_input is not None:
+                grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
+                    grad_output, total_input
+                )
+            else:
+                # fp8 + save_original_input=False: no bf16 input available.
+                # Only reshape grad_output to 2D for the fp8 wgrad path.
+                grad_output = grad_output.contiguous()
+                if grad_output.dim() == 3:
+                    grad_output = grad_output.reshape(
+                        [
+                            grad_output.shape[0] * grad_output.shape[1],
+                            grad_output.shape[2],
+                        ]
+                    )
 
         if ctx.allreduce_dgrad and input_needs_grad:
             # Asynchronous all-reduce
@@ -882,6 +915,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             )[:2]
             inp_t_fp8, inp_t_scale = ctx.inp_t_fp8, ctx.inp_t_scale
             if inp_t_fp8 is None:
+                assert total_input is not None, (
+                    "fp8 wgrad requires either pre-quantized inp_t_fp8 (from"
+                    " fp8 forward with input_trans=True) or the bf16 total_input"
+                    " (set save_original_input=True to keep bf16 activation)"
+                )
                 inp_t_fp8, inp_t_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
                     total_input.T.contiguous(),
                     output_scale_transpose=False,
@@ -898,7 +936,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 pass_name="wgrad",
                 shadow_ref=(
                     paddle.matmul(total_input.T.contiguous(), grad_output)
-                    if _FP8_SHADOW_DEBUG else None
+                    if _FP8_SHADOW_DEBUG and total_input is not None else None
                 ),
             )
 
@@ -928,13 +966,13 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 if getattr(weight, "zero_out_wgrad", False):
                     grad_weight = paddle.zeros(
                         weight.main_grad.shape,
-                        dtype=input.dtype,
+                        dtype=ctx.input_dtype,
                         requires_grad=False,
                     )
                 else:
                     grad_weight = paddle.empty(
                         weight.main_grad.shape,
-                        dtype=input.dtype,
+                        dtype=ctx.input_dtype,
                         requires_grad=False,
                     )
                 weight.grad_added_to_main_grad = True
@@ -942,7 +980,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 grad_weight = None
         else:
             if wgrad_compute:
-                pass  # print(f"[backward] wgrad bf16: total_input={total_input.shape} grad_output={grad_output.shape}")
+                assert total_input is not None, (
+                    "bf16 wgrad requires the saved bf16 activation; set"
+                    " save_original_input=True or enable fp8_wgrad when using fp8"
+                )
+                # print(f"[backward] wgrad bf16: total_input={total_input.shape} grad_output={grad_output.shape}")
             grad_weight, _ = general_gemm(total_input.t(), grad_output)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
@@ -985,6 +1027,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     inp_quant_func=None,
     weight_quant_func=None,
     use_pow2_scale: bool = False,
+    save_original_input: bool = False,
 ) -> paddle.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -1076,6 +1119,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         inp_quant_func,
         weight_quant_func,
         use_pow2_scale,
+        save_original_input,
     ]
 
     if not linear_with_grad_accumulation_and_async_allreduce.warned:
@@ -1190,6 +1234,9 @@ class Linear(paddle.nn.Layer):
         tp_comm_buffer_name: str | None = None,
         disable_grad_reduce: bool = False,
         tp_group: paddle.core.ProcessGroup | None = None,
+        fp8: bool = False,
+        fp8_wgrad: bool = False,
+        save_original_input: bool = False,
     ):
         super().__init__()
 
@@ -1268,13 +1315,19 @@ class Linear(paddle.nn.Layer):
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
-        # FP8 config
-        self.fp8 = getattr(config, "fp8", None) is not None
-        self.fp8_wgrad = getattr(config, "fp8_wgrad", False) and self.fp8
+        # FP8 config: opt-in via explicit kwargs (no longer auto-detected from
+        # config). ``save_original_input`` controls whether to keep bf16
+        # activations for backward when fp8 is on; when False (default), only
+        # fp8-quantized activations are stashed on ctx.
+        self.fp8 = bool(fp8)
+        self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
+        self.save_original_input = bool(save_original_input)
         self.use_pow2_scale = False
         self.inp_quant_func = None
         self.weight_quant_func = None
         if self.fp8:
+            # Linear has no TP; the assertion is trivially satisfied but kept
+            # for symmetry with ColumnParallelLinear / RowParallelLinear.
             from paddlefleet.fp8.quantization import get_quant_func
 
             self.use_pow2_scale = (
@@ -1366,6 +1419,7 @@ class Linear(paddle.nn.Layer):
             inp_quant_func=self.inp_quant_func,
             weight_quant_func=self.weight_quant_func,
             use_pow2_scale=self.use_pow2_scale,
+            save_original_input=self.save_original_input,
         )
 
         output_bias = (
@@ -1591,6 +1645,9 @@ class ColumnParallelLinear(paddle.nn.Layer):
         tp_comm_buffer_name: str | None = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: paddle.core.ProcessGroup | None = None,
+        fp8: bool = False,
+        fp8_wgrad: bool = False,
+        save_original_input: bool = False,
     ):
         super().__init__()
 
@@ -1713,13 +1770,18 @@ class ColumnParallelLinear(paddle.nn.Layer):
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
-        # FP8 config
-        self.fp8 = getattr(config, "fp8", None) is not None
-        self.fp8_wgrad = getattr(config, "fp8_wgrad", False) and self.fp8
+        # FP8 config (opt-in)
+        self.fp8 = bool(fp8)
+        self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
+        self.save_original_input = bool(save_original_input)
         self.use_pow2_scale = False
         self.inp_quant_func = None
         self.weight_quant_func = None
         if self.fp8:
+            assert self.world_size == 1, (
+                "ColumnParallelLinear FP8 currently requires TP=1, "
+                f"got world_size={self.world_size}"
+            )
             from paddlefleet.fp8.quantization import get_quant_func
 
             self.use_pow2_scale = (
@@ -1854,6 +1916,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             inp_quant_func=self.inp_quant_func,
             weight_quant_func=self.weight_quant_func,
             use_pow2_scale=self.use_pow2_scale,
+            save_original_input=self.save_original_input,
         )
 
         gather_output = self.gather_output
@@ -1954,6 +2017,9 @@ class RowParallelLinear(paddle.nn.Layer):
         is_expert: bool = False,
         tp_comm_buffer_name: str | None = None,  # Not used
         tp_group: paddle.core.ProcessGroup | None = None,
+        fp8: bool = False,
+        fp8_wgrad: bool = False,
+        save_original_input: bool = False,
     ):
         super().__init__()
 
@@ -2054,13 +2120,18 @@ class RowParallelLinear(paddle.nn.Layer):
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
-        # FP8 config
-        self.fp8 = getattr(config, "fp8", None) is not None
-        self.fp8_wgrad = getattr(config, "fp8_wgrad", False) and self.fp8
+        # FP8 config (opt-in)
+        self.fp8 = bool(fp8)
+        self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
+        self.save_original_input = bool(save_original_input)
         self.use_pow2_scale = False
         self.inp_quant_func = None
         self.weight_quant_func = None
         if self.fp8:
+            assert self.world_size == 1, (
+                "RowParallelLinear FP8 currently requires TP=1, "
+                f"got world_size={self.world_size}"
+            )
             from paddlefleet.fp8.quantization import get_quant_func
 
             self.use_pow2_scale = (
@@ -2145,6 +2216,7 @@ class RowParallelLinear(paddle.nn.Layer):
             inp_quant_func=self.inp_quant_func,
             weight_quant_func=self.weight_quant_func,
             use_pow2_scale=self.use_pow2_scale,
+            save_original_input=self.save_original_input,
         )
 
         # All-reduce across all the partitions.

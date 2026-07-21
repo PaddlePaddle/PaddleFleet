@@ -80,13 +80,13 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
     _dump_count = 0
 
     @staticmethod
-    def forward(ctx, x: Tensor, weight: Tensor, num_groups: int, o_lora_rank: int, fp8_wgrad: bool = True):
+    def forward(ctx, x: Tensor, weight: Tensor, num_groups: int, o_lora_rank: int, fp8_wgrad: bool = True, save_original_input: bool = False):
         assert _DEEP_GEMM_AVAILABLE, "GroupedOutputFP8 requires deep_gemm.fp8_einsum"
         b, sq, _, d = x.shape
         assert d % 128 == 0, "FP8 grouped output requires per-group hidden dim to be divisible by 128"
         assert o_lora_rank % 128 == 0, "FP8 grouped output requires o_lora_rank to be divisible by 128"
         if not GroupedOutputFP8._logged:
-            print(f"[fp8_grouped_output] forward: x={list(x.shape)} weight={list(weight.shape)} num_groups={num_groups} o_lora_rank={o_lora_rank} d={d} fp8_wgrad={fp8_wgrad}", flush=True)
+            print(f"[fp8_grouped_output] forward: x={list(x.shape)} weight={list(weight.shape)} num_groups={num_groups} o_lora_rank={o_lora_rank} d={d} fp8_wgrad={fp8_wgrad} save_original_input={save_original_input}", flush=True)
             GroupedOutputFP8._logged = True
         weight_bf16 = weight.reshape([num_groups, o_lora_rank, d])
         weight_for_gemm = weight_bf16.transpose([0, 2, 1]).contiguous()
@@ -204,73 +204,111 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
             )
 
             # -------- Dump raw bf16 inputs when diff exceeds threshold --------
-            # Controlled by env vars:
+            # Disabled by default. Enable by setting the dump directory:
+            #   PADDLEFLEET_FP8_SHADOW_DUMP_DIR       (unset -> feature off)
             #   PADDLEFLEET_FP8_SHADOW_DUMP_THRESHOLD (default 1e-3)
-            #   PADDLEFLEET_FP8_SHADOW_DUMP_DIR       (default ./fp8_shadow_dumps)
             #   PADDLEFLEET_FP8_SHADOW_DUMP_MAX       (default 8, per rank)
             # Triggers on max(fp8_vs_paddle, fp8_vs_dg) so any fp8 quant issue is captured.
-            _dump_thr = float(
-                os.environ.get("PADDLEFLEET_FP8_SHADOW_DUMP_THRESHOLD", "1e-3")
-            )
-            _dump_max = int(
-                os.environ.get("PADDLEFLEET_FP8_SHADOW_DUMP_MAX", "8")
-            )
-            _trigger_diff = max(diff, diff_dg)
-            if (
-                _trigger_diff > _dump_thr
-                and GroupedOutputFP8._dump_count < _dump_max
-            ):
-                import numpy as np
+            _dump_dir = os.environ.get("PADDLEFLEET_FP8_SHADOW_DUMP_DIR")
+            if _dump_dir:
+                _dump_thr = float(
+                    os.environ.get("PADDLEFLEET_FP8_SHADOW_DUMP_THRESHOLD", "1e-3")
+                )
+                _dump_max = int(
+                    os.environ.get("PADDLEFLEET_FP8_SHADOW_DUMP_MAX", "8")
+                )
+                _trigger_diff = max(diff, diff_dg)
+                if (
+                    _trigger_diff > _dump_thr
+                    and GroupedOutputFP8._dump_count < _dump_max
+                ):
+                    import numpy as np
 
-                _dump_dir = os.environ.get(
-                    "PADDLEFLEET_FP8_SHADOW_DUMP_DIR", "./fp8_shadow_dumps"
-                )
-                os.makedirs(_dump_dir, exist_ok=True)
-                try:
-                    _rank = paddle.distributed.get_rank()
-                except Exception:
-                    _rank = 0
-                _idx = GroupedOutputFP8._dump_count
-                GroupedOutputFP8._dump_count += 1
-                _fname = (
-                    f"fwd_grouped_output_rank{_rank}_idx{_idx}"
-                    f"_b{b}_sq{sq}_g{num_groups}_r{o_lora_rank}_d{d}"
-                    f"_diff{_trigger_diff:.3e}.npz"
-                )
-                _fpath = os.path.join(_dump_dir, _fname)
-                with paddle.no_grad():
-                    np.savez(
-                        _fpath,
-                        x=x.detach().astype("float32").numpy(),
-                        weight=weight_bf16.detach()
-                        .astype("float32")
-                        .numpy(),
-                        # keep original dtype string for reproduction fidelity
-                        x_dtype=str(x.dtype),
-                        weight_dtype=str(weight_bf16.dtype),
-                        diff_fp8_vs_paddle=np.float64(diff),
-                        diff_fp8_vs_dg=np.float64(diff_dg),
-                        diff_paddle_vs_dg=np.float64(diff_ref),
-                        # Range-Relative RMSE (per TE tests/pytorch/utils.py)
-                        rrmse_fp8_vs_paddle=np.float64(rrmse),
-                        rrmse_fp8_vs_dg=np.float64(rrmse_dg),
-                        rrmse_paddle_vs_dg=np.float64(rrmse_ref),
-                        # Standard relative RMSE (rmse / sqrt(mean(ref^2)))
-                        rrmse_std_fp8_vs_paddle=np.float64(rrmse_std),
-                        rrmse_std_fp8_vs_dg=np.float64(rrmse_std_dg),
-                        rrmse_std_paddle_vs_dg=np.float64(rrmse_std_ref),
-                        rmse_fp8_vs_paddle=np.float64(rmse),
-                        rmse_fp8_vs_dg=np.float64(rmse_dg),
-                        rmse_paddle_vs_dg=np.float64(rmse_ref),
+                    os.makedirs(_dump_dir, exist_ok=True)
+                    try:
+                        _rank = paddle.distributed.get_rank()
+                    except Exception:
+                        _rank = 0
+                    _idx = GroupedOutputFP8._dump_count
+                    GroupedOutputFP8._dump_count += 1
+                    _fname = (
+                        f"fwd_grouped_output_rank{_rank}_idx{_idx}"
+                        f"_b{b}_sq{sq}_g{num_groups}_r{o_lora_rank}_d{d}"
+                        f"_diff{_trigger_diff:.3e}.npz"
                     )
-                print(
-                    f"[FP8_SHADOW][fwd_grouped_output][DUMP] rank={_rank} "
-                    f"idx={_idx}/{_dump_max} diff={_trigger_diff:.4e} > {_dump_thr:.1e} "
-                    f"saved to {_fpath}",
-                    flush=True,
-                )
+                    _fpath = os.path.join(_dump_dir, _fname)
+                    with paddle.no_grad():
+                        np.savez(
+                            _fpath,
+                            x=x.detach().astype("float32").numpy(),
+                            weight=weight_bf16.detach()
+                            .astype("float32")
+                            .numpy(),
+                            # keep original dtype string for reproduction fidelity
+                            x_dtype=str(x.dtype),
+                            weight_dtype=str(weight_bf16.dtype),
+                            diff_fp8_vs_paddle=np.float64(diff),
+                            diff_fp8_vs_dg=np.float64(diff_dg),
+                            diff_paddle_vs_dg=np.float64(diff_ref),
+                            # Range-Relative RMSE (per TE tests/pytorch/utils.py)
+                            rrmse_fp8_vs_paddle=np.float64(rrmse),
+                            rrmse_fp8_vs_dg=np.float64(rrmse_dg),
+                            rrmse_paddle_vs_dg=np.float64(rrmse_ref),
+                            # Standard relative RMSE (rmse / sqrt(mean(ref^2)))
+                            rrmse_std_fp8_vs_paddle=np.float64(rrmse_std),
+                            rrmse_std_fp8_vs_dg=np.float64(rrmse_std_dg),
+                            rrmse_std_paddle_vs_dg=np.float64(rrmse_std_ref),
+                            rmse_fp8_vs_paddle=np.float64(rmse),
+                            rmse_fp8_vs_dg=np.float64(rmse_dg),
+                            rmse_paddle_vs_dg=np.float64(rmse_ref),
+                        )
+                    print(
+                        f"[FP8_SHADOW][fwd_grouped_output][DUMP] rank={_rank} "
+                        f"idx={_idx}/{_dump_max} diff={_trigger_diff:.4e} > {_dump_thr:.1e} "
+                        f"saved to {_fpath}",
+                        flush=True,
+                    )
 
-        ctx.save_for_backward(x, weight_bf16)
+        # FP8 opt-in policy: when ``save_original_input=False`` (default) we skip
+        # stashing the bf16 activation on ctx to save memory. Since the wgrad
+        # path re-quantizes x with quant_method="1x128" anyway, we run the same
+        # quantization eagerly here and stash the fp8 result on ctx. This is
+        # numerically identical to re-quantizing in backward (deterministic).
+        # The bf16 wgrad path (``fp8_wgrad=False``) requires bf16 x, so it
+        # forces ``save_original_input=True`` at the call site.
+        if save_original_input or not fp8_wgrad:
+            ctx.save_for_backward(x, weight_bf16)
+            ctx.bf16_x_saved = True
+            ctx.x_fp8_w_pre = None
+            ctx.x_scale_w_pre = None
+            ctx.x_shape = None
+        else:
+            assert (b * sq) % 128 == 0, (
+                "GroupedOutputFP8 save_original_input=False requires "
+                f"(batch*seqlen) divisible by 128, got b={b}, sq={sq}"
+            )
+            x_wgrad_pre = (
+                x.reshape([b * sq, num_groups, d])
+                .transpose([1, 2, 0])
+                .contiguous()
+            )  # [h, d, b*sq]
+            x_w_2d_pre = x_wgrad_pre.reshape([-1, b * sq]).contiguous()
+            x_fp8_w_pre, x_scale_w_pre = (
+                paddle.incubate.nn.functional.fp8_quant_blockwise(
+                    x_w_2d_pre,
+                    output_scale_transpose=False,
+                    quant_method="1x128",
+                    input_transpose=False,
+                    using_pow2_scale=True,
+                )[:2]
+            )
+            x_fp8_w_pre = x_fp8_w_pre.reshape([num_groups, d, b * sq])
+            x_scale_w_pre = x_scale_w_pre.reshape([num_groups, d, -1])
+            ctx.save_for_backward(weight_bf16)
+            ctx.bf16_x_saved = False
+            ctx.x_fp8_w_pre = x_fp8_w_pre
+            ctx.x_scale_w_pre = x_scale_w_pre
+            ctx.x_shape = (b, sq, num_groups, d)
         ctx.num_groups = num_groups
         ctx.o_lora_rank = o_lora_rank
         ctx.fp8_wgrad = fp8_wgrad
@@ -278,13 +316,18 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
-        x, weight = ctx.saved_tensor()
+        if ctx.bf16_x_saved:
+            x, weight = ctx.saved_tensor()
+            b, sq, _, d = x.shape
+        else:
+            (weight,) = ctx.saved_tensor()
+            b, sq, _, d = ctx.x_shape
+            x = None
         num_groups = ctx.num_groups
         o_lora_rank = ctx.o_lora_rank
         fp8_wgrad = ctx.fp8_wgrad
-        b, sq, _, d = x.shape
         grad_output = grad_output.reshape([b, sq, num_groups, o_lora_rank])
-        print(f"[fp8_grouped_output] backward: grad_output={list(grad_output.shape)} x={list(x.shape)} fp8_wgrad={fp8_wgrad}", flush=True) if not GroupedOutputFP8._logged_bwd else None
+        print(f"[fp8_grouped_output] backward: grad_output={list(grad_output.shape)} x_saved={ctx.bf16_x_saved} fp8_wgrad={fp8_wgrad}", flush=True) if not GroupedOutputFP8._logged_bwd else None
         GroupedOutputFP8._logged_bwd = True
 
         # dgrad: always FP8
@@ -373,18 +416,24 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
                 f"FP8 grouped output wgrad requires (batch*seqlen) to be divisible by 128, "
                 f"got b={b}, sq={sq}, b*sq={b * sq}"
             )
-            x_wgrad = x.reshape([b * sq, num_groups, d]).transpose([1, 2, 0]).contiguous()  # [h, d, b*sq]
-            x_w_2d = x_wgrad.reshape([-1, b * sq]).contiguous()  # [h*d, b*sq]
-            x_fp8_w, x_scale_w = paddle.incubate.nn.functional.fp8_quant_blockwise(
-                x_w_2d,
-                output_scale_transpose=False,
-                quant_method="1x128",
-                input_transpose=False,
-                using_pow2_scale=True,
-            )[:2]
-            # scale: [h*d, ceil(b*sq/128)] -> reshape to [h, d, ceil(b*sq/128)]
-            x_fp8_w = x_fp8_w.reshape([num_groups, d, b * sq])
-            x_scale_w = x_scale_w.reshape([num_groups, d, -1])
+            if ctx.bf16_x_saved:
+                x_wgrad = x.reshape([b * sq, num_groups, d]).transpose([1, 2, 0]).contiguous()  # [h, d, b*sq]
+                x_w_2d = x_wgrad.reshape([-1, b * sq]).contiguous()  # [h*d, b*sq]
+                x_fp8_w, x_scale_w = paddle.incubate.nn.functional.fp8_quant_blockwise(
+                    x_w_2d,
+                    output_scale_transpose=False,
+                    quant_method="1x128",
+                    input_transpose=False,
+                    using_pow2_scale=True,
+                )[:2]
+                # scale: [h*d, ceil(b*sq/128)] -> reshape to [h, d, ceil(b*sq/128)]
+                x_fp8_w = x_fp8_w.reshape([num_groups, d, b * sq])
+                x_scale_w = x_scale_w.reshape([num_groups, d, -1])
+            else:
+                # Reuse fp8 activation pre-computed in forward (identical
+                # quantization to the bf16-saved path, so precision matches).
+                x_fp8_w = ctx.x_fp8_w_pre
+                x_scale_w = ctx.x_scale_w_pre
 
             go_wgrad = grad_output.reshape([b * sq, num_groups, o_lora_rank]).transpose([1, 2, 0]).contiguous()  # [h, r, b*sq]
             go_w_2d = go_wgrad.reshape([-1, b * sq]).contiguous()  # [h*r, b*sq]
@@ -419,7 +468,7 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
             # -------- FP8 shadow bf16 diff for wgrad (debug only) ---------
             # Mirrors the fp8_wgrad=False branch below:
             #     grad_weight = paddle.einsum("bsgd,bsgr->grd", x, grad_output)
-            if os.environ.get("PADDLEFLEET_FP8_SHADOW_DEBUG", "0") == "1":
+            if os.environ.get("PADDLEFLEET_FP8_SHADOW_DEBUG", "0") == "1" and x is not None:
                 with paddle.no_grad():
                     bf16_ref = paddle.einsum(
                         "bsgd,bsgr->grd", x, grad_output
@@ -456,6 +505,10 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
                 )
         else:
             # bf16 path
+            assert x is not None, (
+                "GroupedOutputFP8: fp8_wgrad=False requires "
+                "save_original_input=True to keep bf16 activation."
+            )
             grad_weight = paddle.einsum("bsgd,bsgr->grd", x, grad_output)
 
         return grad_x, grad_weight.reshape([num_groups * o_lora_rank, d])
@@ -600,6 +653,7 @@ class DSv4HybridAttention(Attention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
+        save_original_input: bool | None = None,
     ):
         super().__init__(
             config=config,
@@ -689,6 +743,27 @@ class DSv4HybridAttention(Attention):
         )
 
         linear_proj_in_size = config.o_groups * config.o_lora_rank
+        # FP8 opt-in policy: fp8 / fp8_wgrad come from config; save_original_input
+        # is provided by the user at network-construction time (not from config).
+        # Default rule (when caller passes None):
+        #   fp8=False                       -> True  (bf16 pipeline needs bf16 x)
+        #   fp8=True  and fp8_wgrad=False   -> True  (bf16 wgrad needs bf16 x)
+        #   fp8=True  and fp8_wgrad=True    -> False (fp8 wgrad, skip bf16 save)
+        # Assert TP=1 when fp8 is enabled — DSv4 FP8 is currently only wired up
+        # for the non-parallel path.
+        self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
+        self.fp8 = bool(getattr(config, "fp8", False))
+        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
+        if save_original_input is None:
+            save_original_input = not (self.fp8 and self.fp8_wgrad)
+        self.save_original_input = bool(save_original_input)
+        self.use_fp8_grouped_output = self.fp8 and _DEEP_GEMM_AVAILABLE
+        if self.fp8:
+            tp_nranks = getattr(self.pg_collection.tp, "nranks", 1)
+            assert tp_nranks == 1, (
+                "DSv4HybridAttention FP8 currently requires TP=1, "
+                f"got tp.nranks={tp_nranks}"
+            )
         self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
             linear_proj_in_size,
@@ -700,10 +775,10 @@ class DSv4HybridAttention(Attention):
             skip_bias_add=True,
             is_expert=False,
             tp_group=self.pg_collection.tp,
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            save_original_input=self.save_original_input,
         )
-        self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
-        self.use_fp8_grouped_output = getattr(config, "fp8", False) and _DEEP_GEMM_AVAILABLE
-        self.fp8_wgrad = getattr(config, "fp8_wgrad", False)
 
         # Gated attention. For MQA the gate multiplies the output of the grouped
         # low-rank projection (linear_o_group_proj), right before o_proj.
@@ -874,6 +949,7 @@ class DSv4HybridAttention(Attention):
                 self.o_local_groups,
                 self.config.o_lora_rank,
                 self.fp8_wgrad,
+                self.save_original_input,
             )
         else:
             wo_a_weight = self.linear_o_group_proj.reshape(
@@ -953,6 +1029,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
+        save_original_input: bool | None = None,
     ):
         super().__init__(
             config=config,
@@ -963,6 +1040,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             is_mtp_layer=is_mtp_layer,
+            save_original_input=save_original_input,
         )
 
         self.q_lora_rank = config.q_lora_rank
@@ -980,6 +1058,9 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            save_original_input=self.save_original_input,
         )
 
         # Q layernorm
@@ -1002,6 +1083,9 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             skip_bias_add=False,
             is_expert=False,
             tp_group=self.pg_collection.tp,
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            save_original_input=self.save_original_input,
         )
 
         # KV projection: hidden_size -> v_head_dim (single head)
@@ -1016,6 +1100,9 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             skip_bias_add=False,
             is_expert=False,
             tp_group=self.pg_collection.tp,
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            save_original_input=self.save_original_input,
         )
 
         # KV layernorm
