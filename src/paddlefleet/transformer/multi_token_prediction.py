@@ -761,16 +761,22 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         # === MTP depth sampling (prefix-length sampling) ===
-        # Sample K once (in the depth-0 layer), stash on the shared config so the
-        # other MTP layers, the LM head and the loss all agree; skip depths >= K
-        # (pass-through, no transformer_layer compute). Disabled by default.
+        # Sample K once per micro-batch in the depth-0 layer and carry it in
+        # dict_args so it flows WITH the data. This is robust to
+        # gradient_accumulation_steps>1, pipeline_parallel, and recompute: there
+        # is no shared/config state that an interleaved micro-batch could
+        # overwrite, and the recompute of a layer replays the same saved
+        # dict_args. Depths >= K skip their transformer_layer forward.
         if getattr(self.config, "mtp_depth_sampling", None) and not self.config.enable_mtp_magic_send:
             D = self.config.num_nextn_predict_layers
             if self.layer_number == 0:
-                self.config._mtp_sampled_depth = self._sample_mtp_depth()
-            K = getattr(self.config, "_mtp_sampled_depth", D)
+                k = self._sample_mtp_depth()
+                dict_args["mtp_sampled_depth"] = k
+                self._last_sampled_depth = k  # observability only, not used in logic
+            K = dict_args.get("mtp_sampled_depth", D)
             if self.layer_number >= K:
-                # Skip this depth entirely: leave hidden_states_concat unchanged.
+                # Skip this depth entirely: leave hidden_states_concat unchanged
+                # (K stays in dict_args for downstream MTP layers + the LM head).
                 return dict_args
 
         # === Magic Send branch ===

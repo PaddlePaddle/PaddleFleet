@@ -456,22 +456,12 @@ class LanguageLoss(FleetLayer):
                 else:
                     lm_loss = self._forward(logits[0], lm_labels)
 
-                # MTP depth sampling: only depths < K were computed this step;
-                # skip the rest so mtp_loss holds exactly K entries. The final
-                # `sum(mtp_loss) / len(mtp_loss)` therefore averages over the K
-                # sampled depths (per user's choice: skipped depths not counted).
-                _mtp_K = getattr(
-                    self.config,
-                    "_mtp_sampled_depth",
-                    self.config.num_nextn_predict_layers,
-                )
-                _mtp_sampling_on = bool(
-                    getattr(self.config, "mtp_depth_sampling", None)
-                )
                 for depth in range(self.config.num_nextn_predict_layers):
-                    if _mtp_sampling_on and (
-                        depth >= _mtp_K or mtp_logits[depth] is None
-                    ):
+                    # MTP depth sampling: the LM head emits None for depths not
+                    # computed this step; skip them so mtp_loss holds only the K
+                    # computed depths (loss then averages over K). No effect when
+                    # sampling is off (logits are never None).
+                    if mtp_logits[depth] is None:
                         continue
                     logits_cur_depth = mtp_logits[depth]
                     labels_cur_depth = labels_ori[
@@ -633,6 +623,14 @@ class LanguageLoss(FleetLayer):
                     f"mtp{i + 1}.final_loss",
                     loss_val,
                 )
+
+            # MTP depth sampling: mtp_loss holds only the computed prefix
+            # (depths 0..len-1). Drop stale tracker entries for the skipped
+            # deeper depths so the trainer does not re-log a stale value on
+            # steps where those depths were sampled out (keeps per-depth plots
+            # sparse-but-correct instead of flat).
+            for _d in range(len(mtp_loss), self.config.num_nextn_predict_layers):
+                LanguageLoss.mtp_loss_tracker.pop(f"mtp_{_d + 1}_loss", None)
 
             # Track the standalone main (non-MTP) LM loss so it can be logged
             # separately from the combined total loss.

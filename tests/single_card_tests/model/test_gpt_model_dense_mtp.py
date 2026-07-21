@@ -626,29 +626,35 @@ class TestMTPDepthSampling(unittest.TestCase):
         """Fixed K=1: forward/backward runs, loss finite, only depth-0 active."""
         cfg = self._cfg([1.0, 0.0, 0.0])
         model = gpt_builder(cfg, num_stages=1)
+        mtp0 = self._mtp0(model)
         loss = self._run_step(model, cfg)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
         assert not paddle.isinf(loss).any(), "loss Inf"
-        assert getattr(cfg, "_mtp_sampled_depth", None) == 1, (
-            f"expected sampled K==1, got {getattr(cfg, '_mtp_sampled_depth', None)}"
+        assert getattr(mtp0, "_last_sampled_depth", None) == 1, (
+            f"expected sampled K==1, got {getattr(mtp0, '_last_sampled_depth', None)}"
         )
 
     def test_forward_backward_sampling_full(self):
         """Fixed K=3 sampling equals running all depths; loss finite."""
         cfg = self._cfg([0.0, 0.0, 1.0])
         model = gpt_builder(cfg, num_stages=1)
+        mtp0 = self._mtp0(model)
         loss = self._run_step(model, cfg)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
-        assert getattr(cfg, "_mtp_sampled_depth", None) == 3
+        assert getattr(mtp0, "_last_sampled_depth", None) == 3
 
     def test_null_baseline_runs(self):
         """mtp_depth_sampling=None (default) trains normally (no skip path)."""
         cfg = self._cfg(None)
         model = gpt_builder(cfg, num_stages=1)
+        mtp0 = self._mtp0(model)
         loss = self._run_step(model, cfg)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
-        assert not hasattr(cfg, "_mtp_sampled_depth"), (
+        assert not hasattr(mtp0, "_last_sampled_depth"), (
             "sampling state must not be set when feature is disabled"
+        )
+        assert not hasattr(cfg, "_mtp_sampled_depth"), (
+            "no config-level sampling state should exist"
         )
 
 
