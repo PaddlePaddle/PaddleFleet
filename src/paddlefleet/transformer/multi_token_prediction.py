@@ -721,6 +721,35 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         return outputs
 
+    def _sample_mtp_depth(self):
+        """Sample how many MTP depths K to actually run this step (prefix 1..K).
+
+        Driven by config.mtp_depth_sampling, a list P(K=k) of length
+        D=num_nextn_predict_layers. K is sampled on global rank 0 and broadcast
+        to every rank so that MoE expert-parallel all-to-all stays consistent
+        (all ranks must run the exact same set of depths). Returns D when
+        sampling is disabled.
+        """
+        import numpy as np
+
+        D = self.config.num_nextn_predict_layers
+        ratio = getattr(self.config, "mtp_depth_sampling", None)
+        if not ratio:
+            return D
+        probs = np.asarray(ratio, dtype="float64")
+        probs = probs / probs.sum()
+        # sample on this rank, then overwrite with rank-0's value via broadcast
+        k = int(np.random.choice(len(probs), p=probs)) + 1
+        try:
+            if paddle.distributed.is_initialized():
+                t = paddle.to_tensor([k], dtype="int32")
+                paddle.distributed.broadcast(t, src=0)
+                k = int(t.item())
+        except Exception:
+            # Non-distributed / single process: keep local sample.
+            pass
+        return max(1, min(k, D))
+
     def forward(self, dict_args: dict):
         if "context" in dict_args:
             assert dict_args["context"] is None, (
@@ -730,6 +759,19 @@ class MultiTokenPredictionLayer(FleetLayer):
             assert dict_args["packed_seq_params"] is None, (
                 "multi token prediction + sequence packing is not yet supported."
             )
+
+        # === MTP depth sampling (prefix-length sampling) ===
+        # Sample K once (in the depth-0 layer), stash on the shared config so the
+        # other MTP layers, the LM head and the loss all agree; skip depths >= K
+        # (pass-through, no transformer_layer compute). Disabled by default.
+        if getattr(self.config, "mtp_depth_sampling", None) and not self.config.enable_mtp_magic_send:
+            D = self.config.num_nextn_predict_layers
+            if self.layer_number == 0:
+                self.config._mtp_sampled_depth = self._sample_mtp_depth()
+            K = getattr(self.config, "_mtp_sampled_depth", D)
+            if self.layer_number >= K:
+                # Skip this depth entirely: leave hidden_states_concat unchanged.
+                return dict_args
 
         # === Magic Send branch ===
         # hidden_states is pure backbone output (not concatenated); mtp_input_embeds provided by MTPEmbeddingLayer

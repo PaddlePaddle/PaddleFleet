@@ -338,5 +338,319 @@ class TestDenseMTP(unittest.TestCase):
         )
 
 
+class TestSharedMTP(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        seed = 46
+        random.seed(seed)
+        np.random.seed(seed)
+        paddle.seed(seed)
+        strategy = fleet.DistributedStrategy()
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": 1,
+            "pp_degree": 1,
+            "sharding_degree": 1,
+            "sep_degree": 1,
+            "cp_degree": 1,
+            "ep_degree": 1,
+            "moe_sharding_degree": 1,
+            "order": [
+                "sharding",
+                "moe_sharding",
+                "pp",
+                "sep",
+                "cp",
+                "dp",
+                "ep",
+                "mp",
+            ],
+        }
+        try:
+            fleet.init(is_collective=True, strategy=strategy)
+        except Exception:
+            pass
+        hcg = fleet.get_hybrid_communicate_group()
+        try:
+            ps.initialize_model_parallel(hcg)
+        except Exception:
+            # Another test class in the same process may have already
+            # initialized model-parallel global state; reuse it.
+            pass
+        cls.strategy = strategy
+
+    def _base_kwargs(self):
+        return dict(
+            num_hidden_layers=2,
+            hidden_size=512,
+            vocab_size=100,
+            max_sequence_length=64,
+            num_attention_heads=4,
+            intermediate_size=1024,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            use_bias=False,
+            rotary_percent=1.0,
+            rotary_base=10000,
+            rope_scaling=1.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            tie_word_embeddings=True,
+            use_qk_norm=True,
+            num_nextn_predict_layers=2,
+        )
+
+    def _mtp_layers(self, model):
+        return [
+            layer
+            for layer in model.run_function
+            if isinstance(layer, MultiTokenPredictionLayer)
+        ]
+
+    def _decoder_layers(self, model):
+        return [
+            layer
+            for layer in model.run_function
+            if isinstance(layer, TransformerLayer)
+        ]
+
+    def test_shared_weights_reuse_false(self):
+        """mtp_shared_weights=True (reuse=False): every MTP depth shares depth-0's
+        full parameter set (transformer_layer body + enorm/hnorm/eh_proj/norm)."""
+        config = GPTConfig(
+            **self._base_kwargs(),
+            use_dense_mtp=True,
+            mtp_shared_weights=True,
+        )
+        model = gpt_builder(config, num_stages=1)
+        mtp_layers = self._mtp_layers(model)
+        assert len(mtp_layers) == 2, (
+            f"expected 2 MTP layers, got {len(mtp_layers)}"
+        )
+
+        src = dict(mtp_layers[0].named_parameters())
+        assert len(src) > 0, "MTP layer should have parameters"
+        not_shared = [
+            name
+            for name, p in mtp_layers[1].named_parameters()
+            if src.get(name) is not p
+        ]
+        assert not not_shared, (
+            f"depth-1 should share ALL depth-0 params, not_shared={not_shared[:8]}"
+        )
+        # Fusion modules explicitly shared.
+        d1 = dict(mtp_layers[1].named_parameters())
+        for fus in ["enorm.weight", "hnorm.weight", "eh_proj.weight"]:
+            assert fus in src, f"expected fusion param {fus} on MTP layer"
+            assert src[fus] is d1.get(fus), f"fusion {fus} not shared across depths"
+
+    def test_shared_weights_reuse_true(self):
+        """mtp_shared_weights + mtp_reuse_last_layer: bodies alias backbone-last,
+        fusion modules shared across depths."""
+        config = GPTConfig(
+            **self._base_kwargs(),
+            mtp_reuse_last_layer=True,
+            mtp_shared_weights=True,
+        )
+        model = gpt_builder(config, num_stages=1)
+        mtp_layers = self._mtp_layers(model)
+        decoder_layers = self._decoder_layers(model)
+        assert len(mtp_layers) == 2
+        assert decoder_layers, "Model should have decoder layers"
+
+        backbone = dict(decoder_layers[-1].named_parameters())
+        # Both depths' transformer_layer bodies alias the backbone-last layer.
+        for depth, mtp in enumerate(mtp_layers):
+            not_shared = [
+                name
+                for name, p in mtp.transformer_layer.named_parameters()
+                if backbone.get(name) is not p
+            ]
+            assert not not_shared, (
+                f"depth-{depth} body should alias backbone-last, "
+                f"not_shared={not_shared[:5]}"
+            )
+        # Fusion modules shared across depths (depth-1 -> depth-0).
+        d0 = dict(mtp_layers[0].named_parameters())
+        d1 = dict(mtp_layers[1].named_parameters())
+        for fus in ["enorm.weight", "hnorm.weight", "eh_proj.weight", "norm.weight"]:
+            if fus in d0:
+                assert d0[fus] is d1.get(fus), (
+                    f"fusion {fus} not shared across depths"
+                )
+
+    def test_shared_weights_off_by_default(self):
+        """Without mtp_shared_weights, depths keep independent params."""
+        config = GPTConfig(
+            **self._base_kwargs(),
+            use_dense_mtp=True,
+        )
+        model = gpt_builder(config, num_stages=1)
+        mtp_layers = self._mtp_layers(model)
+        assert len(mtp_layers) == 2
+        d0 = dict(mtp_layers[0].named_parameters())
+        d1 = dict(mtp_layers[1].named_parameters())
+        shared = [n for n, p in d1.items() if d0.get(n) is p]
+        assert not shared, (
+            f"depths must be independent when feature is off, shared={shared[:5]}"
+        )
+
+
+class TestMTPDepthSampling(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        seed = 46
+        random.seed(seed)
+        np.random.seed(seed)
+        paddle.seed(seed)
+        strategy = fleet.DistributedStrategy()
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": 1,
+            "pp_degree": 1,
+            "sharding_degree": 1,
+            "sep_degree": 1,
+            "cp_degree": 1,
+            "ep_degree": 1,
+            "moe_sharding_degree": 1,
+            "order": [
+                "sharding",
+                "moe_sharding",
+                "pp",
+                "sep",
+                "cp",
+                "dp",
+                "ep",
+                "mp",
+            ],
+        }
+        try:
+            fleet.init(is_collective=True, strategy=strategy)
+        except Exception:
+            pass
+        hcg = fleet.get_hybrid_communicate_group()
+        try:
+            ps.initialize_model_parallel(hcg)
+        except Exception:
+            pass
+        cls.strategy = strategy
+
+    def _cfg(self, mtp_depth_sampling, num_nextn=3):
+        return GPTConfig(
+            num_hidden_layers=2,
+            hidden_size=512,
+            vocab_size=100,
+            max_sequence_length=64,
+            num_attention_heads=4,
+            moe_expert_fusion=False,
+            intermediate_size=1024,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            n_routed_experts=8,
+            moe_intermediate_size=1024,
+            moe_token_dispatcher_type="alltoall",
+            n_shared_experts=1,
+            use_bias=False,
+            rotary_percent=1.0,
+            rotary_base=10000,
+            rope_scaling=1.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            tie_word_embeddings=True,
+            use_qk_norm=True,
+            num_nextn_predict_layers=num_nextn,
+            use_dense_mtp=False,
+            mtp_depth_sampling=mtp_depth_sampling,
+        )
+
+    def _mtp0(self, model):
+        for layer in model.run_function:
+            if isinstance(layer, MultiTokenPredictionLayer):
+                return layer
+        return None
+
+    def _run_step(self, model, config):
+        seq = config.max_sequence_length
+        data = list(range(seq))
+        input_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat((1, 1))
+        position_ids = paddle.to_tensor(data, dtype=paddle.int64).repeat((1, 1))
+        labels = paddle.to_tensor(
+            list(range(1, seq + 1)), dtype=paddle.int64
+        ).repeat((1, 1))
+        pipe = NoPipelineParallel(model, self.strategy)
+        loss = pipe.forward_backward_pipeline(
+            (
+                {"input_ids": [input_ids], "position_ids": [position_ids]},
+                [labels],
+            )
+        )
+        return loss
+
+    def test_sampler_fixed_k1(self):
+        """P(K=1)=1 -> always sample K=1."""
+        cfg = self._cfg([1.0, 0.0, 0.0])
+        model = gpt_builder(cfg, num_stages=1)
+        mtp0 = self._mtp0(model)
+        ks = [mtp0._sample_mtp_depth() for _ in range(50)]
+        assert set(ks) == {1}, f"expected all K==1, got {sorted(set(ks))}"
+
+    def test_sampler_fixed_k3(self):
+        """P(K=3)=1 -> always sample K=3 (= run all depths)."""
+        cfg = self._cfg([0.0, 0.0, 1.0])
+        model = gpt_builder(cfg, num_stages=1)
+        mtp0 = self._mtp0(model)
+        ks = [mtp0._sample_mtp_depth() for _ in range(50)]
+        assert set(ks) == {3}, f"expected all K==3, got {sorted(set(ks))}"
+
+    def test_sampler_distribution(self):
+        """Mixed distribution -> K spans the expected support, E[K] < D."""
+        cfg = self._cfg([0.5, 0.5, 0.0])
+        model = gpt_builder(cfg, num_stages=1)
+        mtp0 = self._mtp0(model)
+        ks = [mtp0._sample_mtp_depth() for _ in range(400)]
+        assert set(ks) <= {1, 2}, f"K out of support: {sorted(set(ks))}"
+        assert 1 in ks and 2 in ks, f"both 1 and 2 should appear: {sorted(set(ks))}"
+        assert sum(ks) / len(ks) < 3, "E[K] must be < D=3"
+
+    def test_forward_backward_sampling_k1(self):
+        """Fixed K=1: forward/backward runs, loss finite, only depth-0 active."""
+        cfg = self._cfg([1.0, 0.0, 0.0])
+        model = gpt_builder(cfg, num_stages=1)
+        loss = self._run_step(model, cfg)
+        assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
+        assert not paddle.isinf(loss).any(), "loss Inf"
+        assert getattr(cfg, "_mtp_sampled_depth", None) == 1, (
+            f"expected sampled K==1, got {getattr(cfg, '_mtp_sampled_depth', None)}"
+        )
+
+    def test_forward_backward_sampling_full(self):
+        """Fixed K=3 sampling equals running all depths; loss finite."""
+        cfg = self._cfg([0.0, 0.0, 1.0])
+        model = gpt_builder(cfg, num_stages=1)
+        loss = self._run_step(model, cfg)
+        assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
+        assert getattr(cfg, "_mtp_sampled_depth", None) == 3
+
+    def test_null_baseline_runs(self):
+        """mtp_depth_sampling=None (default) trains normally (no skip path)."""
+        cfg = self._cfg(None)
+        model = gpt_builder(cfg, num_stages=1)
+        loss = self._run_step(model, cfg)
+        assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
+        assert not hasattr(cfg, "_mtp_sampled_depth"), (
+            "sampling state must not be set when feature is disabled"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -456,7 +456,23 @@ class LanguageLoss(FleetLayer):
                 else:
                     lm_loss = self._forward(logits[0], lm_labels)
 
+                # MTP depth sampling: only depths < K were computed this step;
+                # skip the rest so mtp_loss holds exactly K entries. The final
+                # `sum(mtp_loss) / len(mtp_loss)` therefore averages over the K
+                # sampled depths (per user's choice: skipped depths not counted).
+                _mtp_K = getattr(
+                    self.config,
+                    "_mtp_sampled_depth",
+                    self.config.num_nextn_predict_layers,
+                )
+                _mtp_sampling_on = bool(
+                    getattr(self.config, "mtp_depth_sampling", None)
+                )
                 for depth in range(self.config.num_nextn_predict_layers):
+                    if _mtp_sampling_on and (
+                        depth >= _mtp_K or mtp_logits[depth] is None
+                    ):
+                        continue
                     logits_cur_depth = mtp_logits[depth]
                     labels_cur_depth = labels_ori[
                         :, (depth + 1) : (depth + 1 + seq_length)

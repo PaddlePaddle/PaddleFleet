@@ -74,6 +74,25 @@ class TransformerConfig(ModelParallelConfig):
     mtp_reuse_last_layer: bool = False
     """When True, MTP layers reuse the last backbone TransformerLayer parameters."""
 
+    mtp_shared_weights: bool = False
+    """When True, all MTP depths share a single MultiTokenPredictionLayer's parameters
+    (the transformer_layer body AND the fusion modules enorm/hnorm/eh_proj/norm) by
+    aliasing depths 1..D-1 to depth 0. Works with mtp_reuse_last_layer both False and
+    True (when combined, the shared body further points at the reused backbone-last
+    layer). No effect when num_nextn_predict_layers <= 1."""
+
+    mtp_depth_sampling: list | None = None
+    """Per-step random sampling of how many MTP depths to actually run, to keep MTP
+    compute close to num_nextn_predict_layers=1 while still training deeper depths
+    occasionally.
+    - None: disabled — always run all num_nextn_predict_layers depths (default).
+    - list[float] of length D=num_nextn_predict_layers: a probability distribution
+      P(K=k), k=1..D (must sum to 1). Each step samples a prefix length K and runs
+      only MTP depths 1..K; depths >K are skipped (no forward, no loss). The loss
+      denominator stays D, so the sampling frequency P(K>=i) acts as depth i's
+      effective (survival-shaped) weight. K is sampled once and synced across all
+      ranks (required so MoE expert-parallel all-to-all stays consistent)."""
+
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
 
@@ -968,6 +987,25 @@ class TransformerConfig(ModelParallelConfig):
                 "is enabled."
             )
             self.use_dense_mtp = False
+        if self.mtp_depth_sampling is not None:
+            assert not self.enable_mtp_magic_send, (
+                "mtp_depth_sampling is not supported with enable_mtp_magic_send=True"
+            )
+            assert not self.separate_mtp_headloss, (
+                "mtp_depth_sampling is not supported with separate_mtp_headloss=True"
+            )
+            D = self.num_nextn_predict_layers
+            assert (
+                isinstance(self.mtp_depth_sampling, (list, tuple))
+                and len(self.mtp_depth_sampling) == D
+            ), (
+                "mtp_depth_sampling must be a list of length "
+                f"num_nextn_predict_layers={D}, got {self.mtp_depth_sampling}"
+            )
+            _s = float(sum(self.mtp_depth_sampling))
+            assert abs(_s - 1.0) < 1e-3, (
+                f"mtp_depth_sampling must sum to 1.0 (P(K=k)), got sum={_s}"
+            )
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (
                 "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
