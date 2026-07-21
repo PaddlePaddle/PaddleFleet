@@ -86,12 +86,14 @@ from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
+    MQASelfAttention,
 )
 from paddlefleet.transformer.multi_token_prediction import (
     get_mtp_layer_spec_for_backend,
 )
 from paddlefleet.transformer.paddle_norm import L2Norm
 from paddlefleet.transformer.transformer_layer import (
+    HySparseTransformerLayer,
     TransformerLayer,
     TransformerLayerSublayersSpec,
     TransformerLayerWithOverlap,
@@ -231,6 +233,10 @@ def get_attention_spec(
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
         # Decide attention class: always MLASelfAttention (DSA is a pluggable core_attention)
         attn_cls = MLASelfAttention
+
+        if config is not None and config.enable_hy_sparse_attention:
+            attn_cls = MQASelfAttention
+
         # Gated attention
         gated_attention = getattr(config, "gated_attention", False)
 
@@ -422,6 +428,9 @@ def get_gpt_layer_local_spec(
         )
 
         transformer_cls = HyperConnectionTransformerLayer
+
+    if config is not None and config.enable_hy_sparse_attention:
+        transformer_cls = HySparseTransformerLayer
 
     if paddle.distributed.is_initialized():
         try:

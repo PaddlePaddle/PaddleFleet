@@ -471,6 +471,7 @@ class MultiLatentAttention(Attention):
         packed_seq_params=None,
         in_recompute: bool = False,
         position_ids=None,
+        shared_kv: list[Tensor] | None = None,
         **kwargs,
     ):
         """Forward pass for multi-latent attention"""
@@ -590,6 +591,14 @@ class MultiLatentAttention(Attention):
             )
 
         _log(core_attn_out, "core_attn_out", layer_num)
+
+        if self.config.enable_hy_sparse_attention and shared_kv is not None:
+            shared_key = paddle.concat(
+                [kv_compressed.unsqueeze(2), k_pos_emb], axis=-1
+            )
+            shared_kv.append(shared_key)
+            block_indices = paddle.empty([0])  # TODO: from full attention
+            shared_kv.append(block_indices)
 
         # =================
         # Output. [b, sq, h]
@@ -1332,3 +1341,423 @@ class MLASelfAttention(MultiLatentAttention):
     def _backward_output_proj(self):
         """Computes weight gradients of output projection layer"""
         self.o_proj.backward_dw()
+
+
+class MQASelfAttention(MLASelfAttention):
+    """Multi-Query Attention."""
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers_spec: MLASelfAttentionSublayersSpec,
+        layer_number: int,
+        attn_mask_type=AttnMaskType.padding,
+        cp_comm_type: str | None = None,
+        pg_collection: ProcessGroupCollection | None = None,
+        is_mtp_layer: bool = False,
+    ):
+        super().__init__(
+            config=config,
+            sublayers_spec=sublayers_spec,
+            layer_number=layer_number,
+            attn_mask_type=attn_mask_type,
+            cp_comm_type=cp_comm_type,
+            pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
+        )
+
+        assert not self.config.apply_rope_fusion, (
+            "MQA does not support rope fusion."
+        )
+
+        # Use MQA only when HySparse is enabled and this is an SWA layer.
+        # Otherwise, use its parent's forward method (MLA).
+        self.is_mqa = config.enable_hy_sparse_attention and self.is_swa
+
+        if self.is_mqa:
+            # Adjust absorbed kv channels for core attention
+            k_channels = self.config.kv_lora_rank + self.qk_rope_head_dim
+            v_channels = self.config.kv_lora_rank
+
+            self.core_attention.hidden_size_per_partition = (
+                k_channels * self.num_attention_heads_per_partition
+            )
+            self.core_attention.k_channels = k_channels
+            self.core_attention.v_channels = v_channels
+
+            # Block sparse attention
+            self.sparse_core_attention = build_spec_layer(
+                sublayers_spec.core_attention,
+                config=self.core_attention.config,
+                layer_number=self.layer_number,
+                attn_mask_type=self.attn_mask_type,
+                attention_type=self.attention_type,
+                is_mtp_layer=self.is_mtp_layer,
+                is_swa=False,
+                softmax_scale=self.config.softmax_scale,
+                k_channels=k_channels,
+                v_channels=v_channels,
+                num_attention_heads=self.num_attention_heads,
+                num_key_value_heads=1,
+                cp_comm_type=cp_comm_type,
+                pg_collection=self.pg_collection,
+            )
+
+            # Gate for block sparse attention
+            if self.gated_attention:
+                self.sparse_gate_proj = build_spec_layer(
+                    sublayers_spec.gate_proj,
+                    self.gate_proj.input_size,
+                    self.gate_proj.output_size,
+                    config=self.config,
+                    init_method=self.config.init_method,
+                    gather_output=False,
+                    bias=self.config.use_bias,
+                    skip_bias_add=False,
+                    is_expert=False,
+                    tp_comm_buffer_name="mla_gate",
+                    tp_group=self.pg_collection.tp,
+                )
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        key_value_states=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        attention_bias=None,
+        packed_seq_params=None,
+        in_recompute: bool = False,
+        position_ids=None,
+        shared_kv: list[Tensor] | None = None,
+        **kwargs,
+    ):
+        """Forward pass for multi-latent attention"""
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        _log = TransformerLayer._log_md5
+
+        assert rotary_pos_emb is None, (
+            "Rotary position embeddings should not be passed into MQA."
+        )
+        assert attention_bias is None, (
+            "Attention bias should not be passed into MQA."
+        )
+        assert rotary_pos_cos is None and rotary_pos_sin is None, (
+            "MQA does not support Flash Decoding"
+        )
+        assert not get_context_parallel_world_size() > 1, (
+            "MQA does not support context parallel."
+        )
+        assert get_pg_size(self.pg_collection.tp) == 1, (
+            "MQA does not support tensor parallel."
+        )
+
+        if not self.is_mqa:
+            return super().forward(
+                hidden_states,
+                attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                key_value_states=key_value_states,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                position_ids=position_ids,
+                shared_kv=shared_kv,
+                **kwargs,
+            )
+
+        # =====================
+        # Query, Key, and Value
+        # =====================
+        # Get the query, key and value tensors based on the type of attention
+        # Also get q_compressed for DSA indexer (if enabled)
+        query, key, value, q_compressed, kv_compressed, k_pos_emb = (
+            self.get_query_key_value_tensors(
+                hidden_states,
+                key_value_states,
+                position_ids,
+                packed_seq_params,
+            )
+        )
+
+        layer_num = getattr(self, "layer_number", -1)
+        _log(query, "attn_query", layer_num)
+        _log(key, "attn_key", layer_num)
+        if value is not None:
+            _log(value, "attn_value", layer_num)
+
+        attn_mask_type = self.attn_mask_type
+        query = query.contiguous()
+        key = key.contiguous()
+
+        if value is not None:
+            value = value.contiguous()
+
+        # ==================================
+        # core attention computation
+        # ==================================
+        # Extract inference kwargs to pass through to core_attention
+        past_key_values = kwargs.get("past_key_values")
+        layer_idx = kwargs.get("layer_idx")
+        use_cache = kwargs.get("use_cache", False)
+
+        # Static batching attention kernel.
+        core_attn_out = self.core_attention(
+            query,
+            key,
+            value,
+            attention_mask,
+            attn_mask_startend_row_indices,
+            attn_mask_type=attn_mask_type,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            use_rr_flash_attention=self.use_rr_flash_attention and in_recompute,
+            past_key_values=past_key_values,
+            layer_idx=layer_idx,
+            use_cache=use_cache,
+        )
+
+        _log(core_attn_out, "core_attn_out", layer_num)
+
+        # =================
+        # Absorb value. [b, sq, num_heads * v_head_dim]
+        # =================
+
+        kv_lora_rank = self.config.kv_lora_rank
+        num_heads = self.num_attention_heads_per_partition
+
+        v_absorb_weight = self.kv_b_proj.weight.reshape(
+            [kv_lora_rank, num_heads, -1]
+        )[:, :, self.qk_nope_head_dim :]
+
+        def compute_absorbed_v(core_attn_out):
+            core_attn_out = core_attn_out.view(
+                *core_attn_out.shape[:-1], num_heads, kv_lora_rank
+            )
+            core_attn_out = paddle.einsum(
+                "bshl,lhv->bshv", core_attn_out, v_absorb_weight
+            )
+            core_attn_out = core_attn_out.view(
+                *core_attn_out.shape[:-2], num_heads * self.v_head_dim
+            )
+            return core_attn_out
+
+        core_attn_out = compute_absorbed_v(core_attn_out)
+
+        # =================
+        # Sparse attention computation
+        # =================
+
+        shared_key, shared_block_indices = shared_kv
+        shared_value = shared_key[:, :, :, :kv_lora_rank].contiguous()
+
+        sparse_core_attn_out = self.sparse_core_attention(
+            query,
+            shared_key,
+            shared_value,
+            attention_mask,
+            attn_mask_startend_row_indices,
+            attn_mask_type=attn_mask_type,
+            attention_bias=attention_bias,
+            layer_idx=layer_idx,
+        )
+
+        sparse_core_attn_out = compute_absorbed_v(sparse_core_attn_out)
+
+        # =================
+        # Output. [b, sq, h]
+        # =================
+        # Apply gated attention
+        if self.gated_attention:
+            # Gate input source: q_compressed (post q_a_layernorm, dim=q_lora_rank) when
+            # gated_attn_use_q_lora is set, otherwise hidden_states.
+            gate_source = (
+                q_compressed if self.gated_attn_use_q_lora else hidden_states
+            )
+            core_attn_out = self._gate(gate_source, core_attn_out)
+
+        # Add sparse attention output
+        if self.gated_attention:
+            gate, _ = self.sparse_gate_proj(gate_source)
+            sparse_core_attn_out = (
+                sparse_core_attn_out * paddle.nn.functional.sigmoid(gate)
+            )
+        core_attn_out += sparse_core_attn_out
+
+        output, bias = self.o_proj(core_attn_out)
+
+        _log(output, "attn_o_proj_out", layer_num)
+
+        return output, bias
+
+    def get_query_key_value_tensors(
+        self,
+        hidden_states,
+        key_value_states=None,
+        position_ids=None,
+        packed_seq_params=None,
+    ):
+        """
+        Derives `query`, `key` and `value` tensors from `hidden_states`.
+        """
+        if not self.is_mqa:
+            return super().get_query_key_value_tensors(
+                hidden_states,
+                key_value_states=key_value_states,
+                position_ids=position_ids,
+                packed_seq_params=packed_seq_params,
+            )
+
+        # b = batch size, s = sequence length, h = hidden size, n = num attention heads
+        # Attention heads [b, s, n*h]
+        assert hidden_states.ndim == 3, (
+            f"hidden_states should be 3D, [b, s, n*h], got {hidden_states.ndim}D"
+        )
+
+        # =========================================
+        # Prepare RoPE and seqlen related params
+        # =========================================
+        rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
+            hidden_states, self.config, packed_seq_params
+        )
+
+        # rotary_pos_emb: [1, s, 1, pe_dim]
+        mscale = 1.0
+        rotary_pos_cos = None
+        rotary_pos_sin = None
+
+        assert self.config.rope_type == "rope", (
+            f"MQA only supports rope_type 'rope', got {self.config.rope_type}"
+        )
+        assert packed_seq_params is None, (
+            "MQA doesn't support packed_seq_params"
+        )
+
+        rotary_pos_emb = self.rotary_pos_emb(
+            rotary_seq_len,
+            position_ids=None if self.training else position_ids,
+        )
+
+        # =========================================
+        # QKV down projection and layernorm
+        # =========================================
+        if self.config.q_lora_rank is not None:
+            q_compressed, _ = self.q_a_proj(hidden_states)
+        else:
+            q_compressed = hidden_states
+
+        # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
+        kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
+
+        # kv_compressed: [b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
+        kv_compressed, k_pos_emb = paddle.split(
+            kv_combined,
+            [self.config.kv_lora_rank, self.qk_rope_head_dim],
+            axis=-1,
+        )
+
+        # =========================================
+        # Apply norm
+        # =========================================
+
+        if self.config.q_lora_rank is not None:
+            # q_compressed: [num_tokens, q_lora_rank]
+            q_compressed = self.q_a_layernorm(q_compressed)
+
+        kv_compressed = self.kv_a_layernorm(kv_compressed)
+
+        # === MD5 probes for MLA intermediate values ===
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        _log = TransformerLayer._log_md5
+        _log(q_compressed, "mla_q_compressed_normed", self.layer_number)
+        _log(kv_compressed, "mla_kv_compressed_normed", self.layer_number)
+        _log(k_pos_emb, "mla_k_pos_emb_raw", self.layer_number)
+
+        # =========================================
+        # QKV up projection and RoPE apply
+        # =========================================
+
+        def qkv_up_proj_and_rope_apply(
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            position_ids=None,
+        ):
+            """
+            Apply the up projection and RoPE to the query and key.
+            When sequence packing enabled, the input tensors adopt a packed shape of [t, ...];
+            otherwise, they maintain the unpacked shape [b, s, ...]. In subsequent code comments,
+            we uniformly use [num_tokens, ...] to denote [b, s, ...] or [t, ...] for two cases.
+            """
+            if self.config.q_lora_rank is not None:
+                # q_compressed: [num_tokens, q_lora_rank]
+                # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
+                q, _ = self.q_b_proj(q_compressed)
+            else:
+                # q_compressed: [num_tokens, hidden_size]
+                # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
+                q, _ = self.q_proj(q_compressed)
+
+            # q: [num_tokens, n, q_head_dim]
+            q = q.view(
+                *q.size()[:-1],
+                self.num_attention_heads_per_partition,
+                self.q_head_dim,
+            )
+
+            kv_lora_rank = self.config.kv_lora_rank
+            num_heads = self.num_attention_heads_per_partition
+
+            q_no_pe = q[..., : self.qk_nope_head_dim]
+            q_pos_emb = q[..., self.qk_nope_head_dim :]
+
+            q_absorb_weight = self.kv_b_proj.weight.reshape(
+                [kv_lora_rank, num_heads, -1]
+            )[:, :, : self.qk_nope_head_dim]
+            q_nope_absorbed = paddle.einsum(
+                "bshd,lhd->bshl", q_no_pe, q_absorb_weight
+            )
+
+            q_pos_emb = apply_rotary_pos_emb(
+                q_pos_emb,
+                rotary_pos_emb,
+                rotary_pos_cos,
+                rotary_pos_sin,
+                config=self.config,
+                mscale=mscale,
+            )
+            k_pos_emb = apply_rotary_pos_emb(
+                k_pos_emb.unsqueeze(-2),
+                rotary_pos_emb,
+                rotary_pos_cos,
+                rotary_pos_sin,
+                config=self.config,
+                mscale=mscale,
+            )
+
+            kv_compressed = kv_compressed.unsqueeze(-2)
+
+            query = paddle.concat([q_nope_absorbed, q_pos_emb], axis=-1)
+            key = paddle.concat([kv_compressed, k_pos_emb], axis=-1)
+            value = kv_compressed
+
+            return query, key, value, k_pos_emb
+
+        query, key, value, k_pos_emb = qkv_up_proj_and_rope_apply(
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+            rotary_pos_emb,
+            rotary_pos_cos,
+            rotary_pos_sin,
+            position_ids,
+        )
+
+        return query, key, value, q_compressed, kv_compressed, k_pos_emb

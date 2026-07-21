@@ -1022,6 +1022,8 @@ class TransformerLayer(nn.Layer):
             self.self_attn, DSv4HybridAttention
         ):
             extra_kwargs["input_ids"] = input_ids
+        if "shared_kv" in kwargs:
+            extra_kwargs["shared_kv"] = kwargs["shared_kv"]
 
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
@@ -1502,6 +1504,147 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             hidden_states.stop_gradient = False
 
         return hidden_states
+
+
+class HySparseTransformerLayer(TransformerLayer):
+    """Transformer layer with cross-layer KV sharing."""
+
+    def forward(
+        self,
+        dict_args: dict,
+    ):
+        """
+        Perform a forward pass through the transformer layer.
+
+        This method calls the core computation of a transformer layer, including
+        self-attention, cross-attention (if applicable), and feed-forward operations.
+        """
+        # Remove 'dynamic_inference_decode_only' from kwargs if present
+        # this is only used to uniquely identify decode and non-decode cuda graph
+        # runners in the cuda graph manager
+        dict_args.pop("dynamic_inference_decode_only", None)
+        keys = tuple(dict_args.keys())
+        values = tuple(dict_args.values())
+
+        is_mtp = dict_args.pop("is_mtp", False)
+        TransformerLayer._skip_mtp_probes = (
+            is_mtp  # Suppress MD5 probes for MTP passes
+        )
+
+        if self.full_recompute:
+
+            def dict_args_get_clone(key):
+                """Clone is necessary for some args."""
+                value = dict_args.get(key, None)
+                return value.clone() if value is not None else None
+
+            outputs = recompute(
+                self._forward_impl,
+                hidden_states=dict_args["hidden_states"],
+                attention_mask=dict_args.get("attention_mask", None),
+                attn_mask_startend_row_indices=dict_args_get_clone(
+                    "attn_mask_startend_row_indices"
+                ),
+                context=dict_args.get("context", None),
+                context_mask=dict_args.get("context_mask", None),
+                rotary_pos_emb=dict_args_get_clone("rotary_pos_emb"),
+                rotary_pos_cos=dict_args_get_clone("rotary_pos_cos"),
+                rotary_pos_sin=dict_args_get_clone("rotary_pos_sin"),
+                swa_rotary_pos_emb=dict_args_get_clone("swa_rotary_pos_emb"),
+                swa_rotary_pos_cos=dict_args_get_clone("swa_rotary_pos_cos"),
+                swa_rotary_pos_sin=dict_args_get_clone("swa_rotary_pos_sin"),
+                position_ids=dict_args_get_clone("position_ids"),
+                attention_bias=dict_args.get("attention_bias", None),
+                packed_seq_params=dict_args.get("packed_seq_params", None),
+                input_ids=dict_args.get("input_ids", None),
+                shared_key=dict_args.get("shared_key", None),
+                shared_block_indices=dict_args.get(
+                    "shared_block_indices", None
+                ),
+            )
+        else:
+            outputs = self._forward_impl(**dict_args)
+
+        if isinstance(outputs, tuple):
+            output, shared_key, shared_block_indices = outputs
+        else:
+            output, shared_key, shared_block_indices = outputs, None, None
+
+        rst = OrderedDict()
+        rst = {"hidden_states": output}
+        if shared_key is not None:
+            rst["shared_key"] = shared_key
+            rst["shared_block_indices"] = shared_block_indices
+        rst = {**dict_args, **rst}
+        return rst
+
+    def _forward_impl(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+        input_ids: Tensor | None = None,
+        shared_key: Tensor | None = None,
+        shared_block_indices: Tensor | None = None,
+        **kwargs,
+    ):
+        timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
+
+        # 使用统一的 shared_kv 参数处理输入输出:
+        # 1. 对于 swa 层是输入, 只消费 shared_kv，不生产;
+        # 2. 对于 full 层是输出, 只生产 shared_kv, 不消费.
+        if self.self_attn.is_swa:
+            shared_kv = [shared_key, shared_block_indices]
+        else:
+            shared_kv = []
+
+        self._log_md5(hidden_states, "input", self.layer_number)
+        with profile("attn"):
+            hidden_states, context = self._forward_attention(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                context=context,
+                context_mask=context_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                swa_rotary_pos_sin=swa_rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=self.full_recompute,
+                input_ids=input_ids,
+                shared_kv=shared_kv,
+                **kwargs,
+            )
+        assert context is None, (
+            "HySparseTransformerLayer doesn't support cross-attention."
+        )
+        self._log_md5(hidden_states, "post_attn_residual", self.layer_number)
+        with profile(timer_name):
+            output = self._forward_mlp(hidden_states, input_ids=input_ids)
+        self._log_md5(output, "layer_output", self.layer_number)
+
+        if (not self.self_attn.is_swa) and shared_kv:
+            shared_key, shared_block_indices = shared_kv
+            if self.training and not paddle.is_grad_enabled():
+                shared_key.stop_gradient = False
+            return output, shared_key, shared_block_indices
+        return output
 
 
 class TransformerLayerWithOverlap(TransformerLayer):
