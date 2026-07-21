@@ -41,6 +41,10 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import (
+    need_recompute_in_block,
+    need_recompute_in_first_n,
+)
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
@@ -501,6 +505,40 @@ class MultiLatentAttention(Attention):
             and "gated_attn" in self.config.recompute_modules
         )
 
+        self.recompute_qkv_up_porj_and_rope = False
+        if self.config.recompute_granularity == "selective":
+            modules = self.config.recompute_modules
+            if isinstance(modules, list) and "mla_qkv_recompute" in modules:
+                self.recompute_qkv_up_porj_and_rope = (
+                    True
+                    if self.config.recompute_num_layers is None
+                    else (
+                        need_recompute_in_block(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_num_layers,
+                        )
+                        if self.config.recompute_method == "block"
+                        else need_recompute_in_first_n(
+                            self.layer_number,
+                            self.config,
+                            self.config.recompute_num_layers,
+                        )
+                    )
+                )
+            elif isinstance(modules, dict) and "mla_qkv_recompute" in modules:
+                assert self.config.recompute_method in ["first_n", "block"]
+                num_layers = modules["mla_qkv_recompute"]
+                self.recompute_qkv_up_porj_and_rope = (
+                    need_recompute_in_block(
+                        self.layer_number, self.config, num_layers
+                    )
+                    if self.config.recompute_method == "block"
+                    else need_recompute_in_first_n(
+                        self.layer_number, self.config, num_layers
+                    )
+                )
+
     def _compute_absorbed_q(self, query):
         """
         Compute absorbed query for FD MLA decode kernel.
@@ -714,6 +752,13 @@ class MultiLatentAttention(Attention):
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
             )
+
+        if self.recompute_qkv_up_porj_and_rope and self.training:
+            assert getattr(self, "_qkv_recompute", None) is not None
+            self._qkv_recompute.discard_output_and_register_recompute(
+                core_attn_out
+            )
+            self._qkv_recompute = None
 
         _log(core_attn_out, "core_attn_out", layer_num)
 
@@ -1520,15 +1565,30 @@ class MLASelfAttention(MultiLatentAttention):
 
             return query, key, value, k_pe
 
-        query, key, value, k_pos_emb = qkv_up_proj_and_rope_apply(
-            q_compressed,
-            kv_compressed,
-            k_pos_emb,
-            rotary_pos_emb,
-            rotary_pos_cos,
-            rotary_pos_sin,
-            position_ids,
-        )
+        if self.recompute_qkv_up_porj_and_rope and self.training:
+            self._qkv_recompute = RecomputeWithoutOutput()
+            query, key, value, k_pos_emb = self._qkv_recompute.recompute(
+                qkv_up_proj_and_rope_apply,
+                q_compressed,
+                kv_compressed,
+                k_pos_emb,
+                rotary_pos_emb,
+                rotary_pos_cos,
+                rotary_pos_sin,
+                position_ids,
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+        else:
+            query, key, value, k_pos_emb = qkv_up_proj_and_rope_apply(
+                q_compressed,
+                kv_compressed,
+                k_pos_emb,
+                rotary_pos_emb,
+                rotary_pos_cos,
+                rotary_pos_sin,
+                position_ids,
+            )
 
         return query, key, value, q_compressed, kv_compressed, k_pos_emb
 

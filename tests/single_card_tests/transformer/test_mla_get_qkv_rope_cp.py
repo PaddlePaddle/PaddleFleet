@@ -255,6 +255,7 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         )
         layer.layer_number = 1
         layer.training = True
+        layer.recompute_qkv_up_porj_and_rope = False
         return layer
 
     def _hidden(self, batch=2, seq=32, hidden=16):
