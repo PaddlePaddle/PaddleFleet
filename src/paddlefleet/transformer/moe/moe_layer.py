@@ -1118,9 +1118,15 @@ class MoELayer(nn.Layer):
             if tokens_per_expert[expert_idx] <= 0.1:
                 continue
             current_state = hidden_states[idx, None].reshape([-1, d_model])
-            expert_out = expert_layer(current_state)[0]
             current_weight = topk_weights[idx, top_x].unsqueeze(-1)
-            current_hidden_states = expert_out * current_weight
+            if use_accuracy_compatible_kernel():
+                expert_out = expert_layer(
+                    current_state, per_token_scale=current_weight.squeeze(-1)
+                )[0]
+                current_hidden_states = expert_out
+            else:
+                expert_out = expert_layer(current_state)[0]
+                current_hidden_states = expert_out * current_weight
 
             # use scatter to replace index_add
             final_hidden_states_tmp = paddle.zeros_like(final_hidden_states)

@@ -299,6 +299,50 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
         layer.fp8_quant_weight()
 
 
+class TestMoELayerSingleCardAccuracy(unittest.TestCase):
+    """Test accuracy-compatible routing-weight placement."""
+
+    @patch("paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel")
+    def test_accuracy_gate_applies_weight_inside_expert(self, accuracy_gate):
+        accuracy_gate.return_value = True
+        layer = MoELayer.__new__(MoELayer)
+        layer.num_experts = 1
+        expert = MagicMock(return_value=(paddle.ones([1, 2]), None))
+        layer.experts = [expert]
+        hidden_states = paddle.ones([1, 2])
+        selected_experts = paddle.zeros([1, 1], dtype="int64")
+        topk_weights = paddle.to_tensor([[0.25]], dtype="float32")
+
+        output = layer._forward_single_card_moe(
+            hidden_states, selected_experts, topk_weights
+        )
+
+        paddle.testing.assert_close(output, paddle.ones([1, 2]))
+        expert.assert_called_once()
+        paddle.testing.assert_close(
+            expert.call_args.kwargs["per_token_scale"], paddle.to_tensor([0.25])
+        )
+
+    @patch("paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel")
+    def test_default_path_applies_weight_after_expert(self, accuracy_gate):
+        accuracy_gate.return_value = False
+        layer = MoELayer.__new__(MoELayer)
+        layer.num_experts = 1
+        expert = MagicMock(return_value=(paddle.ones([1, 2]), None))
+        layer.experts = [expert]
+        hidden_states = paddle.ones([1, 2])
+        selected_experts = paddle.zeros([1, 1], dtype="int64")
+        topk_weights = paddle.to_tensor([[0.25]], dtype="float32")
+
+        output = layer._forward_single_card_moe(
+            hidden_states, selected_experts, topk_weights
+        )
+
+        paddle.testing.assert_close(output, paddle.full([1, 2], 0.25))
+        self.assertEqual(expert.call_count, 1)
+        paddle.testing.assert_close(expert.call_args.args[0], hidden_states)
+
+
 class TestMoELayerForwardLogging(unittest.TestCase):
     """Test forward loss logging hooks."""
 
