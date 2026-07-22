@@ -57,12 +57,17 @@ _ACCURACY_COMPATIBLE_KERNEL: bool = (
 )
 
 
-def _accuracy_compatible_q_down_projection(projection, hidden_states):
-    """Apply q-down with the Torch-aligned strided-transpose GEMM formulation."""
+def _accuracy_compatible_projection(projection, hidden_states):
+    """Apply a projection with Torch-aligned strided-transpose GEMM formulation."""
     output_bias = projection.bias if projection.skip_bias_add else None
     bias = None if projection.skip_bias_add else projection.bias
     output = paddle.nn.functional.linear(hidden_states, projection.weight, bias)
     return output, output_bias
+
+
+def _accuracy_compatible_q_down_projection(projection, hidden_states):
+    """Apply q-down with the Torch-aligned strided-transpose GEMM formulation."""
+    return _accuracy_compatible_projection(projection, hidden_states)
 
 
 def _ec_compatible_rope_apply(
@@ -598,7 +603,12 @@ class MultiLatentAttention(Attention):
             output = FP8OverlapProj.apply(core_attn_out, self.o_proj.weight)
             bias = None
         else:
-            output, bias = self.o_proj(core_attn_out)
+            if _ACCURACY_COMPATIBLE_KERNEL and get_pg_size(self.pg_collection.tp) == 1:
+                output, bias = _accuracy_compatible_projection(
+                    self.o_proj, core_attn_out
+                )
+            else:
+                output, bias = self.o_proj(core_attn_out)
 
         if self.gated_attention and self.recompute_gated_attn:
             gate_recompute.discard_output_and_register_recompute(output)

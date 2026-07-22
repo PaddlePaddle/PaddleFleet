@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
+    _accuracy_compatible_projection,
     _accuracy_compatible_q_down_projection,
 )
 
@@ -46,6 +47,36 @@ def _make_mla_self_attn(**attrs):
         for k, v in attrs.items():
             object.__setattr__(attn, k, v)
         return attn
+
+
+class TestAccuracyCompatibleProjection(unittest.TestCase):
+    def test_matches_functional_linear_and_preserves_skip_bias_contract(self):
+        import paddle
+
+        hidden = paddle.randn([1, 3, 4])
+        weight = paddle.randn([4, 6])
+        bias = paddle.randn([6])
+        projection = MagicMock(weight=weight, bias=bias, skip_bias_add=True)
+
+        output, output_bias = _accuracy_compatible_projection(projection, hidden)
+
+        expected = paddle.nn.functional.linear(hidden, weight)
+        self.assertTrue(paddle.equal_all(output, expected).item())
+        self.assertIs(output_bias, bias)
+
+    def test_adds_bias_when_skip_bias_add_is_false(self):
+        import paddle
+
+        hidden = paddle.randn([1, 3, 4])
+        weight = paddle.randn([4, 6])
+        bias = paddle.randn([6])
+        projection = MagicMock(weight=weight, bias=bias, skip_bias_add=False)
+
+        output, output_bias = _accuracy_compatible_projection(projection, hidden)
+
+        expected = paddle.nn.functional.linear(hidden, weight, bias)
+        self.assertTrue(paddle.equal_all(output, expected).item())
+        self.assertIsNone(output_bias)
 
 
 class TestAccuracyCompatibleQDownProjection(unittest.TestCase):
