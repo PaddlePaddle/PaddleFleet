@@ -215,9 +215,12 @@ class _HybridEPManager(_DispatchManager):
         self._active_buffer = None
         self.hybridep_buffer_configs = hybridep_buffer_configs or {}
         self._moe_deep_gemm = moe_deep_gemm
+        self._reset_dispatch_state()
+        self._num_unpadded_tokens = None
+
+    def _reset_dispatch_state(self):
         self._dispatch_uses_fp8 = None
         self._dispatch_pad_multiple = None
-        self._num_unpadded_tokens = None
 
     def _set_dispatch_state(self, use_fp8: bool):
         self._dispatch_uses_fp8 = use_fp8
@@ -497,8 +500,7 @@ class _HybridEPManager(_DispatchManager):
         self.dispatched_probs = None
         self.handle = None
         self.num_permuted_tokens = None
-        self._dispatch_uses_fp8 = None
-        self._dispatch_pad_multiple = None
+        self._reset_dispatch_state()
         if (
             self._num_unpadded_tokens is not None
             and hidden_states.shape[0] != self._num_unpadded_tokens
