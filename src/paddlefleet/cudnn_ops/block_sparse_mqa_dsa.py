@@ -49,6 +49,7 @@ and contribute no KV gradient).
 """
 
 import os
+from functools import lru_cache
 
 import paddle
 
@@ -56,16 +57,15 @@ _DSA_HEADS = 64  # FlashMLA sparse fwd only supports h_q == 64 on SM100.
 _NEG_SINK = -1e30  # sink so large-negative that exp(sink - m) underflows to 0.
 
 
+@lru_cache(maxsize=1)
 def is_dsa_available() -> bool:
     """Whether the FlashMLA sparse fwd + cuDNN DSA bwd path can run here.
 
     The DSA fwd/bwd kernels are only implemented for SM100+ (Blackwell); there
-    is no eager fallback below it. The cuDNN DSA *backward* additionally does a
-    bare ``import cudnn`` (the NVIDIA cuDNN python frontend) at call time, which
-    ``paddlefleet_ops.is_cudnn_frontend_available()`` (an ops-level probe) does
-    NOT cover. Probe both here so environments missing either -- e.g. an SM90
-    H20 CI box without the ``cudnn`` wheel -- report unavailable and skip the
-    path instead of failing deep inside the backward.
+    is no eager fallback below it. Probe the actual PaddleFleet ops dependencies
+    once per process. Avoid importing the standalone ``cudnn`` package here:
+    under Paddle's torch proxy its module discovery can recursively enter
+    ``find_spec`` and hang the first attention forward.
     """
     try:
         import paddlefleet_ops
@@ -81,9 +81,6 @@ def is_dsa_available() -> bool:
             return False
         if not paddlefleet_ops.is_cudnn_frontend_available():
             return False
-        # The backward's ``import cudnn`` python frontend is a separate wheel
-        # from the ops-level frontend checked above.
-        import cudnn  # noqa: F401
     except (ImportError, RuntimeError, AttributeError):
         return False
     return True
