@@ -175,6 +175,7 @@ class MoELayer(nn.Layer):
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
+        self.use_fp4_expert_qat = getattr(config, "use_fp4_expert_qat", False)
         self.use_ue8m0 = config.use_ue8m0
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
@@ -334,6 +335,7 @@ class MoELayer(nn.Layer):
         expert_args["moe_intermediate_size"] = self.moe_intermediate_size
         expert_args["is_expert"] = True
         expert_args["mlp_spec"] = self.moe_sublayers.mlp_spec
+        expert_args["use_fp4_expert_qat"] = self.use_fp4_expert_qat
 
         use_fused_weight = self.moe_expert_fusion
         if (
@@ -398,6 +400,7 @@ class MoELayer(nn.Layer):
                     self.experts.append(None)
 
         shared_expert_args = deepcopy(expert_args)
+        shared_expert_args.pop("use_fp4_expert_qat", None)
         if self.config.gpt_model_use_experimental_version:
             shared_expert_args["is_expert"] = False
             shared_expert_args["config"] = shared_expert_config
@@ -957,6 +960,7 @@ class MoELayer(nn.Layer):
                     recompute_moe_premute=self.recompute_moe_premute,
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+                    use_fp4_expert_qat=self.use_fp4_expert_qat,
                     use_auto_subbatch=self.use_auto_subbatch,
                     auto_subbatch_mode=self.auto_subbatch_mode,
                     moe_expert_fusion=self.moe_expert_fusion,
@@ -1016,6 +1020,7 @@ class MoELayer(nn.Layer):
             moe_expert_fusion=self.moe_expert_fusion,
             recompute_moe_gate_up=self.recompute_moe_gate_up,
             use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+            use_fp4_expert_qat=self.use_fp4_expert_qat,
             fp8_dispatched_handle=fp8_dispatched_handle,
             is_first_fwd=is_first_fwd,
             dw_p2p_overlap=self.dw_p2p_overlap,
@@ -1115,6 +1120,7 @@ class MoELayer(nn.Layer):
                     recompute_moe_premute=self.recompute_moe_premute,
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     use_bf16_gemm_weight_grad=not self.fp8_wgrad,
+                    use_fp4_expert_qat=self.use_fp4_expert_qat,
                     use_auto_subbatch=self.use_auto_subbatch,
                     auto_subbatch_mode=self.auto_subbatch_mode,
                     moe_expert_fusion=self.moe_expert_fusion,

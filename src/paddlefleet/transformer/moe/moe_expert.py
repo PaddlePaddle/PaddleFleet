@@ -24,6 +24,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 )
 
 from paddlefleet import utils
+from paddlefleet.fp8.qat import apply_fp4_expert_fake_quant
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
@@ -672,7 +673,9 @@ class StandardMLPExpert(MLP):
         moe_intermediate_size: int,
         is_expert: bool,
         mlp_spec: MLPSublayersSpec,
+        use_fp4_expert_qat: bool = False,
     ):
+        self.use_fp4_expert_qat = use_fp4_expert_qat
         if moe_intermediate_size == config.intermediate_size:
             super().__init__(
                 config,
@@ -693,3 +696,20 @@ class StandardMLPExpert(MLP):
                 intermediate_size=moe_intermediate_size,
                 # tp_group=pg_collection.expt_tp,
             )
+
+    def forward(self, hidden_states, per_token_scale=None):
+        if not self.use_fp4_expert_qat:
+            return super().forward(
+                hidden_states, per_token_scale=per_token_scale
+            )
+
+        up_gate_weight = apply_fp4_expert_fake_quant(
+            self.up_gate_proj.weight, True
+        )
+        down_weight = apply_fp4_expert_fake_quant(self.down_proj.weight, True)
+        return super().forward(
+            hidden_states,
+            per_token_scale=per_token_scale,
+            up_gate_weight=up_gate_weight,
+            down_weight=down_weight,
+        )

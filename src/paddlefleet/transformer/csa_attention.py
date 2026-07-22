@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
 # CP utilities are imported lazily inside _forward_cp to avoid circular imports
 # at module load time. The public symbols are re-exported here for convenience.
-from paddlefleet.fp8.qat import fp8_simulate_qat
+from paddlefleet.fp8.qat import fp4_indexer_fake_quant, fp8_simulate_qat
 from paddlefleet.transformer.cp_utils import (
     all_gather_cp,
     build_causal_mask_cp,
@@ -1303,6 +1303,9 @@ class Compressor(nn.Layer):
         )
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
+        self.use_fp4_indexer_qat = self.rotate and getattr(
+            config, "use_fp4_indexer_qat", False
+        )
         self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
         self.swa_high_precision_norm = getattr(
             config, "swa_high_precision_norm", False
@@ -1488,7 +1491,9 @@ class Compressor(nn.Layer):
                     use_fast_hadamard=self.use_fast_hadamard,
                     high_precision_hadamard=self.swa_high_precision_norm,
                 )
-                if self.use_fp8_qat:
+                if self.use_fp4_indexer_qat:
+                    kv = fp4_indexer_fake_quant(kv)
+                elif self.use_fp8_qat:
                     kv = fp8_simulate_qat(kv, 128)
             else:
                 if self.use_fp8_qat:
@@ -1639,6 +1644,7 @@ class CSAIndexer(nn.Layer):
         )
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
+        self.use_fp4_indexer_qat = getattr(config, "use_fp4_indexer_qat", False)
         self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
 
     def forward_before_topk(
@@ -1673,8 +1679,10 @@ class CSAIndexer(nn.Layer):
             )
         q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
 
-        # k QAT:
-        if self.use_fp8_qat:
+        # Q is quantized only after RoPE and normalized Hadamard rotation.
+        if self.use_fp4_indexer_qat:
+            q = fp4_indexer_fake_quant(q)
+        elif self.use_fp8_qat:
             q = fp8_simulate_qat(q, 128)
 
         # K path: own compressor (already applies RoPE and rotation internally)
