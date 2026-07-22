@@ -1,6 +1,9 @@
 name: CE Daily Release
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 20 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -43,8 +46,7 @@ env:
   paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.3/latest/"
   use_release: ${{ inputs.use_release || 'true' }}
   update_baseline: ${{ inputs.update_baseline || 'false' }}
-  fleet_branch: "release/0.3"
-  formers_branch: "release/1.2"
+
 defaults:
   run:
     shell: bash
@@ -172,6 +174,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          fleet_branch=$(git branch -r | grep -oP 'origin/release/\K[\d.]+' | sort -V | tail -1); fleet_branch="release/${fleet_branch}"
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -317,6 +320,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git submodule update --init --recursive
+          fleet_branch=$(git branch -r | grep -oP 'origin/release/\K[\d.]+' | sort -V | tail -1); fleet_branch="release/${fleet_branch}"
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -480,6 +484,7 @@ jobs:
             git fetch origin refs/pull/${PR_ID}/head:pr-${PR_ID}
             git checkout pr-${PR_ID}
           else
+            fleet_branch=$(git branch -r | grep -oP 'origin/release/\K[\d.]+' | sort -V | tail -1); fleet_branch="release/${fleet_branch}"
             git checkout ${fleet_branch}
           fi
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -508,6 +513,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          formers_branch=$(git branch -r | grep -oP 'origin/release/\K[\d.]+' | sort -V | tail -1); formers_branch="release/${formers_branch}"
           git checkout ${formers_branch}
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
@@ -719,6 +725,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          fleet_branch=$(git branch -r | grep -oP 'origin/release/\K[\d.]+' | sort -V | tail -1); fleet_branch="release/${fleet_branch}"
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -748,6 +755,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          formers_branch=$(git branch -r | grep -oP 'origin/release/\K[\d.]+' | sort -V | tail -1); formers_branch="release/${formers_branch}"
           git checkout ${formers_branch}
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
@@ -1176,6 +1184,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          fleet_branch=$(git branch -r | grep -oP 'origin/release/\K[\d.]+' | sort -V | tail -1); fleet_branch="release/${fleet_branch}"
           git checkout ${fleet_branch}
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install colorlog>=6.10.1
@@ -1204,6 +1213,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          formers_branch=$(git branch -r | grep -oP 'origin/release/\K[\d.]+' | sort -V | tail -1); formers_branch="release/${formers_branch}"
           git checkout ${formers_branch}
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
