@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -1158,6 +1159,9 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
         self.assertGreaterEqual(mocked.call_count, 1)
         self.assertEqual(mocked.call_args_list[0].args[0], 1)
 
+    @unittest.skipIf(
+        sys.version_info < (3, 12), "cuDNN indexer requires Python >= 3.12"
+    )
     def test_cudnn_indexer_document_mask_matches_separate_documents(self):
         """Main-path integration: csa_indexer_backend='cudnn' packed-vs-separate.
 
