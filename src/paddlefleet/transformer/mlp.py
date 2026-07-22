@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -53,6 +54,15 @@ from paddlefleet.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ACCURACY_COMPATIBLE_KERNEL = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
+
+
+def _accuracy_compatible_swiglu(hidden_states):
+    gate, linear = paddle.chunk(hidden_states, 2, axis=-1)
+    return F.silu(gate) * linear
 
 
 # pylint: disable=missing-class-docstring
@@ -185,6 +195,20 @@ class MLP(FleetLayer):
             self.config, "gpt_model_use_experimental_version", False
         )
         if (
+            _ACCURACY_COMPATIBLE_KERNEL
+            and bias_parallel is None
+            and self.hidden_act == F.silu
+            and self.config.gated_linear_unit
+        ):
+            intermediate_parallel = _accuracy_compatible_swiglu(
+                intermediate_parallel
+            )
+            if per_token_scale is not None:
+                original_dtype = intermediate_parallel.dtype
+                intermediate_parallel = (
+                    intermediate_parallel * per_token_scale.unsqueeze(-1)
+                ).to(original_dtype)
+        elif (
             self.config.use_bias
             and self.config.gpt_model_use_experimental_version
             and self.config.tensor_model_parallel_size == 1
@@ -198,7 +222,7 @@ class MLP(FleetLayer):
             )
             return output, None
 
-        if (
+        elif (
             _use_paddle_swiglu
             and self.hidden_act == F.silu
             and self.config.gated_linear_unit
