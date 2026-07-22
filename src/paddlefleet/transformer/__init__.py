@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .hysparse_config import HySparseConfig as HySparseConfig
 from .layer import FleetLayer as FleetLayer
 from .transformer_config import TransformerConfig as TransformerConfig
 
 __all__ = [
     "FleetLayer",
+    "HySparseConfig",
     "TransformerConfig",
 ]
