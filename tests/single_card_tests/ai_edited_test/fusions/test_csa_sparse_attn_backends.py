@@ -66,6 +66,19 @@ COS_THRESHOLDS = {
     "d_sink": 0.95,
 }
 
+# Magnitude-sensitive relative-L2 ceilings (||tl-cu|| / ||cu||). Cosine is
+# scale-invariant, so it passes even if the two backends diverge by a constant
+# factor (exactly the class of bug -- e.g. a 128x gradient scale -- that shipped
+# undetected). Since this compares TileLang vs cuDNN (two kernels, no fp32 ref)
+# the bound guards against a scale divergence between the backends. Ceilings are
+# ~2x the worst observed bf16-level error across all TEST_CASES.
+REL_L2_THRESHOLDS = {
+    "out": 5e-3,
+    "dq": 3e-3,
+    "dkv": 7e-4,
+    "d_sink": 6e-3,
+}
+
 
 def cosine_sim(a, b):
     a_f = a.flatten().cast("float32")
@@ -79,6 +92,14 @@ def cosine_sim(a, b):
 
 def max_abs_diff(a, b):
     return float((a.cast("float32") - b.cast("float32")).abs().max())
+
+
+def rel_l2(a, b):
+    a_f = a.flatten().cast("float32")
+    b_f = b.flatten().cast("float32")
+    return float(
+        paddle.linalg.norm(a_f - b_f) / (paddle.linalg.norm(b_f) + 1e-12)
+    )
 
 
 def make_inputs(batch_size, seq_len, kv_seq_len, num_heads, head_dim, topk):
@@ -136,16 +157,33 @@ def run_single_shape(
         return False, {"d_sink": None}
 
     metrics = {
-        "out": (cosine_sim(out_tl, out_cu), max_abs_diff(out_tl, out_cu)),
-        "dq": (cosine_sim(dq_tl, dq_cu), max_abs_diff(dq_tl, dq_cu)),
-        "dkv": (cosine_sim(dkv_tl, dkv_cu), max_abs_diff(dkv_tl, dkv_cu)),
+        "out": (
+            cosine_sim(out_tl, out_cu),
+            max_abs_diff(out_tl, out_cu),
+            rel_l2(out_tl, out_cu),
+        ),
+        "dq": (
+            cosine_sim(dq_tl, dq_cu),
+            max_abs_diff(dq_tl, dq_cu),
+            rel_l2(dq_tl, dq_cu),
+        ),
+        "dkv": (
+            cosine_sim(dkv_tl, dkv_cu),
+            max_abs_diff(dkv_tl, dkv_cu),
+            rel_l2(dkv_tl, dkv_cu),
+        ),
         "d_sink": (
             cosine_sim(dsink_tl, dsink_cu),
             max_abs_diff(dsink_tl, dsink_cu),
+            rel_l2(dsink_tl, dsink_cu),
         ),
     }
+    # Gate on BOTH a cosine floor (direction) and a rel-L2 ceiling (magnitude);
+    # cosine alone is scale-blind and would pass a constant-factor divergence.
     passed = all(
         metrics[name][0] > COS_THRESHOLDS[name] for name in COS_THRESHOLDS
+    ) and all(
+        metrics[name][2] < REL_L2_THRESHOLDS[name] for name in REL_L2_THRESHOLDS
     )
     return passed, metrics
 

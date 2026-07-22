@@ -175,9 +175,32 @@ class TestBlockScoreFA4Backward(unittest.TestCase):
         ref = _ref_causal_attn(qr, kr, vr, sm_scale)
         ref.backward(g.astype("float32"))
 
-        self.assertGreater(_cos(qf.grad, qr.grad), 0.99)
-        self.assertGreater(_cos(kf.grad, kr.grad), 0.99)
-        self.assertGreater(_cos(vf.grad, vr.grad), 0.99)
+        # Cosine floor + magnitude-sensitive rel-L2 ceiling: cosine alone is
+        # scale-invariant and would miss a constant-factor gradient scale bug.
+        assert_close(
+            self,
+            "fa4_dense_dq",
+            qf.grad,
+            qr.grad,
+            min_cos=0.99,
+            max_rel_l2=6e-3,
+        )
+        assert_close(
+            self,
+            "fa4_dense_dk",
+            kf.grad,
+            kr.grad,
+            min_cos=0.99,
+            max_rel_l2=6e-3,
+        )
+        assert_close(
+            self,
+            "fa4_dense_dv",
+            vf.grad,
+            vr.grad,
+            min_cos=0.99,
+            max_rel_l2=6e-3,
+        )
 
     def test_default_sm_scale(self):
         _sm100_or_skip(self)
@@ -196,7 +219,17 @@ class TestBlockScoreFA4Backward(unittest.TestCase):
             q, k, v, sm_scale=d**-0.5, block_B=64, causal=True
         )
         self.assertEqual(list(out_default.shape), [b, s, h, d])
-        self.assertGreater(_cos(out_default, out_explicit), 0.999)
+        # Kernel-vs-kernel: default sm_scale must reproduce the explicit one.
+        # Guard magnitude too so a scale drift between the two paths can't hide
+        # behind a scale-invariant cosine.
+        assert_close(
+            self,
+            "default_sm_scale_out",
+            out_default,
+            out_explicit,
+            min_cos=0.999,
+            max_rel_l2=1e-3,
+        )
 
     def test_packed_multidoc_backward(self):
         # Packed [40, 88, 133, 27] documents (all unaligned to block_B) with a
@@ -246,9 +279,30 @@ class TestBlockScoreFA4Backward(unittest.TestCase):
         ref = _ref_packed_attn(qr, kr, vr, mask, sm_scale)
         ref.backward(g.astype("float32"))
 
-        assert_close(self, "fa4_packed_dq", qf.grad, qr.grad, min_cos=0.99)
-        assert_close(self, "fa4_packed_dk", kf.grad, kr.grad, min_cos=0.99)
-        assert_close(self, "fa4_packed_dv", vf.grad, vr.grad, min_cos=0.99)
+        assert_close(
+            self,
+            "fa4_packed_dq",
+            qf.grad,
+            qr.grad,
+            min_cos=0.99,
+            max_rel_l2=6e-3,
+        )
+        assert_close(
+            self,
+            "fa4_packed_dk",
+            kf.grad,
+            kr.grad,
+            min_cos=0.99,
+            max_rel_l2=6e-3,
+        )
+        assert_close(
+            self,
+            "fa4_packed_dv",
+            vf.grad,
+            vr.grad,
+            min_cos=0.99,
+            max_rel_l2=6e-3,
+        )
 
 
 if __name__ == "__main__":

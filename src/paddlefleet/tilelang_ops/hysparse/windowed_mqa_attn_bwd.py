@@ -283,7 +283,14 @@ def windowed_mqa_bwd(
                     0.0,
                 )
             T.reduce_sum(sink_contrib, sink_acc, dim=0, clear=True)
-            T.atomic_add(dAttnSink[bh], sink_acc[0])
+            # reduce_sum broadcasts the scalar to every thread; a bare atomic
+            # would then commit it on all `threads` lanes (dAttnSink counted
+            # threads-x). Guard the once-per-(bm,bh,bb)-block global commit to a
+            # single lane using the same idiom as block_score_mha.py (T.Parallel
+            # loop + `if i == 0`).
+            for i in T.Parallel(BM):
+                if i == 0:
+                    T.atomic_add(dAttnSink[bh], sink_acc[0])
 
     return main
 

@@ -155,7 +155,7 @@ class TestWindowedMQAForward(unittest.TestCase):
         ref = _ref_masked_attn(q, k, v, allow, sm_scale)
         self.assertEqual(list(out.shape), [b, s, h, dv])
         self.assertEqual(list(lse.shape), [b, s, h])
-        self.assertGreater(_cos(out, ref), 0.995)
+        assert_close(self, "out", out, ref, min_cos=0.995, max_rel_l2=6e-2)
 
     def test_sliding_window_matches_dense(self):
         _skip_if_no_cuda(self)
@@ -177,7 +177,7 @@ class TestWindowedMQAForward(unittest.TestCase):
         )
         allow = _window_allow_mask(vr, s_kv)
         ref = _ref_masked_attn(q, k, v, allow, sm_scale)
-        self.assertGreater(_cos(out, ref), 0.995)
+        assert_close(self, "out", out, ref, min_cos=0.995, max_rel_l2=6e-2)
 
     def test_asymmetric_dk_dv(self):
         # absorbed-MLA-like head: D (key/query) != D_v (value). D=128, D_v=64.
@@ -201,7 +201,7 @@ class TestWindowedMQAForward(unittest.TestCase):
         allow = _window_allow_mask(vr, s_kv)
         ref = _ref_masked_attn(q, k, v, allow, sm_scale)
         self.assertEqual(list(out.shape), [b, s, h, dv])
-        self.assertGreater(_cos(out, ref), 0.995)
+        assert_close(self, "out", out, ref, min_cos=0.995, max_rel_l2=6e-2)
 
 
 class TestSlidingWindowWrapper(unittest.TestCase):
@@ -240,9 +240,15 @@ class TestSlidingWindowWrapper(unittest.TestCase):
         ref = _ref_masked_attn(qr, kr, vr_, allow, sm_scale)
         ref.backward(g.astype("float32"))
 
-        self.assertGreater(_cos(qk.grad, qr.grad), 0.99)
-        self.assertGreater(_cos(kk.grad, kr.grad), 0.99)
-        self.assertGreater(_cos(vk.grad, vr_.grad), 0.99)
+        assert_close(
+            self, "dQ", qk.grad, qr.grad, min_cos=0.99, max_rel_l2=7e-2
+        )
+        assert_close(
+            self, "dK", kk.grad, kr.grad, min_cos=0.99, max_rel_l2=1.3e-1
+        )
+        assert_close(
+            self, "dV", vk.grad, vr_.grad, min_cos=0.99, max_rel_l2=1.3e-1
+        )
 
     def test_grads_ragged_seqlen(self):
         # Regression for the windowed-bwd out-of-bounds guard: when
@@ -290,9 +296,15 @@ class TestSlidingWindowWrapper(unittest.TestCase):
                 np.isfinite(got.astype("float32").numpy()).all(),
                 f"{name} has non-finite entries (OOB read?)",
             )
-        self.assertGreater(_cos(qk.grad, qr.grad), 0.99)
-        self.assertGreater(_cos(kk.grad, kr.grad), 0.99)
-        self.assertGreater(_cos(vk.grad, vr_.grad), 0.99)
+        assert_close(
+            self, "dQ", qk.grad, qr.grad, min_cos=0.99, max_rel_l2=7e-2
+        )
+        assert_close(
+            self, "dK", kk.grad, kr.grad, min_cos=0.99, max_rel_l2=1.3e-1
+        )
+        assert_close(
+            self, "dV", vk.grad, vr_.grad, min_cos=0.99, max_rel_l2=1.3e-1
+        )
 
     def test_wrapper_default_sm_scale(self):
         _skip_if_no_cuda(self)
@@ -390,7 +402,7 @@ class TestWindowedMQAAttnSink(unittest.TestCase):
         )
         allow = _window_allow_mask(vr, s_kv)
         ref = _ref_masked_attn(q, k, v, allow, sm_scale, attn_sink=attn_sink)
-        self.assertGreater(_cos(out, ref), 0.99)
+        assert_close(self, "out", out, ref, min_cos=0.99, max_rel_l2=6e-2)
 
     def test_sink_grad_matches_reference(self):
         # d(attn_sink) from the fused backward must match autograd on the dense
@@ -435,8 +447,17 @@ class TestWindowedMQAAttnSink(unittest.TestCase):
         ref.backward(g.astype("float32"))
 
         self.assertIsNotNone(sink_k.grad)
-        self.assertGreater(_cos(qk.grad, qr.grad), 0.99)
-        self.assertGreater(_cos(sink_k.grad, sink_r.grad), 0.99)
+        assert_close(
+            self, "dQ", qk.grad, qr.grad, min_cos=0.99, max_rel_l2=7e-2
+        )
+        assert_close(
+            self,
+            "dSink",
+            sink_k.grad,
+            sink_r.grad,
+            min_cos=0.99,
+            max_rel_l2=8e-2,
+        )
 
 
 class TestPackedMultiDocBackward(unittest.TestCase):
@@ -502,13 +523,26 @@ class TestPackedMultiDocBackward(unittest.TestCase):
         ref = _ref_masked_attn(qr, kr, vr_, allow, sm_scale, attn_sink=sink_r)
         ref.backward(g.astype("float32"))
 
-        assert_close(self, "out", out, ref, min_cos=0.99)
-        assert_close(self, "dQ", qk.grad, qr.grad, min_cos=0.99)
-        assert_close(self, "dK", kk.grad, kr.grad, min_cos=0.99)
-        assert_close(self, "dV", vk.grad, vr_.grad, min_cos=0.99)
+        assert_close(self, "out", out, ref, min_cos=0.99, max_rel_l2=6e-2)
+        assert_close(
+            self, "dQ", qk.grad, qr.grad, min_cos=0.99, max_rel_l2=7e-2
+        )
+        assert_close(
+            self, "dK", kk.grad, kr.grad, min_cos=0.99, max_rel_l2=1.3e-1
+        )
+        assert_close(
+            self, "dV", vk.grad, vr_.grad, min_cos=0.99, max_rel_l2=1.3e-1
+        )
         if sink_k is not None:
             self.assertIsNotNone(sink_k.grad)
-            assert_close(self, "dSink", sink_k.grad, sink_r.grad, min_cos=0.99)
+            assert_close(
+                self,
+                "dSink",
+                sink_k.grad,
+                sink_r.grad,
+                min_cos=0.99,
+                max_rel_l2=8e-2,
+            )
 
     def test_packed_multidoc_backward_sinkless(self):
         _skip_if_no_cuda(self)
