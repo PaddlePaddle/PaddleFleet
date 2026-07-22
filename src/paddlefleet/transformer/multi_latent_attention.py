@@ -512,7 +512,14 @@ class MultiLatentAttention(Attention):
         else:
             q_absorbed, wv_b = None, None
 
-        if self.recompute_core_attention and self.training:
+        if (
+            self.recompute_core_attention and self.training
+        ):
+            q_absorbed, wv_b = (
+                self._compute_absorbed_q(query)
+                if _ACCURACY_COMPATIBLE_KERNEL
+                else (q_absorbed, wv_b)
+            )
             core_attn_out = recompute(
                 self.core_attention,
                 query,
@@ -536,6 +543,8 @@ class MultiLatentAttention(Attention):
                 v_b_proj_weight=wv_b,
             )
         else:
+            if _ACCURACY_COMPATIBLE_KERNEL:
+                q_absorbed, wv_b = self._compute_absorbed_q(query)
             # Static batching attention kernel.
             core_attn_out = self.core_attention(
                 query,

@@ -34,6 +34,7 @@ from paddlefleet.transformer.dsa_attention import (
     DSAIndexerSublayersSpec,
     FusedDSAIndexerLoss,
     Indexer,
+    _unfused_absorbed_dsa_attention,
     _unfused_dsa_attention,
     hadamard_transform,
     rotate_activation,
@@ -147,6 +148,41 @@ class TestRotateActivation(unittest.TestCase):
         out_manual = hadamard_transform(x, scale=expected_scale)
         diff = (out - out_manual).abs().max()
         self.assertAlmostEqual(float(diff), 0.0, places=4)
+
+
+class TestUnfusedAbsorbedDSAAttention(unittest.TestCase):
+    def test_matches_explicit_value_projection(self):
+        paddle.seed(2026)
+        b, s, heads, latent, rope, value_dim = 1, 4, 2, 8, 4, 6
+        query = paddle.randn([b, s, heads, latent + rope], dtype="float32")
+        key = paddle.randn([b, s, 1, latent + rope], dtype="float32")
+        value = key[..., :latent]
+        v_up = paddle.randn([heads, latent, value_dim], dtype="float32")
+        mask = paddle.triu(
+            paddle.full([s, s], float("-inf"), dtype="float32"), diagonal=1
+        )[None, None]
+
+        actual = _unfused_absorbed_dsa_attention(
+            query, key, value, v_up, mask, 0.5
+        )
+        probabilities = paddle.nn.functional.softmax(
+            paddle.matmul(
+                query.transpose([0, 2, 1, 3]),
+                key.transpose([0, 2, 3, 1]),
+            )
+            * 0.5
+            + mask,
+            axis=-1,
+        )
+        latent_context = paddle.matmul(
+            probabilities, value.transpose([0, 2, 1, 3])
+        )
+        expected = paddle.einsum(
+            "bhsr,hrd->bshd", latent_context, v_up
+        ).reshape([b, s, heads * value_dim])
+
+        self.assertEqual(actual.shape, [b, s, heads * value_dim])
+        self.assertTrue(paddle.equal_all(actual, expected).item())
 
 
 class TestUnfusedDSAAttention(unittest.TestCase):

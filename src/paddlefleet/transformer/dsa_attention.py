@@ -25,6 +25,7 @@ This module provides:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -56,6 +57,10 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_ACCURACY_COMPATIBLE_KERNEL = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
 
 
 def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
@@ -186,6 +191,30 @@ def _unfused_dsa_attention(
     )
 
     return output
+
+
+def _unfused_absorbed_dsa_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    v_up_weight: Tensor,
+    combined_mask: Tensor | None,
+    softmax_scale: float,
+) -> Tensor:
+    """Unfused absorbed-MLA sparse attention for accuracy alignment."""
+    b, s, num_heads, _ = query.shape
+    q = query.transpose([0, 2, 1, 3])
+    k = key.transpose([0, 2, 3, 1])
+    scores = paddle.matmul(q.cast("float32"), k.cast("float32")) * softmax_scale
+    if combined_mask is not None:
+        scores = scores + combined_mask.cast("float32")
+    probabilities = F.softmax(scores, axis=-1)
+    latent_value = value.transpose([0, 2, 1, 3])
+    latent_context = paddle.matmul(probabilities.cast(value.dtype), latent_value)
+    projected = paddle.einsum(
+        "bhsr,hrd->bshd", latent_context, v_up_weight
+    )
+    return projected.reshape([b, s, num_heads * v_up_weight.shape[-1]])
 
 
 def _normalize_dsa_mask(mask: Tensor | None) -> Tensor | None:
@@ -1569,9 +1598,28 @@ class DSAttention(FleetLayer):
             combined_mask = attention_mask.cast("float32") + combined_mask
 
         # Run sparse attention (batch-first layout)
-        core_attn_out = _unfused_dsa_attention(
-            query, key, value, combined_mask, self.softmax_scale
-        )
+        if (
+            _ACCURACY_COMPATIBLE_KERNEL
+            and q_absorbed is not None
+            and kv_compressed is not None
+            and k_pos_emb is not None
+            and v_b_proj_weight is not None
+        ):
+            key_absorbed = paddle.concat(
+                [kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1
+            )
+            core_attn_out = _unfused_absorbed_dsa_attention(
+                q_absorbed,
+                key_absorbed,
+                kv_compressed.unsqueeze(-2),
+                v_b_proj_weight,
+                combined_mask,
+                self.softmax_scale,
+            )
+        else:
+            core_attn_out = _unfused_dsa_attention(
+                query, key, value, combined_mask, self.softmax_scale
+            )
 
         # Attach indexer loss if training
         if self.training and indexer_loss is not None:
