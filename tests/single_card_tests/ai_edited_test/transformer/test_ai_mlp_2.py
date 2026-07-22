@@ -90,6 +90,38 @@ class TestMLPWithSwigluPath(unittest.TestCase):
         self.assertEqual(output.shape, [2, 4, 64])
         return compatible_swiglu
 
+    def test_accuracy_compatible_projection_matches_functional_linear(self):
+        config = _make_config(gated_linear_unit=True)
+        spec = _make_mlp_spec(config)
+        mlp = MLP(config=config, sublayers_spec=spec)
+        hidden_states = paddle.randn([2, 4, 128])
+
+        output, output_bias = mlp_module._accuracy_compatible_projection(
+            mlp.down_proj, hidden_states
+        )
+
+        expected = F.linear(hidden_states, mlp.down_proj.weight)
+        paddle.testing.assert_close(output, expected)
+        self.assertIsNone(output_bias)
+
+    def test_accuracy_gate_selects_projection(self):
+        config = _make_config(gated_linear_unit=True)
+        spec = _make_mlp_spec(config)
+        mlp = MLP(config=config, sublayers_spec=spec)
+        hidden_states = paddle.randn([2, 4, 64])
+
+        with mock.patch.object(
+            mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", True
+        ), mock.patch.object(
+            mlp_module,
+            "_accuracy_compatible_projection",
+            wraps=mlp_module._accuracy_compatible_projection,
+        ) as compatible_projection:
+            output, _ = mlp(hidden_states)
+
+        self.assertEqual(output.shape, [2, 4, 64])
+        compatible_projection.assert_called_once()
+
     def test_accuracy_gate_selects_explicit_swiglu(self):
         self._run_with_accuracy_gate(True).assert_called_once()
 

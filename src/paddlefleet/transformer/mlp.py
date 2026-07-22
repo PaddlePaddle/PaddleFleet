@@ -65,6 +65,13 @@ def _accuracy_compatible_swiglu(hidden_states):
     return F.silu(gate) * linear
 
 
+def _accuracy_compatible_projection(projection, hidden_states):
+    output_bias = projection.bias if projection.skip_bias_add else None
+    bias = None if projection.skip_bias_add else projection.bias
+    output = F.linear(hidden_states, projection.weight, bias)
+    return output, output_bias
+
+
 # pylint: disable=missing-class-docstring
 @dataclass
 class MLPSublayersSpec:
@@ -322,7 +329,15 @@ class MLP(FleetLayer):
 
         # [s, b, h]
         nvtx_range_push(suffix="down_proj")
-        output, output_bias = self.down_proj(intermediate_parallel)
+        if (
+            _ACCURACY_COMPATIBLE_KERNEL
+            and self.config.tensor_model_parallel_size == 1
+        ):
+            output, output_bias = _accuracy_compatible_projection(
+                self.down_proj, intermediate_parallel
+            )
+        else:
+            output, output_bias = self.down_proj(intermediate_parallel)
         nvtx_range_pop(suffix="down_proj")
 
         if per_token_scale is not None and output_bias is not None:
