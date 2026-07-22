@@ -945,7 +945,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
           '
 
       - name: Qwen sft
@@ -957,7 +957,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
           '
 
       - name: Qwen lora
@@ -969,7 +969,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
           '
 
       - name: Qwen vl sft
