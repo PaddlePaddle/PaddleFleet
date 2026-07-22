@@ -37,8 +37,18 @@ if paddlefleet_ops.is_sonic_moe_available():
     from paddlefleet_ops.sonicmoe.enums import ActivationType
     from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
         deepep_topk_to_sonic_metadata,
-        deepep_topk_to_sonic_metadata_with_scales,
     )
+
+    try:
+        from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
+            deepep_topk_to_sonic_metadata_with_scales,
+        )
+    except ImportError:
+        # Older installed paddlefleet_ops binaries (pre-#1348) do not export
+        # the fp8-scales variant; the sibling optional imports below use the
+        # same guard. Only the fp8 + fp8_scale MoE path calls it, which this
+        # config does not exercise.
+        deepep_topk_to_sonic_metadata_with_scales = None
     from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
         _differentiable_router_scores,
     )

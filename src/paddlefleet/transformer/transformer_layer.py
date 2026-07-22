@@ -1022,6 +1022,8 @@ class TransformerLayer(nn.Layer):
             self.self_attn, DSv4HybridAttention
         ):
             extra_kwargs["input_ids"] = input_ids
+        if "shared_kv" in kwargs:
+            extra_kwargs["shared_kv"] = kwargs["shared_kv"]
 
         if rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
@@ -1498,6 +1500,331 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             hidden_states.stop_gradient = False
 
         return hidden_states
+
+
+class HySparseTransformerLayer(TransformerLayer):
+    """Transformer layer with cross-layer KV sharing."""
+
+    def _mtp_enabled(self, is_mtp):
+        return (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not is_mtp
+            and not self.config.mtp_load_weight_only
+            and not self.config.enable_mtp_magic_send
+        )
+
+    def _mtp_split(self, dict_args, is_mtp):
+        """Split MTP-stacked tensors into main-decoder parts.
+
+        Mirrors ``TransformerLayer.forward`` (the base class does this inline).
+        MTP concatenates the main hidden state and the ``num_nextn_predict_layers``
+        shifted hidden states along the batch dimension; input_ids / position_ids /
+        masks carry their MTP parts along the seq dimension. Split so the layer
+        body sees a consistent (main-decoder) batch/seq, mutating ``dict_args`` in
+        place. Returns a context dict for :meth:`_mtp_restore`, or ``None`` when
+        MTP is not active.
+        """
+        if not self._mtp_enabled(is_mtp):
+            return None
+        n = self.config.num_nextn_predict_layers
+        ctx = {
+            "mtp_ids": None,
+            "mtp_input_ids": None,
+            "rotary_pos_emb_full": None,
+            "rotary_pos_cos_full": None,
+            "rotary_pos_sin_full": None,
+            "attn_mask_mtp": None,
+        }
+
+        # hidden_states: split along batch dim -> main + mtp parts
+        tensor_list = paddle.split(dict_args["hidden_states"], n + 1)
+        hidden_states = tensor_list[0]
+        ctx["mtp_input"] = tuple(tensor_list[1:])
+        dict_args["hidden_states"] = hidden_states
+
+        # position_ids: split along seq dim
+        if not self.config.gpt_model_use_experimental_version:
+            if (
+                "position_ids" in dict_args
+                and dict_args["position_ids"] is not None
+            ):
+                position_ids = dict_args["position_ids"]
+                dict_args["position_ids"] = position_ids[:, :-n]
+                ctx["mtp_ids"] = position_ids[:, -n:]
+
+        # rotary_pos_emb/cos/sin: trim to main-decoder seq length
+        if self.config.sequence_parallel:
+            main_seq_len = (
+                hidden_states.shape[0] * self.config.tensor_model_parallel_size
+            )
+        else:
+            main_seq_len = hidden_states.shape[1]
+        if (
+            "rotary_pos_emb" in dict_args
+            and dict_args["rotary_pos_emb"] is not None
+        ):
+            ctx["rotary_pos_emb_full"] = dict_args["rotary_pos_emb"]
+            if self.config.sequence_parallel:
+                dict_args["rotary_pos_emb"] = ctx["rotary_pos_emb_full"][
+                    :main_seq_len
+                ]
+            else:
+                dict_args["rotary_pos_emb"] = ctx["rotary_pos_emb_full"][
+                    :, :main_seq_len
+                ]
+        if (
+            "rotary_pos_cos" in dict_args
+            and dict_args["rotary_pos_cos"] is not None
+        ):
+            ctx["rotary_pos_cos_full"] = dict_args["rotary_pos_cos"]
+            dict_args["rotary_pos_cos"] = ctx["rotary_pos_cos_full"][
+                :, :main_seq_len
+            ]
+        if (
+            "rotary_pos_sin" in dict_args
+            and dict_args["rotary_pos_sin"] is not None
+        ):
+            ctx["rotary_pos_sin_full"] = dict_args["rotary_pos_sin"]
+            dict_args["rotary_pos_sin"] = ctx["rotary_pos_sin_full"][
+                :, :main_seq_len
+            ]
+
+        # input_ids: split along seq dim (only when it carries mtp tokens)
+        if "input_ids" in dict_args and dict_args["input_ids"] is not None:
+            full_input_ids = dict_args["input_ids"]
+            seq_lens = hidden_states.shape[
+                0 if self.config.sequence_parallel else 1
+            ]
+            if get_context_parallel_world_size() > 1:
+                seq_lens *= get_context_parallel_world_size()
+            if full_input_ids.shape[-1] > seq_lens:
+                dict_args["input_ids"] = full_input_ids[:, :-n].contiguous()
+                ctx["mtp_input_ids"] = full_input_ids[:, -n:].contiguous()
+
+        # attn_mask_startend_row_indices: split along seq dim (old dataflow)
+        if (
+            not self.config.experimental_dataflow
+            and "attn_mask_startend_row_indices" in dict_args
+            and dict_args["attn_mask_startend_row_indices"] is not None
+        ):
+            mask = dict_args["attn_mask_startend_row_indices"]
+            dict_args["attn_mask_startend_row_indices"] = mask[:, :, :-n, :]
+            ctx["attn_mask_mtp"] = mask[:, :, -n:, :]
+
+        return ctx
+
+    def _mtp_restore(self, dict_args, output, ctx):
+        """Re-stack MTP outputs and restore full-length auxiliary tensors.
+
+        Inverse of :meth:`_mtp_split`. Returns the batch-stacked hidden state and
+        restores ``dict_args`` (input_ids / position_ids / rotary / mask) to full
+        length for the next layer.
+        """
+        hidden_states_concat = paddle.concat([output, *ctx["mtp_input"]])
+
+        if not self.config.gpt_model_use_experimental_version:
+            if "position_ids" in dict_args and ctx["mtp_ids"] is not None:
+                dict_args["position_ids"] = paddle.concat(
+                    [dict_args["position_ids"], ctx["mtp_ids"]], axis=1
+                )
+        if ctx["rotary_pos_emb_full"] is not None:
+            dict_args["rotary_pos_emb"] = ctx["rotary_pos_emb_full"]
+        if ctx["rotary_pos_cos_full"] is not None:
+            dict_args["rotary_pos_cos"] = ctx["rotary_pos_cos_full"]
+        if ctx["rotary_pos_sin_full"] is not None:
+            dict_args["rotary_pos_sin"] = ctx["rotary_pos_sin_full"]
+        if ctx["mtp_input_ids"] is not None and "input_ids" in dict_args:
+            dict_args["input_ids"] = paddle.concat(
+                [dict_args["input_ids"], ctx["mtp_input_ids"]], axis=1
+            )
+        if (
+            not self.config.experimental_dataflow
+            and "attn_mask_startend_row_indices" in dict_args
+            and ctx["attn_mask_mtp"] is not None
+        ):
+            dict_args["attn_mask_startend_row_indices"] = paddle.concat(
+                [
+                    dict_args["attn_mask_startend_row_indices"],
+                    ctx["attn_mask_mtp"],
+                ],
+                axis=2,
+            )
+        return hidden_states_concat
+
+    def forward(
+        self,
+        dict_args: dict,
+    ):
+        """
+        Perform a forward pass through the transformer layer.
+
+        This method calls the core computation of a transformer layer, including
+        self-attention, cross-attention (if applicable), and feed-forward operations.
+        """
+        # Remove 'dynamic_inference_decode_only' from kwargs if present
+        # this is only used to uniquely identify decode and non-decode cuda graph
+        # runners in the cuda graph manager
+        dict_args.pop("dynamic_inference_decode_only", None)
+        keys = tuple(dict_args.keys())
+        values = tuple(dict_args.values())
+
+        is_mtp = dict_args.pop("is_mtp", False)
+        TransformerLayer._skip_mtp_probes = (
+            is_mtp  # Suppress MD5 probes for MTP passes
+        )
+
+        # MTP stacks the main decoder + shifted hidden states along the batch
+        # dim (see MTP module's paddle.concat(axis=0)); the base
+        # TransformerLayer.forward splits them off so attention / MoE router see
+        # a consistent batch, then re-stacks. HySparseTransformerLayer must do
+        # the same, otherwise the batch-2 stacked hidden reaches the MoE router
+        # with batch-1 input_ids and trips its shape assertion. Split now,
+        # restore after the layer body runs.
+        mtp_ctx = self._mtp_split(dict_args, is_mtp)
+
+        if self.full_recompute or (not has_recovered()):
+
+            def dict_args_get_clone(key):
+                """Clone is necessary for some args."""
+                value = dict_args.get(key, None)
+                return value.clone() if value is not None else None
+
+            # Mirror the base TransformerLayer recompute path: recompute both
+            # when full_recompute is set AND inside the RECOVER_STEP recovery
+            # window (not has_recovered()), so recovering training keeps the
+            # same reduced activation footprint. Activation-offload settings are
+            # threaded via _compute_act_offload_kwargs (consumed by recompute).
+            offload_kwargs = self._compute_act_offload_kwargs()
+            outputs = recompute(
+                self._forward_impl,
+                hidden_states=dict_args["hidden_states"],
+                attention_mask=dict_args.get("attention_mask", None),
+                attn_mask_startend_row_indices=dict_args_get_clone(
+                    "attn_mask_startend_row_indices"
+                ),
+                context=dict_args.get("context", None),
+                context_mask=dict_args.get("context_mask", None),
+                rotary_pos_emb=dict_args_get_clone("rotary_pos_emb"),
+                rotary_pos_cos=dict_args_get_clone("rotary_pos_cos"),
+                rotary_pos_sin=dict_args_get_clone("rotary_pos_sin"),
+                swa_rotary_pos_emb=dict_args_get_clone("swa_rotary_pos_emb"),
+                swa_rotary_pos_cos=dict_args_get_clone("swa_rotary_pos_cos"),
+                swa_rotary_pos_sin=dict_args_get_clone("swa_rotary_pos_sin"),
+                position_ids=dict_args_get_clone("position_ids"),
+                attention_bias=dict_args.get("attention_bias", None),
+                packed_seq_params=dict_args.get("packed_seq_params", None),
+                input_ids=dict_args.get("input_ids", None),
+                origin_input_ids=dict_args.get("origin_input_ids", None),
+                shared_key=dict_args.get("shared_key", None),
+                shared_block_indices=dict_args.get(
+                    "shared_block_indices", None
+                ),
+                **offload_kwargs,
+            )
+        else:
+            outputs = self._forward_impl(**dict_args)
+
+        if isinstance(outputs, tuple):
+            output, shared_key, shared_block_indices = outputs
+        else:
+            output, shared_key, shared_block_indices = outputs, None, None
+
+        rst = OrderedDict()
+        rst = {"hidden_states": output}
+        if mtp_ctx is not None:
+            # Re-stack main + mtp hidden along batch and restore full-length
+            # auxiliary tensors (input_ids / position_ids / rotary / mask) into
+            # dict_args for the next layer.
+            rst["hidden_states"] = self._mtp_restore(dict_args, output, mtp_ctx)
+        if shared_key is not None:
+            rst["shared_key"] = shared_key
+            rst["shared_block_indices"] = shared_block_indices
+        rst = {**dict_args, **rst}
+        return rst
+
+    def _forward_impl(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+        input_ids: Tensor | None = None,
+        shared_key: Tensor | None = None,
+        shared_block_indices: Tensor | None = None,
+        origin_input_ids: Tensor | None = None,
+        **kwargs,
+    ):
+        timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
+
+        # 使用统一的 shared_kv 参数处理输入输出:
+        # 1. 对于 swa 层是输入, 只消费 shared_kv，不生产;
+        # 2. 对于 full 层是输出, 只生产 shared_kv, 不消费.
+        if self.self_attn.is_swa:
+            if shared_key is None or shared_block_indices is None:
+                raise ValueError(
+                    f"HySparse SWA layer (layer_number={self.layer_number}) "
+                    "requires shared KV latent and top-k block indices from a "
+                    "preceding full-attention layer, but none were provided. "
+                    "Ensure the first backbone attention layer is a full "
+                    "(non-SWA) attention layer so it can produce the shared "
+                    "state -- e.g. set window_attn_skip_freq so that layer 0 "
+                    "is full attention rather than SWA."
+                )
+            shared_kv = [shared_key, shared_block_indices]
+        else:
+            shared_kv = []
+
+        self._log_md5(hidden_states, "input", self.layer_number)
+        with profile("attn"):
+            hidden_states, context = self._forward_attention(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                context=context,
+                context_mask=context_mask,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                swa_rotary_pos_sin=swa_rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=self.full_recompute,
+                input_ids=input_ids,
+                shared_kv=shared_kv,
+                **kwargs,
+            )
+        assert context is None, (
+            "HySparseTransformerLayer doesn't support cross-attention."
+        )
+        self._log_md5(hidden_states, "post_attn_residual", self.layer_number)
+        with profile(timer_name):
+            output = self._forward_mlp(
+                hidden_states,
+                input_ids=input_ids,
+                origin_input_ids=origin_input_ids,
+            )
+        self._log_md5(output, "layer_output", self.layer_number)
+
+        if (not self.self_attn.is_swa) and shared_kv:
+            shared_key, shared_block_indices = shared_kv
+            if self.training and not paddle.is_grad_enabled():
+                shared_key.stop_gradient = False
+            return output, shared_key, shared_block_indices
+        return output
 
 
 class TransformerLayerWithOverlap(TransformerLayer):
