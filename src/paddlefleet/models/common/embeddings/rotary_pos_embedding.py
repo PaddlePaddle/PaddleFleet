@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,6 +30,10 @@ from paddle import Tensor, nn
 from paddlefleet import parallel_state
 
 logger = logging.getLogger(__name__)
+
+_ACCURACY_COMPATIBLE_KERNEL = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
 
 
 __all__ = [
@@ -77,15 +82,24 @@ class RotaryEmbedding(nn.Layer):
         self.rotary_interleaved = rotary_interleaved
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        self.inv_freq = 1.0 / (
-            rotary_base
-            ** (
-                paddle.arange(0, dim, 2, dtype=paddle.int64).astype(
-                    dtype=paddle.float32
+        if _ACCURACY_COMPATIBLE_KERNEL:
+            with paddle.device.device_guard("cpu"):
+                exponent = paddle.arange(0, dim, 2, dtype=paddle.float32) / dim
+                self.inv_freq = paddle.reciprocal(
+                    paddle.pow(paddle.to_tensor(rotary_base, dtype=paddle.float32), exponent)
                 )
-                / dim
+            if paddle.device.get_device().split(":")[0].lower() == "gpu":
+                self.inv_freq = self.inv_freq.cuda()
+        else:
+            self.inv_freq = 1.0 / (
+                rotary_base
+                ** (
+                    paddle.arange(0, dim, 2, dtype=paddle.int64).astype(
+                        dtype=paddle.float32
+                    )
+                    / dim
+                )
             )
-        )
 
         if rope_scaling:
             self.inv_freq = self._apply_scaling(
