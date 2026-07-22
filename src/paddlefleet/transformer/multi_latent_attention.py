@@ -52,6 +52,18 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
+_ACCURACY_COMPATIBLE_KERNEL: bool = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
+
+
+def _accuracy_compatible_q_down_projection(projection, hidden_states):
+    """Apply q-down with the Torch-aligned strided-transpose GEMM formulation."""
+    output_bias = projection.bias if projection.skip_bias_add else None
+    bias = None if projection.skip_bias_add else projection.bias
+    output = paddle.nn.functional.linear(hidden_states, projection.weight, bias)
+    return output, output_bias
+
 
 def _ec_compatible_rope_apply(
     q_pe,
@@ -813,7 +825,15 @@ class MLASelfAttention(MultiLatentAttention):
         if self.config.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [b, s, q_lora_rank / TP]
-            q_compressed, _ = self.q_a_proj(hidden_states)
+            if (
+                _ACCURACY_COMPATIBLE_KERNEL
+                and get_pg_size(self.pg_collection.tp) == 1
+            ):
+                q_compressed, _ = _accuracy_compatible_q_down_projection(
+                    self.q_a_proj, hidden_states
+                )
+            else:
+                q_compressed, _ = self.q_a_proj(hidden_states)
 
             # When output is sharded (ColumnParallelLinear):
             # Gather output to restore output dim q_lora_rank;
