@@ -139,15 +139,6 @@ def _causal_valid_range(b, s):
     return paddle.concat([bos, eos], axis=-1).contiguous()
 
 
-def _cos(a, b):
-    import numpy as np
-
-    af = a.astype("float32").numpy().reshape(-1)
-    bf = b.astype("float32").numpy().reshape(-1)
-    denom = (np.linalg.norm(af) * np.linalg.norm(bf)) + 1e-12
-    return float(np.dot(af, bf) / denom)
-
-
 def _select_blocks(b, s, block_B, topk):
     """Per-token relative block ids: block 0 plus the running block (pos//BB),
     padded with -1 to width ``topk``."""
@@ -215,9 +206,16 @@ class TestBlockSparseDSA(unittest.TestCase):
         out_dsa, dq_dsa, dkv_dsa = self._run_dsa(q, kf, idx, vr, sm)
         out_ref, dq_ref, dkv_ref = self._run_ref(q, kf, idx, vr, sm)
         self.assertEqual(list(out_dsa.shape), [b, s, h * self.Dv])
-        self.assertGreater(_cos(out_dsa, out_ref), 0.99)
-        self.assertGreater(_cos(dq_dsa, dq_ref), 0.99)
-        self.assertGreater(_cos(dkv_dsa, dkv_ref), 0.99)
+        # Cosine AND magnitude-sensitive rel-L2 (cosine alone is scale-blind).
+        assert_close(
+            self, "dsa_h4:out", out_dsa, out_ref, min_cos=0.99, max_rel_l2=4e-3
+        )
+        assert_close(
+            self, "dsa_h4:dq", dq_dsa, dq_ref, min_cos=0.99, max_rel_l2=5e-3
+        )
+        assert_close(
+            self, "dsa_h4:dkv", dkv_dsa, dkv_ref, min_cos=0.99, max_rel_l2=4e-3
+        )
 
     def test_dsa_vs_dense_reference_h64(self):
         _skip_if_no_dsa(self)
@@ -225,9 +223,20 @@ class TestBlockSparseDSA(unittest.TestCase):
         q, kf, vr, idx, sm = self._make(b, s, h, topk, seed=13)
         out_dsa, dq_dsa, dkv_dsa = self._run_dsa(q, kf, idx, vr, sm)
         out_ref, dq_ref, dkv_ref = self._run_ref(q, kf, idx, vr, sm)
-        self.assertGreater(_cos(out_dsa, out_ref), 0.99)
-        self.assertGreater(_cos(dq_dsa, dq_ref), 0.99)
-        self.assertGreater(_cos(dkv_dsa, dkv_ref), 0.99)
+        assert_close(
+            self, "dsa_h64:out", out_dsa, out_ref, min_cos=0.99, max_rel_l2=4e-3
+        )
+        assert_close(
+            self, "dsa_h64:dq", dq_dsa, dq_ref, min_cos=0.99, max_rel_l2=5e-3
+        )
+        assert_close(
+            self,
+            "dsa_h64:dkv",
+            dkv_dsa,
+            dkv_ref,
+            min_cos=0.99,
+            max_rel_l2=4e-3,
+        )
 
     def test_learnable_sink_matches_reference(self):
         # A finite learnable per-head sink: DSA forward + dq/dkv/d_sink grads
@@ -272,10 +281,31 @@ class TestBlockSparseDSA(unittest.TestCase):
         out_ref = out_ref.reshape([b, s, h * self.Dv])
         out_ref.sum().backward()
 
-        self.assertGreater(_cos(out_dsa, out_ref), 0.99)
+        assert_close(
+            self,
+            "dsa_sink:out",
+            out_dsa,
+            out_ref,
+            min_cos=0.99,
+            max_rel_l2=1.2e-1,
+        )
         self.assertIsNotNone(sink_d.grad)
-        self.assertGreater(_cos(qd.grad, qr.grad), 0.99)
-        self.assertGreater(_cos(sink_d.grad, sink_r.grad), 0.99)
+        assert_close(
+            self,
+            "dsa_sink:dq",
+            qd.grad,
+            qr.grad,
+            min_cos=0.99,
+            max_rel_l2=1e-1,
+        )
+        assert_close(
+            self,
+            "dsa_sink:dsink",
+            sink_d.grad,
+            sink_r.grad,
+            min_cos=0.99,
+            max_rel_l2=3e-1,
+        )
 
     def test_neg_sink_matches_sinkless(self):
         # Sinkless (attn_sink=None) must match a very-negative explicit sink:
@@ -305,7 +335,16 @@ class TestBlockSparseDSA(unittest.TestCase):
             kv_lora_rank=self.Dv,
             attn_sink=neg_sink,
         )
-        self.assertGreater(_cos(out_none, out_neg), 0.999999)
+        # Sinkless vs disabled sink must be bit-for-bit equivalent: enforce a
+        # tight magnitude ceiling alongside the near-exact cosine floor.
+        assert_close(
+            self,
+            "dsa_neg_sink_vs_sinkless:out",
+            out_none,
+            out_neg,
+            min_cos=0.999999,
+            max_rel_l2=1e-3,
+        )
 
 
 class TestBlockSparseDSAPackedMultiDoc(unittest.TestCase):
@@ -397,9 +436,15 @@ class TestBlockSparseDSAPackedMultiDoc(unittest.TestCase):
         self.assertGreater(int(vr[0, :, 0].max()), 0)  # nonzero bos present
         out_d, dq_d, dkv_d, _ = self._run_dsa(q, kf, idx, vr, sm)
         out_r, dq_r, dkv_r, _ = self._run_ref(q, kf, idx, vr, sm)
-        assert_close(self, "dsa_packed_out", out_d, out_r, min_cos=0.99)
-        assert_close(self, "dsa_packed_dq", dq_d, dq_r, min_cos=0.99)
-        assert_close(self, "dsa_packed_dkv", dkv_d, dkv_r, min_cos=0.99)
+        assert_close(
+            self, "dsa_packed_out", out_d, out_r, min_cos=0.99, max_rel_l2=4e-3
+        )
+        assert_close(
+            self, "dsa_packed_dq", dq_d, dq_r, min_cos=0.99, max_rel_l2=5e-3
+        )
+        assert_close(
+            self, "dsa_packed_dkv", dkv_d, dkv_r, min_cos=0.99, max_rel_l2=4e-3
+        )
 
     def test_packed_backward_finite_sink(self):
         # REGRESSION for the DSA finite-sink dQ fix. Before the fix, a finite
@@ -423,11 +468,39 @@ class TestBlockSparseDSAPackedMultiDoc(unittest.TestCase):
         sink = paddle.randn([h], dtype="float32") * 0.5
         out_d, dq_d, dkv_d, ds_d = self._run_dsa(q, kf, idx, vr, sm, sink=sink)
         out_r, dq_r, dkv_r, ds_r = self._run_ref(q, kf, idx, vr, sm, sink=sink)
-        assert_close(self, "dsa_packed_sink_out", out_d, out_r, min_cos=0.99)
-        assert_close(self, "dsa_packed_sink_dq", dq_d, dq_r, min_cos=0.99)
-        assert_close(self, "dsa_packed_sink_dkv", dkv_d, dkv_r, min_cos=0.99)
+        assert_close(
+            self,
+            "dsa_packed_sink_out",
+            out_d,
+            out_r,
+            min_cos=0.99,
+            max_rel_l2=4e-3,
+        )
+        assert_close(
+            self,
+            "dsa_packed_sink_dq",
+            dq_d,
+            dq_r,
+            min_cos=0.99,
+            max_rel_l2=5e-3,
+        )
+        assert_close(
+            self,
+            "dsa_packed_sink_dkv",
+            dkv_d,
+            dkv_r,
+            min_cos=0.99,
+            max_rel_l2=4e-3,
+        )
         self.assertIsNotNone(ds_d)
-        assert_close(self, "dsa_packed_sink_dsink", ds_d, ds_r, min_cos=0.99)
+        assert_close(
+            self,
+            "dsa_packed_sink_dsink",
+            ds_d,
+            ds_r,
+            min_cos=0.99,
+            max_rel_l2=5e-4,
+        )
 
     def test_packed_vs_solo_dq_equivalence(self):
         # A document run alone (bos=0) and the SAME document packed behind an
@@ -473,7 +546,12 @@ class TestBlockSparseDSAPackedMultiDoc(unittest.TestCase):
 
         dq_pack_doc = dq_pack[:, prefix_len:, :, :]
         assert_close(
-            self, "dsa_pack_vs_solo_dq", dq_pack_doc, dq_solo, min_cos=0.99
+            self,
+            "dsa_pack_vs_solo_dq",
+            dq_pack_doc,
+            dq_solo,
+            min_cos=0.99,
+            max_rel_l2=1e-3,
         )
 
 

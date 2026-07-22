@@ -163,6 +163,7 @@ class TestBlockScoreMHADenseRef(unittest.TestCase):
             lse_k,
             lse_r,
             min_cos=0.999,
+            max_rel_l2=1e-7,
         )
         self._check_block_logit(f"{tag}:block_logit", blk_k, blk_r)
 

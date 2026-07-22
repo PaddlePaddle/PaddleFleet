@@ -135,6 +135,17 @@ def _cos(a, b):
     return float(np.dot(af, bf) / denom)
 
 
+def _rel_l2(a, b):
+    # Relative Frobenius error ||a-ref|| / ||ref||: unlike cosine this is
+    # scale-SENSITIVE, so it catches a constant-factor / offset gradient error
+    # (e.g. a wrong gradient scale) that cosine is blind to.
+    import numpy as np
+
+    af = a.astype("float32").numpy().reshape(-1)
+    bf = b.astype("float32").numpy().reshape(-1)
+    return float(np.linalg.norm(af - bf) / (np.linalg.norm(bf) + 1e-12))
+
+
 def _select_blocks(b, s, block_B, topk):
     """Per-token relative block ids: block 0 plus the running block (pos//BB),
     padded with -1 to width ``topk``."""
@@ -212,9 +223,17 @@ class TestBlockSparseDSAPadTo512(unittest.TestCase):
             _cos(dkv_dsa[..., : self.KV_LORA], dkv_ref[..., : self.KV_LORA]),
             0.99,
         )
+        self.assertLess(
+            _rel_l2(dkv_dsa[..., : self.KV_LORA], dkv_ref[..., : self.KV_LORA]),
+            4e-3,
+        )
         self.assertGreater(
             _cos(dkv_dsa[..., self.KV_LORA :], dkv_ref[..., self.KV_LORA :]),
             0.99,
+        )
+        self.assertLess(
+            _rel_l2(dkv_dsa[..., self.KV_LORA :], dkv_ref[..., self.KV_LORA :]),
+            5e-3,
         )
 
     def test_pad_path_equivalent_to_native_512(self):
@@ -262,7 +281,10 @@ class TestBlockSparseDSAPadTo512(unittest.TestCase):
         out512 = out512.reshape([b, s, h * self.KV_LORA])
 
         self.assertEqual(list(out_pad.shape), list(out512.shape))
+        # Near-exact equivalence: enforce a tight magnitude ceiling alongside
+        # the near-exact cosine floor (cosine alone would miss a scale drift).
         self.assertGreater(_cos(out_pad, out512), 0.999999)
+        self.assertLess(_rel_l2(out_pad, out512), 1e-3)
 
 
 if __name__ == "__main__":
