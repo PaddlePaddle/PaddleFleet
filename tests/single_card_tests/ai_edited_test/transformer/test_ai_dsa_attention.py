@@ -290,5 +290,19 @@ class TestDSAIndexerLossAutoScaler(unittest.TestCase):
         self.assertEqual(result.shape, output.shape)
 
 
+class TestDSATopKSharing(unittest.TestCase):
+    def test_layer_classification(self):
+        from paddlefleet.transformer.dsa_attention import (
+            is_dsa_skip_topk_layer,
+            source_dsa_compute_layer,
+        )
+
+        self.assertFalse(is_dsa_skip_topk_layer(3, 3, 4))
+        self.assertTrue(is_dsa_skip_topk_layer(4, 3, 4))
+        self.assertEqual(source_dsa_compute_layer(4, 3, 4), 3)
+        self.assertFalse(is_dsa_skip_topk_layer(7, 3, 4))
+        self.assertEqual(source_dsa_compute_layer(8, 3, 4), 7)
+
+
 if __name__ == "__main__":
     unittest.main()
