@@ -24,6 +24,7 @@ sys.path.insert(
 )
 
 import unittest
+from unittest.mock import patch
 
 import paddle
 from paddle.distributed.fleet.meta_parallel import LayerSpec
@@ -81,6 +82,40 @@ class TestRMSNormForwardDetailed(unittest.TestCase):
         x = paddle.randn([2, 4, 128])
         out = norm(x)
         self.assertEqual(out.shape, [2, 4, 128])
+
+    @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "1"})
+    def test_accuracy_compatible_forward_uses_single_bfloat16_round(self):
+        config = _make_config(params_dtype="bfloat16")
+        norm = RMSNorm(config=config, normalized_shape=64)
+        x = paddle.randn([2, 3, 64], dtype="float32").cast("bfloat16")
+        weight = paddle.randn([64], dtype="float32").cast("bfloat16")
+        norm.weight.set_value(weight)
+
+        out = norm(x)
+        x_fp32 = x.cast("float32")
+        expected = (
+            x_fp32
+            * paddle.rsqrt(x_fp32.square().mean(axis=-1, keepdim=True) + 1e-5)
+            * weight.cast("float32")
+        ).cast("bfloat16")
+
+        self.assertTrue(
+            paddle.equal_all(out.cast("float32"), expected.cast("float32")).item()
+        )
+
+    @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "0"})
+    @patch("paddlefleet.transformer.paddle_norm.rms_norm")
+    def test_default_forward_keeps_native_rms_norm(self, mock_rms_norm):
+        config = _make_config(params_dtype="float32")
+        norm = RMSNorm(config=config, normalized_shape=64)
+        x = paddle.randn([2, 3, 64], dtype="float32")
+        expected = paddle.randn([2, 3, 64], dtype="float32")
+        mock_rms_norm.return_value = expected
+
+        out = norm(x)
+
+        self.assertTrue(paddle.equal_all(out, expected).item())
+        mock_rms_norm.assert_called_once()
 
     def test_enable_sequence_parallel(self):
         """Test RMSNorm enable_sequence_parallel."""

@@ -19,8 +19,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
-from paddle.distributed.fleet.meta_parallel import LayerSpec
+from paddle.distributed.fleet.meta_parallel import LayerSpec, ScheduleNode
 from paddle.nn.functional import layer_norm, rms_norm
+
+from paddlefleet.jit import jit_fuser
 
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
@@ -33,9 +35,8 @@ except ImportError:
         return parameter
 
 
-from paddle.distributed.fleet.meta_parallel import ScheduleNode
-
-from paddlefleet.jit import jit_fuser
+def _use_accuracy_compatible_kernel() -> bool:
+    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -76,6 +77,17 @@ class RMSNorm(paddle.nn.Layer):
         # Ensure hidden_states dtype matches weight dtype for rms_norm
         if hidden_states.dtype != self.weight.dtype:
             hidden_states = hidden_states.astype(self.weight.dtype)
+        if _use_accuracy_compatible_kernel():
+            hidden_states_fp32 = hidden_states.astype(paddle.float32)
+            variance = paddle.mean(
+                paddle.square(hidden_states_fp32), axis=-1, keepdim=True
+            )
+            output = hidden_states_fp32 * paddle.rsqrt(
+                variance + self.variance_epsilon
+            )
+            return (output * self.weight.astype(paddle.float32)).astype(
+                self.weight.dtype
+            )
         rms_norm_out = rms_norm(
             hidden_states,
             hidden_states.shape[-1:],
