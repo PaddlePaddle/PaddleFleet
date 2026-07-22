@@ -192,7 +192,15 @@ class MLP(FleetLayer):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
-        intermediate_parallel, bias_parallel = self.up_gate_proj(hidden_states)
+        if (
+            _ACCURACY_COMPATIBLE_KERNEL
+            and self.config.tensor_model_parallel_size == 1
+        ):
+            intermediate_parallel, bias_parallel = _accuracy_compatible_projection(
+                self.up_gate_proj, hidden_states
+            )
+        else:
+            intermediate_parallel, bias_parallel = self.up_gate_proj(hidden_states)
         nvtx_range_pop(suffix="up_gate_proj")
 
         nvtx_range_push(suffix="activation")

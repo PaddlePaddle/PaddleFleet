@@ -104,7 +104,7 @@ class TestMLPWithSwigluPath(unittest.TestCase):
         paddle.testing.assert_close(output, expected)
         self.assertIsNone(output_bias)
 
-    def test_accuracy_gate_selects_projection(self):
+    def test_accuracy_gate_selects_both_projections(self):
         config = _make_config(gated_linear_unit=True)
         spec = _make_mlp_spec(config)
         mlp = MLP(config=config, sublayers_spec=spec)
@@ -120,7 +120,7 @@ class TestMLPWithSwigluPath(unittest.TestCase):
             output, _ = mlp(hidden_states)
 
         self.assertEqual(output.shape, [2, 4, 64])
-        compatible_projection.assert_called_once()
+        self.assertEqual(compatible_projection.call_count, 2)
 
     def test_accuracy_gate_selects_explicit_swiglu(self):
         self._run_with_accuracy_gate(True).assert_called_once()
