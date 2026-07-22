@@ -466,6 +466,7 @@ class MoELayer(nn.Layer):
                     hybridep_buffer_configs=getattr(
                         config, "hybridep_buffer_configs", None
                     ),
+                    moe_deep_gemm=self.moe_deep_gemm,
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"

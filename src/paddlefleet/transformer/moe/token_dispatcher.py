@@ -193,6 +193,7 @@ class _HybridEPManager(_DispatchManager):
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
         hybridep_buffer_configs: dict | None = None,
+        moe_deep_gemm: bool = False,
     ):
         if not HAVE_HYBRID_EP:
             raise ImportError("HybridEP runtime is not available.")
@@ -213,7 +214,19 @@ class _HybridEPManager(_DispatchManager):
         self.handle = None
         self._active_buffer = None
         self.hybridep_buffer_configs = hybridep_buffer_configs or {}
+        self._moe_deep_gemm = moe_deep_gemm
+        self._reset_dispatch_state()
         self._num_unpadded_tokens = None
+
+    def _reset_dispatch_state(self):
+        self._dispatch_uses_fp8 = None
+        self._dispatch_pad_multiple = None
+
+    def _set_dispatch_state(self, use_fp8: bool):
+        self._dispatch_uses_fp8 = use_fp8
+        self._dispatch_pad_multiple = (
+            FP8_ALIGN if use_fp8 or self._moe_deep_gemm else None
+        )
 
     def _get_max_num_tokens_per_rank(self, num_local_tokens: int, place) -> int:
         max_num_tokens = num_local_tokens
@@ -411,6 +424,7 @@ class _HybridEPManager(_DispatchManager):
                 )
             )
             scaling_factor = scaling_factor.T.contiguous()
+        self._set_dispatch_state(use_fp8)
         (
             hidden_states,
             dispatched_probs,
@@ -424,7 +438,7 @@ class _HybridEPManager(_DispatchManager):
             num_of_experts_per_rank=self.num_local_experts,
             use_fp8=use_fp8,
             scaling_factor=scaling_factor,
-            pad_multiple=FP8_ALIGN if use_fp8 else None,
+            pad_multiple=self._dispatch_pad_multiple,
             num_permuted_tokens=num_permuted_tokens,
             non_blocking=True,
         )
@@ -486,6 +500,7 @@ class _HybridEPManager(_DispatchManager):
         self.dispatched_probs = None
         self.handle = None
         self.num_permuted_tokens = None
+        self._reset_dispatch_state()
         if (
             self._num_unpadded_tokens is not None
             and hidden_states.shape[0] != self._num_unpadded_tokens
@@ -827,6 +842,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         moe_ep_barrier: bool = True,
         dispatcher_type: str | None = None,
         hybridep_buffer_configs: dict | None = None,
+        moe_deep_gemm: bool = False,
     ):
         super().__init__(ep_group)
 
@@ -846,6 +862,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         }
         if manager_cls is _HybridEPManager:
             manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
+            manager_kwargs["moe_deep_gemm"] = moe_deep_gemm
         self._comm_manager = manager_cls(**manager_kwargs)
 
     def dispatch_preprocess(

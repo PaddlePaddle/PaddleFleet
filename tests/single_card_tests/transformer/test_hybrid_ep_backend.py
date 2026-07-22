@@ -93,6 +93,7 @@ def _new_hybrid_manager(**overrides):
         "hybridep_buffer_configs": overrides.pop(
             "hybridep_buffer_configs", None
         ),
+        "moe_deep_gemm": overrides.pop("moe_deep_gemm", False),
     }
     manager = _HybridEPManager(**init_kwargs)
     for key, value in overrides.items():
@@ -250,6 +251,21 @@ class TestHybridEPBackendSelection(unittest.TestCase):
         self.assertIsInstance(dispatcher._comm_manager, _HybridEPManager)
         self.assertIs(dispatcher._comm_manager.group, group)
         self.assertEqual(dispatcher._comm_manager.num_local_experts, 2)
+
+    def test_flex_dispatcher_enables_deepgemm_expert_padding(self):
+        dispatcher = MoEFlexTokenDispatcher(
+            num_local_experts=2,
+            num_experts_per_tok=2,
+            n_routed_experts=4,
+            ep_group=_HybridEPGroup(nranks=2),
+            dispatcher_type="hybridep",
+            moe_deep_gemm=True,
+        )
+
+        dispatcher._comm_manager._set_dispatch_state(use_fp8=False)
+        self.assertEqual(
+            dispatcher._comm_manager._dispatch_pad_multiple, FP8_ALIGN
+        )
 
 
 class TestHybridEPMetadata(unittest.TestCase):
@@ -747,6 +763,49 @@ class TestHybridEPDispatchBoundary(unittest.TestCase):
             [HYBRIDEP_TOKEN_ALIGNMENT, 1],
         )
 
+    def test_bf16_deepgemm_dispatch_aligns_expert_inputs(self):
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1),
+            router_topk=1,
+            num_experts=2,
+            num_local_experts=2,
+            moe_deep_gemm=True,
+            routing_map=paddle.to_tensor(
+                [[True, False], [False, True]], dtype="bool"
+            ),
+            routing_probs=paddle.to_tensor(
+                [[1.0, 0.0], [0.0, 1.0]], dtype="float32"
+            ),
+        )
+        buffer = _RecordingHybridEPBuffer(
+            dispatch_results=[
+                (
+                    paddle.zeros([256, 4], dtype="bfloat16"),
+                    paddle.ones([256], dtype="float32"),
+                    None,
+                    paddle.to_tensor([128, 128], dtype="int64"),
+                    _make_hybrid_ep_handle(
+                        num_dispatched_tokens=2,
+                        local_expert_routing_map=manager.routing_map,
+                    ),
+                )
+            ]
+        )
+        _bind_buffer(manager, buffer)
+
+        manager._dispatch_with_permute_impl(
+            paddle.ones([2, 4], dtype="bfloat16"),
+            paddle.to_tensor([[0], [1]], dtype="int64"),
+            paddle.ones([2, 1], dtype="float32"),
+            use_fp8=False,
+        )
+
+        dispatch_kwargs = buffer.dispatch_calls[-1]
+        self.assertEqual(dispatch_kwargs["hidden"].dtype, paddle.bfloat16)
+        self.assertFalse(dispatch_kwargs["use_fp8"])
+        self.assertEqual(dispatch_kwargs["pad_multiple"], FP8_ALIGN)
+        self.assertEqual(manager.num_permuted_tokens, 256)
+
     def test_public_dispatch_uses_router_metadata_and_records_runtime_state(
         self,
     ):
@@ -953,6 +1012,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
                 self._active_buffer = buffer
                 self.handle = handle
                 self.use_fp8 = use_fp8
+                self._dispatch_pad_multiple = FP8_ALIGN if use_fp8 else None
                 return (
                     x * 2,
                     token_probs.reshape([-1]),
@@ -988,7 +1048,9 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             buffer.combine_calls[-1]["probs"].dtype, paddle.float32
         )
 
-    def test_dispatch_pylayer_trims_padded_grad_without_dense_probs(self):
+    def test_dispatch_pylayer_trims_padded_grad_and_keeps_alignment_without_dense_probs(
+        self,
+    ):
         grad_x = paddle.concat(
             [
                 paddle.full([2, 4], 5.0, dtype="float32"),
@@ -1005,6 +1067,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             ):
                 self._active_buffer = buffer
                 self.handle = handle
+                self._dispatch_pad_multiple = FP8_ALIGN
                 return x * 2, token_probs.reshape([-1]), None
 
         manager = DispatchingManager()
@@ -1026,6 +1089,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
         self.assertEqual(
             buffer.combine_calls[-1]["probs"].dtype, paddle.float32
         )
+        self.assertEqual(buffer.combine_calls[-1]["pad_multiple"], FP8_ALIGN)
 
     def test_combine_pylayer_requires_active_permuted_rows(self):
         manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=1))
@@ -1041,20 +1105,39 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
                 2,
             )
 
-    def test_combine_pylayer_accepts_explicit_active_permuted_rows(self):
-        manager = _new_hybrid_manager(group=_HybridEPGroup(nranks=1))
-        manager.handle = _make_hybrid_ep_handle(token_data_type="BF16")
-        manager._active_buffer = _RecordingHybridEPBuffer(
-            combine_results=[(paddle.full([2, 4], 4.0, dtype="float32"), None)]
+    def test_combine_pylayer_uses_deepgemm_alignment_in_both_directions(self):
+        manager = _new_hybrid_manager(
+            group=_HybridEPGroup(nranks=1), moe_deep_gemm=True
         )
+        manager.handle = _make_hybrid_ep_handle(token_data_type="BF16")
+        buffer = _RecordingHybridEPBuffer(
+            combine_results=[(paddle.full([2, 4], 4.0, dtype="float32"), None)],
+            dispatch_results=[
+                (
+                    paddle.full([2, 4], 2.0, dtype="float32"),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            ],
+        )
+        manager._active_buffer = buffer
+        manager._set_dispatch_state(use_fp8=False)
+        x = paddle.zeros([2, 4], dtype="float32")
+        x.stop_gradient = False
 
         result = HybridEPCombine.apply(
-            paddle.zeros([2, 4], dtype="float32"),
+            x,
             manager,
             2,
         )
+        result.sum().backward()
 
         self.assertEqual(result.numpy().tolist(), [[4.0] * 4, [4.0] * 4])
+        self.assertEqual(x.grad.numpy().tolist(), [[2.0] * 4, [2.0] * 4])
+        self.assertEqual(buffer.combine_calls[-1]["pad_multiple"], FP8_ALIGN)
+        self.assertEqual(buffer.dispatch_calls[-1]["pad_multiple"], FP8_ALIGN)
 
     def test_combine_pylayer_replays_dispatch_in_backward(self):
         combined = paddle.ones([2, 4], dtype="float32")
@@ -1089,6 +1172,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
         manager.padded_tokens_per_expert = paddle.to_tensor(
             [1, 1], dtype="int64"
         )
+        manager._set_dispatch_state(use_fp8=True)
         x = paddle.zeros([2, 4], dtype="float32")
         x.stop_gradient = False
 
@@ -1124,6 +1208,7 @@ class TestHybridEPAutogradBridge(unittest.TestCase):
             grad_output,
             num_permuted_tokens=2,
             use_fp8_dispatch=False,
+            pad_multiple=None,
         )
 
         self.assertEqual(
