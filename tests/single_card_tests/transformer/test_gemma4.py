@@ -1094,6 +1094,129 @@ class TestGemma4TopKRouterForwardFull(unittest.TestCase):
         # Should reshape to [8, 64] internally, output still [8, 2]
         self.assertEqual(result[1].shape, [8, 2])
 
+    def test_origin_input_ids_forwarded_to_super(self):
+        """Verify origin_input_ids is passed through to TopKRouter.forward (commit 83adbc9)."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            TopKRouter,
+        )
+
+        router = self._make_router()
+        inp = paddle.randn([2, 4, 64])
+        origin_ids = paddle.randint(0, 100, [2, 6])
+
+        with patch.object(
+            TopKRouter,
+            "forward",
+            return_value=(
+                None,
+                paddle.ones([8, 2]),
+                paddle.zeros([8, 2], dtype="int64"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        ) as mock_super_forward:
+            router.forward(inp, input_ids=None, origin_input_ids=origin_ids)
+            mock_super_forward.assert_called_once()
+            call_kwargs = mock_super_forward.call_args[1]
+            self.assertIn("origin_input_ids", call_kwargs)
+            self.assertTrue(
+                paddle.equal_all(
+                    call_kwargs["origin_input_ids"], origin_ids
+                ).item()
+            )
+
+    def test_origin_input_ids_none_by_default(self):
+        """When origin_input_ids is not passed, super().forward gets None."""
+        from paddlefleet.transformer.moe.moe_layer import (
+            TopKRouter,
+        )
+
+        router = self._make_router()
+        inp = paddle.randn([2, 4, 64])
+
+        with patch.object(
+            TopKRouter,
+            "forward",
+            return_value=(
+                None,
+                paddle.ones([8, 2]),
+                paddle.zeros([8, 2], dtype="int64"),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        ) as mock_super_forward:
+            router.forward(inp)
+            call_kwargs = mock_super_forward.call_args[1]
+            self.assertIsNone(call_kwargs.get("origin_input_ids"))
+
+
+# ===========================================================
+# Test: Gemma4TransformerLayer origin_input_ids (commit 83adbc9)
+# ===========================================================
+
+
+class TestGemma4TransformerLayerOriginInputIds(unittest.TestCase):
+    """Tests for origin_input_ids parameter in Gemma4TransformerLayer._forward_impl."""
+
+    def _make_layer(self, use_moe=True):
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+        from paddlefleet.transformer.transformer_layer import (
+            Gemma4TransformerLayer,
+        )
+
+        layer = Gemma4TransformerLayer.__new__(Gemma4TransformerLayer)
+        nn.Layer.__init__(layer)
+        layer.input_layernorm = nn.LayerNorm(64)
+        layer.post_self_attn_layernorm = nn.LayerNorm(64)
+        layer.pre_mlp_layernorm = nn.LayerNorm(64)
+        layer.post_mlp_layernorm = nn.LayerNorm(64)
+        layer.register_buffer(
+            "layer_scalar", paddle.full([1], 2.0, dtype="float32")
+        )
+        layer.self_attn = MagicMock(
+            return_value=(paddle.ones([2, 4, 64]), None)
+        )
+        mock_mlp = MagicMock(spec=MoELayer)
+        mock_mlp.return_value = (paddle.ones([2, 4, 64]), None)
+        layer.mlp = mock_mlp
+        return layer
+
+    def test_forward_impl_accepts_origin_input_ids(self):
+        """_forward_impl should accept origin_input_ids without error."""
+        layer = self._make_layer()
+        origin_ids = paddle.randint(0, 100, [2, 6])
+        out = layer._forward_impl(
+            paddle.randn([2, 4, 64]),
+            origin_input_ids=origin_ids,
+        )
+        self.assertEqual(out.shape, [2, 4, 64])
+
+    def test_forward_impl_passes_origin_input_ids_to_moe(self):
+        """origin_input_ids should be forwarded to self.mlp when it's a MoELayer.
+
+        NOTE: commit 83adbc9 added origin_input_ids to the signature but did NOT
+        pass it to self.mlp(...). This test verifies the fix that adds
+        origin_input_ids=origin_input_ids in the MoE call path.
+        """
+        layer = self._make_layer()
+        origin_ids = paddle.randint(0, 100, [2, 6])
+        layer._forward_impl(
+            paddle.randn([2, 4, 64]),
+            input_ids=paddle.randint(0, 100, [2, 4]),
+            origin_input_ids=origin_ids,
+        )
+        call_kwargs = layer.mlp.call_args[1]
+        self.assertIn("origin_input_ids", call_kwargs)
+        self.assertTrue(
+            paddle.equal_all(call_kwargs["origin_input_ids"], origin_ids).item()
+        )
+
 
 # ===========================================================
 # Test: gemma4_layer_specs additional coverage
