@@ -34,6 +34,7 @@ from paddlefleet.transformer.dsa_attention import (
     DSAIndexerSublayersSpec,
     FusedDSAIndexerLoss,
     Indexer,
+    _AccuracyCompatibleSoftmax,
     _unfused_absorbed_dsa_attention,
     _unfused_dsa_attention,
     hadamard_transform,
@@ -54,6 +55,33 @@ def _make_config(**overrides):
     }
     defaults.update(overrides)
     return TransformerConfig(**defaults)
+
+
+class TestAccuracyCompatibleSoftmax(unittest.TestCase):
+    def test_backward_uses_explicit_reduction_and_positive_masked_zeros(self):
+        logits = paddle.to_tensor(
+            [[[[1.0, -float("inf"), -2.0], [0.5, 0.25, -float("inf")]]]],
+            dtype="float32",
+            stop_gradient=False,
+        )
+        grad_output = paddle.to_tensor(
+            [[[[0.75, -1.0, 0.125], [-0.25, 0.5, 2.0]]]],
+            dtype="float32",
+        )
+        valid_mask = paddle.isfinite(logits)
+        probabilities = _AccuracyCompatibleSoftmax.apply(logits, valid_mask)
+        probabilities.backward(grad_output)
+        expected = probabilities.detach() * (
+            grad_output
+            - paddle.sum(
+                grad_output * probabilities.detach(), axis=-1, keepdim=True
+            )
+        )
+        expected = paddle.where(valid_mask, expected, paddle.zeros_like(expected))
+
+        self.assertTrue(paddle.equal_all(logits.grad, expected))
+        masked_bits = logits.grad[~valid_mask].numpy().view("uint32")
+        self.assertTrue((masked_bits == 0).all())
 
 
 class TestAbsorbedDSAAttention(unittest.TestCase):

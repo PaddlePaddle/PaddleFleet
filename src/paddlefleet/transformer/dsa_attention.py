@@ -63,6 +63,35 @@ _ACCURACY_COMPATIBLE_KERNEL = (
 )
 
 
+class _AccuracyCompatibleSoftmax(paddle.autograd.PyLayer):
+    """Masked softmax with explicit reduction and positive masked zeros."""
+
+    @staticmethod
+    def forward(ctx, logits: Tensor, valid_mask: Tensor) -> Tensor:
+        probabilities = F.softmax(logits, axis=-1)
+        probabilities = paddle.where(
+            valid_mask, probabilities, paddle.zeros_like(probabilities)
+        )
+        ctx.save_for_backward(probabilities, valid_mask)
+        return probabilities
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> tuple[Tensor, None]:
+        probabilities, valid_mask = ctx.saved_tensor()
+        grad_logits = probabilities * (
+            grad_output
+            - paddle.sum(
+                grad_output * probabilities,
+                axis=-1,
+                keepdim=True,
+            )
+        )
+        grad_logits = paddle.where(
+            valid_mask, grad_logits, paddle.zeros_like(grad_logits)
+        )
+        return grad_logits, None
+
+
 def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     """Fast Walsh-Hadamard Transform using the butterfly algorithm.
 
@@ -216,7 +245,11 @@ def _unfused_absorbed_dsa_attention(
         scores = paddle.matmul(q.cast("float32"), k.cast("float32")) * softmax_scale
     if combined_mask is not None:
         scores = scores + combined_mask.cast("float32")
-    probabilities = F.softmax(scores, axis=-1)
+    probabilities = (
+        _AccuracyCompatibleSoftmax.apply(scores, paddle.isfinite(scores))
+        if _ACCURACY_COMPATIBLE_KERNEL
+        else F.softmax(scores, axis=-1)
+    )
     latent_value = value.transpose([0, 2, 1, 3])
     latent_context = paddle.matmul(probabilities.cast(value.dtype), latent_value)
     projected = paddle.einsum(
