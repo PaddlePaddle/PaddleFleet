@@ -54,6 +54,16 @@ def _use_accuracy_compatible_kernel() -> bool:
     return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 
 
+def _accuracy_compatible_cross_entropy(
+    logits: Tensor, labels: Tensor, ignored_index: int
+) -> Tensor:
+    """Run Megatron-style CE while preserving its masked sentinel gradient."""
+    from paddlefleet.tensor_parallel import vocab_parallel_cross_entropy
+
+    labels = paddle.where(labels == ignored_index, paddle.zeros_like(labels), labels)
+    return vocab_parallel_cross_entropy(logits, labels)
+
+
 def _tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
     """Calculate MD5 hash of a tensor, **for debugging only**.
 
@@ -222,6 +232,14 @@ class LanguageLoss(FleetLayer):
         if self.enable_parallel_cross_entropy:
             self.loss_func = (
                 paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
+            )
+        elif _use_accuracy_compatible_kernel():
+            # Keep TP=1 loss backward identical to Megatron's unfused
+            # vocab-parallel cross entropy. Paddle's native CrossEntropyLoss
+            # produces the same scalar but differs in raw logits gradients.
+            self.loss_func = functools.partial(
+                _accuracy_compatible_cross_entropy,
+                ignored_index=self.ignored_index,
             )
         else:
             self.loss_func = paddle.nn.CrossEntropyLoss(

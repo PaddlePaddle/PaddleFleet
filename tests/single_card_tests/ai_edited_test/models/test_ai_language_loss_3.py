@@ -32,8 +32,24 @@ from paddlefleet.models.common.language_loss.language_loss import (
     LanguageLoss,
     MainLanguageLoss,
     MTPLanguageLoss,
+    _accuracy_compatible_cross_entropy,
     subbatch,
 )
+
+
+class TestAccuracyCompatibleCrossEntropy(unittest.TestCase):
+    def test_ignored_label_preserves_megatron_signed_zero_gradient(self):
+        logits = paddle.zeros([1, 1, 3], dtype="float32")
+        logits.stop_gradient = False
+        labels = paddle.full([1, 1], -100, dtype="int64")
+
+        loss = _accuracy_compatible_cross_entropy(logits, labels, ignored_index=-100)
+        (loss * paddle.zeros_like(loss)).sum().backward()
+
+        bits = logits.grad.numpy().view("uint32")
+        self.assertEqual(bits[0, 0, 0], 0x80000000)
+        self.assertEqual(bits[0, 0, 1], 0)
+        self.assertEqual(bits[0, 0, 2], 0)
 
 
 class TestSubbatchWithRecompute(unittest.TestCase):
