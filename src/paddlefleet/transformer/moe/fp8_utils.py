@@ -937,7 +937,6 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, n] = [m_sum, k] * [num_groups, k, n] (m_sum = sum(tokens_per_expert))
         """
         if self.use_w4a8:
-            print(">>>>>enter _fwd_gate_up_w4a8", flush=True)
             # 反向存储（dequant_input: fp8 1x32 / 否则 bf16）在 _fwd_gate_up_w4a8
             # 内完成，直接复用前向的量化结果
             return self._fwd_gate_up_w4a8(x, expert_w1, scale=scale)
@@ -1257,7 +1256,6 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
         if self.use_w4a8:
-            print(">>>>>enter _fwd_down_w4a8", flush=True)
             return self._fwd_down_w4a8(
                 o1, unzipped_probs, expert_w2, o3=o3, clear_o1=clear_o1
             )
