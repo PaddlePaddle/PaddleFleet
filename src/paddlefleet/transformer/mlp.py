@@ -65,6 +65,46 @@ def _accuracy_compatible_swiglu(hidden_states):
     return F.silu(gate) * linear
 
 
+class _AccuracyCompatibleRouterScaleGradFunction(paddle.autograd.PyLayer):
+    """Apply router scale while matching Megatron's grouped reduction shape."""
+
+    @staticmethod
+    def forward(ctx, activation, scale, reduction_rows):
+        ctx.activation_dtype = activation.dtype
+        ctx.reduction_rows = int(reduction_rows)
+        ctx.save_for_backward(activation, scale)
+        return (activation * scale.unsqueeze(-1)).cast(activation.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        activation, scale = ctx.saved_tensor()
+        row_count = activation.shape[0]
+        products = activation.cast("float32") * grad_output.cast("float32")
+        if ctx.reduction_rows > row_count:
+            products = paddle.concat(
+                [
+                    products,
+                    paddle.zeros(
+                        [ctx.reduction_rows - row_count, products.shape[-1]],
+                        dtype=products.dtype,
+                    ),
+                ],
+                axis=0,
+            )
+        grad_scale = products.sum(axis=-1)[:row_count]
+        return None, grad_scale.cast(scale.dtype)
+
+
+def _accuracy_compatible_router_scale(activation, scale, reduction_rows):
+    native_activation_path = (
+        activation * scale.detach().unsqueeze(-1)
+    ).cast(activation.dtype)
+    scale_path = _AccuracyCompatibleRouterScaleGradFunction.apply(
+        activation.detach(), scale, reduction_rows
+    )
+    return native_activation_path + (scale_path - scale_path.detach())
+
+
 class _AccuracyCompatibleLinearInputGradFunction(paddle.autograd.PyLayer):
     """Linear forward with a materialized-transpose input gradient."""
 
@@ -211,7 +251,12 @@ class MLP(FleetLayer):
             tp_group=tp_group,
         )
 
-    def forward(self, hidden_states, per_token_scale=None):
+    def forward(
+        self,
+        hidden_states,
+        per_token_scale=None,
+        accuracy_compatible_router_reduction_rows=None,
+    ):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
@@ -243,9 +288,16 @@ class MLP(FleetLayer):
             )
             if per_token_scale is not None:
                 original_dtype = intermediate_parallel.dtype
-                intermediate_parallel = (
-                    intermediate_parallel * per_token_scale.unsqueeze(-1)
-                ).to(original_dtype)
+                if accuracy_compatible_router_reduction_rows is not None:
+                    intermediate_parallel = _accuracy_compatible_router_scale(
+                        intermediate_parallel,
+                        per_token_scale,
+                        accuracy_compatible_router_reduction_rows,
+                    )
+                else:
+                    intermediate_parallel = (
+                        intermediate_parallel * per_token_scale.unsqueeze(-1)
+                    ).to(original_dtype)
         elif (
             self.config.use_bias
             and self.config.gpt_model_use_experimental_version

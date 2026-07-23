@@ -644,9 +644,11 @@ class MoELayer(nn.Layer):
             if scale_chunks is None:
                 expert_output = expert(chunk)[0]
             else:
-                expert_output = expert(chunk, per_token_scale=scale_chunks[i])[
-                    0
-                ]
+                expert_output = expert(
+                    chunk,
+                    per_token_scale=scale_chunks[i],
+                    accuracy_compatible_router_reduction_rows=dispatched_input.shape[0],
+                )[0]
             outputs += [expert_output]
 
         if not outputs:
@@ -1174,7 +1176,9 @@ class MoELayer(nn.Layer):
             current_weight = topk_weights[idx, top_x].unsqueeze(-1)
             if accuracy_compatible:
                 expert_out = expert_layer(
-                    current_state, per_token_scale=current_weight.squeeze(-1)
+                    current_state,
+                    per_token_scale=current_weight.squeeze(-1),
+                    accuracy_compatible_router_reduction_rows=selected_experts.numel(),
                 )[0]
                 current_hidden_states = expert_out
             else:

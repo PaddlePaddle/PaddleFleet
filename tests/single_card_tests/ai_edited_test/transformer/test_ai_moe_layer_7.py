@@ -363,6 +363,9 @@ class TestMoELayerSingleCardAccuracy(unittest.TestCase):
         paddle.testing.assert_close(
             expert.call_args.kwargs["per_token_scale"], paddle.to_tensor([0.25])
         )
+        self.assertEqual(
+            expert.call_args.kwargs["accuracy_compatible_router_reduction_rows"], 1
+        )
 
     @patch("paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel")
     def test_default_path_applies_weight_after_expert(self, accuracy_gate):

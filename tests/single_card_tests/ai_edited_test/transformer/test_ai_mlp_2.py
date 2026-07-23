@@ -72,6 +72,37 @@ class TestMLPWithSwigluPath(unittest.TestCase):
 
         paddle.testing.assert_close(output, F.silu(gate) * linear)
 
+    def test_accuracy_compatible_router_scale_preserves_forward_and_dgrads(self):
+        activation = paddle.randn([3, 2048], dtype="bfloat16")
+        activation.stop_gradient = False
+        scale = paddle.randn([3], dtype="float32")
+        scale.stop_gradient = False
+        grad_output = paddle.randn([3, 2048], dtype="bfloat16")
+
+        output = mlp_module._accuracy_compatible_router_scale(
+            activation, scale, reduction_rows=8
+        )
+        expected_output = (activation * scale.unsqueeze(-1)).cast(activation.dtype)
+        self.assertEqual(output.numpy().tobytes(), expected_output.numpy().tobytes())
+
+        output.backward(grad_output)
+
+        expected_activation_grad = (
+            grad_output * scale.detach().unsqueeze(-1)
+        ).cast(activation.dtype)
+        self.assertEqual(
+            activation.grad.numpy().tobytes(),
+            expected_activation_grad.numpy().tobytes(),
+        )
+        products = activation.detach().cast("float32") * grad_output.cast("float32")
+        padded_products = paddle.concat(
+            [products, paddle.zeros([5, 2048], dtype="float32")], axis=0
+        )
+        expected_scale_grad = padded_products.sum(axis=-1)[:3]
+        self.assertEqual(
+            scale.grad.numpy().tobytes(), expected_scale_grad.numpy().tobytes()
+        )
+
     def _run_with_accuracy_gate(self, enabled):
         config = _make_config(gated_linear_unit=True, bias_activation_fusion=True)
         spec = _make_mlp_spec(config)
