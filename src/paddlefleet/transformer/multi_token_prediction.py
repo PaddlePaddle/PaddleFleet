@@ -15,12 +15,14 @@
 
 from __future__ import annotations
 
+import os
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
+import paddle.nn.functional as F
 from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import (
     LayerSpec,
@@ -57,6 +59,18 @@ SUPPORTED_ATTN_MASK = [
     AttnMaskType.no_mask,
     AttnMaskType.padding_causal,
 ]
+
+_ACCURACY_COMPATIBLE_KERNEL = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
+
+
+def _mtp_eh_projection(projection, hidden_states, tensor_parallel_size):
+    if _ACCURACY_COMPATIBLE_KERNEL and tensor_parallel_size == 1:
+        output_bias = projection.bias if projection.skip_bias_add else None
+        bias = None if projection.skip_bias_add else projection.bias
+        return F.linear(hidden_states, projection.weight, bias), output_bias
+    return projection(hidden_states)
 
 
 class MTPLossLoggingHelper:
@@ -540,7 +554,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
             # and the (i + K)-th token's embedding, and combine them with linear projection.
             hidden_states = paddle.cat((decoder_input, hidden_states), -1)
-            hidden_states, _ = self.eh_proj(hidden_states)
+            hidden_states, _ = _mtp_eh_projection(
+                self.eh_proj, hidden_states, self.tensor_parallel
+            )
             # For tensor parallel we need to gather the tensor across the model-parallel
             # ranks after the linear projection. This used to call
             # `all_gather_last_dim_from_tensor_parallel_region`, but that utility reduces

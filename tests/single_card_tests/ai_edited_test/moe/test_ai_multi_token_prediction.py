@@ -242,6 +242,36 @@ class TestMultiTokenPrediction(unittest.TestCase):
         self.assertIn(AttnMaskType.no_mask, SUPPORTED_ATTN_MASK)
         self.assertIn(AttnMaskType.padding_causal, SUPPORTED_ATTN_MASK)
 
+    def test_mtp_eh_projection_accuracy_gate(self):
+        """Accuracy mode uses functional linear only for TP=1."""
+        from paddlefleet.transformer import multi_token_prediction as mtp
+
+        class Projection:
+            def __init__(self):
+                self.weight = paddle.randn([4, 3])
+                self.bias = None
+                self.skip_bias_add = False
+                self.called = False
+
+            def __call__(self, hidden_states):
+                self.called = True
+                return paddle.full([2, 3], -1.0), None
+
+        hidden_states = paddle.randn([2, 4])
+        projection = Projection()
+        expected = paddle.nn.functional.linear(hidden_states, projection.weight)
+
+        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", True):
+            actual, bias = mtp._mtp_eh_projection(projection, hidden_states, 1)
+            paddle.testing.assert_close(actual, expected)
+            self.assertIsNone(bias)
+            self.assertFalse(projection.called)
+
+            native, bias = mtp._mtp_eh_projection(projection, hidden_states, 2)
+            paddle.testing.assert_close(native, paddle.full([2, 3], -1.0))
+            self.assertIsNone(bias)
+            self.assertTrue(projection.called)
+
     def test_weight_only_mtp_layer_forward(self):
         """Test WeightOnlyMTPLayer.forward returns dict_args."""
         from paddlefleet.transformer.multi_token_prediction import (
