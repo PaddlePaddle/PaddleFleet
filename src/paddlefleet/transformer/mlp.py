@@ -65,10 +65,33 @@ def _accuracy_compatible_swiglu(hidden_states):
     return F.silu(gate) * linear
 
 
+class _AccuracyCompatibleLinearInputGradFunction(paddle.autograd.PyLayer):
+    """Linear forward with a materialized-transpose input gradient."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, weight):
+        ctx.save_for_backward(weight)
+        return F.linear(hidden_states, weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (weight,) = ctx.saved_tensor()
+        grad_input = paddle.matmul(
+            grad_output, weight.transpose([1, 0]).contiguous()
+        )
+        return grad_input, None
+
+
 def _accuracy_compatible_projection(projection, hidden_states):
     output_bias = projection.bias if projection.skip_bias_add else None
     bias = None if projection.skip_bias_add else projection.bias
-    output = F.linear(hidden_states, projection.weight, bias)
+    output = _AccuracyCompatibleLinearInputGradFunction.apply(
+        hidden_states, projection.weight.detach()
+    )
+    if bias is not None:
+        output = output + bias.detach()
+    parameter_path = F.linear(hidden_states.detach(), projection.weight, bias)
+    output = output + (parameter_path - parameter_path.detach())
     return output, output_bias
 
 

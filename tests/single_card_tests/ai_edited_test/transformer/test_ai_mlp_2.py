@@ -104,6 +104,31 @@ class TestMLPWithSwigluPath(unittest.TestCase):
         paddle.testing.assert_close(output, expected)
         self.assertIsNone(output_bias)
 
+    def test_accuracy_compatible_projection_uses_materialized_dgrad(self):
+        config = _make_config(gated_linear_unit=True)
+        spec = _make_mlp_spec(config)
+        mlp = MLP(config=config, sublayers_spec=spec)
+        hidden_states = paddle.randn([2, 4, 128])
+        hidden_states.stop_gradient = False
+        grad_output = paddle.randn([2, 4, 64])
+
+        output, _ = mlp_module._accuracy_compatible_projection(
+            mlp.down_proj, hidden_states
+        )
+        output.backward(grad_output)
+
+        expected = paddle.matmul(
+            grad_output, mlp.down_proj.weight.transpose([1, 0]).contiguous()
+        )
+        self.assertTrue(paddle.equal_all(hidden_states.grad, expected).item())
+        expected_weight_grad = paddle.matmul(
+            hidden_states.detach().reshape([-1, hidden_states.shape[-1]]).transpose([1, 0]),
+            grad_output.reshape([-1, grad_output.shape[-1]]),
+        )
+        self.assertTrue(
+            paddle.equal_all(mlp.down_proj.weight.grad, expected_weight_grad).item()
+        )
+
     def test_accuracy_gate_selects_both_projections(self):
         config = _make_config(gated_linear_unit=True)
         spec = _make_mlp_spec(config)
