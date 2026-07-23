@@ -327,7 +327,50 @@ def get_cutoff_doc_starts(cutoff_doc_lens: Tensor) -> Tensor:
 
 @dataclass
 class CSADocMaskMetadata:
-    """Reusable CSA metadata derived from ``startend_row_indices``."""
+    """
+    Reusable CSA metadata derived from `startend_row_indices`.
+
+    假设输入 seqlen=32，其中每个文本的 doc_lens=[5, 14, 3, 8]，最后还有 padding=2
+
+    则非压缩相关的信息如下，注意所有列表的长度都是32：
+    start_end_row_indices: [5 ... 5, 19  ... 19, 22 ... 22, 30 ... 30, 30, 30 ]
+    doc_start_per_pos:     [0 ... 0,  5  ...  5, 19 ... 19, 22 ... 22, 22, 22 ]
+    doc_len_per_pos:       [5 ... 5, 14  ... 14,  3 ...  3,  8 ...  8,  8,  8 ]
+    pos_in_doc:            [0 ... 4,  0  ... 13,  0 ...  2,  0 ...  7,  8,  9 ]
+    is_valid:              [T ... T,  T  ...  T,  T ...  T,  T ...  T,  F,  F ]
+                            {- 5 -}  {-- 14 --}  {-- 3 --}  {-- 8 --}  {- 2 -}
+    说明：
+    * padding 在 start_end_row_indices 中用前一个 doc 的末尾数字或对角线的值表示
+    * 其他变量中 padding 部分相当于自然接续前一个 doc，但实际上对梯度无贡献
+
+    假设压缩 ratio=4，则压缩前的相关信息如下，注意最后填充-1使得列表长度依然为32：
+    n_compressed:          seqlen // ratio = 8
+    actual_n_compressed:   sum(n // ratio for n in doc_lens) = 6
+    cutoff_gather_indices: [0 ... 3,  5  ... 16,   ...  , 22 ... 29, -1 ... -1]
+    cutoff_pos_in_doc:     [0 ... 3,  0  ... 11,   ...  ,  0 ...  7, -1 ... -1]
+                            {- 4 -}  {-- 12 --}  {- 0 -}  {-- 8 --}  {-- 8 --}
+
+    针对压缩变量的信息，长度为 n_compressed=8，最后无效部分填充 False 或-1：
+    compressed_is_first:   [ T,  T,  F,  F,  T,  F,  F,  F]
+    compressed_pos_in_doc: [ 0,  0,  4,  8,  0,  4, -1, -1]
+
+    其他变量：
+    每个位置所属 doc 的首个压缩 kv 槽的全局下标，最后 padding 自然接续，总长度32：
+    compressed_doc_start_per_pos: [0 ... 0,  1 ... 1, 4 ... 4, 4 ... 4,  4,  4 ]
+                                   {- 5 -}  {- 14 -}  {- 3 -}  {- 8 -}  {- 2 -}
+
+    window_topk_idxs: shape=[1, seqlen, window_size]
+    * idxs[0, i] 表示每个 q[i] 可以看见的 kv 的下标，升序排列，但-1在最后
+    * “看见”当且仅当两者属于同一个 doc、且满足因果律、且在 window_size 范围内、且 q[i] 有效
+
+    compress_topk_idxs: shape=[1, seqlen, n_compressed]
+    * idxs[0, i, j] = j 当且仅当 q[i] 可以看见 compressed_kv[j]，否则为-1
+    * “看见”当且仅当同 doc、且 compressed_kv[j] 包含的 token 均不晚于 q[i]、且 q[i] 有效
+      (也就是说，q[i] 要么完全在 compressed_kv[j] 之后，要么恰好是其最后一个 token)
+    * 另外，支持 offset 参数，即给 idxs 中所有非-1的数统一加上 offset
+
+    TODO(liangshuhao): 当前为了和原有流程兼容，压缩相关变量均截去了padding，后续会统一保留
+    """
 
     startend_row_indices: Tensor
     ratio: int
@@ -339,6 +382,11 @@ class CSADocMaskMetadata:
     doc_start_per_pos: Tensor
     doc_len_per_pos: Tensor
     is_valid: Tensor
+    pos_in_doc: Tensor
+    cutoff_gather_indices: Tensor
+    cutoff_pos_in_doc: Tensor
+    compressed_is_first: Tensor
+    compressed_pos_in_doc: Tensor
     _doc_lens_cutoff: Tensor | None = None
     _doc_lens_list: list[int] | None = None
     _doc_starts_cutoff: Tensor | None = None
@@ -359,6 +407,7 @@ class CSADocMaskMetadata:
         seqlen: int,
         startend_row_indices: Tensor | None,
         n_compressed: int | None = None,
+        dense_mode: bool = False,
     ) -> CSADocMaskMetadata | None:
         """Build metadata from ``startend_row_indices``.
 
@@ -373,6 +422,7 @@ class CSADocMaskMetadata:
                 mode (returns ``None``).
             n_compressed: optional override for ``seqlen // ratio``; used when
                 the caller already knows the compressed slot count.
+            dense_mode: whether it is in dense mode (no indexer).
 
         Returns:
             A populated :class:`CSADocMaskMetadata`, or ``None`` when
@@ -380,18 +430,51 @@ class CSADocMaskMetadata:
         """
         if startend_row_indices is None:
             return None
+
+        from paddlefleet.triton_ops.document_mask_fusion import (
+            cutoff_compact_triton,
+            document_mask_triton,
+        )
+
         ratio, batch_size, seqlen, n_compressed = _normalize_csa_docmask_args(
             ratio, batch_size, seqlen, n_compressed
         )
         _validate_csa_docmask_shape(startend_row_indices, batch_size, seqlen)
 
+        # Generate general metadata
+        doc_start_per_pos, doc_len_per_pos, pos_in_doc = document_mask_triton(
+            startend_row_indices.flatten()
+        )
         (
-            doc_start_per_pos,
-            doc_len_per_pos,
-            is_valid,
-            doc_lens,
-            doc_starts,
-        ) = _derive_csa_doc_boundaries(startend_row_indices, seqlen)
+            cutoff_gather_indices,
+            cutoff_pos_in_doc,
+            n_cutoff,
+            compressed_is_first,
+            compressed_pos_in_doc,
+        ) = cutoff_compact_triton(pos_in_doc, doc_len_per_pos, ratio)
+
+        n_cutoff = n_cutoff.item()
+        assert n_cutoff % ratio == 0, (
+            "seqlen after cutoff should be divisible by ratio, "
+            f"got {n_cutoff} and {ratio}."
+        )
+        actual_n_compressed = n_cutoff // ratio
+        cutoff_gather_indices = cutoff_gather_indices[:n_cutoff]
+        cutoff_pos_in_doc = cutoff_pos_in_doc[:n_cutoff]
+        compressed_is_first = compressed_is_first[:actual_n_compressed]
+        compressed_pos_in_doc = compressed_pos_in_doc[:actual_n_compressed]
+
+        # Generate metadata for indexer only
+        if ratio > 1 and not dense_mode:
+            (
+                doc_start_per_pos,
+                doc_len_per_pos,
+                is_valid,
+                doc_lens,
+                doc_starts,
+            ) = _derive_csa_doc_boundaries(startend_row_indices, seqlen)
+        else:
+            is_valid = doc_lens = doc_starts = None
 
         return cls(
             startend_row_indices=startend_row_indices,
@@ -404,6 +487,12 @@ class CSADocMaskMetadata:
             doc_start_per_pos=doc_start_per_pos,
             doc_len_per_pos=doc_len_per_pos,
             is_valid=is_valid,
+            pos_in_doc=pos_in_doc,
+            cutoff_gather_indices=cutoff_gather_indices,
+            cutoff_pos_in_doc=cutoff_pos_in_doc,
+            compressed_is_first=compressed_is_first,
+            compressed_pos_in_doc=compressed_pos_in_doc,
+            _actual_n_compressed=actual_n_compressed,
         )
 
     @property
@@ -470,12 +559,12 @@ class CSADocMaskMetadata:
             and self._window_size == window_size
         )
         if not cache_hit:
-            self._window_topk_idxs = _build_window_topk_idxs_from_doc_bounds(
-                self.batch_size,
-                self.seqlen,
-                window_size,
-                self.doc_start_per_pos,
-                self.is_valid,
+            from paddlefleet.triton_ops.document_mask_fusion import (
+                window_topk_idxs_triton,
+            )
+
+            self._window_topk_idxs = window_topk_idxs_triton(
+                self.doc_start_per_pos, self.doc_len_per_pos, window_size
             )
             self._window_size = window_size
         return self._window_topk_idxs
@@ -493,14 +582,22 @@ class CSADocMaskMetadata:
             and self._compress_offset == offset
         )
         if not cache_hit:
-            self._compress_topk_idxs = (
-                _build_compress_topk_idxs_from_valid_range(
-                    self.batch_size,
-                    self.seqlen,
-                    self.n_compressed,
-                    offset,
-                    self.valid_range,
-                )
+            from paddlefleet.triton_ops.document_mask_fusion import (
+                compressed_doc_start_triton,
+                compressed_topk_idxs_triton,
+            )
+
+            compressed_doc_start_per_pos = compressed_doc_start_triton(
+                self.startend_row_indices.flatten(),
+                self.doc_start_per_pos,
+                self.ratio,
+            )
+            self._compress_topk_idxs = compressed_topk_idxs_triton(
+                compressed_doc_start_per_pos,
+                self.pos_in_doc,
+                self.doc_len_per_pos,
+                self.ratio,
+                offset,
             )
             self._compress_offset = offset
         return self._compress_topk_idxs
@@ -736,6 +833,7 @@ def _apply_rope(
     ratio: int = 1,
     doc_lens_cutoff: Tensor | None = None,  # for token compressed, such as kv
     doc_lens: Tensor | None = None,  # for token not compressed, such as q
+    compressed_pos_in_doc: Tensor | None = None,  # for token compressed
     position_offset: int = 0,
     high_precision_rope: bool = False,
 ) -> Tensor:
@@ -829,6 +927,16 @@ def _apply_rope(
                 axis=1,
             )
         freqs = freqs[:, position_offset:needed_len, :, :]
+    elif compressed_pos_in_doc is not None:
+        freqs = paddle.gather(freqs, compressed_pos_in_doc, axis=1)
+        if freqs.shape[1] < rotary_seq_len:
+            freqs = paddle.nn.functional.pad(
+                freqs,
+                pad=[0, 0, 0, 0, 0, rotary_seq_len - freqs.shape[1]],
+                mode="constant",
+                value=0.0,
+            )
+        freqs = freqs[:, :rotary_seq_len]
     elif ratio > 1:  # CP without document mask -> KV
         freqs = freqs[:, position_offset * ratio : total_seq_len : ratio, :][
             :, :rotary_seq_len, :
@@ -1410,28 +1518,13 @@ class Compressor(nn.Layer):
         # Shared compression logic for both CP and non-CP paths.
         if docmask_meta is not None:
             # per-document cutoff, pack contiguously without padding
-            doc_lens = docmask_meta.doc_lens
-            doc_starts = docmask_meta.doc_starts
-            doc_lens_cutoff = docmask_meta.doc_lens_cutoff
-            doc_starts_cutoff = docmask_meta.doc_starts_cutoff
-
-            assert len(doc_lens) == len(doc_starts)
-            assert len(doc_lens) == len(doc_lens_cutoff)
-            assert len(doc_lens) == len(doc_starts_cutoff)
-
             n_compressed = sq // ratio
             actual_n_compressed = docmask_meta.actual_n_compressed
-            total_cutoff = actual_n_compressed * ratio
+            cutoff_gather_indices = docmask_meta.cutoff_gather_indices
 
             # Pack only valid cutoff data contiguously (no padding)
-            kv, score = compact_kv_score_cutoff(
-                doc_starts,
-                doc_lens_cutoff,
-                doc_starts_cutoff,
-                total_cutoff,
-                kv,
-                score,
-            )
+            kv = paddle.gather(kv, cutoff_gather_indices, axis=1)
+            score = paddle.gather(score, cutoff_gather_indices, axis=1)
 
             # Reshape: [b, actual_n_compressed, ratio, coff * head_dim]
             kv = kv.reshape([b, actual_n_compressed, ratio, -1])
@@ -1443,7 +1536,7 @@ class Compressor(nn.Layer):
             score = score + ape
 
             if self.overlap:
-                is_first = docmask_meta.get_is_first_compressed_group()
+                is_first = docmask_meta.compressed_is_first
                 kv = self._overlap_transform(
                     kv, fill_value=0, is_first=is_first
                 )
@@ -1488,7 +1581,7 @@ class Compressor(nn.Layer):
                     self.config,
                     n_compressed,
                     ratio=ratio,
-                    doc_lens_cutoff=doc_lens_cutoff,
+                    compressed_pos_in_doc=docmask_meta.compressed_pos_in_doc,
                     high_precision_rope=self.high_precision_rope,
                 )
 
@@ -2134,7 +2227,7 @@ class CompressedSparseAttention(FleetLayer):
             )
 
         # Compute loss_mask from input_ids (mask out padding tokens)
-        if input_ids is not None:
+        if input_ids is not None and self.indexer is not None:
             if (
                 get_context_parallel_world_size() > 1
                 and not self.config.experimental_dataflow
