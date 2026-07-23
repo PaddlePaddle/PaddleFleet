@@ -70,6 +70,32 @@ def _accuracy_compatible_q_down_projection(projection, hidden_states):
     return _accuracy_compatible_projection(projection, hidden_states)
 
 
+def _accuracy_compatible_mla_rope_apply(
+    q_pe,
+    k_pe,
+    rope_base,
+    position_ids,
+):
+    """Apply Megatron MLA RoPE ordering for explicit MTP position IDs."""
+    head_dim = q_pe.shape[-1]
+    inv_freq = paddle.pow(
+        paddle.to_tensor(rope_base, dtype="float32"),
+        -paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim),
+    )
+    freqs = paddle.outer(position_ids.cast("float32"), inv_freq)
+    freqs = paddle.concat((freqs, freqs), axis=-1)[None, :, None, :]
+
+    def rotate(tensor):
+        tensor = paddle.concat((tensor[..., 0::2], tensor[..., 1::2]), axis=-1)
+        x1, x2 = paddle.chunk(tensor, 2, axis=-1)
+        rotated = paddle.concat((-x2, x1), axis=-1)
+        return tensor * paddle.cos(freqs).cast(tensor.dtype) + rotated * paddle.sin(
+            freqs
+        ).cast(tensor.dtype)
+
+    return rotate(q_pe), rotate(k_pe)
+
+
 def _ec_compatible_rope_apply(
     q_pe,
     k_pe,
@@ -1126,7 +1152,18 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
-                if self.config.gpt_model_use_experimental_version:
+                if (
+                    _ACCURACY_COMPATIBLE_KERNEL
+                    and position_ids is not None
+                    and position_ids.ndim == 1
+                ):
+                    q_pos_emb, k_pos_emb = _accuracy_compatible_mla_rope_apply(
+                        q_pos_emb,
+                        k_pos_emb,
+                        self.rope_theta,
+                        position_ids,
+                    )
+                elif self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
                         TransformerLayer,

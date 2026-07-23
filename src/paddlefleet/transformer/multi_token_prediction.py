@@ -73,6 +73,22 @@ def _mtp_eh_projection(projection, hidden_states, tensor_parallel_size):
     return projection(hidden_states)
 
 
+def _mtp_shift_position_ids(
+    position_ids, hidden_states, layer_number, sequence_parallel
+):
+    """Match Megatron MTP's depth-wise rotary-position roll in accuracy mode."""
+    if not _ACCURACY_COMPATIBLE_KERNEL:
+        return position_ids
+    if position_ids is None:
+        if sequence_parallel:
+            return None
+        position_ids = paddle.arange(hidden_states.shape[1], dtype="int64").unsqueeze(0)
+    shifted = paddle.roll(position_ids, shifts=-(layer_number + 1), axis=-1)
+    if shifted.ndim == 2 and shifted.shape[0] == 1:
+        shifted = shifted.squeeze(0)
+    return shifted
+
+
 class MTPLossLoggingHelper:
     """Helper class for logging MTP losses."""
 
@@ -617,7 +633,12 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
                 "is_mtp": True,
                 "input_ids": input_ids,
-                "position_ids": position_ids,
+                "position_ids": _mtp_shift_position_ids(
+                    position_ids,
+                    hidden_states,
+                    self.layer_number,
+                    self.sequence_parallel,
+                ),
             }
             rst_dict = self.transformer_layer(input_dict)
 

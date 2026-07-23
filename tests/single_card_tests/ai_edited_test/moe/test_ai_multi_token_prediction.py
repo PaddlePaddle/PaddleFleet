@@ -272,6 +272,57 @@ class TestMultiTokenPrediction(unittest.TestCase):
             self.assertIsNone(bias)
             self.assertTrue(projection.called)
 
+    def test_mtp_shift_position_ids_accuracy_gate(self):
+        """Accuracy mode rolls MTP positions by one plus prediction depth."""
+        from paddlefleet.transformer import multi_token_prediction as mtp
+
+        position_ids = paddle.to_tensor([[0, 1, 2, 3]], dtype="int64")
+        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", True):
+            actual = mtp._mtp_shift_position_ids(
+                position_ids,
+                paddle.zeros([1, 4, 2]),
+                layer_number=0,
+                sequence_parallel=False,
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    actual, paddle.to_tensor([1, 2, 3, 0], dtype="int64")
+                ).item()
+            )
+            actual = mtp._mtp_shift_position_ids(
+                position_ids,
+                paddle.zeros([1, 4, 2]),
+                layer_number=1,
+                sequence_parallel=False,
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    actual, paddle.to_tensor([2, 3, 0, 1], dtype="int64")
+                ).item()
+            )
+            inferred = mtp._mtp_shift_position_ids(
+                None,
+                paddle.zeros([1, 4, 2]),
+                layer_number=0,
+                sequence_parallel=False,
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    inferred, paddle.to_tensor([1, 2, 3, 0], dtype="int64")
+                ).item()
+            )
+
+        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", False):
+            self.assertIs(
+                mtp._mtp_shift_position_ids(
+                    position_ids,
+                    paddle.zeros([1, 4, 2]),
+                    layer_number=0,
+                    sequence_parallel=False,
+                ),
+                position_ids,
+            )
+
     def test_weight_only_mtp_layer_forward(self):
         """Test WeightOnlyMTPLayer.forward returns dict_args."""
         from paddlefleet.transformer.multi_token_prediction import (

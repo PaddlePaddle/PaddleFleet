@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
+    _accuracy_compatible_mla_rope_apply,
     _accuracy_compatible_projection,
     _accuracy_compatible_q_down_projection,
 )
@@ -47,6 +48,26 @@ def _make_mla_self_attn(**attrs):
         for k, v in attrs.items():
             object.__setattr__(attn, k, v)
         return attn
+
+
+class TestAccuracyCompatibleMLARope(unittest.TestCase):
+    def test_roll_position_contract_matches_expected_rotation(self):
+        import paddle
+
+        q_pe = paddle.to_tensor([[[[1.0, 2.0, 3.0, 4.0]]]])
+        k_pe = q_pe.clone()
+        position_ids = paddle.to_tensor([1], dtype="int64")
+        q_out, k_out = _accuracy_compatible_mla_rope_apply(
+            q_pe, k_pe, rope_base=100.0, position_ids=position_ids
+        )
+
+        inv_freq = paddle.to_tensor([1.0, 0.1], dtype="float32")
+        freqs = paddle.concat((inv_freq, inv_freq)).reshape([1, 1, 1, 4])
+        ordered = paddle.to_tensor([[[[1.0, 3.0, 2.0, 4.0]]]])
+        rotated = paddle.to_tensor([[[[-2.0, -4.0, 1.0, 3.0]]]])
+        expected = ordered * paddle.cos(freqs) + rotated * paddle.sin(freqs)
+        paddle.testing.assert_close(q_out, expected)
+        paddle.testing.assert_close(k_out, expected)
 
 
 class TestAccuracyCompatibleProjection(unittest.TestCase):
