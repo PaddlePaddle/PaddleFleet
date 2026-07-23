@@ -94,6 +94,37 @@ from .moe_utils import (
 )
 
 
+class _AccuracyCompatibleExpertInputGather(PyLayer):
+    """Gather expert inputs while fixing routed-token dgrad accumulation order."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, token_indices, tokens_per_expert):
+        ctx.hidden_shape = hidden_states.shape
+        ctx.save_for_backward(token_indices, tokens_per_expert)
+        return paddle.index_select(hidden_states, token_indices, axis=0)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        token_indices, tokens_per_expert = ctx.saved_tensor()
+        grad_hidden = paddle.zeros(ctx.hidden_shape, dtype=grad_output.dtype)
+        offset = 0
+        for count in tokens_per_expert.tolist():
+            count = int(count)
+            if count == 0:
+                continue
+            next_offset = offset + count
+            expert_grad = paddle.zeros_like(grad_hidden)
+            expert_grad = paddle.scatter(
+                expert_grad,
+                token_indices[offset:next_offset],
+                grad_output[offset:next_offset],
+                overwrite=False,
+            )
+            grad_hidden = grad_hidden + expert_grad
+            offset = next_offset
+        return grad_hidden, None, None
+
+
 class GradDtypeGuard(PyLayer):
     """Guard the grad's dtype if different from input's dtype."""
 
@@ -1108,6 +1139,25 @@ class MoELayer(nn.Layer):
         tokens_per_expert = expert_mask.reshape([expert_mask.shape[0], -1]).sum(
             axis=-1
         )
+        accuracy_compatible = use_accuracy_compatible_kernel()
+        gathered_state_chunks = None
+        token_counts = [int(count) for count in tokens_per_expert.tolist()]
+        if accuracy_compatible:
+            expert_token_indices = []
+            for expert_idx in range(self.num_experts):
+                _, expert_indices = paddle.where(expert_mask[expert_idx])
+                if tokens_per_expert[expert_idx] > 0.1:
+                    expert_token_indices.append(expert_indices.reshape([-1]))
+            token_indices = paddle.concat(expert_token_indices, axis=0)
+            gathered_states = _AccuracyCompatibleExpertInputGather.apply(
+                hidden_states, token_indices, tokens_per_expert
+            )
+            gathered_state_chunks = paddle.split(
+                gathered_states,
+                num_or_sections=token_counts,
+                axis=0,
+            )
+
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
@@ -1117,9 +1167,12 @@ class MoELayer(nn.Layer):
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             if tokens_per_expert[expert_idx] <= 0.1:
                 continue
-            current_state = hidden_states[idx, None].reshape([-1, d_model])
+            if accuracy_compatible:
+                current_state = gathered_state_chunks[expert_idx]
+            else:
+                current_state = hidden_states[idx, None].reshape([-1, d_model])
             current_weight = topk_weights[idx, top_x].unsqueeze(-1)
-            if use_accuracy_compatible_kernel():
+            if accuracy_compatible:
                 expert_out = expert_layer(
                     current_state, per_token_scale=current_weight.squeeze(-1)
                 )[0]

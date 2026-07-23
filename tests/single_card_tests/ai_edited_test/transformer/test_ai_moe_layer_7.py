@@ -33,6 +33,7 @@ from paddlefleet.transformer.moe.moe_layer import (
     GradDtypeUnguard,
     MoELayer,
     MoESublayers,
+    _AccuracyCompatibleExpertInputGather,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -297,6 +298,46 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
         layer.fp8 = False
         # Should return early without errors
         layer.fp8_quant_weight()
+
+
+class TestAccuracyCompatibleExpertInputGather(unittest.TestCase):
+    def test_backward_accumulates_experts_in_forward_order(self):
+        hidden = paddle.to_tensor(
+            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+            dtype="bfloat16",
+        )
+        hidden.stop_gradient = False
+        parameter = paddle.ones([4], dtype="bfloat16")
+        parameter.stop_gradient = False
+        indices = paddle.to_tensor([0, 1, 0, 1], dtype="int64")
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        gathered = _AccuracyCompatibleExpertInputGather.apply(
+            hidden, indices, tokens_per_expert
+        )
+        expert_grads = paddle.to_tensor(
+            [
+                [1.0, 16.0, 256.0, 4096.0],
+                [2.0, 32.0, 512.0, 8192.0],
+                [0.25, 4.0, 64.0, 1024.0],
+                [0.5, 8.0, 128.0, 2048.0],
+            ],
+            dtype="bfloat16",
+        )
+        (gathered * parameter).backward(expert_grads)
+
+        expected = paddle.to_tensor(
+            [
+                [1.25, 20.0, 320.0, 5120.0],
+                [2.5, 40.0, 640.0, 10240.0],
+            ],
+            dtype="bfloat16",
+        )
+        self.assertEqual(hidden.grad.numpy().tobytes(), expected.numpy().tobytes())
+        expected_parameter_grad = paddle.sum(gathered.detach() * expert_grads, axis=0)
+        self.assertEqual(
+            parameter.grad.numpy().tobytes(),
+            expected_parameter_grad.numpy().tobytes(),
+        )
 
 
 class TestMoELayerSingleCardAccuracy(unittest.TestCase):
