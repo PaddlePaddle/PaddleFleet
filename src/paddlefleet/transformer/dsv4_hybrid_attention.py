@@ -269,14 +269,14 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
                         flush=True,
                     )
 
-        # FP8 opt-in policy: when ``save_original_input=False`` (default) we skip
+        # FP8 opt-in policy: when ``save_original_input=False`` we skip
         # stashing the bf16 activation on ctx to save memory. Since the wgrad
         # path re-quantizes x with quant_method="1x128" anyway, we run the same
         # quantization eagerly here and stash the fp8 result on ctx. This is
         # numerically identical to re-quantizing in backward (deterministic).
-        # The bf16 wgrad path (``fp8_wgrad=False``) requires bf16 x, so it
-        # forces ``save_original_input=True`` at the call site.
-        if save_original_input or not fp8_wgrad:
+        # For ``fp8_wgrad=False`` the backward bf16 wgrad path dequantizes
+        # ``x_fp8_w_pre`` back to bf16 on the fly.
+        if save_original_input:
             ctx.save_for_backward(x, weight_bf16)
             ctx.bf16_x_saved = True
             ctx.x_fp8_w_pre = None
@@ -505,10 +505,21 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
                 )
         else:
             # bf16 path
-            assert x is not None, (
-                "GroupedOutputFP8: fp8_wgrad=False requires "
-                "save_original_input=True to keep bf16 activation."
-            )
+            if x is None:
+                # save_original_input=False: dequant the pre-quantized fp8
+                # activation back to bf16. ``x_fp8_w_pre`` is
+                # ``[g, d, b*sq]``; reshape to 2D ``[g*d, b*sq]`` for
+                # fused_act_dequant, then unpack back to ``[b, sq, g, d]``.
+                x_fp8_2d = ctx.x_fp8_w_pre.reshape([num_groups * d, b * sq])
+                x_scale_2d = ctx.x_scale_w_pre.reshape([num_groups * d, -1])
+                x_bf16_2d = paddle.incubate.nn.functional.fused_act_dequant(
+                    x_fp8_2d, x_scale_2d
+                )
+                x = (
+                    x_bf16_2d.reshape([num_groups, d, b * sq])
+                    .transpose([2, 0, 1])
+                    .reshape([b, sq, num_groups, d])
+                )
             grad_weight = paddle.einsum("bsgd,bsgr->grd", x, grad_output)
 
         return grad_x, grad_weight.reshape([num_groups * o_lora_rank, d])
@@ -653,7 +664,6 @@ class DSv4HybridAttention(Attention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
-        save_original_input: bool | None = None,
     ):
         super().__init__(
             config=config,
@@ -743,20 +753,15 @@ class DSv4HybridAttention(Attention):
         )
 
         linear_proj_in_size = config.o_groups * config.o_lora_rank
-        # FP8 opt-in policy: fp8 / fp8_wgrad come from config; save_original_input
-        # is provided by the user at network-construction time (not from config).
-        # Default rule (when caller passes None):
-        #   fp8=False                       -> True  (bf16 pipeline needs bf16 x)
-        #   fp8=True  and fp8_wgrad=False   -> True  (bf16 wgrad needs bf16 x)
-        #   fp8=True  and fp8_wgrad=True    -> False (fp8 wgrad, skip bf16 save)
+        # FP8 comes from ``config`` now. ``save_original_input`` is a settable
+        # attribute (default ``not self.fp8``) so callers can override it
+        # post-construction if the wgrad path needs the bf16 activation kept.
         # Assert TP=1 when fp8 is enabled — DSv4 FP8 is currently only wired up
         # for the non-parallel path.
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
         self.fp8 = bool(getattr(config, "fp8", False))
         self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
-        if save_original_input is None:
-            save_original_input = not (self.fp8 and self.fp8_wgrad)
-        self.save_original_input = bool(save_original_input)
+        self.save_original_input = not self.fp8
         self.use_fp8_grouped_output = self.fp8 and _DEEP_GEMM_AVAILABLE
         if self.fp8:
             tp_nranks = getattr(self.pg_collection.tp, "nranks", 1)
@@ -775,9 +780,6 @@ class DSv4HybridAttention(Attention):
             skip_bias_add=True,
             is_expert=False,
             tp_group=self.pg_collection.tp,
-            fp8=self.fp8,
-            fp8_wgrad=self.fp8_wgrad,
-            save_original_input=self.save_original_input,
         )
 
         # Gated attention. For MQA the gate multiplies the output of the grouped
@@ -1029,7 +1031,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
-        save_original_input: bool | None = None,
     ):
         super().__init__(
             config=config,
@@ -1040,7 +1041,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             is_mtp_layer=is_mtp_layer,
-            save_original_input=save_original_input,
         )
 
         self.q_lora_rank = config.q_lora_rank
@@ -1058,9 +1058,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
-            fp8=self.fp8,
-            fp8_wgrad=self.fp8_wgrad,
-            save_original_input=self.save_original_input,
         )
 
         # Q layernorm
@@ -1083,9 +1080,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             skip_bias_add=False,
             is_expert=False,
             tp_group=self.pg_collection.tp,
-            fp8=self.fp8,
-            fp8_wgrad=self.fp8_wgrad,
-            save_original_input=self.save_original_input,
         )
 
         # KV projection: hidden_size -> v_head_dim (single head)
@@ -1100,9 +1094,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             skip_bias_add=False,
             is_expert=False,
             tp_group=self.pg_collection.tp,
-            fp8=self.fp8,
-            fp8_wgrad=self.fp8_wgrad,
-            save_original_input=self.save_original_input,
         )
 
         # KV layernorm

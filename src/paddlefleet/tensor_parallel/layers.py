@@ -562,6 +562,27 @@ def _bwd_quant_blockwise_1x128(x, use_pow2_scale, use_ue8m0):
     )[:2]
 
 
+def _dequant_inp_t_to_bf16(inp_t_fp8, inp_t_scale):
+    """Dequantize the pre-quantized ``[K, M]`` fp8 activation back to bf16.
+
+    Used by the backward wgrad fallback when ``save_original_input=False``
+    (so the bf16 activation was not saved) and ``fp8_wgrad=False`` (so the
+    wgrad gemm still runs in bf16). ``inp_t_fp8`` is the transposed-
+    orientation fp8 quantization emitted by the forward quant kernel,
+    with shape ``[K, M]`` — exactly what ``total_input.t()`` would be.
+
+    ``inp_t_scale`` was passed through ``_mn_major`` at forward time
+    (stride-only ``.T`` view for DeepGEMM's ``stride(-2)==1`` requirement).
+    ``fused_act_dequant`` requires K-major scale (``stride(-1)==1``), so
+    we materialize a contiguous copy here. Handles both float32 scales
+    and UE8M0 int32-packed scales transparently.
+    """
+    scale_k_major = inp_t_scale.contiguous()
+    return paddle.incubate.nn.functional.fused_act_dequant(
+        inp_t_fp8, scale_k_major
+    )
+
+
 def _make_bwd_inp_quant_func(use_pow2_scale, use_ue8m0):
     """Return an ``inp_quant_func`` callable for the backward dgrad path.
 
@@ -1048,12 +1069,33 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 grad_weight = None
         else:
             if wgrad_compute:
-                assert total_input is not None, (
-                    "bf16 wgrad requires the saved bf16 activation; set"
-                    " save_original_input=True or enable fp8_wgrad when using fp8"
-                )
-                # print(f"[backward] wgrad bf16: total_input={total_input.shape} grad_output={grad_output.shape}")
-            grad_weight, _ = general_gemm(total_input.t(), grad_output)
+                if total_input is not None:
+                    # print(f"[backward] wgrad bf16: total_input={total_input.shape} grad_output={grad_output.shape}")
+                    grad_weight, _ = general_gemm(
+                        total_input.t(), grad_output
+                    )
+                elif ctx.inp_t_fp8 is not None:
+                    # ``save_original_input=False`` + ``fp8_wgrad=False``:
+                    # no bf16 activation was saved, but the forward quant
+                    # kernel already produced the transposed fp8
+                    # activation on ctx. Dequantize it back to bf16 to
+                    # feed the bf16 wgrad gemm. ``inp_t_fp8`` has shape
+                    # ``[K, M]`` — this is directly ``total_input.t()``.
+                    total_input_t_bf16 = _dequant_inp_t_to_bf16(
+                        ctx.inp_t_fp8, ctx.inp_t_scale
+                    )
+                    grad_weight, _ = general_gemm(
+                        total_input_t_bf16, grad_output
+                    )
+                else:
+                    raise AssertionError(
+                        "bf16 wgrad requires either the saved bf16 "
+                        "activation (save_original_input=True) or a "
+                        "pre-quantized fp8 activation on ctx.inp_t_fp8 "
+                        "(fp8 forward with input_trans=True)"
+                    )
+            else:
+                grad_weight = None
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
@@ -1304,9 +1346,7 @@ class Linear(paddle.nn.Layer):
         tp_comm_buffer_name: str | None = None,
         disable_grad_reduce: bool = False,
         tp_group: paddle.core.ProcessGroup | None = None,
-        fp8: bool = False,
-        fp8_wgrad: bool = False,
-        save_original_input: bool = False,
+        disable_fp8: bool = False,
     ):
         super().__init__()
 
@@ -1385,13 +1425,14 @@ class Linear(paddle.nn.Layer):
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
-        # FP8 config: opt-in via explicit kwargs (no longer auto-detected from
-        # config). ``save_original_input`` controls whether to keep bf16
-        # activations for backward when fp8 is on; when False (default), only
-        # fp8-quantized activations are stashed on ctx.
-        self.fp8 = bool(fp8)
-        self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
-        self.save_original_input = bool(save_original_input)
+        # FP8 is inherited from ``config`` unless the caller opts out via
+        # ``disable_fp8``. ``save_original_input`` defaults to ``not self.fp8``
+        # and is a settable attribute — callers can override it post-init when
+        # the wgrad path needs the bf16 activation kept (e.g. the shared
+        # expert's up_gate_proj).
+        self.fp8 = bool(getattr(config, "fp8", None)) and not disable_fp8
+        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
+        self.save_original_input = not self.fp8
         self.use_pow2_scale = False
         self.use_ue8m0 = False
         self.inp_quant_func = None
@@ -1719,9 +1760,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
         tp_comm_buffer_name: str | None = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: paddle.core.ProcessGroup | None = None,
-        fp8: bool = False,
-        fp8_wgrad: bool = False,
-        save_original_input: bool = False,
+        disable_fp8: bool = False,
     ):
         super().__init__()
 
@@ -1844,10 +1883,12 @@ class ColumnParallelLinear(paddle.nn.Layer):
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
-        # FP8 config (opt-in)
-        self.fp8 = bool(fp8)
-        self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
-        self.save_original_input = bool(save_original_input)
+        # FP8 is inherited from ``config`` unless the caller opts out via
+        # ``disable_fp8``. ``save_original_input`` defaults to ``not self.fp8``
+        # and is a settable attribute — callers can override it post-init.
+        self.fp8 = bool(getattr(config, "fp8", None)) and not disable_fp8
+        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
+        self.save_original_input = not self.fp8
         self.use_pow2_scale = False
         self.use_ue8m0 = False
         self.inp_quant_func = None
@@ -2095,9 +2136,7 @@ class RowParallelLinear(paddle.nn.Layer):
         is_expert: bool = False,
         tp_comm_buffer_name: str | None = None,  # Not used
         tp_group: paddle.core.ProcessGroup | None = None,
-        fp8: bool = False,
-        fp8_wgrad: bool = False,
-        save_original_input: bool = False,
+        disable_fp8: bool = False,
     ):
         super().__init__()
 
@@ -2198,10 +2237,12 @@ class RowParallelLinear(paddle.nn.Layer):
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
-        # FP8 config (opt-in)
-        self.fp8 = bool(fp8)
-        self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
-        self.save_original_input = bool(save_original_input)
+        # FP8 is inherited from ``config`` unless the caller opts out via
+        # ``disable_fp8``. ``save_original_input`` defaults to ``not self.fp8``
+        # and is a settable attribute — callers can override it post-init.
+        self.fp8 = bool(getattr(config, "fp8", None)) and not disable_fp8
+        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
+        self.save_original_input = not self.fp8
         self.use_pow2_scale = False
         self.use_ue8m0 = False
         self.inp_quant_func = None

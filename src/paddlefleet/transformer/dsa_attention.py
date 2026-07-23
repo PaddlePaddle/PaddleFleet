@@ -276,7 +276,6 @@ class DSAIndexer(paddle.nn.Layer):
         sublayers_spec: DSAIndexerSublayersSpec,
         layer_number: int,
         pg_collection: ProcessGroupCollection | None = None,
-        save_original_input: bool | None = None,
     ):
         super().__init__()
         self.config = config
@@ -295,9 +294,7 @@ class DSAIndexer(paddle.nn.Layer):
 
         self.fp8 = bool(getattr(self.config, "fp8", None))
         self.fp8_wgrad = bool(getattr(self.config, "fp8_wgrad", False))
-        if save_original_input is None:
-            save_original_input = not (self.fp8 and self.fp8_wgrad)
-        self.save_original_input = bool(save_original_input)
+        self.save_original_input = not self.fp8
         if self.fp8:
             tp_size = (
                 pg_collection.tp.nranks if pg_collection.tp is not None else 1
@@ -316,9 +313,6 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wq_b",
-            fp8=self.fp8,
-            fp8_wgrad=self.fp8_wgrad,
-            save_original_input=self.save_original_input,
         )
 
         # wk: hidden_size -> head_dim (single shared K, duplicated)
@@ -333,9 +327,6 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wk",
-            fp8=self.fp8,
-            fp8_wgrad=self.fp8_wgrad,
-            save_original_input=self.save_original_input,
         )
 
         # k_norm: LayerNorm (NOT RMSNorm) per reference
@@ -357,6 +348,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_weights_proj",
+            disable_fp8=True,
         )
 
         # Initialize Position Embedding.

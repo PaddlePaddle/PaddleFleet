@@ -1388,6 +1388,7 @@ class Compressor(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            disable_fp8=True,
         )
         self.linear_wgate = build_spec_layer(
             sublayers_spec.linear_wgate,
@@ -1400,6 +1401,7 @@ class Compressor(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            disable_fp8=True,
         )
 
         self.ape = self.create_parameter(
@@ -1687,7 +1689,6 @@ class CSAIndexer(nn.Layer):
         sublayers_spec: CSAIndexerSublayersSpec,
         compress_ratio: int,
         rotary_pos_emb=None,
-        save_original_input: bool | None = None,
     ):
         super().__init__()
         self.config = config
@@ -1706,9 +1707,7 @@ class CSAIndexer(nn.Layer):
 
         self.fp8 = bool(getattr(config, "fp8", None))
         self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False))
-        if save_original_input is None:
-            save_original_input = not (self.fp8 and self.fp8_wgrad)
-        self.save_original_input = bool(save_original_input)
+        self.save_original_input = not self.fp8
 
         # Q projection: q_lora_rank -> n_heads * head_dim
         self.linear_wq_b = build_spec_layer(
@@ -1722,9 +1721,6 @@ class CSAIndexer(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
-            fp8=self.fp8,
-            fp8_wgrad=self.fp8_wgrad,
-            save_original_input=self.save_original_input,
         )
 
         # Weights projection: hidden_size -> n_heads
@@ -1739,6 +1735,7 @@ class CSAIndexer(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            disable_fp8=True,
         )
 
         # Own compressor (smaller head_dim, with Hadamard rotation)

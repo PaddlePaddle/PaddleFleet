@@ -94,31 +94,11 @@ class MLP(FleetLayer):
         intermediate_size: int | None = None,
         hidden_size: int | None = None,
         tp_group=None,
-        fp8: bool = False,
-        fp8_wgrad: bool = False,
-        save_original_input: bool | None = None,
+        disable_fp8: bool = False,
     ):
         super().__init__(config=config)
 
         self.config: TransformerConfig = config
-
-        # FP8 opt-in: caller passes fp8/fp8_wgrad/save_original_input; when
-        # ``fp8`` is False the up_gate_proj / down_proj Linears stay bf16
-        # (they no longer read ``config.fp8`` implicitly).
-        self.fp8 = bool(fp8)
-        self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
-        if save_original_input is None:
-            save_original_input = not (self.fp8 and self.fp8_wgrad)
-        self.save_original_input = bool(save_original_input)
-        fp8_kwargs = (
-            {
-                "fp8": self.fp8,
-                "fp8_wgrad": self.fp8_wgrad,
-                "save_original_input": self.save_original_input,
-            }
-            if self.fp8
-            else {}
-        )
 
         self.input_size = (
             input_size if input_size is not None else self.config.hidden_size
@@ -169,7 +149,7 @@ class MLP(FleetLayer):
             skip_bias_add=skip_bias_add,
             is_expert=is_expert,
             tp_group=tp_group,
-            **fp8_kwargs,
+            disable_fp8=disable_fp8,
         )
 
         # Ensure hidden_act is a callable function, not a bound method
@@ -196,7 +176,7 @@ class MLP(FleetLayer):
             skip_bias_add=skip_bias_add,
             is_expert=is_expert,
             tp_group=tp_group,
-            **fp8_kwargs,
+            disable_fp8=disable_fp8,
         )
 
     def forward(self, hidden_states, per_token_scale=None):

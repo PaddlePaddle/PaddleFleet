@@ -29,11 +29,7 @@ class StandardMLPSharedExpert(MLP):
         moe_intermediate_size: int,
         is_expert: bool,
         mlp_spec: MLPSublayersSpec,
-        save_original_input: bool | None = None,
     ):
-        # FP8 opt-in: shared experts pick up fp8 / fp8_wgrad from config.
-        fp8 = bool(getattr(config, "fp8", None))
-        fp8_wgrad = bool(getattr(config, "fp8_wgrad", False))
         if moe_intermediate_size == config.intermediate_size:
             super().__init__(
                 config,
@@ -41,9 +37,6 @@ class StandardMLPSharedExpert(MLP):
                 is_expert=is_expert,
                 intermediate_size=moe_intermediate_size,
                 # tp_group=pg_collection.expt_tp,
-                fp8=fp8,
-                fp8_wgrad=fp8_wgrad,
-                save_original_input=save_original_input,
             )
         else:
             # Local SequentialMLP can still be used here by overriding the intermediate_size
@@ -56,13 +49,10 @@ class StandardMLPSharedExpert(MLP):
                 is_expert=is_expert,
                 intermediate_size=moe_intermediate_size,
                 # tp_group=pg_collection.expt_tp,
-                fp8=fp8,
-                fp8_wgrad=fp8_wgrad,
-                save_original_input=save_original_input,
             )
         self.use_shared_expert_gate = config.moe_shared_expert_gate
         # The first linear of shared_expert don't save quanted activation for backward
-        # because high precision activation has been held by gate, 
+        # because high precision activation has been held by gate,
         self.up_gate_proj.save_original_input = True
         if self.use_shared_expert_gate:
             self.gate_weight = paddle.create_parameter(
