@@ -283,6 +283,7 @@ class MlpNode:
         use_ue8m0=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_w4a8=False,
     ):
         """
         Constructor
@@ -384,6 +385,7 @@ class MlpNode:
                 dw_p2p_overlap=dw_p2p_overlap,
                 moe_expert_fusion=moe_expert_fusion,
                 clamp_value=clamp_value,
+                use_w4a8=use_w4a8,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -1954,6 +1956,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_ue8m0=False,
         dw_p2p_overlap=False,
         clamp_value=None,
+        use_w4a8=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -1983,6 +1986,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_ue8m0=use_ue8m0,
             dw_p2p_overlap=dw_p2p_overlap,
             clamp_value=clamp_value,
+            use_w4a8=use_w4a8,
         )
 
         if fp8_dispatched_handle is not None:

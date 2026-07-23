@@ -172,9 +172,15 @@ class MoELayer(nn.Layer):
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.use_ue8m0 = config.use_ue8m0
+        self.use_w4a8 = config.use_w4a8
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
-        self.fp8_dispatch = bool(config.fp8) and not self.using_sonic_moe
+        self.moe_dequant_input = config.moe_dequant_input
+        self.fp8_dispatch = (
+            bool(config.fp8)
+            and not self.using_sonic_moe
+            and config.fp8_dispatch_deepep
+        )
         self.fp8_wgrad = config.fp8_wgrad
         self.moe_expert_fusion = config.moe_expert_fusion
         self.moe_subbatch_token_num_after_dispatch = (
@@ -768,6 +774,7 @@ class MoELayer(nn.Layer):
                     use_fp8_mlp=self.fp8,
                     moe_deep_gemm=self.moe_deep_gemm,
                     recompute_moe_gate_up=self.recompute_moe_gate_up,
+                    dequant_input=self.moe_dequant_input,
                     recompute_moe_premute=self.recompute_moe_premute,
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     use_bf16_gemm_weight_grad=not self.fp8_wgrad,
@@ -779,6 +786,7 @@ class MoELayer(nn.Layer):
                     dw_p2p_overlap=self.dw_p2p_overlap,
                     clamp_value=self.config.activation_func_clamp_value,
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
+                    use_w4a8=self.use_w4a8,
                 )
 
         with profile("combine"):
@@ -922,6 +930,7 @@ class MoELayer(nn.Layer):
                     use_ue8m0=self.use_ue8m0,
                     dw_p2p_overlap=self.dw_p2p_overlap,
                     clamp_value=self.config.activation_func_clamp_value,
+                    use_w4a8=self.use_w4a8,
                 )
 
             if is_first_fwd:
