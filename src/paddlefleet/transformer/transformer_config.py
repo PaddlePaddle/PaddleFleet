@@ -20,7 +20,7 @@ from __future__ import annotations
 import functools
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
@@ -1086,6 +1086,12 @@ class TransformerConfig(ModelParallelConfig):
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
     }
 
+    # Outbound Fleet -> HuggingFace name/value mapping (mirror of transform_rules).
+    # Base is empty; subclasses declare renames. Forms:
+    #   "fleet_name": "hf_name"               -> rename
+    #   "fleet_name": ("hf_name", value_fn)   -> rename + value convert
+    hf_export_rules = {}
+
     @classmethod
     def from_config(cls, config_dict):
         # note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
@@ -1130,6 +1136,85 @@ class TransformerConfig(ModelParallelConfig):
 
     def get(self, key: str, default=None):
         return getattr(self, key, default)
+
+    # ------------------------------------------------------------------
+    # Outbound export: Fleet-canonical config -> HuggingFace config.json dict
+    # ------------------------------------------------------------------
+    def to_hf_config(self) -> dict:
+        """Render this Fleet config into a HuggingFace ``config.json`` dict.
+
+        Applies ``hf_export_rules`` (rename + value convert) and generic value
+        normalization, then delegates structural / whitelist decisions to the
+        ``_hf_export_postprocess`` and ``_hf_export_whitelist`` subclass hooks.
+        If ``_hf_export_source`` is set, it is used as the value source so the
+        output reflects the raw user config rather than provider-derived values.
+        """
+        # 1) Aggregate effective config.
+        source = getattr(self, "_hf_export_source", None)
+        if source is not None:
+            if hasattr(source, "to_dict"):
+                raw = dict(source.to_dict())
+            elif isinstance(source, dict):
+                raw = dict(source)
+            else:
+                raw = dict(vars(source))
+        else:
+            # Providers skip dataclass __init__, so merge class-level field
+            # defaults with instance vars.
+            raw = {f.name: getattr(self, f.name) for f in fields(self)}
+            raw.update(vars(self))
+        raw.pop("_hf_export_source", None)
+
+        rules = getattr(self, "hf_export_rules", {}) or {}
+        hf_targets = set()
+        for spec in rules.values():
+            hf_targets.add(spec[0] if isinstance(spec, tuple) else spec)
+
+        out: dict = {}
+        # First pass: renamed / value-converted fields take precedence.
+        for fleet_key, val in raw.items():
+            if fleet_key not in rules:
+                continue
+            spec = rules[fleet_key]
+            if isinstance(spec, tuple):
+                hf_key, value_fn = spec
+                out[hf_key] = value_fn(val)
+            else:
+                out[spec] = val
+        # Second pass: passthrough, never overwriting a renamed result.
+        for fleet_key, val in raw.items():
+            if fleet_key in rules:
+                continue
+            if fleet_key in hf_targets and fleet_key in out:
+                continue
+            out[fleet_key] = val
+
+        # 3) Generic value normalization for fields without an explicit rule.
+        if callable(out.get("hidden_act")):
+            out["hidden_act"] = out["hidden_act"].__name__
+        if "params_dtype" in out and out["params_dtype"] is not None:
+            out["params_dtype"] = str(out["params_dtype"]).replace(
+                "paddle.", ""
+            )
+
+        # 4) Structural post-processing (base is a no-op).
+        self._hf_export_postprocess(raw, out)
+
+        # 5) Whitelist filtering (base keeps all keys).
+        whitelist = self._hf_export_whitelist(raw)
+        if whitelist is not None:
+            out = {k: v for k, v in out.items() if k in whitelist}
+
+        return out
+
+    def _hf_export_postprocess(self, raw: dict, out: dict) -> None:
+        """Hook for structural transforms during ``to_hf_config``. ``out`` is the
+        HF dict built so far (mutate in place). Base does nothing."""
+        return None
+
+    def _hf_export_whitelist(self, raw: dict):
+        """Hook returning the set of HF keys to keep, or ``None`` to keep all."""
+        return None
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.
