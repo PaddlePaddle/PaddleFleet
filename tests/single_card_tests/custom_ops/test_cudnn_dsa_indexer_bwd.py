@@ -852,6 +852,7 @@ class TestTransformerConfigCsaIndexerBackend(unittest.TestCase):
             experimental_attention_variant="dsv4_hybrid",
             csa_compress_ratios=[4],
             csa_indexer_backend="cudnn",
+            qk_pos_emb_head_dim=64,
         )
         self.assertEqual(cfg.csa_indexer_backend, "cudnn")
 
@@ -862,6 +863,7 @@ class TestTransformerConfigCsaIndexerBackend(unittest.TestCase):
             experimental_attention_variant="dsv4_hybrid",
             csa_compress_ratios=[4],
             csa_indexer_backend="tilelang",
+            qk_pos_emb_head_dim=64,
         )
         self.assertEqual(cfg.csa_indexer_backend, "tilelang")
 

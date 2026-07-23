@@ -1423,6 +1423,11 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+            if self.qk_pos_emb_head_dim is None:
+                raise ValueError(
+                    "qk_pos_emb_head_dim must be explicitly set when using "
+                    "dsv4_hybrid attention. Set to 0 to explicitly disable RoPE."
+                )
 
         # swa_high_precision_norm is only supported for DSv4 models.
         if (

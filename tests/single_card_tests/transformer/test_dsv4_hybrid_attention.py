@@ -300,6 +300,14 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 compress_ratio=4,
             )
 
+    def test_qk_pos_emb_head_dim_not_none(self):
+        with self.assertRaisesRegex(
+            ValueError, "qk_pos_emb_head_dim must be explicitly set"
+        ):
+            cfg = _make_config()
+            cfg.qk_pos_emb_head_dim = None
+            cfg.__post_init__()
+
     def test_phase2_loss_topk_does_not_expand_attention_topk(self):
         config = _make_config(
             dsa_index_topk=2,
