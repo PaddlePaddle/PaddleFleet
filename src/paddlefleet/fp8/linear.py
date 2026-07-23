@@ -65,13 +65,24 @@ class _FP8Gemm(paddle.autograd.Function):
             )
 
         if is_fp8_tensor(weight) is False:
-            weight_fp8, weight_scale = weight_quant_func(weight)
+            wq_result = weight_quant_func(weight)
+            if len(wq_result) == 2:
+                weight_fp8, weight_scale = wq_result
+                weight_fp8_bwd, weight_scale_bwd = None, None
+            else:
+                (
+                    weight_fp8_bwd, weight_scale_bwd,
+                    weight_fp8, weight_scale,
+                ) = wq_result
         else:
             weight_fp8, weight_scale = weight
+            weight_fp8_bwd, weight_scale_bwd = None, None
 
         ctx.save_for_backward(
             inp_t_fp8, inp_t_scale, weight, weight_fp8, weight_scale
         )
+        ctx.weight_fp8_bwd = weight_fp8_bwd
+        ctx.weight_scale_bwd = weight_scale_bwd
         ctx.use_pow2_scale = use_pow2_scale
         out = paddle.empty(
             [inp_fp8.shape[0], weight_fp8.shape[0]], dtype=paddle.bfloat16
@@ -129,9 +140,15 @@ class _FP8Gemm(paddle.autograd.Function):
         grad_input = paddle.empty(
             [inp_t_fp8.shape[1], inp_t_fp8.shape[0]], dtype=paddle.bfloat16
         )
+        # Reuse the backward-orientation weight quantized in forward when
+        # available; otherwise transpose the forward-orientation copy.
+        if getattr(ctx, "weight_fp8_bwd", None) is not None:
+            weight_bwd = (ctx.weight_fp8_bwd, ctx.weight_scale_bwd)
+        else:
+            weight_bwd = (weight_fp8.T.contiguous(), weight_scale.T)
         deep_gemm.fp8_gemm_nt(
             (grad_out_fp8, grad_out_scale),
-            (weight_fp8.T.contiguous(), weight_scale.T),
+            weight_bwd,
             grad_input,
         )
 

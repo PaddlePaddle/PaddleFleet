@@ -533,6 +533,47 @@ def linear_with_frozen_weight(
     return LinearWithFrozenWeight.apply(*args)
 
 
+def _bwd_quant_blockwise_1x128(x, use_pow2_scale, use_ue8m0):
+    """Backward-path 1x128 blockwise quant.
+
+    When ``use_ue8m0=True`` we produce int32-packed pow2 scales in MN-major
+    layout (``output_scale_transpose=True`` + ``.T`` stride-only view) so
+    DeepGEMM's SM100 INT/(1,1,128) branch can consume them without extra
+    H2D transfers. When ``use_ue8m0=False`` we keep the original behavior
+    (fp32 scales, ``output_scale_transpose=False``) which matches the
+    pre-existing pow2-only golden.
+    """
+    if use_ue8m0:
+        fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+            x,
+            output_scale_transpose=True,
+            quant_method="1x128",
+            input_transpose=False,
+            using_pow2_scale=True,
+            using_ue8m0_scale=True,
+        )[:2]
+        return fp8, scale.T
+    return paddle.incubate.nn.functional.fp8_quant_blockwise(
+        x,
+        output_scale_transpose=False,
+        quant_method="1x128",
+        input_transpose=False,
+        using_pow2_scale=use_pow2_scale,
+    )[:2]
+
+
+def _make_bwd_inp_quant_func(use_pow2_scale, use_ue8m0):
+    """Return an ``inp_quant_func`` callable for the backward dgrad path.
+
+    Mirrors ``_bwd_quant_blockwise_1x128`` but returns a callable in the
+    shape expected by ``general_gemm``'s ``inp_quant_func`` argument.
+    """
+    def _f(x):
+        return _bwd_quant_blockwise_1x128(x, use_pow2_scale, use_ue8m0)
+
+    return _f
+
+
 def general_gemm(
     a,
     b,
@@ -588,17 +629,24 @@ def general_gemm(
             else:
                 inp_fp8, inp_scale, inp_t_fp8, inp_t_scale = quant_result
 
+        # ``weight_quant_func`` accepts the raw weight ``b`` [K, N] and
+        # returns a 4-tuple ``(fp8_bwd, scale_bwd, fp8_fwd, scale_fwd)``:
+        # the forward orientation feeds ``fp8_gemm_nt`` here, the backward
+        # orientation is stashed on ctx for dgrad's reuse.
+        weight_fp8_bwd, weight_scale_bwd = None, None
         if is_fp8_tensor(b):
             weight_fp8, weight_scale = b
         else:
-            # weight is [K, N] but fp8_gemm_nt expects B as [N, K]
-            weight_fp8, weight_scale = weight_quant_func(b.T.contiguous())
-
-        # print(f"[general_gemm] fp8 path: "
-        #       f"A shape={inp_fp8.shape} stride={inp_fp8.strides} dtype={inp_fp8.dtype} "
-        #       f"B shape={weight_fp8.shape} stride={weight_fp8.strides} dtype={weight_fp8.dtype} "
-        #       f"A_scale shape={inp_scale.shape} B_scale shape={weight_scale.shape} "
-        #       f"out={'accumulate '+str(out.shape) if out is not None else 'new'}")
+            wq_result = weight_quant_func(b)
+            if len(wq_result) == 2:
+                weight_fp8, weight_scale = wq_result
+            else:
+                (
+                    weight_fp8_bwd,
+                    weight_scale_bwd,
+                    weight_fp8,
+                    weight_scale,
+                ) = wq_result
 
         if out is not None:
             # Accumulate into existing buffer
@@ -615,7 +663,6 @@ def general_gemm(
                 recipe=recipe,
             )
 
-        # print(f"[general_gemm] fp8 done: out shape={out.shape}")
         if a_orig_shape is not None:
             out = out.reshape(list(a_orig_shape[:-1]) + [out.shape[-1]])
 
@@ -652,7 +699,16 @@ def general_gemm(
                     flush=True,
                 )
 
-        return out, (inp_fp8, inp_scale, inp_t_fp8, inp_t_scale, weight_fp8, weight_scale)
+        return out, (
+            inp_fp8,
+            inp_scale,
+            inp_t_fp8,
+            inp_t_scale,
+            weight_fp8,
+            weight_scale,
+            weight_fp8_bwd,
+            weight_scale_bwd,
+        )
 
     else:
         # Standard bf16/fp16 path
@@ -693,6 +749,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         inp_quant_func=None,
         weight_quant_func=None,
         use_pow2_scale=False,
+        use_ue8m0=False,
         save_original_input=False,
     ):
         """Forward."""
@@ -730,6 +787,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.inp_quant_func = inp_quant_func
         ctx.weight_quant_func = weight_quant_func
         ctx.use_pow2_scale = use_pow2_scale
+        ctx.use_ue8m0 = use_ue8m0
         ctx.save_original_input = save_original_input
 
         if sequence_parallel:
@@ -755,16 +813,29 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         # Save fp8 quantized tensors for backward reuse
         if fp8 and fp8_meta is not None:
-            _, _, inp_t_fp8, inp_t_scale, weight_fp8, weight_scale = fp8_meta
+            (
+                _,
+                _,
+                inp_t_fp8,
+                inp_t_scale,
+                weight_fp8,
+                weight_scale,
+                weight_fp8_bwd,
+                weight_scale_bwd,
+            ) = fp8_meta
             ctx.inp_t_fp8 = inp_t_fp8
             ctx.inp_t_scale = inp_t_scale
             ctx.weight_fp8 = weight_fp8
             ctx.weight_scale = weight_scale
+            ctx.weight_fp8_bwd = weight_fp8_bwd
+            ctx.weight_scale_bwd = weight_scale_bwd
         else:
             ctx.inp_t_fp8 = None
             ctx.inp_t_scale = None
             ctx.weight_fp8 = None
             ctx.weight_scale = None
+            ctx.weight_fp8_bwd = None
+            ctx.weight_scale_bwd = None
 
         return output
 
@@ -826,31 +897,32 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         if input_needs_grad:
             if fp8 and ctx.weight_fp8 is not None:
                 # FP8 dgrad: grad_input = grad_output @ weight
-                # fp8_gemm_nt(A, B) = A @ B.T, so B = weight.T = [K, N] K-major
-                # print(f"[backward] dgrad fp8: grad_output={grad_output.shape} weight_fp8={ctx.weight_fp8.shape} weight_scale={ctx.weight_scale.shape}")
                 if _FP8_SHADOW_DEBUG:
                     with paddle.no_grad():
-                        # dgrad math: grad_input = grad_output @ weight.T
-                        # (mirrors the bf16 fallback branch below)
                         dgrad_shadow = paddle.matmul(grad_output, weight.t())
                 else:
                     dgrad_shadow = None
+                # Forward already quantized the backward orientation; reuse
+                # it here. Fall back to `.T.contiguous()` only for the
+                # legacy path where forward received a pre-quantized weight.
+                if ctx.weight_fp8_bwd is not None:
+                    weight_bwd = (ctx.weight_fp8_bwd, ctx.weight_scale_bwd)
+                else:
+                    weight_bwd = (
+                        ctx.weight_fp8.T.contiguous(),
+                        ctx.weight_scale.T.contiguous(),
+                    )
                 grad_input, _ = general_gemm(
                     grad_output,
-                    (ctx.weight_fp8.T.contiguous(), ctx.weight_scale.T.contiguous()),
+                    weight_bwd,
                     fp8=True,
-                    inp_quant_func=lambda x: paddle.incubate.nn.functional.fp8_quant_blockwise(
-                        x,
-                        output_scale_transpose=False,
-                        quant_method="1x128",
-                        input_transpose=False,
-                        using_pow2_scale=ctx.use_pow2_scale,
-                    )[:2],
+                    inp_quant_func=_make_bwd_inp_quant_func(
+                        ctx.use_pow2_scale, ctx.use_ue8m0
+                    ),
                     pass_name="dgrad",
                     shadow_ref=dgrad_shadow,
                 )
             else:
-                # print(f"[backward] dgrad bf16: grad_output={grad_output.shape} weight={weight.shape}")
                 grad_input, _ = general_gemm(
                     grad_output, weight.t(), pass_name="dgrad",
                 )
@@ -906,13 +978,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             # grad_output and total_input are already 2D from prepare_input_tensors_for_wgrad_compute
             # Quantize grad_output transposed and total_input transposed
             # print(f"[backward] wgrad fp8: grad_output={grad_output.shape} total_input={total_input.shape}")
-            grad_out_t_fp8, grad_out_t_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+            grad_out_t_fp8, grad_out_t_scale = _bwd_quant_blockwise_1x128(
                 grad_output.T.contiguous(),
-                output_scale_transpose=False,
-                quant_method="1x128",
-                input_transpose=False,
-                using_pow2_scale=ctx.use_pow2_scale,
-            )[:2]
+                ctx.use_pow2_scale,
+                ctx.use_ue8m0,
+            )
             inp_t_fp8, inp_t_scale = ctx.inp_t_fp8, ctx.inp_t_scale
             if inp_t_fp8 is None:
                 assert total_input is not None, (
@@ -920,13 +990,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                     " fp8 forward with input_trans=True) or the bf16 total_input"
                     " (set save_original_input=True to keep bf16 activation)"
                 )
-                inp_t_fp8, inp_t_scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+                inp_t_fp8, inp_t_scale = _bwd_quant_blockwise_1x128(
                     total_input.T.contiguous(),
-                    output_scale_transpose=False,
-                    quant_method="1x128",
-                    input_transpose=False,
-                    using_pow2_scale=ctx.use_pow2_scale,
-                )[:2]
+                    ctx.use_pow2_scale,
+                    ctx.use_ue8m0,
+                )
 
             grad_weight, _ = general_gemm(
                 (inp_t_fp8, inp_t_scale),
@@ -1027,6 +1095,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     inp_quant_func=None,
     weight_quant_func=None,
     use_pow2_scale: bool = False,
+    use_ue8m0: bool = False,
     save_original_input: bool = False,
 ) -> paddle.Tensor:
     """Linear layer execution with asynchronous communication and
@@ -1119,6 +1188,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         inp_quant_func,
         weight_quant_func,
         use_pow2_scale,
+        use_ue8m0,
         save_original_input,
     ]
 
@@ -1323,6 +1393,7 @@ class Linear(paddle.nn.Layer):
         self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
         self.save_original_input = bool(save_original_input)
         self.use_pow2_scale = False
+        self.use_ue8m0 = False
         self.inp_quant_func = None
         self.weight_quant_func = None
         if self.fp8:
@@ -1333,11 +1404,13 @@ class Linear(paddle.nn.Layer):
             self.use_pow2_scale = (
                 paddle.device.cuda.get_device_capability()[0] == 10
             )
+            self.use_ue8m0 = bool(getattr(config, "use_ue8m0", False))
             self.inp_quant_func, self.weight_quant_func = get_quant_func(
                 getattr(config, "fp8_recipe", "blockwise"),
                 input_trans=True,
                 out_scale_trans=False,
                 pow2_scale=self.use_pow2_scale,
+                use_ue8m0=self.use_ue8m0,
             )
 
     def forward(
@@ -1419,6 +1492,7 @@ class Linear(paddle.nn.Layer):
             inp_quant_func=self.inp_quant_func,
             weight_quant_func=self.weight_quant_func,
             use_pow2_scale=self.use_pow2_scale,
+            use_ue8m0=self.use_ue8m0,
             save_original_input=self.save_original_input,
         )
 
@@ -1775,6 +1849,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
         self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
         self.save_original_input = bool(save_original_input)
         self.use_pow2_scale = False
+        self.use_ue8m0 = False
         self.inp_quant_func = None
         self.weight_quant_func = None
         if self.fp8:
@@ -1787,11 +1862,13 @@ class ColumnParallelLinear(paddle.nn.Layer):
             self.use_pow2_scale = (
                 paddle.device.cuda.get_device_capability()[0] == 10
             )
+            self.use_ue8m0 = bool(getattr(config, "use_ue8m0", False))
             self.inp_quant_func, self.weight_quant_func = get_quant_func(
                 getattr(config, "fp8_recipe", "blockwise"),
                 input_trans=True,
                 out_scale_trans=False,
                 pow2_scale=self.use_pow2_scale,
+                use_ue8m0=self.use_ue8m0,
             )
 
     def forward(
@@ -1916,6 +1993,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             inp_quant_func=self.inp_quant_func,
             weight_quant_func=self.weight_quant_func,
             use_pow2_scale=self.use_pow2_scale,
+            use_ue8m0=self.use_ue8m0,
             save_original_input=self.save_original_input,
         )
 
@@ -2125,6 +2203,7 @@ class RowParallelLinear(paddle.nn.Layer):
         self.fp8_wgrad = bool(fp8_wgrad) and self.fp8
         self.save_original_input = bool(save_original_input)
         self.use_pow2_scale = False
+        self.use_ue8m0 = False
         self.inp_quant_func = None
         self.weight_quant_func = None
         if self.fp8:
@@ -2137,11 +2216,13 @@ class RowParallelLinear(paddle.nn.Layer):
             self.use_pow2_scale = (
                 paddle.device.cuda.get_device_capability()[0] == 10
             )
+            self.use_ue8m0 = bool(getattr(config, "use_ue8m0", False))
             self.inp_quant_func, self.weight_quant_func = get_quant_func(
                 getattr(config, "fp8_recipe", "blockwise"),
                 input_trans=True,
                 out_scale_trans=False,
                 pow2_scale=self.use_pow2_scale,
+                use_ue8m0=self.use_ue8m0,
             )
 
     def forward(self, input_):
@@ -2216,6 +2297,7 @@ class RowParallelLinear(paddle.nn.Layer):
             inp_quant_func=self.inp_quant_func,
             weight_quant_func=self.weight_quant_func,
             use_pow2_scale=self.use_pow2_scale,
+            use_ue8m0=self.use_ue8m0,
             save_original_input=self.save_original_input,
         )
 
