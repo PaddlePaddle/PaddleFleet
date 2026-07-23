@@ -94,6 +94,18 @@ from .moe_utils import (
 )
 
 
+class _AccuracyCompatibleMoEInputBranches(PyLayer):
+    """Fan out MoE input branches and combine their dgrads in Megatron order."""
+
+    @staticmethod
+    def forward(ctx, hidden_states):
+        return hidden_states.clone(), hidden_states.clone(), hidden_states.clone()
+
+    @staticmethod
+    def backward(ctx, routed_grad, router_grad, shared_grad):
+        return (routed_grad + router_grad) + shared_grad
+
+
 class _AccuracyCompatibleExpertInputGather(PyLayer):
     """Gather expert inputs while fixing routed-token dgrad accumulation order."""
 
@@ -1010,6 +1022,16 @@ class MoELayer(nn.Layer):
             hidden_states = GatherOp.apply(hidden_states)
         orig_shape = hidden_states.shape
         residuals = hidden_states
+        if (
+            use_accuracy_compatible_kernel()
+            and self.shared_experts is not None
+            and self.expert_model_parallel_size <= 1
+        ):
+            hidden_states, router_hidden_states, residuals = (
+                _AccuracyCompatibleMoEInputBranches.apply(hidden_states)
+            )
+        else:
+            router_hidden_states = hidden_states
 
         layer_idx = getattr(self, "layer_number", None)
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
@@ -1023,7 +1045,7 @@ class MoELayer(nn.Layer):
             aux_loss,
             z_loss,
         ) = self.gate(
-            hidden_states,
+            router_hidden_states,
             input_ids=input_ids,
         )
         # topk_weights, topk_indices: Shape is [seq_len, moe_router_topk]

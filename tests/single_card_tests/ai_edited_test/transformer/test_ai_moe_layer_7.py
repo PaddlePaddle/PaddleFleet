@@ -34,6 +34,7 @@ from paddlefleet.transformer.moe.moe_layer import (
     MoELayer,
     MoESublayers,
     _AccuracyCompatibleExpertInputGather,
+    _AccuracyCompatibleMoEInputBranches,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -298,6 +299,32 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
         layer.fp8 = False
         # Should return early without errors
         layer.fp8_quant_weight()
+
+
+class TestAccuracyCompatibleMoEInputBranches(unittest.TestCase):
+    def test_backward_uses_routed_router_shared_order(self):
+        hidden = paddle.zeros([1, 4], dtype="bfloat16")
+        hidden.stop_gradient = False
+        routed, router, shared = _AccuracyCompatibleMoEInputBranches.apply(hidden)
+        routed_grad = paddle.to_tensor(
+            [[1.0, 1.0, 1.0, 1.0]], dtype="bfloat16"
+        )
+        router_grad = paddle.to_tensor(
+            [[0.00390625, 0.0078125, 0.015625, 0.03125]], dtype="bfloat16"
+        )
+        shared_grad = paddle.to_tensor(
+            [[-1.0, -1.0, -1.0, -1.0]], dtype="bfloat16"
+        )
+
+        paddle.autograd.backward(
+            [routed, router, shared],
+            [routed_grad, router_grad, shared_grad],
+        )
+
+        expected = (routed_grad + router_grad) + shared_grad
+        alternative = (router_grad + shared_grad) + routed_grad
+        self.assertEqual(hidden.grad.numpy().tobytes(), expected.numpy().tobytes())
+        self.assertNotEqual(expected.numpy().tobytes(), alternative.numpy().tobytes())
 
 
 class TestAccuracyCompatibleExpertInputGather(unittest.TestCase):
