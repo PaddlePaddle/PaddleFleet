@@ -205,7 +205,15 @@ def _unfused_absorbed_dsa_attention(
     b, s, num_heads, _ = query.shape
     q = query.transpose([0, 2, 1, 3])
     k = key.transpose([0, 2, 3, 1])
-    scores = paddle.matmul(q.cast("float32"), k.cast("float32")) * softmax_scale
+    if _ACCURACY_COMPATIBLE_KERNEL:
+        scores = paddle.bmm(
+            q.cast("float32").reshape([b * num_heads, s, -1]),
+            k.cast("float32").expand([b, num_heads, -1, -1]).reshape(
+                [b * num_heads, -1, s]
+            ),
+        ).reshape([b, num_heads, s, s]) * softmax_scale
+    else:
+        scores = paddle.matmul(q.cast("float32"), k.cast("float32")) * softmax_scale
     if combined_mask is not None:
         scores = scores + combined_mask.cast("float32")
     probabilities = F.softmax(scores, axis=-1)

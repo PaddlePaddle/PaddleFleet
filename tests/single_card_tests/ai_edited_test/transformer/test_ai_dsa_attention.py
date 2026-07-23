@@ -56,6 +56,41 @@ def _make_config(**overrides):
     return TransformerConfig(**defaults)
 
 
+class TestAbsorbedDSAAttention(unittest.TestCase):
+    def test_absorbed_attention_accuracy_path_uses_bmm_layout(self):
+        query = paddle.randn([1, 3, 2, 8], dtype="bfloat16")
+        key = paddle.randn([1, 3, 1, 8], dtype="bfloat16")
+        value = paddle.randn([1, 3, 1, 4], dtype="bfloat16")
+        weight = paddle.randn([2, 4, 8], dtype="bfloat16")
+        mask = paddle.zeros([1, 1, 3, 3], dtype="float32")
+
+        with patch(
+            "paddlefleet.transformer.dsa_attention._ACCURACY_COMPATIBLE_KERNEL",
+            True,
+        ):
+            output = _unfused_absorbed_dsa_attention(
+                query, key, value, weight, mask, 1.0
+            )
+
+        expected_scores = paddle.bmm(
+            query.transpose([0, 2, 1, 3]).cast("float32").reshape([2, 3, 8]),
+            key.transpose([0, 2, 3, 1]).expand([1, 2, 8, 3]).cast("float32").reshape(
+                [2, 8, 3]
+            ),
+        ).reshape([1, 2, 3, 3])
+        expected_probabilities = paddle.nn.functional.softmax(
+            expected_scores + mask, axis=-1
+        )
+        expected_context = paddle.matmul(
+            expected_probabilities.cast(value.dtype),
+            value.transpose([0, 2, 1, 3]),
+        )
+        expected = paddle.einsum("bhsr,hrd->bshd", expected_context, weight).reshape(
+            [1, 3, 16]
+        )
+        self.assertTrue(paddle.equal_all(output.cast("float32"), expected.cast("float32")))
+
+
 class TestHadamardTransform(unittest.TestCase):
     """Test hadamard_transform function."""
 
