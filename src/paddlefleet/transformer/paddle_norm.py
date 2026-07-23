@@ -38,6 +38,40 @@ except ImportError:
 def _use_accuracy_compatible_kernel() -> bool:
     return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 
+
+class _AccuracyCompatibleRMSNormFunction(paddle.autograd.PyLayer):
+    """RMSNorm core with a stable fp32 backward and canonical zero gradients."""
+
+    @staticmethod
+    def forward(ctx, hidden_states: paddle.Tensor, epsilon: float):
+        variance = paddle.mean(
+            paddle.square(hidden_states), axis=-1, keepdim=True
+        )
+        inv_rms = paddle.rsqrt(variance + epsilon)
+        ctx.save_for_backward(hidden_states, inv_rms)
+        return hidden_states * inv_rms
+
+    @staticmethod
+    def backward(ctx, grad_output: paddle.Tensor):
+        hidden_states, inv_rms = ctx.saved_tensor()
+        dot = paddle.sum(
+            grad_output * hidden_states, axis=-1, keepdim=True
+        )
+        correction_scale = (
+            dot
+            * (-0.5)
+            * paddle.pow(inv_rms, 3)
+            / hidden_states.shape[-1]
+        )
+        correction = (correction_scale * hidden_states) * 2.0
+        grad_input = grad_output * inv_rms + correction
+        return paddle.where(
+            grad_input == 0,
+            paddle.zeros_like(grad_input),
+            grad_input,
+        )
+
+
 if TYPE_CHECKING:
     from paddle import Tensor
 
@@ -79,11 +113,8 @@ class RMSNorm(paddle.nn.Layer):
             hidden_states = hidden_states.astype(self.weight.dtype)
         if _use_accuracy_compatible_kernel():
             hidden_states_fp32 = hidden_states.astype(paddle.float32)
-            variance = paddle.mean(
-                paddle.square(hidden_states_fp32), axis=-1, keepdim=True
-            )
-            output = hidden_states_fp32 * paddle.rsqrt(
-                variance + self.variance_epsilon
+            output = _AccuracyCompatibleRMSNormFunction.apply(
+                hidden_states_fp32, self.variance_epsilon
             )
             return (output * self.weight.astype(paddle.float32)).astype(
                 self.weight.dtype

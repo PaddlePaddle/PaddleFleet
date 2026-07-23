@@ -26,6 +26,7 @@ sys.path.insert(
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import paddle
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
@@ -102,6 +103,22 @@ class TestRMSNormForwardDetailed(unittest.TestCase):
         self.assertTrue(
             paddle.equal_all(out.cast("float32"), expected.cast("float32")).item()
         )
+
+    @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "1"})
+    def test_accuracy_compatible_backward_canonicalizes_zero_gradients(self):
+        config = _make_config(params_dtype="bfloat16")
+        norm = RMSNorm(config=config, normalized_shape=4)
+        norm.weight.set_value(
+            paddle.to_tensor([-1.0, 1.0, -2.0, 2.0], dtype="bfloat16")
+        )
+        x = paddle.to_tensor(
+            [[[1.0, -1.0, 2.0, -2.0]]], dtype="bfloat16", stop_gradient=False
+        )
+
+        norm(x).backward(paddle.zeros_like(x))
+
+        grad_bits = x.grad.cpu().numpy().view(np.uint16)
+        self.assertTrue(np.all(grad_bits == 0))
 
     @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "0"})
     @patch("paddlefleet.transformer.paddle_norm.rms_norm")
