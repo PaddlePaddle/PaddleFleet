@@ -1430,7 +1430,11 @@ class Linear(paddle.nn.Layer):
         # and is a settable attribute — callers can override it post-init when
         # the wgrad path needs the bf16 activation kept (e.g. the shared
         # expert's up_gate_proj).
-        self.fp8 = bool(getattr(config, "fp8", None)) and not disable_fp8
+        self.fp8 = (
+            bool(getattr(config, "full_fp8_computation", False))
+            and bool(getattr(config, "fp8", None))
+            and not disable_fp8
+        )
         self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
         self.save_original_input = not self.fp8
         self.use_pow2_scale = False
@@ -1886,7 +1890,11 @@ class ColumnParallelLinear(paddle.nn.Layer):
         # FP8 is inherited from ``config`` unless the caller opts out via
         # ``disable_fp8``. ``save_original_input`` defaults to ``not self.fp8``
         # and is a settable attribute — callers can override it post-init.
-        self.fp8 = bool(getattr(config, "fp8", None)) and not disable_fp8
+        self.fp8 = (
+            bool(getattr(config, "full_fp8_computation", False))
+            and bool(getattr(config, "fp8", None))
+            and not disable_fp8
+        )
         self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
         self.save_original_input = not self.fp8
         self.use_pow2_scale = False
@@ -2240,7 +2248,11 @@ class RowParallelLinear(paddle.nn.Layer):
         # FP8 is inherited from ``config`` unless the caller opts out via
         # ``disable_fp8``. ``save_original_input`` defaults to ``not self.fp8``
         # and is a settable attribute — callers can override it post-init.
-        self.fp8 = bool(getattr(config, "fp8", None)) and not disable_fp8
+        self.fp8 = (
+            bool(getattr(config, "full_fp8_computation", False))
+            and bool(getattr(config, "fp8", None))
+            and not disable_fp8
+        )
         self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
         self.save_original_input = not self.fp8
         self.use_pow2_scale = False

@@ -759,7 +759,9 @@ class DSv4HybridAttention(Attention):
         # Assert TP=1 when fp8 is enabled — DSv4 FP8 is currently only wired up
         # for the non-parallel path.
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
-        self.fp8 = bool(getattr(config, "fp8", False))
+        self.fp8 = bool(getattr(config, "full_fp8_computation", False)) and bool(
+            getattr(config, "fp8", False)
+        )
         self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
         self.save_original_input = not self.fp8
         self.use_fp8_grouped_output = self.fp8 and _DEEP_GEMM_AVAILABLE
