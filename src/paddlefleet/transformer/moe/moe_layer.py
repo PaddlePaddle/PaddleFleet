@@ -1712,10 +1712,14 @@ class Gemma4TopKRouter(TopKRouter):
         h = (h / rms).cast(hidden_states.dtype)
         return h * self.router_input_scale * self._inv_sqrt_d
 
-    def forward(self, input, input_ids=None):
+    def forward(self, input, input_ids=None, origin_input_ids=None):
         """Normalize input, then delegate to TopKRouter for full routing logic."""
         normalized_input = self._normalize_input(input)
-        return super().forward(normalized_input, input_ids=input_ids)
+        return super().forward(
+            normalized_input,
+            input_ids=input_ids,
+            origin_input_ids=origin_input_ids,
+        )
 
 
 class Gemma4MoELayer(MoELayer):

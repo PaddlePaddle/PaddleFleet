@@ -2398,6 +2398,7 @@ class Gemma4TransformerLayer(TransformerLayer):
         attention_bias: Tensor | None = None,
         packed_seq_params=None,
         input_ids: Tensor | None = None,
+        origin_input_ids: Tensor | None = None,
         **kwargs,
     ):
         # === Attention block ===
