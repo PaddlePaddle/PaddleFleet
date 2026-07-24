@@ -38,9 +38,7 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 if paddlefleet_ops.is_sonic_moe_available():
     try:
         from paddlefleet_ops.sonicmoe import run_sonic_moe
-    except ModuleNotFoundError as exc:
-        if exc.name != "paddlefleet_ops.sonicmoe.interface":
-            raise
+    except ImportError:
         from .fusion_layer_utils import run_sonic_moe
 
 from .moe_utils import (

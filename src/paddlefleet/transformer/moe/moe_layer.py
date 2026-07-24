@@ -1595,8 +1595,11 @@ class MoELayer(nn.Layer):
                     delattr(weight_obj, attr)
 
         if hasattr(self, "grouped_gemm_experts"):
-            _clear_attrs(self.grouped_gemm_experts.weight1)
-            _clear_attrs(self.grouped_gemm_experts.weight2)
+            if isinstance(self.grouped_gemm_experts, SonicMoEExpert):
+                self.grouped_gemm_experts.clear_fp8_weights()
+            else:
+                _clear_attrs(self.grouped_gemm_experts.weight1)
+                _clear_attrs(self.grouped_gemm_experts.weight2)
         else:
             for expert in self.experts:
                 if expert is not None:

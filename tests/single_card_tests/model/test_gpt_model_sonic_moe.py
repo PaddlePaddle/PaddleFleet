@@ -120,6 +120,17 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         self.n_routed_experts = 8
         self.acc_steps = 1
 
+    def test_sonic_moe_import(self):
+        from paddlefleet_ops import sonicmoe
+
+        from paddlefleet.transformer.moe import fusion_layer_utils, moe_expert
+
+        expected_run_sonic_moe = getattr(
+            sonicmoe, "run_sonic_moe", fusion_layer_utils.run_sonic_moe
+        )
+        self.assertIs(moe_expert.run_sonic_moe, expected_run_sonic_moe)
+        self.assertTrue(hasattr(moe_expert, "SonicMoEExpert"))
+
     @staticmethod
     def _small_init_method(tensor):
         """Small uniform init for precision tests (matches pre-update behavior)."""
