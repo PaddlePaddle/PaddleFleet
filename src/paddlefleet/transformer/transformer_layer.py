@@ -1264,6 +1264,30 @@ class TransformerLayer(nn.Layer):
     def clear_fp8_quant_weight(self):
         if isinstance(self.mlp, MoELayer):
             self.mlp.clear_fp8_quant_weight()
+        # Symmetric to fp8_quant_weight above: drop the per-Linear fp8
+        # cache stashed on non-MoE Linear weights, otherwise post-optimizer
+        # forwards keep using the pre-step quantized weight.
+        from paddlefleet.tensor_parallel.layers import (
+            ColumnParallelLinear,
+            Linear,
+            RowParallelLinear,
+        )
+
+        seen = set()
+        for m in self.sublayers(include_self=False):
+            if not isinstance(
+                m, (Linear, ColumnParallelLinear, RowParallelLinear)
+            ):
+                continue
+            # MoE experts are handled by self.mlp.clear_fp8_quant_weight above.
+            if getattr(m, "is_expert", False):
+                continue
+            if id(m) in seen:
+                continue
+            seen.add(id(m))
+            clear_fn = getattr(m, "clear_fp8_quant_weight", None)
+            if clear_fn is not None:
+                clear_fn()
 
     def use_fp8(self):
         if isinstance(self.mlp, MoELayer):

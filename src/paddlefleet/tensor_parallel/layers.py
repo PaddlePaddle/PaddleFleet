@@ -101,6 +101,25 @@ def _fp8_prequant_weight(layer):
     weight.fp8_scale_bwd = scale_bwd
 
 
+def _fp8_clear_prequant_weight(layer):
+    """Drop the fp8 cache stashed by ``_fp8_prequant_weight``.
+
+    Symmetric to ``_fp8_prequant_weight``: strips ``fp8_weight_fwd`` and
+    both scale attrs from ``layer.weight`` so the next ``weight_quant_func``
+    call re-quantizes the (post-optimizer-step) bf16 weight. Safe to call
+    when no cache exists or the layer is bf16.
+    """
+    weight = getattr(layer, "weight", None)
+    if weight is None:
+        return
+    for attr in ("fp8_weight_fwd", "fp8_scale_fwd", "fp8_scale_bwd"):
+        if hasattr(weight, attr):
+            try:
+                delattr(weight, attr)
+            except AttributeError:
+                setattr(weight, attr, None)
+
+
 def _maybe_color_linear_fp8_weight(layer):
     """Tag ``layer.weight`` with the linear-fp8 color, once, if unset."""
     if not getattr(layer, "fp8", False):
@@ -1412,6 +1431,16 @@ class Linear(paddle.nn.Layer):
         """
         _fp8_prequant_weight(self)
 
+    def clear_fp8_quant_weight(self):
+        """Drop the fp8 cache stashed by :meth:`fp8_quant_weight`.
+
+        Must be called after every optimizer step (paired with
+        ``fp8_quant_weight`` on the next iter) so a stale post-step weight
+        cache does not shadow the freshly-updated bf16 weight in
+        ``weight_quant_func``.
+        """
+        _fp8_clear_prequant_weight(self)
+
     def forward(
         self,
         input_: paddle.Tensor,
@@ -1879,6 +1908,10 @@ class ColumnParallelLinear(paddle.nn.Layer):
         """Pre-quantize this ColumnParallelLinear's weight (see ``Linear.fp8_quant_weight``)."""
         _fp8_prequant_weight(self)
 
+    def clear_fp8_quant_weight(self):
+        """Drop the fp8 cache (see ``Linear.clear_fp8_quant_weight``)."""
+        _fp8_clear_prequant_weight(self)
+
     def forward(
         self,
         input_: paddle.Tensor,
@@ -2241,6 +2274,10 @@ class RowParallelLinear(paddle.nn.Layer):
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         """Pre-quantize this RowParallelLinear's weight (see ``Linear.fp8_quant_weight``)."""
         _fp8_prequant_weight(self)
+
+    def clear_fp8_quant_weight(self):
+        """Drop the fp8 cache (see ``Linear.clear_fp8_quant_weight``)."""
+        _fp8_clear_prequant_weight(self)
 
     def forward(self, input_):
         """Forward of RowParallelLinear

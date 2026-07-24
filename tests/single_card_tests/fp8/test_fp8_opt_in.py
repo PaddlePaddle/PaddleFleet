@@ -41,6 +41,8 @@ from paddlefleet.fp8.utils import is_fp8_tensor
 from paddlefleet.tensor_parallel import ColumnParallelLinear
 from paddlefleet.tensor_parallel.layers import (
     Linear,
+    RowParallelLinear,
+    _fp8_clear_prequant_weight,
     _fp8_prequant_weight,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -389,6 +391,132 @@ class TestFp8PrequantWeightRealCache(unittest.TestCase):
         self.assertIsNone(getattr(layer.weight, "fp8_weight_fwd", None))
         self.assertIsNone(getattr(layer.weight, "fp8_scale_fwd", None))
         self.assertIsNone(getattr(layer.weight, "fp8_scale_bwd", None))
+
+
+class TestFp8ClearPrequantWeight(unittest.TestCase):
+    """``clear_fp8_quant_weight`` must invalidate the per-Linear cache so
+    the next forward re-quantizes the (post-optimizer-step) weight."""
+
+    def _assert_cache_absent(self, weight):
+        self.assertIsNone(getattr(weight, "fp8_weight_fwd", None))
+        self.assertIsNone(getattr(weight, "fp8_scale_fwd", None))
+        self.assertIsNone(getattr(weight, "fp8_scale_bwd", None))
+
+    def _assert_cache_present(self, weight):
+        self.assertIsNotNone(getattr(weight, "fp8_weight_fwd", None))
+        self.assertIsNotNone(getattr(weight, "fp8_scale_fwd", None))
+        self.assertIsNotNone(getattr(weight, "fp8_scale_bwd", None))
+
+    @_REQUIRE_GPU
+    def test_helper_strips_all_three_cache_attrs(self):
+        cfg = _fp8_config()
+        paddle.seed(0)
+        layer = _new_linear(cfg)
+        _fp8_prequant_weight(layer)
+        self._assert_cache_present(layer.weight)
+
+        _fp8_clear_prequant_weight(layer)
+        self._assert_cache_absent(layer.weight)
+
+    @_REQUIRE_GPU
+    def test_helper_is_idempotent_and_bf16_safe(self):
+        # Clearing a never-quantized fp8 layer must not raise.
+        cfg = _fp8_config()
+        paddle.seed(0)
+        layer = _new_linear(cfg)
+        _fp8_clear_prequant_weight(layer)
+        self._assert_cache_absent(layer.weight)
+
+        # Second clear on a real cache is also safe.
+        _fp8_prequant_weight(layer)
+        _fp8_clear_prequant_weight(layer)
+        _fp8_clear_prequant_weight(layer)
+        self._assert_cache_absent(layer.weight)
+
+        # bf16 layer never had a cache — must remain untouched.
+        bf16_layer = _new_linear(_bf16_config())
+        _fp8_clear_prequant_weight(bf16_layer)
+        self._assert_cache_absent(bf16_layer.weight)
+
+    @_REQUIRE_GPU
+    def test_linear_clear_fp8_quant_weight_method(self):
+        cfg = _fp8_config()
+        paddle.seed(0)
+        layer = _new_linear(cfg)
+        layer.fp8_quant_weight()
+        self._assert_cache_present(layer.weight)
+
+        layer.clear_fp8_quant_weight()
+        self._assert_cache_absent(layer.weight)
+
+    @_REQUIRE_GPU
+    def test_column_parallel_clear_fp8_quant_weight_method(self):
+        cfg = _fp8_config()
+        paddle.seed(0)
+        layer = _new_linear(
+            cfg, cls=ColumnParallelLinear, gather_output=False, tp_group=None
+        )
+        layer.fp8_quant_weight()
+        self._assert_cache_present(layer.weight)
+
+        layer.clear_fp8_quant_weight()
+        self._assert_cache_absent(layer.weight)
+
+    @_REQUIRE_GPU
+    def test_row_parallel_clear_fp8_quant_weight_method(self):
+        cfg = _fp8_config()
+        paddle.seed(0)
+        layer = _new_linear(
+            cfg,
+            cls=RowParallelLinear,
+            input_is_parallel=False,
+            tp_group=None,
+            skip_bias_add=False,
+        )
+        layer.fp8_quant_weight()
+        self._assert_cache_present(layer.weight)
+
+        layer.clear_fp8_quant_weight()
+        self._assert_cache_absent(layer.weight)
+
+    @_REQUIRE_GPU
+    def test_clear_forces_requantization_after_weight_update(self):
+        """The real bug: without clear, a stale cache shadows the updated
+        weight. After clear, the next quant call must reflect the new bf16
+        weight (different fp8 bytes)."""
+        cfg = _fp8_config()
+        paddle.seed(0)
+        layer = _new_linear(cfg)
+
+        layer.fp8_quant_weight()
+        cached_fp8_pre = layer.weight.fp8_weight_fwd
+        pre_bytes = cached_fp8_pre.astype("float32").numpy().copy()
+
+        # Simulate an optimizer step: perturb the bf16 weight in-place.
+        with paddle.no_grad():
+            layer.weight.add_(
+                paddle.full_like(layer.weight, 0.5, dtype=layer.weight.dtype)
+            )
+
+        # Without clear, weight_quant_func would keep returning the stale
+        # cache — verify the cache is still the pre-step fp8 tensor.
+        self.assertTrue(
+            np.array_equal(
+                layer.weight.fp8_weight_fwd.astype("float32").numpy(),
+                pre_bytes,
+            )
+        )
+
+        # After clear + re-quant, the cache must reflect the new weight.
+        layer.clear_fp8_quant_weight()
+        self._assert_cache_absent(layer.weight)
+        layer.fp8_quant_weight()
+        self._assert_cache_present(layer.weight)
+        post_bytes = layer.weight.fp8_weight_fwd.astype("float32").numpy()
+        self.assertFalse(
+            np.array_equal(pre_bytes, post_bytes),
+            "fp8 cache did not refresh after weight update",
+        )
 
 
 if __name__ == "__main__":
