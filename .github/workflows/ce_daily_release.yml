@@ -3,7 +3,7 @@ name: CE Daily Release
 on:
   pull_request:
     branches:
-      - develp
+      - develop
   schedule:
     - cron: '0 20 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
