@@ -265,12 +265,12 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
             fp8_layer, bf16_layer, [4, 128, 512]
         )
 
-        self.assertLess(out_diff, 0.01, f"output diff too large: {out_diff}")
+        self.assertLess(out_diff, 0.001, f"output diff too large: {out_diff}")
         self.assertLess(
-            x_grad_diff, 0.02, f"x_grad diff too large: {x_grad_diff}"
+            x_grad_diff, 0.001, f"x_grad diff too large: {x_grad_diff}"
         )
         self.assertLess(
-            w_grad_diff, 0.02, f"w_grad diff too large: {w_grad_diff}"
+            w_grad_diff, 0.001, f"w_grad diff too large: {w_grad_diff}"
         )
 
     @_REQUIRE_GPU
@@ -294,12 +294,12 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
             fp8_layer, bf16_layer, [4, 128, 512]
         )
 
-        self.assertLess(out_diff, 0.01, f"output diff too large: {out_diff}")
+        self.assertLess(out_diff, 0.001, f"output diff too large: {out_diff}")
         self.assertLess(
-            x_grad_diff, 0.02, f"x_grad diff too large: {x_grad_diff}"
+            x_grad_diff, 0.001, f"x_grad diff too large: {x_grad_diff}"
         )
         self.assertLess(
-            w_grad_diff, 0.02, f"w_grad diff too large: {w_grad_diff}"
+            w_grad_diff, 0.001, f"w_grad diff too large: {w_grad_diff}"
         )
 
     @_REQUIRE_GPU
