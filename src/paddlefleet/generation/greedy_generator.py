@@ -335,6 +335,7 @@ class GreedyGenerator:
         top_k: int = 0,
         top_p: float = 0.0,
         return_log_probs: bool = False,
+        no_cache: bool = False,
     ) -> paddle.Tensor | tuple[paddle.Tensor, list[list[float]]]:
         """Run auto-regressive decoding with optional sampling.
 
@@ -375,7 +376,7 @@ class GreedyGenerator:
         """
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be [B, L]")
-        self.cache.reset()
+
         self.model.eval()
 
         bsz, prompt_len = input_ids.shape
@@ -391,115 +392,130 @@ class GreedyGenerator:
             if paddle.distributed.is_initialized()
             else 0
         )
-
-        with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
-            # ---- Prefill ----
-            position_ids = (
-                paddle.arange(prompt_len, dtype="int64")
-                .unsqueeze(0)
-                .expand([bsz, prompt_len])
-            )
-            if _DEBUG and _r == 0:
-                logger.info(
-                    "[fwd-debug][prefill] input_ids=%s position_ids=%s",
-                    input_ids.tolist(),
-                    position_ids.tolist(),
-                )
-
-            if self.cache.window_size and any(self.cache.swa_layers):
-                prefill_startend = paddle.full(
-                    [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
-                )
-            else:
-                prefill_startend = None
-            logits = self.model(
-                {
-                    "input_ids": input_ids,
-                    "position_ids": position_ids,
-                    "past_key_values": self.cache,
-                    "use_cache": True,
-                    "attn_mask_startend_row_indices": prefill_startend,
-                }
-            )
-            if _DEBUG and _r == 0:
-                _last = logits[:, -1].cast("float32")
-                logger.info(
-                    "[logits-debug][prefill] shape=%s dtype=%s",
-                    list(logits.shape),
-                    logits.dtype,
-                )
-                logger.info(
-                    "[logits-debug][prefill] min=%.4f max=%.4f mean=%.4f",
-                    float(_last.min()),
-                    float(_last.max()),
-                    float(_last.mean()),
-                )
-                _topk_val, _topk_idx = paddle.topk(_last[0], k=10)
-                logger.info(
-                    "[logits-debug][prefill] top-10 ids=%s vals=%s",
-                    _topk_idx.tolist(),
-                    [round(v, 3) for v in _topk_val.tolist()],
-                )
-                _kv_lens = [
-                    self.cache._seq_len[i]
-                    for i in range(min(3, len(self.cache._seq_len)))
-                    if self.cache._seq_len[i] > 0
-                ]
-                logger.info(
-                    "[kv-debug][prefill] cache seq_lens (first 3 non-zero layers): %s",
-                    _kv_lens,
-                )
-
-            # Apply repetition penalty to prefill output
-            logits = _apply_repetition_penalty(
-                logits, generated, repetition_penalty
-            )
-            last_logits = logits[:, -1]  # [B, vocab]
-            next_tok = _sample_next_token(
-                last_logits, temperature, top_k, top_p
-            )
-            if return_log_probs and log_probs_per_batch is not None:
-                step_log_probs = paddle.nn.functional.log_softmax(
-                    last_logits.cast("float32"), axis=-1
-                )  # [B, vocab]
-                for b in range(bsz):
-                    tok_id = int(next_tok[b, 0].item())
-                    log_probs_per_batch[b].append(
-                        float(step_log_probs[b, tok_id].item())
+        if no_cache:
+            with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
+                # ---- No-KVCache mode: loop prefill ----
+                # Each step runs a full prefill over the entire generated sequence
+                # without maintaining any KV cache state.
+                done = paddle.zeros([bsz, 1], dtype="bool")
+                for step in range(max_new_tokens):
+                    cur_len = generated.shape[1]
+                    position_ids = (
+                        paddle.arange(cur_len, dtype="int64")
+                        .unsqueeze(0)
+                        .expand([bsz, cur_len])
                     )
-            generated = paddle.concat([generated, next_tok], axis=1)
+                    prefill_startend = paddle.full(
+                        [bsz, 1, cur_len, 1], cur_len, dtype="int32"
+                    )
+                    logits = self.model(
+                        {
+                            "input_ids": generated,
+                            "position_ids": position_ids,
+                            "use_cache": False,
+                            "attn_mask_startend_row_indices": prefill_startend,
+                        }
+                    )
+                    logits = _apply_repetition_penalty(
+                        logits, generated, repetition_penalty
+                    )
+                    last_logits = logits[:, -1]  # [B, vocab]
+                    next_tok = last_logits.argmax(axis=-1, keepdim=True)
+                    if return_log_probs and log_probs_per_batch is not None:
+                        step_log_probs = paddle.nn.functional.log_softmax(
+                            last_logits.cast("float32"), axis=-1
+                        )  # [B, vocab]
+                        for b in range(bsz):
+                            tok_id = int(next_tok[b, 0].item())
+                            log_probs_per_batch[b].append(
+                                float(step_log_probs[b, tok_id].item())
+                            )
+                    generated = paddle.concat([generated, next_tok], axis=1)
+                    if eos_token_id is not None:
+                        if isinstance(eos_token_id, list):
+                            # eos_token_id may be nested list like [[t1,t2],[t3]]
+                            # extract single-token stop ids for fast eos check
+                            flat_ids = [
+                                ids[0]
+                                if isinstance(ids, list) and len(ids) == 1
+                                else ids
+                                for ids in eos_token_id
+                                if not isinstance(ids, list) or len(ids) == 1
+                            ]
+                            if flat_ids:
+                                eos_tensor = paddle.to_tensor(
+                                    flat_ids, dtype=next_tok.dtype
+                                ).reshape([1, 1, -1])
+                                hit = (
+                                    next_tok.unsqueeze(-1) == eos_tensor
+                                ).any(axis=-1)
+                                done = done | hit
+                        else:
+                            done = done | (next_tok == eos_token_id)
+                        if done.all().item():
+                            break
 
-            # ---- Decode ----
-            done = paddle.zeros([bsz, 1], dtype="bool")
-            for step in range(max_new_tokens - 1):
-                cur_len = self.cache.get_seq_len()
-                position_ids = paddle.full([bsz, 1], cur_len, dtype="int64")
-                if _DEBUG and _r == 0 and step < 3:
+        else:
+            self.cache.reset()
+            with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
+                # ---- Prefill ----
+                position_ids = (
+                    paddle.arange(prompt_len, dtype="int64")
+                    .unsqueeze(0)
+                    .expand([bsz, prompt_len])
+                )
+                if _DEBUG and _r == 0:
                     logger.info(
-                        "[fwd-debug][decode step=%d] next_tok=%s position_ids=%s cache_seq_len=%d",
-                        step,
-                        next_tok.tolist(),
+                        "[fwd-debug][prefill] input_ids=%s position_ids=%s",
+                        input_ids.tolist(),
                         position_ids.tolist(),
-                        cur_len,
                     )
+
+                if self.cache.window_size and any(self.cache.swa_layers):
+                    prefill_startend = paddle.full(
+                        [bsz, 1, prompt_len, 1], prompt_len, dtype="int32"
+                    )
+                else:
+                    prefill_startend = None
                 logits = self.model(
                     {
-                        "input_ids": next_tok,
+                        "input_ids": input_ids,
                         "position_ids": position_ids,
                         "past_key_values": self.cache,
                         "use_cache": True,
+                        "attn_mask_startend_row_indices": prefill_startend,
                     }
                 )
-                if _DEBUG and _r == 0 and step < 3:
-                    _d = logits[:, -1].cast("float32")
-                    _tv, _ti = paddle.topk(_d[0], k=5)
+                if _DEBUG and _r == 0:
+                    _last = logits[:, -1].cast("float32")
                     logger.info(
-                        "[logits-debug][decode step=%d] top-5 ids=%s vals=%s",
-                        step,
-                        _ti.tolist(),
-                        [round(v, 3) for v in _tv.tolist()],
+                        "[logits-debug][prefill] shape=%s dtype=%s",
+                        list(logits.shape),
+                        logits.dtype,
                     )
-                # Apply repetition penalty
+                    logger.info(
+                        "[logits-debug][prefill] min=%.4f max=%.4f mean=%.4f",
+                        float(_last.min()),
+                        float(_last.max()),
+                        float(_last.mean()),
+                    )
+                    _topk_val, _topk_idx = paddle.topk(_last[0], k=10)
+                    logger.info(
+                        "[logits-debug][prefill] top-10 ids=%s vals=%s",
+                        _topk_idx.tolist(),
+                        [round(v, 3) for v in _topk_val.tolist()],
+                    )
+                    _kv_lens = [
+                        self.cache._seq_len[i]
+                        for i in range(min(3, len(self.cache._seq_len)))
+                        if self.cache._seq_len[i] > 0
+                    ]
+                    logger.info(
+                        "[kv-debug][prefill] cache seq_lens (first 3 non-zero layers): %s",
+                        _kv_lens,
+                    )
+
+                # Apply repetition penalty to prefill output
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty
                 )
@@ -512,36 +528,85 @@ class GreedyGenerator:
                         last_logits.cast("float32"), axis=-1
                     )  # [B, vocab]
                     for b in range(bsz):
-                        # Only collect for sequences not yet finished
-                        if not bool(done[b, 0].item()):
-                            tok_id = int(next_tok[b, 0].item())
-                            log_probs_per_batch[b].append(
-                                float(step_log_probs[b, tok_id].item())
-                            )
+                        tok_id = int(next_tok[b, 0].item())
+                        log_probs_per_batch[b].append(
+                            float(step_log_probs[b, tok_id].item())
+                        )
                 generated = paddle.concat([generated, next_tok], axis=1)
-                if eos_token_id is not None:
-                    if isinstance(eos_token_id, list):
-                        # eos_token_id may be nested list like [[t1,t2],[t3]]
-                        # extract single-token stop ids for fast eos check
-                        flat_ids = [
-                            ids[0]
-                            if isinstance(ids, list) and len(ids) == 1
-                            else ids
-                            for ids in eos_token_id
-                            if not isinstance(ids, list) or len(ids) == 1
-                        ]
-                        if flat_ids:
-                            eos_tensor = paddle.to_tensor(
-                                flat_ids, dtype=next_tok.dtype
-                            ).reshape([1, 1, -1])
-                            hit = (next_tok.unsqueeze(-1) == eos_tensor).any(
-                                axis=-1
-                            )
-                            done = done | hit
-                    else:
-                        done = done | (next_tok == eos_token_id)
-                    if done.all().item():
-                        break
+
+                # ---- Decode ----
+                done = paddle.zeros([bsz, 1], dtype="bool")
+                for step in range(max_new_tokens - 1):
+                    cur_len = self.cache.get_seq_len()
+                    position_ids = paddle.full([bsz, 1], cur_len, dtype="int64")
+                    if _DEBUG and _r == 0 and step < 3:
+                        logger.info(
+                            "[fwd-debug][decode step=%d] next_tok=%s position_ids=%s cache_seq_len=%d",
+                            step,
+                            next_tok.tolist(),
+                            position_ids.tolist(),
+                            cur_len,
+                        )
+                    logits = self.model(
+                        {
+                            "input_ids": next_tok,
+                            "position_ids": position_ids,
+                            "past_key_values": self.cache,
+                            "use_cache": True,
+                        }
+                    )
+                    if _DEBUG and _r == 0 and step < 3:
+                        _d = logits[:, -1].cast("float32")
+                        _tv, _ti = paddle.topk(_d[0], k=5)
+                        logger.info(
+                            "[logits-debug][decode step=%d] top-5 ids=%s vals=%s",
+                            step,
+                            _ti.tolist(),
+                            [round(v, 3) for v in _tv.tolist()],
+                        )
+                    # Apply repetition penalty
+                    logits = _apply_repetition_penalty(
+                        logits, generated, repetition_penalty
+                    )
+                    last_logits = logits[:, -1]  # [B, vocab]
+                    next_tok = _sample_next_token(
+                        last_logits, temperature, top_k, top_p
+                    )
+                    if return_log_probs and log_probs_per_batch is not None:
+                        step_log_probs = paddle.nn.functional.log_softmax(
+                            last_logits.cast("float32"), axis=-1
+                        )  # [B, vocab]
+                        for b in range(bsz):
+                            # Only collect for sequences not yet finished
+                            if not bool(done[b, 0].item()):
+                                tok_id = int(next_tok[b, 0].item())
+                                log_probs_per_batch[b].append(
+                                    float(step_log_probs[b, tok_id].item())
+                                )
+                    generated = paddle.concat([generated, next_tok], axis=1)
+                    if eos_token_id is not None:
+                        if isinstance(eos_token_id, list):
+                            # eos_token_id may be nested list like [[t1,t2],[t3]]
+                            # extract single-token stop ids for fast eos check
+                            flat_ids = [
+                                ids[0]
+                                if isinstance(ids, list) and len(ids) == 1
+                                else ids
+                                for ids in eos_token_id
+                                if not isinstance(ids, list) or len(ids) == 1
+                            ]
+                            if flat_ids:
+                                eos_tensor = paddle.to_tensor(
+                                    flat_ids, dtype=next_tok.dtype
+                                ).reshape([1, 1, -1])
+                                hit = (
+                                    next_tok.unsqueeze(-1) == eos_tensor
+                                ).any(axis=-1)
+                                done = done | hit
+                        else:
+                            done = done | (next_tok == eos_token_id)
+                        if done.all().item():
+                            break
 
         if return_log_probs:
             return generated, log_probs_per_batch
