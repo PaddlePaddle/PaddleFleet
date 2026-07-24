@@ -123,9 +123,7 @@ def SegLU(x, ranges, ts):
 
 class GPTLMHead(ColumnParallelLinear):
     def __init__(self, **kwargs):
-        # Force-disable FP8 on the LM head via the ColumnParallelLinear opt-out
-        # kwarg. No config clone is needed — ``disable_fp8`` is scoped to this
-        # layer and does not mutate the shared config object.
+        # Force-disable FP8 on the LM head.
         kwargs["disable_fp8"] = True
         self.config = kwargs["config"]
         self.skip_weight_param_allocation = kwargs[

@@ -49,13 +49,11 @@ def get_quant_func(
         return scale.T if scale is not None else None
 
     def _cached_weight_result(x):
-        """Return a cached 4-tuple if ``x`` has pre-quantized attrs, else None.
+        """Return a cached 4-tuple if ``x`` was pre-quantized, else None.
 
-        The cache stores only the forward-orientation fp8 tensor plus BOTH
-        scales (fwd + bwd). The backward-orientation fp8 is derived on demand
-        via ``.T.contiguous()`` — fp8 element data is transpose-invariant,
-        while the UE8M0 scale layout is not (which is why both scales must be
-        materialized at quant time and stored persistently).
+        The cache stores the forward-orientation fp8 tensor plus both fwd
+        and bwd scales; the backward-orientation fp8 is derived on demand
+        via ``.T.contiguous()`` in the caller.
         """
         fp8_fwd = getattr(x, "fp8_weight_fwd", None)
         if fp8_fwd is None:
@@ -64,7 +62,6 @@ def get_quant_func(
         scale_bwd = getattr(x, "fp8_scale_bwd", None)
         if scale_fwd is None or scale_bwd is None:
             return None
-        # fp8_bwd = fp8_fwd.T.contiguous()
         return None, scale_bwd, fp8_fwd, scale_fwd
 
     _quant = paddle.incubate.nn.functional.fp8_quant_blockwise
