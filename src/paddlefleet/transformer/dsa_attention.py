@@ -63,6 +63,42 @@ _ACCURACY_COMPATIBLE_KERNEL = (
 )
 
 
+class _AccuracyCompatibleQKMatmul(paddle.autograd.PyLayer):
+    """Batched QK matmul with an explicit broadcast-key gradient reduction."""
+
+    @staticmethod
+    def forward(ctx, query: Tensor, key: Tensor) -> Tensor:
+        batch_size, num_heads, sequence_length, head_dim = query.shape
+        expanded_key = key.expand([batch_size, num_heads, head_dim, sequence_length])
+        scores = paddle.bmm(
+            query.reshape([batch_size * num_heads, sequence_length, head_dim]),
+            expanded_key.reshape(
+                [batch_size * num_heads, head_dim, sequence_length]
+            ),
+        ).reshape([batch_size, num_heads, sequence_length, sequence_length])
+        ctx.save_for_backward(query, key)
+        return scores
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> tuple[Tensor, Tensor]:
+        query, key = ctx.saved_tensor()
+        batch_size, num_heads, sequence_length, head_dim = query.shape
+        expanded_key = key.expand([batch_size, num_heads, head_dim, sequence_length])
+        grad_query = paddle.bmm(
+            grad_output.reshape(
+                [batch_size * num_heads, sequence_length, sequence_length]
+            ),
+            expanded_key.transpose([0, 1, 3, 2]).reshape(
+                [batch_size * num_heads, sequence_length, head_dim]
+            ),
+        ).reshape(query.shape)
+        grad_key_per_head = paddle.matmul(
+            query.transpose([0, 1, 3, 2]), grad_output
+        )
+        grad_key = paddle.sum(grad_key_per_head, axis=1, keepdim=True)
+        return grad_query, grad_key
+
+
 class _AccuracyCompatibleSoftmax(paddle.autograd.PyLayer):
     """Masked softmax with explicit reduction and positive masked zeros."""
 
@@ -235,14 +271,10 @@ def _unfused_absorbed_dsa_attention(
     q = query.transpose([0, 2, 1, 3])
     k = key.transpose([0, 2, 3, 1])
     if _ACCURACY_COMPATIBLE_KERNEL:
-        scores = paddle.bmm(
-            q.cast("float32").reshape([b * num_heads, s, -1]),
-            k.cast("float32").expand([b, num_heads, -1, -1]).reshape(
-                [b * num_heads, -1, s]
-            ),
-        ).reshape([b, num_heads, s, s]) * softmax_scale
+        scores = _AccuracyCompatibleQKMatmul.apply(q.cast("float32"), k.cast("float32"))
     else:
-        scores = paddle.matmul(q.cast("float32"), k.cast("float32")) * softmax_scale
+        scores = paddle.matmul(q.cast("float32"), k.cast("float32"))
+    scores = scores * softmax_scale
     if combined_mask is not None:
         scores = scores + combined_mask.cast("float32")
     probabilities = (

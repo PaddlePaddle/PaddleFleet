@@ -34,6 +34,7 @@ from paddlefleet.transformer.dsa_attention import (
     DSAIndexerSublayersSpec,
     FusedDSAIndexerLoss,
     Indexer,
+    _AccuracyCompatibleQKMatmul,
     _AccuracyCompatibleSoftmax,
     _unfused_absorbed_dsa_attention,
     _unfused_dsa_attention,
@@ -55,6 +56,29 @@ def _make_config(**overrides):
     }
     defaults.update(overrides)
     return TransformerConfig(**defaults)
+
+
+class TestAccuracyCompatibleQKMatmul(unittest.TestCase):
+    def test_backward_reduces_broadcast_key_gradient_with_sum(self):
+        query = paddle.randn([1, 2, 3, 4], dtype="float32")
+        key = paddle.randn([1, 1, 4, 3], dtype="float32")
+        query.stop_gradient = False
+        key.stop_gradient = False
+        grad_output = paddle.randn([1, 2, 3, 3], dtype="float32")
+
+        output = _AccuracyCompatibleQKMatmul.apply(query, key)
+        output.backward(grad_output)
+        expected_query = paddle.matmul(
+            grad_output, key.expand([1, 2, 4, 3]).transpose([0, 1, 3, 2])
+        )
+        expected_key = paddle.sum(
+            paddle.matmul(query.detach().transpose([0, 1, 3, 2]), grad_output),
+            axis=1,
+            keepdim=True,
+        )
+
+        self.assertTrue(paddle.equal_all(query.grad, expected_query))
+        self.assertTrue(paddle.equal_all(key.grad, expected_key))
 
 
 class TestAccuracyCompatibleSoftmax(unittest.TestCase):
