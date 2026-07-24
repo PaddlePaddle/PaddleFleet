@@ -313,6 +313,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wq_b",
+            disable_fp8=True,
         )
 
         # wk: hidden_size -> head_dim (single shared K, duplicated)
@@ -327,6 +328,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wk",
+            disable_fp8=True,
         )
 
         # k_norm: LayerNorm (NOT RMSNorm) per reference

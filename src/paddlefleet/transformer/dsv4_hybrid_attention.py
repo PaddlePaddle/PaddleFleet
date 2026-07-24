@@ -1083,6 +1083,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             is_expert=False,
             tp_group=self.pg_collection.tp,
         )
+        self.linear_q_up_proj.save_original_input = True
 
         # KV projection: hidden_size -> v_head_dim (single head)
         self.linear_kv_proj = build_spec_layer(
@@ -1097,6 +1098,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             is_expert=False,
             tp_group=self.pg_collection.tp,
         )
+        self.linear_kv_proj.save_original_input = True
 
         # KV layernorm
         self.kv_layernorm = build_spec_layer(

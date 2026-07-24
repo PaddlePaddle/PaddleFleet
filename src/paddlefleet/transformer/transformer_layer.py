@@ -1236,6 +1236,38 @@ class TransformerLayer(nn.Layer):
             self.mlp.fp8_quant_weight(
                 batch_mode=batch_mode, quant_transpose=quant_transpose
             )
+        # Walk non-MoE fp8 Linear sublayers (attention projections, dense
+        # MLP, shared expert, indexer linears) and pre-quantize their
+        # weights. Each Linear.fp8_quant_weight is a no-op when self.fp8
+        # is False, so bf16 layers (e.g. GPTLMHead / bf16 indexer heads)
+        # are skipped automatically.
+        from paddlefleet.tensor_parallel.layers import (
+            ColumnParallelLinear,
+            Linear,
+            RowParallelLinear,
+        )
+
+        seen = set()
+        for m in self.sublayers(include_self=False):
+            if not isinstance(
+                m, (Linear, ColumnParallelLinear, RowParallelLinear)
+            ):
+                continue
+            # ``sublayers()`` traverses into the MoE experts too; those
+            # already got pre-quantized above via ``self.mlp.fp8_quant_weight``
+            # (which uses ``fused_stack_quant_without_cache`` with a different
+            # cache layout). Skip them here to avoid double-quant and to
+            # avoid clobbering ``fp8_weight_stacked``-style attributes.
+            if getattr(m, "is_expert", False):
+                continue
+            if id(m) in seen:
+                continue
+            seen.add(id(m))
+            quant_fn = getattr(m, "fp8_quant_weight", None)
+            if quant_fn is not None:
+                quant_fn(
+                    batch_mode=batch_mode, quant_transpose=quant_transpose
+                )
 
     def clear_fp8_quant_weight(self):
         if isinstance(self.mlp, MoELayer):

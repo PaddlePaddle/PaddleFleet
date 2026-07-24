@@ -1723,6 +1723,7 @@ class CSAIndexer(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            disable_fp8=True,
         )
 
         # Weights projection: hidden_size -> n_heads
