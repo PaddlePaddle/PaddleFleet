@@ -32,6 +32,7 @@ from paddlefleet.transformer.multi_latent_attention import (
     _accuracy_compatible_mla_rope_apply,
     _accuracy_compatible_projection,
     _accuracy_compatible_q_down_projection,
+    _accuracy_compatible_q_up_projection,
 )
 
 
@@ -97,6 +98,41 @@ class TestAccuracyCompatibleProjection(unittest.TestCase):
 
         expected = paddle.nn.functional.linear(hidden, weight, bias)
         self.assertTrue(paddle.equal_all(output, expected).item())
+        self.assertIsNone(output_bias)
+
+
+class TestAccuracyCompatibleQUpProjection(unittest.TestCase):
+    def test_preserves_forward_weight_grad_and_materialized_input_dgrad(self):
+        import paddle
+
+        hidden = paddle.randn([1, 3, 4])
+        weight = paddle.randn([4, 6])
+        hidden.stop_gradient = False
+        weight.stop_gradient = False
+        projection = MagicMock(weight=weight, bias=None, skip_bias_add=False)
+        projection.side_effect = lambda value: (
+            paddle.nn.functional.linear(value, weight),
+            None,
+        )
+        grad_output = paddle.randn([1, 3, 6])
+
+        output, output_bias = _accuracy_compatible_q_up_projection(
+            projection, hidden
+        )
+        output.backward(grad_output)
+        expected_input_grad = paddle.matmul(
+            grad_output, weight.detach().transpose([1, 0]).contiguous()
+        )
+        expected_weight_grad = paddle.matmul(
+            hidden.detach().reshape([-1, 4]).transpose([1, 0]),
+            grad_output.reshape([-1, 6]),
+        )
+
+        self.assertTrue(
+            paddle.equal_all(output.detach(), paddle.nn.functional.linear(hidden, weight))
+        )
+        self.assertTrue(paddle.equal_all(hidden.grad, expected_input_grad))
+        self.assertTrue(paddle.equal_all(weight.grad, expected_weight_grad))
         self.assertIsNone(output_bias)
 
 

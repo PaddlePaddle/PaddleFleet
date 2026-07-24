@@ -57,6 +57,32 @@ _ACCURACY_COMPATIBLE_KERNEL: bool = (
 )
 
 
+class _AccuracyCompatibleLinearInputGrad(paddle.autograd.PyLayer):
+    """Linear value path whose backward only returns materialized-transpose dgrad."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, weight):
+        ctx.save_for_backward(weight)
+        return paddle.nn.functional.linear(hidden_states, weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (weight,) = ctx.saved_tensor()
+        grad_input = paddle.matmul(grad_output, weight.transpose([1, 0]).contiguous())
+        return grad_input, None
+
+
+def _accuracy_compatible_q_up_projection(projection, hidden_states):
+    """Preserve native parameter gradients while controlling q-up input dgrad."""
+    output_bias = projection.bias if projection.skip_bias_add else None
+    parameter_path, _ = projection(hidden_states.detach())
+    input_path = _AccuracyCompatibleLinearInputGrad.apply(
+        hidden_states, projection.weight.detach()
+    )
+    output = parameter_path + (input_path - input_path.detach())
+    return output, output_bias
+
+
 def _accuracy_compatible_projection(projection, hidden_states):
     """Apply a projection with Torch-aligned strided-transpose GEMM formulation."""
     output_bias = projection.bias if projection.skip_bias_add else None
@@ -978,7 +1004,15 @@ class MLASelfAttention(MultiLatentAttention):
             if self.config.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_b_proj(q_compressed)
+                if (
+                    _ACCURACY_COMPATIBLE_KERNEL
+                    and get_pg_size(self.pg_collection.tp) == 1
+                ):
+                    q, _ = _accuracy_compatible_q_up_projection(
+                        self.q_b_proj, q_compressed
+                    )
+                else:
+                    q, _ = self.q_b_proj(q_compressed)
             else:
                 # q_compressed: [num_tokens, hidden_size]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
