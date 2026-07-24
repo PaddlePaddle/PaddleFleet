@@ -574,6 +574,7 @@ def _make_bwd_inp_quant_func(use_pow2_scale, use_ue8m0):
     Mirrors ``_bwd_quant_blockwise_1x128`` but returns a callable in the
     shape expected by ``general_gemm``'s ``inp_quant_func`` argument.
     """
+
     def _f(x):
         return _bwd_quant_blockwise_1x128(x, use_pow2_scale, use_ue8m0)
 
@@ -607,7 +608,9 @@ def general_gemm(
         output tensor, and optionally quant cache tuple when fp8=True.
     """
     if fp8:
-        assert _deep_gemm_available, "FP8 GEMM requires paddlefleet_ops.deep_gemm"
+        assert _deep_gemm_available, (
+            "FP8 GEMM requires paddlefleet_ops.deep_gemm"
+        )
 
         from paddlefleet.fp8.utils import is_fp8_tensor
 
@@ -650,20 +653,25 @@ def general_gemm(
         if out is not None:
             # Accumulate into existing buffer
             deep_gemm.fp8_gemm_nt(
-                (inp_fp8, inp_scale), (weight_fp8, weight_scale), out,
-                c=out, recipe=recipe,
+                (inp_fp8, inp_scale),
+                (weight_fp8, weight_scale),
+                out,
+                c=out,
+                recipe=recipe,
             )
         else:
             out = paddle.empty(
                 [inp_fp8.shape[0], weight_fp8.shape[0]], dtype=paddle.bfloat16
             )
             deep_gemm.fp8_gemm_nt(
-                (inp_fp8, inp_scale), (weight_fp8, weight_scale), out,
+                (inp_fp8, inp_scale),
+                (weight_fp8, weight_scale),
+                out,
                 recipe=recipe,
             )
 
         if a_orig_shape is not None:
-            out = out.reshape(list(a_orig_shape[:-1]) + [out.shape[-1]])
+            out = out.reshape([*list(a_orig_shape[:-1]), out.shape[-1]])
 
         return out, (
             inp_fp8,
@@ -756,7 +764,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             total_input = input
 
         output, fp8_meta = general_gemm(
-            total_input, weight, bias=bias,
+            total_input,
+            weight,
+            bias=bias,
             fp8=fp8,
             inp_quant_func=inp_quant_func,
             weight_quant_func=weight_quant_func,
@@ -782,13 +792,17 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             # and backward re-quantizes it, so ``inp_t_fp8``/``inp_t_scale``
             # can be dropped.
             if save_original_input:
-                save_list.extend(
-                    [weight_fp8, weight_scale, weight_scale_bwd]
-                )
+                save_list.extend([weight_fp8, weight_scale, weight_scale_bwd])
                 ctx.fp8_input_stashed = False
             else:
                 save_list.extend(
-                    [inp_t_fp8, inp_t_scale, weight_fp8, weight_scale, weight_scale_bwd]
+                    [
+                        inp_t_fp8,
+                        inp_t_scale,
+                        weight_fp8,
+                        weight_scale,
+                        weight_scale_bwd,
+                    ]
                 )
                 ctx.fp8_input_stashed = True
             ctx.fp8_saved = True
@@ -813,14 +827,19 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         idx += 1
         if ctx.fp8_saved:
             if ctx.fp8_input_stashed:
-                inp_t_fp8 = saved[idx]; idx += 1
-                inp_t_scale = saved[idx]; idx += 1
+                inp_t_fp8 = saved[idx]
+                idx += 1
+                inp_t_scale = saved[idx]
+                idx += 1
             else:
                 inp_t_fp8 = None
                 inp_t_scale = None
-            weight_fp8 = saved[idx]; idx += 1
-            weight_scale = saved[idx]; idx += 1
-            weight_scale_bwd = saved[idx]; idx += 1
+            weight_fp8 = saved[idx]
+            idx += 1
+            weight_scale = saved[idx]
+            idx += 1
+            weight_scale_bwd = saved[idx]
+            idx += 1
         else:
             inp_t_fp8 = None
             inp_t_scale = None
@@ -902,8 +921,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         if wgrad_compute:
             if total_input is not None:
-                grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
-                    grad_output, total_input
+                grad_output, total_input = (
+                    prepare_input_tensors_for_wgrad_compute(
+                        grad_output, total_input
+                    )
                 )
             else:
                 # fp8 + save_original_input=False: no bf16 input available.
@@ -1008,9 +1029,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         else:
             if wgrad_compute:
                 if total_input is not None:
-                    grad_weight, _ = general_gemm(
-                        total_input.t(), grad_output
-                    )
+                    grad_weight, _ = general_gemm(total_input.t(), grad_output)
                 elif inp_t_fp8 is not None:
                     # No bf16 input saved; dequantize the fp8 transposed
                     # activation (shape [K, M] = total_input.t()) for bf16 wgrad.

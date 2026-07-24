@@ -71,8 +71,10 @@ class _FP8Gemm(paddle.autograd.Function):
                 weight_fp8_bwd, weight_scale_bwd = None, None
             else:
                 (
-                    weight_fp8_bwd, weight_scale_bwd,
-                    weight_fp8, weight_scale,
+                    weight_fp8_bwd,
+                    weight_scale_bwd,
+                    weight_fp8,
+                    weight_scale,
                 ) = wq_result
         else:
             weight_fp8, weight_scale = weight

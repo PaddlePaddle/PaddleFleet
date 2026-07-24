@@ -68,6 +68,7 @@ def get_quant_func(
 
     if use_ue8m0:
         if input_trans:
+
             def inp_quant_func(x):
                 fp8, scale, fp8_t, scale_t = _quant(
                     x,
@@ -79,6 +80,7 @@ def get_quant_func(
                 )
                 return fp8, _mn_major(scale), fp8_t, _mn_major(scale_t)
         else:
+
             def inp_quant_func(x):
                 fp8, scale = _quant(
                     x,
@@ -103,8 +105,10 @@ def get_quant_func(
                 using_ue8m0_scale=True,
             )
             return (
-                fp8_bwd, _mn_major(scale_bwd),
-                fp8_fwd, _mn_major(scale_fwd),
+                fp8_bwd,
+                _mn_major(scale_bwd),
+                fp8_fwd,
+                _mn_major(scale_fwd),
             )
     else:
         inp_quant_func = functools.partial(

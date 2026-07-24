@@ -1259,9 +1259,7 @@ class TransformerLayer(nn.Layer):
             seen.add(id(m))
             quant_fn = getattr(m, "fp8_quant_weight", None)
             if quant_fn is not None:
-                quant_fn(
-                    batch_mode=batch_mode, quant_transpose=quant_transpose
-                )
+                quant_fn(batch_mode=batch_mode, quant_transpose=quant_transpose)
 
     def clear_fp8_quant_weight(self):
         if isinstance(self.mlp, MoELayer):

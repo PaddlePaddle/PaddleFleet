@@ -31,7 +31,7 @@ def is_fp8_tensor(x):
     assert tensor.dtype != paddle.float8_e5m2, (
         "FP8 tensor should not be float8_e5m2 dtype, not supported yet."
     )
-    return (
-        tensor.dtype == paddle.float8_e4m3fn
-        and scale.dtype in (paddle.float32, paddle.int32)
+    return tensor.dtype == paddle.float8_e4m3fn and scale.dtype in (
+        paddle.float32,
+        paddle.int32,
     )
