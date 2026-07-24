@@ -168,18 +168,6 @@ def _get_fp8_weight_and_scale(
     return fp8_weight, fp8_scale
 
 
-def _log_stage_memory(stage: str) -> None:
-    paddle.cuda.synchronize()
-    mib = 1024**2
-    print(
-        f"[stage-memory] {stage}: "
-        f"alloc_mib={paddle.cuda.memory_allocated() / mib:.2f}, "
-        f"reserved_mib={paddle.cuda.memory_reserved() / mib:.2f}, "
-        f"peak_alloc_mib={paddle.cuda.max_memory_allocated() / mib:.2f}, "
-        f"peak_reserved_mib={paddle.cuda.max_memory_reserved() / mib:.2f}"
-    )
-
-
 def fused_stack_quant_without_cache(
     expert_weight_list, transpose=False, use_ue8m0=False
 ):
@@ -972,9 +960,6 @@ class ExpertsGroupGemmContiguousNode:
         if clear_o1:
             o1._clear_to_zero_allocation()
         # fused_weighted_swiglu_act_quant 已消费完 o1 产出 o2_fp8，此时 o1 可以安全释放。
-        _log_stage_memory(
-            f"In forward, after swiglu, swiglu_output:{o2_fp8.shape}, dtype: {o2_fp8.dtype}"
-        )
         o3_shape = [o2_fp8.shape[0], w2_quant.shape[1]]
         if o3 is not None:
             assert o3.shape == o3_shape, f"{o3.shape} vs {o3_shape}"
@@ -1286,9 +1271,6 @@ class ExpertsGroupGemmContiguousNode:
                     do2_s,
                     m_indices=self.m_indices,
                 )
-        _log_stage_memory(
-            f"In backward, after down gemm bwd, d_swiglu_output shape:{do2_s.shape}, dtype:{do2_s.dtype}"
-        )
 
         with paddle.amp.auto_cast(False):
             if self.clamp_value is not None and self.clamp_value > 0:
@@ -1317,9 +1299,6 @@ class ExpertsGroupGemmContiguousNode:
                         o1, do2_s, unzipped_probs
                     )
                 )
-        _log_stage_memory(
-            f"In backward, after swiglu bwd, d_swiglu_input shape:{do1.shape}, dtype:{do1.dtype}"
-        )
 
         return do1, o2_s, probs_grad
 
@@ -1675,9 +1654,6 @@ class ExpertsGroupGemmContiguousNode:
         o1 = self.fwd_gate_up(
             hs_out, expert_w1, num_expert, tokens_per_expert, scale=scale
         )
-        _log_stage_memory(
-            f"In forward, after up-gate gemm, up_gate_output shape:{o1.shape}, dtype: {o1.dtype}"
-        )
         if not self.recompute_moe_gate_up:
             self.o1 = o1
             clear_o1 = False
@@ -1700,9 +1676,6 @@ class ExpertsGroupGemmContiguousNode:
             num_expert,
             o3=fwd_down_output,
             clear_o1=clear_o1,
-        )
-        _log_stage_memory(
-            f"In forward, after down gemm, down_output shape: {o3.shape}, dtype: {o3.dtype}"
         )
         return o3
 
@@ -2075,7 +2048,6 @@ class ExpertsGroupGemmContiguousNode:
                 self.bf16_weight_grad(do1, None, expert_w1, self.dw_p2p_overlap)
             else:
                 self.bwd_gate_up_weight(do1, None, expert_w1, clear_input=True)
-            _log_stage_memory("In backward, after w1 grad")
             # 不调用 _record_stream，直接 None。
             # _record_stream 会触发 VMM 积极回收物理页，在 nparts loop 中
             # slice 被释放后原始 input_fp8 的物理页可能被提前回收，
@@ -2089,14 +2061,10 @@ class ExpertsGroupGemmContiguousNode:
                 self.bf16_weight_grad(out_grad, o2_s, expert_w2)
             else:
                 self.bwd_down_weight(out_grad, o2_s, expert_w2)
-            _log_stage_memory("In backward, after w2 grad")
 
             # dx
             dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
 
-            _log_stage_memory(
-                f"In backward, after up_gate gemm bwd, d_up_gate_input shape: {dx.shape}, dtype:{dx.dtype}"
-            )
             # out-of-place 路径下 fused_swiglu_weighted_bwd 异步读 o1，但此时
             # 中间已经执行了 dw1、dw2 等多个 GEMM kernel（同一 stream 顺序入队），
             # 到达此处时 o1 的读取早已完成，del 安全。

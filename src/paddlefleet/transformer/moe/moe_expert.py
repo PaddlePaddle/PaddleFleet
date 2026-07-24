@@ -560,18 +560,26 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.hidden_size = self.config.hidden_size
         self.K = topk
         self._weights_layout = self._GROUPED_LAYOUT
+
         self.sonic_moe_config = _refresh_fp8_config()
         self.sonic_moe_config.enabled = self.config.fp8 is not None
         self.sonic_moe_config.fp8_wgrad = self.config.fp8_wgrad
         self.sonic_moe_config.fuse_y1_quant = True
         self.sonic_moe_config.fuse_y1_bf16_trunc = True
         self.sonic_moe_config.recompute_z = False
+        self.sonic_moe_config.save_z_fp8 = (
+            self.config.sonicmoe_save_upgate_out_in_fp8
+        )
+        clamp_value = self.config.activation_func_clamp_value
+        self.sonic_moe_config.swiglu_clamp_value = (
+            0.0 if clamp_value is None else float(clamp_value)
+        )
 
         # Micro batch tracking for fp8 weight memory optimization.
         # _num_micro_batches: total forward passes per step for this layer.
         # _forward_counter: auto-increments in forward(); reset in quant_weight().
         self._forward_counter = 0
-        self._num_micro_batches = 1
+        self._num_micro_batches = 9999
 
     def set_num_micro_batches(self, num_micro_batches):
         """Set total number of forward passes (micro batches) per training step.
@@ -615,11 +623,9 @@ class SonicMoEExpert(GroupedMLPExpert):
 
         Only transposed_fp8 is needed for backward (activation gradient GEMM).
         """
-        _log_stage_memory("before release fp8")
         for weight in (self.weight1, self.weight2):
             if hasattr(weight, "fp8") and weight.fp8 is not None:
                 weight.fp8 = None
-        _log_stage_memory("after release fp8")
 
     def _convert_grad_layout(self, param, converter, convert_main_grad=True):
         main_grad = getattr(param, "main_grad", None)
@@ -681,15 +687,27 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.convert_weights_to_sonic_layout()
         self.clear_fp8_weights()
 
+        iso32 = self.config.sonicmoe_quant_format == "32x32"
+        assert self.config.sonicmoe_quant_format in ["32x32", "1x32"], (
+            f"sonic_moe_quant_format {self.config.sonicmoe_quant_format} is not supported."
+        )
         payload = quantize_native_fp8_weights(
             self.weight1,
             self.weight2,
+            iso32=iso32,
         )
-        assert payload["format"] == "1x32", (
-            f"quant strategy {payload.get('format')} is not supported."
+        quant_format = payload["format"]
+        assert quant_format in ("1x32", "iso32"), (
+            f"quant strategy {quant_format} is not supported."
         )
-        w1_fp8, w1_scale, w1t_fp8, w1t_scale = payload["w1"]
-        w2_fp8, w2_scale, w2t_fp8, w2t_scale = payload["w2"]
+        if quant_format == "iso32":
+            w1_fp8, w1_scale, w1t_scale = payload["w1"]
+            w2_fp8, w2_scale, w2t_scale = payload["w2"]
+            w1t_fp8 = w1_fp8.transpose([0, 2, 1])
+            w2t_fp8 = w2_fp8.transpose([0, 2, 1])
+        else:
+            w1_fp8, w1_scale, w1t_fp8, w1t_scale = payload["w1"]
+            w2_fp8, w2_scale, w2t_fp8, w2t_scale = payload["w2"]
         self.weight1.fp8 = (w1_fp8, w1_scale)
         self.weight1.transposed_fp8 = (w1t_fp8, w1t_scale)
         self.weight2.fp8 = (w2_fp8, w2_scale)
