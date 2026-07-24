@@ -159,7 +159,7 @@ jobs:
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
-          
+
 
           echo "Install uv"
           export WITH_COVERAGE=ON
@@ -443,8 +443,6 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
-            -e fleet_branch \
-            -e formers_branch \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -470,7 +468,7 @@ jobs:
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
-          
+
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -478,15 +476,15 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
-          if [ "${GITHUB_EVENT_NAME}" == "pull_request" ]; then
-            git fetch origin refs/pull/${PR_ID}/head:pr-${PR_ID}
-            git checkout pr-${PR_ID}
-          else
-            git fetch --all
-            fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
-            git checkout ${fleet_branch}
-          fi
-
+          # if [ "${GITHUB_EVENT_NAME}" == "pull_request" ]; then
+          #   git fetch origin refs/pull/${PR_ID}/head:pr-${PR_ID}
+          #   git checkout pr-${PR_ID}
+          # else
+          #   git checkout ${COMMIT_ID}
+          # fi
+          git fetch --all
+          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
+          git checkout ${formers_branch}
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${fleet_branch}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -518,7 +516,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
+          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
@@ -694,8 +692,6 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
-            -e fleet_branch \
-            -e formers_branch \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -720,7 +716,7 @@ jobs:
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
-         
+
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -764,7 +760,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
+          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
@@ -1157,8 +1153,6 @@ jobs:
             -e PADDLE_URL \
             -e BASE_NAME \
             -e update_baseline \
-            -e fleet_branch \
-            -e formers_branch \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -1226,7 +1220,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
+          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
