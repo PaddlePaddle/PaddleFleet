@@ -36,7 +36,6 @@ from paddlefleet.fp8.qat import fp8_simulate_qat
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
-
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
@@ -64,7 +63,6 @@ def _q_rms_norm(q: Tensor, eps: float, high_precision_norm: bool) -> Tensor:
         return q.astype(ori_dtype)
     else:
         return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
-
 
 
 from paddlefleet.transformer.utils import (
@@ -295,20 +293,7 @@ class DSv4HybridAttention(Attention):
         )
 
         linear_proj_in_size = config.o_groups * config.o_lora_rank
-        # FP8 opt-in for the o_proj Linear only. Grouped output projection
-        # stays bf16. DSv4 FP8 currently requires TP=1.
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
-        self.fp8 = bool(getattr(config, "full_fp8_computation", False)) and bool(
-            getattr(config, "fp8", False)
-        )
-        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
-        self.save_original_input = not self.fp8
-        if self.fp8:
-            tp_nranks = getattr(self.pg_collection.tp, "nranks", 1)
-            assert tp_nranks == 1, (
-                "DSv4HybridAttention FP8 currently requires TP=1, "
-                f"got tp.nranks={tp_nranks}"
-            )
         self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
             linear_proj_in_size,

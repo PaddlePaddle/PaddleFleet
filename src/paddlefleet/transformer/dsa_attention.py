@@ -292,15 +292,6 @@ class DSAIndexer(paddle.nn.Layer):
         self.index_topk = config.dsa_index_topk
         self.softmax_scale = self.head_dim**-0.5
 
-        self.fp8 = bool(getattr(self.config, "fp8", None))
-        self.fp8_wgrad = bool(getattr(self.config, "fp8_wgrad", False))
-        self.save_original_input = not self.fp8
-        if self.fp8:
-            tp_size = (
-                pg_collection.tp.nranks if pg_collection.tp is not None else 1
-            )
-            assert tp_size == 1, "FP8 in DSA Indexer requires TP=1"
-
         # wq_b: q_lora_rank -> n_heads * head_dim (duplicated)
         self.wq_b = build_spec_layer(
             sublayers_spec.linear_wq_b,

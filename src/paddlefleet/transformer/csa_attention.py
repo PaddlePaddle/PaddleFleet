@@ -1705,12 +1705,6 @@ class CSAIndexer(nn.Layer):
 
         self.rotary_pos_emb = rotary_pos_emb
 
-        self.fp8 = bool(getattr(config, "full_fp8_computation", False)) and bool(
-            getattr(config, "fp8", None)
-        )
-        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False))
-        self.save_original_input = not self.fp8
-
         # Q projection: q_lora_rank -> n_heads * head_dim
         self.linear_wq_b = build_spec_layer(
             sublayers_spec.linear_wq_b,
