@@ -46,6 +46,7 @@ from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
+    DocMaskMetadata,
 )
 
 if TYPE_CHECKING:
@@ -88,7 +89,7 @@ def build_document_rope_freqs(
             the returned freqs cover ``[0, position_offset + sq)`` and are
             sliced by the caller.
         doc_lens: optional precomputed document lengths (e.g. from
-            ``CSADocMaskMetadata.doc_lens``) to avoid recomputing them from
+            ``DocMaskMetadata.legacy_doc_lens``) to avoid recomputing them from
             ``startend_row_indices``.
 
     Returns:
@@ -134,7 +135,7 @@ def _build_rope_freqs(
     rotary_pos_emb: nn.Layer,
     sq: int,
     position_offset: int = 0,
-    docmask_meta: CSADocMaskMetadata | None = None,
+    docmask_meta: DocMaskMetadata | None = None,
     startend_row_indices: Tensor | None = None,
 ):
     if docmask_meta is not None:
@@ -142,7 +143,7 @@ def _build_rope_freqs(
             rotary_pos_emb,
             sq,
             position_offset=position_offset,
-            doc_lens=docmask_meta.doc_lens,
+            doc_lens=docmask_meta.legacy_doc_lens,
         )
     elif startend_row_indices is not None:
         freqs, mscale = build_document_rope_freqs(
@@ -386,12 +387,19 @@ class DSv4HybridAttention(Attention):
         ratio = int(getattr(self.core_attention, "compress_ratio", 0))
         if startend_row_indices is not None:
             docmask_seqlen = sq * cp_size if cp_size > 1 else sq
-            docmask_meta = CSADocMaskMetadata.build(
-                max(1, ratio),
-                b,
-                docmask_seqlen,
-                startend_row_indices,
-            )
+            if ratio > 0:
+                docmask_meta = CSADocMaskMetadata.build(
+                    ratio,
+                    b,
+                    docmask_seqlen,
+                    startend_row_indices,
+                )
+            else:
+                docmask_meta = DocMaskMetadata.build(
+                    b,
+                    docmask_seqlen,
+                    startend_row_indices,
+                )
 
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(
@@ -518,7 +526,7 @@ class DSv4HybridAttention(Attention):
         hidden_states: Tensor,
         startend_row_indices: Tensor | None = None,
         position_offset: int = 0,
-        docmask_meta: CSADocMaskMetadata | None = None,
+        docmask_meta: DocMaskMetadata | None = None,
     ):
         """Override in subclass."""
         raise NotImplementedError
@@ -623,7 +631,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         hidden_states: Tensor,
         startend_row_indices: Tensor | None = None,
         position_offset: int = 0,
-        docmask_meta: CSADocMaskMetadata | None = None,
+        docmask_meta: DocMaskMetadata | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Derive query, key, value from hidden_states.
 

@@ -69,27 +69,28 @@ from paddlefleet.transformer.cp_utils import (
 )
 
 
+def _normalize_docmask_args(batch_size: int, seqlen: int) -> tuple[int, int]:
+    batch_size = int(batch_size)
+    seqlen = int(seqlen)
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got batch_size: {batch_size}")
+    if seqlen <= 0:
+        raise ValueError(f"seqlen must be positive, got seqlen: {seqlen}")
+    return batch_size, seqlen
+
+
 def _normalize_csa_docmask_args(
     ratio: int,
     batch_size: int,
     seqlen: int,
     n_compressed: int | None = None,
-    *,
-    require_batch_one: bool = True,
 ) -> tuple[int, int, int, int]:
     ratio = int(ratio)
-    batch_size = int(batch_size)
-    seqlen = int(seqlen)
+    batch_size, seqlen = _normalize_docmask_args(batch_size, seqlen)
     if n_compressed is not None:
         n_compressed = int(n_compressed)
     if ratio <= 0:
         raise ValueError(f"ratio must be positive, got ratio: {ratio}")
-    if seqlen <= 0:
-        raise ValueError(f"seqlen must be positive, got seqlen: {seqlen}")
-    if require_batch_one and batch_size != 1:
-        raise ValueError(
-            f"only support batch_size = 1, got batch_size: {batch_size}"
-        )
     if n_compressed is None:
         n_compressed = seqlen // ratio
     if n_compressed < 0:
@@ -116,26 +117,50 @@ def _validate_csa_docmask_shape(
 def _derive_csa_doc_boundaries(
     startend_row_indices: Tensor,
     seqlen: int,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-    mask = startend_row_indices.flatten().cast("int64")
-    positions = paddle.arange(seqlen, dtype="int64")
+) -> tuple[Tensor, Tensor, Tensor, list[Tensor], list[Tensor]]:
+    """Derive independent document boundaries for each batch sample.
 
-    is_boundary = paddle.zeros([seqlen], dtype="bool")
-    is_boundary[0] = True
-    is_boundary[1:] = (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+    The input is ``[B, 1, S_global, 1]``. Returns int64
+    ``doc_start_per_pos[B, S_global]``, int32
+    ``doc_len_per_pos[B, S_global]``, bool ``is_valid[B, S_global]``, and
+    per-sample int32 lengths/int64 starts. Padded positions are invalid but
+    retain their final document's start and length for shape-stable masking.
+    """
+    mask = startend_row_indices[:, 0, :, 0].cast("int64")
+    batch_size = mask.shape[0]
+    positions = paddle.arange(seqlen, dtype="int64").unsqueeze(0)
+    positions = positions.expand([batch_size, seqlen])
+
+    is_boundary = paddle.zeros([batch_size, seqlen], dtype="bool")
+    is_boundary[:, 0] = True
+    if seqlen > 1:
+        is_boundary[:, 1:] = (positions[:, 1:] == mask[:, :-1]) & (
+            mask[:, 1:] != mask[:, :-1]
+        )
 
     doc_start_per_pos = paddle.cummax(
-        is_boundary.cast("int64") * positions, axis=0
+        is_boundary.cast("int64") * positions, axis=1
     ).values
     pos_in_doc = positions - doc_start_per_pos
     doc_len_per_pos = mask - doc_start_per_pos
     is_valid = pos_in_doc < doc_len_per_pos
 
-    doc_starts_i64 = paddle.nonzero(is_boundary).flatten()
-    doc_lens = (mask[doc_starts_i64] - doc_starts_i64).cast("int32")
-    doc_starts = doc_starts_i64
+    doc_lens_per_batch = []
+    doc_starts_per_batch = []
+    for batch_idx in range(batch_size):
+        doc_starts_i64 = paddle.nonzero(is_boundary[batch_idx]).flatten()
+        doc_lens_per_batch.append(
+            (mask[batch_idx, doc_starts_i64] - doc_starts_i64).cast("int32")
+        )
+        doc_starts_per_batch.append(doc_starts_i64)
 
-    return doc_start_per_pos, doc_len_per_pos, is_valid, doc_lens, doc_starts
+    return (
+        doc_start_per_pos,
+        doc_len_per_pos,
+        is_valid,
+        doc_lens_per_batch,
+        doc_starts_per_batch,
+    )
 
 
 def _build_window_topk_idxs_from_doc_bounds(
@@ -145,19 +170,27 @@ def _build_window_topk_idxs_from_doc_bounds(
     doc_start_per_pos: Tensor,
     is_valid: Tensor,
 ) -> Tensor:
+    """Build int64 ``[B, S_global, W]`` sample-local window indices.
+
+    ``doc_start_per_pos`` and ``is_valid`` are ``[B, S_global]``. Indices
+    never cross a document or sample; invalid slots and padded rows are ``-1``.
+    """
     if window_size <= 0:
         raise ValueError(f"window_size must be positive, got {window_size}")
-    positions = paddle.arange(seqlen, dtype="int64")
-    win_start = paddle.maximum(doc_start_per_pos, positions - window_size + 1)
-    offsets = paddle.arange(window_size, dtype="int64").unsqueeze(0)
-    indices = win_start.unsqueeze(1) + offsets
-    invalid = (
-        (indices > positions.unsqueeze(1))
-        | (indices < doc_start_per_pos.unsqueeze(1))
-        | (~is_valid).unsqueeze(1).expand_as(indices)
+    positions = paddle.arange(seqlen, dtype="int64").reshape([1, seqlen, 1])
+    win_start = paddle.maximum(
+        doc_start_per_pos, positions[:, :, 0] - window_size + 1
     )
-    result = paddle.where(invalid, paddle.full_like(indices, -1), indices)
-    return result.unsqueeze(0).expand([batch_size, -1, -1])
+    offsets = paddle.arange(window_size, dtype="int64").reshape(
+        [1, 1, window_size]
+    )
+    indices = win_start.unsqueeze(-1) + offsets
+    invalid = (
+        (indices > positions)
+        | (indices < doc_start_per_pos.unsqueeze(-1))
+        | (~is_valid).unsqueeze(-1).expand_as(indices)
+    )
+    return paddle.where(invalid, paddle.full_like(indices, -1), indices)
 
 
 def _build_compress_topk_idxs_from_valid_range(
@@ -167,19 +200,23 @@ def _build_compress_topk_idxs_from_valid_range(
     offset: int,
     valid_range: Tensor,
 ) -> Tensor:
-    c_grid = paddle.arange(n_compressed, dtype="int64").unsqueeze(0)
-    valid_range = valid_range[0].cast("int64")
-    range_start = valid_range[:, 0]
-    range_end = valid_range[:, 1]
-    active = (c_grid >= range_start.unsqueeze(1)) & (
-        c_grid < range_end.unsqueeze(1)
+    """Build int32 ``[B, S_global, Nc_global]`` compressed KV indices.
+
+    ``valid_range`` is int32 ``[B, S_global, 2]`` in sample-local compressed
+    coordinates. ``offset`` is added to active indices; all others are ``-1``.
+    """
+    c_grid = paddle.arange(n_compressed, dtype="int64").reshape(
+        [1, 1, n_compressed]
     )
-    result = paddle.where(
+    valid_range = valid_range.cast("int64")
+    range_start = valid_range[:, :, 0].unsqueeze(-1)
+    range_end = valid_range[:, :, 1].unsqueeze(-1)
+    active = (c_grid >= range_start) & (c_grid < range_end)
+    return paddle.where(
         active,
         (c_grid + offset).cast("int32"),
-        paddle.full([seqlen, n_compressed], -1, dtype="int32"),
+        paddle.full([batch_size, seqlen, n_compressed], -1, dtype="int32"),
     )
-    return result.unsqueeze(0).expand([batch_size, -1, -1])
 
 
 def _build_compressed_causal_mask_from_valid_range(
@@ -188,16 +225,20 @@ def _build_compressed_causal_mask_from_valid_range(
     n_compressed: int,
     valid_range: Tensor,
 ) -> Tensor:
-    c_grid = paddle.arange(n_compressed, dtype="int64").unsqueeze(0)
-    valid_range = valid_range[0].cast("int64")
-    range_start = valid_range[:, 0]
-    range_end = valid_range[:, 1]
-    valid_mask = (c_grid >= range_start.unsqueeze(1)) & (
-        c_grid < range_end.unsqueeze(1)
+    """Build float32 ``[B, S_global, Nc_global]`` additive causal masks.
+
+    ``valid_range`` is ``[B, S_global, 2]`` in sample-local compressed
+    coordinates. Active groups are ``0``; unavailable groups and padded query
+    rows are ``-inf``.
+    """
+    c_grid = paddle.arange(n_compressed, dtype="int64").reshape(
+        [1, 1, n_compressed]
     )
-    invalid = (
-        (~valid_mask).unsqueeze(0).expand([batch_size, seqlen, n_compressed])
-    )
+    valid_range = valid_range.cast("int64")
+    range_start = valid_range[:, :, 0].unsqueeze(-1)
+    range_end = valid_range[:, :, 1].unsqueeze(-1)
+    valid_mask = (c_grid >= range_start) & (c_grid < range_end)
+    invalid = ~valid_mask
     return paddle.where(
         invalid,
         paddle.full([1], float("-inf"), dtype="float32"),
@@ -212,12 +253,18 @@ def _build_valid_range_from_doc_bounds(
     doc_len_per_pos: Tensor,
     is_valid: Tensor,
 ) -> Tensor:
-    positions = paddle.arange(seqlen, dtype="int64")
+    """Build int32 ``[B, S_global, 2]`` compressed valid ranges.
+
+    Inputs are ``[B, S_global]`` in global-token coordinates. Each output
+    interval is half-open and sample-local in compressed coordinates. Invalid
+    or padded query positions receive the zero range ``[0, 0]``.
+    """
+    positions = paddle.arange(seqlen, dtype="int64").unsqueeze(0)
     pos_in_doc = positions - doc_start_per_pos
     num_compressed_per_pos = doc_len_per_pos // ratio
     boundary_marker = (positions == doc_start_per_pos).cast("int64")
     boundary_compressed = boundary_marker * num_compressed_per_pos
-    cum_compressed = paddle.cumsum(boundary_compressed, axis=0)
+    cum_compressed = paddle.cumsum(boundary_compressed, axis=1)
     doc_col_start = cum_compressed - num_compressed_per_pos
 
     causal_avail = (pos_in_doc + 1) // ratio
@@ -325,66 +372,39 @@ def get_cutoff_doc_starts(cutoff_doc_lens: Tensor) -> Tensor:
     return starts
 
 
-@dataclass
-class CSADocMaskMetadata:
-    """Reusable CSA metadata derived from ``startend_row_indices``."""
+@dataclass(kw_only=True)
+class DocMaskMetadata:
+    """Batched document metadata shared by window and compressed attention.
+
+    ``startend_row_indices`` is ``[B, 1, S_global, 1]``. Dense metadata keeps
+    the leading batch axis: ``doc_start_per_pos``, ``doc_len_per_pos``, and
+    ``is_valid`` are ``[B, S_global]``. Ragged ``doc_lens`` and ``doc_starts``
+    are always ``list[Tensor]`` with one int32/int64 tensor per sample.
+    """
 
     startend_row_indices: Tensor
-    ratio: int
     batch_size: int
     seqlen: int
-    n_compressed: int
-    doc_lens: Tensor
-    doc_starts: Tensor
+    doc_lens: list[Tensor]
+    doc_starts: list[Tensor]
     doc_start_per_pos: Tensor
     doc_len_per_pos: Tensor
     is_valid: Tensor
-    _doc_lens_cutoff: Tensor | None = None
-    _doc_lens_list: list[int] | None = None
-    _doc_starts_cutoff: Tensor | None = None
-    _actual_n_compressed: int | None = None
-    _valid_range: Tensor | None = None
     _window_topk_idxs: Tensor | None = None
     _window_size: int | None = None
-    _compress_topk_idxs: Tensor | None = None
-    _compress_offset: int | None = None
-    _compressed_causal_mask: Tensor | None = None
-    _is_first_compressed_group: Tensor | None = None
 
     @classmethod
     def build(
         cls,
-        ratio: int,
         batch_size: int,
         seqlen: int,
         startend_row_indices: Tensor | None,
-        n_compressed: int | None = None,
-    ) -> CSADocMaskMetadata | None:
-        """Build metadata from ``startend_row_indices``.
-
-        Args:
-            ratio: compression ratio (e.g. 4 or 128).
-            batch_size: batch size; must be 1 (varlen packs docs along seq).
-            seqlen: sequence length; must equal
-                ``startend_row_indices.shape[2]``.
-            startend_row_indices: ``[batch_size, 1, seqlen, 1]`` document
-                boundary tensor where entry ``t`` holds the (exclusive) end
-                row index of ``t``'s document, or ``None`` for causal-only
-                mode (returns ``None``).
-            n_compressed: optional override for ``seqlen // ratio``; used when
-                the caller already knows the compressed slot count.
-
-        Returns:
-            A populated :class:`CSADocMaskMetadata`, or ``None`` when
-            ``startend_row_indices is None``.
-        """
+    ) -> DocMaskMetadata | None:
+        """Build document metadata in global sequence coordinates."""
         if startend_row_indices is None:
             return None
-        ratio, batch_size, seqlen, n_compressed = _normalize_csa_docmask_args(
-            ratio, batch_size, seqlen, n_compressed
-        )
+        batch_size, seqlen = _normalize_docmask_args(batch_size, seqlen)
         _validate_csa_docmask_shape(startend_row_indices, batch_size, seqlen)
-
         (
             doc_start_per_pos,
             doc_len_per_pos,
@@ -392,13 +412,10 @@ class CSADocMaskMetadata:
             doc_lens,
             doc_starts,
         ) = _derive_csa_doc_boundaries(startend_row_indices, seqlen)
-
         return cls(
             startend_row_indices=startend_row_indices,
-            ratio=ratio,
             batch_size=batch_size,
             seqlen=seqlen,
-            n_compressed=n_compressed,
             doc_lens=doc_lens,
             doc_starts=doc_starts,
             doc_start_per_pos=doc_start_per_pos,
@@ -407,62 +424,20 @@ class CSADocMaskMetadata:
         )
 
     @property
-    def doc_lens_cutoff(self) -> Tensor:
-        if self._doc_lens_cutoff is None:
-            self._doc_lens_cutoff = get_cutoff_doc_lens(
-                self.doc_lens, self.ratio
+    def legacy_doc_lens(self) -> Tensor:
+        """Return the legacy tensor form for an explicitly B=1-only caller."""
+        if self.batch_size != 1:
+            raise ValueError(
+                "legacy_doc_lens only supports batch_size == 1, got "
+                f"batch_size: {self.batch_size}"
             )
-        return self._doc_lens_cutoff
-
-    @property
-    def doc_lens_list(self) -> list[int]:
-        """Return cached Python document lengths for cuDNN THD glue."""
-        if self._doc_lens_list is None:
-            self._doc_lens_list = [
-                int(length) for length in self.doc_lens.numpy().tolist()
-            ]
-        return self._doc_lens_list
-
-    @property
-    def doc_starts_cutoff(self) -> Tensor:
-        if self._doc_starts_cutoff is None:
-            self._doc_starts_cutoff = get_cutoff_doc_starts(
-                self.doc_lens_cutoff
-            )
-        return self._doc_starts_cutoff
-
-    @property
-    def actual_n_compressed(self) -> int:
-        if self._actual_n_compressed is None:
-            total_cutoff = int(self.doc_lens_cutoff.sum().item())
-            actual_n_compressed = total_cutoff // self.ratio
-            if actual_n_compressed > self.n_compressed:
-                raise ValueError(
-                    "n_compressed must cover all packed document compressed "
-                    "groups, got n_compressed="
-                    f"{self.n_compressed}, required={actual_n_compressed}"
-                )
-            self._actual_n_compressed = actual_n_compressed
-        return self._actual_n_compressed
-
-    @property
-    def valid_range(self) -> Tensor:
-        if self._valid_range is None:
-            self._valid_range = _build_valid_range_from_doc_bounds(
-                self.ratio,
-                self.seqlen,
-                self.doc_start_per_pos,
-                self.doc_len_per_pos,
-                self.is_valid,
-            ).unsqueeze(0)
-        return self._valid_range
+        return self.doc_lens[0]
 
     def get_window_topk_idxs(self, window_size: int) -> Tensor:
-        """Return ``[batch_size, seqlen, window_size]`` sliding-window indices.
+        """Return int64 ``[B, S_global, W]`` sample-local window indices.
 
-        Indices reset at each document boundary; invalid slots (beyond the
-        query position, before the document start, or on padding) are set to
-        ``-1``. Cached and keyed by ``window_size``.
+        Indices reset at document boundaries. Invalid slots and every padded
+        query row use the ``-1`` sentinel.
         """
         window_size = int(window_size)
         cache_hit = (
@@ -480,12 +455,191 @@ class CSADocMaskMetadata:
             self._window_size = window_size
         return self._window_topk_idxs
 
-    def get_compress_topk_idxs(self, offset: int) -> Tensor:
-        """Return ``[batch_size, seqlen, n_compressed]`` compressed indices.
 
-        For each query position, valid compressed positions (within the
-        document's causal valid range) carry ``compressed_id + offset``;
-        invalid slots are ``-1``. Cached and keyed by ``offset``.
+@dataclass(kw_only=True)
+class CSADocMaskMetadata(DocMaskMetadata):
+    """Compressed-attention metadata for a strictly positive CSA ratio.
+
+    Compressed counts are int32 ``[B]`` and validity is bool
+    ``[B, Nc_global]``. Ragged fields remain lists for every batch size; use
+    the explicitly named ``legacy_*`` accessors only at B=1 compatibility
+    boundaries.
+    """
+
+    ratio: int
+    n_compressed: int
+    compressed_counts: Tensor
+    compressed_valid: Tensor
+    _doc_lens_cutoff: list[Tensor] | None = None
+    _doc_lens_list: list[list[int]] | None = None
+    _doc_starts_cutoff: list[Tensor] | None = None
+    _actual_n_compressed: int | None = None
+    _valid_range: Tensor | None = None
+    _compress_topk_idxs: Tensor | None = None
+    _compress_offset: int | None = None
+    _compressed_causal_mask: Tensor | None = None
+    _is_first_compressed_group: Tensor | None = None
+
+    @classmethod
+    def build(
+        cls,
+        ratio: int,
+        batch_size: int,
+        seqlen: int,
+        startend_row_indices: Tensor | None,
+        n_compressed: int | None = None,
+    ) -> CSADocMaskMetadata | None:
+        """Build metadata from ``startend_row_indices``.
+
+        Args:
+            ratio: strictly positive compression ratio (e.g. 4 or 128).
+            batch_size: positive model batch size.
+            seqlen: global sequence length; must equal
+                ``startend_row_indices.shape[2]``.
+            startend_row_indices: ``[batch_size, 1, seqlen, 1]`` document
+                boundary tensor where entry ``t`` holds the (exclusive) end
+                row index of ``t``'s document, or ``None`` for causal-only
+                mode (returns ``None``).
+            n_compressed: optional override for ``seqlen // ratio``; used when
+                the caller already knows the compressed slot count.
+
+        Returns:
+            A populated :class:`CSADocMaskMetadata`, or ``None`` when
+            ``startend_row_indices is None``.
+        """
+        if startend_row_indices is None:
+            return None
+        ratio, batch_size, seqlen, n_compressed = _normalize_csa_docmask_args(
+            ratio, batch_size, seqlen, n_compressed
+        )
+        documents = DocMaskMetadata.build(
+            batch_size, seqlen, startend_row_indices
+        )
+        compressed_counts = paddle.to_tensor(
+            [
+                int((doc_lens // ratio).sum().item())
+                for doc_lens in documents.doc_lens
+            ],
+            dtype="int32",
+        )
+        compressed_valid = paddle.arange(
+            n_compressed, dtype="int32"
+        ).unsqueeze(0) < compressed_counts.unsqueeze(1)
+
+        return cls(
+            startend_row_indices=documents.startend_row_indices,
+            batch_size=documents.batch_size,
+            seqlen=documents.seqlen,
+            doc_lens=documents.doc_lens,
+            doc_starts=documents.doc_starts,
+            doc_start_per_pos=documents.doc_start_per_pos,
+            doc_len_per_pos=documents.doc_len_per_pos,
+            is_valid=documents.is_valid,
+            ratio=ratio,
+            n_compressed=n_compressed,
+            compressed_counts=compressed_counts,
+            compressed_valid=compressed_valid,
+        )
+
+    @property
+    def doc_lens_cutoff(self) -> list[Tensor]:
+        """Return per-sample int32 document lengths aligned to ``ratio``."""
+        if self._doc_lens_cutoff is None:
+            self._doc_lens_cutoff = [
+                get_cutoff_doc_lens(doc_lens, self.ratio)
+                for doc_lens in self.doc_lens
+            ]
+        return self._doc_lens_cutoff
+
+    @property
+    def legacy_doc_lens_cutoff(self) -> Tensor:
+        """Return cutoff lengths for an explicitly B=1-only caller."""
+        if self.batch_size != 1:
+            raise ValueError(
+                "legacy_doc_lens_cutoff only supports batch_size == 1, got "
+                f"batch_size: {self.batch_size}"
+            )
+        return self.doc_lens_cutoff[0]
+
+    @property
+    def doc_lens_list(self) -> list[list[int]]:
+        """Return cached Python document lengths, grouped by sample."""
+        if self._doc_lens_list is None:
+            self._doc_lens_list = [
+                [int(length) for length in doc_lens.numpy().tolist()]
+                for doc_lens in self.doc_lens
+            ]
+        return self._doc_lens_list
+
+    @property
+    def legacy_doc_lens_list(self) -> list[int]:
+        """Return Python lengths for an explicitly B=1-only caller."""
+        if self.batch_size != 1:
+            raise ValueError(
+                "legacy_doc_lens_list only supports batch_size == 1, got "
+                f"batch_size: {self.batch_size}"
+            )
+        return self.doc_lens_list[0]
+
+    @property
+    def doc_starts_cutoff(self) -> list[Tensor]:
+        """Return per-sample int64 starts in compressed-token coordinates."""
+        if self._doc_starts_cutoff is None:
+            self._doc_starts_cutoff = [
+                get_cutoff_doc_starts(doc_lens_cutoff)
+                for doc_lens_cutoff in self.doc_lens_cutoff
+            ]
+        return self._doc_starts_cutoff
+
+    @property
+    def legacy_doc_starts(self) -> Tensor:
+        """Return document starts for an explicitly B=1-only caller."""
+        if self.batch_size != 1:
+            raise ValueError(
+                "legacy_doc_starts only supports batch_size == 1, got "
+                f"batch_size: {self.batch_size}"
+            )
+        return self.doc_starts[0]
+
+    @property
+    def legacy_doc_starts_cutoff(self) -> Tensor:
+        """Return compressed starts for an explicitly B=1-only caller."""
+        if self.batch_size != 1:
+            raise ValueError(
+                "legacy_doc_starts_cutoff only supports batch_size == 1, got "
+                f"batch_size: {self.batch_size}"
+            )
+        return self.doc_starts_cutoff[0]
+
+    @property
+    def actual_n_compressed(self) -> int:
+        if self._actual_n_compressed is None:
+            self._actual_n_compressed = int(self.compressed_counts.max().item())
+            if self._actual_n_compressed > self.n_compressed:
+                raise ValueError(
+                    "n_compressed must cover all packed document compressed "
+                    "groups, got n_compressed="
+                    f"{self.n_compressed}, required={self._actual_n_compressed}"
+                )
+        return self._actual_n_compressed
+
+    @property
+    def valid_range(self) -> Tensor:
+        if self._valid_range is None:
+            self._valid_range = _build_valid_range_from_doc_bounds(
+                self.ratio,
+                self.seqlen,
+                self.doc_start_per_pos,
+                self.doc_len_per_pos,
+                self.is_valid,
+            )
+        return self._valid_range
+
+    def get_compress_topk_idxs(self, offset: int) -> Tensor:
+        """Return int32 ``[B, S_global, Nc_global]`` compressed indices.
+
+        Indices are sample-local with ``offset`` applied; unavailable groups
+        and padded query rows use the ``-1`` sentinel.
         """
         offset = int(offset)
         cache_hit = (
@@ -506,11 +660,7 @@ class CSADocMaskMetadata:
         return self._compress_topk_idxs
 
     def get_compressed_causal_mask(self) -> Tensor:
-        """Return ``[batch_size, seqlen, n_compressed]`` float32 causal mask.
-
-        ``0`` for valid (within the document's compressed range), ``-inf``
-        otherwise. Cached on first access.
-        """
+        """Return float32 ``[B, S_global, Nc_global]`` additive mask."""
         cache_hit = self._compressed_causal_mask is not None
         if not cache_hit:
             self._compressed_causal_mask = (
@@ -524,17 +674,21 @@ class CSADocMaskMetadata:
         return self._compressed_causal_mask
 
     def get_is_first_compressed_group(self) -> Tensor:
-        """Return ``[actual_n_compressed]`` bool flags marking each document's
-        first compressed group (used by overlap transforms to avoid reusing
-        the previous document's data). Cached on first access.
-        """
+        """Return bool ``[B, max(compressed_counts)]`` first-group flags."""
         cache_hit = self._is_first_compressed_group is not None
         if not cache_hit:
-            is_first = paddle.zeros([self.actual_n_compressed], dtype="bool")
-            first_indices = self.doc_starts_cutoff // self.ratio
-            valid_indices = first_indices < self.actual_n_compressed
-            is_first[first_indices[valid_indices]] = True
-            self._is_first_compressed_group = is_first
+            is_first = paddle.zeros(
+                [self.batch_size, self.actual_n_compressed], dtype="bool"
+            )
+            for batch_idx, starts_cutoff in enumerate(
+                self.doc_starts_cutoff
+            ):
+                first_indices = starts_cutoff // self.ratio
+                valid_indices = first_indices < self.actual_n_compressed
+                is_first[batch_idx, first_indices[valid_indices]] = True
+            self._is_first_compressed_group = (
+                is_first[0] if self.batch_size == 1 else is_first
+            )
         return self._is_first_compressed_group
 
 
@@ -1031,7 +1185,7 @@ def _compute_fused_csa_indexer_loss_forward(
                 if docmask_meta is not None
                 else startend_row_indices
             ),
-            doc_lens=docmask_meta.doc_lens_list
+            doc_lens=docmask_meta.legacy_doc_lens_list
             if docmask_meta is not None
             else None,
             seq_offset=int(seq_offset),
@@ -1410,10 +1564,10 @@ class Compressor(nn.Layer):
         # Shared compression logic for both CP and non-CP paths.
         if docmask_meta is not None:
             # per-document cutoff, pack contiguously without padding
-            doc_lens = docmask_meta.doc_lens
-            doc_starts = docmask_meta.doc_starts
-            doc_lens_cutoff = docmask_meta.doc_lens_cutoff
-            doc_starts_cutoff = docmask_meta.doc_starts_cutoff
+            doc_lens = docmask_meta.legacy_doc_lens
+            doc_starts = docmask_meta.legacy_doc_starts
+            doc_lens_cutoff = docmask_meta.legacy_doc_lens_cutoff
+            doc_starts_cutoff = docmask_meta.legacy_doc_starts_cutoff
 
             assert len(doc_lens) == len(doc_starts)
             assert len(doc_lens) == len(doc_lens_cutoff)
@@ -1665,7 +1819,7 @@ class CSAIndexer(nn.Layer):
         compressor so that indexer K is computed over the full global sequence.
         """
         b, sq, _ = x.shape
-        doc_lens = docmask_meta.doc_lens if docmask_meta is not None else None
+        doc_lens = docmask_meta.legacy_doc_lens if docmask_meta is not None else None
         # Q path
         q, _ = self.linear_wq_b(qr)  # [b, sq, n_heads * head_dim]
         q = q.reshape([b, sq, self.index_n_heads, self.index_head_dim])
@@ -1995,7 +2149,7 @@ class CompressedSparseAttention(FleetLayer):
                         startend_row_indices=docmask_meta.startend_row_indices
                         if docmask_meta is not None
                         else None,
-                        doc_lens=docmask_meta.doc_lens_list
+                        doc_lens=docmask_meta.legacy_doc_lens_list
                         if docmask_meta is not None
                         else None,
                     )
@@ -2601,7 +2755,7 @@ class CompressedSparseAttention(FleetLayer):
                                 startend_row_indices=docmask_meta.startend_row_indices
                                 if docmask_meta is not None
                                 else None,
-                                doc_lens=docmask_meta.doc_lens_list
+                                doc_lens=docmask_meta.legacy_doc_lens_list
                                 if docmask_meta is not None
                                 else None,
                                 seq_offset=position_offset,

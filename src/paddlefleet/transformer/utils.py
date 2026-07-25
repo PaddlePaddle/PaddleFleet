@@ -175,29 +175,36 @@ def startend_row_indices_add_sliding_window(
 # ---------------------------------------------------------------------------
 
 
-def get_doc_lens(startend_row_indices: paddle.Tensor) -> paddle.Tensor:
-    """Derive document lengths from startend_row_indices.
-
-    Args:
-        startend_row_indices: [batch_size, h, seqlen, 1] tensor where
-            each value is the end boundary (exclusive) of the document that
-            position belongs to.
-
-    Returns:
-        doc_lens: [n_docs] int32 tensor of document lengths.
-    """
-    mask = startend_row_indices.flatten().cast("int64")
+def _get_doc_lens_1d(mask: paddle.Tensor) -> paddle.Tensor:
+    mask = mask.cast("int64")
     seqlen = mask.shape[0]
     positions = paddle.arange(seqlen, dtype="int64")
-
     is_boundary = paddle.zeros([seqlen], dtype="bool")
     is_boundary[0] = True
-    is_boundary[1:] = (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
-
+    if seqlen > 1:
+        is_boundary[1:] = (positions[1:] == mask[:-1]) & (
+            mask[1:] != mask[:-1]
+        )
     boundary_indices = paddle.nonzero(is_boundary).flatten()
-    doc_ends = mask[boundary_indices]
-    doc_lens = (doc_ends - boundary_indices).cast("int32")
-    return doc_lens
+    return (mask[boundary_indices] - boundary_indices).cast("int32")
+
+
+def get_doc_lens_per_batch(
+    startend_row_indices: paddle.Tensor,
+) -> list[paddle.Tensor]:
+    """Derive independent document lengths for every batch sample."""
+    mask = startend_row_indices[:, 0, :, 0]
+    return [_get_doc_lens_1d(mask[batch_idx]) for batch_idx in range(mask.shape[0])]
+
+
+def get_doc_lens(startend_row_indices: paddle.Tensor) -> paddle.Tensor:
+    """Derive document lengths, retaining the tensor API for ``B == 1``."""
+    doc_lens_per_batch = get_doc_lens_per_batch(startend_row_indices)
+    if len(doc_lens_per_batch) != 1:
+        raise ValueError(
+            "get_doc_lens returns one tensor; use get_doc_lens_per_batch for B > 1"
+        )
+    return doc_lens_per_batch[0]
 
 
 def get_doc_starts(doc_lens: paddle.Tensor) -> paddle.Tensor:

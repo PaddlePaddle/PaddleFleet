@@ -37,6 +37,7 @@ from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
     CompressedSparseAttentionSublayersSpec,
     CSADocMaskMetadata,
+    DocMaskMetadata,
     _apply_rope,
     _build_compressed_causal_mask,
     _resolve_csa_indexer_attn_topk_effective,
@@ -54,6 +55,7 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.utils import get_doc_lens, get_doc_lens_per_batch
 
 _SEED = 42
 
@@ -80,6 +82,16 @@ def _make_startend_row_indices(doc_lens, seqlen):
     if len(values) < seqlen:
         values.extend([doc_end] * (seqlen - len(values)))
     return paddle.to_tensor(values, dtype="int32").reshape([1, 1, seqlen, 1])
+
+
+def _make_batched_startend_row_indices(doc_lens_per_batch, seqlen):
+    return paddle.concat(
+        [
+            _make_startend_row_indices(doc_lens, seqlen)
+            for doc_lens in doc_lens_per_batch
+        ],
+        axis=0,
+    )
 
 
 def _make_config(
@@ -384,6 +396,110 @@ class TestCSADocMaskMetadata(unittest.TestCase):
             dtype="int32",
         ).reshape([1, 1, 16, 1])
 
+    def test_batched_metadata_keeps_samples_and_documents_independent(self):
+        ratio = 2
+        batch_size = 2
+        seqlen = 8
+        startend_row_indices = _make_batched_startend_row_indices(
+            [[4, 3], [2, 6]], seqlen
+        )
+        meta = CSADocMaskMetadata.build(
+            ratio, batch_size, seqlen, startend_row_indices
+        )
+
+        self.assertEqual(list(meta.doc_start_per_pos.shape), [2, 8])
+        self.assertEqual(
+            meta.doc_start_per_pos.numpy().tolist(),
+            [[0, 0, 0, 0, 4, 4, 4, 4], [0, 0, 2, 2, 2, 2, 2, 2]],
+        )
+        self.assertEqual(
+            meta.doc_len_per_pos.numpy().tolist(),
+            [[4, 4, 4, 4, 3, 3, 3, 3], [2, 2, 6, 6, 6, 6, 6, 6]],
+        )
+        self.assertEqual(
+            meta.is_valid.numpy().tolist(),
+            [[True, True, True, True, True, True, True, False], [True] * 8],
+        )
+        self.assertEqual(
+            [doc_lens.numpy().tolist() for doc_lens in meta.doc_lens],
+            [[4, 3], [2, 6]],
+        )
+        self.assertEqual(
+            [
+                doc_starts.numpy().tolist()
+                for doc_starts in meta.doc_starts
+            ],
+            [[0, 4], [0, 2]],
+        )
+        with self.assertRaisesRegex(ValueError, "batch_size == 1"):
+            _ = meta.legacy_doc_lens
+        with self.assertRaisesRegex(ValueError, "batch_size == 1"):
+            _ = meta.legacy_doc_starts
+        self.assertEqual(meta.compressed_counts.numpy().tolist(), [3, 4])
+        self.assertEqual(
+            meta.compressed_valid.numpy().tolist(),
+            [[True, True, True, False], [True, True, True, True]],
+        )
+        self.assertEqual(meta.actual_n_compressed, 4)
+
+        window = meta.get_window_topk_idxs(3).numpy().tolist()
+        self.assertEqual(window[0][4], [4, -1, -1])
+        self.assertEqual(window[0][7], [-1, -1, -1])
+        self.assertEqual(window[1][2], [2, -1, -1])
+        self.assertEqual(window[1][7], [5, 6, 7])
+
+        compressed = meta.get_compress_topk_idxs(0).numpy().tolist()
+        self.assertEqual(compressed[0][3], [0, 1, -1, -1])
+        self.assertEqual(compressed[0][5], [-1, -1, 2, -1])
+        self.assertEqual(compressed[0][7], [-1, -1, -1, -1])
+        self.assertEqual(compressed[1][7], [-1, 1, 2, 3])
+        self.assertEqual(
+            meta.get_is_first_compressed_group().numpy().tolist(),
+            [[True, False, True, False], [True, True, False, False]],
+        )
+
+        valid_range = meta.valid_range.numpy().tolist()
+        for batch_idx in range(batch_size):
+            for query_idx in range(seqlen):
+                start, end = valid_range[batch_idx][query_idx]
+                for compressed_idx in compressed[batch_idx][query_idx]:
+                    self.assertTrue(
+                        compressed_idx == -1 or start <= compressed_idx < end
+                    )
+
+    def test_zero_ratio_is_rejected_and_window_metadata_is_separate(self):
+        seqlen = 8
+        startend_row_indices = _make_batched_startend_row_indices(
+            [[4, 3], [2, 6]], seqlen
+        )
+
+        with self.assertRaisesRegex(ValueError, "ratio must be positive"):
+            CSADocMaskMetadata.build(0, 2, seqlen, startend_row_indices)
+
+        meta = DocMaskMetadata.build(2, seqlen, startend_row_indices)
+        self.assertEqual(
+            [doc_lens.numpy().tolist() for doc_lens in meta.doc_lens],
+            [[4, 3], [2, 6]],
+        )
+        self.assertEqual(list(meta.get_window_topk_idxs(3).shape), [2, 8, 3])
+        self.assertFalse(hasattr(meta, "n_compressed"))
+
+    def test_doc_lens_per_batch_utility_preserves_b1_api(self):
+        startend_row_indices = _make_batched_startend_row_indices(
+            [[4, 3], [2, 6]], 8
+        )
+        self.assertEqual(
+            [doc_lens.numpy().tolist() for doc_lens in get_doc_lens_per_batch(
+                startend_row_indices
+            )],
+            [[4, 3], [2, 6]],
+        )
+        with self.assertRaises(ValueError):
+            get_doc_lens(startend_row_indices)
+        self.assertEqual(
+            get_doc_lens(startend_row_indices[:1]).numpy().tolist(), [4, 3]
+        )
+
     def test_metadata_matches_expected_docmask_outputs(self):
         ratio = 4
         batch_size = 1
@@ -395,12 +511,17 @@ class TestCSADocMaskMetadata(unittest.TestCase):
 
         self.assertIsNotNone(meta)
         self.assertEqual(meta.actual_n_compressed, 2)
-        self.assertEqual(meta.doc_lens.numpy().tolist(), [5, 7])
-        self.assertEqual(meta.doc_lens_list, [5, 7])
+        self.assertEqual(meta.doc_lens[0].numpy().tolist(), [5, 7])
+        self.assertEqual(meta.doc_lens_list, [[5, 7]])
         self.assertIs(meta.doc_lens_list, meta.doc_lens_list)
-        self.assertEqual(meta.doc_starts.numpy().tolist(), [0, 5])
-        self.assertEqual(meta.doc_lens_cutoff.numpy().tolist(), [4, 4])
-        self.assertEqual(meta.doc_starts_cutoff.numpy().tolist(), [0, 4])
+        self.assertEqual(meta.doc_starts[0].numpy().tolist(), [0, 5])
+        self.assertEqual(meta.doc_lens_cutoff[0].numpy().tolist(), [4, 4])
+        self.assertEqual(meta.doc_starts_cutoff[0].numpy().tolist(), [0, 4])
+        self.assertIs(meta.legacy_doc_lens, meta.doc_lens[0])
+        self.assertIs(meta.legacy_doc_starts, meta.doc_starts[0])
+        self.assertIs(meta.legacy_doc_lens_cutoff, meta.doc_lens_cutoff[0])
+        self.assertIs(meta.legacy_doc_starts_cutoff, meta.doc_starts_cutoff[0])
+        self.assertEqual(meta.legacy_doc_lens_list, [5, 7])
         self.assertEqual(
             meta.valid_range.numpy().tolist(),
             [
@@ -492,10 +613,10 @@ class TestCSADocMaskMetadata(unittest.TestCase):
         startend_row_indices = _make_startend_row_indices([129, 128, 1], seqlen)
         meta = CSADocMaskMetadata.build(ratio, 1, seqlen, startend_row_indices)
 
-        self.assertEqual(meta.doc_lens.numpy().tolist(), [129, 128, 1])
-        self.assertEqual(meta.doc_starts.numpy().tolist(), [0, 129, 257])
-        self.assertEqual(meta.doc_lens_cutoff.numpy().tolist(), [128, 128, 0])
-        self.assertEqual(meta.doc_starts_cutoff.numpy().tolist(), [0, 128, 256])
+        self.assertEqual(meta.doc_lens[0].numpy().tolist(), [129, 128, 1])
+        self.assertEqual(meta.doc_starts[0].numpy().tolist(), [0, 129, 257])
+        self.assertEqual(meta.doc_lens_cutoff[0].numpy().tolist(), [128, 128, 0])
+        self.assertEqual(meta.doc_starts_cutoff[0].numpy().tolist(), [0, 128, 256])
         self.assertEqual(meta.actual_n_compressed, 2)
         self.assertEqual(
             meta.get_is_first_compressed_group().numpy().tolist(),
@@ -1123,7 +1244,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             ).item()
         )
 
-    def test_top_level_builds_ratio_one_metadata_for_window_only_docmask(self):
+    def test_top_level_builds_document_metadata_for_window_only_docmask(self):
         paddle.seed(_SEED)
         config = _make_config(
             hidden_size=64,
@@ -1145,8 +1266,8 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dsv4_hybrid_attention.CSADocMaskMetadata.build",
-                wraps=CSADocMaskMetadata.build,
+                "paddlefleet.transformer.dsv4_hybrid_attention.DocMaskMetadata.build",
+                wraps=DocMaskMetadata.build,
             ) as mocked,
             paddle.no_grad(),
         ):
@@ -1157,7 +1278,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             )
 
         self.assertGreaterEqual(mocked.call_count, 1)
-        self.assertEqual(mocked.call_args_list[0].args[0], 1)
+        self.assertEqual(mocked.call_args_list[0].args[:2], (1, 32))
 
     @unittest.skipIf(
         sys.version_info < (3, 12), "cuDNN indexer requires Python >= 3.12"
