@@ -151,6 +151,44 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
         expected = [0, 1, 1, 1, 1]
         self.assertEqual(config.moe_layer_freq, expected)
 
+    # --- first_k_dense_replace vs moe_n_hash_layers mutual exclusivity ---
+
+    def test_hash_layers_with_first_k_dense_raises(self):
+        """moe_n_hash_layers > 0 and first_k_dense_replace > 0 should raise ValueError."""
+        with self.assertRaisesRegex(
+            ValueError,
+            "first_k_dense_replace.*moe_n_hash_layers.*mutually exclusive",
+        ):
+            TransformerConfig(
+                num_hidden_layers=12,
+                first_k_dense_replace=4,
+                moe_n_hash_layers=2,
+                actual_vocab_size=32000,
+                num_experts_per_tok=2,
+                n_routed_experts=8,
+            )
+
+    def test_hash_layers_with_zero_first_k_dense_ok(self):
+        """moe_n_hash_layers > 0 with first_k_dense_replace=0 is valid."""
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            first_k_dense_replace=0,
+            moe_n_hash_layers=4,
+            actual_vocab_size=32000,
+            num_experts_per_tok=2,
+            n_routed_experts=8,
+        )
+        self.assertEqual(config.moe_n_hash_layers, 4)
+
+    def test_first_k_dense_with_zero_hash_layers_ok(self):
+        """first_k_dense_replace > 0 with moe_n_hash_layers=0 (default) is valid."""
+        config = TransformerConfig(
+            num_hidden_layers=12,
+            first_k_dense_replace=2,
+        )
+        self.assertEqual(config.first_k_dense_replace, 2)
+        self.assertEqual(config.moe_n_hash_layers, 0)
+
 
 class TestRoutedScalingFactorConfig(unittest.TestCase):
     """Tests for the routed_scaling_factor and routed_scaling_factor_learnable fields
