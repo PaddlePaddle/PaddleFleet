@@ -607,7 +607,8 @@ class SonicMoEExpert(GroupedMLPExpert):
 
     def _release_fp8_weight_after_fwd(self, recompute_moe_gate_up):
         release_fp8_weight_after_fwd = (
-            self._is_last_micro_batch
+            self.config.sonicmoe_quant_format == "1x32"
+            and self._is_last_micro_batch
             and not g_shard_bypass_dygraph_optimizer
             and not recompute_moe_gate_up
             and self.config.recompute_granularity != "full"
