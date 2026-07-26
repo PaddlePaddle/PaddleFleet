@@ -14,7 +14,8 @@
 
 import sys
 import unittest
-from unittest.mock import patch
+from contextlib import nullcontext
+from unittest.mock import PropertyMock, patch
 
 import paddle
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
@@ -442,8 +443,6 @@ class TestCSADocMaskMetadata(unittest.TestCase):
             meta.compressed_valid.numpy().tolist(),
             [[True, True, True, False], [True, True, True, True]],
         )
-        self.assertEqual(meta.actual_n_compressed, 4)
-
         window = meta.get_window_topk_idxs(3).numpy().tolist()
         self.assertEqual(window[0][4], [4, -1, -1])
         self.assertEqual(window[0][7], [-1, -1, -1])
@@ -703,7 +702,7 @@ class TestCSADocMaskMetadata(unittest.TestCase):
         )
 
         self.assertIsNotNone(meta)
-        self.assertEqual(meta.actual_n_compressed, 2)
+        self.assertEqual(meta.compressed_counts.numpy().tolist(), [2])
         self.assertEqual(meta.doc_lens[0].numpy().tolist(), [5, 7])
         self.assertEqual(meta.doc_lens_list, [[5, 7]])
         self.assertIs(meta.doc_lens_list, meta.doc_lens_list)
@@ -810,7 +809,7 @@ class TestCSADocMaskMetadata(unittest.TestCase):
         self.assertEqual(meta.doc_starts[0].numpy().tolist(), [0, 129, 257])
         self.assertEqual(meta.doc_lens_cutoff[0].numpy().tolist(), [128, 128, 0])
         self.assertEqual(meta.doc_starts_cutoff[0].numpy().tolist(), [0, 128, 256])
-        self.assertEqual(meta.actual_n_compressed, 2)
+        self.assertEqual(meta.compressed_counts.numpy().tolist(), [2])
         self.assertEqual(
             meta.get_is_first_compressed_group().numpy().tolist(),
             [[True, True, False]],
@@ -885,6 +884,397 @@ class TestCSADocMaskMetadata(unittest.TestCase):
     def test_metadata_rejects_inconsistent_shape(self):
         with self.assertRaisesRegex(ValueError, "startend_row_indices"):
             CSADocMaskMetadata.build(4, 1, 8, self._make_docmask())
+
+
+class _FixedCapacityCompressor(paddle.nn.Layer):
+    def __init__(self, ratio, head_dim):
+        super().__init__()
+        self.ratio = ratio
+        self.head_dim = head_dim
+        self.calls = 0
+
+    def forward(self, x, cp_group=None, docmask_meta=None):
+        self.calls += 1
+        n_compressed = (
+            docmask_meta.n_compressed
+            if docmask_meta is not None
+            else x.shape[1] // self.ratio
+        )
+        return paddle.zeros(
+            [x.shape[0], n_compressed, self.head_dim], dtype=x.dtype
+        )
+
+
+class TestDSv4HybridConsumerMigration(unittest.TestCase):
+    def _capture_sparse_attention(self, attention):
+        captured = {}
+
+        def sparse_attention(query, kv_full, attn_sink, topk_idxs, softmax_scale):
+            captured["kv_full"] = kv_full
+            captured["topk_idxs"] = topk_idxs
+            return paddle.zeros(
+                [query.shape[0], query.shape[1], query.shape[2] * query.shape[3]],
+                dtype=query.dtype,
+            )
+
+        return captured, sparse_attention
+
+    def _make_inputs(self, config, batch_size, seqlen):
+        dtype = "bfloat16"
+        query = paddle.randn(
+            [batch_size, seqlen, config.num_attention_heads, config.v_head_dim],
+            dtype=dtype,
+        )
+        key = paddle.randn(
+            [batch_size, seqlen, 1, config.v_head_dim], dtype=dtype
+        )
+        x = paddle.randn([batch_size, seqlen, config.hidden_size], dtype=dtype)
+        qr = paddle.randn([batch_size, seqlen, config.q_lora_rank], dtype=dtype)
+        return query, key, x, qr
+
+    def test_csa_and_hca_consume_per_sample_validity(self):
+        for ratio, seqlen, doc_lens in (
+            (4, 8, [[3, 3], [8]]),
+            (128, 256, [[127, 127], [256]]),
+        ):
+            with self.subTest(ratio=ratio):
+                config = _make_config(
+                    hidden_size=64,
+                    num_attention_heads=2,
+                    v_head_dim=32,
+                    q_lora_rank=32,
+                    o_groups=2,
+                    o_lora_rank=16,
+                    csa_window_size=2,
+                    csa_compress_ratios=[ratio],
+                    num_layers=1,
+                )
+                attention = _build_attention(config, 0).core_attention
+                compressor = _FixedCapacityCompressor(
+                    ratio, config.v_head_dim
+                )
+                attention.compressor = compressor
+                meta = CSADocMaskMetadata.build(
+                    ratio,
+                    2,
+                    seqlen,
+                    _make_batched_startend_row_indices(doc_lens, seqlen),
+                )
+                self.assertEqual(meta.compressed_counts.numpy().tolist(), [0, 2])
+                query, key, x, qr = self._make_inputs(config, 2, seqlen)
+                captured, sparse_attention = self._capture_sparse_attention(
+                    attention
+                )
+
+                if ratio < 128:
+                    attention.indexer = paddle.nn.Identity()
+                    indexer_topk = meta.get_compress_topk_idxs(0)
+                    indexer = patch.object(
+                        attention,
+                        "_compute_indexer_compressed_topk_idxs",
+                        return_value=(indexer_topk, None, None),
+                    )
+                else:
+                    indexer = nullcontext()
+
+                with (
+                    indexer,
+                    patch.object(
+                        attention,
+                        "_validate_docmask_batch_size",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        attention,
+                        "compressed_sparse_attn",
+                        side_effect=sparse_attention,
+                    ),
+                ):
+                    attention(
+                        query,
+                        key,
+                        key,
+                        x=x,
+                        qr=qr,
+                        docmask_meta=meta,
+                    )
+
+                self.assertEqual(compressor.calls, 1)
+                self.assertEqual(
+                    list(captured["kv_full"].shape),
+                    [2, seqlen + meta.n_compressed, config.v_head_dim],
+                )
+                compressed_topk = captured["topk_idxs"][:, :, 2:]
+                self.assertTrue((compressed_topk[0] == -1).all().item())
+                self.assertTrue(
+                    (compressed_topk[1, :, 1] >= 0).any().item()
+                )
+
+    def test_cudnn_batched_dispatch_skips_legacy_doc_adapter(self):
+        calls = []
+
+        def cudnn_topk(index_q, index_k_comp, weights, **kwargs):
+            topk = min(int(kwargs["topk_effective"]), index_k_comp.shape[1])
+            calls.append(
+                {
+                    "valid_range": kwargs["valid_range"],
+                    "doc_lens": kwargs.get("doc_lens"),
+                }
+            )
+            indices = paddle.zeros(
+                [index_q.shape[0], index_q.shape[1], topk], dtype="int64"
+            )
+            lengths = paddle.full(
+                [index_q.shape[0], index_q.shape[1]],
+                topk,
+                dtype="int32",
+            )
+            return indices, lengths
+
+        for cp_size in (1, 2):
+            with self.subTest(cp_size=cp_size):
+                calls.clear()
+                seqlen_global = 8
+                seqlen_local = seqlen_global // cp_size
+                config = _make_config(
+                    hidden_size=64,
+                    num_attention_heads=2,
+                    v_head_dim=32,
+                    q_lora_rank=32,
+                    o_groups=2,
+                    o_lora_rank=16,
+                    csa_window_size=2,
+                    csa_compress_ratios=[4],
+                    csa_indexer_backend="cudnn",
+                    context_parallel_size=cp_size,
+                    num_layers=1,
+                )
+                if cp_size == 1:
+                    attention = _build_attention(config, 0).core_attention
+                else:
+                    spec = get_attention_spec(
+                        config=config,
+                        attention_layer_type="dsv4_hybrid_attention",
+                        attn_mask_type=AttnMaskType.causal,
+                    )
+                    attention = build_spec_layer(
+                        spec.sublayers_spec.core_attention,
+                        config=config,
+                        layer_number=0,
+                        attn_mask_type=AttnMaskType.causal,
+                        attention_type="self",
+                        pg_collection=_FakePGCollection(cp_nranks=cp_size),
+                        compress_ratio=4,
+                    )
+                attention.eval()
+                attention.compressor = _FixedCapacityCompressor(
+                    4, config.v_head_dim
+                )
+                meta = CSADocMaskMetadata.build(
+                    4,
+                    2,
+                    seqlen_global,
+                    _make_batched_startend_row_indices([[3, 3], [8]], seqlen_global),
+                )
+                query, key, x, qr = self._make_inputs(
+                    config, 2, seqlen_local
+                )
+                captured, sparse_attention = self._capture_sparse_attention(
+                    attention
+                )
+
+                def gather(tensor, dim=0, group=None):
+                    return paddle.concat([tensor, tensor], axis=dim)
+
+                with (
+                    patch.object(
+                        attention,
+                        "_validate_docmask_batch_size",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        attention,
+                        "compressed_sparse_attn",
+                        side_effect=sparse_attention,
+                    ),
+                    patch.object(
+                        CSADocMaskMetadata,
+                        "legacy_doc_lens_list",
+                        new_callable=PropertyMock,
+                        side_effect=AssertionError(
+                            "B=2 must not evaluate legacy_doc_lens_list"
+                        ),
+                    ),
+                    patch(
+                        "paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn.cudnn_indexer_topk_fwd",
+                        side_effect=cudnn_topk,
+                    ),
+                    patch.object(
+                        sys.modules["paddlefleet.transformer.csa_attention"],
+                        "all_gather_cp",
+                        side_effect=gather,
+                    ),
+                ):
+                    attention(
+                        query,
+                        key,
+                        key,
+                        x=x,
+                        qr=qr,
+                        docmask_meta=meta,
+                    )
+
+                self.assertEqual(len(calls), 1)
+                self.assertIsNone(calls[-1]["doc_lens"])
+                self.assertEqual(calls[-1]["valid_range"].shape[0], 2)
+                self.assertEqual(captured["topk_idxs"].shape[0], 2)
+
+    def test_all_invalid_compressed_capacity_skips_consumers(self):
+        ratio = 4
+        seqlen = 8
+        config = _make_config(
+            hidden_size=64,
+            num_attention_heads=2,
+            v_head_dim=32,
+            q_lora_rank=32,
+            o_groups=2,
+            o_lora_rank=16,
+            csa_window_size=2,
+            csa_compress_ratios=[ratio],
+            num_layers=1,
+        )
+        attention = _build_attention(config, 0).core_attention
+        compressor = _FixedCapacityCompressor(ratio, config.v_head_dim)
+        attention.compressor = compressor
+        meta = CSADocMaskMetadata.build(
+            ratio,
+            2,
+            seqlen,
+            _make_batched_startend_row_indices([[3, 3], [2, 2]], seqlen),
+        )
+        self.assertEqual(meta.compressed_counts.numpy().tolist(), [0, 0])
+        query, key, x, qr = self._make_inputs(config, 2, seqlen)
+        captured, sparse_attention = self._capture_sparse_attention(attention)
+
+        with (
+            patch.object(
+                attention,
+                "_validate_docmask_batch_size",
+                return_value=None,
+            ),
+            patch.object(
+                attention,
+                "compressed_sparse_attn",
+                side_effect=sparse_attention,
+            ),
+        ):
+            attention(
+                query,
+                key,
+                key,
+                x=x,
+                qr=qr,
+                docmask_meta=meta,
+            )
+
+        self.assertEqual(compressor.calls, 0)
+        self.assertEqual(
+            list(captured["kv_full"].shape),
+            [2, seqlen, config.v_head_dim],
+        )
+        self.assertEqual(list(captured["topk_idxs"].shape), [2, seqlen, 2])
+
+    def test_window_mode_uses_batched_metadata_without_compression(self):
+        for cp_size in (1, 2):
+            with self.subTest(cp_size=cp_size):
+                seqlen_global = 8
+                seqlen_local = seqlen_global // cp_size
+                config = _make_config(
+                    hidden_size=64,
+                    num_attention_heads=2,
+                    v_head_dim=32,
+                    q_lora_rank=32,
+                    o_groups=2,
+                    o_lora_rank=16,
+                    csa_window_size=2,
+                    csa_compress_ratios=[0],
+                    context_parallel_size=cp_size,
+                    num_layers=1,
+                )
+                if cp_size == 1:
+                    attention = _build_attention(config, 0).core_attention
+                else:
+                    spec = get_attention_spec(
+                        config=config,
+                        attention_layer_type="dsv4_hybrid_attention",
+                        attn_mask_type=AttnMaskType.causal,
+                    )
+                    attention = build_spec_layer(
+                        spec.sublayers_spec.core_attention,
+                        config=config,
+                        layer_number=0,
+                        attn_mask_type=AttnMaskType.causal,
+                        attention_type="self",
+                        pg_collection=_FakePGCollection(cp_nranks=cp_size),
+                        compress_ratio=0,
+                    )
+                self.assertIsNone(attention.compressor)
+                meta = DocMaskMetadata.build(
+                    2,
+                    seqlen_global,
+                    _make_batched_startend_row_indices(
+                        [[3, 5], [6, 2]], seqlen_global
+                    ),
+                )
+                query, key, x, qr = self._make_inputs(
+                    config, 2, seqlen_local
+                )
+                captured, sparse_attention = self._capture_sparse_attention(
+                    attention
+                )
+
+                def gather(tensor, dim=0, group=None):
+                    return paddle.concat([tensor, tensor], axis=dim)
+
+                gather_patch = patch.object(
+                    sys.modules["paddlefleet.transformer.csa_attention"],
+                    "all_gather_cp",
+                    side_effect=gather,
+                )
+                with (
+                    gather_patch,
+                    patch.object(
+                        attention,
+                        "_validate_docmask_batch_size",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        attention,
+                        "compressed_sparse_attn",
+                        side_effect=sparse_attention,
+                    ),
+                ):
+                    attention(
+                        query,
+                        key,
+                        key,
+                        x=x,
+                        qr=qr,
+                        docmask_meta=meta,
+                    )
+
+                self.assertEqual(
+                    list(captured["topk_idxs"].shape),
+                    [2, seqlen_local, 2],
+                )
+                self.assertNotEqual(
+                    captured["topk_idxs"][0].numpy().tolist(),
+                    captured["topk_idxs"][1].numpy().tolist(),
+                )
+                self.assertEqual(
+                    list(captured["kv_full"].shape),
+                    [2, seqlen_global, config.v_head_dim],
+                )
 
 
 class TestDSv4HybridDocumentRoPE(unittest.TestCase):

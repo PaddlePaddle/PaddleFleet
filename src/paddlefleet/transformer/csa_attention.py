@@ -473,7 +473,6 @@ class CSADocMaskMetadata(DocMaskMetadata):
     _doc_lens_cutoff: list[Tensor] | None = None
     _doc_lens_list: list[list[int]] | None = None
     _doc_starts_cutoff: list[Tensor] | None = None
-    _actual_n_compressed: int | None = None
     _valid_range: Tensor | None = None
     _compress_topk_idxs: Tensor | None = None
     _compress_offset: int | None = None
@@ -612,18 +611,6 @@ class CSADocMaskMetadata(DocMaskMetadata):
                 f"batch_size: {self.batch_size}"
             )
         return self.doc_starts_cutoff[0]
-
-    @property
-    def actual_n_compressed(self) -> int:
-        if self._actual_n_compressed is None:
-            self._actual_n_compressed = int(self.compressed_counts.max().item())
-            if self._actual_n_compressed > self.n_compressed:
-                raise ValueError(
-                    "n_compressed must cover all packed document compressed "
-                    "groups, got n_compressed="
-                    f"{self.n_compressed}, required={self._actual_n_compressed}"
-                )
-        return self._actual_n_compressed
 
     @property
     def compressed_gather_indices(self) -> Tensor:
@@ -1386,7 +1373,7 @@ def _compute_fused_csa_indexer_loss_forward(
                 else startend_row_indices
             ),
             doc_lens=docmask_meta.legacy_doc_lens_list
-            if docmask_meta is not None
+            if docmask_meta is not None and docmask_meta.batch_size == 1
             else None,
             seq_offset=int(seq_offset),
             return_topk_scores=True,
@@ -1732,8 +1719,8 @@ class Compressor(nn.Layer):
             docmask_meta: document-mask metadata, or None for simple causal mode.
 
         Returns:
-            compressed_kv: [b, sq // ratio, head_dim] or None if too short.
-            In CP mode, returns the local rank's slice of the global compressed KV.
+            compressed_kv: [b, n_compressed, head_dim] or None if too short.
+            In document mode, ``n_compressed`` is the fixed global capacity.
         """
         b, sq, _ = x.shape
         ratio = self.compress_ratio
@@ -1809,7 +1796,7 @@ class Compressor(nn.Layer):
             # TODO: should we cast?
             # Gated pooling: softmax over the pool_dim, weighted sum.
             kv = (kv * F.softmax(score, axis=2)).sum(axis=2)
-            # kv: [b, actual_n_compressed, head_dim]
+            # kv: [b, n_compressed, head_dim]
 
             if self.swa_high_precision_norm:
                 kv = self.norm(
@@ -2357,7 +2344,7 @@ class CompressedSparseAttention(FleetLayer):
                         if docmask_meta is not None
                         else None,
                         doc_lens=docmask_meta.legacy_doc_lens_list
-                        if docmask_meta is not None
+                        if docmask_meta is not None and docmask_meta.batch_size == 1
                         else None,
                     )
                 topk_indices_compressed = cu_topk_indices
@@ -2462,6 +2449,16 @@ class CompressedSparseAttention(FleetLayer):
 
         return compress_topk_idxs, indexer_loss, tilelang_indexer_loss_state
 
+    @staticmethod
+    def _validate_docmask_batch_size(
+        batch_size: int, docmask_meta: DocMaskMetadata | None
+    ) -> None:
+        if docmask_meta is not None:
+            assert batch_size == 1, (
+                "when docmask_meta is not None, ",
+                f"only support batch_size == 1, current batch_size: {batch_size}",
+            )
+
     def forward(
         self,
         query: Tensor,
@@ -2487,12 +2484,7 @@ class CompressedSparseAttention(FleetLayer):
             output: [b, sq, np * v_head_dim]
         """
         b, sq, np_heads, hn = query.shape
-
-        if docmask_meta is not None:
-            assert b == 1, (
-                "when docmask_meta is not None, ",
-                f"only support batch_size == 1, current batch_size: {b}",
-            )
+        self._validate_docmask_batch_size(b, docmask_meta)
 
         # Compute loss_mask from input_ids (mask out padding tokens)
         if input_ids is not None:
@@ -2542,12 +2534,10 @@ class CompressedSparseAttention(FleetLayer):
                 docmask_meta=docmask_meta,
             )
 
-        if docmask_meta is not None and self.compress_ratio > 1:
-            actual_n_compressed = docmask_meta.actual_n_compressed
-        elif self.compress_ratio > 1:
-            actual_n_compressed = sq // self.compress_ratio
-        else:
-            actual_n_compressed = 0
+        has_valid_compressed = self.compress_ratio > 1 and (
+            docmask_meta is None
+            or bool(paddle.any(docmask_meta.compressed_valid).item())
+        )
 
         # Step 1: Prepare single-head KV
         kv = key.squeeze(2)  # [b, sq, v_head_dim]
@@ -2556,7 +2546,8 @@ class CompressedSparseAttention(FleetLayer):
         if (
             self.compressor is not None
             and self.compress_ratio > 1
-            and actual_n_compressed > 0
+            and sq >= self.compress_ratio
+            and has_valid_compressed
         ):
             compressed_kv = self.compressor(
                 x,
@@ -2589,7 +2580,6 @@ class CompressedSparseAttention(FleetLayer):
         if (
             self.compress_ratio > 1
             and n_compressed > 0
-            and actual_n_compressed > 0
         ):
             if self.indexer is not None:
                 (
@@ -2710,13 +2700,10 @@ class CompressedSparseAttention(FleetLayer):
             n_compressed_local = sq // self.compress_ratio
         n_compressed_global = n_compressed_local * self.cp_size
 
-        # Compute actual_n_compressed accounting for document boundaries
-        if docmask_meta is not None and self.compress_ratio > 1:
-            actual_n_compressed = docmask_meta.actual_n_compressed
-        elif self.compress_ratio > 1:
-            actual_n_compressed = n_compressed_global
-        else:
-            actual_n_compressed = 0
+        has_valid_compressed = self.compress_ratio > 1 and (
+            docmask_meta is None
+            or bool(paddle.any(docmask_meta.compressed_valid).item())
+        )
 
         offset = sq_global  # compressed indices follow vanilla KV in kv_full
 
@@ -2724,7 +2711,7 @@ class CompressedSparseAttention(FleetLayer):
             self.compressor is not None
             and self.compress_ratio > 1
             and n_compressed_local > 0
-            and actual_n_compressed > 0
+            and has_valid_compressed
         ):
             # inside the compressor, we will all-gather all the compressed KV
             compressed_kv_global = self.compressor(
@@ -2735,6 +2722,7 @@ class CompressedSparseAttention(FleetLayer):
             kv_full = paddle.concat([kv_global, compressed_kv_global], axis=1)
         else:
             kv_full = kv_global
+            n_compressed_global = 0
 
         # Step 3: Compressed topk + optional fused indexer loss
         indexer_loss = None
@@ -2743,7 +2731,6 @@ class CompressedSparseAttention(FleetLayer):
         if (
             self.compress_ratio > 1
             and n_compressed_global > 0
-            and actual_n_compressed > 0
         ):
             if self.indexer is not None:
                 x_det = x.detach()
@@ -2963,7 +2950,7 @@ class CompressedSparseAttention(FleetLayer):
                                 if docmask_meta is not None
                                 else None,
                                 doc_lens=docmask_meta.legacy_doc_lens_list
-                                if docmask_meta is not None
+                                if docmask_meta is not None and docmask_meta.batch_size == 1
                                 else None,
                                 seq_offset=position_offset,
                             )
