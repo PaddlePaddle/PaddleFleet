@@ -932,6 +932,139 @@ class TestDSv4HybridConsumerMigration(unittest.TestCase):
         qr = paddle.randn([batch_size, seqlen, config.q_lora_rank], dtype=dtype)
         return query, key, x, qr
 
+    def test_batched_sparse_entry_matches_independent_b1(self):
+        paddle.seed(_SEED)
+        ratio = 4
+        seqlen = 8
+        doc_lens_per_batch = [[3, 3], [8]]
+        config = _make_config(
+            hidden_size=64,
+            num_attention_heads=2,
+            v_head_dim=32,
+            q_lora_rank=32,
+            o_groups=2,
+            o_lora_rank=16,
+            csa_window_size=2,
+            csa_compress_ratios=[ratio],
+            csa_sparse_attn_backend="unfused",
+            num_layers=1,
+        )
+        attention = _build_attention(config, 0).core_attention
+        attention.eval()
+        startend_row_indices = _make_batched_startend_row_indices(
+            doc_lens_per_batch, seqlen
+        )
+        meta = CSADocMaskMetadata.build(
+            ratio, 2, seqlen, startend_row_indices
+        )
+        self.assertEqual(meta.compressed_counts.numpy().tolist(), [0, 2])
+
+        query, key, x, qr = self._make_inputs(config, 2, seqlen)
+        for tensor in (query, key, x):
+            tensor.stop_gradient = False
+
+        def fixed_compress_topk(*args, docmask_meta=None, **kwargs):
+            return docmask_meta.get_compress_topk_idxs(seqlen), None, None
+
+        captured_topk = []
+        sparse_backend = attention.compressed_sparse_attn
+
+        def capture_sparse_backend(
+            query, kv_full, attn_sink, topk_idxs, softmax_scale
+        ):
+            captured_topk.append(topk_idxs.detach().clone())
+            return sparse_backend(
+                query, kv_full, attn_sink, topk_idxs, softmax_scale
+            )
+
+        with (
+            patch.object(
+                attention,
+                "_compute_indexer_compressed_topk_idxs",
+                side_effect=fixed_compress_topk,
+            ),
+            patch.object(
+                attention,
+                "compressed_sparse_attn",
+                side_effect=capture_sparse_backend,
+            ),
+        ):
+            batched_output = attention(
+                query,
+                key,
+                key,
+                x=x,
+                qr=qr,
+                docmask_meta=meta,
+            )
+            batched_output.cast("float32").sum().backward()
+
+        self.assertEqual(len(captured_topk), 1)
+        self.assertEqual(
+            list(captured_topk[0].shape),
+            [2, seqlen, attention.window_size + meta.n_compressed],
+        )
+        compressed_topk = captured_topk[0][:, :, attention.window_size :]
+        self.assertTrue((compressed_topk[0] == -1).all().item())
+        self.assertTrue((compressed_topk[1] >= seqlen).any().item())
+
+        batched_grads = [tensor.grad.detach().clone() for tensor in (query, key, x)]
+        reference_outputs = []
+        reference_grads = [[], [], []]
+        for batch_idx, doc_lens in enumerate(doc_lens_per_batch):
+            ref_meta = CSADocMaskMetadata.build(
+                ratio,
+                1,
+                seqlen,
+                _make_batched_startend_row_indices([doc_lens], seqlen),
+            )
+            ref_inputs = [
+                tensor.detach()[batch_idx : batch_idx + 1].clone()
+                for tensor in (query, key, x)
+            ]
+            for tensor in ref_inputs:
+                tensor.stop_gradient = False
+            query_b1, key_b1, x_b1 = ref_inputs
+            qr_b1 = qr.detach()[batch_idx : batch_idx + 1].clone()
+
+            with patch.object(
+                attention,
+                "_compute_indexer_compressed_topk_idxs",
+                side_effect=fixed_compress_topk,
+            ):
+                output_b1 = attention(
+                    query_b1,
+                    key_b1,
+                    key_b1,
+                    x=x_b1,
+                    qr=qr_b1,
+                    docmask_meta=ref_meta,
+                )
+                output_b1.cast("float32").sum().backward()
+
+            reference_outputs.append(output_b1.detach())
+            for grad_idx, tensor in enumerate(ref_inputs):
+                gradient = (
+                    tensor.grad.detach()
+                    if tensor.grad is not None
+                    else paddle.zeros_like(tensor)
+                )
+                reference_grads[grad_idx].append(gradient)
+
+        paddle.testing.assert_close(
+            batched_output.detach().cast("float32"),
+            paddle.concat(reference_outputs).cast("float32"),
+            rtol=0.05,
+            atol=0.2,
+        )
+        for batched_grad, gradients_b1 in zip(batched_grads, reference_grads):
+            paddle.testing.assert_close(
+                batched_grad.cast("float32"),
+                paddle.concat(gradients_b1).cast("float32"),
+                rtol=0.05,
+                atol=0.2,
+            )
+
     def test_csa_and_hca_consume_per_sample_validity(self):
         for ratio, seqlen, doc_lens in (
             (4, 8, [[3, 3], [8]]),
@@ -979,11 +1112,6 @@ class TestDSv4HybridConsumerMigration(unittest.TestCase):
 
                 with (
                     indexer,
-                    patch.object(
-                        attention,
-                        "_validate_docmask_batch_size",
-                        return_value=None,
-                    ),
                     patch.object(
                         attention,
                         "compressed_sparse_attn",
@@ -1089,11 +1217,6 @@ class TestDSv4HybridConsumerMigration(unittest.TestCase):
                 with (
                     patch.object(
                         attention,
-                        "_validate_docmask_batch_size",
-                        return_value=None,
-                    ),
-                    patch.object(
-                        attention,
                         "compressed_sparse_attn",
                         side_effect=sparse_attention,
                     ),
@@ -1157,11 +1280,6 @@ class TestDSv4HybridConsumerMigration(unittest.TestCase):
         captured, sparse_attention = self._capture_sparse_attention(attention)
 
         with (
-            patch.object(
-                attention,
-                "_validate_docmask_batch_size",
-                return_value=None,
-            ),
             patch.object(
                 attention,
                 "compressed_sparse_attn",
@@ -1243,11 +1361,6 @@ class TestDSv4HybridConsumerMigration(unittest.TestCase):
                 )
                 with (
                     gather_patch,
-                    patch.object(
-                        attention,
-                        "_validate_docmask_batch_size",
-                        return_value=None,
-                    ),
                     patch.object(
                         attention,
                         "compressed_sparse_attn",

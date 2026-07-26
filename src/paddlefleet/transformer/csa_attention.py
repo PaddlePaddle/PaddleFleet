@@ -2449,16 +2449,6 @@ class CompressedSparseAttention(FleetLayer):
 
         return compress_topk_idxs, indexer_loss, tilelang_indexer_loss_state
 
-    @staticmethod
-    def _validate_docmask_batch_size(
-        batch_size: int, docmask_meta: DocMaskMetadata | None
-    ) -> None:
-        if docmask_meta is not None:
-            assert batch_size == 1, (
-                "when docmask_meta is not None, ",
-                f"only support batch_size == 1, current batch_size: {batch_size}",
-            )
-
     def forward(
         self,
         query: Tensor,
@@ -2484,7 +2474,6 @@ class CompressedSparseAttention(FleetLayer):
             output: [b, sq, np * v_head_dim]
         """
         b, sq, np_heads, hn = query.shape
-        self._validate_docmask_batch_size(b, docmask_meta)
 
         # Compute loss_mask from input_ids (mask out padding tokens)
         if input_ids is not None:
