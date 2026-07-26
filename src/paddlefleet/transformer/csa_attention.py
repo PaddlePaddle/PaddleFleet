@@ -888,37 +888,158 @@ def _apply_rope(
     config: TransformerConfig,
     rotary_seq_len: int,
     ratio: int = 1,
-    doc_lens_cutoff: Tensor | None = None,  # for token compressed, such as kv
-    doc_lens: Tensor | None = None,  # for token not compressed, such as q
+    doc_lens_cutoff: Tensor | list[Tensor] | None = None,  # compressed KV
+    doc_lens: Tensor | list[Tensor] | None = None,  # uncompressed Q
     position_offset: int = 0,
     high_precision_rope: bool = False,
 ) -> Tensor:
-    """Apply RoPE to the last pos_dim dims, leaving first nope_dim unchanged.
-
-    For compressed positions (ratio > 1), subsamples the RoPE frequencies
-    by taking every ratio-th position.
+    """Apply RoPE to ``pos_dim`` while preserving every dimension of ``x``.
 
     Args:
-        x: [b, seq, ...dim...] where last dim = nope_dim + pos_dim
-        nope_dim: dimensions that don't get RoPE
-        pos_dim: dimensions that get RoPE
-        rotary_pos_emb_module: RotaryEmbedding instance
-        config: transformer config
-        rotary_seq_len: sequence length for this tensor
-        ratio: compression ratio for position subsampling
-        doc_lens_cutoff: per-doc cutoff lengths for compressed RoPE (ratio > 1)
-        position_offset: global position offset for CP (cp_rank * sq_local)
+        x: ``[B, S, D]`` or ``[B, S, H, D]``, with
+            ``D = nope_dim + pos_dim``.
+        nope_dim: trailing-vector dimensions left unrotated.
+        pos_dim: trailing-vector dimensions ``D_rope`` to rotate.
+        rotary_pos_emb_module: embedding that returns base frequencies
+            ``[1, L_base, 1, D_rope]``.
+        config: transformer configuration.
+        rotary_seq_len: ``S_local`` for Q or ``Nc_global`` for compressed KV.
+        ratio: compression ratio used to subsample base positions for KV.
+        doc_lens_cutoff: compressed-KV cutoff lengths in canonical ragged form
+            ``list[Tensor[N_docs_i]]`` of length ``B`` (or a legacy B=1
+            tensor). After division by ``ratio``, per-document frequency slices
+            concatenate to ``[Nc_i, 1, D_rope]`` and pad independently to
+            global capacity ``[B, Nc_global, 1, D_rope]``.
+        doc_lens: uncompressed-Q document lengths in the same canonical form.
+            Per-document slices concatenate in global coordinates, pad to a
+            common covering length, and CP-slice to local frequencies
+            ``[B, S_local, 1, D_rope]``.
+        position_offset: global CP offset ``cp_rank * S_local`` for Q. It is not
+            applied to document-aware compressed KV, whose sequence is global.
+        high_precision_rope: whether rotary arithmetic uses high precision.
+
+    Frequency contract:
+        With no document metadata, ordinary frequencies retain broadcast batch
+        size one: ``[1, S, 1, D_rope]`` after offset/subsampling. With metadata,
+        normalized ragged lengths always contain one 1D tensor per batch row.
+        The selected frequencies are consumed by
+        ``_apply_rotary_pos_emb_bshd`` against ``[B, S, H_or_1, D_rope]``.
+
+    Returns:
+        Tensor with exactly the same shape as ``x``.
     """
     assert not (doc_lens_cutoff is not None and doc_lens is not None), (
         "Both doc_lens_cutoff and doc_lens are set, but only one is needed, or both of them are none."
     )
+
+    def _normalize_doc_lens(
+        value: Tensor | list[Tensor] | tuple[Tensor, ...],
+    ) -> list[Tensor]:
+        """Normalize accepted document-length representations.
+
+        Args:
+            value: integer document lengths as legacy ``Tensor[N_docs]`` for
+                B=1, dense ``Tensor[B, N_docs]`` for uniform document counts,
+                or ragged ``list[Tensor[N_docs_i]]`` / tuple of length ``B``.
+
+        Returns:
+            Canonical ``list[Tensor[N_docs_i]]`` of length ``B``, with every
+            element one-dimensional.
+        """
+        if isinstance(value, (list, tuple)):
+            normalized = list(value)
+        elif value.ndim == 1:
+            normalized = [value]
+        elif value.ndim == 2:
+            normalized = [
+                value[batch_idx] for batch_idx in range(value.shape[0])
+            ]
+        else:
+            raise ValueError(
+                "document lengths must be a list of 1D tensors or a 1D/2D tensor"
+            )
+        if len(normalized) != x.shape[0]:
+            raise ValueError(
+                "document length batch size "
+                f"{len(normalized)} does not match input batch size {x.shape[0]}"
+            )
+        if any(sample_doc_lens.ndim != 1 for sample_doc_lens in normalized):
+            raise ValueError("each sample's document lengths must be a 1D tensor")
+        return normalized
+
+    def _build_batched_document_freqs(
+        base_freqs: Tensor,
+        doc_lens_per_batch: list[Tensor],
+        min_len: int,
+    ) -> Tensor:
+        """Build batched document-local frequencies.
+
+        Args:
+            base_freqs: rotary frequencies ``[1, L_base, 1, D_rope]``.
+            doc_lens_per_batch: ragged ``list[Tensor[N_docs_i]]`` of length
+                ``B`` with one integer document-length tensor per sample.
+            min_len: scalar minimum sequence capacity; it is
+                ``position_offset + S_local`` for Q or ``Nc_global`` for
+                compressed KV.
+
+        Shape contract:
+            Each document becomes ``[L_doc, 1, D_rope]``; concatenation gives
+            ``[S_valid_i, 1, D_rope]`` and zero-padding uses common capacity
+            ``max(min_len, max_i(S_valid_i))``.
+
+        Returns:
+            Batched frequencies ``[B, S_cover, 1, D_rope]``.
+        """
+        rows = []
+        for sample_doc_lens in doc_lens_per_batch:
+            sample_freqs = [
+                base_freqs[0, : int(doc_len), :, :]
+                for doc_len in sample_doc_lens.tolist()
+            ]
+            row = (
+                paddle.concat(sample_freqs, axis=0)
+                if sample_freqs
+                else base_freqs[0, :0, :, :]
+            )
+            rows.append(row)
+
+        target_len = max(min_len, *(row.shape[0] for row in rows))
+        padded_rows = []
+        for row in rows:
+            if row.shape[0] < target_len:
+                row = paddle.concat(
+                    [
+                        row,
+                        paddle.zeros(
+                            [target_len - row.shape[0], *base_freqs.shape[2:]],
+                            dtype=base_freqs.dtype,
+                        ),
+                    ],
+                    axis=0,
+                )
+            padded_rows.append(row)
+        return paddle.stack(padded_rows, axis=0)
+
     if doc_lens_cutoff is not None:  # KV token + document mask
-        compressed_doc_lens = (doc_lens_cutoff // ratio).cast("int32")
-        max_compressed_doc_len = int(compressed_doc_lens.max().item())
+        doc_lens_cutoff_per_batch = _normalize_doc_lens(doc_lens_cutoff)
+        compressed_doc_lens = [
+            (sample_doc_lens // ratio).cast("int32")
+            for sample_doc_lens in doc_lens_cutoff_per_batch
+        ]
+        max_compressed_doc_len = max(
+            int(sample_doc_lens.max().item())
+            for sample_doc_lens in compressed_doc_lens
+            if sample_doc_lens.numel() > 0
+        )
         max_cutoff_doc_len = max_compressed_doc_len * ratio
         result = rotary_pos_emb_module(max_cutoff_doc_len, packed_seq=False)
     elif doc_lens is not None:  # Q token + document mask
-        max_doc_len = int(doc_lens.max().item())
+        doc_lens_per_batch = _normalize_doc_lens(doc_lens)
+        max_doc_len = max(
+            int(sample_doc_lens.max().item())
+            for sample_doc_lens in doc_lens_per_batch
+            if sample_doc_lens.numel() > 0
+        )
         result = rotary_pos_emb_module(max_doc_len, packed_seq=False)
     else:
         total_seq_len = (
@@ -934,54 +1055,20 @@ def _apply_rope(
     # DSv4 reference RoPE is norm-preserving. Yarn's concentration scale is not
     # applied in the Megatron DSv4 CSA path, so keep Paddle CSA identical here.
     mscale = 1.0
-    # freqs: [1, total_seq_len, pos_dim]
+    # Base freqs: [1, total_seq_len, 1, D_rope]. Document branches below
+    # convert them to [B, S_selected, 1, D_rope] before rotary application.
     if doc_lens_cutoff is not None:  # KV token + document mask
         freqs = freqs[:, :max_cutoff_doc_len:ratio, :, :]
-        doc_freqs = [
-            freqs[:, :doc_len, :, :]
-            for doc_len in compressed_doc_lens.tolist()
-            if doc_len > 0
-        ]
-        if doc_freqs:
-            freqs = paddle.concat(doc_freqs, axis=1)
-        else:
-            freqs = freqs[:, :0, :, :]
-        if freqs.shape[1] < rotary_seq_len:
-            pad_len = rotary_seq_len - freqs.shape[1]
-            freqs = paddle.concat(
-                [
-                    freqs,
-                    paddle.zeros(
-                        [1, pad_len, 1, freqs.shape[-1]], dtype=freqs.dtype
-                    ),
-                ],
-                axis=1,
-            )
+        freqs = _build_batched_document_freqs(
+            freqs, compressed_doc_lens, rotary_seq_len
+        )
         freqs = freqs[:, :rotary_seq_len, :, :]
     elif doc_lens is not None:  # Q token + document mask
         freqs = freqs[:, :max_doc_len, :, :]
-        doc_freqs = [
-            freqs[:, :doc_len, :, :]
-            for doc_len in doc_lens.tolist()
-            if doc_len > 0
-        ]
-
-        if doc_freqs:
-            freqs = paddle.concat(doc_freqs, axis=1)
-        else:
-            freqs = freqs[:, :0, :, :]
         needed_len = position_offset + rotary_seq_len
-        if freqs.shape[1] < needed_len:
-            pad_len = needed_len - freqs.shape[1]
-            freqs = paddle.concat(
-                [
-                    freqs,
-                    paddle.zeros(
-                        [1, pad_len, 1, freqs.shape[-1]], dtype=freqs.dtype
-                    ),
-                ],
-                axis=1,
-            )
+        freqs = _build_batched_document_freqs(
+            freqs, doc_lens_per_batch, needed_len
+        )
         freqs = freqs[:, position_offset:needed_len, :, :]
     elif ratio > 1:  # CP without document mask -> KV
         freqs = freqs[:, position_offset * ratio : total_seq_len : ratio, :][
@@ -1813,13 +1900,32 @@ class CSAIndexer(nn.Layer):
         cp_group=None,
         docmask_meta: CSADocMaskMetadata | None = None,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Compute Q, compressed K, and weights before top-k selection.
+        """Compute indexer Q, globally compressed K, and local weights.
 
-        In CP mode, position_offset and cp_group are forwarded to the internal
-        compressor so that indexer K is computed over the full global sequence.
+        Args:
+            x: local hidden states ``[B, S_local, hidden_size]``.
+            qr: local query representation ``[B, S_local, q_lora_rank]``.
+            position_offset: global CP offset for document-aware Q RoPE.
+            cp_group: CP group forwarded to the compressor, which gathers the
+                projected KV sequence before global compression.
+            docmask_meta: global per-sample metadata whose consumed
+                ``doc_lens`` field is ``list[Tensor[N_docs_i]]`` of length
+                ``B``. Its global sequence coordinates match the KV sequence
+                gathered by the compressor before compression.
+
+        Shape contract:
+            ``linear_wq_b`` maps Q to ``[B, S_local, H * D]`` and reshape gives
+            ``[B, S_local, H, D]`` before local document-aware RoPE. The nested
+            compressor returns global K ``[B, Nc_global, D]`` under CP (and the
+            equivalent full-sequence capacity without CP). Weights stay local
+            as ``[B, S_local, H]``.
+
+        Returns:
+            ``(q, k, weights)`` with shapes ``[B, S_local, H, D]``,
+            ``[B, Nc_global, D]``, and ``[B, S_local, H]`` respectively.
         """
         b, sq, _ = x.shape
-        doc_lens = docmask_meta.legacy_doc_lens if docmask_meta is not None else None
+        doc_lens = docmask_meta.doc_lens if docmask_meta is not None else None
         # Q path
         q, _ = self.linear_wq_b(qr)  # [b, sq, n_heads * head_dim]
         q = q.reshape([b, sq, self.index_n_heads, self.index_head_dim])

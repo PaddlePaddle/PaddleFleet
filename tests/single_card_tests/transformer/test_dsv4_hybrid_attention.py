@@ -36,6 +36,7 @@ from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
     CompressedSparseAttentionSublayersSpec,
+    CSAIndexer,
     CSADocMaskMetadata,
     DocMaskMetadata,
     _apply_rope,
@@ -733,6 +734,378 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
                 freqs_from_mask.cast("float32"),
             ).item()
         )
+
+    def test_document_rope_freqs_resets_each_batch_sample(self):
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        startend_row_indices = paddle.to_tensor(
+            [
+                3,
+                3,
+                3,
+                8,
+                8,
+                8,
+                8,
+                8,
+                2,
+                2,
+                8,
+                8,
+                8,
+                8,
+                8,
+                8,
+            ],
+            dtype="int32",
+        ).reshape([2, 1, 8, 1])
+        doc_lens = [
+            paddle.to_tensor([3, 5], dtype="int32"),
+            paddle.to_tensor([2, 6], dtype="int32"),
+        ]
+
+        batched_freqs, _ = build_document_rope_freqs(
+            rotary_pos_emb, 8, startend_row_indices
+        )
+        self.assertEqual(
+            list(batched_freqs.shape),
+            [2, 8, 1, config.qk_pos_emb_head_dim],
+        )
+        for batch_idx, sample_doc_lens in enumerate(doc_lens):
+            sample_freqs, _ = build_document_rope_freqs(
+                rotary_pos_emb,
+                8,
+                startend_row_indices[batch_idx : batch_idx + 1],
+                doc_lens=sample_doc_lens,
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    batched_freqs[batch_idx],
+                    sample_freqs[0],
+                    atol=0.0,
+                    rtol=0.0,
+                ).item()
+            )
+
+    def test_document_rope_freqs_with_position_offset_slices_each_batch_sample(
+        self,
+    ):
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        startend_row_indices = paddle.to_tensor(
+            [
+                3,
+                3,
+                3,
+                8,
+                8,
+                8,
+                8,
+                8,
+                2,
+                2,
+                8,
+                8,
+                8,
+                8,
+                8,
+                8,
+            ],
+            dtype="int32",
+        ).reshape([2, 1, 8, 1])
+        position_offset = 4
+        sq_local = 4
+        batched_freqs, _ = build_document_rope_freqs(
+            rotary_pos_emb,
+            sq_local,
+            startend_row_indices,
+            position_offset=position_offset,
+        )
+        for batch_idx, sample_doc_lens in enumerate(
+            [
+                paddle.to_tensor([3, 5], dtype="int32"),
+                paddle.to_tensor([2, 6], dtype="int32"),
+            ]
+        ):
+            global_freqs, _ = build_document_rope_freqs(
+                rotary_pos_emb, 8, doc_lens=sample_doc_lens
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    batched_freqs[
+                        batch_idx, position_offset : position_offset + sq_local
+                    ],
+                    global_freqs[0, position_offset : position_offset + sq_local],
+                    atol=0.0,
+                    rtol=0.0,
+                ).item()
+            )
+
+    def test_batched_document_rope_matches_independent_q_references(self):
+        paddle.seed(_SEED)
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        x = paddle.randn([2, 8, config.v_head_dim], dtype="float32")
+        doc_lens = [
+            paddle.to_tensor([3, 5], dtype="int32"),
+            paddle.to_tensor([2, 6], dtype="int32"),
+        ]
+        batched_out = _apply_rope(
+            x,
+            config.qk_nope_head_dim,
+            config.qk_rope_head_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=8,
+            doc_lens=doc_lens,
+        )
+        for batch_idx, sample_doc_lens in enumerate(doc_lens):
+            sample_out = _apply_rope(
+                x[batch_idx : batch_idx + 1],
+                config.qk_nope_head_dim,
+                config.qk_rope_head_dim,
+                rotary_pos_emb,
+                config,
+                rotary_seq_len=8,
+                doc_lens=sample_doc_lens,
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    batched_out[batch_idx : batch_idx + 1],
+                    sample_out,
+                    atol=0.0,
+                    rtol=0.0,
+                ).item()
+            )
+
+    def test_batched_compressed_document_rope_matches_independent_references(
+        self,
+    ):
+        paddle.seed(_SEED)
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        ratio = 2
+        x = paddle.randn(
+            [2, 4, 1, config.v_head_dim], dtype="float32"
+        )
+        doc_lens_cutoff = [
+            paddle.to_tensor([4, 4], dtype="int32"),
+            paddle.to_tensor([2, 6], dtype="int32"),
+        ]
+        batched_out = _apply_rope(
+            x,
+            config.qk_nope_head_dim,
+            config.qk_rope_head_dim,
+            rotary_pos_emb,
+            config,
+            rotary_seq_len=4,
+            ratio=ratio,
+            doc_lens_cutoff=doc_lens_cutoff,
+        )
+        for batch_idx, sample_doc_lens in enumerate(doc_lens_cutoff):
+            sample_out = _apply_rope(
+                x[batch_idx : batch_idx + 1],
+                config.qk_nope_head_dim,
+                config.qk_rope_head_dim,
+                rotary_pos_emb,
+                config,
+                rotary_seq_len=4,
+                ratio=ratio,
+                doc_lens_cutoff=sample_doc_lens,
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    batched_out[batch_idx : batch_idx + 1],
+                    sample_out,
+                    atol=0.0,
+                    rtol=0.0,
+                ).item()
+            )
+
+    def test_indexer_q_rope_uses_batched_document_metadata(self):
+        paddle.seed(_SEED)
+        config = _make_config(
+            hidden_size=32,
+            q_lora_rank=32,
+            dsa_index_n_heads=1,
+            dsa_index_head_dim=32,
+            qk_pos_emb_head_dim=16,
+            rope_type="yarn",
+        )
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        indexer = type("FakeIndexer", (), {})()
+        indexer.config = config
+        indexer.index_n_heads = 1
+        indexer.index_head_dim = 32
+        indexer.qk_pos_emb_head_dim = 16
+        indexer.rotary_pos_emb = rotary_pos_emb
+        indexer.use_fast_hadamard = False
+        indexer.use_fp8_qat = False
+        indexer.linear_wq_b = lambda value: (value, None)
+        indexer.compressor = lambda value, **kwargs: paddle.zeros(
+            [value.shape[0], value.shape[1] // 2, 32], dtype=value.dtype
+        )
+        indexer.linear_weights_proj = lambda value: (
+            paddle.zeros([value.shape[0], value.shape[1], 1], dtype=value.dtype),
+            None,
+        )
+
+        startend_row_indices = _make_batched_startend_row_indices(
+            [[3, 5], [2, 6]], 8
+        )
+        docmask_meta = CSADocMaskMetadata.build(
+            2, 2, 8, startend_row_indices
+        )
+        x = paddle.randn([2, 8, 32], dtype="bfloat16")
+        qr = paddle.randn([2, 8, 32], dtype="bfloat16")
+        batched_q, _, _ = CSAIndexer.forward_before_topk(
+            indexer, x, qr, docmask_meta=docmask_meta
+        )
+
+        for batch_idx in range(2):
+            sample_meta = CSADocMaskMetadata.build(
+                2,
+                1,
+                8,
+                startend_row_indices[batch_idx : batch_idx + 1],
+            )
+            sample_q, _, _ = CSAIndexer.forward_before_topk(
+                indexer,
+                x[batch_idx : batch_idx + 1],
+                qr[batch_idx : batch_idx + 1],
+                docmask_meta=sample_meta,
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    batched_q[batch_idx : batch_idx + 1].cast("float32"),
+                    sample_q.cast("float32"),
+                    atol=0.0,
+                    rtol=0.0,
+                ).item()
+            )
+
+    def test_apply_rope_rejects_document_batch_broadcast(self):
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        x = paddle.randn([2, 4, config.v_head_dim], dtype="float32")
+
+        mismatched_doc_lens = [
+            paddle.to_tensor([2, 2], dtype="int32"),
+            [paddle.to_tensor([2, 2], dtype="int32")],
+        ]
+        for doc_lens in mismatched_doc_lens:
+            with self.subTest(doc_lens_type=type(doc_lens).__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "document length batch size 1 does not match input batch size 2",
+                ):
+                    _apply_rope(
+                        x,
+                        config.qk_nope_head_dim,
+                        config.qk_rope_head_dim,
+                        rotary_pos_emb,
+                        config,
+                        rotary_seq_len=4,
+                        doc_lens=doc_lens,
+                    )
+
+    def test_apply_rope_rejects_non_1d_document_lengths(self):
+        config = _make_config(rope_type="yarn")
+        rotary_pos_emb = YarnRotaryEmbedding(
+            config.qk_pos_emb_head_dim,
+            rotary_base=config.csa_compress_rotary_base,
+            scaling_factor=getattr(config, "rotary_scaling_factor", 40),
+            original_max_position_embeddings=getattr(
+                config, "original_max_position_embeddings", 4096
+            ),
+            beta_fast=getattr(config, "beta_fast", 32),
+            beta_slow=getattr(config, "beta_slow", 1),
+            mscale=getattr(config, "mscale", 1.0),
+            mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+        )
+        x = paddle.randn([2, 4, config.v_head_dim], dtype="float32")
+
+        with self.assertRaisesRegex(
+            ValueError, "each sample's document lengths must be a 1D tensor"
+        ):
+            _apply_rope(
+                x,
+                config.qk_nope_head_dim,
+                config.qk_rope_head_dim,
+                rotary_pos_emb,
+                config,
+                rotary_seq_len=4,
+                doc_lens=[
+                    paddle.to_tensor([[2, 2]], dtype="int32"),
+                    paddle.to_tensor([2, 2], dtype="int32"),
+                ],
+            )
 
     def test_document_rope_freqs_with_position_offset_pads_to_local_slice(self):
         config = _make_config(rope_type="yarn")

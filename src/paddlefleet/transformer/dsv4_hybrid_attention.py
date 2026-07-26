@@ -67,7 +67,7 @@ def _q_rms_norm(q: Tensor, eps: float, high_precision_norm: bool) -> Tensor:
 
 
 from paddlefleet.transformer.utils import (
-    get_doc_lens,
+    get_doc_lens_per_batch,
 )
 
 
@@ -76,59 +76,96 @@ def build_document_rope_freqs(
     sq: int,
     startend_row_indices: Tensor | None = None,
     position_offset: int = 0,
-    doc_lens: Tensor | None = None,
+    doc_lens: Tensor | list[Tensor] | None = None,
 ):
-    """Build RoPE frequencies that restart from zero for each document.
+    """Build document-local RoPE frequencies without flattening the batch.
 
     Args:
-        rotary_pos_emb: the layer's RotaryEmbedding / YarnRotaryEmbedding.
-        sq: local query sequence length.
-        startend_row_indices: optional ``[1, 1, seqlen, 1]`` document
-            boundary tensor. Required only when ``doc_lens`` is not provided.
-        position_offset: global position offset for CP (``cp_rank * sq``);
-            the returned freqs cover ``[0, position_offset + sq)`` and are
-            sliced by the caller.
-        doc_lens: optional precomputed document lengths (e.g. from
-            ``DocMaskMetadata.legacy_doc_lens``) to avoid recomputing them from
-            ``startend_row_indices``.
+        rotary_pos_emb: RotaryEmbedding / YarnRotaryEmbedding. Calling it with
+            ``L_max`` returns ``freqs`` shaped ``[1, L_max, 1, D_rope]``;
+            squeezing batch and head produces ``[L_max, D_rope]``.
+        sq: local query sequence length ``S_local``.
+        startend_row_indices: optional document boundaries ``[B, 1,
+            S_global, 1]``. Used only when ``doc_lens`` is not provided.
+        position_offset: global CP offset. The local slice is
+            ``[position_offset, position_offset + S_local)``.
+        doc_lens: precomputed lengths. Canonical form is a ragged
+            ``list[Tensor[N_docs_i]]`` of int tensors with one element per
+            batch sample; a one-dimensional tensor remains supported for B=1.
+
+    Shape contract:
+        For sample ``i``, each document slice is ``[L_doc, D_rope]`` and
+        concatenation gives ``[S_valid_i, D_rope]``, where
+        ``S_valid_i = sum(doc_lens[i])``. Rows are zero-frequency padded to
+        ``S_cover = max(position_offset + S_local, max_i(S_valid_i))`` and
+        stacked/unsqueezed as ``[B, S_cover, 1, D_rope]``. When metadata covers
+        the full global sequence, ``S_cover == S_global``; padding represents
+        invalid positions and is never a document position.
 
     Returns:
-        (freqs, mscale): ``freqs`` is ``[1, position_offset + sq, 1, head_dim]``
-        and ``mscale`` is the YaRN mscale (DSv4 forces it to 1.0 downstream).
+        ``(freqs, mscale)`` where ``freqs`` has the shape above and ``mscale``
+        is the YaRN scale (DSv4 forces it to ``1.0`` downstream).
     """
     if doc_lens is None:
         assert startend_row_indices is not None, (
             "Document RoPE requires startend_row_indices when doc_lens is not provided."
         )
-        assert (
-            startend_row_indices.shape[0] == 1
-            and startend_row_indices.shape[1] == 1
-        ), "Document RoPE currently expects batch_size == 1 and head == 1."
-        doc_lens = get_doc_lens(startend_row_indices)
+        assert startend_row_indices.shape[1] == 1, (
+            "Document RoPE expects the document boundary head dimension to be 1."
+        )
+        doc_lens = get_doc_lens_per_batch(startend_row_indices)
+    elif isinstance(doc_lens, paddle.Tensor):
+        if doc_lens.ndim == 1:
+            doc_lens = [doc_lens]
+        elif doc_lens.ndim == 2:
+            doc_lens = [doc_lens[batch_idx] for batch_idx in range(doc_lens.shape[0])]
+        else:
+            raise ValueError(
+                "doc_lens must be a list of 1D tensors or a 1D/2D tensor"
+            )
+    else:
+        doc_lens = list(doc_lens)
 
-    max_doc_len = int(doc_lens.max().item())
+    if not doc_lens:
+        raise ValueError("doc_lens must contain at least one batch sample")
+
+    max_doc_len = max(
+        int(sample_doc_lens.max().item())
+        for sample_doc_lens in doc_lens
+        if sample_doc_lens.numel() > 0
+    )
     _rope_result = rotary_pos_emb(max_doc_len, packed_seq=False)
     if isinstance(_rope_result, tuple):
         freqs, mscale = _rope_result
     else:
         freqs, mscale = _rope_result, 1.0
     freqs = freqs.squeeze(0).squeeze(1)
-    doc_freqs = [freqs[:doc_len] for doc_len in doc_lens.tolist()]
-    freqs = paddle.concat(doc_freqs, axis=0)
     needed_len = position_offset + sq
-    if freqs.shape[0] < needed_len:
-        freqs = paddle.concat(
-            [
-                freqs,
-                paddle.zeros(
-                    [needed_len - freqs.shape[0], freqs.shape[-1]],
-                    dtype=freqs.dtype,
-                ),
-            ],
-            axis=0,
-        )
+    rows = []
+    for sample_doc_lens in doc_lens:
+        sample_freqs = [
+            freqs[: int(doc_len)] for doc_len in sample_doc_lens.tolist()
+        ]
+        row = paddle.concat(sample_freqs, axis=0) if sample_freqs else freqs[:0]
+        rows.append(row)
 
-    return freqs.reshape([1, -1, 1, freqs.shape[-1]]), mscale
+    global_len = max(needed_len, *(row.shape[0] for row in rows))
+    padded_rows = []
+    for row in rows:
+        if row.shape[0] < global_len:
+            row = paddle.concat(
+                [
+                    row,
+                    paddle.zeros(
+                        [global_len - row.shape[0], freqs.shape[-1]],
+                        dtype=freqs.dtype,
+                    ),
+                ],
+                axis=0,
+            )
+        padded_rows.append(row)
+
+    return paddle.stack(padded_rows, axis=0).unsqueeze(2), mscale
 
 
 def _build_rope_freqs(
@@ -138,12 +175,35 @@ def _build_rope_freqs(
     docmask_meta: DocMaskMetadata | None = None,
     startend_row_indices: Tensor | None = None,
 ):
+    """Build and CP-slice frequencies for a local query sequence.
+
+    Args:
+        rotary_pos_emb: embedding that returns base frequencies
+            ``[1, S_cover, 1, D_rope]``.
+        sq: local sequence length ``S_local``.
+        position_offset: global CP offset ``cp_rank * S_local``.
+        docmask_meta: optional batched metadata. Its consumed ``doc_lens`` is a
+            ``list[Tensor[N_docs_i]]`` of length ``B``; its dense boundary
+            source uses global shape ``[B, 1, S_global, 1]``.
+        startend_row_indices: optional global document boundaries
+            ``[B, 1, S_global, 1]`` used when ``docmask_meta`` is absent.
+
+    Shape contract:
+        Document-aware branches first build ``[B, S_cover, 1, D_rope]`` in
+        global coordinates. The ordinary branch builds broadcast frequencies
+        ``[1, position_offset + S_local, 1, D_rope]``. All branches slice
+        ``[position_offset:position_offset + S_local]``.
+
+    Returns:
+        Frequencies ``[B_or_1, S_local, 1, D_rope]`` and rotary scale, where
+        ``B_or_1`` is ``B`` with document metadata and ``1`` otherwise.
+    """
     if docmask_meta is not None:
         freqs, mscale = build_document_rope_freqs(
             rotary_pos_emb,
             sq,
             position_offset=position_offset,
-            doc_lens=docmask_meta.legacy_doc_lens,
+            doc_lens=docmask_meta.doc_lens,
         )
     elif startend_row_indices is not None:
         freqs, mscale = build_document_rope_freqs(
@@ -158,7 +218,7 @@ def _build_rope_freqs(
             freqs, mscale = _rope_result
         else:
             freqs, mscale = _rope_result, 1.0
-    return freqs[:, position_offset : position_offset + sq, :], mscale
+    return freqs[:, position_offset : position_offset + sq, :, :], mscale
 
 
 # ---------------------------------------------------------------------------
