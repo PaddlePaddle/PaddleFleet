@@ -41,6 +41,7 @@ from paddlefleet.transformer.csa_attention import (
     DocMaskMetadata,
     _apply_rope,
     _build_compressed_causal_mask,
+    compact_kv_score_cutoff,
     _resolve_csa_indexer_attn_topk_effective,
     _resolve_csa_indexer_loss_topk_effective,
     get_compress_topk_idxs,
@@ -468,6 +469,197 @@ class TestCSADocMaskMetadata(unittest.TestCase):
                         compressed_idx == -1 or start <= compressed_idx < end
                     )
 
+    def test_batched_fixed_capacity_compaction_matches_b1_gradients(self):
+        ratio = 2
+        batch_size = 2
+        seqlen = 8
+        dim = 3
+        startend_row_indices = _make_batched_startend_row_indices(
+            [[4, 3], [2, 6]], seqlen
+        )
+        meta = CSADocMaskMetadata.build(
+            ratio, batch_size, seqlen, startend_row_indices
+        )
+        total_cutoff = meta.n_compressed * ratio
+
+        self.assertEqual(
+            meta.compressed_gather_indices.numpy().tolist(),
+            [list(range(6)) + [0, 0], list(range(8))],
+        )
+        self.assertEqual(
+            meta.compressed_token_valid.numpy().tolist(),
+            [[True] * 6 + [False, False], [True] * 8],
+        )
+
+        kv = paddle.arange(
+            batch_size * seqlen * dim, dtype="float32"
+        ).reshape([batch_size, seqlen, dim])
+        score = kv.detach().clone() * 0.25 + 1
+        kv.stop_gradient = False
+        score.stop_gradient = False
+        kv_cutoff, score_cutoff = compact_kv_score_cutoff(
+            meta.doc_starts,
+            meta.doc_lens_cutoff,
+            meta.doc_starts_cutoff,
+            total_cutoff,
+            kv,
+            score,
+        )
+        weights = paddle.arange(1, total_cutoff + 1, dtype="float32").reshape(
+            [1, total_cutoff, 1]
+        )
+        (kv_cutoff * weights + score_cutoff * (weights * 2)).sum().backward()
+
+        ref_kv = []
+        ref_score = []
+        ref_kv_grad = []
+        ref_score_grad = []
+        for batch_idx in range(batch_size):
+            ref_meta = CSADocMaskMetadata.build(
+                ratio,
+                1,
+                seqlen,
+                startend_row_indices[batch_idx : batch_idx + 1],
+                meta.n_compressed,
+            )
+            kv_b1 = kv.detach()[batch_idx : batch_idx + 1].clone()
+            score_b1 = score.detach()[batch_idx : batch_idx + 1].clone()
+            kv_b1.stop_gradient = False
+            score_b1.stop_gradient = False
+            kv_out, score_out = compact_kv_score_cutoff(
+                ref_meta.doc_starts,
+                ref_meta.doc_lens_cutoff,
+                ref_meta.doc_starts_cutoff,
+                total_cutoff,
+                kv_b1,
+                score_b1,
+            )
+            (kv_out * weights + score_out * (weights * 2)).sum().backward()
+            ref_kv.append(kv_out.detach())
+            ref_score.append(score_out.detach())
+            ref_kv_grad.append(kv_b1.grad)
+            ref_score_grad.append(score_b1.grad)
+
+        paddle.testing.assert_close(kv_cutoff, paddle.concat(ref_kv))
+        paddle.testing.assert_close(score_cutoff, paddle.concat(ref_score))
+        paddle.testing.assert_close(kv.grad, paddle.concat(ref_kv_grad))
+        paddle.testing.assert_close(
+            score.grad, paddle.concat(ref_score_grad)
+        )
+        self.assertTrue((kv_cutoff[0, 6:] == 0).all().item())
+        self.assertTrue((score_cutoff[0, 6:] == 0).all().item())
+
+    def test_32k_gather_map_avoids_per_document_host_sync(self):
+        ratio = 4
+        batch_size = 2
+        seqlen = 32768
+        startend_row_indices = _make_batched_startend_row_indices(
+            [[128] * 256, [128] * 255], seqlen
+        )
+        meta = CSADocMaskMetadata.build(
+            ratio, batch_size, seqlen, startend_row_indices
+        )
+
+        original_item = paddle.Tensor.item
+        with patch.object(
+            paddle.Tensor,
+            "item",
+            autospec=True,
+            side_effect=original_item,
+        ) as item_mock:
+            gather_indices = meta.compressed_gather_indices
+            token_valid = meta.compressed_token_valid
+
+        self.assertLessEqual(item_mock.call_count, batch_size)
+        self.assertEqual(gather_indices.shape, [batch_size, seqlen])
+        self.assertEqual(token_valid.shape, [batch_size, seqlen])
+        self.assertEqual(
+            gather_indices[0].numpy().tolist(), list(range(seqlen))
+        )
+        self.assertTrue(token_valid[0].all().item())
+        self.assertEqual(
+            gather_indices[1, :32640].numpy().tolist(), list(range(32640))
+        )
+        self.assertTrue(token_valid[1, :32640].all().item())
+        self.assertTrue((gather_indices[1, 32640:] == 0).all().item())
+        self.assertFalse(token_valid[1, 32640:].any().item())
+
+    def test_batched_compressor_matches_independent_b1_forward_and_gradients(
+        self,
+    ):
+        paddle.seed(11)
+        config = _make_config(num_layers=1, csa_compress_ratios=[4])
+        compressor = _build_attention(config, 0).core_attention.compressor
+        parameters = list(compressor.parameters())
+        startend_row_indices = _make_batched_startend_row_indices(
+            [[4, 3], [8]], 8
+        )
+        meta = CSADocMaskMetadata.build(4, 2, 8, startend_row_indices)
+        x = paddle.randn([2, 8, config.hidden_size], dtype="bfloat16")
+        x.stop_gradient = False
+
+        batched = compressor(x, docmask_meta=meta)
+        batched.cast("float32").sum().backward()
+        batched_param_grads = [
+            p.grad.detach().clone() if p.grad is not None else None
+            for p in parameters
+        ]
+        batched_x_grad = x.grad.detach().clone()
+
+        reference_outputs = []
+        reference_x_grads = []
+        reference_param_grads = None
+        for batch_idx in range(2):
+            for parameter in parameters:
+                parameter.clear_gradient()
+            x_b1 = x.detach()[batch_idx : batch_idx + 1].clone()
+            x_b1.stop_gradient = False
+            meta_b1 = CSADocMaskMetadata.build(
+                4,
+                1,
+                8,
+                startend_row_indices[batch_idx : batch_idx + 1],
+                meta.n_compressed,
+            )
+            output_b1 = compressor(x_b1, docmask_meta=meta_b1)
+            output_b1.cast("float32").sum().backward()
+            reference_outputs.append(output_b1.detach())
+            reference_x_grads.append(x_b1.grad.detach())
+            gradients = [
+                p.grad.detach().clone() if p.grad is not None else None
+                for p in parameters
+            ]
+            if reference_param_grads is None:
+                reference_param_grads = gradients
+            else:
+                for grad_idx, gradient in enumerate(gradients):
+                    if gradient is not None:
+                        reference_param_grads[grad_idx] += gradient
+
+        paddle.testing.assert_close(
+            batched.detach().cast("float32"),
+            paddle.concat(reference_outputs).cast("float32"),
+            rtol=0.05,
+            atol=0.2,
+        )
+        paddle.testing.assert_close(
+            batched_x_grad.cast("float32"),
+            paddle.concat(reference_x_grads).cast("float32"),
+            rtol=0.05,
+            atol=0.2,
+        )
+        for batched_grad, reference_grad in zip(
+            batched_param_grads, reference_param_grads
+        ):
+            if batched_grad is not None:
+                paddle.testing.assert_close(
+                    batched_grad.cast("float32"),
+                    reference_grad.cast("float32"),
+                    rtol=0.05,
+                    atol=0.2,
+                )
+        self.assertTrue((batched[0, 1] == 0).all().item())
+
     def test_zero_ratio_is_rejected_and_window_metadata_is_separate(self):
         seqlen = 8
         startend_row_indices = _make_batched_startend_row_indices(
@@ -605,7 +797,7 @@ class TestCSADocMaskMetadata(unittest.TestCase):
         self.assertTrue(paddle.isinf(causal_mask[:, 12:, :]).all().item())
         self.assertEqual(
             meta.get_is_first_compressed_group().numpy().tolist(),
-            [True, True],
+            [[True, True, False, False]],
         )
 
     def test_metadata_handles_three_docs_ratio_128(self):
@@ -621,7 +813,7 @@ class TestCSADocMaskMetadata(unittest.TestCase):
         self.assertEqual(meta.actual_n_compressed, 2)
         self.assertEqual(
             meta.get_is_first_compressed_group().numpy().tolist(),
-            [True, True],
+            [[True, True, False]],
         )
 
         valid_range = meta.valid_range.numpy().tolist()[0]

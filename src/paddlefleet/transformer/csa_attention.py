@@ -479,6 +479,8 @@ class CSADocMaskMetadata(DocMaskMetadata):
     _compress_offset: int | None = None
     _compressed_causal_mask: Tensor | None = None
     _is_first_compressed_group: Tensor | None = None
+    _compressed_gather_indices: Tensor | None = None
+    _compressed_token_valid: Tensor | None = None
 
     @classmethod
     def build(
@@ -624,6 +626,27 @@ class CSADocMaskMetadata(DocMaskMetadata):
         return self._actual_n_compressed
 
     @property
+    def compressed_gather_indices(self) -> Tensor:
+        """Return int64 ``[B, Nc_global * ratio]`` token gather indices."""
+        if self._compressed_gather_indices is None:
+            (
+                self._compressed_gather_indices,
+                self._compressed_token_valid,
+            ) = _build_compressed_gather_map(
+                self.doc_starts,
+                self.doc_lens_cutoff,
+                self.n_compressed * self.ratio,
+            )
+        return self._compressed_gather_indices
+
+    @property
+    def compressed_token_valid(self) -> Tensor:
+        """Return bool ``[B, Nc_global * ratio]`` token validity."""
+        if self._compressed_token_valid is None:
+            _ = self.compressed_gather_indices
+        return self._compressed_token_valid
+
+    @property
     def valid_range(self) -> Tensor:
         if self._valid_range is None:
             self._valid_range = _build_valid_range_from_doc_bounds(
@@ -674,21 +697,21 @@ class CSADocMaskMetadata(DocMaskMetadata):
         return self._compressed_causal_mask
 
     def get_is_first_compressed_group(self) -> Tensor:
-        """Return bool ``[B, max(compressed_counts)]`` first-group flags."""
+        """Return bool ``[B, Nc_global]`` first-group flags."""
         cache_hit = self._is_first_compressed_group is not None
         if not cache_hit:
             is_first = paddle.zeros(
-                [self.batch_size, self.actual_n_compressed], dtype="bool"
+                [self.batch_size, self.n_compressed], dtype="bool"
             )
-            for batch_idx, starts_cutoff in enumerate(
-                self.doc_starts_cutoff
+            for batch_idx, (starts_cutoff, lengths_cutoff) in enumerate(
+                zip(self.doc_starts_cutoff, self.doc_lens_cutoff)
             ):
                 first_indices = starts_cutoff // self.ratio
-                valid_indices = first_indices < self.actual_n_compressed
+                valid_indices = paddle.logical_and(
+                    first_indices < self.n_compressed, lengths_cutoff > 0
+                )
                 is_first[batch_idx, first_indices[valid_indices]] = True
-            self._is_first_compressed_group = (
-                is_first[0] if self.batch_size == 1 else is_first
-            )
+            self._is_first_compressed_group = is_first
         return self._is_first_compressed_group
 
 
@@ -839,38 +862,128 @@ def _build_compressed_causal_mask(
     return docmask_meta.get_compressed_causal_mask()
 
 
+def _build_compressed_gather_map(
+    doc_starts: list[Tensor],
+    doc_lens_cutoff: list[Tensor],
+    total_cutoff: int,
+) -> tuple[Tensor, Tensor]:
+    """Build independent fixed-capacity token maps for each batch row.
+
+    Args:
+        doc_starts: Length-``B`` list of 1-D document-start tensors.
+        doc_lens_cutoff: Length-``B`` list of 1-D tensors containing the
+            retained token count for each document.
+        total_cutoff: Fixed token capacity ``Nc_global * ratio`` per row.
+
+    Returns:
+        Gather indices and token validity, both shaped
+        ``[B, total_cutoff]``.
+
+    Example:
+        For starts ``[0, 5, 10]`` and lengths ``[4, 4, 4]``, cumulative
+        ends are ``[4, 8, 12]``. Packed ranges ``[0:4]``, ``[4:8]``, and
+        ``[8:12]`` map to source ranges ``[0:4]``, ``[5:9]``, and
+        ``[10:14]``. ``searchsorted(..., right=True)`` selects the next
+        document at an exclusive end; positions ``[12:total_cutoff]`` are
+        masked and use gather index zero.
+    """
+    packed_positions = paddle.arange(total_cutoff, dtype="int64")
+    gather_rows = []
+    valid_rows = []
+    for starts, lengths in zip(doc_starts, doc_lens_cutoff):
+        n_docs = starts.shape[0]
+        if n_docs == 0:
+            gather_rows.append(paddle.zeros_like(packed_positions))
+            valid_rows.append(paddle.zeros([total_cutoff], dtype="bool"))
+            continue
+
+        starts = starts.astype("int64")
+        lengths = lengths.astype("int64")
+        packed_ends = paddle.cumsum(lengths)
+        packed_len = int(packed_ends[-1].item())
+        if packed_len > total_cutoff:
+            raise ValueError(
+                "total_cutoff is smaller than a sample's valid compressed "
+                f"token count: {packed_len} > {total_cutoff}"
+            )
+
+        token_valid = packed_positions < packed_ends[-1]
+        doc_indices = paddle.searchsorted(
+            packed_ends, packed_positions, right=True
+        )
+        doc_indices = paddle.minimum(
+            doc_indices,
+            paddle.full_like(doc_indices, n_docs - 1),
+        )
+        packed_starts = packed_ends - lengths
+        gather_indices = (
+            paddle.gather(starts, doc_indices)
+            + packed_positions
+            - paddle.gather(packed_starts, doc_indices)
+        )
+        gather_rows.append(
+            paddle.where(
+                token_valid,
+                gather_indices,
+                paddle.zeros_like(gather_indices),
+            )
+        )
+        valid_rows.append(token_valid)
+    return paddle.stack(gather_rows), paddle.stack(valid_rows)
+
+
 def compact_kv_score_cutoff(
-    doc_starts: Tensor,
-    doc_lens_cutoff: Tensor,
-    doc_starts_cutoff: Tensor,
+    doc_starts: Tensor | list[Tensor],
+    doc_lens_cutoff: Tensor | list[Tensor],
+    doc_starts_cutoff: Tensor | list[Tensor],
     total_cutoff: int,
     kv: Tensor,
     score: Tensor,
 ) -> tuple[Tensor, Tensor]:
-    """
-    Compact `kv` and `score` by gathering valid rows into a dense buffer.
+    """Gather ragged document tokens into fixed-capacity dense buffers.
 
-    Equivalent to the following loop implementation:
-        kv_cutoff = paddle.zeros([b, total_cutoff, coff_head_dim], kv.dtype)
-        score_cutoff = paddle.full([b, total_cutoff, coff_head_dim], float("-inf"), score.dtype)
-        for s0, n, s1 in zip(doc_starts, doc_lens_cutoff, doc_starts_cutoff):
-            kv_cutoff[:, s1 : (s1 + n), :] = kv[:, s0 : (s0 + n), :]
-            score_cutoff[:, s1 : (s1 + n), :] = score[:, s0 : (s0 + n), :]
-    """
-    # seg_id[j] = which input segment the j-th output position came from
-    seg_id = paddle.repeat_interleave(
-        paddle.arange(len(doc_lens_cutoff), dtype="int64"),
-        doc_lens_cutoff.astype("int64"),
-    )
-    # within-segment offset
-    seg_offset = (
-        paddle.arange(total_cutoff, dtype="int64") - doc_starts_cutoff[seg_id]
-    )
-    # source position in the (b, sq, head_dim) tensor
-    src_idx = doc_starts[seg_id] + seg_offset
+    Args:
+        doc_starts: Length-``B`` list of 1-D document-start tensors. A
+            single 1-D tensor is accepted for the legacy ``B == 1`` path.
+        doc_lens_cutoff: Matching per-document retained token counts.
+        doc_starts_cutoff: Matching per-document packed-output starts;
+            retained for the legacy compaction contract.
+        total_cutoff: Fixed token capacity ``Nc_global * ratio`` per row.
+        kv: Projected KV shaped ``[B, S_global, D_kv]``.
+        score: Compression scores shaped ``[B, S_global, D_score]``.
 
-    kv_cutoff = paddle.gather(kv, src_idx, axis=1)  # [B, S, H]
-    score_cutoff = paddle.gather(score, src_idx, axis=1)  # [B, S, H]
+    Returns:
+        Compacted KV and scores shaped ``[B, total_cutoff, D_kv]`` and
+        ``[B, total_cutoff, D_score]``. Invalid padded slots are zero.
+    """
+    if isinstance(doc_starts, Tensor):
+        doc_starts = [doc_starts]
+        doc_lens_cutoff = [doc_lens_cutoff]
+        doc_starts_cutoff = [doc_starts_cutoff]
+    gather_indices, token_valid = _build_compressed_gather_map(
+        doc_starts, doc_lens_cutoff, total_cutoff
+    )
+    b, seqlen, dim = kv.shape
+    if gather_indices.shape[0] != b:
+        raise ValueError(
+            "document metadata batch does not match KV batch: "
+            f"{gather_indices.shape[0]} != {b}"
+        )
+    batch_offsets = paddle.arange(b, dtype="int64").unsqueeze(1) * seqlen
+    flat_indices = (gather_indices + batch_offsets).reshape([-1])
+    kv_cutoff = paddle.gather(
+        kv.reshape([b * seqlen, dim]), flat_indices, axis=0
+    ).reshape([b, total_cutoff, dim])
+    score_cutoff = paddle.gather(
+        score.reshape([b * seqlen, score.shape[-1]]), flat_indices, axis=0
+    ).reshape([b, total_cutoff, score.shape[-1]])
+    token_valid = token_valid.unsqueeze(-1)
+    kv_cutoff = paddle.where(
+        token_valid, kv_cutoff, paddle.zeros_like(kv_cutoff)
+    )
+    score_cutoff = paddle.where(
+        token_valid, score_cutoff, paddle.zeros_like(score_cutoff)
+    )
 
     return kv_cutoff, score_cutoff
 
@@ -1574,10 +1687,10 @@ class Compressor(nn.Layer):
         Args:
             tensor: input tensor.
             fill_value: fill value for positions without valid previous data.
-            is_first: optional [n_groups] bool mask that is True for each
-                compressed group that starts a new document (no valid
-                predecessor). When provided, prevents pulling data across
-                document boundaries.
+            is_first: optional ``[B, n_groups]`` bool mask that is True for
+                each compressed group that starts a new document or is an
+                invalid padded slot. When provided, prevents pulling data
+                across document boundaries or into padding.
         """
         b, n_groups, ratio, _ = tensor.shape
         d = self.head_dim
@@ -1591,15 +1704,15 @@ class Compressor(nn.Layer):
         # Zero out at document boundaries: the first compressed group of each
         # document has no valid previous group to pull from.
         if is_first is not None:
-            # is_first: [n_groups] bool mask; positions where is_first=True
-            # should not use previous group data
-            # is_first[0] is always True (handled by skipping group 0 above),
-            # so we only need to handle is_first[1:] for groups 1..n_groups-1
+            # is_first: [B, n_groups] bool mask; positions where
+            # is_first=True should not use previous group data.
             if n_groups > 1:
-                boundary_mask = is_first[1:]  # [n_groups - 1]
-                bm = boundary_mask.reshape([1, -1, 1, 1])
+                if len(is_first.shape) == 1:
+                    boundary_mask = is_first[1:].reshape([1, -1, 1, 1])
+                else:
+                    boundary_mask = is_first[:, 1:].reshape([b, -1, 1, 1])
                 new_tensor[:, 1:, :ratio, :] = paddle.where(
-                    bm,
+                    boundary_mask,
                     paddle.full([1], fill_value, dtype=tensor.dtype),
                     new_tensor[:, 1:, :ratio, :],
                 )
@@ -1650,21 +1763,13 @@ class Compressor(nn.Layer):
 
         # Shared compression logic for both CP and non-CP paths.
         if docmask_meta is not None:
-            # per-document cutoff, pack contiguously without padding
-            doc_lens = docmask_meta.legacy_doc_lens
-            doc_starts = docmask_meta.legacy_doc_starts
-            doc_lens_cutoff = docmask_meta.legacy_doc_lens_cutoff
-            doc_starts_cutoff = docmask_meta.legacy_doc_starts_cutoff
+            # Gather every sample into the same global compressed capacity.
+            doc_lens_cutoff = docmask_meta.doc_lens_cutoff
+            doc_starts = docmask_meta.doc_starts
+            doc_starts_cutoff = docmask_meta.doc_starts_cutoff
+            n_compressed = docmask_meta.n_compressed
+            total_cutoff = n_compressed * ratio
 
-            assert len(doc_lens) == len(doc_starts)
-            assert len(doc_lens) == len(doc_lens_cutoff)
-            assert len(doc_lens) == len(doc_starts_cutoff)
-
-            n_compressed = sq // ratio
-            actual_n_compressed = docmask_meta.actual_n_compressed
-            total_cutoff = actual_n_compressed * ratio
-
-            # Pack only valid cutoff data contiguously (no padding)
             kv, score = compact_kv_score_cutoff(
                 doc_starts,
                 doc_lens_cutoff,
@@ -1674,17 +1779,26 @@ class Compressor(nn.Layer):
                 score,
             )
 
-            # Reshape: [b, actual_n_compressed, ratio, coff * head_dim]
-            kv = kv.reshape([b, actual_n_compressed, ratio, -1])
-            score = score.reshape([b, actual_n_compressed, ratio, -1])
+            # Reshape: [b, Nc_global, ratio, coff * head_dim]
+            kv = kv.reshape([b, n_compressed, ratio, -1])
+            score = score.reshape([b, n_compressed, ratio, -1])
 
             # APE: [ratio, coff * head_dim] -> [1, 1, ratio, coff * head_dim]
             ape = self.ape.reshape([1, 1, ratio, -1])
             ape = ape.cast(score.dtype) if _ACCURACY_COMPATIBLE_KERNEL else ape
             score = score + ape
 
+            token_valid = docmask_meta.compressed_token_valid.reshape(
+                [b, n_compressed, ratio, 1]
+            )
+            kv = paddle.where(token_valid, kv, paddle.zeros_like(kv))
+            score = paddle.where(token_valid, score, paddle.zeros_like(score))
+
             if self.overlap:
-                is_first = docmask_meta.get_is_first_compressed_group()
+                is_first = paddle.logical_or(
+                    docmask_meta.get_is_first_compressed_group(),
+                    paddle.logical_not(docmask_meta.compressed_valid),
+                )
                 kv = self._overlap_transform(
                     kv, fill_value=0, is_first=is_first
                 )
@@ -1705,19 +1819,6 @@ class Compressor(nn.Layer):
                 )
             else:
                 kv = self.norm(kv.cast(x.dtype))
-
-            # Pad to n_compressed before RoPE
-            if actual_n_compressed < n_compressed:
-                pad_len = n_compressed - actual_n_compressed
-                kv = paddle.concat(
-                    [
-                        kv,
-                        paddle.zeros(
-                            [b, pad_len, kv.shape[-1]], dtype=kv.dtype
-                        ),
-                    ],
-                    axis=1,
-                )
 
             # Apply RoPE with subsampled positions
             if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
