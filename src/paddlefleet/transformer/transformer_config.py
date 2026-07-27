@@ -65,7 +65,7 @@ class TransformerConfig(ModelParallelConfig):
     mtp_num_layers: int = 0
     """MTP Layer number."""
 
-    mtp_loss_scaling_factor: float = 0.3
+    mtp_loss_scaling_factor: float = 0.1
     """Weighting factor of Multi-Token Prediction (MTP) loss."""
 
     add_mtp_loss: bool = True
@@ -564,8 +564,8 @@ class TransformerConfig(ModelParallelConfig):
     topk_method: str = "greedy"
     """Options are greedy, group_limited_greedy, no_auxtc"""
 
-    moe_token_dispatcher_type: str = "deepep"
-    """The type of token dispatcher to use. The default is 'deepep'.
+    moe_token_dispatcher_type: str = "alltoall"
+    """The type of token dispatcher to use. The default is 'alltoall'.
     Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_allgather_gate_overlap: bool = True
@@ -1124,8 +1124,8 @@ class TransformerConfig(ModelParallelConfig):
     by TransformerConfig.transform_rules.
     """
 
-    dsa_indexer_loss_coeff: float | None = None
-    """KL loss coefficient for DSA Indexer training. None disables the KL loss.
+    dsa_indexer_loss_coeff: float = 0.0
+    """KL loss coefficient for DSA Indexer training. 0 disables the KL loss.
 
     Note: This field corresponds to the HuggingFace config.json field "indexer_loss_coeff".
     The mapping from HuggingFace field name to PaddleFleet internal field name is handled
@@ -1170,9 +1170,6 @@ class TransformerConfig(ModelParallelConfig):
     This allows compatibility with MLA's YaRN RoPE which always generates
     interleaved frequencies.
     """
-
-    dsa_indexer_loss_coeff: float = 0.01
-    """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
 
     ####################
     # CSA / DSv4 Hybrid Attention
