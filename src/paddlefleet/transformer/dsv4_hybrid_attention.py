@@ -65,6 +65,120 @@ def _q_rms_norm(q: Tensor, eps: float, high_precision_norm: bool) -> Tensor:
         return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
 
 
+def _validate_dsv4_boundary_values(
+    startend_row_indices: Tensor,
+    upper_bound: int,
+    description: str,
+    *,
+    require_per_sample_max: bool = False,
+) -> None:
+    """Validate exclusive document endpoints against a sequence bound."""
+    min_endpoint = int(paddle.min(startend_row_indices).item())
+    max_endpoint = int(paddle.max(startend_row_indices).item())
+    if min_endpoint < 0 or max_endpoint > upper_bound:
+        raise ValueError(
+            f"{description} document endpoints must be in [0, {upper_bound}], "
+            f"got range [{min_endpoint}, {max_endpoint}]"
+        )
+
+    if require_per_sample_max:
+        per_sample_max = paddle.max(
+            startend_row_indices.reshape([startend_row_indices.shape[0], -1]),
+            axis=1,
+        ).tolist()
+        if any(int(endpoint) != upper_bound for endpoint in per_sample_max):
+            raise ValueError(
+                f"each sample must end at {upper_bound}, got maximum "
+                f"document endpoints {per_sample_max}"
+            )
+
+
+def _pack_dsv4_logical_batch(
+    hidden_states: Tensor,
+    startend_row_indices: Tensor | None,
+    *,
+    cp_size: int,
+    dense_mode: bool,
+    max_sequence_length: int | None = None,
+) -> tuple[Tensor, Tensor | None, int, int]:
+    """Pack a logical batch into the single-sequence DSV4 representation."""
+    if len(hidden_states.shape) != 3:
+        raise ValueError(
+            "DSv4HybridAttention expects rank-3 hidden_states [B, S, H], "
+            f"got shape {hidden_states.shape}"
+        )
+
+    batch_size, seqlen, _ = hidden_states.shape
+    if batch_size <= 1:
+        return hidden_states, startend_row_indices, batch_size, seqlen
+
+    if not dense_mode:
+        raise NotImplementedError(
+            "DSv4HybridAttention only supports batch_size > 1 in dense mode; "
+            "indexer mode is unsupported"
+        )
+    if cp_size > 1:
+        raise NotImplementedError(
+            "DSv4HybridAttention does not support batch_size > 1 with "
+            f"context parallelism (batch_size={batch_size}, cp_size={cp_size})"
+        )
+
+    if startend_row_indices is None:
+        raise ValueError(
+            "DSv4HybridAttention requires startend_row_indices when "
+            "batch_size > 1 to preserve sample isolation"
+        )
+
+    expected_shape = [batch_size, 1, seqlen, 1]
+    if list(startend_row_indices.shape) != expected_shape:
+        raise ValueError(
+            "startend_row_indices must have shape "
+            f"{expected_shape} for batch_size > 1, got "
+            f"{list(startend_row_indices.shape)}"
+        )
+    if max_sequence_length is not None and int(max_sequence_length) != seqlen:
+        raise ValueError(
+            "DSv4HybridAttention batch packing requires "
+            "max_sequence_length to equal the per-sample sequence length; "
+            f"got max_sequence_length={max_sequence_length}, S={seqlen}"
+        )
+    _validate_dsv4_boundary_values(
+        startend_row_indices,
+        seqlen,
+        "unpacked",
+        require_per_sample_max=True,
+    )
+    sample_offsets = (
+        paddle.arange(batch_size, dtype=startend_row_indices.dtype).reshape(
+            [batch_size, 1, 1, 1]
+        )
+        * seqlen
+    )
+    startend_row_indices = (startend_row_indices + sample_offsets).reshape(
+        [1, 1, batch_size * seqlen, 1]
+    )
+    _validate_dsv4_boundary_values(
+        startend_row_indices,
+        batch_size * seqlen,
+        "packed",
+    )
+
+    hidden_states = hidden_states.reshape([1, batch_size * seqlen, -1])
+    return hidden_states, startend_row_indices, batch_size, seqlen
+
+
+def _unpack_dsv4_logical_batch(
+    output: Tensor, batch_size: int, seqlen: int
+) -> Tensor:
+    """Restore DSV4 output to the caller's logical batch shape."""
+    if len(output.shape) != 3:
+        raise ValueError(
+            "DSv4HybridAttention output must be rank 3 before unpacking, "
+            f"got shape {output.shape}"
+        )
+    return output.reshape([batch_size, seqlen, -1])
+
+
 from paddlefleet.transformer.utils import (
     get_doc_lens,
 )
@@ -379,6 +493,17 @@ class DSv4HybridAttention(Attention):
             if cp_pg is not None and cp_size > 1
             else 0
         )
+        hidden_states, startend_row_indices, original_b, original_sq = (
+            _pack_dsv4_logical_batch(
+                hidden_states,
+                startend_row_indices,
+                cp_size=cp_size,
+                dense_mode=self.config.csa_dense_mode,
+                max_sequence_length=getattr(
+                    self.config, "max_sequence_length", None
+                ),
+            )
+        )
         b, sq, _ = hidden_states.shape
         position_offset = cp_rank * sq if cp_size > 1 else 0
 
@@ -501,6 +626,9 @@ class DSv4HybridAttention(Attention):
 
         if self.gated_attention and self.recompute_gated_attn:
             gate_recompute.discard_output_and_register_recompute(output)
+
+        if original_b > 1:
+            output = _unpack_dsv4_logical_batch(output, original_b, original_sq)
 
         return output, bias
 
