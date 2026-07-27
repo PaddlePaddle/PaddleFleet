@@ -422,7 +422,7 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
         self.assertLess(
             x_grad_diff, 0.001, f"x_grad diff too large: {x_grad_diff}"
         )
-        fp8_cfg = _fp8_config(use_ue8m0=False)
+        fp8_cfg = _fp8_config(use_ue8m0=False, fp8_wgrad=False)
         bf16_cfg = _bf16_config()
 
         paddle.seed(0)
