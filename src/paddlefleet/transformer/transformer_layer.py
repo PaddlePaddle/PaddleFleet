@@ -1816,12 +1816,11 @@ class HySparseTransformerLayer(TransformerLayer):
         )
         self._log_md5(hidden_states, "post_attn_residual", self.layer_number)
         with profile(timer_name):
-            output = hidden_states
-            # output = self._forward_mlp(
-            #     hidden_states,
-            #     input_ids=input_ids,
-            #     origin_input_ids=origin_input_ids,
-            # )
+            output = self._forward_mlp(
+                hidden_states,
+                input_ids=input_ids,
+                origin_input_ids=origin_input_ids,
+            )
         self._log_md5(output, "layer_output", self.layer_number)
 
         if (not self.self_attn.is_swa) and shared_kv:
