@@ -29,8 +29,8 @@ Run with:
   SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
   NVSHMEM_LIB="$SITE_PACKAGES/nvidia/nvshmem/lib"
   export LD_LIBRARY_PATH="$NVSHMEM_LIB:$LD_LIBRARY_PATH"
-  export PYTHONPATH=./ernie5:./utils:./third_party/ernie-core/src:./third_party/ernie-core/PaddleFormers:./third_party/ernie-core/PaddleFleet/src/:./third_party/data_processor:$PYTHONPATH
-  python third_party/ernie-core/PaddleFleet/tests/single_card_tests/ai_edited_test/test_ai_dw_overlap.py
+  export PYTHONPATH=./ernie5:./utils:./third_party/ernie-core/src:./third_party/ernie-core/PaddleFleet:./third_party/ernie-core/PaddleFleet/src/:./third_party/data_processor:$PYTHONPATH
+  python third_party/ernie-core/PaddleFleet/test/formers/single_card_tests/ai_edited_test/test_ai_dw_overlap.py
 """
 
 import os
