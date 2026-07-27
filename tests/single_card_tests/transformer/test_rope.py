@@ -127,26 +127,34 @@ def apply_fused_rope_reference(x, freqs):
 
 
 class TestApplyRotaryPosEmbRouter(unittest.TestCase):
-    def test_negative_sequence_parallel_is_not_time_major(self):
+    def test_sequence_parallel_controls_time_major(self):
         """Only positive sequence-parallel values enable time-major inputs."""
-        config = make_config(apply_rope_fusion=False, high_precision_rope=False)
-        config.sequence_parallel = -1
         t = paddle.zeros([1, 2, 1, 4], dtype="float32")
         freqs = paddle.zeros([1, 2, 4], dtype="float32")
 
-        with patch(
-            "paddlefleet.models.common.embeddings.rope_utils._apply_rotary_pos_emb_bshd",
-            return_value=t,
-        ) as apply_bshd:
-            apply_rotary_pos_emb(
-                t=t,
-                freqs=freqs,
-                cos=None,
-                sin=None,
-                config=config,
-            )
+        for sequence_parallel, expected_time_major in [(-1, False), (1, True)]:
+            with self.subTest(sequence_parallel=sequence_parallel):
+                config = make_config(
+                    apply_rope_fusion=False, high_precision_rope=False
+                )
+                config.sequence_parallel = sequence_parallel
 
-        self.assertIs(apply_bshd.call_args.kwargs["time_major"], False)
+                with patch(
+                    "paddlefleet.models.common.embeddings.rope_utils._apply_rotary_pos_emb_bshd",
+                    return_value=t,
+                ) as apply_bshd:
+                    apply_rotary_pos_emb(
+                        t=t,
+                        freqs=freqs,
+                        cos=None,
+                        sin=None,
+                        config=config,
+                    )
+
+                self.assertIs(
+                    apply_bshd.call_args.kwargs["time_major"],
+                    expected_time_major,
+                )
 
 
 class TestApplyRotaryPosEmbFusedHighPrecision(unittest.TestCase):
