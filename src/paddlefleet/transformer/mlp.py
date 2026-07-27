@@ -176,11 +176,24 @@ class MLP(FleetLayer):
             tp_group=tp_group,
         )
 
-    def forward(self, hidden_states, per_token_scale=None):
+    def forward(
+        self,
+        hidden_states,
+        per_token_scale=None,
+        up_gate_weight=None,
+        down_weight=None,
+    ):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
-        intermediate_parallel, bias_parallel = self.up_gate_proj(hidden_states)
+        if up_gate_weight is None:
+            intermediate_parallel, bias_parallel = self.up_gate_proj(
+                hidden_states
+            )
+        else:
+            intermediate_parallel, bias_parallel = self.up_gate_proj(
+                hidden_states, weight=up_gate_weight
+            )
         nvtx_range_pop(suffix="up_gate_proj")
 
         nvtx_range_push(suffix="activation")
@@ -195,11 +208,17 @@ class MLP(FleetLayer):
             and self.config.tensor_model_parallel_size == 1
         ):
             hidden_states = paddle.incubate.nn.functional.fused_linear(
-                hidden_states, self.up_gate_proj.weight, self.up_gate_proj.bias
+                hidden_states,
+                self.up_gate_proj.weight
+                if up_gate_weight is None
+                else up_gate_weight,
+                self.up_gate_proj.bias,
             )
             hidden_states = F.swiglu(hidden_states)
             output = paddle.incubate.nn.functional.fused_linear(
-                hidden_states, self.down_proj.weight, self.down_proj.bias
+                hidden_states,
+                self.down_proj.weight if down_weight is None else down_weight,
+                self.down_proj.bias,
             )
             return output, None
 
@@ -303,7 +322,12 @@ class MLP(FleetLayer):
 
         # [s, b, h]
         nvtx_range_push(suffix="down_proj")
-        output, output_bias = self.down_proj(intermediate_parallel)
+        if down_weight is None:
+            output, output_bias = self.down_proj(intermediate_parallel)
+        else:
+            output, output_bias = self.down_proj(
+                intermediate_parallel, weight=down_weight
+            )
         nvtx_range_pop(suffix="down_proj")
 
         if per_token_scale is not None and output_bias is not None:

@@ -207,6 +207,7 @@ def setup_ops_extension():
             f"{_ext_rel}/router_metadata.cu",
             f"{_ext_rel}/count_cumsum.cu",
             f"{_ext_rel}/filter_scores.cu",
+            f"{_ext_rel}/fused_mxfp4_fake_quant.cu",
             f"{_ext_rel}/fuse_stack_transpose_fp8_quant.cu",
             f"{_ext_rel}/fuse_apply_rotary_pos_emb_vision.cu",
             f"{_ext_rel}/fused_swiglu_probs_bwd.cu",

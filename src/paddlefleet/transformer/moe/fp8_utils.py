@@ -19,6 +19,10 @@ import numpy
 import paddle
 import paddle.nn.functional as F
 
+from paddlefleet.fp8.qat import (
+    apply_fp4_expert_fake_quant,
+    fp4_expert_fake_quant,
+)
 from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
     fused_swiglu_scale_forward,
@@ -98,6 +102,8 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
 
 __all__ = [
     "ExpertsGroupGemmContiguousNode",
+    "apply_fp4_expert_fake_quant",
+    "fp4_expert_fake_quant",
 ]
 
 
@@ -459,6 +465,7 @@ class ExpertsGroupGemmContiguousNode:
         expert_id=None,
         moe_subbatch_token_num_after_dispatch=None,
         use_bf16_gemm_weight_grad=False,
+        use_fp4_expert_qat=False,
         use_fp8_mlp=True,
         moe_deep_gemm=False,
         use_ue8m0=False,
@@ -528,6 +535,7 @@ class ExpertsGroupGemmContiguousNode:
                 and self.moe_subbatch_token_num_after_dispatch % FP8_ALIGN == 0
             ), self.moe_subbatch_token_num_after_dispatch
         self.use_bf16_gemm_weight_grad = use_bf16_gemm_weight_grad
+        self.use_fp4_expert_qat = use_fp4_expert_qat
         self.use_fp8_mlp = use_fp8_mlp
         self.moe_deep_gemm = moe_deep_gemm
         self.use_ue8m0 = use_ue8m0
@@ -1648,6 +1656,13 @@ class ExpertsGroupGemmContiguousNode:
                 x.down_proj.weight for x in self.experts if x is not None
             ]
 
+        expert_w1 = apply_fp4_expert_fake_quant(
+            expert_w1, self.use_fp4_expert_qat
+        )
+        expert_w2 = apply_fp4_expert_fake_quant(
+            expert_w2, self.use_fp4_expert_qat
+        )
+
         num_expert = len(expert_w1)
 
         # o1
@@ -1918,6 +1933,10 @@ class ExpertsGroupGemmContiguousNode:
             and not getattr(_ge, "disable_lora", False)
             and not getattr(_ge, "merged", False)
         )
+        if _has_lora and self.use_fp4_expert_qat:
+            raise RuntimeError(
+                "MXFP4 expert QAT and expert LoRA cannot be enabled together"
+            )
 
         if self.moe_expert_fusion and not self.use_fp8_mlp:
             if _has_lora:
@@ -1937,15 +1956,22 @@ class ExpertsGroupGemmContiguousNode:
             expert_w1 = [
                 x.up_gate_proj.weight for x in self.experts if x is not None
             ]
+
+        quantized_w1 = apply_fp4_expert_fake_quant(
+            expert_w1, self.use_fp4_expert_qat
+        )
+        quantized_w2 = apply_fp4_expert_fake_quant(
+            expert_w2, self.use_fp4_expert_qat
+        )
         if self.recompute_moe_gate_up:
             o1 = self.fwd_gate_up(
-                None, expert_w1, len(expert_w1), self.tokens_per_expert
+                None, quantized_w1, len(quantized_w1), self.tokens_per_expert
             )
         else:
             o1 = self.o1
 
         do1, o2_s, probs_grad = self.bwd_down_input_bf16(
-            expert_w2, out_grad, o1, unzipped_probs
+            quantized_w2, out_grad, o1, unzipped_probs
         )
         del o1
         self.o1 = None
@@ -1986,7 +2012,7 @@ class ExpertsGroupGemmContiguousNode:
             self.bf16_weight_grad(out_grad, o2_s, expert_w2)
 
         # dx
-        dx = self.bwd_gate_up_input_bf16(do1, expert_w1)
+        dx = self.bwd_gate_up_input_bf16(do1, quantized_w1)
         del do1
         self.reset_state()
         return dx, probs_grad
@@ -2019,16 +2045,26 @@ class ExpertsGroupGemmContiguousNode:
             ]
             num_expert = len(expert_w1)
 
+        quantized_w1 = apply_fp4_expert_fake_quant(
+            expert_w1, self.use_fp4_expert_qat
+        )
+        quantized_w2 = apply_fp4_expert_fake_quant(
+            expert_w2, self.use_fp4_expert_qat
+        )
         if self.recompute_moe_gate_up:
             o1 = self.fwd_gate_up(
-                None, expert_w1, num_expert, self.tokens_per_expert
+                None, quantized_w1, num_expert, self.tokens_per_expert
             )
         else:
             o1 = self.o1
 
         # do2
         do1, o2_s, probs_grad = self.bwd_down_input_fp8(
-            expert_w2, out_grad, o1, unzipped_probs, inplace_swiglu_prob=True
+            quantized_w2,
+            out_grad,
+            o1,
+            unzipped_probs,
+            inplace_swiglu_prob=True,
         )
         # del o1 时机：
         #   inplace（USE_INPLACE_SWIGLU_BWD=True 且无 clamp）：do1 与 o1 共用 buffer，
@@ -2064,7 +2100,7 @@ class ExpertsGroupGemmContiguousNode:
                 self.bwd_down_weight(out_grad, o2_s, expert_w2)
 
             # dx
-            dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
+            dx = self.bwd_gate_up_input_fp8(do1, quantized_w1, dx=out_grad)
             # out-of-place 路径下 fused_swiglu_weighted_bwd 异步读 o1，但此时
             # 中间已经执行了 dw1、dw2 等多个 GEMM kernel（同一 stream 顺序入队），
             # 到达此处时 o1 的读取早已完成，del 安全。
@@ -2075,7 +2111,7 @@ class ExpertsGroupGemmContiguousNode:
             # 为了更充分地overlap, 将dx提前。不过这样可能会增加峰值显存。
 
             # dx
-            dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
+            dx = self.bwd_gate_up_input_fp8(do1, quantized_w1, dx=out_grad)
 
             dx, task = a2a_async_fn(dx)
             # dw1

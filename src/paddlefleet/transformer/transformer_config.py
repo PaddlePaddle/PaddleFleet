@@ -668,6 +668,15 @@ class TransformerConfig(ModelParallelConfig):
     use_fp8_qat: bool = False
     """Whether to enable FP8 Quantization-Aware Training (QAT)."""
 
+    use_fp4_expert_qat: bool = False
+    """Whether to fake-quantize routed expert weights to MXFP4 during training."""
+
+    use_fp4_indexer_qat: bool = False
+    """Whether to fake-quantize DeepSeek-V4 Indexer Q/K to MXFP4.
+
+    This takes precedence over ``use_fp8_qat`` for the Indexer Q/K tensors.
+    """
+
     ####################
     # initialization
     ####################

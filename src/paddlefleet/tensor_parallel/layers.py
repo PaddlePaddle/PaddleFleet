@@ -1676,20 +1676,24 @@ class RowParallelLinear(paddle.nn.Layer):
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
 
-    def forward(self, input_):
+    def forward(self, input_, weight: paddle.Tensor | None = None):
         """Forward of RowParallelLinear
 
         Args:
             input_: 3D tensor whose order of dimension is [sequence, batch, hidden]
+            weight: Optional weight tensor to use instead of the registered parameter.
 
         Returns:
             - output
             - bias
         """
 
+        if weight is None:
+            weight = self.weight
+
         if getattr(self.config, "gpt_model_use_experimental_version", False):
             output = row_sequence_parallel_linear(
-                input_, self.weight, self.bias, mp_group=self.tp_group
+                input_, weight, self.bias, mp_group=self.tp_group
             )
             return output, None
 
@@ -1709,7 +1713,7 @@ class RowParallelLinear(paddle.nn.Layer):
             )
 
         # Matrix multiply.
-        if not self.weight.requires_grad:
+        if not weight.requires_grad:
             self._forward_impl = linear_with_frozen_weight
         else:
             self._forward_impl = (
@@ -1731,7 +1735,7 @@ class RowParallelLinear(paddle.nn.Layer):
 
         output_parallel = self._forward_impl(
             input=input_parallel,
-            weight=self.weight,
+            weight=weight,
             bias=None,
             gradient_accumulation_fusion=self.gradient_accumulation_fusion,
             allreduce_dgrad=allreduce_dgrad,
