@@ -1427,6 +1427,17 @@ class TransformerConfig(ModelParallelConfig):
 
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
+            if (
+                self.first_k_dense_replace is not None
+                and self.first_k_dense_replace > 0
+            ):
+                raise ValueError(
+                    f"first_k_dense_replace ({self.first_k_dense_replace}) and "
+                    f"moe_n_hash_layers ({self.moe_n_hash_layers}) are mutually "
+                    f"exclusive; the first_k_dense_replace dense layers would "
+                    f"suppress hash routing. Set first_k_dense_replace=0 if you "
+                    f"want hash routing."
+                )
             if self.actual_vocab_size is None:
                 raise ValueError(
                     "actual_vocab_size must be set when moe_n_hash_layers > 0; "
