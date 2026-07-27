@@ -881,9 +881,6 @@ class MultiLatentAttention(Attention):
         )
 
         use_tl = getattr(self.config, "hy_sparse_full_attn_use_tilelang", False)
-        # use_tl = getattr(self.config, "hy_sparse_full_attn_use_tilelang", False) or (
-        # get_context_parallel_world_size() > 1
-        # )
         if use_tl:
             from paddlefleet.tilelang_ops.hysparse.block_score_mha import (
                 block_score_mha_attn_fwd,
@@ -905,7 +902,7 @@ class MultiLatentAttention(Attention):
         global_valid_range = valid_range
         global_startend_row_indices = attn_mask_startend_row_indices
         startend_row_indices = attn_mask_startend_row_indices
-        cp_size = get_context_parallel_world_size()
+        cp_size = get_pg_size(self.pg_collection.cp)
         if cp_size > 1:
             cp_mode = getattr(
                 self.config, "cp_balance_mode", "dualchunk_allgather"
