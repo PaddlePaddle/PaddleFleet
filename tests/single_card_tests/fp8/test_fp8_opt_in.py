@@ -363,9 +363,9 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
         )
         self.assertLess(w_grad_diff, 0.05)
 
-    @_REQUIRE_GPU
+    @_REQUIRE_SM100
     def test_linear_fp8_no_ue8m0_matches_bf16(self):
-        """FP8 Linear with use_ue8m0=False should work on SM90+ (H-series)."""
+        """FP8 Linear with use_ue8m0=False, fp8_wgrad=True requires SM100+."""
         fp8_cfg = _fp8_config(use_ue8m0=False)
         bf16_cfg = _bf16_config()
 
@@ -390,8 +390,38 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
         )
 
     @_REQUIRE_GPU
-    def test_column_parallel_fp8_no_ue8m0_matches_bf16(self):
-        """ColumnParallelLinear FP8 with use_ue8m0=False on SM90+ (H-series)."""
+    def test_linear_fp8_no_ue8m0_forward_only(self):
+        """FP8 Linear with use_ue8m0=False and fp8_wgrad=False works on H-series."""
+        fp8_cfg = _fp8_config(use_ue8m0=False, fp8_wgrad=False)
+        bf16_cfg = _bf16_config()
+
+        paddle.seed(0)
+        fp8_layer = _new_linear(fp8_cfg)
+        paddle.seed(0)
+        bf16_layer = _new_linear(bf16_cfg)
+        _copy_weight(fp8_layer, bf16_layer)
+
+        self.assertTrue(fp8_layer.fp8)
+        self.assertFalse(fp8_layer.use_ue8m0)
+        self.assertFalse(fp8_layer.fp8_wgrad)
+
+        x = paddle.randn([4, 128, 512], dtype="bfloat16")
+        x_fp8 = x.detach()
+        x_fp8.stop_gradient = False
+        x_bf16 = x.detach()
+        x_bf16.stop_gradient = False
+
+        out_fp8, _ = fp8_layer(x_fp8)
+        out_bf16, _ = bf16_layer(x_bf16)
+        out_fp8.sum().backward()
+        out_bf16.sum().backward()
+
+        out_diff = _calc_diff(out_fp8, out_bf16)
+        x_grad_diff = _calc_diff(x_fp8.grad, x_bf16.grad)
+        self.assertLess(out_diff, 0.001, f"output diff too large: {out_diff}")
+        self.assertLess(
+            x_grad_diff, 0.001, f"x_grad diff too large: {x_grad_diff}"
+        )
         fp8_cfg = _fp8_config(use_ue8m0=False)
         bf16_cfg = _bf16_config()
 
