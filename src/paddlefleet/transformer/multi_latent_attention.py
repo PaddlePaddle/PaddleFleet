@@ -916,26 +916,25 @@ class MultiLatentAttention(Attention):
                 )
             if startend_row_indices is not None:
                 cp_rank = get_pg_rank(self.pg_collection.cp)
+                # Match DotProductAttention's CP FlashMask contract: first
+                # expand global [LTS] to [LTS, UTE], then localize all query
+                # row boundaries together for this rank's dual chunks.
+                if startend_row_indices.shape[-1] == 1:
+                    causal_end = paddle.arange(
+                        kv_s, dtype=startend_row_indices.dtype
+                    ).reshape([1, 1, kv_s, 1])
+                    causal_end = paddle.expand_as(
+                        causal_end, startend_row_indices
+                    )
+                    startend_row_indices = paddle.concat(
+                        [startend_row_indices, causal_end], axis=-1
+                    )
+                else:
+                    raise ValueError(
+                        "HySparse CP expects one FlashMask boundaries, "
+                        f"but got {startend_row_indices.shape[-1]}"
+                    )
                 if cp_mode == "dualchunk_allgather":
-                    # Match DotProductAttention's CP FlashMask contract: first
-                    # expand global [LTS] to [LTS, UTE], then localize all query
-                    # row boundaries together for this rank's dual chunks.
-                    if startend_row_indices.shape[-1] == 1:
-                        causal_end = paddle.arange(
-                            kv_s, dtype=startend_row_indices.dtype
-                        ).reshape([1, 1, kv_s, 1])
-                        causal_end = paddle.expand_as(
-                            causal_end, startend_row_indices
-                        )
-                        startend_row_indices = paddle.concat(
-                            [startend_row_indices, causal_end], axis=-1
-                        )
-                    else:
-                        raise ValueError(
-                            "HySparse CP expects one FlashMask boundaries, "
-                            f"but got {startend_row_indices.shape[-1]}"
-                        )
-
                     seq_blocksize = q_s // 2
                     startend_row_indices = preprocess_index_dual_chunks(
                         startend_row_indices,
