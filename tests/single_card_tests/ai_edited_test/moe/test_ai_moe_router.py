@@ -2129,22 +2129,18 @@ class TestMoELayerSetLayerNumberForwardsIsMtp(unittest.TestCase):
 class TestFusedGateDetachMatmulAccuracyCompatible(unittest.TestCase):
     """Cover the use_accuracy_compatible paths of FusedGateDetachMatmul.
 
-    forward (moe_router.py:112-114) rounds the gate weight through bf16 before
-    the fp32 GEMM; backward must reuse the SAME bf16-rounded weight for x_grad,
-    both in the plain branch (moe_router.py:176-186) and the dw_p2p_overlap
-    branch (moe_router.py:152-154). Using the raw fp32 weight there would make
-    x_grad inconsistent with the forward when the incoming weight is fp32.
+    The gate GEMM mirrors Megatron's ``RouterGatingLinearFunction``: the weight
+    is used as stored and only up-cast to fp32 (``weight.to(router_dtype)``), so
+    no extra rounding is applied. The accuracy-compatible flag only selects the
+    two-GEMM backward (matching MG's separate dgrad/wgrad ``torch.mm`` calls)
+    instead of the fused ``matmul_grad``.
     """
 
     def setUp(self):
         paddle.seed(2024)
 
-    @staticmethod
-    def _round_bf16(t):
-        return t.cast(paddle.bfloat16).cast(paddle.float32)
-
-    def test_forward_uses_bf16_rounded_weight(self):
-        """forward: output == x @ round_bf16(w.T) and differs from raw fp32."""
+    def test_forward_upcasts_weight_losslessly(self):
+        """forward: output == x @ w.T in fp32, no rounding of the weight."""
         from paddlefleet.transformer.moe.moe_router import FusedGateDetachMatmul
 
         # w is [E, D]; forward transposes internally so output is [B, E].
@@ -2152,20 +2148,19 @@ class TestFusedGateDetachMatmulAccuracyCompatible(unittest.TestCase):
         w = paddle.randn([4, 64], dtype=paddle.float32)
 
         out_acc = FusedGateDetachMatmul.apply(x, w, False, True)
-        ref = paddle.matmul(x.cast("float32"), self._round_bf16(w.T))
+        ref = paddle.matmul(x.cast("float32"), w.T.cast("float32"))
         np.testing.assert_allclose(
             out_acc.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
         )
 
-        # The accuracy-compatible output must differ from the raw fp32 path,
-        # otherwise the bf16 rounding was not applied.
+        # The flag must not change the forward numerics at all.
         out_raw = FusedGateDetachMatmul.apply(x, w, False, False)
-        self.assertFalse(
-            np.allclose(out_acc.numpy(), out_raw.numpy(), atol=1e-4)
+        np.testing.assert_allclose(
+            out_acc.numpy(), out_raw.numpy(), rtol=0, atol=0
         )
 
-    def test_backward_plain_uses_bf16_rounded_weight(self):
-        """backward (no overlap): x_grad/w_grad match the bf16-rounded weight."""
+    def test_backward_plain_uses_stored_weight(self):
+        """backward (no overlap): x_grad/w_grad use the weight as stored."""
         from paddlefleet.transformer.moe.moe_router import FusedGateDetachMatmul
 
         x = paddle.randn([4, 64], dtype=paddle.float32)
@@ -2177,8 +2172,7 @@ class TestFusedGateDetachMatmulAccuracyCompatible(unittest.TestCase):
         out = FusedGateDetachMatmul.apply(x, w, False, True)
         (out * coeff).sum().backward()
 
-        w_round = self._round_bf16(w)
-        ref_xg = paddle.matmul(coeff, w_round)
+        ref_xg = paddle.matmul(coeff, w.cast("float32"))
         ref_wg = paddle.matmul(coeff, x.cast("float32"), transpose_x=True)
         np.testing.assert_allclose(
             x.grad.numpy(), ref_xg.numpy(), rtol=1e-6, atol=1e-6
@@ -2187,15 +2181,8 @@ class TestFusedGateDetachMatmulAccuracyCompatible(unittest.TestCase):
             w.grad.numpy(), ref_wg.numpy(), rtol=1e-6, atol=1e-6
         )
 
-        # Regression guard: x_grad must NOT match the raw fp32 weight, which is
-        # what the pre-fix code produced when w is a genuine fp32 tensor.
-        ref_xg_raw = paddle.matmul(coeff, w.cast("float32"))
-        self.assertFalse(
-            np.allclose(x.grad.numpy(), ref_xg_raw.numpy(), atol=1e-4)
-        )
-
-    def test_backward_dw_p2p_overlap_uses_bf16_rounded_weight(self):
-        """backward (dw_p2p_overlap): x_grad matches the bf16-rounded weight.
+    def test_backward_dw_p2p_overlap_uses_stored_weight(self):
+        """backward (dw_p2p_overlap): x_grad uses the weight as stored.
 
         w.stop_gradient=True isolates the x_grad computation (the weight grad is
         deferred to WeightGradStore and skipped here).
@@ -2211,16 +2198,31 @@ class TestFusedGateDetachMatmulAccuracyCompatible(unittest.TestCase):
         out = FusedGateDetachMatmul.apply(x, w, True, True)
         (out * coeff).sum().backward()
 
-        w_round = self._round_bf16(w)
-        ref_xg = paddle.matmul(coeff, w_round)
+        ref_xg = paddle.matmul(coeff, w.cast("float32"))
         np.testing.assert_allclose(
             x.grad.numpy(), ref_xg.numpy(), rtol=1e-6, atol=1e-6
         )
 
-        ref_xg_raw = paddle.matmul(coeff, w.cast("float32"))
-        self.assertFalse(
-            np.allclose(x.grad.numpy(), ref_xg_raw.numpy(), atol=1e-4)
+    def test_bf16_weight_forward_backward(self):
+        """A bf16-stored weight (the MG layout) works through fwd and bwd."""
+        from paddlefleet.transformer.moe.moe_router import FusedGateDetachMatmul
+
+        x = paddle.randn([4, 64], dtype=paddle.float32)
+        w = paddle.randn([4, 64], dtype=paddle.float32).cast(paddle.bfloat16)
+        x.stop_gradient = False
+        w.stop_gradient = False
+        coeff = paddle.randn([4, 4], dtype=paddle.float32)
+
+        out = FusedGateDetachMatmul.apply(x, w, False, True)
+        self.assertEqual(out.dtype, paddle.float32)
+        (out * coeff).sum().backward()
+
+        ref = paddle.matmul(x, w.T.cast("float32"))
+        np.testing.assert_allclose(
+            out.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
         )
+        # MG casts grad_weight back to the weight storage dtype.
+        self.assertEqual(w.grad.dtype, paddle.bfloat16)
 
 
 class TestRouterAccuracyCompatible(unittest.TestCase):
