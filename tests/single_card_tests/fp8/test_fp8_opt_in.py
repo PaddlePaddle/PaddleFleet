@@ -45,7 +45,13 @@ from paddlefleet.tensor_parallel.layers import (
     _fp8_clear_prequant_weight,
     _fp8_prequant_weight,
 )
+from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+# Initialize the model-parallel RNG tracker so that GPU weight initialization
+# works in single-card (non-distributed) test environments.
+if paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+    model_parallel_cuda_manual_seed(42)
 
 _HAS_GPU = (
     paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
@@ -66,28 +72,28 @@ def _calc_diff(x: paddle.Tensor, y: paddle.Tensor) -> float:
 
 
 def _fp8_config(**overrides) -> TransformerConfig:
-    base = dict(
-        num_hidden_layers=1,
-        hidden_size=512,
-        intermediate_size=512,
-        use_bias=False,
-        use_cpu_initialization=False,
-        fp8="blockwise",
-        fp8_wgrad=True,
-        full_fp8_computation=True,
-    )
+    base = {
+        "num_hidden_layers": 1,
+        "hidden_size": 512,
+        "intermediate_size": 512,
+        "use_bias": False,
+        "use_cpu_initialization": False,
+        "fp8": "blockwise",
+        "fp8_wgrad": True,
+        "full_fp8_computation": True,
+    }
     base.update(overrides)
     return TransformerConfig(**base)
 
 
 def _bf16_config(**overrides) -> TransformerConfig:
-    base = dict(
-        num_hidden_layers=1,
-        hidden_size=512,
-        intermediate_size=512,
-        use_bias=False,
-        use_cpu_initialization=False,
-    )
+    base = {
+        "num_hidden_layers": 1,
+        "hidden_size": 512,
+        "intermediate_size": 512,
+        "use_bias": False,
+        "use_cpu_initialization": False,
+    }
     base.update(overrides)
     return TransformerConfig(**base)
 

@@ -70,11 +70,14 @@ class _FP8Gemm(paddle.autograd.Function):
                 weight_fp8, weight_scale = wq_result
                 weight_fp8_bwd, weight_scale_bwd = None, None
             else:
+                # weight_quant_func returns (fp8, scale, fp8_t, scale_t)
+                # where fp8 is [N,K] (original orientation, for fp8_gemm_nt)
+                # and fp8_t is [K,N] (transposed, for dgrad backward path).
                 (
-                    weight_fp8_bwd,
-                    weight_scale_bwd,
                     weight_fp8,
                     weight_scale,
+                    weight_fp8_bwd,
+                    weight_scale_bwd,
                 ) = wq_result
         else:
             weight_fp8, weight_scale = weight

@@ -1292,6 +1292,8 @@ class TransformerLayer(nn.Layer):
     def use_fp8(self):
         if isinstance(self.mlp, MoELayer):
             return self.mlp.use_fp8()
+        else:
+            return self.config.fp8 is not None
 
 
 class HyperConnectionTransformerLayer(TransformerLayer):

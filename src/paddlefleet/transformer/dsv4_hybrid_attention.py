@@ -698,7 +698,7 @@ class DSv4HybridAttention(Attention):
 
         # Grouped output projection
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
-        if self.config.fp8 is not None:
+        if self.config.fp8 is not None and self.config.full_fp8_computation:
             core_attn_out = GroupedOutputFP8.apply(
                 core_attn_out,
                 self.linear_o_group_proj,
