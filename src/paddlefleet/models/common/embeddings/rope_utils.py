@@ -548,7 +548,7 @@ def apply_rotary_pos_emb(
         "multi_latent_attention": config.multi_latent_attention,
         "high_precision_rope": config.high_precision_rope,
         "rope_theta": config.rope_theta,
-        "time_major": config.sequence_parallel,
+        "time_major": config.sequence_parallel > 0,
         "sp_group": sp_group,
         "inverse": inverse,
         "mla_output_remove_interleaving": mla_output_remove_interleaving,

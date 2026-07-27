@@ -14,6 +14,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import paddle
@@ -123,6 +124,29 @@ def apply_fused_rope_reference(x, freqs):
     )
     rotated = rotated.astype(x.dtype)
     return paddle.cat((rotated, x[..., rot_dim:]), axis=-1)
+
+
+class TestApplyRotaryPosEmbRouter(unittest.TestCase):
+    def test_negative_sequence_parallel_is_not_time_major(self):
+        """Only positive sequence-parallel values enable time-major inputs."""
+        config = make_config(apply_rope_fusion=False, high_precision_rope=False)
+        config.sequence_parallel = -1
+        t = paddle.zeros([1, 2, 1, 4], dtype="float32")
+        freqs = paddle.zeros([1, 2, 4], dtype="float32")
+
+        with patch(
+            "paddlefleet.models.common.embeddings.rope_utils._apply_rotary_pos_emb_bshd",
+            return_value=t,
+        ) as apply_bshd:
+            apply_rotary_pos_emb(
+                t=t,
+                freqs=freqs,
+                cos=None,
+                sin=None,
+                config=config,
+            )
+
+        self.assertIs(apply_bshd.call_args.kwargs["time_major"], False)
 
 
 class TestApplyRotaryPosEmbFusedHighPrecision(unittest.TestCase):
