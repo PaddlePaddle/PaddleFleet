@@ -109,11 +109,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
-        if ctx.use_accuracy_compatible:
-            w_aligned = w.cast(paddle.bfloat16).cast(ctx.dtype)
-            return F.linear(x.cast(ctx.dtype), w_aligned)
-        else:
-            return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
+        return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
     @staticmethod
     def backward(ctx, y_grad):
@@ -132,6 +128,12 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                     x_cast, y_grad, transpose_x=True
                 ).T  # 始终先算梯度
 
+            # MG returns `grad_weight.to(weight_dtype)` and only then accumulates
+            # it into the fp32 main_grad, so the wgrad passes through the weight
+            # storage dtype first.
+            if ctx.use_accuracy_compatible:
+                w_grad = w_grad.cast(weight.dtype).cast(paddle.float32)
+
             if hasattr(weight, "main_grad"):
                 if weight.main_grad is None:
                     weight.main_grad = paddle.zeros(
@@ -149,11 +151,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
 
         if ctx.dw_p2p_overlap:
             x_cast = x.cast(ctx.dtype)
-            if ctx.use_accuracy_compatible:
-                # Match the forward's bf16-rounded effective weight for x_grad.
-                w_cast = w.cast(paddle.bfloat16).cast(ctx.dtype)
-            else:
-                w_cast = w.cast(ctx.dtype)
+            w_cast = w.cast(ctx.dtype)
 
             x_g = paddle.matmul(y_grad, w_cast.T, transpose_y=True)
             x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
@@ -174,12 +172,12 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 return x_grad, None
         else:
             if ctx.use_accuracy_compatible:
-                # Reuse the same effective weight as the forward (which rounds
-                # w through bf16 before the fp32 GEMM); using the raw fp32 w
-                # here would make x_grad inconsistent with the forward when the
-                # incoming weight is still fp32 (e.g. params_dtype=float32).
-                w_for_dx = w.cast(paddle.bfloat16).cast(ctx.dtype)
-                x_g = paddle.matmul(y_grad, w_for_dx)
+                # Mirror MG `RouterGatingLinearFunction.backward`:
+                #   grad_input  = torch.mm(grad_output, weight.to(router_dtype))
+                #   grad_weight = torch.mm(grad_output.t(), inp.to(router_dtype))
+                # i.e. two separate GEMMs (not a fused matmul_grad), then each
+                # gradient cast back to its own storage dtype.
+                x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
                 w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
                 x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
                 w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
