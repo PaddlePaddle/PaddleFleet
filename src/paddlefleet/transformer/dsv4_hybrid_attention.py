@@ -62,6 +62,7 @@ except (ImportError, RuntimeError):
     deep_gemm = None
     _DEEP_GEMM_AVAILABLE = False
 
+
 def _fleet_fp8_wo_a_gemm_enabled():
     if os.environ.get("FLEET_FP8_WO_A_GEMM", "1") in ("0", "false", "False"):
         return False
@@ -71,6 +72,8 @@ def _fleet_fp8_wo_a_gemm_enabled():
         and paddle.device.cuda.device_count() > 0
         and paddle.device.cuda.get_device_capability()[0] >= 10
     )
+
+
 FLEET_FP8_WO_A_GEMM = _fleet_fp8_wo_a_gemm_enabled()
 
 

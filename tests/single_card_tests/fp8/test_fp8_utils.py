@@ -24,14 +24,16 @@ Run with:
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import paddle
 
 from paddlefleet.fp8.quantization import get_quant_func
 from paddlefleet.fp8.utils import is_fp8_tensor
 
-_HAS_GPU = paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+_HAS_GPU = (
+    paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+)
 _REQUIRE_GPU = unittest.skipUnless(_HAS_GPU, "Requires CUDA GPU")
 _SM90_PLUS = _HAS_GPU and paddle.device.cuda.get_device_capability()[0] >= 9
 _REQUIRE_SM90 = unittest.skipUnless(_SM90_PLUS, "Requires SM90+ GPU")
@@ -135,7 +137,10 @@ class TestGetQuantFuncNonUe8m0(unittest.TestCase):
     def test_non_ue8m0_weight_quant_without_out_scale_trans(self):
         """out_scale_trans=False does NOT transpose scales."""
         _, weight_func = get_quant_func(
-            "blockwise", input_trans=True, out_scale_trans=False, pow2_scale=True
+            "blockwise",
+            input_trans=True,
+            out_scale_trans=False,
+            pow2_scale=True,
         )
         w = paddle.randn([256, 128], dtype="bfloat16")
         result = weight_func(w)
@@ -188,13 +193,13 @@ class TestMnMajor(unittest.TestCase):
 
     def test_mn_major_none(self):
         """_mn_major(None) should return None."""
-        from paddlefleet.fp8.quantization import get_quant_func
 
         # Access _mn_major indirectly by checking behavior
         # The cached path returns None as first element; if _mn_major were applied
         # to None it would crash. This is covered by cache_hit tests above.
         # Direct test: import the module and test
         import importlib
+
         import paddlefleet.fp8.quantization as qmod
 
         importlib.reload(qmod)  # ensure fresh
