@@ -45,7 +45,7 @@ sed -i '/trainer.save_model()/s/^/# /' run_pretrain.py
 export FLAGS_use_stride_compute_kernel=False
 
 python -c "
-infile = '$root_dir/PaddleFleet/paddlefleet/trainer/training_args.py'
+infile = '$root_dir/PaddleFleet/src/paddlefleet/trainer/training_args.py'
 outfile = infile + '.new'
 with open(infile) as fin, open(outfile, 'w') as fout:
     for line in fin:
@@ -55,4 +55,4 @@ with open(infile) as fin, open(outfile, 'w') as fout:
         else:
             fout.write(line)
 "
-mv $root_dir/PaddleFleet/paddlefleet/trainer/training_args.py.new $root_dir/PaddleFleet/paddlefleet/trainer/training_args.py
+mv $root_dir/PaddleFleet/src/paddlefleet/trainer/training_args.py.new $root_dir/PaddleFleet/src/paddlefleet/trainer/training_args.py

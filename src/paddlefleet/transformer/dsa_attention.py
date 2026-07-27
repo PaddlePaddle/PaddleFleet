@@ -77,7 +77,7 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
 
     Reference:
         - fast-hadamard-transform (Tri Dao): csrc/fast_hadamard_transform_cuda.cu
-        - PaddleFleet/paddlefleet/quantization/hadamard_utils.py (matmul_hadU)
+        - PaddleFleet/src/paddlefleet/quantization/hadamard_utils.py (matmul_hadU)
 
     Args:
         x: Input tensor of shape (..., dim). dim must be a power of 2.
