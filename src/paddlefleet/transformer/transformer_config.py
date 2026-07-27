@@ -1356,6 +1356,13 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
+        # Hyper-connection (mHC) validation
+        if self.use_fused_mhc:
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "use_fused_mhc requires enable_hyper_connections=True."
+                )
+
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:
