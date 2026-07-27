@@ -908,6 +908,12 @@ class MultiLatentAttention(Attention):
             valid_range = ContextParallelScatterOp.apply(
                 valid_range, 1, cp_mode
             )
+            if startend_row_indices is None:
+                startend_row_indices = paddle.full(
+                    [b, 1, kv_s, 1],
+                    fill_value=kv_s,
+                    dtype="int32",
+                )
             if startend_row_indices is not None:
                 cp_rank = get_pg_rank(self.pg_collection.cp)
                 if cp_mode == "dualchunk_allgather":
