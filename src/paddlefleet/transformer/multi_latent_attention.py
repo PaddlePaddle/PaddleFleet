@@ -912,6 +912,25 @@ class MultiLatentAttention(Attention):
             if startend_row_indices is not None:
                 cp_rank = get_pg_rank(self.pg_collection.cp)
                 if cp_mode == "dualchunk_allgather":
+                    # Match DotProductAttention's CP FlashMask contract: first
+                    # expand global [LTS] to [LTS, UTE], then localize all query
+                    # row boundaries together for this rank's dual chunks.
+                    if startend_row_indices.shape[-1] == 1:
+                        causal_end = paddle.arange(
+                            kv_s, dtype=startend_row_indices.dtype
+                        ).reshape([1, 1, kv_s, 1])
+                        causal_end = paddle.expand_as(
+                            causal_end, startend_row_indices
+                        )
+                        startend_row_indices = paddle.concat(
+                            [startend_row_indices, causal_end], axis=-1
+                        )
+                    elif startend_row_indices.shape[-1] != 2:
+                        raise ValueError(
+                            "HySparse CP expects one or two FlashMask boundaries, "
+                            f"but got {startend_row_indices.shape[-1]}"
+                        )
+
                     seq_blocksize = q_s // 2
                     startend_row_indices = preprocess_index_dual_chunks(
                         startend_row_indices,
@@ -922,47 +941,6 @@ class MultiLatentAttention(Attention):
                         seq_blocksize=seq_blocksize,
                         max_seqlen_q=seq_blocksize,
                     )
-
-                    # With local dual-chunk Q and global K/V, FA's built-in
-                    # causal mask uses the wrong (bottom-right aligned) query
-                    # positions. Encode the global causal boundary as FlashMask's
-                    # upper-end vector and run the kernel with causal=False.
-                    causal_end = paddle.arange(kv_s, dtype="int32").reshape(
-                        [1, 1, kv_s, 1]
-                    )
-                    causal_end = preprocess_index_dual_chunks(
-                        causal_end,
-                        chunk_id_first=cp_rank,
-                        chunk_id_second=2 * get_pg_size(self.pg_collection.cp)
-                        - cp_rank
-                        - 1,
-                        seq_blocksize=seq_blocksize,
-                        max_seqlen_q=seq_blocksize,
-                    )
-                    causal_end = paddle.expand_as(
-                        causal_end, startend_row_indices[..., :1]
-                    )
-                    if startend_row_indices.shape[-1] == 1:
-                        # Non-causal two-vector format: [LTS, UTE].
-                        startend_row_indices = paddle.concat(
-                            [startend_row_indices, causal_end], axis=-1
-                        )
-                    elif startend_row_indices.shape[-1] == 2:
-                        # Causal two-vector format [LTS, LTE] becomes the
-                        # non-causal four-vector format [LTS, LTE, UTS, UTE].
-                        startend_row_indices = paddle.concat(
-                            [
-                                startend_row_indices,
-                                paddle.zeros_like(causal_end),
-                                causal_end,
-                            ],
-                            axis=-1,
-                        )
-                    else:
-                        raise ValueError(
-                            "HySparse CP expects one or two FlashMask boundaries, "
-                            f"but got {startend_row_indices.shape[-1]}"
-                        )
                 elif cp_mode == "contiguous_allgather":
                     startend_row_indices = preprocess_index(
                         startend_row_indices,
