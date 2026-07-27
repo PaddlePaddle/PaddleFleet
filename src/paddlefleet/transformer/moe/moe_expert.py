@@ -638,6 +638,18 @@ class SonicMoEExpert(GroupedMLPExpert):
     def _convert_layout(
         self, target_layout, weight1_converter, weight2_converter
     ):
+        # Shared MTP layers can have separate expert instances over the same
+        # parameters, so the instance-local layout flag may be stale. Infer the
+        # layout from the paired weight dimensions instead of the local config.
+        # In SONIC_LAYOUT: w1 [E, 2I, H], w2 [E, H, I]
+        # In GROUPED_LAYOUT: w1 [E, H, 2I], w2 [E, I, H]
+        w1_shape = self.weight1.shape
+        w2_shape = self.weight2.shape
+        if w1_shape[1] == 2 * w2_shape[2] and w1_shape[2] == w2_shape[1]:
+            self._weights_layout = self._SONIC_LAYOUT
+        elif w1_shape[1] == w2_shape[2] and w1_shape[2] == 2 * w2_shape[1]:
+            self._weights_layout = self._GROUPED_LAYOUT
+
         if self._weights_layout == target_layout:
             return
         with paddle.no_grad():
