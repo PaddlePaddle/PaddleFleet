@@ -110,7 +110,7 @@ def weighted_swiglu_back(g, y, weights):
 
 
 @jit_fuser
-def clamped_swiglu(y, clamp_value):
+def clamped_swiglu(y, clamp_value, high_precision=False):
     """SwiGLU with clamped inputs for numerical stability.
 
     Clamps y1 (gate) to (-inf, clamp_value] and y2 (value) to
@@ -129,11 +129,14 @@ def clamped_swiglu(y, clamp_value):
     y_1 = y_1.clip(max=clamp_value)
     y_2 = y_2.clip(min=-clamp_value, max=clamp_value)
     res = F.silu(y_1) * y_2
-    return res.cast(dtype)
+    if high_precision:
+        return res
+    else:
+        return res.cast(dtype)
 
 
 @jit_fuser
-def clamped_swiglu_back(g, y, clamp_value):
+def clamped_swiglu_back(g, y, clamp_value, high_precision=False):
     """Backward pass for clamped_swiglu.
 
     Gradient is zeroed out where inputs were clamped.
@@ -152,6 +155,8 @@ def clamped_swiglu_back(g, y, clamp_value):
     """
     dtype = y.dtype
     y_fp32 = y.cast(paddle.float32)
+    if high_precision:
+        g = g.cast(paddle.float32)
     y_1, y_2 = paddle.chunk(y_fp32, 2, axis=-1)
     y_1_clamped = y_1.clip(max=clamp_value)
     y_2_clamped = y_2.clip(min=-clamp_value, max=clamp_value)
@@ -167,7 +172,7 @@ def clamped_swiglu_back(g, y, clamp_value):
 
 
 @jit_fuser
-def clamped_bias_swiglu(y, bias, clamp_value):
+def clamped_bias_swiglu(y, bias, clamp_value, high_precision=False):
     """Clamped SwiGLU with bias addition.
 
     Adds bias to the input tensor, then applies clamped SwiGLU activation.
@@ -183,11 +188,11 @@ def clamped_bias_swiglu(y, bias, clamp_value):
         paddle.Tensor: clamped_swiglu(y + bias), same dtype as y.
     """
     y = y + bias
-    return clamped_swiglu(y, clamp_value)
+    return clamped_swiglu(y, clamp_value, high_precision)
 
 
 @jit_fuser
-def clamped_bias_swiglu_back(g, y, bias, clamp_value):
+def clamped_bias_swiglu_back(g, y, bias, clamp_value, high_precision=False):
     """Backward pass for clamped_bias_swiglu.
 
     Adds bias to the input tensor and delegates to clamped_swiglu_back
@@ -203,7 +208,7 @@ def clamped_bias_swiglu_back(g, y, bias, clamp_value):
         paddle.Tensor: Gradient w.r.t. (y + bias), same dtype as y.
     """
     y = y + bias
-    return clamped_swiglu_back(g, y, clamp_value)
+    return clamped_swiglu_back(g, y, clamp_value, high_precision)
 
 
 @jit_fuser
@@ -261,7 +266,13 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
     @staticmethod
     @nvtx_decorator()
     def forward(
-        ctx, input, bias, fp8_input_store, cpu_offload_input, clamp_value=None
+        ctx,
+        input,
+        bias,
+        fp8_input_store,
+        cpu_offload_input,
+        clamp_value=None,
+        high_precision=False,
     ):
         """Forward pass of biased SwiGLU activation.
 
@@ -288,8 +299,9 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
         ctx.clamp_value = clamp_value
+        ctx.high_precision = high_precision
         if clamp_value is not None and clamp_value > 0:
-            return clamped_bias_swiglu(input, bias, clamp_value)
+            return clamped_bias_swiglu(input, bias, clamp_value, high_precision)
         return bias_swiglu(input, bias)
 
     @staticmethod
@@ -323,7 +335,12 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
     @staticmethod
     @nvtx_decorator()
     def forward(
-        ctx, input, fp8_input_store, cpu_offload_input, clamp_value=None
+        ctx,
+        input,
+        fp8_input_store,
+        cpu_offload_input,
+        clamp_value=None,
+        high_precision=False,
     ):
         """Forward pass of SwiGLU activation.
 
@@ -348,8 +365,9 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
         ctx.clamp_value = clamp_value
+        ctx.high_precision = high_precision
         if clamp_value is not None and clamp_value > 0:
-            return clamped_swiglu(input, clamp_value)
+            return clamped_swiglu(input, clamp_value, high_precision)
         return swiglu(input)
 
     @staticmethod
@@ -365,9 +383,12 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
             paddle.Tensor: Gradient with respect to the input tensor.
         """
         input = ctx.saved_tensor()[0]
+        high_precision = ctx.high_precision
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         if ctx.clamp_value is not None and ctx.clamp_value > 0:
-            tmp = clamped_swiglu_back(grad_output, input, ctx.clamp_value)
+            tmp = clamped_swiglu_back(
+                grad_output, input, ctx.clamp_value, high_precision
+            )
         else:
             tmp = swiglu_back(grad_output, input)
         return tmp
@@ -409,6 +430,7 @@ def bias_swiglu_impl(
     fp8_input_store=False,
     cpu_offload_input=False,
     clamp_value=None,
+    high_precision=False,
 ):
     """Implementation of biased SwiGLU that handles different input shapes.
 
@@ -438,11 +460,20 @@ def bias_swiglu_impl(
     input = input.view(-1, ori_shape[-1])
     if bias is not None:
         output = BiasSwiGLUFunction.apply(
-            input, bias, fp8_input_store, cpu_offload_input, clamp_value
+            input,
+            bias,
+            fp8_input_store,
+            cpu_offload_input,
+            clamp_value,
+            high_precision,
         )
     else:
         output = SwiGLUFunction.apply(
-            input, fp8_input_store, cpu_offload_input, clamp_value
+            input,
+            fp8_input_store,
+            cpu_offload_input,
+            clamp_value,
+            high_precision,
         )
 
     return (

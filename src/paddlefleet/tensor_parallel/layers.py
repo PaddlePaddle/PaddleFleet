@@ -741,6 +741,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         use_pow2_scale=False,
         use_ue8m0=False,
         save_original_input=False,
+        input_in_high_precision=False,
     ):
         """Forward."""
         if gradient_accumulation_fusion and hasattr(weight, "main_grad"):
@@ -797,7 +798,14 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         save_list = []
         if not skip_bf16_input_save:
-            save_list.append(input._new_shared_tensor())
+            input_for_bw = input
+            if input_in_high_precision:
+                # Cast fp32 input back to weight dtype (bf16) for backward pass,
+                # so that grad_input stays in bf16.
+                # Only applies to shared_expert's down_proj when both
+                # shared_expert_fp8=True and silu_quant_high_precision=True.
+                input_for_bw = input.cast(weight.dtype)
+            save_list.append(input_for_bw._new_shared_tensor())
         save_list.append(weight)
         if fp8 and fp8_meta is not None:
             (
@@ -1113,6 +1121,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     use_pow2_scale: bool = False,
     use_ue8m0: bool = False,
     save_original_input: bool = False,
+    input_in_high_precision: bool = False,
 ) -> paddle.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -1206,6 +1215,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         use_pow2_scale,
         use_ue8m0,
         save_original_input,
+        input_in_high_precision,
     ]
 
     if not linear_with_grad_accumulation_and_async_allreduce.warned:
@@ -2354,6 +2364,9 @@ class RowParallelLinear(paddle.nn.Layer):
             use_pow2_scale=self.use_pow2_scale,
             use_ue8m0=self.use_ue8m0,
             save_original_input=self.save_original_input,
+            input_in_high_precision=getattr(
+                self, "input_in_high_precision", False
+            ),
         )
 
         # All-reduce across all the partitions.

@@ -307,6 +307,9 @@ class TransformerConfig(ModelParallelConfig):
     """Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). Only
     used when gated_linear_unit is True"""
 
+    silu_quant_high_precision_in_shared_expert: bool = False
+    """If True, use high precision computation for SiLU quantization in share expert"""
+
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
 
@@ -1192,6 +1195,11 @@ class TransformerConfig(ModelParallelConfig):
                 assert self.variable_seq_lengths, (
                     "enable_mtp_magic_send with vpp requires variable_seq_lengths=True"
                 )
+
+        if self.silu_quant_high_precision_in_shared_expert:
+            assert self.fp8, (
+                "silu_quant_high_precision_in_shared_expert requires fp8 to be True."
+            )
 
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size

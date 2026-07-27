@@ -19,6 +19,7 @@ import paddle
 import paddle.nn.functional as F
 
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
+from paddlefleet.transformer.moe.fp8_utils import quant_blockwize
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -64,6 +65,18 @@ class StandardMLPSharedExpert(MLP):
             config.init_method(self.gate_weight)
         else:
             self.gate_weight = None
+
+        if self.config.silu_quant_high_precision_in_shared_expert:
+            # SiLU outputs fp32 for higher precision; configure down_proj to
+            # accept fp32 input and quantize it to fp8 before matmul.
+            self.silu_return_high_precision = True
+            self.down_proj.inp_quant_func = lambda x: quant_blockwize(
+                x,
+                quant_method="1x128",
+                quant_dtype="fp8",
+                using_ue8m0_scale=True,
+            )
+            self.down_proj.input_in_high_precision = True
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         output, output_bias = super().forward(hidden_states)

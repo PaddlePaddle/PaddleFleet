@@ -273,6 +273,9 @@ class MLP(FleetLayer):
                         ),
                         cpu_offload_input=False,
                         clamp_value=self.config.activation_func_clamp_value,
+                        high_precision=getattr(
+                            self, "silu_return_high_precision", False
+                        ),
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")
