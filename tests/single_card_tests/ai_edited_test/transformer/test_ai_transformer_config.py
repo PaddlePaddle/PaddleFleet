@@ -343,7 +343,7 @@ class TestTransformerConfigEdgeCases(unittest.TestCase):
         cfg = _make_config()
         self.assertEqual(cfg.num_nextn_predict_layers, 0)
         self.assertFalse(cfg.train_mtp_only)
-        self.assertEqual(cfg.mtp_loss_scaling_factor, 0.3)
+        self.assertEqual(cfg.mtp_loss_scaling_factor, 0.1)
 
     def test_dsa_config_defaults(self):
         cfg = _make_config()
