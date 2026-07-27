@@ -924,9 +924,9 @@ class MultiLatentAttention(Attention):
                         startend_row_indices = paddle.concat(
                             [startend_row_indices, causal_end], axis=-1
                         )
-                    elif startend_row_indices.shape[-1] != 2:
+                    else:
                         raise ValueError(
-                            "HySparse CP expects one or two FlashMask boundaries, "
+                            "HySparse CP expects one FlashMask boundaries, "
                             f"but got {startend_row_indices.shape[-1]}"
                         )
 
