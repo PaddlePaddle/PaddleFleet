@@ -32,7 +32,6 @@ from paddle.distributed.fleet.meta_parallel import (
 from paddle.distributed.fleet.utils import recompute
 from paddlefleet_ops import is_deep_ep_available
 
-from paddlefleet.context_parallel_utils import ContextParallelAllGatherOp
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
@@ -214,39 +213,6 @@ class TransformerLayer(nn.Layer):
             )
             print(
                 f"[MD5 Probe] Rank={rank} Layer={layer_idx} {name} MD5={md5} shape={list(tensor.shape)}",
-                flush=True,
-            )
-
-    def _log_output_md5(self, output):
-        if os.environ.get("HYSPARSE_CP_DEBUG_OUTPUT_MD5", "0") != "1":
-            return
-        if TransformerLayer._skip_mtp_probes:
-            return
-
-        cp_size = get_context_parallel_world_size()
-        global_output = output
-        cp_rank = 0
-        if cp_size > 1:
-            cp_group = self.pg_collection.cp
-            cp_rank = cp_group.rank
-            cp_mode = self.config.cp_balance_mode
-            global_output = ContextParallelAllGatherOp.apply(
-                output.detach(), 1, cp_mode
-            )
-
-        if cp_rank == 0:
-            md5 = hashlib.md5(
-                global_output.cast("float32").numpy().tobytes()
-            ).hexdigest()
-            rank = (
-                paddle.distributed.get_rank()
-                if paddle.distributed.is_initialized()
-                else 0
-            )
-            print(
-                f"[HySparse Output MD5] Rank={rank} CP={cp_size} "
-                f"Layer={self.layer_number} MD5={md5} "
-                f"shape={list(global_output.shape)}",
                 flush=True,
             )
 
@@ -1184,13 +1150,7 @@ class TransformerLayer(nn.Layer):
             self.layer_number,
         )
 
-        if os.environ.get("HYSPARSE_CP_DEBUG_SKIP_MLP", "0") == "1":
-            print("[ghz] skip mlp")
-            mlp_output_with_bias = (
-                paddle.zeros_like(post_attention_layernorm_output),
-                None,
-            )
-        elif self.recompute_mlp:
+        if self.recompute_mlp:
             _mlp_input_ids = (
                 input_ids if isinstance(self.mlp, MoELayer) else None
             )
@@ -1863,7 +1823,6 @@ class HySparseTransformerLayer(TransformerLayer):
             #     origin_input_ids=origin_input_ids,
             # )
         self._log_md5(output, "layer_output", self.layer_number)
-        self._log_output_md5(output)
 
         if (not self.self_attn.is_swa) and shared_kv:
             shared_key, shared_block_indices = shared_kv

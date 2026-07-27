@@ -899,8 +899,6 @@ class MultiLatentAttention(Attention):
         valid_range = build_hysparse_valid_range(
             attn_mask_startend_row_indices, kv_s, b
         )
-        global_valid_range = valid_range
-        global_startend_row_indices = attn_mask_startend_row_indices
         startend_row_indices = attn_mask_startend_row_indices
         cp_size = get_pg_size(self.pg_collection.cp)
         if cp_size > 1:
@@ -976,63 +974,6 @@ class MultiLatentAttention(Attention):
                 startend_row_indices=startend_row_indices,
             )
 
-            if (
-                cp_size > 1
-                and os.environ.get("HYSPARSE_CP_DEBUG_REFERENCE", "0") == "1"
-            ):
-                with paddle.no_grad():
-                    global_query = ContextParallelAllGatherOp.apply(
-                        query.detach(), 1, cp_mode
-                    )
-                    reference_out, _, _ = block_score_fa4_attn_fwd(
-                        global_query,
-                        key.detach(),
-                        value.detach(),
-                        valid_range=global_valid_range,
-                        sm_scale=sm_scale,
-                        block_B=block_B,
-                        causal=True,
-                        startend_row_indices=global_startend_row_indices,
-                    )
-                    global_out = ContextParallelAllGatherOp.apply(
-                        out.detach(), 1, cp_mode
-                    ).contiguous()
-                    out_fp32 = global_out.cast("float32").contiguous()
-                    reference_fp32 = reference_out.cast("float32").contiguous()
-                    out_md5 = out_fp32._md5sum()
-                    reference_md5 = reference_fp32._md5sum()
-                    abs_diff = paddle.abs(out_fp32 - reference_fp32)
-                    rel_diff = abs_diff / paddle.maximum(
-                        paddle.abs(reference_fp32),
-                        paddle.full([], 1e-6, dtype="float32"),
-                    )
-                    max_abs = float(paddle.max(abs_diff).item())
-                    mean_abs = float(paddle.mean(abs_diff).item())
-                    max_rel = float(paddle.max(rel_diff).item())
-                    is_close = bool(
-                        paddle.allclose(
-                            out_fp32,
-                            reference_fp32,
-                            rtol=1e-3,
-                            atol=1e-3,
-                        ).item()
-                    )
-                    cp_rank = get_pg_rank(self.pg_collection.cp)
-                    print(
-                        "[HySparse CP reference] "
-                        f"cp_rank={cp_rank}/{cp_size} "
-                        f"local_q_shape={list(query.shape)} "
-                        f"global_q_shape={list(global_query.shape)} "
-                        f"local_out_shape={list(out.shape)} "
-                        f"global_out_shape={list(global_out.shape)} "
-                        f"cp_global_out_md5={out_md5} "
-                        f"reference_out_md5={reference_md5} "
-                        f"max_abs={max_abs:.8e} "
-                        f"mean_abs={mean_abs:.8e} "
-                        f"max_rel={max_rel:.8e} "
-                        f"allclose={is_close}",
-                        flush=True,
-                    )
         block_indices = select_topk_blocks(
             block_logit,
             lse,
