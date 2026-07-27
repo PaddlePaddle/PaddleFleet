@@ -689,8 +689,10 @@ class MultiLatentAttention(Attention):
             q_absorbed, wv_b = None, None
 
         if self.config.enable_hy_sparse_attention and shared_kv is not None:
-            if get_pg_size(self.pg_collection.cp) > 1:
-                cp_mode = getattr(self.config, "cp_balance_mode", "dualchunk_allgather")
+            if get_context_parallel_world_size() > 1:
+                cp_mode = getattr(
+                    self.config, "cp_balance_mode", "dualchunk_allgather"
+                )
                 key = ContextParallelAllGatherOp.apply(key, 1, cp_mode)
                 value = ContextParallelAllGatherOp.apply(value, 1, cp_mode)
 
@@ -880,7 +882,7 @@ class MultiLatentAttention(Attention):
 
         use_tl = getattr(self.config, "hy_sparse_full_attn_use_tilelang", False)
         # use_tl = getattr(self.config, "hy_sparse_full_attn_use_tilelang", False) or (
-            # get_context_parallel_world_size() > 1
+        # get_context_parallel_world_size() > 1
         # )
         if use_tl:
             from paddlefleet.tilelang_ops.hysparse.block_score_mha import (
@@ -903,9 +905,11 @@ class MultiLatentAttention(Attention):
         global_valid_range = valid_range
         global_startend_row_indices = attn_mask_startend_row_indices
         startend_row_indices = attn_mask_startend_row_indices
-        cp_size = get_pg_size(self.pg_collection.cp)
+        cp_size = get_context_parallel_world_size()
         if cp_size > 1:
-            cp_mode = getattr(self.config, "cp_balance_mode", "dualchunk_allgather")
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
             valid_range = ContextParallelScatterOp.apply(
                 valid_range, 1, cp_mode
             )
@@ -935,9 +939,7 @@ class MultiLatentAttention(Attention):
                     startend_row_indices = preprocess_index_dual_chunks(
                         startend_row_indices,
                         chunk_id_first=cp_rank,
-                        chunk_id_second=2 * get_pg_size(self.pg_collection.cp)
-                        - cp_rank
-                        - 1,
+                        chunk_id_second=2 * cp_size - cp_rank - 1,
                         seq_blocksize=seq_blocksize,
                         max_seqlen_q=seq_blocksize,
                     )
@@ -1911,7 +1913,9 @@ class MQASelfAttention(MLASelfAttention):
             value = value.contiguous()
 
         if get_context_parallel_world_size() > 1:
-            cp_mode = getattr(self.config, "cp_balance_mode", "dualchunk_allgather")
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
             key = ContextParallelAllGatherOp.apply(key, 1, cp_mode)
             value = ContextParallelAllGatherOp.apply(value, 1, cp_mode)
 
@@ -1944,7 +1948,9 @@ class MQASelfAttention(MLASelfAttention):
             attn_mask_startend_row_indices, kv_s, b
         )
         if get_context_parallel_world_size() > 1:
-            cp_mode = getattr(self.config, "cp_balance_mode", "dualchunk_allgather")
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
             window_valid_range = ContextParallelScatterOp.apply(
                 window_valid_range, 1, cp_mode
             )
@@ -2004,8 +2010,12 @@ class MQASelfAttention(MLASelfAttention):
 
         shared_key, shared_block_indices = shared_kv
         if get_context_parallel_world_size() > 1:
-            cp_mode = getattr(self.config, "cp_balance_mode", "dualchunk_allgather")
-            shared_key = ContextParallelAllGatherOp.apply(shared_key, 1, cp_mode)
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
+            shared_key = ContextParallelAllGatherOp.apply(
+                shared_key, 1, cp_mode
+            )
 
         # Shared compressed KV latent from the full layer, with
         # Dk=kv_lora_rank+qk_rope_head_dim. Squeeze to [B, S_kv, D]; its leading
@@ -2144,7 +2154,9 @@ class MQASelfAttention(MLASelfAttention):
             position_ids=None if self.training else position_ids,
         )
         if get_context_parallel_world_size() > 1:
-            cp_mode = getattr(self.config, "cp_balance_mode", "dualchunk_allgather")
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
             rotary_pos_emb = ContextParallelScatterOp.apply(
                 rotary_pos_emb, 1, cp_mode
             )

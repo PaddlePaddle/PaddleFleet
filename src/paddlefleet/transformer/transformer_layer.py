@@ -1151,7 +1151,7 @@ class TransformerLayer(nn.Layer):
         )
 
         if os.environ.get("HYSPARSE_CP_DEBUG_SKIP_MLP", "0") == "1":
-            print(f"[ghz] skip mlp")
+            print("[ghz] skip mlp")
             mlp_output_with_bias = (
                 paddle.zeros_like(post_attention_layernorm_output),
                 None,
