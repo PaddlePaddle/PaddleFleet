@@ -900,8 +900,11 @@ class MultiLatentAttention(Attention):
         valid_range = build_hysparse_valid_range(
             attn_mask_startend_row_indices, kv_s, b
         )
+        global_valid_range = valid_range
+        global_startend_row_indices = attn_mask_startend_row_indices
         startend_row_indices = attn_mask_startend_row_indices
-        if get_pg_size(self.pg_collection.cp) > 1:
+        cp_size = get_pg_size(self.pg_collection.cp)
+        if cp_size > 1:
             cp_mode = getattr(self.config, "cp_balance_mode", "dualchunk_allgather")
             valid_range = ContextParallelScatterOp.apply(
                 valid_range, 1, cp_mode
@@ -919,6 +922,47 @@ class MultiLatentAttention(Attention):
                         seq_blocksize=seq_blocksize,
                         max_seqlen_q=seq_blocksize,
                     )
+
+                    # With local dual-chunk Q and global K/V, FA's built-in
+                    # causal mask uses the wrong (bottom-right aligned) query
+                    # positions. Encode the global causal boundary as FlashMask's
+                    # upper-end vector and run the kernel with causal=False.
+                    causal_end = paddle.arange(kv_s, dtype="int32").reshape(
+                        [1, 1, kv_s, 1]
+                    )
+                    causal_end = preprocess_index_dual_chunks(
+                        causal_end,
+                        chunk_id_first=cp_rank,
+                        chunk_id_second=2 * get_pg_size(self.pg_collection.cp)
+                        - cp_rank
+                        - 1,
+                        seq_blocksize=seq_blocksize,
+                        max_seqlen_q=seq_blocksize,
+                    )
+                    causal_end = paddle.expand_as(
+                        causal_end, startend_row_indices[..., :1]
+                    )
+                    if startend_row_indices.shape[-1] == 1:
+                        # Non-causal two-vector format: [LTS, UTE].
+                        startend_row_indices = paddle.concat(
+                            [startend_row_indices, causal_end], axis=-1
+                        )
+                    elif startend_row_indices.shape[-1] == 2:
+                        # Causal two-vector format [LTS, LTE] becomes the
+                        # non-causal four-vector format [LTS, LTE, UTS, UTE].
+                        startend_row_indices = paddle.concat(
+                            [
+                                startend_row_indices,
+                                paddle.zeros_like(causal_end),
+                                causal_end,
+                            ],
+                            axis=-1,
+                        )
+                    else:
+                        raise ValueError(
+                            "HySparse CP expects one or two FlashMask boundaries, "
+                            f"but got {startend_row_indices.shape[-1]}"
+                        )
                 elif cp_mode == "contiguous_allgather":
                     startend_row_indices = preprocess_index(
                         startend_row_indices,
@@ -941,7 +985,7 @@ class MultiLatentAttention(Attention):
                 valid_range=valid_range,
                 sm_scale=sm_scale,
                 block_B=block_B,
-                causal=True,
+                causal=cp_size == 1,
             )
         else:
             out, lse, block_logit = block_score_fa4_attn_fwd(
@@ -951,9 +995,67 @@ class MultiLatentAttention(Attention):
                 valid_range=valid_range,
                 sm_scale=sm_scale,
                 block_B=block_B,
-                causal=True,
+                causal=cp_size == 1,
                 startend_row_indices=startend_row_indices,
             )
+
+            if (
+                cp_size > 1
+                and os.environ.get("HYSPARSE_CP_DEBUG_REFERENCE", "0") == "1"
+            ):
+                with paddle.no_grad():
+                    global_query = ContextParallelAllGatherOp.apply(
+                        query.detach(), 1, cp_mode
+                    )
+                    reference_out, _, _ = block_score_fa4_attn_fwd(
+                        global_query,
+                        key.detach(),
+                        value.detach(),
+                        valid_range=global_valid_range,
+                        sm_scale=sm_scale,
+                        block_B=block_B,
+                        causal=True,
+                        startend_row_indices=global_startend_row_indices,
+                    )
+                    global_out = ContextParallelAllGatherOp.apply(
+                        out.detach(), 1, cp_mode
+                    ).contiguous()
+                    out_fp32 = global_out.cast("float32").contiguous()
+                    reference_fp32 = reference_out.cast("float32").contiguous()
+                    out_md5 = out_fp32._md5sum()
+                    reference_md5 = reference_fp32._md5sum()
+                    abs_diff = paddle.abs(out_fp32 - reference_fp32)
+                    rel_diff = abs_diff / paddle.maximum(
+                        paddle.abs(reference_fp32),
+                        paddle.full([], 1e-6, dtype="float32"),
+                    )
+                    max_abs = float(paddle.max(abs_diff).item())
+                    mean_abs = float(paddle.mean(abs_diff).item())
+                    max_rel = float(paddle.max(rel_diff).item())
+                    is_close = bool(
+                        paddle.allclose(
+                            out_fp32,
+                            reference_fp32,
+                            rtol=1e-3,
+                            atol=1e-3,
+                        ).item()
+                    )
+                    cp_rank = get_pg_rank(self.pg_collection.cp)
+                    print(
+                        "[HySparse CP reference] "
+                        f"cp_rank={cp_rank}/{cp_size} "
+                        f"local_q_shape={list(query.shape)} "
+                        f"global_q_shape={list(global_query.shape)} "
+                        f"local_out_shape={list(out.shape)} "
+                        f"global_out_shape={list(global_out.shape)} "
+                        f"cp_global_out_md5={out_md5} "
+                        f"reference_out_md5={reference_md5} "
+                        f"max_abs={max_abs:.8e} "
+                        f"mean_abs={mean_abs:.8e} "
+                        f"max_rel={max_rel:.8e} "
+                        f"allclose={is_close}",
+                        flush=True,
+                    )
         block_indices = select_topk_blocks(
             block_logit,
             lse,
@@ -1787,7 +1889,6 @@ class MQASelfAttention(MLASelfAttention):
         assert rotary_pos_cos is None and rotary_pos_sin is None, (
             "MQA does not support Flash Decoding"
         )
-        print(f"[ghz] {get_context_parallel_world_size()=}")
         if get_pg_size(self.pg_collection.tp) != 1:
             raise ValueError("MQA does not support tensor parallel.")
 

@@ -1150,7 +1150,13 @@ class TransformerLayer(nn.Layer):
             self.layer_number,
         )
 
-        if self.recompute_mlp:
+        if os.environ.get("HYSPARSE_CP_DEBUG_SKIP_MLP", "0") == "1":
+            print(f"[ghz] skip mlp")
+            mlp_output_with_bias = (
+                paddle.zeros_like(post_attention_layernorm_output),
+                None,
+            )
+        elif self.recompute_mlp:
             _mlp_input_ids = (
                 input_ids if isinstance(self.mlp, MoELayer) else None
             )
