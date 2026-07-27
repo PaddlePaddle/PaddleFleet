@@ -919,6 +919,101 @@ class TestReturnLogProbsNoCache(unittest.TestCase):
         self.assertAlmostEqual(log_probs[0][0], expected_lp, places=4)
 
 
+class TestNoCacheEosListBranch(unittest.TestCase):
+    """Cover the `isinstance(eos_token_id, list)` branch in _generate_no_cache."""
+
+    def _make_generator(self, token_sequence, batch_size=1, vocab_size=100):
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        self._call_idx = 0
+        seq = token_sequence
+        bsz = batch_size
+
+        def fake_forward(inputs):
+            cur_len = inputs["input_ids"].shape[1]
+            logits = paddle.zeros([bsz, cur_len, vocab_size], dtype="float32")
+            tok_id = seq[min(self._call_idx, len(seq) - 1)]
+            logits[:, -1, tok_id] = 10.0
+            self._call_idx += 1
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    def test_eos_list_single_token_stops(self):
+        """no_cache: eos_token_id=[[3],[7]] should stop on token 7."""
+        gen = self._make_generator([5, 5, 7, 5, 5])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=10, eos_token_id=[[3], [7]], no_cache=True
+        )
+        generated = out[0, 2:].tolist()
+        self.assertEqual(generated, [5, 5, 7])
+
+    def test_eos_list_flat_int_stops(self):
+        """no_cache: eos_token_id=[3, 7] (flat ints) should stop on token 3."""
+        gen = self._make_generator([5, 3, 9, 9])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=10, eos_token_id=[3, 7], no_cache=True
+        )
+        generated = out[0, 2:].tolist()
+        self.assertEqual(generated, [5, 3])
+
+    def test_eos_list_multi_token_no_early_stop(self):
+        """no_cache: multi-token stop seq [[10,20]] should NOT trigger early stop."""
+        gen = self._make_generator([10, 5, 5, 5, 5])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=5, eos_token_id=[[10, 20]], no_cache=True
+        )
+        generated = out[0, 2:].tolist()
+        self.assertEqual(len(generated), 5)
+
+    def test_eos_list_batch_all_done(self):
+        """no_cache: both batch elements hit eos from list → early stop."""
+        gen = self._make_generator([5, 7, 9, 9], batch_size=2)
+        input_ids = paddle.to_tensor([[1, 2], [3, 4]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=10, eos_token_id=[[7]], no_cache=True
+        )
+        # Both hit token 7 at step 2 → generated 2 tokens: [5, 7]
+        generated = out[0, 2:].tolist()
+        self.assertEqual(generated, [5, 7])
+
+    def test_eos_list_with_log_probs(self):
+        """no_cache: list eos + return_log_probs works together."""
+        gen = self._make_generator([5, 5, 3, 9, 9])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        generated, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=10,
+            eos_token_id=[[3], [7]],
+            no_cache=True,
+            return_log_probs=True,
+        )
+        num_new = generated.shape[1] - input_ids.shape[1]
+        self.assertEqual(num_new, 3)  # 5, 5, 3(eos)
+        self.assertEqual(len(log_probs[0]), 3)
+
+
 if __name__ == "__main__":
     print("Running greedy generator unit tests...")
     unittest.main(verbosity=2)

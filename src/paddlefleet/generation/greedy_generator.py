@@ -348,9 +348,12 @@ class GreedyGenerator:
                     .unsqueeze(0)
                     .expand([bsz, cur_len])
                 )
-                prefill_startend = paddle.full(
-                    [bsz, 1, cur_len, 1], cur_len, dtype="int32"
-                )
+                if self.cache.window_size and any(self.cache.swa_layers):
+                    prefill_startend = paddle.full(
+                        [bsz, 1, cur_len, 1], cur_len, dtype="int32"
+                    )
+                else:
+                    prefill_startend = None
                 logits = self.model(
                     {
                         "input_ids": generated,
@@ -371,10 +374,11 @@ class GreedyGenerator:
                         last_logits.cast("float32"), axis=-1
                     )  # [B, vocab]
                     for b in range(bsz):
-                        tok_id = int(next_tok[b, 0].item())
-                        log_probs_per_batch[b].append(
-                            float(step_log_probs[b, tok_id].item())
-                        )
+                        if not bool(done[b, 0].item()):
+                            tok_id = int(next_tok[b, 0].item())
+                            log_probs_per_batch[b].append(
+                                float(step_log_probs[b, tok_id].item())
+                            )
                 generated = paddle.concat([generated, next_tok], axis=1)
                 if eos_token_id is not None:
                     if isinstance(eos_token_id, list):
