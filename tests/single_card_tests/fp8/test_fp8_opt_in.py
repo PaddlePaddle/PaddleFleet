@@ -59,6 +59,12 @@ _HAS_GPU = (
 _REQUIRE_GPU = unittest.skipUnless(
     _HAS_GPU, "FP8 blockwise kernels require a CUDA device"
 )
+# FP8 forward/backward with deep_gemm requires SM100+ (Blackwell).
+# On SM90 (H20/H100) the wgrad path hits "c.has_value() and d.scalar_type() == kFloat".
+_SM100_PLUS = _HAS_GPU and paddle.device.cuda.get_device_capability()[0] >= 10
+_REQUIRE_SM100 = unittest.skipUnless(
+    _SM100_PLUS, "FP8 Linear forward/backward requires SM100+ (Blackwell) GPU"
+)
 
 
 def _calc_diff(x: paddle.Tensor, y: paddle.Tensor) -> float:
@@ -259,7 +265,7 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
             _calc_diff(fp8_layer.weight.grad, bf16_layer.weight.grad),
         )
 
-    @_REQUIRE_GPU
+    @_REQUIRE_SM100
     def test_linear_fp8_matches_bf16_within_tol(self):
         fp8_cfg = _fp8_config()
         bf16_cfg = _bf16_config()
@@ -284,7 +290,7 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
             w_grad_diff, 0.001, f"w_grad diff too large: {w_grad_diff}"
         )
 
-    @_REQUIRE_GPU
+    @_REQUIRE_SM100
     def test_column_parallel_linear_fp8_matches_bf16(self):
         fp8_cfg = _fp8_config()
         bf16_cfg = _bf16_config()
@@ -319,7 +325,7 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
             w_grad_diff, 0.001, f"w_grad diff too large: {w_grad_diff}"
         )
 
-    @_REQUIRE_GPU
+    @_REQUIRE_SM100
     def test_save_original_input_true_keeps_output_equivalent(self):
         """Toggling ``save_original_input`` changes the wgrad path but
         forward output must stay identical."""
@@ -357,8 +363,68 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
         )
         self.assertLess(w_grad_diff, 0.05)
 
+    @_REQUIRE_GPU
+    def test_linear_fp8_no_ue8m0_matches_bf16(self):
+        """FP8 Linear with use_ue8m0=False should work on SM90+ (H-series)."""
+        fp8_cfg = _fp8_config(use_ue8m0=False)
+        bf16_cfg = _bf16_config()
 
-class TestFp8PrequantWeightRealCache(unittest.TestCase):
+        paddle.seed(0)
+        fp8_layer = _new_linear(fp8_cfg)
+        paddle.seed(0)
+        bf16_layer = _new_linear(bf16_cfg)
+
+        self.assertTrue(fp8_layer.fp8)
+        self.assertFalse(fp8_layer.use_ue8m0)
+
+        out_diff, x_grad_diff, w_grad_diff = self._run_fwd_bwd(
+            fp8_layer, bf16_layer, [4, 128, 512]
+        )
+
+        self.assertLess(out_diff, 0.001, f"output diff too large: {out_diff}")
+        self.assertLess(
+            x_grad_diff, 0.001, f"x_grad diff too large: {x_grad_diff}"
+        )
+        self.assertLess(
+            w_grad_diff, 0.001, f"w_grad diff too large: {w_grad_diff}"
+        )
+
+    @_REQUIRE_GPU
+    def test_column_parallel_fp8_no_ue8m0_matches_bf16(self):
+        """ColumnParallelLinear FP8 with use_ue8m0=False on SM90+ (H-series)."""
+        fp8_cfg = _fp8_config(use_ue8m0=False)
+        bf16_cfg = _bf16_config()
+
+        paddle.seed(0)
+        fp8_layer = _new_linear(
+            fp8_cfg,
+            cls=ColumnParallelLinear,
+            gather_output=False,
+            tp_group=None,
+        )
+        paddle.seed(0)
+        bf16_layer = _new_linear(
+            bf16_cfg,
+            cls=ColumnParallelLinear,
+            gather_output=False,
+            tp_group=None,
+        )
+
+        self.assertTrue(fp8_layer.fp8)
+        self.assertFalse(fp8_layer.use_ue8m0)
+
+        out_diff, x_grad_diff, w_grad_diff = self._run_fwd_bwd(
+            fp8_layer, bf16_layer, [4, 128, 512]
+        )
+
+        self.assertLess(out_diff, 0.001, f"output diff too large: {out_diff}")
+        self.assertLess(
+            x_grad_diff, 0.001, f"x_grad diff too large: {x_grad_diff}"
+        )
+        self.assertLess(
+            w_grad_diff, 0.001, f"w_grad diff too large: {w_grad_diff}"
+        )
+
     """``_fp8_prequant_weight`` must actually populate the weight cache."""
 
     @_REQUIRE_GPU

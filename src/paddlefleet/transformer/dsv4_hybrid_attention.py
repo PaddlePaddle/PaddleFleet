@@ -25,6 +25,7 @@ Components:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -61,6 +62,12 @@ except (ImportError, RuntimeError):
     deep_gemm = None
     _DEEP_GEMM_AVAILABLE = False
 
+FLEET_FP8_WO_A_GEMM = os.environ.get("FLEET_FP8_WO_A_GEMM", "1") not in (
+    "0",
+    "false",
+    "False",
+)
+
 
 def _q_rms_norm(q: Tensor, eps: float, high_precision_norm: bool) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
@@ -94,8 +101,7 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
 
     Runs the grouped GEMM through ``deep_gemm.fp8_einsum`` with blockwise
     quantization (1x128 for activations/gradients, 128x128 for weights).
-    ``dgrad`` is always FP8; ``wgrad`` is FP8 unless ``fp8_wgrad=False``,
-    which needs ``save_original_input=True`` to keep the bf16 activation.
+    ``dgrad`` is always FP8; ``wgrad`` is FP8 unless ``fp8_wgrad=False``.
     """
 
     @staticmethod
@@ -151,7 +157,6 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
         # ``save_original_input=False`` (default) skips stashing the bf16
         # activation to save memory: the FP8 wgrad path only needs the
         # "1x128" quantized activation, so it is produced eagerly here.
-        # ``fp8_wgrad=False`` needs bf16 ``x`` and therefore forces saving it.
         if save_original_input:
             ctx.save_for_backward(x, weight_bf16)
             ctx.bf16_x_saved = True
@@ -698,7 +703,11 @@ class DSv4HybridAttention(Attention):
 
         # Grouped output projection
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
-        if self.config.fp8 is not None and self.config.full_fp8_computation:
+        if (
+            self.config.fp8 is not None
+            and self.config.full_fp8_computation
+            and FLEET_FP8_WO_A_GEMM
+        ):
             core_attn_out = GroupedOutputFP8.apply(
                 core_attn_out,
                 self.linear_o_group_proj,

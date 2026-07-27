@@ -47,8 +47,13 @@ try:
 except (ImportError, RuntimeError):
     _DEEP_GEMM_AVAILABLE = False
 
+# fp8_einsum requires SM100+ (Blackwell). On older GPUs (e.g. H20/SM90)
+# the function exists but raises "Unsupported architecture" at runtime.
+_SM100_PLUS = _HAS_GPU and paddle.device.cuda.get_device_capability()[0] >= 10
+
 _REQUIRE_DEEP_GEMM = unittest.skipUnless(
-    _DEEP_GEMM_AVAILABLE, "deep_gemm.fp8_einsum not available"
+    _DEEP_GEMM_AVAILABLE and _SM100_PLUS,
+    "deep_gemm.fp8_einsum requires SM100+ (Blackwell) GPU",
 )
 
 
@@ -224,8 +229,31 @@ class TestGroupedOutputFP8Backward(unittest.TestCase):
         # wgrad should not be all zeros
         self.assertGreater(w.grad.abs().max().item(), 0.0)
 
+    @_REQUIRE_GPU
+    @_REQUIRE_DEEP_GEMM
+    def test_fp8_wgrad_false_save_original_input_false(self):
+        """fp8_wgrad=False + save_original_input=False uses dequant fallback."""
+        paddle.seed(101)
+        b, sq, num_groups, d, o_lora_rank = 1, 128, 4, 256, 128
+        x_data = paddle.randn([b, sq, num_groups, d], dtype="bfloat16")
+        weight_data = paddle.randn(
+            [num_groups * o_lora_rank, d], dtype="bfloat16"
+        )
 
-class TestGroupedOutputFP8Assertions(unittest.TestCase):
+        x = x_data.clone().detach()
+        x.stop_gradient = False
+        w = weight_data.clone().detach()
+        w.stop_gradient = False
+        out = GroupedOutputFP8.apply(
+            x, w, num_groups, o_lora_rank, False, False
+        )
+        loss = out.sum()
+        loss.backward()
+
+        self.assertIsNotNone(w.grad)
+        self.assertEqual(list(w.grad.shape), list(weight_data.shape))
+        self.assertGreater(w.grad.abs().max().item(), 0.0)
+
     """Input validation checks."""
 
     @_REQUIRE_GPU
