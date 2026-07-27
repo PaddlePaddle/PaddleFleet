@@ -47,8 +47,9 @@ from paddlefleet.tensor_parallel.layers import (
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-
-_HAS_GPU = paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+_HAS_GPU = (
+    paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
+)
 _REQUIRE_GPU = unittest.skipUnless(
     _HAS_GPU, "FP8 blockwise kernels require a CUDA device"
 )
@@ -168,7 +169,9 @@ class TestLinearFp8GatingRealForward(unittest.TestCase):
     def test_master_switch_off_matches_bf16(self):
         """``full_fp8_computation=False`` on a fp8-recipe config must be
         bit-exact with a pure bf16 config."""
-        fp8_off_config = _bf16_config(fp8="blockwise", full_fp8_computation=False)
+        fp8_off_config = _bf16_config(
+            fp8="blockwise", full_fp8_computation=False
+        )
         bf16_config = _bf16_config()
 
         paddle.seed(0)
@@ -282,11 +285,17 @@ class TestFp8LinearForwardBackward(unittest.TestCase):
 
         paddle.seed(0)
         fp8_layer = _new_linear(
-            fp8_cfg, cls=ColumnParallelLinear, gather_output=False, tp_group=None
+            fp8_cfg,
+            cls=ColumnParallelLinear,
+            gather_output=False,
+            tp_group=None,
         )
         paddle.seed(0)
         bf16_layer = _new_linear(
-            bf16_cfg, cls=ColumnParallelLinear, gather_output=False, tp_group=None
+            bf16_cfg,
+            cls=ColumnParallelLinear,
+            gather_output=False,
+            tp_group=None,
         )
 
         self.assertTrue(fp8_layer.fp8)
