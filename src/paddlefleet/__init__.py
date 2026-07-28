@@ -136,6 +136,7 @@ modules = [
     "trl",
     "utils",
     "version",
+    "transformer",
     "transformers",
     "training",
     "timers",
@@ -158,6 +159,7 @@ import_structure["transformers.tokenizer_utils"] = ["PreTrainedTokenizer"]
 
 if TYPE_CHECKING:
     from . import datasets  # noqa
+    from . import transformer  # noqa
     from . import transformers  # noqa
     from . import (
         cli,

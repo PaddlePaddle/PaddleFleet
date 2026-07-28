@@ -44,7 +44,7 @@ install_requirements() {
     cd -
     # python -m pip install --no-cache-dir ${paddle} --no-dependencies --progress-bar off
     # echo "paddlepaddle-gpu @ https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/cbf3469113cd76b7d5f4cba7b8d7d5f55d9e9911/paddlepaddle_gpu-3.3.0-cp310-cp310-linux_x86_64.whl" >> requirements.txt
-    python setup.py bdist_wheel > /dev/null
+    python -m pip wheel . --no-deps --wheel-dir dist > /dev/null
     if [ $FLAGS_enable_CE == "true" ];then
         python -m pip install dist/*.whl 
         #fleet develop
@@ -71,7 +71,7 @@ install_requirements() {
         python -m pip install paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ 
     else
         # fleet_locked paddle_locked
-        pip install "$(ls -t dist/*.whl | head -1)[paddlefleet]" -i https://pypi.org/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+        pip install "$(ls -t dist/paddlefleet-*.whl | head -1)" -i https://pypi.org/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu129/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/
         #paddlefleet_ops for fleet_locked
         echo "Download PaddleFleet form https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddleFleet.tar"
         wget -q --no-proxy  https://paddle-qa.bj.bcebos.com/CodeSync/develop/PaddleFleet.tar --no-check-certificate
@@ -89,7 +89,7 @@ install_requirements() {
         bash scripts/install_ops_wheel.sh
         cd -
     fi
-    pip install -r tests/requirements.txt -i https://pypi.org/simple 
+    python -m pip install --group test-formers -i https://pypi.org/simple
 
     echo "paddle commit:"
     python -c "import paddle; print(paddle.version.commit)"
@@ -164,7 +164,9 @@ fi
 get_diff_TO_case
 set_env
 if [[ ${FLAGS_enable_CI} == "true" ]] || [[ ${FLAGS_enable_CE} == "true" ]];then
-    install_requirements
+    if [[ ${SKIP_INSTALL_REQUIREMENTS:-false} != "true" ]]; then
+        install_requirements
+    fi
     cd ${nlp_dir}
     echo ' Testing all unittest cases '
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
