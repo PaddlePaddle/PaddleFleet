@@ -710,10 +710,16 @@ def general_gemm(
     else:
         # Standard bf16/fp16 path
         if bias is not None:
-            output = paddle.nn.functional.linear(a, b, bias)
+            if use_accuracy_compatible:
+                weight_t = b.T.contiguous()
+                output = paddle.matmul(a, weight_t, transpose_y=True)
+                output = output + bias
+            else:
+                output = paddle.nn.functional.linear(a, b, bias)
         else:
             if use_accuracy_compatible:
-                output = paddle.nn.functional.linear(a, b)
+                weight_t = b.T.contiguous()
+                output = paddle.matmul(a, weight_t, transpose_y=True)
             else:
                 output = paddle.matmul(a, b)
         return output, None
