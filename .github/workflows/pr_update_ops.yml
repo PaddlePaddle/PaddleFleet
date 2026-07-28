@@ -38,9 +38,6 @@ jobs:
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "packages_changed=true" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.event.created }}" == "true" ]]; then
-            # Newly created branch (e.g. release/**): force build ops
-            echo "packages_changed=true" >> $GITHUB_OUTPUT
           else
             if git diff --name-only HEAD~1 HEAD -- packages/ | grep -q .; then
               echo "packages_changed=true" >> $GITHUB_OUTPUT
@@ -129,7 +126,7 @@ jobs:
       CCACHE_MAXSIZE: 50G
       CCACHE_LIMIT_MULTIPLE: 0.8
       UV_HTTP_TIMEOUT: 600
-      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
+      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cni"
     steps:
       - name: Check docker image and run container
         run: |
@@ -593,8 +590,7 @@ jobs:
         run: |
           set -e
           python -m pip install requests
-          rm -rf notify_paddle_link.py*
-          wget -O notify_paddle_link.py https://paddle-qa.bj.bcebos.com/paddlefleet/notify_paddle_link.py
+          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
           WHEEL_FILE=$(cat "${{ matrix.flavor.name_key }}")
           echo "Notify paddletest for ${WHEEL_FILE} (${{ matrix.flavor.bos_CUDA }})"
           python notify_paddle_link.py ${{ matrix.flavor.bos_CUDA }} ${WHEEL_FILE} paddlefleet-ops
