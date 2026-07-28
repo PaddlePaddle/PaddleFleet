@@ -3,13 +3,17 @@ name: Bot Approval Required
 # 合入门禁：满足以下任一条件本检查即通过（仅统计【当前 head commit】上的评审）——
 #   1) AI review 机器人 risemeup1111 对当前 head commit 提交了 APPROVED 评审；或
 #   2) APPROVERS 名单中任意一个账号对当前 head commit 提交了 APPROVED 评审。
-# 推送新 commit（synchronize）、重开 PR 或提交 / 更新 review 时自动复检；旧 commit 上的审批在 push 新提交后自动失效。
+# 推送新 commit（synchronize）、重开 PR、提交 / 更新 review 或 PR 评论时自动复检；旧 commit 上的审批在 push 新提交后自动失效。
 # CI 团队成员可通过 check-bypass（skip-ci label / 评论）豁免本检查。
 on:
   pull_request:
     types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+  issue_comment:
+    types: [created, edited, deleted]
 
 permissions:
   contents: read
@@ -24,7 +28,7 @@ env:
 jobs:
   check-bypass:
     name: Check bypass
-    if: ${{ github.repository_owner == 'PaddlePaddle' }}
+    if: ${{ github.repository_owner == 'PaddlePaddle' && (github.event_name != 'issue_comment' || github.event.issue.pull_request != null) }}
     uses: ./.github/workflows/check-bypass.yml
     with:
       workflow-name: 'bot-approval-required'
@@ -34,18 +38,27 @@ jobs:
   check-bot-approval:
     name: Require review-bot approval
     needs: [check-bypass]
-    if: ${{ needs.check-bypass.outputs.can-skip != 'true' }}
+    if: ${{ (github.event_name != 'issue_comment' || github.event.issue.pull_request != null) && needs.check-bypass.outputs.can-skip != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Verify approval status
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
           set -euo pipefail
           echo "AI review 机器人账号: ${REQUIRED_BOT_LOGIN}"
+
+          # 普通 PR 评论（issue_comment）没有 pull_request payload，需要通过 API 获取当前 head。
+          pr_json=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
+          HEAD_SHA=$(jq -r '.head.sha // empty' <<<"${pr_json}")
+          if [ -z "${HEAD_SHA}" ]; then
+            echo "::error::无法解析 PR #${PR_NUMBER} 的当前 head sha。"
+            exit 1
+          fi
+          echo "PR 编号: #${PR_NUMBER}"
+          echo "当前 head sha: ${HEAD_SHA}"
 
           # 分页读取全部 reviews，避免超过 100 条时漏掉后续页面上的评审。
           reviews=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" | jq -s 'add')
