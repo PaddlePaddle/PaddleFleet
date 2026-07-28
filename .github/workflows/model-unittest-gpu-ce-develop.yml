@@ -180,7 +180,6 @@ jobs:
           else
             echo "Not in a pull_request event. Skipping PR-specific operations."
           fi
-          git checkout e03a504fd6680379314f5fd253541bd5e5fa41fe
           git log --pretty=oneline -10
           DOCKER_EOF
       - name: Determine trigger mode
