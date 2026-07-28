@@ -1910,7 +1910,6 @@ class ExpertsGroupGemmContiguousNode:
         if used_inplace_swiglu:
             del o1
         self.o1 = None
-
         if a2a_async_fn is None:
             # dw1
             if self.use_bf16_gemm_weight_grad:
@@ -1933,6 +1932,7 @@ class ExpertsGroupGemmContiguousNode:
 
             # dx
             dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
+
             # out-of-place 路径下 fused_swiglu_weighted_bwd 异步读 o1，但此时
             # 中间已经执行了 dw1、dw2 等多个 GEMM kernel（同一 stream 顺序入队），
             # 到达此处时 o1 的读取早已完成，del 安全。

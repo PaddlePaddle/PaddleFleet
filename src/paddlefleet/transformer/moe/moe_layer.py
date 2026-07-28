@@ -959,6 +959,7 @@ class MoELayer(nn.Layer):
                     use_fp8,
                     tokens_per_expert=tokens_per_expert,
                     fp8_scale=fp8_scale,
+                    recompute_moe_gate_up=self.recompute_moe_gate_up,
                     fp8_combine_grad_handle=fp8_combine_grad_handle,
                 )
             else:
@@ -1437,6 +1438,7 @@ class MoELayer(nn.Layer):
                 topk_indices,
                 topk_weights,
                 use_fp8,
+                recompute_moe_gate_up=self.recompute_moe_gate_up,
             )
             return final_hidden_states.cast(hidden_states.dtype)
         else:

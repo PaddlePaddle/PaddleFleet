@@ -750,8 +750,17 @@ class TransformerConfig(ModelParallelConfig):
     """When set to True, clone the output of scatter_to_sequence_parallel_region in embedding layer
     to facilitate garbage collection of input."""
 
+    ####################
+    # SonicMoE
+    ####################``
     using_sonic_moe: bool = False
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
+
+    sonicmoe_quant_format: str = "32x32"
+    """Quantization format used in SonicMoE for quantizing weights, options are 32x32 and 1x32."""
+
+    sonicmoe_save_upgate_out_in_fp8: bool = False
+    """Save the up-gate output in FP8 or BF16, if True, save in FP8."""
 
     ####################
     # MLA
