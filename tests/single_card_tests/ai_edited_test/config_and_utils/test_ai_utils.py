@@ -273,7 +273,7 @@ class TestGetTensorModelParallelGroupIfNone(unittest.TestCase):
         with (
             patch("paddle.distributed.is_initialized", return_value=True),
             patch("paddle.distributed.get_rank", return_value=0),
-            patch("paddlefleet.utils.parallel_state") as mock_ps,
+            patch("paddlefleet.utils._fleet_utils.parallel_state") as mock_ps,
         ):
             mock_ps.get_tensor_model_parallel_group.return_value = MagicMock()
             result = get_tensor_model_parallel_group_if_none(None)
@@ -285,7 +285,7 @@ class TestGetTensorModelParallelGroupIfNone(unittest.TestCase):
         with (
             patch("paddle.distributed.is_initialized", return_value=True),
             patch("paddle.distributed.get_rank", return_value=0),
-            patch("paddlefleet.utils.parallel_state") as mock_ps,
+            patch("paddlefleet.utils._fleet_utils.parallel_state") as mock_ps,
         ):
             mock_ps.get_expert_tensor_parallel_group.return_value = MagicMock()
             result = get_tensor_model_parallel_group_if_none(
@@ -405,7 +405,7 @@ class TestNvtxFunctions(unittest.TestCase):
         self.assertIsInstance(path, str)
         self.assertIn(".", path)
 
-    @patch("paddlefleet.utils._nvtx_enabled", True)
+    @patch("paddlefleet.utils._fleet_utils._nvtx_enabled", True)
     def test_nvtx_range_push_enabled(self):
         from paddlefleet.utils import nvtx_range_push
 
@@ -413,7 +413,7 @@ class TestNvtxFunctions(unittest.TestCase):
             nvtx_range_push("enabled_range")
             mock_push.assert_called_once_with("enabled_range")
 
-    @patch("paddlefleet.utils._nvtx_enabled", True)
+    @patch("paddlefleet.utils._fleet_utils._nvtx_enabled", True)
     def test_nvtx_range_pop_enabled(self):
         from paddlefleet.utils import nvtx_range_pop, nvtx_range_push
 
@@ -422,7 +422,7 @@ class TestNvtxFunctions(unittest.TestCase):
             nvtx_range_pop("range_to_pop")
             mock_pop.assert_called_once()
 
-    @patch("paddlefleet.utils._nvtx_enabled", True)
+    @patch("paddlefleet.utils._fleet_utils._nvtx_enabled", True)
     def test_nvtx_range_pop_empty_stack_raises(self):
         import paddlefleet.utils as utils_module
 
@@ -653,7 +653,7 @@ class TestGetBatchOnThisCpRank(unittest.TestCase):
             "labels": mock_labels,
             "other_key": "not_scattered",
         }
-        with patch("paddlefleet.utils.ContextParallelScatterOp") as mock_cp_op:
+        with patch("paddlefleet.utils._fleet_utils.ContextParallelScatterOp") as mock_cp_op:
             mock_cp_op.apply.side_effect = lambda x, **kw: x
             result = get_batch_on_this_cp_rank(inputs)
         self.assertIn("input_ids", result)
@@ -664,7 +664,7 @@ class TestGetBatchOnThisCpRank(unittest.TestCase):
         from paddlefleet.utils import get_batch_on_this_cp_rank
 
         t = paddle.randn([2, 4])
-        with patch("paddlefleet.utils.ContextParallelScatterOp") as mock_cp_op:
+        with patch("paddlefleet.utils._fleet_utils.ContextParallelScatterOp") as mock_cp_op:
             mock_cp_op.apply.return_value = t
             result = get_batch_on_this_cp_rank(t)
         self.assertIsNotNone(result)

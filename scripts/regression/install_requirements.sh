@@ -16,6 +16,10 @@
 
 install_requirements() {
     local ce_branch=${1:-"false"}
+    if [[ ${SKIP_INSTALL_REQUIREMENTS:-false} == "true" ]]; then
+        echo "Skip installing requirements; CI wheels are already installed"
+        return 0
+    fi
     start_ts=$(date +%s)
     python -m pip uninstall paddlepaddle paddlepaddle_gpu paddlefleet paddlefleet -y
     rm -rf ./build ./dist ./paddlefleet.egg-info/
