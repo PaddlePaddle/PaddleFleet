@@ -27,7 +27,7 @@ VL_DATA_DIR = "tests/fixtures/dummy/sft-vl"
 
 VL_DATASETS = {
     "DoclingMatix": {
-        "url": "https://paddlefleet.bj.bcebos.com/datasets/DoclingMatix.tar.gz",
+        "url": "https://paddleformers.bj.bcebos.com/datasets/DoclingMatix.tar.gz",
         "archive_name": "DoclingMatix.tar.gz",
         "extract_cmd": "tar zxf {archive_path} -C {target_dir}/",
         "check_path": "DoclingMatix",
