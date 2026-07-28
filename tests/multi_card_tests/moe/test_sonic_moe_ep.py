@@ -252,8 +252,9 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
         fp8_wgrad=True,
         expert_model_parallel_size=4,
         pg_collection=None,
+        config=None,
     ):
-        transformer_config = self._build_transformer_config(
+        transformer_config = config or self._build_transformer_config(
             using_sonic_moe=using_sonic_moe,
             fp8=fp8,
             moe_deep_gemm=moe_deep_gemm,
@@ -655,10 +656,58 @@ class TestSonicMoEExpertParallelPrecision(unittest.TestCase):
             title="Sonic-MoE FP8 vs BF16 accumulated grad",
         )
 
+    def run_test_z_bf16_recompute_z(self):
+        paddle.seed(self.seed)
+        model_parallel_cuda_manual_seed(self.seed)
+        sonic_fp8 = self._build_moe_layer(using_sonic_moe=True, fp8="e4m3")
+
+        recompute_config = self._build_transformer_config(
+            using_sonic_moe=True, fp8="e4m3"
+        )
+        recompute_config.recompute_granularity = "selective"
+        recompute_config.recompute_modules = ["moe_gate_up"]
+
+        paddle.seed(self.seed)
+        model_parallel_cuda_manual_seed(self.seed)
+        sonic_fp8_recompute_z = self._build_moe_layer(
+            using_sonic_moe=True,
+            fp8="e4m3",
+            config=recompute_config,
+        )
+        self.assertFalse(sonic_fp8.recompute_moe_gate_up)
+        self.assertTrue(sonic_fp8_recompute_z.recompute_moe_gate_up)
+
+        input_data_list = [
+            paddle.randn([2, 64, self.hidden_size], dtype=paddle.bfloat16)
+        ]
+        output, grads = self._run_accumulated_forward_backward(
+            sonic_fp8, input_data_list
+        )
+        output_recompute, grads_recompute = (
+            self._run_accumulated_forward_backward(
+                sonic_fp8_recompute_z, input_data_list
+            )
+        )
+        clear_all_fp8_weight_caches()
+
+        self._assert_tensor_diff_less(
+            output,
+            output_recompute,
+            tol=1e-2,
+            title="Sonic-MoE FP8 recompute_z output",
+        )
+        self._assert_grad_diff_less(
+            grads,
+            grads_recompute,
+            tol=1e-2,
+            title="Sonic-MoE FP8 recompute_z accumulated grad",
+        )
+
     def test_sonic_moe_all(self):
         self.run_test_sonic_moe_ep_grad_accumulation()
         self.run_test_ep_precision()
         self.run_test_bf16_wgrad()
+        self.run_test_z_bf16_recompute_z()
 
 
 if __name__ == "__main__":

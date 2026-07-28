@@ -761,6 +761,259 @@ class TestReturnLogProbs(unittest.TestCase):
             self.assertNotAlmostEqual(actual, expected_post_temp, places=4)
 
 
+class TestReturnLogProbsNoCache(unittest.TestCase):
+    """Unit tests for return_log_probs in the no_cache=True branch."""
+
+    def _make_generator(self, token_sequence, batch_size=1, vocab_size=100):
+        """Create a GreedyGenerator backed by a fake model for no_cache mode.
+
+        In no_cache mode the model is called with the full sequence each step,
+        returning logits of shape [B, seq_len, vocab].  We make the last-position
+        logit peak at ``token_sequence[call_idx]``.
+        """
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        self._call_idx = 0
+        seq = token_sequence
+        bsz = batch_size
+
+        def fake_forward(inputs):
+            cur_len = inputs["input_ids"].shape[1]
+            logits = paddle.zeros([bsz, cur_len, vocab_size], dtype="float32")
+            tok_id = seq[min(self._call_idx, len(seq) - 1)]
+            logits[:, -1, tok_id] = 10.0
+            self._call_idx += 1
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    def test_return_type_without_log_probs(self):
+        """no_cache + return_log_probs=False should return a plain Tensor."""
+        gen = self._make_generator([5, 6, 7])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(input_ids, max_new_tokens=3, no_cache=True)
+        self.assertIsInstance(out, paddle.Tensor)
+
+    def test_return_type_with_log_probs(self):
+        """no_cache + return_log_probs=True should return (Tensor, list)."""
+        gen = self._make_generator([5, 6, 7])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=3, no_cache=True, return_log_probs=True
+        )
+        self.assertIsInstance(out, tuple)
+        self.assertEqual(len(out), 2)
+        generated, log_probs = out
+        self.assertIsInstance(generated, paddle.Tensor)
+        self.assertIsInstance(log_probs, list)
+
+    def test_log_probs_are_non_positive(self):
+        """Log-softmax values must be <= 0 in no_cache mode."""
+        gen = self._make_generator([5, 6, 7])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=3, no_cache=True, return_log_probs=True
+        )
+        for lp in log_probs[0]:
+            self.assertLessEqual(lp, 0.0)
+
+    def test_log_probs_length_equals_generated_tokens(self):
+        """Number of log-probs == max_new_tokens when no eos in no_cache mode."""
+        max_new = 4
+        gen = self._make_generator([5, 6, 7, 8])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        generated, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=max_new,
+            no_cache=True,
+            return_log_probs=True,
+        )
+        num_new = generated.shape[1] - input_ids.shape[1]
+        self.assertEqual(len(log_probs[0]), num_new)
+
+    def test_log_probs_length_with_eos(self):
+        """Log-probs list length equals number of tokens generated before eos stop."""
+        # tokens: 5, 3(eos) → stops after 2 tokens
+        gen = self._make_generator([5, 3, 6, 7])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        generated, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=10,
+            eos_token_id=3,
+            no_cache=True,
+            return_log_probs=True,
+        )
+        num_new = generated.shape[1] - input_ids.shape[1]
+        self.assertEqual(num_new, 2)
+        self.assertEqual(len(log_probs[0]), 2)
+
+    def test_log_probs_dominant_token_is_high(self):
+        """Chosen token has logit=10, others=0 → log-prob should be close to 0."""
+        gen = self._make_generator([42])
+        input_ids = paddle.to_tensor([[1]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=1, no_cache=True, return_log_probs=True
+        )
+        self.assertGreater(log_probs[0][0], -0.5)
+
+    def test_batch_log_probs_shape(self):
+        """With batch_size=2 in no_cache mode the outer list has 2 elements."""
+        gen = self._make_generator([5, 6, 7], batch_size=2)
+        input_ids = paddle.to_tensor([[1, 2], [3, 4]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=3, no_cache=True, return_log_probs=True
+        )
+        self.assertEqual(len(log_probs), 2)
+
+    def test_batch_each_element_is_list_of_floats(self):
+        """Each per-batch log-prob in no_cache mode must be a list of float."""
+        gen = self._make_generator([5, 6, 7], batch_size=2)
+        input_ids = paddle.to_tensor([[1, 2], [3, 4]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=3, no_cache=True, return_log_probs=True
+        )
+        for per_seq in log_probs:
+            self.assertIsInstance(per_seq, list)
+            for lp in per_seq:
+                self.assertIsInstance(lp, float)
+
+    def test_log_probs_value_consistency(self):
+        """log_probs[0][0] must equal log_softmax of the first-step logits in no_cache."""
+        vocab_size = 100
+        chosen_tok = 42
+        logit_val = 10.0
+
+        gen = self._make_generator(
+            [chosen_tok], batch_size=1, vocab_size=vocab_size
+        )
+        input_ids = paddle.to_tensor([[1]], dtype="int64")
+        _, log_probs = gen.generate(
+            input_ids, max_new_tokens=1, no_cache=True, return_log_probs=True
+        )
+
+        manual_logits = paddle.zeros([vocab_size], dtype="float32")
+        manual_logits[chosen_tok] = logit_val
+        expected_lp = float(
+            paddle.nn.functional.log_softmax(manual_logits, axis=-1)[
+                chosen_tok
+            ].item()
+        )
+        self.assertAlmostEqual(log_probs[0][0], expected_lp, places=4)
+
+
+class TestNoCacheEosListBranch(unittest.TestCase):
+    """Cover the `isinstance(eos_token_id, list)` branch in _generate_no_cache."""
+
+    def _make_generator(self, token_sequence, batch_size=1, vocab_size=100):
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        self._call_idx = 0
+        seq = token_sequence
+        bsz = batch_size
+
+        def fake_forward(inputs):
+            cur_len = inputs["input_ids"].shape[1]
+            logits = paddle.zeros([bsz, cur_len, vocab_size], dtype="float32")
+            tok_id = seq[min(self._call_idx, len(seq) - 1)]
+            logits[:, -1, tok_id] = 10.0
+            self._call_idx += 1
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    def test_eos_list_single_token_stops(self):
+        """no_cache: eos_token_id=[[3],[7]] should stop on token 7."""
+        gen = self._make_generator([5, 5, 7, 5, 5])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=10, eos_token_id=[[3], [7]], no_cache=True
+        )
+        generated = out[0, 2:].tolist()
+        self.assertEqual(generated, [5, 5, 7])
+
+    def test_eos_list_flat_int_stops(self):
+        """no_cache: eos_token_id=[3, 7] (flat ints) should stop on token 3."""
+        gen = self._make_generator([5, 3, 9, 9])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=10, eos_token_id=[3, 7], no_cache=True
+        )
+        generated = out[0, 2:].tolist()
+        self.assertEqual(generated, [5, 3])
+
+    def test_eos_list_multi_token_no_early_stop(self):
+        """no_cache: multi-token stop seq [[10,20]] should NOT trigger early stop."""
+        gen = self._make_generator([10, 5, 5, 5, 5])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=5, eos_token_id=[[10, 20]], no_cache=True
+        )
+        generated = out[0, 2:].tolist()
+        self.assertEqual(len(generated), 5)
+
+    def test_eos_list_batch_all_done(self):
+        """no_cache: both batch elements hit eos from list → early stop."""
+        gen = self._make_generator([5, 7, 9, 9], batch_size=2)
+        input_ids = paddle.to_tensor([[1, 2], [3, 4]], dtype="int64")
+        out = gen.generate(
+            input_ids, max_new_tokens=10, eos_token_id=[[7]], no_cache=True
+        )
+        # Both hit token 7 at step 2 → generated 2 tokens: [5, 7]
+        generated = out[0, 2:].tolist()
+        self.assertEqual(generated, [5, 7])
+
+    def test_eos_list_with_log_probs(self):
+        """no_cache: list eos + return_log_probs works together."""
+        gen = self._make_generator([5, 5, 3, 9, 9])
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        generated, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=10,
+            eos_token_id=[[3], [7]],
+            no_cache=True,
+            return_log_probs=True,
+        )
+        num_new = generated.shape[1] - input_ids.shape[1]
+        self.assertEqual(num_new, 3)  # 5, 5, 3(eos)
+        self.assertEqual(len(log_probs[0]), 3)
+
+
 if __name__ == "__main__":
     print("Running greedy generator unit tests...")
     unittest.main(verbosity=2)

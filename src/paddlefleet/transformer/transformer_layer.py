@@ -1236,14 +1236,64 @@ class TransformerLayer(nn.Layer):
             self.mlp.fp8_quant_weight(
                 batch_mode=batch_mode, quant_transpose=quant_transpose
             )
+        # Pre-quantize non-MoE fp8 Linear sublayers (attention projections,
+        # dense MLP, shared expert, indexer). Each Linear.fp8_quant_weight
+        # is a no-op when the layer is bf16.
+        from paddlefleet.tensor_parallel.layers import (
+            ColumnParallelLinear,
+            Linear,
+            RowParallelLinear,
+        )
+
+        seen = set()
+        for m in self.sublayers(include_self=False):
+            if not isinstance(
+                m, (Linear, ColumnParallelLinear, RowParallelLinear)
+            ):
+                continue
+            # MoE experts are handled by self.mlp.fp8_quant_weight above.
+            if getattr(m, "is_expert", False):
+                continue
+            if id(m) in seen:
+                continue
+            seen.add(id(m))
+            quant_fn = getattr(m, "fp8_quant_weight", None)
+            if quant_fn is not None:
+                quant_fn(batch_mode=batch_mode, quant_transpose=quant_transpose)
 
     def clear_fp8_quant_weight(self):
         if isinstance(self.mlp, MoELayer):
             self.mlp.clear_fp8_quant_weight()
+        # Symmetric to fp8_quant_weight above: drop the per-Linear fp8
+        # cache stashed on non-MoE Linear weights, otherwise post-optimizer
+        # forwards keep using the pre-step quantized weight.
+        from paddlefleet.tensor_parallel.layers import (
+            ColumnParallelLinear,
+            Linear,
+            RowParallelLinear,
+        )
+
+        seen = set()
+        for m in self.sublayers(include_self=False):
+            if not isinstance(
+                m, (Linear, ColumnParallelLinear, RowParallelLinear)
+            ):
+                continue
+            # MoE experts are handled by self.mlp.clear_fp8_quant_weight above.
+            if getattr(m, "is_expert", False):
+                continue
+            if id(m) in seen:
+                continue
+            seen.add(id(m))
+            clear_fn = getattr(m, "clear_fp8_quant_weight", None)
+            if clear_fn is not None:
+                clear_fn()
 
     def use_fp8(self):
         if isinstance(self.mlp, MoELayer):
             return self.mlp.use_fp8()
+        else:
+            return self.config.fp8 is not None
 
 
 class HyperConnectionTransformerLayer(TransformerLayer):

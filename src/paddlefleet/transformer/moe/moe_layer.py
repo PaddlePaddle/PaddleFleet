@@ -176,9 +176,11 @@ class MoELayer(nn.Layer):
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.use_ue8m0 = config.use_ue8m0
+        self.use_w4a8 = config.use_w4a8
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
         self.fp8_dispatch = bool(config.fp8)
+        self.fp8_dispatch = bool(config.fp8) and not self.use_w4a8
         self.fp8_wgrad = config.fp8_wgrad
         self.fp8_dispatch_bwd = (
             self.fp8_dispatch and self.using_sonic_moe and self.fp8_wgrad
@@ -959,6 +961,7 @@ class MoELayer(nn.Layer):
                     use_fp8,
                     tokens_per_expert=tokens_per_expert,
                     fp8_scale=fp8_scale,
+                    recompute_moe_gate_up=self.recompute_moe_gate_up,
                     fp8_combine_grad_handle=fp8_combine_grad_handle,
                 )
             else:
@@ -986,6 +989,7 @@ class MoELayer(nn.Layer):
                     use_accuracy_compatible=getattr(
                         self.config, "use_accuracy_compatible", False
                     ),
+                    use_w4a8=self.use_w4a8,
                 )
 
         with profile("combine"):
@@ -1144,6 +1148,7 @@ class MoELayer(nn.Layer):
                     use_accuracy_compatible=getattr(
                         self.config, "use_accuracy_compatible", False
                     ),
+                    use_w4a8=self.use_w4a8,
                 )
 
             if is_first_fwd:
@@ -1437,6 +1442,7 @@ class MoELayer(nn.Layer):
                 topk_indices,
                 topk_weights,
                 use_fp8,
+                recompute_moe_gate_up=self.recompute_moe_gate_up,
             )
             return final_hidden_states.cast(hidden_states.dtype)
         else:
@@ -1593,8 +1599,11 @@ class MoELayer(nn.Layer):
                     delattr(weight_obj, attr)
 
         if hasattr(self, "grouped_gemm_experts"):
-            _clear_attrs(self.grouped_gemm_experts.weight1)
-            _clear_attrs(self.grouped_gemm_experts.weight2)
+            if isinstance(self.grouped_gemm_experts, SonicMoEExpert):
+                self.grouped_gemm_experts.clear_fp8_weights()
+            else:
+                _clear_attrs(self.grouped_gemm_experts.weight1)
+                _clear_attrs(self.grouped_gemm_experts.weight2)
         else:
             for expert in self.experts:
                 if expert is not None:

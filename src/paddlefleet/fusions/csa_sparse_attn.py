@@ -96,6 +96,27 @@ def unfused_compressed_sparse_attn(
     return output
 
 
+def _csa_compute_topk_length(topk_idxs_flat: Tensor) -> Tensor:
+    """Per-query safe loop bound for the cuDNN backward kernel (``mTopkLength``).
+
+    Returns ``[N]`` int32 = (index of last valid entry + 1) per row, i.e. a SAFE
+    upper bound: all valid entries lie in ``[0, topk_length)``. Uses the trailing
+    bound (NOT ``sum(valid)``) so it stays correct when ``-1`` entries are
+    interleaved (multi-doc leading/interior holes). Clamped to >=1 so the kernel
+    writes every dq row (dq is allocated uninitialized in the backend).
+
+    Args:
+        topk_idxs_flat: ``[N, W]`` int32 global indices, -1 == invalid.
+    """
+    with paddle.no_grad():
+        _, w = topk_idxs_flat.shape
+        valid = (topk_idxs_flat >= 0).astype("int32")  # [N, W]
+        cols = paddle.arange(1, w + 1, dtype="int32").unsqueeze(0)  # [1, W]
+        trailing_len = (valid * cols).max(-1)  # [N] last valid index + 1
+        trailing_len = paddle.clip(trailing_len, min=1).astype("int32")
+    return trailing_len
+
+
 class CSASparseAttention(paddle.autograd.PyLayer):
     @staticmethod
     def forward(
@@ -160,6 +181,8 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             lse_flat = lse.reshape([b * sq, np_heads])
             topk_idxs_flat = _local_to_global_flat(topk_idxs, s_kv)
 
+            topk_length = _csa_compute_topk_length(topk_idxs_flat)
+
             dq_flat, dkv_flat, d_sink = csa_sparse_attn_bwd_cudnn(
                 q_flat,
                 kv_flat,
@@ -169,6 +192,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 attn_sink,
                 topk_idxs_flat,
                 softmax_scale=ctx.softmax_scale,
+                topk_length=topk_length,
             )
             dq = dq_flat.reshape(query.shape)
             dkv = dkv_flat.reshape(kv_full.shape)

@@ -310,7 +310,7 @@ class _BlockSparseDSA(paddle.autograd.PyLayer):
             dq = dq.cast(ctx.query_dtype)
         dkv = None
         if gk:
-            dkv = dkv_flat.reshape([b, s, dk]).cast(ctx.kv_dtype)
+            dkv = dkv_flat.reshape([b, skv, dk]).cast(ctx.kv_dtype)
         d_attn_sink = None
         if gsink:
             # The cuDNN DSA backward (SM100) allocates ``d_sink`` but its kernel
@@ -399,15 +399,16 @@ def block_sparse_mqa_attention_dsa(
         shared_block_indices, valid_range, block_B
     )
 
-    b, s, num_heads, d_qk = query.shape
+    b, q_s, num_heads, d_qk = query.shape
+    kv_s = shared_key_sq.shape[1]
     pad_v = 512 - kv_lora_rank
     if pad_v > 0:
         # Re-lay [value | rope] -> [value | zeros | rope] so value == leading 512.
         q_val, q_rope = query[..., :kv_lora_rank], query[..., kv_lora_rank:]
         k_val = shared_key_sq[..., :kv_lora_rank]
         k_rope = shared_key_sq[..., kv_lora_rank:]
-        zq = paddle.zeros([b, s, num_heads, pad_v], dtype=query.dtype)
-        zk = paddle.zeros([b, s, pad_v], dtype=shared_key_sq.dtype)
+        zq = paddle.zeros([b, q_s, num_heads, pad_v], dtype=query.dtype)
+        zk = paddle.zeros([b, kv_s, pad_v], dtype=shared_key_sq.dtype)
         query_p = paddle.concat([q_val, zq, q_rope], axis=-1)
         key_p = paddle.concat([k_val, zk, k_rope], axis=-1)
         eff_d_v = 512
@@ -430,6 +431,6 @@ def block_sparse_mqa_attention_dsa(
 
     if pad_v > 0:
         # Drop the padded value columns: keep the real leading kv_lora_rank.
-        out = out.reshape([b, s, num_heads, eff_d_v])[..., :kv_lora_rank]
-        out = out.reshape([b, s, num_heads * kv_lora_rank])
+        out = out.reshape([b, q_s, num_heads, eff_d_v])[..., :kv_lora_rank]
+        out = out.reshape([b, q_s, num_heads * kv_lora_rank])
     return out, None

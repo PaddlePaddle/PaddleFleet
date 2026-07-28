@@ -35,7 +35,7 @@ dependencies = [
     "omegaconf",
     "orjson",
     "paddlecodec>=0.2,<0.3; sys_platform == 'linux'",
-    "paddlepaddle-gpu==3.4.0.post20260723+6ec1dc38ef0",
+    "paddlepaddle-gpu==3.4.0.post20260728+8a1040b3d08",
     "protobuf>=3.20.2",
     "regex",
     "safetensors",
