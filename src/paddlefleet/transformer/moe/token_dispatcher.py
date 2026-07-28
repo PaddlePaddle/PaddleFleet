@@ -1223,7 +1223,8 @@ class AllToAllTokenDispatcher(nn.Layer):
             probs=(None if use_accuracy_compatible_kernel() else self.probs),
             routing_map=self.routing_map,
         )
-        return output.cast(self.hidden_states_dtype)
+        output_dtype = getattr(self, "hidden_states_dtype", output.dtype)
+        return output.cast(output_dtype)
 
 
 class _RouterAllGather(paddle.autograd.PyLayer):
