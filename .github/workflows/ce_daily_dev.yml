@@ -167,6 +167,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout 82c2496dca23f
           pip install colorlog>=6.10.1
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
@@ -329,7 +330,9 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout 82c2496dca23f
           git submodule update --init --recursive
+          
           pip install colorlog>=6.10.1
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
@@ -505,6 +508,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout 82c2496dca23f
           pip install colorlog>=6.10.1
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
@@ -769,6 +773,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout 82c2496dca23f
           pip install colorlog>=6.10.1
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
@@ -1288,6 +1293,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout 82c2496dca23f
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install colorlog>=6.10.1
@@ -1647,6 +1653,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git checkout 82c2496dca23f
           # git pull --no-edit origin pull/${PR_ID}/head
           '
 
