@@ -1694,7 +1694,8 @@ jobs:
           git config --global --add safe.directory /workspace/PaddleFleet
           python -m pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           python -m pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          python -c "import paddle; import paddlefleet; import paddlefleet_ops; print(paddle.version.commit); print(paddlefleet.version.commit)"
+          python -m pip install --group test-formers -i https://pypi.org/simple
+          python -c "import pytest; import paddle; import paddlefleet; import paddlefleet_ops; print(paddle.version.commit); print(paddlefleet.version.commit)"
           DOCKER_EOF
       - name: Determine trigger mode
         id: trigger_mode
