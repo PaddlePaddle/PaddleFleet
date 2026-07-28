@@ -1027,6 +1027,7 @@ class TestTransformerConfigMqaIndexerCpMode(unittest.TestCase):
                 self._config(
                     cp_balance_mode="contiguous_allgather",
                     mqa_indexer_cp_mode="dualchunk_p2p",
+                    dsa_indexer_loss_coeff=0.01,
                     **self.MQA_HYBRID,
                     **phase,
                 )

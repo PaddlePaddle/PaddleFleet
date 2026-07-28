@@ -1238,7 +1238,8 @@ class AllToAllTokenDispatcher(nn.Layer):
             routing_map=self.routing_map,
             use_accuracy_compatible=self.use_accuracy_compatible,
         )
-        return output.cast(self.hidden_states_dtype)
+        output_dtype = getattr(self, "hidden_states_dtype", output.dtype)
+        return output.cast(output_dtype)
 
 
 class _RouterAllGather(paddle.autograd.PyLayer):

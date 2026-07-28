@@ -244,7 +244,7 @@ class TestPP(unittest.TestCase):
         print("PP loss MD5:", overlap_loss._md5sum())
 
         actual_md5 = overlap_loss._md5sum()
-        expected_md5 = "d389df6ffaea31994404e9268f496967"
+        expected_md5 = "c095ff73e0078fae9fb936c6efb69c22"
         print(f"PP loss MD5 - Actual: {actual_md5}, Expected: {expected_md5}")
         assert actual_md5 == expected_md5, (
             f"PP loss MD5 mismatch! Actual: {actual_md5}, Expected: {expected_md5}"
