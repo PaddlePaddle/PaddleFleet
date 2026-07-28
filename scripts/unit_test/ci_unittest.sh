@@ -32,8 +32,6 @@ if [ -f "${PYTEST_EXECUTE_FLAG_FILE}" ]; then
 fi
 dir_name=$(dirname "${PYTEST_EXECUTE_FLAG_FILE}")
 mkdir -p "${dir_name}"
-AGILE_COMPILE_BRANCH=$4
-
 install_requirements() {
     start_ts=$(date +%s)
     python -m pip config --user set global.trusted-host pypi.org
@@ -143,25 +141,7 @@ print_info() {
     fi
 }
 
-get_diff_TO_case(){
-export FLAGS_enable_CI=false
-if [ -z "${AGILE_COMPILE_BRANCH}" ]; then
-    # Scheduled Regression Test
-    FLAGS_enable_CI=true
-else
-    for file_name in `git diff --numstat ${AGILE_COMPILE_BRANCH} -- |awk '{print $NF}'`;do
-        ext="${file_name##*.}"
-        echo "file_name: ${file_name}, ext: ${file_name##*.}"
-        [[ -f "$file_name" ]] || continue
-        if [[ "$ext" == "py" ]] || [[ "$ext" == "yml" ]] || [[ "$file_name" == "requirements.txt" ]]; then
-            FLAGS_enable_CI=true
-            break
-        fi
-    done
-fi
-}
-
-get_diff_TO_case
+export FLAGS_enable_CI=true
 set_env
 if [[ ${FLAGS_enable_CI} == "true" ]] || [[ ${FLAGS_enable_CE} == "true" ]];then
     if [[ ${SKIP_INSTALL_REQUIREMENTS:-false} != "true" ]]; then

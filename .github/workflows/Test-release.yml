@@ -1437,10 +1437,9 @@ jobs:
       work_dir: ${{ github.workspace }}
       CI_JOB_NAME: unittest-gpu-ci
       TASK: PaddleFleet_CI_unittest_gpu_${{ github.event.pull_request.number || github.run_id }}
-      IMAGE_NAME: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-dev
+      IMAGE_NAME: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev
       python_version: 3.12
       paddle_whl: https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl
-      AGILE_COMPILE_BRANCH: ${{ github.event.pull_request.base.ref }}
       PYTEST_EXECUTE_FLAG_FILE: ${{ github.workspace }}/../../../PYTEST_EXECUTE_FLAG_FILE/${{ github.event.pull_request.number || '0' }}/${{ github.event.pull_request.head.sha || github.sha }}/pytest_execute.flag
     outputs:
       pytest_execute_flag: ${{ steps.set_pytest_flag.outputs.pytest_execute_flag }}
@@ -1469,7 +1468,6 @@ jobs:
             -e "PR_ID=$PR_ID" \
             -e "BRANCH=$BRANCH" \
             -e "COMMIT_ID=$COMMIT_ID" \
-            -e "AGILE_COMPILE_BRANCH=$AGILE_COMPILE_BRANCH" \
             -e CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
             -e NVIDIA_VISIBLE_DEVICES="${GPU_DEVICES}" \
             -e "PYTEST_EXECUTE_FLAG_FILE=$PYTEST_EXECUTE_FLAG_FILE" \
@@ -1495,23 +1493,6 @@ jobs:
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           DOCKER_EOF
-      - name: Change python version
-        run: |
-          work_dir="${{ github.workspace }}"
-          docker exec -i \
-            -e "work_dir=$work_dir" \
-            -e "python_version=$python_version" \
-            "$container_name" /bin/bash <<-DOCKER_EOF
-          set -e
-          cp /home/models/Miniforge3-Linux-x86_64.sh /tmp/miniforge.sh
-          bash /tmp/miniforge.sh -b -p /opt/conda
-          /opt/conda/bin/conda create -n py_\$python_version python=\$python_version -y \
-            --override-channels \
-            -c conda-forge
-          . /opt/conda/etc/profile.d/conda.sh
-          conda activate py_\$python_version
-          python --version
-          DOCKER_EOF
       - name: Install test dependencies
         run: |
           work_dir="${{ github.workspace }}"
@@ -1520,8 +1501,7 @@ jobs:
             -e "python_version=$python_version" \
             "$container_name" /bin/bash <<-DOCKER_EOF
           set -e
-          . /opt/conda/etc/profile.d/conda.sh
-          conda activate py_\$python_version
+          python -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
           source \$work_dir/../../../proxy
           cd /workspace/PaddleFleet
           python -m pip install --upgrade pip
@@ -1538,8 +1518,6 @@ jobs:
         id: test
         run: |
           docker exec -t "$container_name" /bin/bash -c '
-          . /opt/conda/etc/profile.d/conda.sh
-          conda activate py_$python_version
           python --version
           ldconfig
           mkdir -p /root/.cache/pip
@@ -1548,7 +1526,7 @@ jobs:
           source $work_dir/../../../proxy
           source $work_dir/../../../AISTUDIO_ACCESS_TOKEN
           SKIP_INSTALL_REQUIREMENTS=true bash -x scripts/unit_test/ci_unittest.sh \
-            ${paddle_whl} false ${PYTEST_EXECUTE_FLAG_FILE} ${AGILE_COMPILE_BRANCH}
+            ${paddle_whl} false ${PYTEST_EXECUTE_FLAG_FILE}
           '
       - name: Display Test Summary
         if: always()
@@ -1660,7 +1638,7 @@ jobs:
       work_dir: ${{ github.workspace }}
       CI_JOB_NAME: model-unittest-gpu-ci
       TASK: PaddleFleet_CI_model_unittest_gpu_${{ github.event.pull_request.number || github.run_id }}
-      IMAGE_NAME: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-dev
+      IMAGE_NAME: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev
       python_version: 3.12
       paddle_whl: https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl
     steps:
@@ -1702,15 +1680,21 @@ jobs:
       - name: Install PaddleFleet
         run: |
           work_dir="${{ github.workspace }}"
-          docker exec -i -e "work_dir=$work_dir" "$container_name" /bin/bash <<-DOCKER_EOF
+          docker exec -i \
+            -e "work_dir=$work_dir" \
+            -e "python_version=$python_version" \
+            "$container_name" /bin/bash <<-DOCKER_EOF
+          set -e
+          python -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          python --version
           rm -rf * .[^.]*
           mkdir PaddleFleet && cd PaddleFleet
           wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
-          pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          python -m pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          python -m pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          python -c "import paddlefleet; import paddlefleet_ops; print(paddlefleet.version.commit)"
           DOCKER_EOF
       - name: Determine trigger mode
         id: trigger_mode
@@ -1750,21 +1734,6 @@ jobs:
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "update_baseline_models=$UPDATE_BASELINE_MODELS" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-      - name: Change python version
-        run: |
-          work_dir="${{ github.workspace }}"
-          docker exec -i -e "work_dir=$work_dir" -e "python_version=$python_version" "$container_name" /bin/bash <<-DOCKER_EOF
-          echo "Change python version to $python_version"
-          set -e
-          cp ${work_dir}/../../../Miniforge3-latest-Linux-x86_64.sh /tmp/miniforge.sh
-          bash /tmp/miniforge.sh -b -p /opt/conda
-          /opt/conda/bin/conda create -n py_\$python_version python=\$python_version -y \
-            --override-channels \
-            -c conda-forge
-          . /opt/conda/etc/profile.d/conda.sh
-          conda activate py_\$python_version
-          python --version
-          DOCKER_EOF
       - name: Test
         id: test
         run: |
@@ -1782,8 +1751,6 @@ jobs:
             -e BRANCH="$BRANCH" \
             -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
             $container_name /bin/bash <<-DOCKER_EOF
-          . /opt/conda/etc/profile.d/conda.sh
-          conda activate py_$python_version
           python --version
           ldconfig
           mkdir -p /root/.cache/pip
