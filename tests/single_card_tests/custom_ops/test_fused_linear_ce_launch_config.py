@@ -88,7 +88,7 @@ class TestCELaunchConfigSelection(unittest.TestCase):
             self.assertEqual(num_warps, expected, msg=f"V={v}")
 
     def test_large_vocab_hits_tuned_target(self):
-        # 大 vocab（如 201216）应命中 B300 调优目标 (2048 tile / 4 warps)，
+        # 大 vocab（如 201216）应命中调优目标 (2048 tile / 4 warps)，
         # 即每线程 2048/(4*32)=16 列，恰为 CE_ELEMENTS_PER_THREAD。
         block_size, num_warps = _select_ce_launch_config(201216)
         self.assertEqual(block_size, 2048)

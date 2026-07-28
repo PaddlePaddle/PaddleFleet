@@ -40,13 +40,13 @@ MAX_FUSED_SIZE = 65536 // 2
 # each of the (num_warps*32) threads has to hold V/threads columns; for large
 # vocab (e.g. V=201216) that is 32 fp32/thread plus all the SegLU temporaries,
 # which overflows the register file. The compiler then caps registers at 1
-# block/SM and spills the tile to local memory (HBM) — measured on B300 as
+# block/SM and spills the tile to local memory (HBM) — measured as
 # 52.7 GB actual DRAM traffic vs 9.9 GB ideal (5.3x), ~11x the mem-bound floor.
 #
 # Instead, size the launch from a per-thread element budget: cap the tile small
 # enough to stay register-resident, then pick num_warps so each thread handles
-# ~CE_ELEMENTS_PER_THREAD columns. Tuned on B300 (2048 tile / 4 warps -> 16
-# cols/thread) gives zero local spill and ~2.1x speedup over the old 32768/32.
+# ~CE_ELEMENTS_PER_THREAD columns. Tuned to 2048 tile / 4 warps -> 16
+# cols/thread, giving zero local spill and ~2.1x speedup over the old 32768/32.
 CE_BLOCK_SIZE_CAP = 2048
 CE_ELEMENTS_PER_THREAD = 16
 
