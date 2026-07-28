@@ -27,7 +27,7 @@ fi
 
 
 if [[ ! -d $data_dir/DoclingMatix ]]; then
-  wget https://paddlefleet.bj.bcebos.com/datasets/DoclingMatix.tar.gz
+  wget https://paddleformers.bj.bcebos.com/datasets/DoclingMatix.tar.gz
   tar -xf DoclingMatix.tar.gz -C $data_dir
   rm -rf DoclingMatix.tar.gz
 fi

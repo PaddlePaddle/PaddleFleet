@@ -22,7 +22,7 @@ Sample data:
 For ease of testing, we also provide a [demo dataset](https://paddlefleet.bj.bcebos.com/datasets/pt_data.tar.gz) that can be used directly:
 
 ```shell
-wget https://paddlefleet.bj.bcebos.com/datasets/pt_data.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/pt_data.tar.gz
 mkdir -p data/pt && tar -xf pt_data.tar.gz -C data/pt/
 ```
 
@@ -33,7 +33,7 @@ We can also choose to use offline bit pre-training data streams, which saves mor
 For ease of testing, we also provide an [offline pre-training demo dataset](https://paddlefleet.bj.bcebos.com/datasets/pretrain_offline_data.tar.gz) that can be used directly:
 
 ```shell
-wget https://paddlefleet.bj.bcebos.com/datasets/pretrain_offline_data.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/pretrain_offline_data.tar.gz
 tar -xf pretrain_offline_data.tar.gz -C data/pre-training/
 ```
 
@@ -169,7 +169,7 @@ Demo data for function call training:
 
 For ease of testing, we also provide a `chatml` function call SFT dataset that can be used directly:
 ```bash
-wget https://paddlefleet.bj.bcebos.com/datasets/sft_function_call_demo.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/sft_function_call_demo.tar.gz
 
 mkdir -p data/sft && tar -zxf sft_function_call_demo.tar.gz -C data/sft/
 ```
@@ -304,7 +304,7 @@ Sample data
 
 For ease of testing, we also provide a `chatml` function call DPO dataset that can be used directly:
 ```bash
-wget https://paddlefleet.bj.bcebos.com/datasets/dpo_function_call_1k.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/dpo_function_call_1k.tar.gz
 
 mkdir -p data/dpo_fc && tar -zxf dpo_function_call_1k.tar.gz -C data/dpo_fc/
 ```

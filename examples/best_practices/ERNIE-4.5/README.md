@@ -39,7 +39,7 @@ Python: 3.10
 
 ```shell
 # 下载训用配置
-wget https://paddlefleet.bj.bcebos.com/models/eb45_model_configs.tar.gz
+wget https://paddleformers.bj.bcebos.com/models/eb45_model_configs.tar.gz
 tar xf eb45_model_configs.tar.gz
 
 # 21B
@@ -72,7 +72,7 @@ tokenizer_name_or_path: examples/experiments/ernie_pretrain/ernie/src/tokenizers
 或从源上下载：
 
 ```shell
-wget https://paddlefleet.bj.bcebos.com/models/eb45_tokenizer_model.tar.gz
+wget https://paddleformers.bj.bcebos.com/models/eb45_tokenizer_model.tar.gz
 tar xf eb45_tokenizer_model.tar.gz
 ```
 然后指定配置为：

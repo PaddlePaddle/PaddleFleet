@@ -45,8 +45,8 @@ PaddleFleet 通过在训练配置文件中指定字段`model_name_or_path`来设
 为了方便起见，我们也提供了一个快速上手的孟加拉语数据集（训练集和测试集），可用于微调 PaddleOCR-VL-0.9B 对孟加拉语进行识别，使用以下命令下载：
 
 ```shell
-wget https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-train_Bengali.jsonl
-wget https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-test_Bengali.jsonl
+wget https://paddleformers.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-train_Bengali.jsonl
+wget https://paddleformers.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-test_Bengali.jsonl
 ```
 
 孟加拉语训练数据示例：

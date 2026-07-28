@@ -27,7 +27,7 @@ pip install -e .
 在开始训练前，需要额外准备图片数据：
 ```
 cd PaddleFleet/test/formers/fixtures/dummy/sft-vl
-wget https://paddlefleet.bj.bcebos.com/datasets/thinksafe_vl_data.tar
+wget https://paddleformers.bj.bcebos.com/datasets/thinksafe_vl_data.tar
 tar -xf thinksafe_vl_data.tar
 ```
 

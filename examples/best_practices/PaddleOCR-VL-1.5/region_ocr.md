@@ -40,7 +40,7 @@ PaddleFleet 通过在训练配置文件中指定字段`model_name_or_path`来设
 为了方便起见，我们提供了一个快速上手的 RegionOCR 数据集，可用于微调 PaddleOCR-VL-1.5-0.9B 对区域文本进行识别，使用以下命令下载并解压到 `./region_visual`目录（数据集大小约 12 G）：
 
 ```bash
-wget https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/region_visual_dataset.tar
+wget https://paddleformers.bj.bcebos.com/datasets/ocr-vl/region_visual_dataset.tar
 mkdir -p ./region_visual
 tar -xvf region_visual_dataset.tar -C ./region_visual
 ```
@@ -88,7 +88,7 @@ tar -xvf region_visual_dataset.tar -C ./region_visual
 RegionOCR 数据格式可以通过 Spotting 数据格式的数据集生成，我们提供了一个基于开源数据集 [laion-400M](https://laion.ai/blog/laion-400-open-dataset/) 构建的 laion_spotting 数据集，使用以下命令下载：
 
 ```bash
-wget https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/laion_spotting.jsonl
+wget https://paddleformers.bj.bcebos.com/datasets/ocr-vl/laion_spotting.jsonl
 ```
 Spotting 数据格式说明：
 

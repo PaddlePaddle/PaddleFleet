@@ -85,10 +85,10 @@ PaddleFleet 支持业界常用的不同的数据集格式，通常情况下，�
 
 ```shell
 # messages格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/pt_online_data_messages.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/pt_online_data_messages.tar.gz
 mkdir -p data/pt && tar -xf pt_online_data_messages.tar.gz -C data/pt/
 # erniekit格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/pt_online_data_erniekit.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/pt_online_data_erniekit.tar.gz
 mkdir -p data/pt && tar -xf pt_online_data_erniekit.tar.gz -C data/pt/
 ```
 
@@ -99,7 +99,7 @@ mkdir -p data/pt && tar -xf pt_online_data_erniekit.tar.gz -C data/pt/
 为了方便测试，我们也提供了 **离线预训练 demo 数据集** 可以直接使用：
 
 ```shell
-wget https://paddlefleet.bj.bcebos.com/datasets/pretrain_offline_data.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/pretrain_offline_data.tar.gz
 mkdir -p data/pre-training && tar -xf pretrain_offline_data.tar.gz -C data/pre-training/
 ```
 您也可以制作自己的离线数据流，离线数据流制作方法如下：
@@ -201,7 +201,7 @@ python -u examples/tools/create_pretraining_data.py \
 > 为了方便测试，我们也提供了 `messages` 格式的 `function call` 数据集可以直接使用：
 >
 > ```shell
-> wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/sft_function_call_data.tar.gz
+> wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/sft_function_call_data.tar.gz
 > mkdir -p data/sft && tar -zxf sft_function_call_data.tar.gz -C data/sft/
 > ```
 >
@@ -254,10 +254,10 @@ python -u examples/tools/create_pretraining_data.py \
 
 ```shell
 # messages格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/sft_online_data_messages.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/sft_online_data_messages.tar.gz
 mkdir -p data/sft && tar -xf sft_online_data_messages.tar.gz -C data/sft/
 # erniekit格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/sft_online_data_erniekit.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/sft_online_data_erniekit.tar.gz
 mkdir -p data/sft && tar -xf sft_online_data_erniekit.tar.gz -C data/sft/
 ```
 
@@ -368,7 +368,7 @@ python examples/tools/merge.py --input_dirs /path/B,/path/A --split train --outp
 >
 > ```shell
 > # messages格式
-> wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/dpo_function_call_data.tar.gz
+> wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/dpo_function_call_data.tar.gz
 > mkdir -p data/dpo && tar -xf dpo_function_call_data.tar.gz -C data/dpo/
 > ```
 >
@@ -430,10 +430,10 @@ python examples/tools/merge.py --input_dirs /path/B,/path/A --split train --outp
 
 ```shell
 # messages格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/dpo_online_data_messages.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/dpo_online_data_messages.tar.gz
 mkdir -p data/dpo && tar -xf dpo_online_data_messages.tar.gz -C data/dpo/
 # erniekit格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/dpo_online_data_erniekit.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/dpo_online_data_erniekit.tar.gz
 mkdir -p data/dpo && tar -xf dpo_online_data_erniekit.tar.gz -C data/dpo/
 ```
 
@@ -556,10 +556,10 @@ mkdir -p data/dpo && tar -xf dpo_online_data_erniekit.tar.gz -C data/dpo/
 
 ```shell
 # messages格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/sft_vl_data_messages.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/sft_vl_data_messages.tar.gz
 mkdir -p data/sft-vl && tar -xf sft_vl_data_messages.tar.gz -C data/sft-vl
 # erniekit格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/sft_vl_data_erniekit.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/sft_vl_data_erniekit.tar.gz
 mkdir -p data/sft-vl && tar -xf sft_vl_data_erniekit.tar.gz -C data/sft-vl
 ```
 
@@ -638,7 +638,7 @@ mkdir -p data/sft-vl && tar -xf sft_vl_data_erniekit.tar.gz -C data/sft-vl
 
 ```shell
 # messages格式
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/dpo_vl_data_messages.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/dpo_vl_data_messages.tar.gz
 mkdir -p data/dpo-vl && tar -xf dpo_vl_data_messages.tar.gz -C data/dpo-vl
 ```
 

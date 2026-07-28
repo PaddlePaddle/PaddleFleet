@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-wget https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-train_Bengali.jsonl
-wget https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-test_Bengali.jsonl
+wget https://paddleformers.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-train_Bengali.jsonl
+wget https://paddleformers.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-test_Bengali.jsonl
 
 export FLAGS_use_stride_kernel=True
 

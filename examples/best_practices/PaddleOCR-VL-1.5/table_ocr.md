@@ -40,7 +40,7 @@ PaddleFleet 通过在训练配置文件中指定字段`model_name_or_path`来设
 为了方便起见，我们提供了一个快速上手的复杂表格 Table 数据集，可用于微调 PaddleOCR-VL-1.5-0.9B 对复杂表格进行识别，该数据集为程序生成的复杂表格结构，实际内容不具备现实意义，使用以下命令下载并解压到 `./complex_table` 目录（数据集大小约 33 G）：
 
 ```bash
-wget https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/complex_table_dataset.tar
+wget https://paddleformers.bj.bcebos.com/datasets/ocr-vl/complex_table_dataset.tar
 mkdir -p ./complex_table
 tar -xvf complex_table_dataset.tar -C ./complex_table
 ```

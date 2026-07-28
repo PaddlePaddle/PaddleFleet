@@ -14,7 +14,7 @@
 预训练数据规模非常庞大，通常以 TB 为单位。为了方便演示，我们提供一个 demo 数据集，执行下载并解压。如果想要使用自己的数据进行训练，请参考[数据集格式说明](./dataset_format.md)进行数据的准备。
 
 ```shell
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/pt_online_data_messages.tar.gz
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/pt_online_data_messages.tar.gz
 mkdir -p data/pt && tar -xf pt_online_data_messages.tar.gz -C data/pt/
 ```
 

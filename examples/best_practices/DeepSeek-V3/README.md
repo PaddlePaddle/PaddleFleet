@@ -34,8 +34,8 @@ Python: 3.10
 ```shell
 # Download dsv3 model data
 mkdir -p data
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/ds3_industrycorpus2_94k.bin
-wget https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/ds3_industrycorpus2_94k.idx
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/ds3_industrycorpus2_94k.bin
+wget https://paddleformers.bj.bcebos.com/datasets/release/v1.0/ds3_industrycorpus2_94k.idx
 ```
 你也可以从文本自行制作数据集，参考[数据集格式说明](../../../docs/zh/dataset_format.md)
 

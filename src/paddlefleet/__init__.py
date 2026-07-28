@@ -97,15 +97,19 @@ with suppress(Exception):
     paddle.disable_signal_handler()
 
 PADDLEFLEET_TESTING = os.environ.get("PADDLEFLEET_TESTING", False)
-sys.modules["torchcodec"] = None  # Explicitly disable torchcodec to prevent optional dependency issues
+_disabled_optional_modules = ["torchcodec"]
 if "torch" not in sys.modules and not PADDLEFLEET_TESTING:
-    sys.modules["torch"] = None
-    sys.modules["torchvision"] = None
+    _disabled_optional_modules.extend(["torch", "torchvision"])
+_disabled_optional_modules = [
+    name for name in _disabled_optional_modules if name not in sys.modules
+]
+try:
+    for name in _disabled_optional_modules:
+        sys.modules[name] = None
     import transformers  # qa
-
-    del sys.modules["torch"]
-else:
-    import transformers  # qa
+finally:
+    for name in _disabled_optional_modules:
+        sys.modules.pop(name, None)
 
 logger.warning(
     """Due to potential compatibility issues between PaddlePaddle and PyTorch in PaddleFleet, PaddleFleet defaults `transformers.utils.import_utils.is_torch_available` and `transformers.utils.import_utils.is_torchvision_available` to False. If you need to use PyTorch in transformers or torchvision, please add `del sys.modules['transformers']` before using them."""
