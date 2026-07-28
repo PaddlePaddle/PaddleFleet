@@ -27,27 +27,27 @@ VL_DATA_DIR = "tests/fixtures/dummy/sft-vl"
 
 VL_DATASETS = {
     "DoclingMatix": {
-        "url": "https://paddlefleet.bj.bcebos.com/datasets/DoclingMatix.tar.gz",
+        "url": "https://paddleformers.bj.bcebos.com/datasets/DoclingMatix.tar.gz",
         "archive_name": "DoclingMatix.tar.gz",
         "extract_cmd": "tar zxf {archive_path} -C {target_dir}/",
         "check_path": "DoclingMatix",
         "is_dir": True,
     },
     "thinksafe_vl_data": {
-        "url": "https://paddlefleet.bj.bcebos.com/datasets/thinksafe_vl_data.tar",
+        "url": "https://paddleformers.bj.bcebos.com/datasets/thinksafe_vl_data.tar",
         "archive_name": "thinksafe_vl_data.tar",
         "extract_cmd": "tar xf {archive_path} -C {target_dir}/",
         "check_path": "thinksafe_vl_data",
         "is_dir": True,
     },
     "ocr_vl_sft-test_Bengali": {
-        "url": "https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-test_Bengali.jsonl",
+        "url": "https://paddleformers.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-test_Bengali.jsonl",
         "extract_cmd": None,
         "check_path": "ocr_vl_sft-test_Bengali.jsonl",
         "is_dir": False,
     },
     "ocr_vl_sft-train_Bengali": {
-        "url": "https://paddlefleet.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-train_Bengali.jsonl",
+        "url": "https://paddleformers.bj.bcebos.com/datasets/ocr-vl/ocr_vl_sft-train_Bengali.jsonl",
         "extract_cmd": None,
         "check_path": "ocr_vl_sft-train_Bengali.jsonl",
         "is_dir": False,
