@@ -875,9 +875,6 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
     def _make_dispatch_data(self):
         from paddlefleet.transformer.moe.fp8_utils import tilewise_quant
 
-        tokens_per_expert = [
-            self.seq_len * self.topk // self.n_routed_experts
-        ] * self.n_routed_experts
         hidden_states = paddle.randn(
             [self.seq_len, self.hidden_size], "bfloat16"
         )
@@ -893,6 +890,15 @@ class TestFusionMoePyLayerDwP2POverlap(unittest.TestCase):
             )
             indices_np[i] = np.sort(chosen)
         indices = paddle.to_tensor(indices_np)
+        # tokens_per_expert must match the actual routing in indices,
+        # otherwise the permuted buffers contain uninitialized regions.
+        tokens_per_expert = (
+            np.bincount(
+                indices_np.reshape([-1]), minlength=self.n_routed_experts
+            )
+            .astype(np.int64)
+            .tolist()
+        )
         return hidden_states, scale, probs, indices, tokens_per_expert
 
     def _run_fusion_layer(self, dw_p2p_overlap=False):

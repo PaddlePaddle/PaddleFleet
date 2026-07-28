@@ -176,9 +176,11 @@ class MoELayer(nn.Layer):
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.use_ue8m0 = config.use_ue8m0
+        self.use_w4a8 = config.use_w4a8
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
         self.fp8_dispatch = bool(config.fp8)
+        self.fp8_dispatch = bool(config.fp8) and not self.use_w4a8
         self.fp8_wgrad = config.fp8_wgrad
         self.fp8_dispatch_bwd = (
             self.fp8_dispatch and self.using_sonic_moe and self.fp8_wgrad
@@ -987,6 +989,7 @@ class MoELayer(nn.Layer):
                     use_accuracy_compatible=getattr(
                         self.config, "use_accuracy_compatible", False
                     ),
+                    use_w4a8=self.use_w4a8,
                 )
 
         with profile("combine"):
@@ -1145,6 +1148,7 @@ class MoELayer(nn.Layer):
                     use_accuracy_compatible=getattr(
                         self.config, "use_accuracy_compatible", False
                     ),
+                    use_w4a8=self.use_w4a8,
                 )
 
             if is_first_fwd:

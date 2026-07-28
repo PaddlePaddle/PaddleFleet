@@ -743,12 +743,12 @@ def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
     b_padded = pad_grouped_tensor(b, ks_tensor, padded_ks_tensor)
 
     paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
-        a=a_padded,
-        b=b_padded,
-        d=d,
-        ks=padded_sizes_list,
-        ks_tensor=padded_ks_tensor,
-        c=c,
+        a_padded,
+        b_padded,
+        d,
+        padded_sizes_list,
+        padded_ks_tensor,
+        c,
     )
 
     del a_padded, b_padded
