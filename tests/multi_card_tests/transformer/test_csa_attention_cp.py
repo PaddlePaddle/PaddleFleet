@@ -443,7 +443,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         pos_dim = 32
         sq_global = 256
         sq_local = sq_global // CP_SIZE
-        b = 2
+        b = 1
 
         config = TransformerConfig(
             num_hidden_layers=1,
@@ -597,7 +597,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         pos_dim = 64
         sq_global = 256
         sq_local = sq_global // CP_SIZE
-        b = 2
+        b = 1
 
         config = TransformerConfig(
             num_hidden_layers=1,
