@@ -383,7 +383,7 @@ class TestTransformerLayerFP8(unittest.TestCase):
         config = _make_config()
         layer = _make_layer(config)
         result = layer.use_fp8()
-        self.assertIsNone(result)
+        self.assertFalse(result)
 
 
 class TestTransformerLayerBlockAttnRes(unittest.TestCase):

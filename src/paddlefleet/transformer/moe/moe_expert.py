@@ -13,11 +13,13 @@
 # limitations under the License.
 
 
+import os
 from contextlib import nullcontext
 from copy import deepcopy
 
 import paddle
 import paddle.nn.functional as F
+import paddlefleet_ops
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
     shard_weight,
@@ -33,7 +35,12 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from .fusion_layer_utils import run_sonic_moe
+if paddlefleet_ops.is_sonic_moe_available():
+    try:
+        from paddlefleet_ops.sonicmoe import run_sonic_moe
+    except ImportError:
+        from .fusion_layer_utils import run_sonic_moe
+
 from .moe_utils import (
     k_grouped_bf16_gemm_tn_contiguous_aligned,
 )
@@ -59,6 +66,10 @@ except (ImportError, RuntimeError):
     fused_grouped_w1_to_sonic = None
     fused_sonic_w1_to_grouped = None
     fused_transpose_w2_layout = None
+
+g_shard_bypass_dygraph_optimizer = int(
+    os.environ.get("FLAGS_shard_bypass_dygraph_optimizer", 0)
+)
 
 
 class BMMFunction(paddle.autograd.PyLayer):
@@ -462,6 +473,18 @@ class GroupedMLPExpert(FleetLayer):
         return sharded_dict
 
 
+def _log_stage_memory(stage: str) -> None:
+    paddle.cuda.synchronize()
+    mib = 1024**2
+    print(
+        f"[stage-memory] {stage}: "
+        f"alloc_mib={paddle.cuda.memory_allocated() / mib:.2f}, "
+        f"reserved_mib={paddle.cuda.memory_reserved() / mib:.2f}, "
+        f"peak_alloc_mib={paddle.cuda.max_memory_allocated() / mib:.2f}, "
+        f"peak_reserved_mib={paddle.cuda.max_memory_reserved() / mib:.2f}"
+    )
+
+
 class SonicMoEExpert(GroupedMLPExpert):
     _GROUPED_LAYOUT = "grouped"
     _SONIC_LAYOUT = "sonic"
@@ -535,11 +558,73 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.hidden_size = self.config.hidden_size
         self.K = topk
         self._weights_layout = self._GROUPED_LAYOUT
+
         self.sonic_moe_config = _refresh_fp8_config()
         self.sonic_moe_config.enabled = self.config.fp8 is not None
         self.sonic_moe_config.fp8_wgrad = self.config.fp8_wgrad
         self.sonic_moe_config.fuse_y1_quant = True
         self.sonic_moe_config.fuse_y1_bf16_trunc = True
+        self.sonic_moe_config.recompute_z = False
+        self.sonic_moe_config.save_z_fp8 = (
+            self.config.sonicmoe_save_upgate_out_in_fp8
+        )
+        clamp_value = self.config.activation_func_clamp_value
+        self.sonic_moe_config.swiglu_clamp_value = (
+            0.0 if clamp_value is None else float(clamp_value)
+        )
+
+        # Micro batch tracking for fp8 weight memory optimization.
+        # _num_micro_batches: total forward passes per step for this layer.
+        # _forward_counter: auto-increments in forward(); reset in quant_weight().
+        self._forward_counter = 0
+        self._num_micro_batches = 9999
+
+    def set_num_micro_batches(self, num_micro_batches):
+        """Set total number of forward passes (micro batches) per training step.
+
+        This should be called once (e.g. in a callback's on_step_begin) to
+        inform the layer how many forward passes will occur before the next
+        quant_weight(). On the last forward pass, fp8 weights are released to
+        save memory, keeping only transposed_fp8 for backward.
+
+        For pipeline parallel with VPP, num_micro_batches = accumulate_steps.
+        Each virtual chunk shares the same SonicMoEExpert instance, so the
+        layer sees accumulate_steps forward calls per step.
+        """
+        self._num_micro_batches = num_micro_batches
+
+    def set_micro_batch_info(self, micro_batch_id, num_micro_batches):
+        """Legacy API: set current micro batch id and total number.
+
+        Prefer set_num_micro_batches() which works with auto-incrementing counter.
+        """
+        self._forward_counter = micro_batch_id
+        self._num_micro_batches = num_micro_batches
+
+    @property
+    def _is_last_micro_batch(self):
+        return self._forward_counter >= self._num_micro_batches - 1
+
+    def _release_fp8_weight_after_fwd(self, recompute_moe_gate_up):
+        release_fp8_weight_after_fwd = (
+            self.config.sonicmoe_quant_format == "1x32"
+            and self._is_last_micro_batch
+            and not g_shard_bypass_dygraph_optimizer
+            and not recompute_moe_gate_up
+            and self.config.recompute_granularity != "full"
+            and hasattr(self.weight1, "fp8")
+            and hasattr(self.weight2, "fp8")
+        )
+        return release_fp8_weight_after_fwd
+
+    def _release_fp8_weights(self):
+        """Release fp8 weight (non-transposed) to save memory.
+
+        Only transposed_fp8 is needed for backward (activation gradient GEMM).
+        """
+        for weight in (self.weight1, self.weight2):
+            if hasattr(weight, "fp8") and weight.fp8 is not None:
+                weight.fp8 = None
 
     def _convert_grad_layout(self, param, converter, convert_main_grad=True):
         main_grad = getattr(param, "main_grad", None)
@@ -553,6 +638,18 @@ class SonicMoEExpert(GroupedMLPExpert):
     def _convert_layout(
         self, target_layout, weight1_converter, weight2_converter
     ):
+        # Shared MTP layers can have separate expert instances over the same
+        # parameters, so the instance-local layout flag may be stale. Infer the
+        # layout from the paired weight dimensions instead of the local config.
+        # In SONIC_LAYOUT: w1 [E, 2I, H], w2 [E, H, I]
+        # In GROUPED_LAYOUT: w1 [E, H, 2I], w2 [E, I, H]
+        w1_shape = self.weight1.shape
+        w2_shape = self.weight2.shape
+        if w1_shape[1] == 2 * w2_shape[2] and w1_shape[2] == w2_shape[1]:
+            self._weights_layout = self._SONIC_LAYOUT
+        elif w1_shape[1] == w2_shape[2] and w1_shape[2] == 2 * w2_shape[1]:
+            self._weights_layout = self._GROUPED_LAYOUT
+
         if self._weights_layout == target_layout:
             return
         with paddle.no_grad():
@@ -599,20 +696,35 @@ class SonicMoEExpert(GroupedMLPExpert):
     @paddle.no_grad()
     def quant_weight(self):
         self.convert_weights_to_sonic_layout()
+        self.clear_fp8_weights()
 
+        iso32 = self.config.sonicmoe_quant_format == "32x32"
+        assert self.config.sonicmoe_quant_format in ["32x32", "1x32"], (
+            f"sonic_moe_quant_format {self.config.sonicmoe_quant_format} is not supported."
+        )
         payload = quantize_native_fp8_weights(
             self.weight1,
             self.weight2,
+            iso32=iso32,
         )
-        assert payload["format"] == "1x32", (
-            f"quant strategy {payload.get('format')} is not supported."
+        quant_format = payload["format"]
+        assert quant_format in ("1x32", "iso32"), (
+            f"quant strategy {quant_format} is not supported."
         )
-        w1_fp8, w1_scale, w1t_fp8, w1t_scale = payload["w1"]
-        w2_fp8, w2_scale, w2t_fp8, w2t_scale = payload["w2"]
+        if quant_format == "iso32":
+            w1_fp8, w1_scale, w1t_scale = payload["w1"]
+            w2_fp8, w2_scale, w2t_scale = payload["w2"]
+            w1t_fp8 = w1_fp8.transpose([0, 2, 1])
+            w2t_fp8 = w2_fp8.transpose([0, 2, 1])
+        else:
+            w1_fp8, w1_scale, w1t_fp8, w1t_scale = payload["w1"]
+            w2_fp8, w2_scale, w2t_fp8, w2t_scale = payload["w2"]
         self.weight1.fp8 = (w1_fp8, w1_scale)
         self.weight1.transposed_fp8 = (w1t_fp8, w1t_scale)
         self.weight2.fp8 = (w2_fp8, w2_scale)
         self.weight2.transposed_fp8 = (w2t_fp8, w2t_scale)
+        # Reset forward counter for the new step.
+        self._forward_counter = 0
 
     def clear_fp8_weights(self):
         clear_all_fp8_weight_caches()
@@ -636,11 +748,17 @@ class SonicMoEExpert(GroupedMLPExpert):
         use_fp8=False,
         tokens_per_expert=None,
         fp8_scale=None,
+        recompute_moe_gate_up=False,
         fp8_combine_grad_handle=None,
     ):
         self.convert_weights_to_sonic_layout()
         if self.sonic_moe_config.enabled is True and self.need_quant_weight():
             self.quant_weight()
+
+        self.sonic_moe_config.recompute_z = recompute_moe_gate_up
+        release_fp8_weight_after_fwd = self._release_fp8_weight_after_fwd(
+            recompute_moe_gate_up
+        )
         hidden_states = run_sonic_moe(
             hidden_states,
             topk_indices,
@@ -654,7 +772,13 @@ class SonicMoEExpert(GroupedMLPExpert):
             fp8_scale=fp8_scale,
             fp8_combine_grad_handle=fp8_combine_grad_handle,
             fp8_config=self.sonic_moe_config,
+            release_fp8_weights=release_fp8_weight_after_fwd,
         )
+        # Release fp8 weights on last micro batch to save memory.
+        # Only transposed_fp8 is kept for backward computation.
+        if release_fp8_weight_after_fwd:
+            self._release_fp8_weights()
+        self._forward_counter += 1
         return hidden_states
 
     def sharded_state_dict(

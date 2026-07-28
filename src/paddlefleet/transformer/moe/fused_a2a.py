@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import queue
 
 import paddle
@@ -67,6 +68,20 @@ _hybrid_ep_buffer = None
 HYBRIDEP_TOKEN_ALIGNMENT = 128
 
 
+def _supports_sonic_scale_word_packing(quantizer):
+    if quantizer is None:
+        return False
+    try:
+        return "pack_scale_words" in inspect.signature(quantizer).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+_SONIC_PACK_SCALE_WORDS_AVAILABLE = _supports_sonic_scale_word_packing(
+    quantize_activation_blockscaled_fast
+)
+
+
 def barrier_ep(ep_group):
     """barrier_ep"""
     paddle.distributed.barrier(ep_group)
@@ -110,6 +125,90 @@ def _normalize_fp8_scale_for_deepep(
             f"expected [{num_tokens}, {num_scales}]"
         )
     return scale
+
+
+def _pack_sonic_fp8_scale_for_deepep(
+    x_fp8: paddle.Tensor, scale: paddle.Tensor
+):
+    """Expose four 1x32 E8M0 bytes as one DeepEP int32 scale word."""
+    num_tokens, hidden = x_fp8.shape
+    num_groups = (hidden + 31) // 32
+    if not scale.is_contiguous():
+        scale = scale.contiguous()
+    packed_groups = (num_groups + 3) // 4
+    if (
+        num_groups % 4 == 0
+        and scale.dtype == paddle.int32
+        and tuple(scale.shape) == (num_tokens, packed_groups)
+    ):
+        return scale
+    if tuple(scale.shape) != (num_tokens, num_groups):
+        raise RuntimeError(
+            "Invalid Sonic FP8 scale shape before DeepEP dispatch: "
+            f"scale={scale.shape}, x_fp8={x_fp8.shape}, "
+            f"expected [{num_tokens}, {num_groups}]"
+        )
+    if scale.dtype != paddle.uint8:
+        raise TypeError(
+            "Sonic FP8 scale carrier expects raw uint8 E8M0 bytes, "
+            f"got {scale.dtype}"
+        )
+    if num_groups % 4 != 0:
+        # DeepEP's tuple ABI requires a 32-bit scale type. Preserve the
+        # previous value-conversion fallback for non-aligned hidden sizes.
+        return scale.cast(paddle.int32)
+    return scale.view(paddle.int32)
+
+
+def _unpack_sonic_fp8_scale_from_deepep(
+    x_fp8: paddle.Tensor, scale: paddle.Tensor
+):
+    """Recover raw 1x32 E8M0 bytes from DeepEP's int32 carrier."""
+    num_tokens, hidden = x_fp8.shape
+    num_groups = (hidden + 31) // 32
+    if not scale.is_contiguous():
+        scale = scale.contiguous()
+    packed_groups = (num_groups + 3) // 4
+    if (
+        num_groups % 4 == 0
+        and scale.dtype == paddle.int32
+        and tuple(scale.shape) == (num_tokens, packed_groups)
+    ):
+        return scale.view(paddle.uint8)
+    if scale.dtype == paddle.int32 and tuple(scale.shape) == (
+        num_tokens,
+        num_groups,
+    ):
+        return scale.cast(paddle.uint8)
+    raise RuntimeError(
+        "Invalid packed Sonic FP8 scale received from DeepEP: "
+        f"scale={scale.shape}/{scale.dtype}, x_fp8={x_fp8.shape}"
+    )
+
+
+def _sonicmoe_quantize(x):
+    if _SONIC_PACK_SCALE_WORDS_AVAILABLE:
+        fp8, scale = quantize_activation_blockscaled_fast(
+            x,
+            pack_scale_words=(x.shape[1] % 128 == 0),
+        )
+        return fp8, _pack_sonic_fp8_scale_for_deepep(fp8, scale)
+    else:
+        return quantize_activation_blockscaled_fast(x, scale_dtype=paddle.int32)
+
+
+def _record_fp8_combine_grad(grad_x, combine_grad_handle):
+    if combine_grad_handle is None:
+        raise RuntimeError(
+            "For fp8_dispatch, combine_grad_handle must be provided in "
+            "combine backward."
+        )
+    grad_data, grad_scale = grad_x
+    if _SONIC_PACK_SCALE_WORDS_AVAILABLE:
+        grad_scale = _unpack_sonic_fp8_scale_from_deepep(grad_data, grad_scale)
+    combine_grad_handle["data"] = grad_data
+    combine_grad_handle["scale"] = grad_scale
+    return grad_data
 
 
 def configure_buffer(num_sms=None, dispatch_config=None, combine_config=None):
@@ -436,9 +535,7 @@ class DeepEPDispatch(PyLayer):
                 )
                 if not x.is_contiguous():
                     x = x.contiguous()
-                x_fp8, scale = quantize_activation_blockscaled_fast(
-                    x, scale_dtype=paddle.int32
-                )
+                x_fp8, scale = _sonicmoe_quantize(x)
             else:
                 x_fp8, scale = (
                     paddle.incubate.nn.functional.fp8_quant_blockwise(
@@ -534,9 +631,7 @@ class DeepEPCombine(PyLayer):
                 "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
             )
             grad_output = grad_output.contiguous()
-            grad_for_comm = quantize_activation_blockscaled_fast(
-                grad_output, scale_dtype=paddle.int32
-            )
+            grad_for_comm = _sonicmoe_quantize(grad_output)
 
         grad_x = fused_combine_backward_func(
             grad_for_comm,
@@ -549,12 +644,7 @@ class DeepEPCombine(PyLayer):
         )
 
         if ctx.fp8_dispatch:
-            assert ctx.combine_grad_handle is not None, (
-                "For fp8_dispatch, combine_grad_handle must be provided in combine backward."
-            )
-            grad_x, grad_scale = grad_x
-            ctx.combine_grad_handle["data"] = grad_x
-            ctx.combine_grad_handle["scale"] = grad_scale
+            grad_x = _record_fp8_combine_grad(grad_x, ctx.combine_grad_handle)
 
         return grad_x
 
@@ -603,9 +693,7 @@ class DeepEPCombineAsync(PyLayer):
                 "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
             )
             grad_output = grad_output.contiguous()
-            grad_for_comm = quantize_activation_blockscaled_fast(
-                grad_output, scale_dtype=paddle.int32
-            )
+            grad_for_comm = _sonicmoe_quantize(grad_output)
 
         grad_x = fused_combine_backward_func(
             grad_for_comm,
@@ -619,12 +707,7 @@ class DeepEPCombineAsync(PyLayer):
         wait_for_deepep(ctx.group.id)
 
         if ctx.fp8_dispatch:
-            assert ctx.combine_grad_handle is not None, (
-                "For fp8_dispatch, combine_grad_handle must be provided in combine backward."
-            )
-            grad_x, grad_scale = grad_x
-            ctx.combine_grad_handle["data"] = grad_x
-            ctx.combine_grad_handle["scale"] = grad_scale
+            grad_x = _record_fp8_combine_grad(grad_x, ctx.combine_grad_handle)
 
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
@@ -666,9 +749,7 @@ class DeepEPCombineAsyncFunctor(PyLayer):
                 "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
             )
             grad_output = grad_output.contiguous()
-            grad_for_comm = quantize_activation_blockscaled_fast(
-                grad_output, scale_dtype=paddle.int32
-            )
+            grad_for_comm = _sonicmoe_quantize(grad_output)
 
         grad_x = fused_combine_backward_func(
             grad_for_comm,
@@ -682,12 +763,7 @@ class DeepEPCombineAsyncFunctor(PyLayer):
         wait_for_deepep(ctx.group.id)
 
         if ctx.fp8_dispatch:
-            assert ctx.combine_grad_handle is not None, (
-                "For fp8_dispatch, combine_grad_handle must be provided in combine backward."
-            )
-            grad_x, grad_scale = grad_x
-            ctx.combine_grad_handle["data"] = grad_x
-            ctx.combine_grad_handle["scale"] = grad_scale
+            grad_x = _record_fp8_combine_grad(grad_x, ctx.combine_grad_handle)
 
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 

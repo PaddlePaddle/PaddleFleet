@@ -100,11 +100,12 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, w, dw_p2p_overlap=False):
+    def forward(ctx, x, w, dw_p2p_overlap=False, use_accuracy_compatible=False):
         """
         forward
         """
         ctx.dw_p2p_overlap = dw_p2p_overlap
+        ctx.use_accuracy_compatible = use_accuracy_compatible
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
@@ -126,6 +127,12 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 w_grad = paddle.matmul(
                     x_cast, y_grad, transpose_x=True
                 ).T  # 始终先算梯度
+
+            # MG returns `grad_weight.to(weight_dtype)` and only then accumulates
+            # it into the fp32 main_grad, so the wgrad passes through the weight
+            # storage dtype first.
+            if ctx.use_accuracy_compatible:
+                w_grad = w_grad.cast(weight.dtype).cast(paddle.float32)
 
             if hasattr(weight, "main_grad"):
                 if weight.main_grad is None:
@@ -164,21 +171,33 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 WeightGradStore.enabled = False
                 return x_grad, None
         else:
-            w = w.T
-            x_g, w_g = matmul_grad(
-                x.cast(ctx.dtype),
-                w.cast(ctx.dtype),
-                y_grad,
-                False,
-                False,
-            )
+            if ctx.use_accuracy_compatible:
+                # Mirror MG `RouterGatingLinearFunction.backward`:
+                #   grad_input  = torch.mm(grad_output, weight.to(router_dtype))
+                #   grad_weight = torch.mm(grad_output.t(), inp.to(router_dtype))
+                # i.e. two separate GEMMs (not a fused matmul_grad), then each
+                # gradient cast back to its own storage dtype.
+                x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
+                w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                return x_grad, w_grad
+            else:
+                w = w.T
+                x_g, w_g = matmul_grad(
+                    x.cast(ctx.dtype),
+                    w.cast(ctx.dtype),
+                    y_grad,
+                    False,
+                    False,
+                )
 
-            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
-            w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
-            if w_grad is not None:
-                w_grad = w_grad.T
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                if w_grad is not None:
+                    w_grad = w_grad.T
 
-            return x_grad, w_grad
+                return x_grad, w_grad
 
 
 def gate_detach_matmul(
@@ -187,9 +206,12 @@ def gate_detach_matmul(
     use_fuse,
     moe_router_force_load_balancing=False,
     dw_p2p_overlap=False,
+    use_accuracy_compatible=False,
 ):
     if use_fuse:
-        score = FusedGateDetachMatmul.apply(x, weight, dw_p2p_overlap)
+        score = FusedGateDetachMatmul.apply(
+            x, weight, dw_p2p_overlap, use_accuracy_compatible
+        )
     else:
         x = x.cast(paddle.float32)
         score = F.linear(x, weight)
@@ -227,6 +249,9 @@ class StandardMoERouter(nn.Layer):
     ):
         super().__init__()
         self.config = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
 
         self.hidden_size = config.hidden_size
         self.num_experts = config.n_routed_experts
@@ -272,11 +297,18 @@ class StandardMoERouter(nn.Layer):
             )
 
         # Initialize gate weight with Normal distribution aligned with Megatron.
-        self.weight = paddle.create_parameter(
-            shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
-            default_initializer=paddle.nn.initializer.Constant(0.0),
-        )
+        if self.use_accuracy_compatible:
+            self.weight = paddle.create_parameter(
+                shape=[self.num_experts, self.hidden_size],
+                dtype=config.params_dtype,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+        else:
+            self.weight = paddle.create_parameter(
+                shape=[self.num_experts, self.hidden_size],
+                dtype="float32",
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
         config.init_method(self.weight)
 
         if (
@@ -1213,6 +1245,7 @@ class TopKRouter(StandardMoERouter):
                     True,
                     self.config.moe_router_force_load_balancing,
                     getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
                 )
                 logits_1 = gate_detach_matmul(
                     input,
@@ -1220,6 +1253,7 @@ class TopKRouter(StandardMoERouter):
                     True,
                     self.config.moe_router_force_load_balancing,
                     getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
                 )
                 # The two-view contract is sigmoid + sigmoid. scoring_func is
                 # guaranteed to be "sigmoid" here (validated above and in
@@ -1236,6 +1270,7 @@ class TopKRouter(StandardMoERouter):
                     True,
                     self.config.moe_router_force_load_balancing,
                     getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
                 )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)

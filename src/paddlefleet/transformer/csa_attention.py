@@ -1393,6 +1393,7 @@ class Compressor(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            disable_fp8=True,
         )
         self.linear_wgate = build_spec_layer(
             sublayers_spec.linear_wgate,
@@ -1405,6 +1406,7 @@ class Compressor(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            disable_fp8=True,
         )
 
         self.ape = self.create_parameter(
@@ -1720,6 +1722,7 @@ class CSAIndexer(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            disable_fp8=True,
         )
 
         # Weights projection: hidden_size -> n_heads
@@ -1734,6 +1737,7 @@ class CSAIndexer(nn.Layer):
             is_expert=False,
             skip_weight_param_allocation=False,
             tp_group=None,
+            disable_fp8=True,
         )
 
         # Own compressor (smaller head_dim, with Hadamard rotation)

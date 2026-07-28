@@ -25,6 +25,7 @@ Components:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -53,6 +54,28 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.enums import AttnMaskType
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
+try:
+    from paddlefleet_ops import deep_gemm
+
+    _DEEP_GEMM_AVAILABLE = hasattr(deep_gemm, "fp8_einsum")
+except (ImportError, RuntimeError):
+    deep_gemm = None
+    _DEEP_GEMM_AVAILABLE = False
+
+
+def _fleet_fp8_wo_a_gemm_enabled():
+    if os.environ.get("FLEET_FP8_WO_A_GEMM", "1") in ("0", "false", "False"):
+        return False
+    return (
+        _DEEP_GEMM_AVAILABLE
+        and paddle.is_compiled_with_cuda()
+        and paddle.device.cuda.device_count() > 0
+        and paddle.device.cuda.get_device_capability()[0] >= 10
+    )
+
+
+FLEET_FP8_WO_A_GEMM = _fleet_fp8_wo_a_gemm_enabled()
+
 
 def _q_rms_norm(q: Tensor, eps: float, high_precision_norm: bool) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
@@ -63,6 +86,225 @@ def _q_rms_norm(q: Tensor, eps: float, high_precision_norm: bool) -> Tensor:
         return q.astype(ori_dtype)
     else:
         return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
+
+
+def _quant_blockwise(x: Tensor, quant_method: str):
+    """Blockwise FP8 quantization returning ``(fp8, pow2_scale)``.
+
+    Note: ``fp8_einsum`` (used by ``GroupedOutputFP8``) does NOT support UE8M0
+    (int32-packed) scales — it only accepts float32 per-block scales.  Therefore
+    this helper always produces the standard pow2 float32 layout.
+    """
+    return paddle.incubate.nn.functional.fp8_quant_blockwise(
+        x,
+        output_scale_transpose=False,
+        quant_method=quant_method,
+        input_transpose=False,
+        using_pow2_scale=True,
+    )[:2]
+
+
+class GroupedOutputFP8(paddle.autograd.PyLayer):
+    """FP8 grouped output projection ``"...gd,grd->...gr"``.
+
+    Runs the grouped GEMM through ``deep_gemm.fp8_einsum`` with blockwise
+    quantization (1x128 for activations/gradients, 128x128 for weights).
+    ``dgrad`` is always FP8; ``wgrad`` is FP8 unless ``fp8_wgrad=False``.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x: Tensor,
+        weight: Tensor,
+        num_groups: int,
+        o_lora_rank: int,
+        fp8_wgrad: bool = True,
+        save_original_input: bool = False,
+    ):
+        assert _DEEP_GEMM_AVAILABLE, (
+            "GroupedOutputFP8 requires deep_gemm.fp8_einsum"
+        )
+        b, sq, _, d = x.shape
+        assert d % 128 == 0, (
+            "FP8 grouped output requires per-group hidden dim to be "
+            f"divisible by 128, got {d}"
+        )
+        assert o_lora_rank % 128 == 0, (
+            "FP8 grouped output requires o_lora_rank to be divisible by 128, "
+            f"got {o_lora_rank}"
+        )
+        weight_bf16 = weight.reshape([num_groups, o_lora_rank, d])
+        weight_for_gemm = weight_bf16.transpose([0, 2, 1]).contiguous()
+
+        x_fp8, x_scale = _quant_blockwise(
+            x.reshape([-1, d]).contiguous(), "1x128"
+        )
+        x_fp8 = x_fp8.reshape([b * sq, num_groups, d])
+        x_scale = x_scale.reshape([b * sq, num_groups, -1])
+
+        weight_fp8, weight_scale = _quant_blockwise(
+            weight_for_gemm.reshape([-1, o_lora_rank]), "128x128"
+        )
+        weight_fp8 = weight_fp8.reshape([num_groups, d, o_lora_rank])
+        weight_scale = weight_scale.reshape(
+            [num_groups, d // 128, o_lora_rank // 128]
+        )
+
+        out = paddle.empty(
+            [b * sq, num_groups, o_lora_rank], dtype=paddle.bfloat16
+        )
+        deep_gemm.fp8_einsum(
+            "bhd,hdr->bhr",
+            (x_fp8, x_scale),
+            (weight_fp8, weight_scale),
+            out,
+            recipe=(1, 128, 128),
+        )
+
+        # ``save_original_input=False`` (default) skips stashing the bf16
+        # activation to save memory: the FP8 wgrad path only needs the
+        # "1x128" quantized activation, so it is produced eagerly here.
+        if save_original_input:
+            ctx.save_for_backward(x, weight_bf16)
+            ctx.bf16_x_saved = True
+            ctx.x_fp8_w_pre = None
+            ctx.x_scale_w_pre = None
+            ctx.x_shape = None
+        else:
+            assert (b * sq) % 128 == 0, (
+                "GroupedOutputFP8 save_original_input=False requires "
+                f"(batch*seqlen) divisible by 128, got b={b}, sq={sq}"
+            )
+            # [b*sq, h, d] -> [h, d, b*sq] so scales are along the b*sq axis.
+            x_wgrad_pre = (
+                x.reshape([b * sq, num_groups, d])
+                .transpose([1, 2, 0])
+                .contiguous()
+            )
+            x_fp8_w_pre, x_scale_w_pre = _quant_blockwise(
+                x_wgrad_pre.reshape([-1, b * sq]), "1x128"
+            )
+            x_fp8_w_pre = x_fp8_w_pre.reshape([num_groups, d, b * sq])
+            x_scale_w_pre = x_scale_w_pre.reshape([num_groups, d, -1])
+            ctx.save_for_backward(weight_bf16)
+            ctx.bf16_x_saved = False
+            ctx.x_fp8_w_pre = x_fp8_w_pre
+            ctx.x_scale_w_pre = x_scale_w_pre
+            ctx.x_shape = (b, sq, num_groups, d)
+        ctx.num_groups = num_groups
+        ctx.o_lora_rank = o_lora_rank
+        ctx.fp8_wgrad = fp8_wgrad
+        return out.reshape([b, sq, num_groups * o_lora_rank])
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        if ctx.bf16_x_saved:
+            x, weight = ctx.saved_tensor()
+            b, sq, _, d = x.shape
+        else:
+            (weight,) = ctx.saved_tensor()
+            b, sq, _, d = ctx.x_shape
+            x = None
+        num_groups = ctx.num_groups
+        o_lora_rank = ctx.o_lora_rank
+        fp8_wgrad = ctx.fp8_wgrad
+        grad_output = grad_output.reshape([b, sq, num_groups, o_lora_rank])
+
+        # dgrad (always FP8): grad_x = grad_output @ weight, "bhr,hdr->bhd",
+        # so weight [g, r, d] is transposed into the [g, d, r] "hdr" layout.
+        go_fp8, go_scale = _quant_blockwise(
+            grad_output.reshape([-1, o_lora_rank]).contiguous(), "1x128"
+        )
+        go_fp8 = go_fp8.reshape([b * sq, num_groups, o_lora_rank])
+        go_scale = go_scale.reshape([b * sq, num_groups, -1])
+
+        w_for_dgrad = weight.transpose([0, 2, 1]).contiguous()
+        w_fp8, w_scale = _quant_blockwise(
+            w_for_dgrad.reshape([-1, o_lora_rank]), "128x128"
+        )
+        w_fp8 = w_fp8.reshape([num_groups, d, o_lora_rank])
+        w_scale = w_scale.reshape([num_groups, d // 128, o_lora_rank // 128])
+
+        grad_x = paddle.empty([b * sq, num_groups, d], dtype=paddle.bfloat16)
+        deep_gemm.fp8_einsum(
+            "bhr,hdr->bhd",
+            (go_fp8, go_scale),
+            (w_fp8, w_scale),
+            grad_x,
+            recipe=(1, 128, 128),
+        )
+        grad_x = grad_x.reshape([b, sq, num_groups, d])
+
+        if fp8_wgrad:
+            # grad_weight = x^T @ grad_output, "bhd,bhr->hdr". fp8_einsum
+            # permutes both operands by {1, 2, 0}, and recipe=(1, 1, 128)
+            # expects scales along the b*sq axis, so quantize on the
+            # [h, {d,r}, b*sq] layout and permute back to [b*sq, h, {d,r}].
+            assert (b * sq) % 128 == 0, (
+                "FP8 grouped output wgrad requires (batch*seqlen) to be "
+                f"divisible by 128, got b={b}, sq={sq}, b*sq={b * sq}"
+            )
+            if ctx.bf16_x_saved:
+                x_wgrad = (
+                    x.reshape([b * sq, num_groups, d])
+                    .transpose([1, 2, 0])
+                    .contiguous()
+                )
+                x_fp8_w, x_scale_w = _quant_blockwise(
+                    x_wgrad.reshape([-1, b * sq]), "1x128"
+                )
+                x_fp8_w = x_fp8_w.reshape([num_groups, d, b * sq])
+                x_scale_w = x_scale_w.reshape([num_groups, d, -1])
+            else:
+                # Reuse fp8 activation pre-computed in forward (identical
+                # quantization to the bf16-saved path, so precision matches).
+                x_fp8_w = ctx.x_fp8_w_pre
+                x_scale_w = ctx.x_scale_w_pre
+
+            go_wgrad = (
+                grad_output.reshape([b * sq, num_groups, o_lora_rank])
+                .transpose([1, 2, 0])
+                .contiguous()
+            )
+            go_fp8_w, go_scale_w = _quant_blockwise(
+                go_wgrad.reshape([-1, b * sq]), "1x128"
+            )
+            go_fp8_w = go_fp8_w.reshape([num_groups, o_lora_rank, b * sq])
+            go_scale_w = go_scale_w.reshape([num_groups, o_lora_rank, -1])
+
+            x_fp8_w = x_fp8_w.transpose([2, 0, 1]).contiguous()
+            x_scale_w = x_scale_w.transpose([2, 0, 1]).contiguous()
+            go_fp8_w = go_fp8_w.transpose([2, 0, 1]).contiguous()
+            go_scale_w = go_scale_w.transpose([2, 0, 1]).contiguous()
+
+            grad_weight = paddle.empty(
+                [num_groups, d, o_lora_rank], dtype=paddle.bfloat16
+            )
+            deep_gemm.fp8_einsum(
+                "bhd,bhr->hdr",
+                (x_fp8_w, x_scale_w),
+                (go_fp8_w, go_scale_w),
+                grad_weight,
+                recipe=(1, 1, 128),
+            )
+            # [g, d, r] -> [g, r, d]
+            grad_weight = grad_weight.transpose([0, 2, 1]).contiguous()
+        else:
+            if x is None:
+                x_fp8_2d = ctx.x_fp8_w_pre.reshape([num_groups * d, b * sq])
+                x_scale_2d = ctx.x_scale_w_pre.reshape([num_groups * d, -1])
+                x_bf16_2d = paddle.incubate.nn.functional.fused_act_dequant(
+                    x_fp8_2d, x_scale_2d
+                )
+                x = (
+                    x_bf16_2d.reshape([num_groups, d, b * sq])
+                    .transpose([2, 0, 1])
+                    .reshape([b, sq, num_groups, d])
+                )
+            grad_weight = paddle.einsum("bsgd,bsgr->grd", x, grad_output)
+
+        return grad_x, grad_weight.reshape([num_groups * o_lora_rank, d])
 
 
 from paddlefleet.transformer.utils import (
@@ -293,6 +535,7 @@ class DSv4HybridAttention(Attention):
         )
 
         linear_proj_in_size = config.o_groups * config.o_lora_rank
+        self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
         self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
             linear_proj_in_size,
@@ -305,7 +548,6 @@ class DSv4HybridAttention(Attention):
             is_expert=False,
             tp_group=self.pg_collection.tp,
         )
-        self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
 
         # Gated attention. For MQA the gate multiplies the output of the grouped
         # low-rank projection (linear_o_group_proj), right before o_proj.
@@ -469,13 +711,26 @@ class DSv4HybridAttention(Attention):
 
         # Grouped output projection
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
-        wo_a_weight = self.linear_o_group_proj.reshape(
-            [self.o_local_groups, self.config.o_lora_rank, -1]
-        )
-        core_attn_out = paddle.einsum(
-            "...gd,grd->...gr", core_attn_out, wo_a_weight
-        )
-        core_attn_out = core_attn_out.reshape([b, sq, -1])
+        if (
+            self.config.fp8 is not None
+            and self.config.full_fp8_computation
+            and FLEET_FP8_WO_A_GEMM
+        ):
+            core_attn_out = GroupedOutputFP8.apply(
+                core_attn_out,
+                self.linear_o_group_proj,
+                self.o_local_groups,
+                self.config.o_lora_rank,
+                self.config.fp8_wgrad,
+            )
+        else:
+            wo_a_weight = self.linear_o_group_proj.reshape(
+                [self.o_local_groups, self.config.o_lora_rank, -1]
+            )
+            core_attn_out = paddle.einsum(
+                "...gd,grd->...gr", core_attn_out, wo_a_weight
+            )
+            core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Apply gated attention
         if self.gated_attention:
@@ -596,6 +851,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             is_expert=False,
             tp_group=self.pg_collection.tp,
         )
+        self.linear_q_up_proj.save_original_input = True
 
         # KV projection: hidden_size -> v_head_dim (single head)
         self.linear_kv_proj = build_spec_layer(
@@ -610,6 +866,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             is_expert=False,
             tp_group=self.pg_collection.tp,
         )
+        self.linear_kv_proj.save_original_input = True
 
         # KV layernorm
         self.kv_layernorm = build_spec_layer(

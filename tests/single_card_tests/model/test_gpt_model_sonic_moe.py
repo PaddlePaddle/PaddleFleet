@@ -120,6 +120,17 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         self.n_routed_experts = 8
         self.acc_steps = 1
 
+    def test_sonic_moe_import(self):
+        from paddlefleet_ops import sonicmoe
+
+        from paddlefleet.transformer.moe import fusion_layer_utils, moe_expert
+
+        expected_run_sonic_moe = getattr(
+            sonicmoe, "run_sonic_moe", fusion_layer_utils.run_sonic_moe
+        )
+        self.assertIs(moe_expert.run_sonic_moe, expected_run_sonic_moe)
+        self.assertTrue(hasattr(moe_expert, "SonicMoEExpert"))
+
     @staticmethod
     def _small_init_method(tensor):
         """Small uniform init for precision tests (matches pre-update behavior)."""
@@ -158,22 +169,27 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         return TransformerConfig(**kwargs)
 
     def _build_moe_layer(
-        self, using_sonic_moe=False, fp8=None, moe_deep_gemm=None
+        self,
+        using_sonic_moe=False,
+        fp8=None,
+        moe_deep_gemm=None,
+        config=None,
     ):
         paddle.seed(self.seed)
         model_parallel_cuda_manual_seed(self.seed)
-        transformer_config = self._build_transformer_config(
-            using_sonic_moe=using_sonic_moe,
-            fp8=fp8,
-            moe_deep_gemm=moe_deep_gemm,
-        )
+        if config is None:
+            config = self._build_transformer_config(
+                using_sonic_moe=using_sonic_moe,
+                fp8=fp8,
+                moe_deep_gemm=moe_deep_gemm,
+            )
         transformer_layer_spec = get_gpt_layer_local_spec(
-            transformer_config,
+            config,
             num_experts=self.n_routed_experts,
         )
 
         moe_layer = MoELayer(
-            transformer_config,
+            config,
             transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
             self.pg_collection,
         )
@@ -385,13 +401,18 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
 
     def run_test_z_bf16_recompute_z(self):
         sonic_fp8 = self._build_moe_layer(using_sonic_moe=True, fp8="e4m3")
-        sonic_fp8_recompute_z = self._build_moe_layer(
+
+        recompute_config = self._build_transformer_config(
             using_sonic_moe=True, fp8="e4m3"
         )
-
-        sonic_fp8.grouped_gemm_experts.sonic_moe_config.save_z_fp8 = False
-        sonic_fp8_recompute_z.grouped_gemm_experts.sonic_moe_config.save_z_fp8 = False
-        sonic_fp8_recompute_z.grouped_gemm_experts.sonic_moe_config.recompute_z = True
+        recompute_config.recompute_granularity = "selective"
+        recompute_config.recompute_modules = ["moe_gate_up"]
+        sonic_fp8_recompute_z = self._build_moe_layer(
+            using_sonic_moe=True, fp8="e4m3", config=recompute_config
+        )
+        # sonic_fp8.grouped_gemm_experts.sonic_moe_config.save_z_fp8 = False
+        # sonic_fp8_recompute_z.grouped_gemm_experts.sonic_moe_config.save_z_fp8 = False
+        # sonic_fp8_recompute_z.grouped_gemm_experts.sonic_moe_config.recompute_z = True
         # sonic_fp8.grouped_gemm_experts.sonic_moe_config.enabled = True
         input_data_list = []
         for step_idx in range(self.acc_steps):

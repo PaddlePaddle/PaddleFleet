@@ -70,13 +70,12 @@ class TestIsFp8Tensor(unittest.TestCase):
         is_fp8_tensor = _load_fp8_utils()
         self.assertFalse(is_fp8_tensor("not_a_tuple"))
 
-    def test_wrong_length_tuple_raises(self):
-        """Test is_fp8_tensor raises ValueError for tuple with wrong length."""
+    def test_wrong_length_tuple_returns_false(self):
+        """Test is_fp8_tensor returns False for tuple with wrong length."""
         is_fp8_tensor = _load_fp8_utils()
         t = paddle.randn([2, 3])
-        # The function unpacks as (tensor, scale), so 3-element tuple raises
-        with self.assertRaises(ValueError):
-            is_fp8_tensor((t, t, t))
+        # The function returns False for non-2-element tuples
+        self.assertFalse(is_fp8_tensor((t, t, t)))
 
     def test_correct_fp8_tuple_returns_true(self):
         """Test is_fp8_tensor returns True for valid FP8 tuple."""

@@ -671,6 +671,12 @@ class TransformerConfig(ModelParallelConfig):
     use_w4a8: bool = False
     """Whether to use w4a8 for mlp gemm."""
 
+    full_fp8_computation: bool = False
+    """Master switch for FP8 on Linear / ColumnParallelLinear / RowParallelLinear
+    and DSv4HybridSelfAttention / CSAIndexer. When ``False`` these layers stay
+    in bf16 regardless of ``fp8`` / ``fp8_wgrad`` / ``use_ue8m0``. Pre-existing
+    FP8 paths (e.g. ``moe_layer`` / ``moe_expert``) ignore this flag."""
+
     ####################
     # initialization
     ####################
@@ -753,8 +759,17 @@ class TransformerConfig(ModelParallelConfig):
     """When set to True, clone the output of scatter_to_sequence_parallel_region in embedding layer
     to facilitate garbage collection of input."""
 
+    ####################
+    # SonicMoE
+    ####################``
     using_sonic_moe: bool = False
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
+
+    sonicmoe_quant_format: str = "32x32"
+    """Quantization format used in SonicMoE for quantizing weights, options are 32x32 and 1x32."""
+
+    sonicmoe_save_upgate_out_in_fp8: bool = False
+    """Save the up-gate output in FP8 or BF16, if True, save in FP8."""
 
     ####################
     # MLA

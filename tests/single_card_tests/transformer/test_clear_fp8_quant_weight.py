@@ -24,6 +24,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from paddlefleet.transformer.moe.moe_expert import SonicMoEExpert
+from paddlefleet.transformer.moe.moe_layer import MoELayer
+
 
 class TestMoELayerClearFp8QuantWeight(unittest.TestCase):
     """Test MoELayer.clear_fp8_quant_weight logic."""
@@ -100,6 +103,34 @@ class TestMoELayerClearFp8QuantWeight(unittest.TestCase):
             self.assertFalse(
                 hasattr(weight2, attr), f"weight2.{attr} not cleared"
             )
+
+    def test_sonic_expert_path_clears_fp8_weight_caches(self):
+        """SonicMoEExpert cleanup must clear both FP8 weight cache layouts."""
+        moe = SimpleNamespace(moe_use_fusion_node=True, fp8=True)
+        sonic_experts = object.__new__(SonicMoEExpert)
+        sonic_experts.weight1 = SimpleNamespace(
+            fp8=("w1", "s1"), transposed_fp8=("wt1", "st1")
+        )
+        sonic_experts.weight2 = SimpleNamespace(
+            fp8=("w2", "s2"), transposed_fp8=("wt2", "st2")
+        )
+        sonic_experts.clear_fp8_weights = MagicMock(
+            side_effect=lambda: (
+                setattr(sonic_experts.weight1, "fp8", None),
+                setattr(sonic_experts.weight1, "transposed_fp8", None),
+                setattr(sonic_experts.weight2, "fp8", None),
+                setattr(sonic_experts.weight2, "transposed_fp8", None),
+            )
+        )
+        moe.grouped_gemm_experts = sonic_experts
+
+        MoELayer.clear_fp8_quant_weight(moe)
+
+        sonic_experts.clear_fp8_weights.assert_called_once_with()
+        self.assertIsNone(sonic_experts.weight1.fp8)
+        self.assertIsNone(sonic_experts.weight1.transposed_fp8)
+        self.assertIsNone(sonic_experts.weight2.fp8)
+        self.assertIsNone(sonic_experts.weight2.transposed_fp8)
 
     def test_experts_fallback_path_clears_attrs(self):
         """When no grouped_gemm_experts, clear per-expert weight attrs."""
