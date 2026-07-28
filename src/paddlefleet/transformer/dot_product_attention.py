@@ -47,6 +47,10 @@ from paddlefleet.refined_recompute import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.sink_impl import (
+    prepare_fa3_sink_attention,
+    sink_attention_forward,
+)
 from paddlefleet.transformer.utils import (
     attention_mask_func,
     get_sliding_window_left_size,
@@ -752,6 +756,20 @@ class DotProductAttention(FleetLayer):
             else:
                 flashmask_attention_func = flashmask_attention
 
+            use_fa3_sink, attn_mask_startend_row_indices = (
+                prepare_fa3_sink_attention(
+                    query,
+                    key,
+                    value,
+                    self.softmax_offset,
+                    startend_row_indices=attn_mask_startend_row_indices,
+                    causal=is_causal,
+                    context_parallel_size=self.context_parallel_size,
+                    use_rr_flash_attention=use_rr_flash_attention,
+                    flashmask_use_varlen=self.config.flashmask_use_varlen,
+                )
+            )
+
             if self.sliding_window is not None:
                 attn_mask_startend_row_indices = (
                     startend_row_indices_add_sliding_window(
@@ -767,7 +785,8 @@ class DotProductAttention(FleetLayer):
             )
 
             need_value_padding = (
-                not (
+                use_fa3_sink
+                or not (
                     fa_version == 4 and q_head_dim == 192 and v_head_dim == 128
                 )
             ) and q_head_dim != v_head_dim
@@ -786,17 +805,30 @@ class DotProductAttention(FleetLayer):
 
             if not use_rr_flash_attention and self._has_custom_softmax_scale:
                 extra_kwargs["softmax_scale"] = self.softmax_scale
-
-            attn_output = flashmask_attention_func(
-                query.astype(value.dtype),
-                key.astype(value.dtype),
-                value_padded.astype(value.dtype),
-                startend_row_indices=attn_mask_startend_row_indices,
-                dropout=self.config.attention_dropout,
-                causal=is_causal,
-                learnable_sink=self.softmax_offset,
-                **extra_kwargs,
-            )
+            if use_fa3_sink:
+                attn_output = sink_attention_forward(
+                    query.astype(value.dtype),
+                    key.astype(value.dtype),
+                    value_padded.astype(value.dtype),
+                    sink=self.softmax_offset,
+                    startend_row_indices=attn_mask_startend_row_indices,
+                    dropout_p=self.config.attention_dropout,
+                    softmax_scale=self.softmax_scale,
+                    causal=is_causal,
+                    training=self.training,
+                )
+            else:
+                if self.softmax_offset is not None:
+                    extra_kwargs["learnable_sink"] = self.softmax_offset
+                attn_output = flashmask_attention_func(
+                    query.astype(value.dtype),
+                    key.astype(value.dtype),
+                    value_padded.astype(value.dtype),
+                    startend_row_indices=attn_mask_startend_row_indices,
+                    dropout=self.config.attention_dropout,
+                    causal=is_causal,
+                    **extra_kwargs,
+                )
 
             if need_value_padding:
                 # Truncate output back to original v_head_dim
