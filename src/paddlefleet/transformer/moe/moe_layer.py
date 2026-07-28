@@ -1031,6 +1031,7 @@ class MoELayer(nn.Layer):
                     use_fp8,
                     tokens_per_expert=tokens_per_expert,
                     fp8_scale=fp8_scale,
+                    recompute_moe_gate_up=self.recompute_moe_gate_up,
                     fp8_combine_grad_handle=fp8_combine_grad_handle,
                 )
             else:
@@ -1522,6 +1523,7 @@ class MoELayer(nn.Layer):
                 topk_indices,
                 topk_weights,
                 use_fp8,
+                recompute_moe_gate_up=self.recompute_moe_gate_up,
             )
             return final_hidden_states.cast(hidden_states.dtype)
         else:
@@ -1678,8 +1680,11 @@ class MoELayer(nn.Layer):
                     delattr(weight_obj, attr)
 
         if hasattr(self, "grouped_gemm_experts"):
-            _clear_attrs(self.grouped_gemm_experts.weight1)
-            _clear_attrs(self.grouped_gemm_experts.weight2)
+            if isinstance(self.grouped_gemm_experts, SonicMoEExpert):
+                self.grouped_gemm_experts.clear_fp8_weights()
+            else:
+                _clear_attrs(self.grouped_gemm_experts.weight1)
+                _clear_attrs(self.grouped_gemm_experts.weight2)
         else:
             for expert in self.experts:
                 if expert is not None:

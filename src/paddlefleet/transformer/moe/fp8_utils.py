@@ -1095,9 +1095,19 @@ class ExpertsGroupGemmContiguousNode:
                 )
                 d_gate_f32 = gate_g.grad
                 d_up_f32 = val_g.grad
-                d_scale_f32 = scale_g.grad.reshape(unzipped_probs.shape).astype(
-                    "float32"
-                )
+
+                # This ffn-dimension reduction uses a different accumulation order in fp32 than MG(torch) -> dL/dprobs.
+                # The last-bit split causes a 1-ULP gate wgrad difference (isolated test: fp32 vs fp64 differs by ~3.5e-8).
+                # Summing only in fp64 removes the accumulation-order noise and makes both sides converge to the same value; do1 still follows the fp32 path above
+                # while autograd stays unchanged, keeping expert wgrad aligned.
+                probs_grad_fp64 = (
+                    F.silu(gate_c.detach().astype("float64"))
+                    * val_c.detach().astype("float64")
+                    * do2_s.astype("float64").detach()
+                ).sum(axis=-1, keepdim=True)
+                d_scale_f32 = probs_grad_fp64.reshape(
+                    unzipped_probs.shape
+                ).astype("float32")
 
             do1 = paddle.concat([d_gate_f32, d_up_f32], axis=-1).astype(
                 o1.dtype
@@ -2042,7 +2052,6 @@ class ExpertsGroupGemmContiguousNode:
         if used_inplace_swiglu:
             del o1
         self.o1 = None
-
         if a2a_async_fn is None:
             # dw1
             if self.use_bf16_gemm_weight_grad:
@@ -2065,6 +2074,7 @@ class ExpertsGroupGemmContiguousNode:
 
             # dx
             dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
+
             # out-of-place 路径下 fused_swiglu_weighted_bwd 异步读 o1，但此时
             # 中间已经执行了 dw1、dw2 等多个 GEMM kernel（同一 stream 顺序入队），
             # 到达此处时 o1 的读取早已完成，del 安全。

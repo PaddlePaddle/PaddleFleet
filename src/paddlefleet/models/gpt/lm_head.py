@@ -123,6 +123,8 @@ def SegLU(x, ranges, ts):
 
 class GPTLMHead(ColumnParallelLinear):
     def __init__(self, **kwargs):
+        # Force-disable FP8 on the LM head.
+        kwargs["disable_fp8"] = True
         self.config = kwargs["config"]
         self.skip_weight_param_allocation = kwargs[
             "skip_weight_param_allocation"

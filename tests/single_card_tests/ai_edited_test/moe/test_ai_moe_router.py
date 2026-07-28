@@ -2128,5 +2128,153 @@ class TestMoELayerSetLayerNumberForwardsIsMtp(unittest.TestCase):
         moe.gate.set_layer_number.assert_called_once_with(0, is_mtp_layer=False)
 
 
+class TestFusedGateDetachMatmulAccuracyCompatible(unittest.TestCase):
+    """Cover the use_accuracy_compatible paths of FusedGateDetachMatmul.
+
+    The gate GEMM mirrors Megatron's ``RouterGatingLinearFunction``: the weight
+    is used as stored and only up-cast to fp32 (``weight.to(router_dtype)``), so
+    no extra rounding is applied. The accuracy-compatible flag only selects the
+    two-GEMM backward (matching MG's separate dgrad/wgrad ``torch.mm`` calls)
+    instead of the fused ``matmul_grad``.
+    """
+
+    def setUp(self):
+        paddle.seed(2024)
+
+    def test_forward_upcasts_weight_losslessly(self):
+        """forward: output == x @ w.T in fp32, no rounding of the weight."""
+        from paddlefleet.transformer.moe.moe_router import FusedGateDetachMatmul
+
+        # w is [E, D]; forward transposes internally so output is [B, E].
+        x = paddle.randn([4, 64], dtype=paddle.float32)
+        w = paddle.randn([4, 64], dtype=paddle.float32)
+
+        out_acc = FusedGateDetachMatmul.apply(x, w, False, True)
+        ref = paddle.matmul(x.cast("float32"), w.T.cast("float32"))
+        np.testing.assert_allclose(
+            out_acc.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+        # The flag must not change the forward numerics at all.
+        out_raw = FusedGateDetachMatmul.apply(x, w, False, False)
+        np.testing.assert_allclose(
+            out_acc.numpy(), out_raw.numpy(), rtol=0, atol=0
+        )
+
+    def test_backward_plain_uses_stored_weight(self):
+        """backward (no overlap): x_grad/w_grad use the weight as stored."""
+        from paddlefleet.transformer.moe.moe_router import FusedGateDetachMatmul
+
+        x = paddle.randn([4, 64], dtype=paddle.float32)
+        w = paddle.randn([4, 64], dtype=paddle.float32)
+        x.stop_gradient = False
+        w.stop_gradient = False
+        coeff = paddle.randn([4, 4], dtype=paddle.float32)
+
+        out = FusedGateDetachMatmul.apply(x, w, False, True)
+        (out * coeff).sum().backward()
+
+        ref_xg = paddle.matmul(coeff, w.cast("float32"))
+        ref_wg = paddle.matmul(coeff, x.cast("float32"), transpose_x=True)
+        np.testing.assert_allclose(
+            x.grad.numpy(), ref_xg.numpy(), rtol=1e-6, atol=1e-6
+        )
+        np.testing.assert_allclose(
+            w.grad.numpy(), ref_wg.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+    def test_backward_dw_p2p_overlap_uses_stored_weight(self):
+        """backward (dw_p2p_overlap): x_grad uses the weight as stored.
+
+        w.stop_gradient=True isolates the x_grad computation (the weight grad is
+        deferred to WeightGradStore and skipped here).
+        """
+        from paddlefleet.transformer.moe.moe_router import FusedGateDetachMatmul
+
+        x = paddle.randn([4, 64], dtype=paddle.float32)
+        w = paddle.randn([4, 64], dtype=paddle.float32)
+        x.stop_gradient = False
+        w.stop_gradient = True
+        coeff = paddle.randn([4, 4], dtype=paddle.float32)
+
+        out = FusedGateDetachMatmul.apply(x, w, True, True)
+        (out * coeff).sum().backward()
+
+        ref_xg = paddle.matmul(coeff, w.cast("float32"))
+        np.testing.assert_allclose(
+            x.grad.numpy(), ref_xg.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+    def test_bf16_weight_forward_backward(self):
+        """A bf16-stored weight (the MG layout) works through fwd and bwd."""
+        from paddlefleet.transformer.moe.moe_router import FusedGateDetachMatmul
+
+        x = paddle.randn([4, 64], dtype=paddle.float32)
+        w = paddle.randn([4, 64], dtype=paddle.float32).cast(paddle.bfloat16)
+        x.stop_gradient = False
+        w.stop_gradient = False
+        coeff = paddle.randn([4, 4], dtype=paddle.float32)
+
+        out = FusedGateDetachMatmul.apply(x, w, False, True)
+        self.assertEqual(out.dtype, paddle.float32)
+        (out * coeff).sum().backward()
+
+        ref = paddle.matmul(x, w.T.cast("float32"))
+        np.testing.assert_allclose(
+            out.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
+        )
+        # MG casts grad_weight back to the weight storage dtype.
+        self.assertEqual(w.grad.dtype, paddle.bfloat16)
+
+
+class TestRouterAccuracyCompatible(unittest.TestCase):
+    """Cover the router-level use_accuracy_compatible branches.
+
+    - gate weight dtype follows params_dtype when the flag is on, else fp32
+      (moe_router.py:302-313).
+    - TopKRouter.forward runs the fp64 normalization path (moe_router.py:1446).
+    """
+
+    def _router(self, **overrides):
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        defaults = {"n_routed_experts": 4, "num_experts_per_tok": 2}
+        defaults.update(overrides)
+        cfg = _make_router_config(**defaults)
+        router = TopKRouter(config=cfg)
+        router.set_layer_number(0)
+        return router
+
+    def test_gate_weight_dtype_follows_params_dtype_when_enabled(self):
+        router = self._router(
+            use_accuracy_compatible=True, params_dtype=paddle.bfloat16
+        )
+        self.assertEqual(router.weight.dtype, paddle.bfloat16)
+
+    def test_gate_weight_dtype_is_fp32_when_disabled(self):
+        # Without the flag the weight is always fp32, regardless of params_dtype.
+        router = self._router(
+            use_accuracy_compatible=False, params_dtype=paddle.bfloat16
+        )
+        self.assertEqual(router.weight.dtype, paddle.float32)
+
+    def test_forward_fp64_normalization_path(self):
+        """use_accuracy_compatible forward normalizes top_gate via the fp64 path
+        and still produces per-token probabilities that sum to 1."""
+        router = self._router(use_accuracy_compatible=True, norm_topk_prob=True)
+        hidden = paddle.randn([1, 4, 64], dtype=paddle.float32)
+        out = router(hidden, input_ids=None)
+        top_gate, probs = out[1], out[3]
+        # Each token's kept top-k gates are renormalized to sum to 1.
+        row_sums = top_gate.astype("float32").sum(axis=-1).numpy()
+        np.testing.assert_allclose(
+            row_sums, np.ones_like(row_sums), rtol=1e-6, atol=1e-6
+        )
+        probs_sums = probs.astype("float32").sum(axis=-1).numpy()
+        np.testing.assert_allclose(
+            probs_sums, np.ones_like(probs_sums), rtol=1e-6, atol=1e-6
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

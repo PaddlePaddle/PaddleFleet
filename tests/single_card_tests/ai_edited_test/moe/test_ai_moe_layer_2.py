@@ -160,6 +160,8 @@ class TestMoELayerInitSharedExperts(unittest.TestCase):
         ):
             paddle.nn.Layer.__init__(self)
             self.config = config
+            # StandardMLPSharedExpert accesses self.up_gate_proj after super().__init__
+            self.up_gate_proj = MagicMock()
 
         with patch(
             "paddlefleet.transformer.moe.moe_shared_expert.MLP.__init__",

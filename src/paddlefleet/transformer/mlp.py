@@ -94,6 +94,7 @@ class MLP(FleetLayer):
         intermediate_size: int | None = None,
         hidden_size: int | None = None,
         tp_group=None,
+        disable_fp8: bool = False,
     ):
         super().__init__(config=config)
 
@@ -148,6 +149,7 @@ class MLP(FleetLayer):
             skip_bias_add=skip_bias_add,
             is_expert=is_expert,
             tp_group=tp_group,
+            disable_fp8=disable_fp8,
         )
 
         # Ensure hidden_act is a callable function, not a bound method
@@ -174,6 +176,7 @@ class MLP(FleetLayer):
             skip_bias_add=skip_bias_add,
             is_expert=is_expert,
             tp_group=tp_group,
+            disable_fp8=disable_fp8,
         )
 
     def forward(self, hidden_states, per_token_scale=None):
