@@ -35,6 +35,7 @@ from ..parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from ..transformer.moe.moe_utils import _use_accuracy_compatible
 
 # from ..dist_checkpointing.mapping import ShardedStateDict
 # from ..transformer.utils import make_sharded_tensors_for_checkpoint
@@ -516,10 +517,16 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             total_input = input
 
         if bias is not None:
-            output = paddle.nn.functional.linear(total_input, weight, bias)
+            if _use_accuracy_compatible():
+                weight_t = weight.T.contiguous()
+                output = paddle.matmul(total_input, weight_t, transpose_y=True)
+                output = output + bias
+            else:
+                output = paddle.nn.functional.linear(total_input, weight, bias)
         else:
-            if use_accuracy_compatible:
-                output = paddle.nn.functional.linear(total_input, weight)
+            if _use_accuracy_compatible():
+                weight_t = weight.T.contiguous()  # [out, in] contiguous
+                output = paddle.matmul(total_input, weight_t, transpose_y=True)
             else:
                 output = paddle.matmul(total_input, weight)
         return output
@@ -649,7 +656,25 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            grad_weight = total_input.t().matmul(grad_output)
+            if (
+                _use_accuracy_compatible()
+                and getattr(weight, "is_expert_param", False)
+                and hasattr(weight, "main_grad")
+                and weight.main_grad is not None
+                and weight.main_grad.dtype == paddle.float32
+            ):
+                weight.main_grad.add_(
+                    paddle.matmul(
+                        grad_output.astype("float32"),
+                        total_input.astype("float32"),
+                        transpose_x=True,
+                    ).t()
+                )
+                if hasattr(weight, "grad_added_to_main_grad"):
+                    weight.grad_added_to_main_grad = True
+                grad_weight = paddle.zeros(weight.shape, dtype=input.dtype)
+            else:
+                grad_weight = total_input.t().matmul(grad_output)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
@@ -926,6 +951,7 @@ class Linear(paddle.nn.Layer):
             # Weight is duplicated across TP ranks; reduce gradient on DP group.
             self.weight.allreduce = True
             self.weight.is_distributed = False
+            self.weight.is_expert_param = self.is_expert
         else:
             self.weight = None
 
@@ -1318,6 +1344,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
                 self.is_expert and self.expert_parallel
             )
             self.weight.is_distributed = True if self.world_size > 1 else False
+            self.weight.is_expert_param = self.is_expert
         else:
             self.weight = None
 
@@ -1655,6 +1682,7 @@ class RowParallelLinear(paddle.nn.Layer):
                 )
         self.weight.allreduce = not (self.is_expert and self.expert_parallel)
         self.weight.is_distributed = True if self.world_size > 1 else False
+        self.weight.is_expert_param = self.is_expert
 
         if bias:
             self.bias = self.create_parameter(

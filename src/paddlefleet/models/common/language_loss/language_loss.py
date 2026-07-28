@@ -35,11 +35,13 @@ from paddlefleet.context_parallel_utils import (
 )
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
+    get_expert_model_parallel_group,
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.moe.moe_utils import _use_accuracy_compatible
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -430,10 +432,26 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                loss = paddle.sum(
-                    loss.cast(paddle.float32).reshape([-1]) * lossmask
-                )
-                loss = loss / lossmask.sum()
+                if _use_accuracy_compatible():
+                    _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
+                    loss_sum = (
+                        _flat.cast(paddle.float64).sum().cast(paddle.float32)
+                    )
+                    _count = lossmask.sum()
+                    import paddle.distributed as _pdist
+
+                    _ep_size = _pdist.get_world_size(
+                        group=get_expert_model_parallel_group()
+                    )
+                    _acc_sum = paddle.zeros([1], dtype=paddle.float32)
+                    for _ in range(_ep_size):
+                        _acc_sum = _acc_sum + loss_sum
+                    loss = _acc_sum[0] / (_count * _ep_size)
+                else:
+                    loss = paddle.sum(
+                        loss.cast(paddle.float32).reshape([-1]) * lossmask
+                    )
+                    loss = loss / lossmask.sum()
 
         return loss
 
