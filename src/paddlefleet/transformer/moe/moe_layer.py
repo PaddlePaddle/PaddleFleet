@@ -180,8 +180,7 @@ class MoELayer(nn.Layer):
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
         self.fp8_dispatch = bool(config.fp8)
-        self.moe_dequant_input = config.moe_dequant_input
-        self.fp8_dispatch = bool(config.fp8) and config.fp8_dispatch_deepep
+        self.fp8_dispatch = bool(config.fp8) and not self.use_w4a8
         self.fp8_wgrad = config.fp8_wgrad
         self.fp8_dispatch_bwd = (
             self.fp8_dispatch and self.using_sonic_moe and self.fp8_wgrad
@@ -974,7 +973,6 @@ class MoELayer(nn.Layer):
                     use_fp8_mlp=self.fp8,
                     moe_deep_gemm=self.moe_deep_gemm,
                     recompute_moe_gate_up=self.recompute_moe_gate_up,
-                    dequant_input=self.moe_dequant_input,
                     recompute_moe_premute=self.recompute_moe_premute,
                     fp8_dispatched_handle=fp8_dispatched_handle,
                     use_bf16_gemm_weight_grad=not self.fp8_wgrad,

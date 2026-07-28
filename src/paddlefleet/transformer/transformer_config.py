@@ -555,7 +555,7 @@ class TransformerConfig(ModelParallelConfig):
     - ``True``: create a trainable parameter of shape ``[num_experts]``, initialized to
       ``routed_scaling_factor``, and apply it via per-expert lookup after top-k selection."""
 
-    moe_dequant_input: bool = True
+    moe_dequant_input: bool = False
     """Whether to dequantize input."""
 
     moe_expert_fusion: bool = False
@@ -670,9 +670,6 @@ class TransformerConfig(ModelParallelConfig):
 
     use_w4a8: bool = False
     """Whether to use w4a8 for mlp gemm."""
-
-    fp8_dispatch_deepep: bool = True
-    """Whether to use fp8 dispatch for deepep."""
 
     ####################
     # initialization
