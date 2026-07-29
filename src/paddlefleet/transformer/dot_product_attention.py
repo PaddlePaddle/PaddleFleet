@@ -433,12 +433,34 @@ class DotProductAttention(FleetLayer):
             if use_cache and past_key_values is not None:
                 key, value = past_key_values.update(key, value, layer_idx)
                 # During prefill (query_len > 1), is_causal=True handles causal masking.
-                # During decode (query_len == 1), no causal mask needed; and KV length
-                # = history + 1, so the original prefill attention_mask no longer matches
-                # the extended KV length. Skip the mask in that case.
+                # During decode (query_len == 1), no causal mask needed for the causal
+                # structure itself, but if the batch uses left-padding, padded KV
+                # positions still need to be masked out — extend the prefill padding
+                # mask (last row, which corresponds to the last real query position)
+                # across the current KV length.
                 is_causal = query.shape[1] > 1
                 if query.shape[1] == 1:
-                    attn_mask_kv = None
+                    if attention_mask is not None:
+                        # attention_mask shape: broadcastable to
+                        # [bsz, num_heads, q_len_prefill, kv_len_prefill]; take the
+                        # last query row (bool mask over key positions that are
+                        # valid, i.e. not padding) and broadcast it to the current
+                        # (possibly longer) KV length for this decode step.
+                        pad_mask = attention_mask[:, :, -1:, :]
+                        cur_kv_len = key.shape[1]
+                        prefill_kv_len = pad_mask.shape[-1]
+                        if cur_kv_len > prefill_kv_len:
+                            extra = paddle.ones(
+                                [
+                                    *pad_mask.shape[:-1],
+                                    cur_kv_len - prefill_kv_len,
+                                ],
+                                dtype=pad_mask.dtype,
+                            )
+                            pad_mask = paddle.concat([pad_mask, extra], axis=-1)
+                        attn_mask_kv = pad_mask
+                    else:
+                        attn_mask_kv = None
                 else:
                     attn_mask_kv = attention_mask
             else:

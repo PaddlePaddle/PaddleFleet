@@ -147,6 +147,18 @@ class DynamicKVCache:
 # ---------------------------------------------------------------------------
 
 
+def _uses_dsv4_hybrid_attention(cfg) -> bool:
+    """Return True when the model uses DSv4 Hybrid (CSA/HCA) attention.
+
+    Detected from the config: either the attention-variant selector or the
+    presence of per-layer compression ratios drives the CSA/HCA code path.
+    """
+    if getattr(cfg, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return True
+    ratios = getattr(cfg, "csa_compress_ratios", None)
+    return bool(ratios)
+
+
 class GreedyGenerator:
     """Greedy decode on top of a FleetGPTModel using the native KV cache path.
 
@@ -195,7 +207,16 @@ class GreedyGenerator:
             + num_empty_layers_add_in_head
             + num_empty_layers_add_in_tail
         )
-        self.cache = DynamicKVCache(num_layers=total_layers)
+        # DSv4 Hybrid (CSA/HCA) attention needs the richer per-layer decode
+        # state (raw + compressed KV, group buffers, indexer keys). Its cache
+        # also satisfies the standard ``update(k, v, layer_idx)`` protocol, so
+        # it can serve models that interleave CSA/HCA and standard layers.
+        if _uses_dsv4_hybrid_attention(cfg):
+            from paddlefleet.generation.csa_cache import CSADynamicCache
+
+            self.cache = CSADynamicCache(num_layers=total_layers)
+        else:
+            self.cache = DynamicKVCache(num_layers=total_layers)
 
     @paddle.no_grad()
     def generate(
@@ -204,6 +225,7 @@ class GreedyGenerator:
         max_new_tokens: int,
         eos_token_id: int | None = None,
         repetition_penalty: float = 1.0,
+        attention_mask: paddle.Tensor | None = None,
     ) -> paddle.Tensor:
         """Run greedy auto-regressive decoding.
 
@@ -214,6 +236,12 @@ class GreedyGenerator:
                 batches must be done).
             repetition_penalty: Penalty for repeated tokens (1.0 = no penalty,
                 >1.0 = discourage repetition). Default: 1.0.
+            attention_mask: Optional bool/int mask broadcastable to
+                ``[B, 1, 1, L]`` (or ``[B, L]``), where True/1 marks a real
+                (non-padding) token. Required for correctly batching
+                left-padded prompts of different lengths; also used to
+                derive per-sample ``position_ids`` so that RoPE positions
+                are correct despite left-padding.
 
         Returns:
             Tensor of shape ``[B, L + num_generated]`` containing the
@@ -221,25 +249,40 @@ class GreedyGenerator:
         """
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be [B, L]")
+        if max_new_tokens <= 0:
+            return input_ids
         self.cache.reset()
         self.model.eval()
 
         bsz, prompt_len = input_ids.shape
         generated = input_ids.clone()
 
+        if attention_mask is not None:
+            # Flatten to [B, L] bool for position_ids computation regardless
+            # of whether caller passed [B, L] or [B, 1, 1, L].
+            pad_mask_2d = attention_mask.reshape([bsz, -1]).astype("int64")
+        else:
+            pad_mask_2d = None
+
         with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
             # ---- Prefill ----
-            position_ids = (
-                paddle.arange(prompt_len, dtype="int64")
-                .unsqueeze(0)
-                .expand([bsz, prompt_len])
-            )
+            if pad_mask_2d is not None:
+                # Left-padding-aware position ids: position 0 starts at the
+                # first real (non-padding) token for each sample.
+                position_ids = (pad_mask_2d.cumsum(axis=-1) - 1).clip(min=0)
+            else:
+                position_ids = (
+                    paddle.arange(prompt_len, dtype="int64")
+                    .unsqueeze(0)
+                    .expand([bsz, prompt_len])
+                )
             logits = self.model(
                 {
                     "input_ids": input_ids,
                     "position_ids": position_ids,
                     "past_key_values": self.cache,
                     "use_cache": True,
+                    "attention_mask": attention_mask,
                 }
             )
             # Apply repetition penalty to prefill output
@@ -249,17 +292,28 @@ class GreedyGenerator:
             next_tok = logits[:, -1].argmax(axis=-1, keepdim=True)
             generated = paddle.concat([generated, next_tok], axis=1)
 
+            # Last prefill position per sample (i.e. last real token's
+            # position); each decode step's position is this + step + 1.
+            if pad_mask_2d is not None:
+                last_pos = position_ids[:, -1:]
+            else:
+                last_pos = None
+
             # ---- Decode ----
             done = paddle.zeros([bsz, 1], dtype="bool")
             for step in range(max_new_tokens - 1):
                 cur_len = self.cache.get_seq_len()
-                position_ids = paddle.full([bsz, 1], cur_len, dtype="int64")
+                if last_pos is not None:
+                    position_ids = last_pos + (step + 1)
+                else:
+                    position_ids = paddle.full([bsz, 1], cur_len, dtype="int64")
                 logits = self.model(
                     {
                         "input_ids": next_tok,
                         "position_ids": position_ids,
                         "past_key_values": self.cache,
                         "use_cache": True,
+                        "attention_mask": attention_mask,
                     }
                 )
                 # Apply repetition penalty

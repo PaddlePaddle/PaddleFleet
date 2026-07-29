@@ -24,10 +24,16 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 import unittest
+from types import SimpleNamespace
 
 import paddle
 
-from paddlefleet.generation.greedy_generator import DynamicKVCache
+from paddlefleet.generation.csa_cache import CSADynamicCache
+from paddlefleet.generation.greedy_generator import (
+    DynamicKVCache,
+    GreedyGenerator,
+    _uses_dsv4_hybrid_attention,
+)
 
 
 class TestDynamicKVCache(unittest.TestCase):
@@ -145,6 +151,109 @@ class TestDynamicKVCache(unittest.TestCase):
         # Layers 1 and 3 are empty, fallback returns first non-empty (layer 0 = 3)
         self.assertEqual(cache.get_seq_len(1), 3)
         self.assertEqual(cache.get_seq_len(3), 3)
+
+
+class TestCSADynamicCacheProtocol(unittest.TestCase):
+    """CSADynamicCache must also satisfy the standard ``update`` protocol.
+
+    A model that interleaves CSA/HCA layers with standard-attention layers
+    shares one cache object; the standard layers still call
+    ``update(k, v, layer_idx)`` / ``get_seq_len``.
+    """
+
+    def test_standard_update_and_seq_len(self):
+        cache = CSADynamicCache(num_layers=3)
+        self.assertEqual(cache.get_seq_len(0), 0)
+
+        k1 = paddle.randn([1, 4, 8, 64], dtype="bfloat16")
+        v1 = paddle.randn([1, 4, 8, 64], dtype="bfloat16")
+        k, v = cache.update(k1, v1, 0)
+        self.assertEqual(k.shape[1], 4)
+        self.assertEqual(cache.get_seq_len(0), 4)
+
+        k2 = paddle.randn([1, 2, 8, 64], dtype="bfloat16")
+        v2 = paddle.randn([1, 2, 8, 64], dtype="bfloat16")
+        k, v = cache.update(k2, v2, 0)
+        self.assertEqual(k.shape[1], 6)
+        self.assertEqual(v.shape[1], 6)
+
+    def test_csa_state_is_per_layer(self):
+        cache = CSADynamicCache(num_layers=4)
+        s0 = cache.get_csa_state(0)
+        s1 = cache.get_csa_state(1)
+        self.assertIsNot(s0, s1)
+        self.assertEqual(s0.raw_seq_len(), 0)
+        self.assertEqual(s0.n_compressed, 0)
+
+    def test_reset(self):
+        cache = CSADynamicCache(num_layers=2)
+        k = paddle.randn([1, 3, 8, 64], dtype="bfloat16")
+        cache.update(k, k, 0)
+        cache.get_csa_state(1).append_raw(
+            paddle.randn([1, 1, 32], dtype="bfloat16")
+        )
+        cache.reset()
+        self.assertEqual(cache.get_seq_len(0), 0)
+        self.assertEqual(cache.get_csa_state(1).raw_seq_len(), 0)
+
+
+class TestGeneratorCacheSelection(unittest.TestCase):
+    """GreedyGenerator picks the cache class from the model config."""
+
+    @staticmethod
+    def _fake_model(cfg_kwargs):
+        base = {
+            "num_hidden_layers": 4,
+            "sequence_parallel": False,
+            "apply_rope_fusion": False,
+            "recompute_granularity": None,
+            "num_empty_layers_add_in_head": 0,
+            "num_empty_layers_add_in_tail": 0,
+        }
+        base.update(cfg_kwargs)
+        cfg = SimpleNamespace(**base)
+        return SimpleNamespace(config=cfg)
+
+    def test_detects_dsv4_variant(self):
+        cfg = SimpleNamespace(
+            experimental_attention_variant="dsv4_hybrid",
+            csa_compress_ratios=None,
+        )
+        self.assertTrue(_uses_dsv4_hybrid_attention(cfg))
+
+    def test_detects_via_compress_ratios(self):
+        cfg = SimpleNamespace(
+            experimental_attention_variant=None,
+            csa_compress_ratios=[0, 4, 128, 4],
+        )
+        self.assertTrue(_uses_dsv4_hybrid_attention(cfg))
+
+    def test_standard_config_not_detected(self):
+        cfg = SimpleNamespace(
+            experimental_attention_variant=None,
+            csa_compress_ratios=None,
+        )
+        self.assertFalse(_uses_dsv4_hybrid_attention(cfg))
+
+    def test_generator_selects_csa_cache(self):
+        model = self._fake_model(
+            {
+                "experimental_attention_variant": "dsv4_hybrid",
+                "csa_compress_ratios": [0, 4, 128, 4],
+            }
+        )
+        gen = GreedyGenerator(model)
+        self.assertIsInstance(gen.cache, CSADynamicCache)
+
+    def test_generator_selects_standard_cache(self):
+        model = self._fake_model(
+            {
+                "experimental_attention_variant": None,
+                "csa_compress_ratios": None,
+            }
+        )
+        gen = GreedyGenerator(model)
+        self.assertIsInstance(gen.cache, DynamicKVCache)
 
 
 if __name__ == "__main__":

@@ -256,6 +256,11 @@ class DSv4HybridAttention(Attention):
             "attn_mask_startend_row_indices", None
         )
 
+        # KV cache (incremental decode): duck-typed CSADynamicCache.
+        past_key_values = kwargs.get("past_key_values", None)
+        layer_idx = kwargs.get("layer_idx", None)
+        use_cache = kwargs.get("use_cache", False)
+
         # Get Q, K, V tensors
         # In CP mode, pass position_offset so RoPE uses correct global positions.
         cp_pg = getattr(self, "pg_collection", None)
@@ -274,6 +279,13 @@ class DSv4HybridAttention(Attention):
         _, sq, _ = hidden_states.shape
         position_offset = cp_rank * sq if cp_size > 1 else 0
 
+        # Incremental decode: the new token's absolute position is the number
+        # of raw tokens already cached; RoPE (forward + inverse) must use it.
+        if use_cache and past_key_values is not None and cp_size == 1:
+            position_offset = past_key_values.get_csa_state(
+                layer_idx
+            ).raw_seq_len()
+
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(
                 hidden_states=hidden_states,
@@ -291,6 +303,9 @@ class DSv4HybridAttention(Attention):
             attention_mask,
             x=hidden_states,
             qr=q_compressed,
+            past_key_values=past_key_values,
+            layer_idx=layer_idx,
+            use_cache=use_cache,
         )
         # core_attn_out: [b, sq, np * v_head_dim]
 

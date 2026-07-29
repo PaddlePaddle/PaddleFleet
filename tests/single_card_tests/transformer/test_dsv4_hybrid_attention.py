@@ -18,6 +18,7 @@ import unittest
 import paddle
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
+from paddlefleet.generation.csa_cache import CSADynamicCache
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
@@ -1059,6 +1060,292 @@ class TestDSv4HybridQKV(unittest.TestCase):
         self.assertTrue(
             paddle.equal_all(key.cast("float32"), value.cast("float32")).item()
         )
+
+
+class TestDSv4HybridDecodeAlignment(unittest.TestCase):
+    """Prefill-vs-decode numerical alignment for the incremental KV cache.
+
+    Phase A covers HCA (ratio=128): no indexer, no overlap. The full-sequence
+    prefill output at every position must match the token-by-token decode
+    output produced through ``CSADynamicCache``.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        # Prime the model-parallel RNG tracker so RowParallelLinear can fork
+        # its rng state during layer construction (needed when this class runs
+        # standalone; the full-file run relies on an earlier class doing this).
+        model_parallel_cuda_manual_seed(_SEED)
+        # csa_compress_ratios=[0, 4, 128, 4] -> layer 2 is HCA (ratio=128).
+        self.config = _make_config(dsa_indexer_loss_coeff=0.0)
+        self.hca_layer = 2
+
+    def _decode_all(self, attn, hidden, layer_idx):
+        """Run token-by-token decode; return [b, N, hidden] stacked output."""
+        b, n, _ = hidden.shape
+        cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+        outs = []
+        with paddle.no_grad():
+            for t in range(n):
+                tok = hidden[:, t : t + 1, :]
+                out_t, _ = attn(
+                    hidden_states=tok,
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=layer_idx,
+                    use_cache=True,
+                )
+                outs.append(out_t)
+        return paddle.concat(outs, axis=1)
+
+    def _assert_close(self, ref, got, tol=1e-4):
+        diff = (
+            paddle.abs(ref.cast("float32") - got.cast("float32")).max().item()
+        )
+        self.assertLess(diff, tol, f"max abs diff {diff} exceeds tol {tol}")
+
+    def test_hca_decode_matches_prefill(self):
+        attn = _build_attention(self.config, layer_number=self.hca_layer)
+        attn.eval()
+        for n in (256, 512):
+            paddle.seed(_SEED + n)
+            hidden = paddle.randn(
+                [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+            )
+            with paddle.no_grad():
+                prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+            decode_out = self._decode_all(attn, hidden, self.hca_layer)
+            self.assertEqual(list(decode_out.shape), list(prefill_out.shape))
+            self._assert_close(prefill_out, decode_out)
+
+    def test_hca_non_multiple_of_ratio_length(self):
+        """Lengths that are not multiples of ratio leave a partial tail group."""
+        attn = _build_attention(self.config, layer_number=self.hca_layer)
+        attn.eval()
+        for n in (300, 500):
+            paddle.seed(_SEED + n)
+            hidden = paddle.randn(
+                [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+            )
+            with paddle.no_grad():
+                prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+            decode_out = self._decode_all(attn, hidden, self.hca_layer)
+            self._assert_close(prefill_out, decode_out)
+
+    def test_hca_prefill_prime_then_decode(self):
+        """Prefill a prefix (partial group), then decode the remaining tokens.
+
+        Exercises ``_prime_cache_prefill``: the decode outputs for positions
+        after the prefill prefix must match the corresponding positions of a
+        full-sequence prefill.
+        """
+        attn = _build_attention(self.config, layer_number=self.hca_layer)
+        attn.eval()
+        n = 512
+        prefix = 200  # not a multiple of ratio=128 -> partial open group
+        paddle.seed(_SEED + 7)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        with paddle.no_grad():
+            full_out, _ = attn(hidden_states=hidden, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            # Prefill prime on the prefix.
+            prime_out, _ = attn(
+                hidden_states=hidden[:, :prefix, :],
+                attention_mask=None,
+                past_key_values=cache,
+                layer_idx=self.hca_layer,
+                use_cache=True,
+            )
+            self._assert_close(full_out[:, :prefix, :], prime_out)
+
+            # Decode the remaining tokens one at a time.
+            decode_outs = []
+            for t in range(prefix, n):
+                tok = hidden[:, t : t + 1, :]
+                out_t, _ = attn(
+                    hidden_states=tok,
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.hca_layer,
+                    use_cache=True,
+                )
+                decode_outs.append(out_t)
+            decode_out = paddle.concat(decode_outs, axis=1)
+        self._assert_close(full_out[:, prefix:, :], decode_out)
+
+
+class TestCSAHybridDecodeAlignment(unittest.TestCase):
+    """Prefill-vs-decode alignment for CSA (ratio=4): overlap + indexer.
+
+    Layer 1 (``csa_compress_ratios=[0, 4, 128, 4]``) is CSA with overlapping
+    compression and a learned indexer top-k. The full-sequence prefill output
+    at every position must match the token-by-token decode output produced
+    through ``CSADynamicCache`` (which drives the overlapping incremental
+    compressor and the indexer's own incremental compressor + top-k).
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        self.config = _make_config(dsa_indexer_loss_coeff=0.0)
+        self.csa_layer = 1  # ratio=4
+
+    def _decode_all(self, attn, hidden, layer_idx):
+        b, n, _ = hidden.shape
+        cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+        outs = []
+        with paddle.no_grad():
+            for t in range(n):
+                tok = hidden[:, t : t + 1, :]
+                out_t, _ = attn(
+                    hidden_states=tok,
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=layer_idx,
+                    use_cache=True,
+                )
+                outs.append(out_t)
+        return paddle.concat(outs, axis=1)
+
+    def _assert_close(self, ref, got, tol=1e-4):
+        diff = (
+            paddle.abs(ref.cast("float32") - got.cast("float32")).max().item()
+        )
+        self.assertLess(diff, tol, f"max abs diff {diff} exceeds tol {tol}")
+
+    def test_csa_decode_matches_prefill(self):
+        attn = _build_attention(self.config, layer_number=self.csa_layer)
+        attn.eval()
+        for n in (256, 512):
+            paddle.seed(_SEED + n)
+            hidden = paddle.randn(
+                [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+            )
+            with paddle.no_grad():
+                prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+            decode_out = self._decode_all(attn, hidden, self.csa_layer)
+            self.assertEqual(list(decode_out.shape), list(prefill_out.shape))
+            self._assert_close(prefill_out, decode_out)
+
+    def test_csa_non_multiple_of_ratio_length(self):
+        """Lengths not divisible by ratio=4 leave a partial tail group."""
+        attn = _build_attention(self.config, layer_number=self.csa_layer)
+        attn.eval()
+        for n in (250, 511):
+            paddle.seed(_SEED + n)
+            hidden = paddle.randn(
+                [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+            )
+            with paddle.no_grad():
+                prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+            decode_out = self._decode_all(attn, hidden, self.csa_layer)
+            self._assert_close(prefill_out, decode_out)
+
+    def test_csa_prefill_prime_then_decode(self):
+        """Prime a prefix (partial group), then decode the remaining tokens."""
+        attn = _build_attention(self.config, layer_number=self.csa_layer)
+        attn.eval()
+        n = 256
+        prefix = 100  # not a multiple of ratio=4 -> partial open group
+        paddle.seed(_SEED + 13)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        with paddle.no_grad():
+            full_out, _ = attn(hidden_states=hidden, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            prime_out, _ = attn(
+                hidden_states=hidden[:, :prefix, :],
+                attention_mask=None,
+                past_key_values=cache,
+                layer_idx=self.csa_layer,
+                use_cache=True,
+            )
+            self._assert_close(full_out[:, :prefix, :], prime_out)
+
+            decode_outs = []
+            for t in range(prefix, n):
+                tok = hidden[:, t : t + 1, :]
+                out_t, _ = attn(
+                    hidden_states=tok,
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.csa_layer,
+                    use_cache=True,
+                )
+                decode_outs.append(out_t)
+            decode_out = paddle.concat(decode_outs, axis=1)
+        self._assert_close(full_out[:, prefix:, :], decode_out)
+
+
+class TestCSAHybridSharedCacheDispatch(unittest.TestCase):
+    """One ``CSADynamicCache`` dispatched across mixed CSA + HCA layers.
+
+    A real model steps every token through all layers before advancing; the
+    shared cache must keep independent per-``layer_idx`` state. Here layer 1
+    (CSA, ratio=4) and layer 2 (HCA, ratio=128) share one cache. Interleaved
+    token-by-token decode of both layers must match each layer's full prefill.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        self.config = _make_config(dsa_indexer_loss_coeff=0.0)
+        self.csa_layer = 1  # ratio=4
+        self.hca_layer = 2  # ratio=128
+
+    def _assert_close(self, ref, got, tol=1e-4):
+        diff = (
+            paddle.abs(ref.cast("float32") - got.cast("float32")).max().item()
+        )
+        self.assertLess(diff, tol, f"max abs diff {diff} exceeds tol {tol}")
+
+    def test_shared_cache_mixed_layers(self):
+        csa = _build_attention(self.config, layer_number=self.csa_layer)
+        hca = _build_attention(self.config, layer_number=self.hca_layer)
+        csa.eval()
+        hca.eval()
+
+        n = 300  # not a multiple of 128; layer 2 keeps a partial open group
+        paddle.seed(_SEED + 99)
+        h_csa = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        h_hca = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+
+        with paddle.no_grad():
+            csa_prefill, _ = csa(hidden_states=h_csa, attention_mask=None)
+            hca_prefill, _ = hca(hidden_states=h_hca, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            csa_dec, hca_dec = [], []
+            for t in range(n):
+                # Both layers advance for the same token, as in a real model.
+                o_csa, _ = csa(
+                    hidden_states=h_csa[:, t : t + 1, :],
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.csa_layer,
+                    use_cache=True,
+                )
+                o_hca, _ = hca(
+                    hidden_states=h_hca[:, t : t + 1, :],
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.hca_layer,
+                    use_cache=True,
+                )
+                csa_dec.append(o_csa)
+                hca_dec.append(o_hca)
+
+        self._assert_close(csa_prefill, paddle.concat(csa_dec, axis=1))
+        self._assert_close(hca_prefill, paddle.concat(hca_dec, axis=1))
 
 
 if __name__ == "__main__":
