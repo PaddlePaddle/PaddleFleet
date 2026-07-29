@@ -122,5 +122,19 @@ class TestFastHadamardTransformImport(unittest.TestCase):
             )
 
 
+class TestFlashKDAImport(unittest.TestCase):
+    def test_flash_kda_import(self):
+        import paddlefleet_ops
+        from paddlefleet_ops import flash_kda
+
+        self.assertIs(flash_kda, paddlefleet_ops.flash_kda)
+        self.assertTrue(callable(flash_kda.fwd))
+        self.assertTrue(callable(flash_kda.get_workspace_size))
+
+    def test_error_import(self):
+        with self.assertRaises(ImportError):
+            from paddlefleet_ops.flash_kda import xxxx  # noqa: F401
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -202,6 +202,7 @@ def check_submodule_updated():
             "sonic-moe",
             "flash-attention",
             "FlashMLA",
+            "FlashKDA",
             "fast-hadamard-transform",
         ]
         if not all(
@@ -428,6 +429,15 @@ def get_libs():
                     (cuda_major, cuda_minor) <= (12, 8)
                 ),
             },
+        ),
+        EcosystemLibrary(
+            name="FlashKDA",
+            source_rel_path="third_party/FlashKDA",
+            artifacts=[
+                Artifact("flash_kda", "flash_kda"),
+                Artifact("flash_kda_C.py", "flash_kda_C.py"),
+                Artifact("flash_kda_C.so", "flash_kda_C_pd_.so"),
+            ],
         ),
         EcosystemLibrary(
             name="fast-hadamard-transform",
