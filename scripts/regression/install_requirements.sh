@@ -21,17 +21,16 @@ install_requirements() {
     rm -rf ./build ./dist ./paddlefleet.egg-info/
     python -m pip config --user set global.trusted-host pypi.org
     python -m pip config --user set global.index-url https://pypi.org/simple
-    # Todo: fix later 
-    # python -m pip install -U --no-cache-dir transformers -i https://pypi.org/simple > /dev/null
-    python -m pip install -r requirements.txt -i https://pypi.org/simple 
+    pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
     if [[ "$ce_branch" == "CE_Develop_cu132_py312" ]]; then # nightly regerssion
         PYTHON_VERSION=3.12
         CUDA_VERSION=cu132
         #fleet develop
         fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-        wget "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
+        wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
         pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ 
-        pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+        uv build --wheel --package paddlefleet --out-dir dist --clear -v
+        pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
         #paddle develop
         python -m pip uninstall paddlepaddle-gpu -y
         wget -q https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-GpuAll-LinuxCentos-Gcc11-Cuda132-Cudnn920-Trt1016-Py312-Compile/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl
@@ -41,9 +40,10 @@ install_requirements() {
         CUDA_VERSION=cu130
         #fleet develop
         fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-        wget "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
+        wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
         pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ 
-        pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+        uv build --wheel --package paddlefleet --out-dir dist --clear -v
+        pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
         #paddle develop
         python -m pip uninstall paddlepaddle-gpu -y
         wget -q https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp313-cp313-linux_x86_64.whl
@@ -53,53 +53,54 @@ install_requirements() {
         CUDA_VERSION=cu130
         #fleet develop
         fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-        wget "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
+        wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
         pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ 
-        pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+        uv build --wheel --package paddlefleet --out-dir dist --clear -v
+        pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
         #paddle develop
         python -m pip uninstall paddlepaddle-gpu -y
         wget -q https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl
         python -m pip install paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ 
     elif [[ "$ce_branch" == "CE_Release_cu132_py312" ]]; then
-        #formers - build wheel first
-        python setup.py bdist_wheel  > /dev/null
-        #fleet paddle locked
-        wget -q https://paddle-github-action.bj.bcebos.com/PaddleFleet/release/0.3/latest/paddlefleet-0.0.0-py3-none-linux_x86_64.whl
-        python -m pip install paddlefleet-0.0.0-py3-none-linux_x86_64.whl 
+        PYTHON_VERSION=3.12
+        CUDA_VERSION=cu132
+        #fleet develop
+        fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+        wget -q "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${BRANCH}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+        pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ 
+        uv build --wheel --package paddlefleet --out-dir dist --clear -v
+        pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
         python -m pip uninstall paddlepaddle-gpu -y
         wget -q https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-GpuAll-LinuxCentos-Gcc11-Cuda132-Cudnn920-Trt1016-Py312-Compile/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl
         python -m pip install paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl  --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu132 -i https://pypi.org/simple
-        #paddlefleet_ops
-        install_ops_wheel_release
-        #formers - reinstall
         python -m pip install ./dist/*.whl
     elif [[ "$ce_branch" == "CE_Release_cu130_py313" ]]; then # release regerssion
-        #formers - build wheel first
-        python setup.py bdist_wheel  > /dev/null
-        #fleet paddle locked
-        pip install "$(ls -t dist/*.whl | head -1)[paddlefleet]" -i https://pypi.org/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-        #paddlefleet_ops
-        install_ops_wheel_release
-        #formers - reinstall
-        python -m pip install ./dist/*.whl
+        PYTHON_VERSION=3.13
+        CUDA_VERSION=cu130
+        #fleet develop
+        fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+        wget -q "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${BRANCH}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+        pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ 
+        uv build --wheel --package paddlefleet --out-dir dist --clear -v
+        pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
     elif [[ "$ce_branch" == "CE_Release_cu130_py312" ]]; then # release regerssion
-        #formers - build wheel first
-        python setup.py bdist_wheel  > /dev/null
-        #fleet paddle locked
-        pip install "$(ls -t dist/*.whl | head -1)[paddlefleet]" -i https://pypi.org/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-        #paddlefleet_ops
-        install_ops_wheel_release
-        #formers - reinstall
-        python -m pip install ./dist/*.whl
+        PYTHON_VERSION=3.12
+        CUDA_VERSION=cu130
+        #fleet develop
+        fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+        wget -q "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${BRANCH}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+        pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ 
+        uv build --wheel --package paddlefleet --out-dir dist --clear -v
+        pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
      elif [[ "$ce_branch" == "CE_Release_cu130_py311" ]]; then # release regerssion
-        #formers - build wheel first
-        python setup.py bdist_wheel  > /dev/null
-        #fleet paddle locked
-        pip install "$(ls -t dist/*.whl | head -1)[paddlefleet]" -i https://pypi.org/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-        #paddlefleet_ops
-        install_ops_wheel_release
-        #formers - reinstall
-        python -m pip install ./dist/*.whl
+        PYTHON_VERSION=3.11
+        CUDA_VERSION=cu130
+        #fleet develop
+        fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+        wget -q "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${BRANCH}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+        pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ 
+        uv build --wheel --package paddlefleet --out-dir dist --clear -v
+        pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
     elif [[ "$ce_branch" == "CE_Release_cu129_py313" ]]; then # release regerssion
         #formers - build wheel first
         python setup.py bdist_wheel  > /dev/null
@@ -145,7 +146,6 @@ install_requirements() {
         #paddlefleet_ops
         install_ops_wheel_release
     fi
-    python -m pip install -r tests/requirements.txt -i https://pypi.org/simple 
 
     echo "paddle commit:"
     python -c "import paddle; print(paddle.version.commit)"
