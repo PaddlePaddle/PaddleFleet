@@ -1,9 +1,9 @@
 ### data
 train_dataset_type: messages
 eval_dataset_type: messages
-train_dataset_path: ./tests/fixtures/dummy/dpo-vl/train.jsonl
+train_dataset_path: ./test/formers/fixtures/dummy/dpo-vl/train.jsonl
 train_dataset_prob: "1.0"
-eval_dataset_path: ./tests/fixtures/dummy/dpo-vl/eval.jsonl
+eval_dataset_path: ./test/formers/fixtures/dummy/dpo-vl/eval.jsonl
 eval_dataset_prob: "1.0"
 max_seq_len: 8192
 packing: false

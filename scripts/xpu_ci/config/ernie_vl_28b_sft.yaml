@@ -1,6 +1,6 @@
 ### data
 train_dataset_type: messages
-train_dataset_path: tests/fixtures/dummy/sft-vl/thinking_safety_demo.jsonl
+train_dataset_path: test/formers/fixtures/dummy/sft-vl/thinking_safety_demo.jsonl
 train_dataset_prob: "1.0"
 max_seq_len: 32768
 packing: true

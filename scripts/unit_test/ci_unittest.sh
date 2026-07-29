@@ -88,6 +88,7 @@ install_requirements() {
         cd -
     fi
     python -m pip install --group test-formers -i https://pypi.org/simple
+    python -m pip install --no-deps "torch>=2.1,<2.11" -i https://pypi.org/simple
 
     echo "paddle commit:"
     python -c "import paddle; print(paddle.version.commit)"
