@@ -228,21 +228,44 @@ def _unpermute_gather_sum_aligned(
     )  # [num_experts, num_tokens]
     global_position_per_token = global_position.T  # [num_tokens, num_experts]
 
-    topk = int(routing_map_bool.cast("int64").sum(axis=-1)[0].item())
+    # Filter out padding tokens (k=0) before checking fixed top-k
+    per_token_k = routing_map_bool.cast("int64").sum(axis=-1)  # [num_tokens]
+    valid_mask = per_token_k > 0
+    valid_ks = per_token_k.masked_select(valid_mask)
+    if valid_ks.numel() == 0:
+        # All tokens are padding; return zeros
+        return paddle.zeros([num_tokens, hidden], dtype=permuted_tokens.dtype)
+    topk = int(valid_ks.max().item())
+    if int(valid_ks.min().item()) != topk:
+        raise ValueError(
+            "use_accuracy_compatible requires a fixed top-k for all "
+            "valid (non-padding) tokens."
+        )
+
     valid_positions = global_position_per_token * routing_map_bool.cast("int64")
+    # masked_select yields exactly num_valid_tokens * topk entries
     reverse_indices_flat = paddle.masked_select(
         valid_positions, routing_map_bool
-    ).reshape([num_tokens * topk])
+    ).reshape([-1])
     reverse_indices_flat.stop_gradient = True
 
-    return _UnpermuteGatherSumAlignedPyLayer.apply(
+    num_valid_tokens = int(valid_mask.cast("int64").sum().item())
+    result = _UnpermuteGatherSumAlignedPyLayer.apply(
         permuted_tokens,
         reverse_indices_flat,
         num_total_tokens,
-        num_tokens,
+        num_valid_tokens,
         topk,
         hidden,
     )
+
+    if num_valid_tokens < num_tokens:
+        # Some tokens are padding — scatter valid results into a zero-filled output
+        valid_token_indices = valid_mask.nonzero().reshape([-1])
+        output = paddle.zeros([num_tokens, hidden], dtype=result.dtype)
+        output = paddle.scatter(output, valid_token_indices, result)
+        return output
+    return result
 
 
 class ApplyPermutedProbs(PyLayer):

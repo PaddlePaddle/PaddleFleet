@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -379,6 +380,9 @@ class ModelParallelConfig:
 
         if self.tensor_model_parallel_size <= 1:
             self.sequence_parallel = False
+
+        if os.environ.get("USE_ACCURACY_COMPATIBLE", "0") == "1":
+            self.use_accuracy_compatible = True
 
         if getattr(self, "use_accuracy_compatible", False):
             self.deterministic_mode = True
