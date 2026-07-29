@@ -857,5 +857,285 @@ class TestTPGroupAllReduce(unittest.TestCase):
         )
 
 
+# =============================================================================
+# Test: Additional coverage for uncovered branches
+# =============================================================================
+
+
+class TestDegenerateRange(unittest.TestCase):
+    """Test the degenerate total_range < 1e-8 fallback (line 191)."""
+
+    def test_zero_range_fallback(self):
+        """When qb_bin_min == qb_bin_max, total_range should fallback to 2.0."""
+        np.random.seed(999)
+        E, B, k, n = 4, 50, 2, 4
+        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+
+        layer = MagicMock()
+        layer.qb_histogram = paddle.to_tensor(histogram_np, dtype=paddle.int32)
+        layer.num_experts_per_tok = k
+        layer.num_experts = n
+        # Set bin_min == bin_max to trigger the fallback
+        layer.qb_bin_min = 0.0
+        layer.qb_bin_max = 0.0
+        layer.config = MagicMock()
+        layer.config.sequence_parallel = False
+        layer.config.expert_model_parallel_size = 1
+
+        class BiasMock:
+            ndim = 1
+
+            def set_value(self, val):
+                layer._bias_value = val
+
+        layer.e_score_correction_bias = BiasMock()
+
+        callback = MoEQuantileBalancingCallback()
+        callback._update_single_layer(
+            layer, tp_group=None, dp_group=None, sd_group=None
+        )
+
+        # Should still produce valid result (not crash or NaN)
+        actual = layer._bias_value.numpy()
+        self.assertTrue(np.all(np.isfinite(actual)))
+        self.assertAlmostEqual(float(actual.sum()), 0.0, places=4)
+
+
+class TestOnOptimizerEndWithRealRouter(unittest.TestCase):
+    """Test on_optimizer_end with a real StandardMoERouter isinstance check."""
+
+    def test_isinstance_collection(self):
+        """Verify _collect correctly identifies StandardMoERouter with quantile_balancing."""
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        np.random.seed(42)
+        E, B, k, n = 4, 50, 2, 4
+        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+
+        # Create a mock that passes isinstance check
+        layer = MagicMock(spec=StandardMoERouter)
+        layer.topk_method = "quantile_balancing"
+        layer.qb_histogram = paddle.to_tensor(histogram_np, dtype=paddle.int32)
+        layer.num_experts_per_tok = k
+        layer.num_experts = n
+        layer.qb_bin_min = -1.0
+        layer.qb_bin_max = 1.0
+        layer.config = MagicMock()
+        layer.config.sequence_parallel = False
+        layer.config.expert_model_parallel_size = 1
+
+        class BiasMock:
+            ndim = 1
+
+            def set_value(self, val):
+                layer._bias_value = val
+
+        layer.e_score_correction_bias = BiasMock()
+        layer.expert_usage = paddle.zeros([E], dtype=paddle.int64)
+
+        # Create model mock where apply() calls fn on the layer
+        model = MagicMock()
+
+        def _apply(fn):
+            fn(layer)
+
+        model.apply = _apply
+
+        callback = MoEQuantileBalancingCallback()
+        callback.on_optimizer_end(model=model)
+
+        # Verify bias was updated
+        self.assertTrue(hasattr(layer, "_bias_value"))
+        self.assertAlmostEqual(
+            float(layer._bias_value.sum().item()), 0.0, places=4
+        )
+
+    def test_non_qb_layer_skipped(self):
+        """Layers with topk_method != 'quantile_balancing' should be skipped."""
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        layer = MagicMock(spec=StandardMoERouter)
+        layer.topk_method = "noaux_tc"  # Not QB
+
+        model = MagicMock()
+
+        def _apply(fn):
+            fn(layer)
+
+        model.apply = _apply
+
+        callback = MoEQuantileBalancingCallback()
+        # Should not raise, should return early (no QB layers found)
+        callback.on_optimizer_end(model=model)
+
+
+class TestCommGroupsHappyPath(unittest.TestCase):
+    """Test _try_get_comm_groups when fleet IS initialized (mocked)."""
+
+    @patch("paddle.distributed.fleet")
+    def test_all_groups_available(self, mock_fleet):
+        """When all groups are available and have nranks > 1, return them."""
+        mock_hcg = MagicMock()
+        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
+
+        tp_group = MagicMock()
+        tp_group.nranks = 4
+        dp_group = MagicMock()
+        dp_group.nranks = 8
+        sd_group = MagicMock()
+        sd_group.nranks = 2
+
+        mock_hcg.get_model_parallel_group.return_value = tp_group
+        mock_hcg.get_data_parallel_group.return_value = dp_group
+        mock_hcg.get_sharding_parallel_group.return_value = sd_group
+
+        tp, dp, sd = _try_get_comm_groups()
+        self.assertIs(tp, tp_group)
+        self.assertIs(dp, dp_group)
+        self.assertIs(sd, sd_group)
+
+    @patch("paddle.distributed.fleet")
+    def test_single_rank_groups_filtered(self, mock_fleet):
+        """Groups with nranks <= 1 should be filtered to None."""
+        mock_hcg = MagicMock()
+        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
+
+        tp_group = MagicMock()
+        tp_group.nranks = 1  # Single rank → should be None
+        dp_group = MagicMock()
+        dp_group.nranks = 4
+        sd_group = MagicMock()
+        sd_group.nranks = 1  # Single rank → should be None
+
+        mock_hcg.get_model_parallel_group.return_value = tp_group
+        mock_hcg.get_data_parallel_group.return_value = dp_group
+        mock_hcg.get_sharding_parallel_group.return_value = sd_group
+
+        tp, dp, sd = _try_get_comm_groups()
+        self.assertIsNone(tp)
+        self.assertIs(dp, dp_group)
+        self.assertIsNone(sd)
+
+    @patch("paddle.distributed.fleet")
+    def test_none_groups_handled(self, mock_fleet):
+        """If hcg returns None for a group, it should become None."""
+        mock_hcg = MagicMock()
+        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
+
+        mock_hcg.get_model_parallel_group.return_value = None
+        mock_hcg.get_data_parallel_group.return_value = None
+        mock_hcg.get_sharding_parallel_group.return_value = None
+
+        tp, dp, sd = _try_get_comm_groups()
+        self.assertIsNone(tp)
+        self.assertIsNone(dp)
+        self.assertIsNone(sd)
+
+
+class TestTPAllReduceCondition(unittest.TestCase):
+    """Test the TP all-reduce condition (SP=True and EP>1)."""
+
+    def _make_layer_with_config(self, E, B, k, n, histogram_np, sp, ep_size):
+        layer = MagicMock()
+        layer.qb_histogram = paddle.to_tensor(histogram_np, dtype=paddle.int32)
+        layer.num_experts_per_tok = k
+        layer.num_experts = n
+        layer.qb_bin_min = -1.0
+        layer.qb_bin_max = 1.0
+        layer.config = MagicMock()
+        layer.config.sequence_parallel = sp
+        layer.config.expert_model_parallel_size = ep_size
+
+        class BiasMock:
+            ndim = 1
+
+            def set_value(self, val):
+                layer._bias_value = val
+
+        layer.e_score_correction_bias = BiasMock()
+        return layer
+
+    @patch("paddlefleet.transformer.moe.qb_callback.dist")
+    def test_tp_reduce_called_when_sp_and_ep(self, mock_dist):
+        """TP all-reduce should be called when SP=True and EP>1."""
+        np.random.seed(42)
+        E, B, k, n = 4, 50, 2, 4
+        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+
+        layer = self._make_layer_with_config(
+            E, B, k, n, histogram_np, sp=True, ep_size=4
+        )
+
+        tp_group = MagicMock()
+        callback = MoEQuantileBalancingCallback()
+        callback._update_single_layer(
+            layer, tp_group=tp_group, dp_group=None, sd_group=None
+        )
+
+        # TP all_reduce should have been called
+        mock_dist.all_reduce.assert_called_once()
+
+    @patch("paddlefleet.transformer.moe.qb_callback.dist")
+    def test_tp_reduce_skipped_when_sp_false(self, mock_dist):
+        """TP all-reduce should NOT be called when SP=False."""
+        np.random.seed(42)
+        E, B, k, n = 4, 50, 2, 4
+        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+
+        layer = self._make_layer_with_config(
+            E, B, k, n, histogram_np, sp=False, ep_size=4
+        )
+
+        tp_group = MagicMock()
+        callback = MoEQuantileBalancingCallback()
+        callback._update_single_layer(
+            layer, tp_group=tp_group, dp_group=None, sd_group=None
+        )
+
+        # TP all_reduce should NOT have been called
+        mock_dist.all_reduce.assert_not_called()
+
+    @patch("paddlefleet.transformer.moe.qb_callback.dist")
+    def test_tp_reduce_skipped_when_ep1(self, mock_dist):
+        """TP all-reduce should NOT be called when EP=1."""
+        np.random.seed(42)
+        E, B, k, n = 4, 50, 2, 4
+        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+
+        layer = self._make_layer_with_config(
+            E, B, k, n, histogram_np, sp=True, ep_size=1
+        )
+
+        tp_group = MagicMock()
+        callback = MoEQuantileBalancingCallback()
+        callback._update_single_layer(
+            layer, tp_group=tp_group, dp_group=None, sd_group=None
+        )
+
+        # TP all_reduce should NOT have been called
+        mock_dist.all_reduce.assert_not_called()
+
+    @patch("paddlefleet.transformer.moe.qb_callback.dist")
+    def test_dp_and_sd_reduce_called(self, mock_dist):
+        """DP and Sharding all-reduce should always be called when groups provided."""
+        np.random.seed(42)
+        E, B, k, n = 4, 50, 2, 4
+        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+
+        layer = self._make_layer_with_config(
+            E, B, k, n, histogram_np, sp=False, ep_size=1
+        )
+
+        dp_group = MagicMock()
+        sd_group = MagicMock()
+        callback = MoEQuantileBalancingCallback()
+        callback._update_single_layer(
+            layer, tp_group=None, dp_group=dp_group, sd_group=sd_group
+        )
+
+        # DP and SD all_reduce should each have been called
+        self.assertEqual(mock_dist.all_reduce.call_count, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
