@@ -595,11 +595,6 @@ class TransformerConfig(ModelParallelConfig):
     topk_method='quantile_balancing'. Higher values give more precise
     quantile estimation at the cost of slightly more communication."""
 
-    qb_target_quantile: float | None = None
-    """Target quantile for Quantile Balancing. If None, defaults to
-    num_experts_per_tok / n_routed_experts (exact uniform load).
-    Only used when topk_method='quantile_balancing'."""
-
     moe_split_feature_routing: bool = False
     """Enable multi-view (split-feature) MoE routing. When True, the router
     scores each expert with the sum of two independent views: the existing

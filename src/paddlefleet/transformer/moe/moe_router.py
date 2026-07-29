@@ -356,6 +356,12 @@ class StandardMoERouter(nn.Layer):
             self.expert_usage.stop_gradient = True
 
         if self.topk_method == "quantile_balancing":
+            assert not getattr(self.config, "moe_topk_fusion", False), (
+                "quantile_balancing is incompatible with moe_topk_fusion. "
+                "The MoETopkFusion kernel does not support QB's histogram-based "
+                "bias update, and enabling both causes incorrect gate normalization. "
+                "Please set moe_topk_fusion=False when using quantile_balancing."
+            )
             # Bias vector -- same name as noaux_tc for checkpoint compatibility
             if not self.config.gpt_model_use_experimental_version:
                 self.register_buffer(
