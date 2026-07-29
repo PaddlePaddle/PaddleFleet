@@ -15,6 +15,8 @@
 # limitations under the License.
 """FP8 Utils"""
 
+import os
+
 import numpy
 import paddle
 import paddle.nn.functional as F
@@ -35,6 +37,18 @@ try:
     )
 except (ImportError, RuntimeError):
     pass
+
+try:
+    from paddlefleet_ops import (
+        w4a8_dequantize_1x32,
+        w4a8_quantize_1x32,
+        w4a8_stack_quantize_1x32,
+        w4a8_weighted_swiglu_quantize_1x32,
+    )
+
+    HAS_W4A8_FUSED_QUANT = True
+except (ImportError, AttributeError, RuntimeError):
+    HAS_W4A8_FUSED_QUANT = False
 
 # 优先从 paddlefleet_ops 导入（算子已重命名为 paddlefleet_fused_swiglu_probs_bwd 避免冲突），
 # 仅在 paddlefleet_ops 中不存在时回退到旧的 FusedQuantOps。
@@ -248,6 +262,16 @@ def tilewise_quant(x):
 # ---------------------------------------------------------------------------
 
 W4A8_QUANT_BLOCK = 32
+
+
+def _use_w4a8_fused_quant():
+    enabled = os.getenv("PADDLEFLEET_W4A8_FUSED_QUANT", "0") == "1"
+    if enabled and not HAS_W4A8_FUSED_QUANT:
+        raise RuntimeError(
+            "PADDLEFLEET_W4A8_FUSED_QUANT=1 requires paddlefleet_ops "
+            "built with the W4A8 1x32 CUDA custom ops"
+        )
+    return enabled
 
 
 def ceil_to_ue8m0(x):
@@ -495,6 +519,44 @@ def fused_act_dequant_python(x_fp8, sf):
     group_idx = paddle.arange(n, dtype="int64") // gran_k
     sf_expanded = paddle.index_select(sf.astype("float32"), group_idx, axis=1)
     return (x_fp8.astype("float32") * sf_expanded).astype("bfloat16")
+
+
+def _w4a8_quant(x, quant_dtype):
+    if _use_w4a8_fused_quant():
+        return w4a8_quantize_1x32(x, 0 if quant_dtype == "fp8" else 1)
+    return quant_blockwize(x, quant_dtype=quant_dtype)
+
+
+def _w4a8_stack_quant(weights, transpose):
+    if _use_w4a8_fused_quant():
+        weights = _stack_expert_weights(weights)
+        return w4a8_stack_quantize_1x32(weights, transpose)
+    fn = (
+        fuse_stack_transpose_fp8_quant_python
+        if transpose
+        else fuse_stack_fp8_quant_python
+    )
+    return fn(weights, quant_dtype="fp4")
+
+
+def _w4a8_weighted_swiglu_quant(o1, probs, clamp_value=None):
+    if _use_w4a8_fused_quant():
+        return w4a8_weighted_swiglu_quantize_1x32(
+            o1,
+            probs,
+            0.0 if clamp_value is None else float(clamp_value),
+        )
+    if clamp_value is not None and clamp_value > 0:
+        return fuse_weighted_swiglu_fp8_quant_clamp_python(
+            o1, probs, clamp_value
+        )
+    return fuse_weighted_swiglu_fp8_quant_python(o1, probs)
+
+
+def _w4a8_dequant(x_fp8, sf):
+    if _use_w4a8_fused_quant():
+        return w4a8_dequantize_1x32(x_fp8, sf)
+    return fused_act_dequant_python(x_fp8, sf)
 
 
 def split_group_gemm(
@@ -1088,12 +1150,10 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 assert self.input is not None
                 x = self.input
-        # 在线量化权重（无 quant_weight_cache）：[E, K, N] -> [E, N, K/2]
-        w1_fp4, w1_sf = fuse_stack_transpose_fp8_quant_python(
-            expert_w1, quant_dtype="fp4"
-        )
+        # [E, K, N] -> [E, N, K/2]
+        w1_fp4, w1_sf = _w4a8_stack_quant(expert_w1, transpose=True)
         if x_fp8 is None:
-            x_fp8, x_sf = quant_blockwize(x, quant_dtype="fp8")
+            x_fp8, x_sf = _w4a8_quant(x, quant_dtype="fp8")
         # 给反向存储：dequant_input 存 fp8 1x32 量化结果（省显存，
         # 反向 bf16 wgrad 用 fused_act_dequant_python 反量化），否则存 bf16
         if self.dequant_input:
@@ -1116,17 +1176,10 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
         # 在线量化权重：[E, H, K] -> [E, K, H/2]
-        w2_fp4, w2_sf = fuse_stack_transpose_fp8_quant_python(
-            expert_w2, quant_dtype="fp4"
+        w2_fp4, w2_sf = _w4a8_stack_quant(expert_w2, transpose=True)
+        o2_fp8, o2_sf = _w4a8_weighted_swiglu_quant(
+            o1, unzipped_probs, self.clamp_value
         )
-        if self.clamp_value is not None and self.clamp_value > 0:
-            o2_fp8, o2_sf = fuse_weighted_swiglu_fp8_quant_clamp_python(
-                o1, unzipped_probs, self.clamp_value
-            )
-        else:
-            o2_fp8, o2_sf = fuse_weighted_swiglu_fp8_quant_python(
-                o1, unzipped_probs
-            )
         if clear_o1:
             o1._clear_to_zero_allocation()
 
@@ -1148,10 +1201,8 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, n] = [m_sum, k] * [num_groups, k, n]
         w2 [E, N, K] 不转置，收缩维为 K（do3 的列维）。
         """
-        w2_fp4, w2_sf = fuse_stack_fp8_quant_python(
-            expert_w2, quant_dtype="fp4"
-        )
-        grad_fp8, grad_sf = quant_blockwize(unzipped_grad, quant_dtype="fp8")
+        w2_fp4, w2_sf = _w4a8_stack_quant(expert_w2, transpose=False)
+        grad_fp8, grad_sf = _w4a8_quant(unzipped_grad, quant_dtype="fp8")
 
         do2_s = paddle.empty(
             [grad_fp8.shape[0], w2_fp4.shape[1]], dtype=unzipped_grad.dtype
@@ -1187,10 +1238,8 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         w1 [E, K, N] 不转置，收缩维为 N（do1 的列维）。
         """
-        w1_fp4, w1_sf = fuse_stack_fp8_quant_python(
-            expert_w1, quant_dtype="fp4"
-        )
-        do1_fp8, do1_sf = quant_blockwize(do1, quant_dtype="fp8")
+        w1_fp4, w1_sf = _w4a8_stack_quant(expert_w1, transpose=False)
+        do1_fp8, do1_sf = _w4a8_quant(do1, quant_dtype="fp8")
 
         dx_shape = [do1_fp8.shape[0], w1_fp4.shape[1]]
         if dx is None:
@@ -2564,9 +2613,7 @@ class ExpertsGroupGemmContiguousNode:
             if self.dequant_input:
                 if self.use_w4a8:
                     # w4a8 输入是 fp8 1x32 量化（fused_act_dequant 仅支持 1x128）
-                    x = fused_act_dequant_python(
-                        self.input_fp8, self.input_scale
-                    )
+                    x = _w4a8_dequant(self.input_fp8, self.input_scale)
                 else:
                     x = paddle.incubate.nn.functional.fused_act_dequant(
                         self.input_fp8, self.input_scale

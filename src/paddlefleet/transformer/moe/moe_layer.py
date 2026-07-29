@@ -179,7 +179,6 @@ class MoELayer(nn.Layer):
         self.use_w4a8 = config.use_w4a8
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
-        self.fp8_dispatch = bool(config.fp8)
         self.fp8_dispatch = bool(config.fp8) and not self.use_w4a8
         self.fp8_wgrad = config.fp8_wgrad
         self.fp8_dispatch_bwd = (
