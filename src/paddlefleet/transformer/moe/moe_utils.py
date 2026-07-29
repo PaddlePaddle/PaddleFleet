@@ -278,27 +278,39 @@ class _PermuteAlignedPyLayer(PyLayer):
         tokens,
         sorted_indices,
         reverse_indices_flat,
+        valid_token_indices,
         num_tokens,
         topk,
         hidden,
     ):
         ctx.input_dtype = tokens.dtype
         ctx.num_tokens = num_tokens
+        ctx.num_valid_tokens = valid_token_indices.shape[0]
         ctx.topk = topk
         ctx.hidden = hidden
-        ctx.save_for_backward(reverse_indices_flat)
+        ctx.save_for_backward(reverse_indices_flat, valid_token_indices)
         permuted_input = tokens.index_select(axis=0, index=sorted_indices)
         return permuted_input
 
     @staticmethod
     def backward(ctx, grad_permuted):
-        (reverse_indices_flat,) = ctx.saved_tensor()
-        # gather → [N*topk, H] in fp32 → reshape [N, topk, H] → sum(axis=1)
+        reverse_indices_flat, valid_token_indices = ctx.saved_tensor()
+        # gather → [num_valid*topk, H] in fp32 → reshape [num_valid, topk, H] → sum(axis=1)
         gathered = grad_permuted.cast("float32").index_select(
             axis=0, index=reverse_indices_flat
         )
-        gathered = gathered.reshape([ctx.num_tokens, ctx.topk, ctx.hidden])
-        grad_tokens = gathered.sum(axis=1)
+        gathered = gathered.reshape(
+            [ctx.num_valid_tokens, ctx.topk, ctx.hidden]
+        )
+        grad_valid = gathered.sum(axis=1)  # [num_valid, hidden]
+        # Scatter back to [num_tokens, hidden]; padding positions receive zero gradient
+        grad_tokens = paddle.zeros(
+            [ctx.num_tokens, ctx.hidden], dtype="float32"
+        )
+        if ctx.num_valid_tokens > 0:
+            grad_tokens = paddle.scatter(
+                grad_tokens, valid_token_indices, grad_valid, overwrite=True
+            )
         return grad_tokens.cast(ctx.input_dtype)
 
 
@@ -366,10 +378,16 @@ def permute(
         ).reshape([-1])
         reverse_indices_flat.stop_gradient = True
 
+        valid_token_indices = paddle.masked_select(
+            paddle.arange(num_tokens, dtype="int64"), valid_mask
+        )
+        valid_token_indices.stop_gradient = True
+
         permuted_input = _PermuteAlignedPyLayer.apply(
             tokens,
             sorted_indices,
             reverse_indices_flat,
+            valid_token_indices,
             num_tokens,
             topk_val,
             hidden,
