@@ -28,4 +28,3 @@
 [submodule "packages/paddlefleet_ops/third_party/FlashKDA"]
 	path = packages/paddlefleet_ops/third_party/FlashKDA
 	url = https://github.com/PFCCLab/FlashKDA.git
-	branch = paddle
