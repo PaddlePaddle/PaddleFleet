@@ -57,8 +57,8 @@ cp model_configs/ERNIE-4p5-300B-A47B/model_config.json ERNIE-4.5-300B-A47B-Base-
 
 ```shell
 mkdir -p data
-wget -P data https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/eb45_industrycorpus2_94k.bin
-wget -P data https://paddlefleet.bj.bcebos.com/datasets/release/v1.0/eb45_industrycorpus2_94k.idx
+wget -P data https://paddleformers.bj.bcebos.com/datasets/release/v1.0/eb45_industrycorpus2_94k.bin
+wget -P data https://paddleformers.bj.bcebos.com/datasets/release/v1.0/eb45_industrycorpus2_94k.idx
 ```
 
 你也可以从文本自行制作数据集，参考[数据集格式说明](../../../docs/zh/dataset_format.md)

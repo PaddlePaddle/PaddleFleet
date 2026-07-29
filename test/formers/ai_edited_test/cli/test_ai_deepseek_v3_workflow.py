@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 # Direct import to avoid __init__.py triggering workflow.py which requires AutoTokenizer
 _MODULE_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "paddlefleet", "cli", "train", "deepseek_v3_pretrain"
+    os.path.dirname(__file__), "..", "..", "..", "..", "src", "paddlefleet", "cli", "train", "deepseek_v3_pretrain"
 )
 _MODULE_DIR = os.path.abspath(_MODULE_DIR)
 
@@ -48,8 +48,10 @@ if _pkg_name not in sys.modules:
     _pkg_mod.__package__ = _pkg_name
     sys.modules[_pkg_name] = _pkg_mod
 
-# Mock the missing transformers module to avoid import errors
-if "transformers.tokenization_utils_tokenizers" not in sys.modules:
+# Mock the transformers module only when it is genuinely unavailable.
+try:
+    import transformers.tokenization_utils_tokenizers  # noqa: F401
+except ImportError:
     _mock_mod = types.ModuleType("transformers.tokenization_utils_tokenizers")
     _mock_mod.TokenizersBackend = type("TokenizersBackend", (), {})
     sys.modules["transformers.tokenization_utils_tokenizers"] = _mock_mod

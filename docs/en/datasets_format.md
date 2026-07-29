@@ -19,7 +19,7 @@ Sample data:
 ...
 ```
 
-For ease of testing, we also provide a [demo dataset](https://paddlefleet.bj.bcebos.com/datasets/pt_data.tar.gz) that can be used directly:
+For ease of testing, we also provide a [demo dataset](https://paddleformers.bj.bcebos.com/datasets/pt_data.tar.gz) that can be used directly:
 
 ```shell
 wget https://paddleformers.bj.bcebos.com/datasets/pt_data.tar.gz
@@ -30,7 +30,7 @@ mkdir -p data/pt && tar -xf pt_data.tar.gz -C data/pt/
 
 We can also choose to use offline bit pre-training data streams, which saves more memory.
 
-For ease of testing, we also provide an [offline pre-training demo dataset](https://paddlefleet.bj.bcebos.com/datasets/pretrain_offline_data.tar.gz) that can be used directly:
+For ease of testing, we also provide an [offline pre-training demo dataset](https://paddleformers.bj.bcebos.com/datasets/pretrain_offline_data.tar.gz) that can be used directly:
 
 ```shell
 wget https://paddleformers.bj.bcebos.com/datasets/pretrain_offline_data.tar.gz

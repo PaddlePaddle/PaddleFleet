@@ -17,8 +17,10 @@ import types
 import unittest
 from unittest.mock import patch
 
-# Mock the missing transformers module to avoid import errors
-if "transformers.tokenization_utils_tokenizers" not in sys.modules:
+# Mock the transformers module only when it is genuinely unavailable.
+try:
+    import transformers.tokenization_utils_tokenizers  # noqa: F401
+except ImportError:
     _mock_mod = types.ModuleType("transformers.tokenization_utils_tokenizers")
     _mock_mod.TokenizersBackend = type("TokenizersBackend", (), {})
     sys.modules["transformers.tokenization_utils_tokenizers"] = _mock_mod
