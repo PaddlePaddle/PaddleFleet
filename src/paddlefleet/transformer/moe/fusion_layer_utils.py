@@ -387,6 +387,7 @@ class MlpNode:
         clamp_value=None,
         activation_type=None,
         use_accuracy_compatible=False,
+        use_w4a8=False,
     ):
         """
         Constructor
@@ -508,6 +509,7 @@ class MlpNode:
                 clamp_value=clamp_value,
                 activation_type=activation_type,
                 use_accuracy_compatible=use_accuracy_compatible,
+                use_w4a8=use_w4a8,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -3118,6 +3120,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         clamp_value=None,
         activation_type=None,
         use_accuracy_compatible=False,
+        use_w4a8=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -3154,6 +3157,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             clamp_value=clamp_value,
             activation_type=activation_type,
             use_accuracy_compatible=use_accuracy_compatible,
+            use_w4a8=use_w4a8,
         )
 
         if fp8_dispatched_handle is not None:

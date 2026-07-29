@@ -105,6 +105,7 @@ def _make_config(
     csa_sparse_attn_backend="unfused",
     tensor_model_parallel_size=1,
     context_parallel_size=1,
+    csa_dense_mode=False,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -149,6 +150,7 @@ def _make_config(
         csa_sparse_attn_backend=csa_sparse_attn_backend,
         tensor_model_parallel_size=tensor_model_parallel_size,
         context_parallel_size=context_parallel_size,
+        csa_dense_mode=csa_dense_mode,
     )
 
 
@@ -1572,10 +1574,16 @@ class TestDSv4HybridFusedSparseAttention(unittest.TestCase):
 class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
     def setUp(self):
         paddle.seed(_SEED)
-        self.config = _make_config(dsa_indexer_loss_coeff=1.0)
+        self.config = _make_config(
+            dsa_indexer_loss_coeff=1.0, csa_dense_mode=True
+        )
+
+    def _make_startend_for_batch(self, batch_size, seq_len):
+        """Build startend_row_indices for packed B>1, dense_mode=True."""
+        return paddle.full([batch_size, 1, seq_len, 1], seq_len, dtype="int32")
 
     def test_backward_gradient_flow(self):
-        batch_size = 2
+        batch_size = 1
         seq_len = 64
 
         for layer_number in [0, 1]:
@@ -1587,7 +1595,13 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
             )
             hidden.stop_gradient = False
 
-            output, _ = attn(hidden_states=hidden, attention_mask=None)
+            output, _ = attn(
+                hidden_states=hidden,
+                attention_mask=None,
+                attn_mask_startend_row_indices=self._make_startend_for_batch(
+                    batch_size, seq_len
+                ),
+            )
             loss = output.cast("float32").sum()
             loss.backward()
 
@@ -1611,7 +1625,7 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
                     )
 
     def test_eval_mode(self):
-        batch_size = 2
+        batch_size = 1
         seq_len = 64
         attn = _build_attention(self.config, layer_number=1)
         attn.eval()
@@ -1621,7 +1635,13 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         )
 
         with paddle.no_grad():
-            output, bias = attn(hidden_states=hidden, attention_mask=None)
+            output, bias = attn(
+                hidden_states=hidden,
+                attention_mask=None,
+                attn_mask_startend_row_indices=self._make_startend_for_batch(
+                    batch_size, seq_len
+                ),
+            )
 
         self.assertEqual(
             list(output.shape), [batch_size, seq_len, self.config.hidden_size]
@@ -1630,7 +1650,7 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         self.assertIsNone(bias)
 
     def test_different_seq_lengths(self):
-        batch_size = 2
+        batch_size = 1
         attn = _build_attention(self.config, layer_number=2)
 
         for seq_len in [32, 64, 128]:
@@ -1638,7 +1658,13 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
                 [batch_size, seq_len, self.config.hidden_size],
                 dtype=paddle.bfloat16,
             )
-            output, _ = attn(hidden_states=hidden, attention_mask=None)
+            output, _ = attn(
+                hidden_states=hidden,
+                attention_mask=None,
+                attn_mask_startend_row_indices=self._make_startend_for_batch(
+                    batch_size, seq_len
+                ),
+            )
             self.assertEqual(
                 list(output.shape),
                 [batch_size, seq_len, self.config.hidden_size],
@@ -1648,7 +1674,7 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
             )
 
     def test_rope_fusion(self):
-        batch_size = 2
+        batch_size = 1
         seq_len = 128
         self.config.apply_rope_fusion = True
         attn = _build_attention(self.config, layer_number=2)
@@ -1657,7 +1683,13 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
             dtype=paddle.bfloat16,
         )
 
-        output, _ = attn(hidden_states=hidden, attention_mask=None)
+        output, _ = attn(
+            hidden_states=hidden,
+            attention_mask=None,
+            attn_mask_startend_row_indices=self._make_startend_for_batch(
+                batch_size, seq_len
+            ),
+        )
 
         self.assertEqual(
             list(output.shape),
@@ -1666,12 +1698,14 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         self.assertTrue(paddle.isfinite(output.float()).all().item())
 
     def test_gated_attention(self):
-        batch_size = 2
+        batch_size = 1
         seq_len = 64
         model_parallel_cuda_manual_seed(_SEED)
 
         for use_q_lora in [False, True]:
-            config = _make_config(dsa_indexer_loss_coeff=1.0)
+            config = _make_config(
+                dsa_indexer_loss_coeff=1.0, csa_dense_mode=True
+            )
             config.gated_attention = True
             config.gated_attn_use_q_lora = use_q_lora
             attn = _build_attention(config, layer_number=1)
@@ -1686,13 +1720,54 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
                 [batch_size, seq_len, config.hidden_size],
                 dtype=paddle.bfloat16,
             )
-            output, bias = attn(hidden_states=hidden, attention_mask=None)
+            output, bias = attn(
+                hidden_states=hidden,
+                attention_mask=None,
+                attn_mask_startend_row_indices=self._make_startend_for_batch(
+                    batch_size, seq_len
+                ),
+            )
 
             self.assertEqual(
                 list(output.shape),
                 [batch_size, seq_len, config.hidden_size],
             )
             self.assertTrue(paddle.isfinite(output.float()).all().item())
+
+    def test_b1_unchanged_behavior_with_startend(self):
+        """B=1 with startend_row_indices produces same output as without.
+
+        The pack function is a no-op for B<=1, so the output must be identical
+        regardless of whether startend is provided.
+        """
+        seq_len = 64
+        attn = _build_attention(self.config, layer_number=1)
+        attn.eval()
+        hidden = paddle.randn(
+            [1, seq_len, self.config.hidden_size], dtype="bfloat16"
+        )
+        startend = paddle.full([1, 1, seq_len, 1], seq_len, dtype="int32")
+
+        with paddle.no_grad():
+            out_with, _ = attn(
+                hidden_states=hidden,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend,
+            )
+            out_without, _ = attn(
+                hidden_states=hidden,
+                attention_mask=None,
+            )
+
+        self.assertTrue(
+            paddle.allclose(
+                out_with.cast("float32"),
+                out_without.cast("float32"),
+                rtol=1e-5,
+                atol=1e-5,
+            ).item(),
+            "B=1 output differs when startend_row_indices is provided vs absent",
+        )
 
 
 class TestDSv4HybridQKV(unittest.TestCase):
@@ -1701,7 +1776,7 @@ class TestDSv4HybridQKV(unittest.TestCase):
         self.config = _make_config(dsa_indexer_loss_coeff=0.0)
 
     def test_qkv_shapes(self):
-        batch_size = 2
+        batch_size = 1
         seq_len = 64
         attn = _build_attention(self.config, layer_number=1)
         hidden = paddle.randn(
@@ -1735,7 +1810,7 @@ class TestDSv4HybridQKV(unittest.TestCase):
         self.assertEqual(list(kv_compressed.shape), list(hidden.shape))
 
     def test_key_equals_value(self):
-        batch_size = 2
+        batch_size = 1
         seq_len = 64
         attn = _build_attention(self.config, layer_number=1)
         hidden = paddle.randn(
@@ -1747,6 +1822,325 @@ class TestDSv4HybridQKV(unittest.TestCase):
         self.assertTrue(
             paddle.equal_all(key.cast("float32"), value.cast("float32")).item()
         )
+
+
+class TestDSv4PackedForwardBackwardEquivalence(unittest.TestCase):
+    """Verify packed B=2 forward/backward matches two independent B=1 runs.
+
+    This is the strongest regression test: if forward and backward match,
+    all internal metadata, compressor, and attention computations are correct.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        # Single layer with ratio=4, dense_mode=True for B>1 support.
+        # Use unfused backends for maximum determinism.
+        self.config = _make_config(
+            hidden_size=128,
+            num_attention_heads=2,
+            v_head_dim=64,
+            qk_pos_emb_head_dim=32,
+            q_lora_rank=64,
+            o_groups=2,
+            o_lora_rank=32,
+            csa_window_size=16,
+            csa_compress_ratios=[4],
+            num_layers=1,
+            dsa_indexer_loss_coeff=0.0,
+            csa_dense_mode=True,
+            csa_indexer_backend="unfused",
+            csa_sparse_attn_backend="unfused",
+            apply_rope_fusion=False,
+        )
+        self.seq_len = 64
+
+    def test_packed_b2_matches_independent_b1_forward(self):
+        """Forward: packed B=2 output slices match independent B=1 outputs."""
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(self.config, layer_number=0)
+        attn.eval()
+
+        # Two distinct random samples
+        sample_a = paddle.randn(
+            [1, self.seq_len, self.config.hidden_size], dtype="bfloat16"
+        )
+        sample_b = paddle.randn(
+            [1, self.seq_len, self.config.hidden_size], dtype="bfloat16"
+        )
+
+        # Independent B=1 runs
+        startend_b1 = paddle.full(
+            [1, 1, self.seq_len, 1], self.seq_len, dtype="int32"
+        )
+        with paddle.no_grad():
+            out_a, _ = attn(
+                hidden_states=sample_a,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_b1,
+            )
+            out_b, _ = attn(
+                hidden_states=sample_b,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_b1,
+            )
+
+        # Packed B=2 run
+        packed_hs = paddle.concat([sample_a, sample_b], axis=0)  # [2, S, H]
+        startend_b2 = paddle.full(
+            [2, 1, self.seq_len, 1], self.seq_len, dtype="int32"
+        )
+        with paddle.no_grad():
+            out_packed, _ = attn(
+                hidden_states=packed_hs,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_b2,
+            )
+
+        # Verify output shape is correctly restored to [2, S, H]
+        self.assertEqual(
+            list(out_packed.shape),
+            [2, self.seq_len, self.config.hidden_size],
+        )
+
+        # Sliced packed output must match independent outputs
+        self.assertTrue(
+            paddle.allclose(
+                out_packed[0:1, :, :].cast("float32"),
+                out_a.cast("float32"),
+                rtol=1e-4,
+                atol=1e-5,
+            ).item(),
+            "Packed sample A output differs from independent B=1",
+        )
+        self.assertTrue(
+            paddle.allclose(
+                out_packed[1:2, :, :].cast("float32"),
+                out_b.cast("float32"),
+                rtol=1e-4,
+                atol=1e-5,
+            ).item(),
+            "Packed sample B output differs from independent B=1",
+        )
+
+    def test_packed_b2_matches_independent_b1_backward(self):
+        """Backward: packed B=2 grads match sum of independent B=1 grads."""
+        model_parallel_cuda_manual_seed(_SEED)
+
+        # Use full layers for the backward test (CSA-4 at layer 0, window at layer 1, etc.)
+        config_full = _make_config(
+            hidden_size=128,
+            num_attention_heads=2,
+            v_head_dim=64,
+            qk_pos_emb_head_dim=32,
+            q_lora_rank=64,
+            o_groups=2,
+            o_lora_rank=32,
+            csa_window_size=16,
+            csa_compress_ratios=[4, 0, 128, 4],
+            num_layers=4,
+            dsa_indexer_loss_coeff=0.0,
+            csa_dense_mode=True,
+            csa_indexer_backend="unfused",
+            csa_sparse_attn_backend="unfused",
+            apply_rope_fusion=False,
+        )
+
+        seq_len = 64
+
+        for layer_number in [0, 3]:  # CSA-4 layers
+            model_parallel_cuda_manual_seed(_SEED)
+            attn_independent = _build_attention(
+                config_full, layer_number=layer_number
+            )
+            attn_independent.train()
+
+            sample_a = paddle.randn(
+                [1, seq_len, config_full.hidden_size], dtype="bfloat16"
+            )
+            sample_b = paddle.randn(
+                [1, seq_len, config_full.hidden_size], dtype="bfloat16"
+            )
+
+            startend_b1 = paddle.full(
+                [1, 1, seq_len, 1], seq_len, dtype="int32"
+            )
+
+            # Independent B=1 run for sample A
+            hs_a = sample_a.clone()
+            hs_a.stop_gradient = False
+            out_a, _ = attn_independent(
+                hidden_states=hs_a,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_b1,
+            )
+            grad_a = paddle.randn(out_a.shape, dtype=out_a.dtype)
+            out_a.backward(grad_a)
+            grad_hs_a = hs_a.grad.clone()
+            params_a = dict(attn_independent.named_parameters())
+            grads_a = {
+                name: param.grad.clone()
+                for name, param in params_a.items()
+                if param.grad is not None
+            }
+
+            # Independent B=1 run for sample B (fresh model)
+            model_parallel_cuda_manual_seed(_SEED)
+            attn_independent_b = _build_attention(
+                config_full, layer_number=layer_number
+            )
+            attn_independent_b.train()
+            hs_b = sample_b.clone()
+            hs_b.stop_gradient = False
+            out_b, _ = attn_independent_b(
+                hidden_states=hs_b,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_b1,
+            )
+            grad_b = paddle.randn(out_b.shape, dtype=out_b.dtype)
+            out_b.backward(grad_b)
+            grad_hs_b = hs_b.grad.clone()
+            params_b = dict(attn_independent_b.named_parameters())
+            grads_b = {
+                name: param.grad.clone()
+                for name, param in params_b.items()
+                if param.grad is not None
+            }
+
+            # Packed B=2 run (fresh model)
+            model_parallel_cuda_manual_seed(_SEED)
+            attn_packed = _build_attention(
+                config_full, layer_number=layer_number
+            )
+            attn_packed.train()
+
+            packed_hs = paddle.concat([sample_a, sample_b], axis=0)
+            packed_hs.stop_gradient = False
+            startend_b2 = paddle.full(
+                [2, 1, seq_len, 1], seq_len, dtype="int32"
+            )
+
+            out_packed, _ = attn_packed(
+                hidden_states=packed_hs,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_b2,
+            )
+            self.assertEqual(
+                list(out_packed.shape),
+                [2, seq_len, config_full.hidden_size],
+            )
+
+            grad_packed = paddle.concat([grad_a, grad_b], axis=0)
+            out_packed.backward(grad_packed)
+
+            # Hidden gradients: packed[0] should match sample A's grad,
+            # packed[1] should match sample B's grad
+            grad_hs_packed = packed_hs.grad
+            self.assertTrue(
+                paddle.allclose(
+                    grad_hs_packed[0:1, :, :].cast("float32"),
+                    grad_hs_a.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item(),
+                f"Layer {layer_number}: packed sample A hidden grad mismatch",
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    grad_hs_packed[1:2, :, :].cast("float32"),
+                    grad_hs_b.cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item(),
+                f"Layer {layer_number}: packed sample B hidden grad mismatch",
+            )
+
+            # Parameter gradients: packed should match sum of independent
+            # (packed forward accumulates across both samples)
+            params_packed = dict(attn_packed.named_parameters())
+            for name in grads_a:
+                grad_packed = params_packed[name].grad
+                self.assertIsNotNone(
+                    grad_packed,
+                    f"Layer {layer_number}: no gradient for {name} in packed",
+                )
+                grad_sum = grads_a[name] + grads_b[name]
+                self.assertTrue(
+                    paddle.allclose(
+                        grad_packed.cast("float32"),
+                        grad_sum.cast("float32"),
+                        rtol=1e-2,
+                        atol=1e-2,
+                    ).item(),
+                    f"Layer {layer_number}: parameter grad mismatch for {name}\n"
+                    f"  packed={float(grad_packed.cast('float32').abs().max().item()):.6f}\n"
+                    f"  sum_independent={float(grad_sum.cast('float32').abs().max().item()):.6f}",
+                )
+
+    def test_output_shape_restored_b2(self):
+        """Packed B=2 output must be [B, S, H] after unpack."""
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(self.config, layer_number=0)
+        attn.eval()
+
+        hs = paddle.randn(
+            [2, self.seq_len, self.config.hidden_size], dtype="bfloat16"
+        )
+        startend = paddle.full(
+            [2, 1, self.seq_len, 1], self.seq_len, dtype="int32"
+        )
+
+        with paddle.no_grad():
+            output, _ = attn(
+                hidden_states=hs,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend,
+            )
+
+        self.assertEqual(
+            list(output.shape),
+            [2, self.seq_len, self.config.hidden_size],
+        )
+
+    def test_rejects_non_dense_b2(self):
+        """B=2 with dense_mode=False must raise NotImplementedError."""
+        config_no_dense = _make_config(
+            num_layers=1, csa_compress_ratios=[4], csa_dense_mode=False
+        )
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(config_no_dense, layer_number=0)
+        attn.eval()
+
+        hs = paddle.randn(
+            [2, self.seq_len, config_no_dense.hidden_size], dtype="bfloat16"
+        )
+        startend = paddle.full(
+            [2, 1, self.seq_len, 1], self.seq_len, dtype="int32"
+        )
+
+        with self.assertRaises(NotImplementedError):
+            attn(
+                hidden_states=hs,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend,
+            )
+
+    def test_rejects_invalid_startend_shape_b2(self):
+        """B=2 with wrong startend shape must raise ValueError."""
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(self.config, layer_number=0)
+        attn.eval()
+
+        hs = paddle.randn(
+            [2, self.seq_len, self.config.hidden_size], dtype="bfloat16"
+        )
+        startend = paddle.ones([2, 2, self.seq_len, 1], dtype="int32")
+
+        with self.assertRaises(ValueError):
+            attn(
+                hidden_states=hs,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend,
+            )
 
 
 if __name__ == "__main__":
