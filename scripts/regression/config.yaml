@@ -580,8 +580,8 @@ paddleocr_vl:
     model_type: vl
     cli_args:
         template: ernie_vl_nothink
-        train_dataset_path: ./tests/fixtures/dummy/sft-vl/ocr_vl_sft-train_Bengali.jsonl
-        eval_dataset_path: ./tests/fixtures/dummy/sft-vl/ocr_vl_sft-test_Bengali.jsonl
+        train_dataset_path: ./test/formers/fixtures/dummy/sft-vl/ocr_vl_sft-train_Bengali.jsonl
+        eval_dataset_path: ./test/formers/fixtures/dummy/sft-vl/ocr_vl_sft-test_Bengali.jsonl
         train_dataset_type: messages
         eval_dataset_type: messages
         random_shuffle: false
