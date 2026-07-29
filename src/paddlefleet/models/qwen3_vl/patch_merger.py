@@ -54,7 +54,7 @@ class Qwen3VLVisionPathMerger(nn.Module):
                 sublayers_spec=MLPSublayersSpec(
                     up_gate_proj=ColumnParallelLinear,
                     down_proj=RowParallelLinear,
-                    hidden_act=F.gelu,
+                    hidden_act=lambda x: F.gelu(x, approximate="none"),
                 ),
                 extra_kwargs={
                     "config": config,

@@ -113,6 +113,31 @@ class TestMLPConstructor(unittest.TestCase):
         mlp = MLP(config, spec)
         self.assertIsInstance(mlp, MLP)
 
+    def test_sublayer_activation_overrides_config(self):
+        def exact_gelu(x):
+            return F.gelu(x, approximate="none")
+
+        config = _make_config(
+            hidden_act=lambda x: F.gelu(x, approximate="tanh")
+        )
+        spec = get_gpt_layer_local_spec(
+            config
+        ).sublayers_spec.mlp.sublayers_spec
+        spec.hidden_act = exact_gelu
+        mlp = MLP(config, spec)
+
+        self.assertIs(mlp.hidden_act, exact_gelu)
+        for shape in ([2, 5, 64], [3, 7, 64]):
+            numel = 1
+            for dim in shape:
+                numel *= dim
+            x = paddle.linspace(-3.0, 3.0, num=numel).reshape(shape)
+            actual = mlp.hidden_act(x)
+            expected = F.gelu(x, approximate="none")
+            tanh_result = F.gelu(x, approximate="tanh")
+            self.assertTrue(bool(paddle.equal_all(actual, expected)))
+            self.assertFalse(bool(paddle.equal_all(actual, tanh_result)))
+
 
 class TestMLPForward(unittest.TestCase):
     """Tests for MLP forward pass."""

@@ -153,7 +153,11 @@ class MLP(FleetLayer):
         )
 
         # Ensure hidden_act is a callable function, not a bound method
-        hidden_act_value = self.config.hidden_act
+        hidden_act_value = (
+            sublayers_spec.hidden_act
+            if sublayers_spec.hidden_act is not None
+            else self.config.hidden_act
+        )
         if hasattr(hidden_act_value, "__self__") and hasattr(
             hidden_act_value, "__func__"
         ):
