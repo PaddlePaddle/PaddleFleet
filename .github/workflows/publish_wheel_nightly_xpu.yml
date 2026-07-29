@@ -248,7 +248,7 @@ jobs:
       - name: Upload wheel to paddletest
         run: |
           python -m pip install requests
-          wget https://paddle-qa.bj.bcebos.com/paddleformers/notify_paddle_link.py
+          wget https://paddle-qa.bj.bcebos.com/paddlefleet/notify_paddle_link.py
           WHEEL_FILE=$(cat dist/paddlefleet-${{ matrix.xpu.bos_XPU }}-${{ matrix.xpu.platform }}.whl.name)
           OPS_WHEEL_FILE=$(cat dist_ops/paddlefleet_ops-${{ matrix.xpu.bos_XPU }}-${{ matrix.xpu.platform }}.whl.name)
           python notify_paddle_link.py ${{ matrix.xpu.bos_XPU }} ${WHEEL_FILE} paddlefleet
