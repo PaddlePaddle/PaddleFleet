@@ -305,7 +305,13 @@ class TestCudnnBackendDispatch(unittest.TestCase):
         b, sq, h, hn, s_kv, topk = 1, 2, 3, 4, 6, 4
 
         def fake_fwd(
-            q, kv, attn_sink, topk_idxs, sm_scale=None, indexer_topk=0
+            q,
+            kv,
+            attn_sink,
+            topk_idxs,
+            sm_scale=None,
+            indexer_topk=0,
+            topk_length=None,
         ):
             bb, ss, hh, dd = q.shape
             out = paddle.ones([bb, ss, hh, dd], dtype=q.dtype)
