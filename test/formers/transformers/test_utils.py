@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import os
 import unittest
 
@@ -56,12 +55,13 @@ def get_tests_dir(append_path=None):
         joined after the `tests` dir the former is provided.
 
     """
-    # this function caller's __file__
-    caller__file__ = inspect.stack()[1][1]
-    tests_dir = os.path.abspath(os.path.dirname(caller__file__))
+    tests_dir = os.path.abspath(os.path.dirname(__file__))
 
-    while not tests_dir.endswith("tests"):
-        tests_dir = os.path.dirname(tests_dir)
+    while not os.path.isfile(os.path.join(tests_dir, "testing_utils.py")):
+        parent_dir = os.path.dirname(tests_dir)
+        if parent_dir == tests_dir:
+            raise RuntimeError("Could not locate the Formers test directory")
+        tests_dir = parent_dir
 
     if append_path:
         return os.path.join(tests_dir, append_path)
