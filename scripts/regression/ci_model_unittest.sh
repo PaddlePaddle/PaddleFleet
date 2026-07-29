@@ -175,7 +175,7 @@ if [[ ${FLAGS_enable_CI} == "True" ]] || [[ ${FLAGS_enable_CE} != "False" ]];the
     python -c "import paddle; print(paddle.device.device_count())"
     echo "Regression model: ${models}, Update baseline models: ${update_baseline_models}"
     export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-    export FLAGS_tcp_store_using_libuv=0
+    export FLAGS_tcp_store_using_libuv=0 
     PYTHONPATH=$(pwd) \
     COVERAGE_SOURCE=paddlefleet \
     python -m pytest -s -v --alluredir=result --models=${models} --update-baseline=${update_baseline_models} scripts/regression/test_models.py > ${log_path}/model_unittest.log 2>&1
