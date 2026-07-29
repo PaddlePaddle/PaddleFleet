@@ -221,7 +221,11 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
-          OPS_DST=paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          if [[ ${{ github.ref_name }} == "develop" ]]; then
+            OPS_DST=paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          else
+            OPS_DST=paddlefleet_ops-0.0.0.post-cp312-cp312-linux_x86_64.whl
+          fi
           wget -q --no-proxy "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlefleet-ops/${OPS_DST}" -O dist/${OPS_DST}
           echo "OPS_WHL=${OPS_DST}" >> dist/whl_names.txt
           ls -lh dist
