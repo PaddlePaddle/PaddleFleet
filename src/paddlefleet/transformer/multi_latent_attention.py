@@ -26,7 +26,12 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
 )
 from paddle.distributed.fleet.utils import recompute
 
-from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+from paddlefleet.context_parallel_utils import (
+    ContextParallelAllGatherOp,
+    ContextParallelScatterOp,
+    preprocess_index,
+    preprocess_index_dual_chunks,
+)
 from paddlefleet.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
@@ -684,6 +689,13 @@ class MultiLatentAttention(Attention):
             q_absorbed, wv_b = None, None
 
         if self.config.enable_hy_sparse_attention and shared_kv is not None:
+            if get_context_parallel_world_size() > 1:
+                cp_mode = getattr(
+                    self.config, "cp_balance_mode", "dualchunk_allgather"
+                )
+                key = ContextParallelAllGatherOp.apply(key, 1, cp_mode)
+                value = ContextParallelAllGatherOp.apply(value, 1, cp_mode)
+
             # HySparse full-attention layer. The full (dense) attention here is
             # computed by the MHA block-score TileLang op, which additionally
             # emits per-(query, key-block) max logits. We select the top-k key
@@ -874,21 +886,74 @@ class MultiLatentAttention(Attention):
                 block_score_mha_attn_fwd,
             )
 
-        b, s, h, _dv = value.shape
+        b, kv_s, h, _dv = value.shape
+        q_s = query.shape[1]
         block_B = self.config.hy_sparse_block_size
         topk = self.config.hy_sparse_topk
         sm_scale = self.softmax_scale
 
-        # Document valid_range (no window clamp): full-layer block scoring and
-        # the SWA block-sparse branch must share the same document-anchored
-        # blocks so the selected indices are transferable across layers. It also
-        # anchors select_topk_blocks' per-token block bounds. FA4 itself masks
-        # via causal + the raw flashmask ``startend_row_indices`` (same doc
-        # structure valid_range is derived from), so the fused block-max --
-        # taken after FA4's mask_fn -- honours the identical document mask.
+        # Build document ranges and flashmask rows in global sequence order,
+        # then scatter the query axis back to the local dual-chunk layout.
+        # The gathered K/V stays global while the fused kernels operate on
+        # local queries.
         valid_range = build_hysparse_valid_range(
-            attn_mask_startend_row_indices, s, b
+            attn_mask_startend_row_indices, kv_s, b
         )
+        startend_row_indices = attn_mask_startend_row_indices
+        cp_size = get_pg_size(self.pg_collection.cp)
+        if cp_size > 1:
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
+            valid_range = ContextParallelScatterOp.apply(
+                valid_range, 1, cp_mode
+            )
+            if startend_row_indices is None:
+                startend_row_indices = paddle.full(
+                    [b, 1, kv_s, 1],
+                    fill_value=kv_s,
+                    dtype="int32",
+                )
+            if startend_row_indices is not None:
+                cp_rank = get_pg_rank(self.pg_collection.cp)
+                # Match DotProductAttention's CP FlashMask contract: first
+                # expand global [LTS] to [LTS, UTE], then localize all query
+                # row boundaries together for this rank's dual chunks.
+                if startend_row_indices.shape[-1] == 1:
+                    causal_end = paddle.arange(
+                        kv_s, dtype=startend_row_indices.dtype
+                    ).reshape([1, 1, kv_s, 1])
+                    causal_end = paddle.expand_as(
+                        causal_end, startend_row_indices
+                    )
+                    startend_row_indices = paddle.concat(
+                        [startend_row_indices, causal_end], axis=-1
+                    )
+                else:
+                    raise ValueError(
+                        "HySparse CP expects one FlashMask boundaries, "
+                        f"but got {startend_row_indices.shape[-1]}"
+                    )
+                if cp_mode == "dualchunk_allgather":
+                    seq_blocksize = q_s // 2
+                    startend_row_indices = preprocess_index_dual_chunks(
+                        startend_row_indices,
+                        chunk_id_first=cp_rank,
+                        chunk_id_second=2 * cp_size - cp_rank - 1,
+                        seq_blocksize=seq_blocksize,
+                        max_seqlen_q=seq_blocksize,
+                    )
+                elif cp_mode == "contiguous_allgather":
+                    startend_row_indices = preprocess_index(
+                        startend_row_indices,
+                        chunk_id=cp_rank,
+                        seq_blocksize=q_s,
+                        max_seqlen_q=q_s,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unsupported HySparse CP balance mode: {cp_mode}"
+                    )
 
         if use_tl:
             # Independent TileLang MHA scorer: masks purely via valid_range
@@ -900,7 +965,7 @@ class MultiLatentAttention(Attention):
                 valid_range=valid_range,
                 sm_scale=sm_scale,
                 block_B=block_B,
-                causal=True,
+                causal=cp_size == 1,
             )
         else:
             out, lse, block_logit = block_score_fa4_attn_fwd(
@@ -910,9 +975,10 @@ class MultiLatentAttention(Attention):
                 valid_range=valid_range,
                 sm_scale=sm_scale,
                 block_B=block_B,
-                causal=True,
-                startend_row_indices=attn_mask_startend_row_indices,
+                causal=cp_size == 1,
+                startend_row_indices=startend_row_indices,
             )
+
         block_indices = select_topk_blocks(
             block_logit,
             lse,
@@ -920,7 +986,7 @@ class MultiLatentAttention(Attention):
             topk,
             block_B,
         )
-        core_attn_out = out.reshape([b, s, h * _dv])
+        core_attn_out = out.reshape([b, q_s, h * _dv])
         return core_attn_out, block_indices
 
 
@@ -1746,8 +1812,6 @@ class MQASelfAttention(MLASelfAttention):
         assert rotary_pos_cos is None and rotary_pos_sin is None, (
             "MQA does not support Flash Decoding"
         )
-        if get_context_parallel_world_size() > 1:
-            raise ValueError("MQA does not support context parallel.")
         if get_pg_size(self.pg_collection.tp) != 1:
             raise ValueError("MQA does not support tensor parallel.")
 
@@ -1791,6 +1855,13 @@ class MQASelfAttention(MLASelfAttention):
         if value is not None:
             value = value.contiguous()
 
+        if get_context_parallel_world_size() > 1:
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
+            key = ContextParallelAllGatherOp.apply(key, 1, cp_mode)
+            value = ContextParallelAllGatherOp.apply(value, 1, cp_mode)
+
         # ==================================
         # core attention computation
         # ==================================
@@ -1799,6 +1870,7 @@ class MQASelfAttention(MLASelfAttention):
         )
 
         b, s = query.shape[0], query.shape[1]
+        kv_s = key.shape[1]
         block_B = self.config.hy_sparse_block_size
         sm_scale = self.softmax_scale
         window_size = self.config.sliding_window[0]
@@ -1813,11 +1885,21 @@ class MQASelfAttention(MLASelfAttention):
         # valid_range (no window clamp) for the block-sparse branch so its blocks
         # match the full layer's block scoring / selected indices.
         window_valid_range = build_hysparse_valid_range(
-            attn_mask_startend_row_indices, s, b, window_size=window_size
+            attn_mask_startend_row_indices, kv_s, b, window_size=window_size
         )
         doc_valid_range = build_hysparse_valid_range(
-            attn_mask_startend_row_indices, s, b
+            attn_mask_startend_row_indices, kv_s, b
         )
+        if get_context_parallel_world_size() > 1:
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
+            window_valid_range = ContextParallelScatterOp.apply(
+                window_valid_range, 1, cp_mode
+            )
+            doc_valid_range = ContextParallelScatterOp.apply(
+                doc_valid_range, 1, cp_mode
+            )
 
         # Sliding-window main path over the absorbed MQA dimensions.
         core_attn_out, _ = sliding_window_mqa_attention(
@@ -1870,6 +1952,14 @@ class MQASelfAttention(MLASelfAttention):
         # =================
 
         shared_key, shared_block_indices = shared_kv
+        if get_context_parallel_world_size() > 1:
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
+            shared_key = ContextParallelAllGatherOp.apply(
+                shared_key, 1, cp_mode
+            )
+
         # Shared compressed KV latent from the full layer, with
         # Dk=kv_lora_rank+qk_rope_head_dim. Squeeze to [B, S_kv, D]; its leading
         # kv_lora_rank channels are the values.
@@ -2006,6 +2096,19 @@ class MQASelfAttention(MLASelfAttention):
             rotary_seq_len,
             position_ids=None if self.training else position_ids,
         )
+        if get_context_parallel_world_size() > 1:
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
+            rotary_pos_emb = ContextParallelScatterOp.apply(
+                rotary_pos_emb, 1, cp_mode
+            )
+            if rotary_pos_emb.shape[1] != hidden_states.shape[1]:
+                raise ValueError(
+                    "MQA context-parallel RoPE scatter produced an invalid "
+                    f"sequence length: rotary={rotary_pos_emb.shape}, "
+                    f"hidden_states={hidden_states.shape}."
+                )
 
         # =========================================
         # QKV down projection and layernorm
