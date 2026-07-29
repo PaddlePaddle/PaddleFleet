@@ -709,10 +709,16 @@ def general_gemm(
     else:
         # Standard bf16/fp16 path
         if bias is not None:
-            output = paddle.nn.functional.linear(a, b, bias)
+            if use_accuracy_compatible:
+                weight_t = b.T.contiguous()
+                output = paddle.matmul(a, weight_t, transpose_y=True)
+                output = output + bias
+            else:
+                output = paddle.nn.functional.linear(a, b, bias)
         else:
             if use_accuracy_compatible:
-                output = paddle.nn.functional.linear(a, b)
+                weight_t = b.T.contiguous()
+                output = paddle.matmul(a, weight_t, transpose_y=True)
             else:
                 output = paddle.matmul(a, b)
         return output, None
@@ -772,6 +778,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.use_pow2_scale = use_pow2_scale
         ctx.use_ue8m0 = use_ue8m0
         ctx.save_original_input = save_original_input
+        ctx.use_accuracy_compatible = use_accuracy_compatible
 
         if sequence_parallel:
             dim_size = list(input.shape)
@@ -1049,7 +1056,24 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            if wgrad_compute:
+            if (
+                ctx.use_accuracy_compatible
+                and getattr(weight, "is_expert_param", False)
+                and hasattr(weight, "main_grad")
+                and weight.main_grad is not None
+                and weight.main_grad.dtype == paddle.float32
+            ):
+                weight.main_grad.add_(
+                    paddle.matmul(
+                        grad_output.astype("float32"),
+                        total_input.astype("float32"),
+                        transpose_x=True,
+                    ).t()
+                )
+                if hasattr(weight, "grad_added_to_main_grad"):
+                    weight.grad_added_to_main_grad = True
+                grad_weight = paddle.zeros(weight.shape, dtype=input.dtype)
+            elif wgrad_compute:
                 if total_input is not None:
                     grad_weight, _ = general_gemm(total_input.t(), grad_output)
                 elif inp_t_fp8 is not None:
@@ -1363,6 +1387,7 @@ class Linear(paddle.nn.Layer):
             # Weight is duplicated across TP ranks; reduce gradient on DP group.
             self.weight.allreduce = True
             self.weight.is_distributed = False
+            self.weight.is_expert_param = self.is_expert
         else:
             self.weight = None
 
@@ -1826,6 +1851,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
                 self.is_expert and self.expert_parallel
             )
             self.weight.is_distributed = True if self.world_size > 1 else False
+            self.weight.is_expert_param = self.is_expert
         else:
             self.weight = None
 
@@ -2217,6 +2243,7 @@ class RowParallelLinear(paddle.nn.Layer):
                 )
         self.weight.allreduce = not (self.is_expert and self.expert_parallel)
         self.weight.is_distributed = True if self.world_size > 1 else False
+        self.weight.is_expert_param = self.is_expert
 
         if bias:
             self.bias = self.create_parameter(
