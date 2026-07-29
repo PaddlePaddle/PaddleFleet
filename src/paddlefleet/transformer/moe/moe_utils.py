@@ -247,6 +247,8 @@ def _unpermute_gather_sum_aligned(
     global_position_per_token = global_position.T  # [num_tokens, num_experts]
 
     per_token_k = routing_map_bool.cast("int64").sum(axis=-1)
+    # Use max() to get topk; when all tokens are padding, topk==0 and the
+    # subsequent `if num_valid_tokens > 0 and topk > 0` guards handle that case.
     topk = int(per_token_k.max().item())
     valid_mask = per_token_k > 0
     num_valid_tokens = int(valid_mask.cast("int64").sum().item())
