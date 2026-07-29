@@ -358,6 +358,11 @@ class MoELayer(nn.Layer):
                 "for sonic moe, expert weight must be fused."
             )
 
+        if self.fp8 and self.using_sonic_moe is False:
+            logger.warning(
+                f"fp8_weight_quant_format ({self.config.fp8_weight_quant_format}) configuration currently only works in SonicMoE."
+            )
+
         if use_fused_weight:
             if (
                 self.moe_token_dispatcher_type == "allgather"
