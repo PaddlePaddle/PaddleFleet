@@ -32,12 +32,6 @@ except ImportError:
 import paddle.distributed as dist
 from paddle.autograd.py_layer import PyLayer
 
-
-def _use_accuracy_compatible() -> bool:
-    """Runtime switch for cross-framework bit-exact alignment."""
-    return os.environ.get("USE_ACCURACY_COMPATIBLE", "0") == "1"
-
-
 from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
@@ -313,6 +307,7 @@ def permute(
     routing_map,
     num_out_tokens: int | None = None,
     drop_and_pad: bool = False,
+    use_accuracy_compatible: bool = False,
 ):
     """Permute the tokens and probs based on the mask.
     Tokens with the same designated expert will be grouped together.
@@ -340,7 +335,7 @@ def permute(
     )
     sorted_indices = token_indices.masked_select(routing_map_bool_T)
 
-    if _use_accuracy_compatible():
+    if use_accuracy_compatible:
         sorted_indices.stop_gradient = True
         rm_int = routing_map_bool_T.cast("int64")
         tokens_per_expert = rm_int.sum(axis=-1)
@@ -352,11 +347,23 @@ def permute(
         ).T
 
         rm_bool_token = routing_map.cast(paddle.bool)
-        topk_val = int(rm_bool_token.cast("int64").sum(axis=-1)[0].item())
+        per_token_k = rm_bool_token.cast("int64").sum(axis=-1)
+        # Filter out padding tokens (k=0) before checking fixed top-k
+        valid_mask = per_token_k > 0
+        valid_ks = per_token_k.masked_select(valid_mask)
+        if valid_ks.numel() == 0:
+            topk_val = 0
+        else:
+            topk_val = int(valid_ks.max().item())
+            if int(valid_ks.min().item()) != topk_val:
+                raise ValueError(
+                    "use_accuracy_compatible requires a fixed top-k for all "
+                    "valid (non-padding) tokens."
+                )
         valid_positions = global_position * rm_bool_token.cast("int64")
         reverse_indices_flat = paddle.masked_select(
             valid_positions, rm_bool_token
-        ).reshape([num_tokens * topk_val])
+        ).reshape([-1])
         reverse_indices_flat.stop_gradient = True
 
         permuted_input = _PermuteAlignedPyLayer.apply(
@@ -381,6 +388,7 @@ def unpermute(
     probs: paddle.Tensor = None,
     routing_map: paddle.Tensor = None,
     drop_and_pad: bool = False,
+    use_accuracy_compatible: bool = False,
 ):
     """
     Restore the original order of tokens after permutation. If probs are provided, it
@@ -415,7 +423,7 @@ def unpermute(
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
 
-    if _use_accuracy_compatible() and routing_map is not None:
+    if use_accuracy_compatible and routing_map is not None:
         return _unpermute_gather_sum_aligned(
             permuted_tokens, sorted_indices, restore_shape, routing_map
         )
