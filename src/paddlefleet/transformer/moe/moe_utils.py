@@ -154,6 +154,127 @@ def _unpermute_fp32_accum(
     return output_tokens.cast(permuted_tokens.dtype)
 
 
+class _UnpermuteGatherSumAlignedPyLayer(PyLayer):
+    @staticmethod
+    def forward(
+        ctx,
+        permuted_tokens,
+        reverse_indices_flat,
+        valid_token_indices,
+        num_total_tokens,
+        num_tokens,
+        num_valid_tokens,
+        topk,
+        hidden,
+    ):
+        ctx.input_dtype = permuted_tokens.dtype
+        ctx.num_total_tokens = num_total_tokens
+        ctx.num_tokens = num_tokens
+        ctx.num_valid_tokens = num_valid_tokens
+        ctx.topk = topk
+        ctx.hidden = hidden
+        ctx.save_for_backward(reverse_indices_flat, valid_token_indices)
+        output_tokens = paddle.zeros([num_tokens, hidden], dtype="float32")
+        if num_valid_tokens > 0 and topk > 0:
+            gathered = permuted_tokens.cast("float32").index_select(
+                axis=0, index=reverse_indices_flat
+            )
+            gathered = gathered.reshape([num_valid_tokens, topk, hidden])
+            valid_out = gathered.sum(axis=1)  # [num_valid_tokens, H]
+            output_tokens = paddle.scatter(
+                output_tokens,
+                valid_token_indices,
+                valid_out,
+                overwrite=True,
+            )
+        return output_tokens.cast(ctx.input_dtype)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        reverse_indices_flat, valid_token_indices = ctx.saved_tensor()
+        N_total = ctx.num_total_tokens
+        grad_permuted = paddle.zeros([N_total, ctx.hidden], dtype="float32")
+        if ctx.num_valid_tokens > 0 and ctx.topk > 0:
+            # Gather gradients for valid tokens only: [N_valid, H] → [N_valid, topk, H] → [valid_count, H]
+            grad_valid = grad_out.cast("float32").index_select(
+                axis=0, index=valid_token_indices
+            )
+            grad_expand = (
+                grad_valid.unsqueeze(1)
+                .expand([ctx.num_valid_tokens, ctx.topk, ctx.hidden])
+                .reshape([ctx.num_valid_tokens * ctx.topk, ctx.hidden])
+            )
+            valid_count = ctx.num_valid_tokens * ctx.topk
+            src_idx = paddle.arange(valid_count, dtype="int64")
+            inverse_perm = paddle.zeros([N_total], dtype="int64")
+            inverse_perm = paddle.scatter(
+                inverse_perm,
+                reverse_indices_flat,
+                src_idx,
+                overwrite=True,  # UNIQUE indices → deterministic
+            )
+            grad_permuted = grad_expand.index_select(
+                axis=0, index=inverse_perm
+            )
+        return grad_permuted.cast(ctx.input_dtype)
+
+
+def _unpermute_gather_sum_aligned(
+    permuted_tokens: paddle.Tensor,
+    sorted_indices: paddle.Tensor,
+    restore_shape,
+    routing_map: paddle.Tensor,
+) -> paddle.Tensor:
+    num_tokens, hidden = restore_shape[0], restore_shape[-1]
+    num_experts = routing_map.shape[1]
+    num_total_tokens = permuted_tokens.shape[0]
+
+    routing_map_bool = routing_map.cast(paddle.bool)
+    routing_map_T = routing_map_bool.T.contiguous()  # [num_experts, num_tokens]
+
+    tokens_per_expert = routing_map_T.cast("int64").sum(
+        axis=-1
+    )  # [num_experts]
+    expert_offsets = paddle.zeros([num_experts + 1], dtype="int64")
+    expert_offsets[1:] = paddle.cumsum(tokens_per_expert, axis=0)
+
+    position_in_expert_T = (
+        routing_map_T.cast("int64").cumsum(axis=-1) - 1
+    )  # [num_experts, num_tokens]
+    global_position = position_in_expert_T + expert_offsets[:-1].unsqueeze(
+        1
+    )  # [num_experts, num_tokens]
+    global_position_per_token = global_position.T  # [num_tokens, num_experts]
+
+    per_token_k = routing_map_bool.cast("int64").sum(axis=-1)
+    # Use max() to get topk; when all tokens are padding, topk==0 and the
+    # subsequent `if num_valid_tokens > 0 and topk > 0` guards handle that case.
+    topk = int(per_token_k.max().item())
+    valid_mask = per_token_k > 0
+    num_valid_tokens = int(valid_mask.cast("int64").sum().item())
+    valid_count = num_valid_tokens * topk
+    valid_token_indices = paddle.masked_select(
+        paddle.arange(num_tokens, dtype="int64"), valid_mask
+    )
+    valid_token_indices.stop_gradient = True
+    valid_positions = global_position_per_token * routing_map_bool.cast("int64")
+    reverse_indices_flat = paddle.masked_select(valid_positions, routing_map_bool)
+    if valid_count > 0:
+        reverse_indices_flat = reverse_indices_flat.reshape([valid_count])
+    reverse_indices_flat.stop_gradient = True
+
+    return _UnpermuteGatherSumAlignedPyLayer.apply(
+        permuted_tokens,
+        reverse_indices_flat,
+        valid_token_indices,
+        num_total_tokens,
+        num_tokens,
+        num_valid_tokens,
+        topk,
+        hidden,
+    )
+
+
 class ApplyPermutedProbs(PyLayer):
     """tokens * probs with fp32-accumulated probs gradient."""
 
@@ -180,11 +301,59 @@ def barrier_ep(ep_group):
     paddle.distributed.barrier(ep_group)
 
 
+class _PermuteAlignedPyLayer(PyLayer):
+    @staticmethod
+    def forward(
+        ctx,
+        tokens,
+        sorted_indices,
+        reverse_indices_flat,
+        valid_token_indices,
+        num_tokens,
+        topk,
+        num_valid_tokens,
+        hidden,
+    ):
+        ctx.input_dtype = tokens.dtype
+        ctx.num_tokens = num_tokens
+        ctx.topk = topk
+        ctx.num_valid_tokens = num_valid_tokens
+        ctx.hidden = hidden
+        ctx.save_for_backward(reverse_indices_flat, valid_token_indices)
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+        return permuted_input
+
+    @staticmethod
+    def backward(ctx, grad_permuted):
+        reverse_indices_flat, valid_token_indices = ctx.saved_tensor()
+        grad_tokens = paddle.zeros(
+            [ctx.num_tokens, ctx.hidden], dtype="float32"
+        )
+        if ctx.num_valid_tokens > 0 and ctx.topk > 0:
+            # gather → [N_valid*topk, H] in fp32 → reshape [N_valid, topk, H] → sum(axis=1)
+            gathered = grad_permuted.cast("float32").index_select(
+                axis=0, index=reverse_indices_flat
+            )
+            gathered = gathered.reshape(
+                [ctx.num_valid_tokens, ctx.topk, ctx.hidden]
+            )
+            grad_valid = gathered.sum(axis=1)  # [N_valid, H]
+            # Scatter valid-token gradients back into the full [N, H] tensor
+            grad_tokens = paddle.scatter(
+                grad_tokens,
+                valid_token_indices,
+                grad_valid,
+                overwrite=True,
+            )
+        return grad_tokens.cast(ctx.input_dtype)
+
+
 def permute(
     tokens,
     routing_map,
     num_out_tokens: int | None = None,
     drop_and_pad: bool = False,
+    use_accuracy_compatible: bool = False,
 ):
     """Permute the tokens and probs based on the mask.
     Tokens with the same designated expert will be grouped together.
@@ -204,16 +373,66 @@ def permute(
     num_experts = routing_map.shape[1]
 
     # mask [num_tokens, num_experts] -> [num_experts, num_tokens]
-    routing_map = routing_map.cast(paddle.bool).T.contiguous()
+    routing_map_bool_T = routing_map.cast(paddle.bool).T.contiguous()
 
     # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
     token_indices = (
         paddle.arange(num_tokens).unsqueeze(0).expand([num_experts, -1])
     )
-    sorted_indices = token_indices.masked_select(routing_map)
+    sorted_indices = token_indices.masked_select(routing_map_bool_T)
 
-    # use the mapping to permute the tokens
-    permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+    if use_accuracy_compatible:
+        sorted_indices.stop_gradient = True
+        rm_int = routing_map_bool_T.cast("int64")
+        tokens_per_expert = rm_int.sum(axis=-1)
+        expert_offsets = paddle.zeros([num_experts + 1], dtype="int64")
+        expert_offsets[1:] = paddle.cumsum(tokens_per_expert, axis=0)
+        position_in_expert_T = rm_int.cumsum(axis=-1) - 1
+        global_position = (
+            position_in_expert_T + expert_offsets[:-1].unsqueeze(1)
+        ).T
+
+        rm_bool_token = routing_map.cast(paddle.bool)
+        per_token_k = rm_bool_token.cast("int64").sum(axis=-1)
+        topk_val = int(per_token_k.max().item())
+        valid_mask = per_token_k > 0
+        # Validate that all non-padding tokens have the same top-k
+        if topk_val > 0:
+            nonzero_ks = per_token_k[valid_mask]
+            if nonzero_ks.shape[0] > 0 and int(
+                (nonzero_ks != topk_val).any().item()
+            ):
+                raise ValueError(
+                    "USE_ACCURACY_COMPATIBLE requires a fixed top-k per token "
+                    "among non-padding tokens."
+                )
+        num_valid_tokens = int(valid_mask.cast("int64").sum().item())
+        valid_count = num_valid_tokens * topk_val
+        valid_token_indices = paddle.masked_select(
+            paddle.arange(num_tokens, dtype="int64"), valid_mask
+        )
+        valid_token_indices.stop_gradient = True
+        valid_positions = global_position * rm_bool_token.cast("int64")
+        reverse_indices_flat = paddle.masked_select(
+            valid_positions, rm_bool_token
+        )
+        if valid_count > 0:
+            reverse_indices_flat = reverse_indices_flat.reshape([valid_count])
+        reverse_indices_flat.stop_gradient = True
+
+        permuted_input = _PermuteAlignedPyLayer.apply(
+            tokens,
+            sorted_indices,
+            reverse_indices_flat,
+            valid_token_indices,
+            num_tokens,
+            topk_val,
+            num_valid_tokens,
+            hidden,
+        )
+    else:
+        # use the mapping to permute the tokens
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
 
     return permuted_input, sorted_indices
 
@@ -225,6 +444,7 @@ def unpermute(
     probs: paddle.Tensor = None,
     routing_map: paddle.Tensor = None,
     drop_and_pad: bool = False,
+    use_accuracy_compatible: bool = False,
 ):
     """
     Restore the original order of tokens after permutation. If probs are provided, it
@@ -258,6 +478,11 @@ def unpermute(
             )
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
+
+    if use_accuracy_compatible and routing_map is not None:
+        return _unpermute_gather_sum_aligned(
+            permuted_tokens, sorted_indices, restore_shape, routing_map
+        )
 
     if use_accuracy_compatible_kernel():
         output_tokens = _unpermute_fp32_accum(

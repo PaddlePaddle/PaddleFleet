@@ -99,6 +99,9 @@ class MLP(FleetLayer):
         super().__init__(config=config)
 
         self.config: TransformerConfig = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
 
         self.input_size = (
             input_size if input_size is not None else self.config.hidden_size
@@ -228,6 +231,7 @@ class MLP(FleetLayer):
                             False,
                         ),
                         self.config.activation_func_clamp_value,
+                        use_accuracy_compatible=self.use_accuracy_compatible,
                     )
                 elif (
                     self.hidden_act == quick_gelu
@@ -273,6 +277,7 @@ class MLP(FleetLayer):
                         ),
                         cpu_offload_input=False,
                         clamp_value=self.config.activation_func_clamp_value,
+                        use_accuracy_compatible=self.use_accuracy_compatible,
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")

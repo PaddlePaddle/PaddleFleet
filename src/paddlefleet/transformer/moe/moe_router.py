@@ -484,6 +484,29 @@ class StandardMoERouter(nn.Layer):
         input_ids=None,
         origin_input_ids=None,
     ):
+        if self.use_accuracy_compatible:
+            _probs_2d_pf = (
+                probs
+                if probs.dim() == 2
+                else probs.reshape([-1, probs.shape[-1]])
+            )
+            _aux_top_idx_pf = paddle.topk(
+                _probs_2d_pf, k=top_k, axis=-1
+            ).indices.cast("int64")
+            _aux_routing_map_pf = paddle.zeros_like(
+                _probs_2d_pf
+            ).put_along_axis_(
+                _aux_top_idx_pf,
+                paddle.to_tensor(1.0, dtype=_probs_2d_pf.dtype),
+                axis=-1,
+            )
+            _aux_routing_map_pf = _aux_routing_map_pf.reshape(routing_map.shape)
+            # Mask out padding/invalid tokens (rows where original routing_map is all-zero)
+            row_mask = (
+                routing_map.cast("int64").sum(axis=-1, keepdim=True) > 0
+            ).cast(_aux_routing_map_pf.dtype)
+            routing_map = _aux_routing_map_pf * row_mask
+
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
             self.tensor_model_parallel_size > 1
@@ -620,16 +643,29 @@ class StandardMoERouter(nn.Layer):
             )
         else:
             # [B, E]
-            cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
-                denom
-                * paddle.to_tensor(top_k / self.num_experts, dtype="float32")
-            )
-            # [B, E] -> [B] -> []
-            seq_aux_loss = (
-                (cost_coeff * all_probs.sum(axis=seq_axis) / denom)
-                .sum(axis=1)
-                .mean()
-            )
+            if self.use_accuracy_compatible:
+                tokens_per_expert = routing_map.sum(
+                    axis=seq_axis, dtype="float32"
+                )  # [B, E]
+                _aggregated = all_probs.sum(axis=seq_axis)  # [B, E]
+                _per_expert = _aggregated * tokens_per_expert  # [B, E]
+                _scalar = float(self.num_experts) / (
+                    float(top_k) * float(max_seq_len) * float(max_seq_len)
+                )
+                seq_aux_loss = _per_expert.sum() * _scalar
+            else:
+                cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
+                    denom
+                    * paddle.to_tensor(
+                        top_k / self.num_experts, dtype="float32"
+                    )
+                )
+                # [B, E] -> [B] -> []
+                seq_aux_loss = (
+                    (cost_coeff * all_probs.sum(axis=seq_axis) / denom)
+                    .sum(axis=1)
+                    .mean()
+                )
         return seq_aux_loss
 
     def _cal_z_loss(
@@ -919,7 +955,15 @@ class StandardMoERouter(nn.Layer):
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        topk_weight = scores.take_along_axis(topk_idx, axis=1)
+        if self.use_accuracy_compatible:
+            row_idx = paddle.arange(
+                bsz_seq_len, dtype=topk_idx.dtype
+            ).unsqueeze(-1)
+            row_idx = row_idx.expand(topk_idx.shape)
+            gather_idx = paddle.stack([row_idx, topk_idx], axis=-1)
+            topk_weight = paddle.gather_nd(scores, gather_idx)
+        else:
+            topk_weight = scores.take_along_axis(topk_idx, axis=1)
 
         return topk_weight, topk_idx
 
@@ -1331,7 +1375,14 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
-        gates_ori = gates.clone()
+        if self.use_accuracy_compatible:
+            gates_ori = paddle.nn.functional.sigmoid(
+                logits.cast(paddle.float32)
+            ).cast(logits.dtype)
+            if input_ids_none_zero_mask is not None:
+                gates_ori = gates_ori * valid_mask
+        else:
+            gates_ori = gates.clone()
         if self.config.router_aux_loss_coef and self.scoring_func != "softmax":
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
@@ -1441,7 +1492,13 @@ class TopKRouter(StandardMoERouter):
         # norm
         if self.norm_topk_prob:
             if not getattr(self.config, "moe_topk_fusion", False):
-                denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+                if self.use_accuracy_compatible:
+                    _sum_f64 = top_gate.cast(paddle.float64).sum(
+                        axis=-1, keepdim=True
+                    )
+                    denominator = _sum_f64.cast(paddle.float32) + 1e-20
+                else:
+                    denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
 
