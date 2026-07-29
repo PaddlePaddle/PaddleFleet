@@ -243,10 +243,8 @@ def _unpermute_gather_sum_aligned(
         )
 
     valid_positions = global_position_per_token * routing_map_bool.cast("int64")
-    # masked_select yields exactly num_valid_tokens * topk entries
-    reverse_indices_flat = paddle.masked_select(
-        valid_positions, routing_map_bool
-    ).reshape([-1])
+    # masked_select yields exactly num_valid_tokens * topk entries (1D)
+    reverse_indices_flat = paddle.masked_select(valid_positions, routing_map_bool)
     reverse_indices_flat.stop_gradient = True
 
     num_valid_tokens = int(valid_mask.cast("int64").sum().item())
