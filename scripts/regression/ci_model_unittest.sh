@@ -41,7 +41,7 @@ init_env() {
         echo "CE_Release: install paddle release + fleet release + formers release"
         bash ./scripts/regression/install_requirements.sh "${FLAGS_enable_CE}"
         cd ./scripts/regression
-        wget https://paddle-qa.bj.bcebos.com/paddlefleet/ce_release_config/config.yaml
+        wget https://paddle-qa.bj.bcebos.com/paddleformers/ce_release_config/config.yaml
         python merge_configs.py --origin_config config_origin.yaml --update_config config.yaml --output config.yaml 2>&1 | tee /tmp/merge_output.txt
         cd -
 
@@ -51,7 +51,7 @@ init_env() {
         bash ./scripts/regression/install_requirements.sh "${FLAGS_enable_CE}"
         # donwload configs
         cd ./scripts/regression
-        wget https://paddle-qa.bj.bcebos.com/paddlefleet/ce_develop_config/config.yaml
+        wget https://paddle-qa.bj.bcebos.com/paddleformers/ce_develop_config/config.yaml
         python merge_configs.py --origin_config config_origin.yaml --update_config config.yaml --output config.yaml 2>&1 | tee /tmp/merge_output.txt
         cd -
     elif [[ "${FLAGS_enable_CI}" == "True" ]] && [[ "${BRANCH}" == "develop" ]];then
@@ -59,7 +59,7 @@ init_env() {
         bash ./scripts/regression/install_requirements.sh ${FLAGS_enable_CI}
         # donwload configs
         cd ./scripts/regression
-        wget https://paddle-qa.bj.bcebos.com/paddlefleet/ci_develop_config/config.yaml
+        wget https://paddle-qa.bj.bcebos.com/paddleformers/ci_develop_config/config.yaml
         python merge_configs.py --origin_config config_origin.yaml --update_config config.yaml --output config.yaml 2>&1 | tee /tmp/merge_output.txt
         cd -
     else
@@ -67,7 +67,7 @@ init_env() {
         echo "CI: install paddle stable + fleet stable + release formers"
         bash ./scripts/regression/install_requirements.sh ${FLAGS_enable_CI}
         cd ./scripts/regression
-        wget https://paddle-qa.bj.bcebos.com/paddlefleet/ci_release_config/config.yaml
+        wget https://paddle-qa.bj.bcebos.com/paddleformers/ci_release_config/config.yaml
         python merge_configs.py --origin_config config_origin.yaml --update_config config.yaml --output config.yaml 2>&1 | tee /tmp/merge_output.txt
         cd -
     fi

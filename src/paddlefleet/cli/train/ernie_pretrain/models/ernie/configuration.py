@@ -52,7 +52,7 @@ ERNIE_PRETRAINED_INIT_CONFIGURATION = {
 
 ERNIE_PRETRAINED_RESOURCE_FILES_MAP = {
     "model_state": {
-        "facebookresearch/tiny-random-ernie": "https://bj.bcebos.com/paddlefleet/models/community/facebookresearch/tiny-random-ernie/model_state.pdparams",
+        "facebookresearch/tiny-random-ernie": "https://bj.bcebos.com/paddleformers/models/community/facebookresearch/tiny-random-ernie/model_state.pdparams",
     },
 }
 

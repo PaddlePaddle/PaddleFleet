@@ -17,7 +17,7 @@ import unittest
 import numpy as np
 
 from paddlefleet.data import Dict, Pad, Stack, Tuple
-from tests import testing_utils
+from formers import testing_utils
 from formers.common_test import CpuCommonTest
 
 

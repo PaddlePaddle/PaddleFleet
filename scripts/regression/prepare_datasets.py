@@ -54,7 +54,7 @@ VL_DATASETS = {
     },
 }
 
-DPO_VL_IMAGES_URL = "https://paddle-qa.bj.bcebos.com/paddlefleet/images.tar"
+DPO_VL_IMAGES_URL = "https://paddle-qa.bj.bcebos.com/paddleformers/images.tar"
 DPO_VL_DATA_DIR = "tests/fixtures/dummy/dpo-vl"
 
 

@@ -16,7 +16,7 @@ import unittest
 from collections import Counter
 
 from paddlefleet.data import Vocab
-from tests import testing_utils
+from formers import testing_utils
 from formers.common_test import CpuCommonTest
 
 

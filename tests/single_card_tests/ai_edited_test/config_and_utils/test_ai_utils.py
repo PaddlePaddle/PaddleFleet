@@ -424,7 +424,7 @@ class TestNvtxFunctions(unittest.TestCase):
 
     @patch("paddlefleet.utils._fleet_utils._nvtx_enabled", True)
     def test_nvtx_range_pop_empty_stack_raises(self):
-        import paddlefleet.utils as utils_module
+        import paddlefleet.utils._fleet_utils as utils_module
 
         original_messages = utils_module._nvtx_range_messages
         utils_module._nvtx_range_messages = []
