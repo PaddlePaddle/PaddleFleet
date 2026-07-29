@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   re-run:
-    if: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/re-run') && github.event.comment.user.login == github.event.issue.user.login }}
+    if: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request && github.event.comment.user.login == github.event.issue.user.login && contains(fromJSON('["/re-run all-failed","/re-run approval","/re-run bot-approval-required"]'), github.event.comment.body) }}
     runs-on:
       group: APPROVAL
     steps:
@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Rerun all failed jobs
-        if: ${{ contains(github.event.comment.body, 'all-failed') }}
+        if: ${{ github.event.comment.body == '/re-run all-failed' }}
         uses: ./.github/actions/rerun-workflow
         with:
           PR_ID: ${{ github.event.issue.number }}
@@ -35,7 +35,7 @@ jobs:
           JOB_NAME: 'all-failed'
 
       - name: Rerun Approval
-        if: ${{ contains(github.event.comment.body, '/re-run approval') }}
+        if: ${{ github.event.comment.body == '/re-run approval' }}
         uses: ./.github/actions/rerun-workflow
         with:
           PR_ID: ${{ github.event.issue.number }}
@@ -45,7 +45,7 @@ jobs:
           JOB_NAME: 'Check approval'
 
       - name: Rerun Bot Approval Required
-        if: ${{ contains(github.event.comment.body, '/re-run bot-approval-required') }}
+        if: ${{ github.event.comment.body == '/re-run bot-approval-required' }}
         uses: ./.github/actions/rerun-workflow
         with:
           PR_ID: ${{ github.event.issue.number }}
@@ -55,7 +55,7 @@ jobs:
           JOB_NAME: 'Require review-bot approval'
 
   rerun-on-approval:
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.pull_requests[0].number != null }}
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha != '' }}
     runs-on:
       group: APPROVAL
     steps:
@@ -70,7 +70,7 @@ jobs:
       - name: Rerun Approval
         uses: ./.github/actions/rerun-workflow
         with:
-          PR_ID: ${{ github.event.workflow_run.pull_requests[0].number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
@@ -79,7 +79,7 @@ jobs:
       - name: Rerun Bot Approval Required
         uses: ./.github/actions/rerun-workflow
         with:
-          PR_ID: ${{ github.event.workflow_run.pull_requests[0].number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
