@@ -438,6 +438,16 @@ def get_libs():
                 Artifact("flash_kda_C.py", "flash_kda_C.py"),
                 Artifact("flash_kda_C.so", "flash_kda_C_pd_.so"),
             ],
+            extra_env={
+                "FLASH_KDA_CUDA_ARCHS": ",".join(
+                    {
+                        "9.0": "90a",
+                        "10.0": "100a",
+                        "10.3": "103a",
+                    }[arch]
+                    for arch in _deep_ep_arch.split(";")
+                ),
+            },
         ),
         EcosystemLibrary(
             name="fast-hadamard-transform",
