@@ -20,7 +20,7 @@ from paddlefleet.datasets.reader.mix_datasets import ConcatDataset, InterLeaveDa
 from paddlefleet.transformers import AutoTokenizer
 from formers.testing_utils import get_tests_dir
 
-MODEL_NAME = "/home/models/PaddleFleet/tiny-random-glm4moe-bf16/"
+MODEL_NAME = "/home/models/PaddleFormers/tiny-random-glm4moe-bf16/"
 MAX_SEQ_LEN = 8192
 SEED = 42
 NUM_SAMPLES_EACH_EPOCH = 6000000

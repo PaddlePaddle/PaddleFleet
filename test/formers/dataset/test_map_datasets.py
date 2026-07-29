@@ -23,7 +23,7 @@ from paddlefleet.datasets.template.template import get_template_and_fix_tokenize
 from paddlefleet.transformers import AutoTokenizer
 from formers.testing_utils import get_tests_dir
 
-MODEL_NAME = "/home/models/PaddleFleet/tiny-random-qwen3"
+MODEL_NAME = "/home/models/PaddleFormers/tiny-random-qwen3"
 
 
 def _make_base_config(tokenizer, *, packing=False, binpacking=False, mix_strategy="concat", is_valid=False):

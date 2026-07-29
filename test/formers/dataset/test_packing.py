@@ -26,7 +26,7 @@ from paddlefleet.transformers import (
 )
 from formers.testing_utils import get_tests_dir
 
-MODEL_NAME_OR_PATH = "/home/models/PaddleFleet/tiny-random-glm4moe-bf16/"
+MODEL_NAME_OR_PATH = "/home/models/PaddleFormers/tiny-random-glm4moe-bf16/"
 MAX_SEQ_LEN = 8192
 SEED = 23
 

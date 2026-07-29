@@ -153,6 +153,7 @@ import_structure["package_info"] = [
     "__license__",
     "__package_name__",
     "__repository_url__",
+    "__version__",
 ]
 import_structure["timers"] = ["Timers"]
 import_structure["transformers.tokenizer_utils"] = ["PreTrainedTokenizer"]

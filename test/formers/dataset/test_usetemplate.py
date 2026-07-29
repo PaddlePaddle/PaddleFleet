@@ -38,7 +38,7 @@ EXPECTED_WITH_TEMPLATE = {
     "position_ids": list(range(0, 56)),
 }
 
-MODEL_NAME_OR_PATH = "/home/models/PaddleFleet/tiny-random-glm4moe-bf16/"
+MODEL_NAME_OR_PATH = "/home/models/PaddleFormers/tiny-random-glm4moe-bf16/"
 MAX_SEQ_LEN = 8192
 SEED = 23
 
