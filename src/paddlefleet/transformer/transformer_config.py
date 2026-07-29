@@ -756,11 +756,8 @@ class TransformerConfig(ModelParallelConfig):
     using_sonic_moe: bool = False
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
 
-    sonicmoe_quant_format: str = "32x32"
-    """Quantization format used in SonicMoE for quantizing weights, options are 32x32 and 1x32."""
-
-    sonicmoe_save_upgate_out_in_fp8: bool = False
-    """Save the up-gate output in FP8 or BF16, if True, save in FP8."""
+    fp8_weight_quant_format: str = "32x32"
+    """Quantization format for quantizing weights, options are 32x32 and 1x32. Currently only used in SonicMoE."""
 
     ####################
     # MLA
@@ -1134,6 +1131,10 @@ class TransformerConfig(ModelParallelConfig):
                 )
         elif key == "dtype":
             self.params_dtype = value
+        elif key == "sonicmoe_quant_format":
+            raise ValueError(
+                "sonicmoe_quant_format is deprecated. Use fp8_weight_quant_format instead."
+            )
         else:
             setattr(self, key, value)
 
