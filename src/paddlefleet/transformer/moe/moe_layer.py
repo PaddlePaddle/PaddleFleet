@@ -54,7 +54,6 @@ from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import (
     AddAuxiliaryLoss,
-    _use_accuracy_compatible,
     use_accuracy_compatible_kernel,
 )
 from .token_dispatcher import (
@@ -161,6 +160,9 @@ class MoELayer(nn.Layer):
     ):
         super().__init__()
         self.config = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
         self.moe_sublayers = sublayers
         routed_expert_config = deepcopy(config)
         shared_expert_config = deepcopy(config)
@@ -190,7 +192,7 @@ class MoELayer(nn.Layer):
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
-        if _use_accuracy_compatible():
+        if self.use_accuracy_compatible:
             if self.moe_token_dispatcher_type != "alltoall":
                 self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
@@ -488,6 +490,7 @@ class MoELayer(nn.Layer):
                         config, "hybridep_buffer_configs", None
                     ),
                     moe_deep_gemm=self.moe_deep_gemm,
+                    use_accuracy_compatible=self.use_accuracy_compatible,
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"
@@ -507,6 +510,7 @@ class MoELayer(nn.Layer):
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
                     local_expert_indices,
+                    use_accuracy_compatible=self.use_accuracy_compatible,
                 )
             elif self.moe_token_dispatcher_type == "allgather":
                 self.token_dispatcher = AllGatherTokenDispatcher(
@@ -703,7 +707,7 @@ class MoELayer(nn.Layer):
                 self.token_dispatcher, "global_input_probs", None
             )
             if per_token_scale is None:
-                if not _use_accuracy_compatible():
+                if not self.use_accuracy_compatible:
                     raise RuntimeError(
                         "FLAGS_use_accuracy_compatible_kernel requires dispatched "
                         "router probabilities from the token dispatcher."
@@ -718,7 +722,7 @@ class MoELayer(nn.Layer):
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            if _use_accuracy_compatible():
+            if self.use_accuracy_compatible:
                 # Pad small-M experts to 32 rows for cross-framework GEMM alignment
                 _m_real = int(chunk.shape[0])
                 if 0 < _m_real < 17:
@@ -983,7 +987,7 @@ class MoELayer(nn.Layer):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
-        if _use_accuracy_compatible():
+        if self.use_accuracy_compatible:
             return self.custom_forward(
                 hidden_states,
                 probs,
@@ -1313,7 +1317,8 @@ class MoELayer(nn.Layer):
         layer_idx = getattr(self, "layer_number", None)
 
         _three_paths_enabled = (
-            _use_accuracy_compatible() and hidden_states.stop_gradient is False
+            self.use_accuracy_compatible
+            and hidden_states.stop_gradient is False
         )
         if _three_paths_enabled:
             _hs_router_path, _hs_dispatcher_path, _hs_shared_path = (
@@ -1529,7 +1534,10 @@ class MoELayer(nn.Layer):
         else:
             tokens_per_expert = routing_map.sum(axis=0)
             permuted_local_hidden_states, sorted_indices = permute(
-                hidden_states, routing_map, tokens_per_expert
+                hidden_states,
+                routing_map,
+                tokens_per_expert,
+                use_accuracy_compatible=self.use_accuracy_compatible,
             )
             grouped_expert_out = self.grouped_gemm_experts(
                 permuted_local_hidden_states, tokens_per_expert
@@ -1540,6 +1548,7 @@ class MoELayer(nn.Layer):
                 restore_shape=hidden_states.shape,
                 probs=probs,
                 routing_map=routing_map,
+                use_accuracy_compatible=self.use_accuracy_compatible,
             )
             return final_hidden_states.cast(hidden_states.dtype)
 

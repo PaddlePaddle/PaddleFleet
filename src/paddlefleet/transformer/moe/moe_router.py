@@ -34,8 +34,6 @@ from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
     GatherOpLegacy,
 )
 
-from .moe_utils import _use_accuracy_compatible
-
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -174,6 +172,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 return x_grad, None
         else:
             if ctx.use_accuracy_compatible:
+                # Mirror MG `RouterGatingLinearFunction.backward`:
+                #   grad_input  = torch.mm(grad_output, weight.to(router_dtype))
+                #   grad_weight = torch.mm(grad_output.t(), inp.to(router_dtype))
+                # i.e. two separate GEMMs (not a fused matmul_grad), then each
+                # gradient cast back to its own storage dtype.
                 x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
                 w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
                 x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
@@ -481,7 +484,7 @@ class StandardMoERouter(nn.Layer):
         input_ids=None,
         origin_input_ids=None,
     ):
-        if _use_accuracy_compatible():
+        if self.use_accuracy_compatible:
             _probs_2d_pf = (
                 probs
                 if probs.dim() == 2
@@ -498,7 +501,11 @@ class StandardMoERouter(nn.Layer):
                 axis=-1,
             )
             _aux_routing_map_pf = _aux_routing_map_pf.reshape(routing_map.shape)
-            routing_map = _aux_routing_map_pf
+            # Mask out padding/invalid tokens (rows where original routing_map is all-zero)
+            row_mask = (
+                routing_map.cast("int64").sum(axis=-1, keepdim=True) > 0
+            ).cast(_aux_routing_map_pf.dtype)
+            routing_map = _aux_routing_map_pf * row_mask
 
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
@@ -629,17 +636,14 @@ class StandardMoERouter(nn.Layer):
                     float(self.num_experts) / top_k, dtype="float32"
                 )
             )
-            if _use_accuracy_compatible():
-                _aggregated = all_probs.mean(axis=seq_axis)
-            else:
-                _aggregated = all_probs.sum(axis=seq_axis) / denom
-            _per_batch = (cost_coeff * _aggregated).sum(axis=1)
             # Align with ernie: use mean instead of sum/S
             # [B, E] -> [B] -> []
-            seq_aux_loss = _per_batch.mean()
+            seq_aux_loss = (
+                (cost_coeff * all_probs.mean(axis=seq_axis)).sum(axis=1).mean()
+            )
         else:
             # [B, E]
-            if _use_accuracy_compatible():
+            if self.use_accuracy_compatible:
                 tokens_per_expert = routing_map.sum(
                     axis=seq_axis, dtype="float32"
                 )  # [B, E]
@@ -951,7 +955,7 @@ class StandardMoERouter(nn.Layer):
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        if _use_accuracy_compatible():
+        if self.use_accuracy_compatible:
             row_idx = paddle.arange(
                 bsz_seq_len, dtype=topk_idx.dtype
             ).unsqueeze(-1)
@@ -1371,7 +1375,7 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
-        if _use_accuracy_compatible():
+        if self.use_accuracy_compatible:
             gates_ori = paddle.nn.functional.sigmoid(
                 logits.cast(paddle.float32)
             ).cast(logits.dtype)
@@ -1488,7 +1492,7 @@ class TopKRouter(StandardMoERouter):
         # norm
         if self.norm_topk_prob:
             if not getattr(self.config, "moe_topk_fusion", False):
-                if _use_accuracy_compatible():
+                if self.use_accuracy_compatible:
                     _sum_f64 = top_gate.cast(paddle.float64).sum(
                         axis=-1, keepdim=True
                     )

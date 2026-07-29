@@ -41,7 +41,6 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.moe.moe_utils import _use_accuracy_compatible
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -215,6 +214,9 @@ class LanguageLoss(FleetLayer):
         self.pg_collection = pg_collection
 
         self.config = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
         self.ignored_index = -100
         self.enable_parallel_cross_entropy = (
             paddle.distributed.is_initialized()
@@ -432,7 +434,7 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                if _use_accuracy_compatible():
+                if self.use_accuracy_compatible:
                     _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
                     loss_sum = (
                         _flat.cast(paddle.float64).sum().cast(paddle.float32)
@@ -440,8 +442,13 @@ class LanguageLoss(FleetLayer):
                     _count = lossmask.sum()
                     import paddle.distributed as _pdist
 
-                    _ep_size = _pdist.get_world_size(
-                        group=get_expert_model_parallel_group()
+                    _ep_group = get_expert_model_parallel_group(
+                        check_initialized=False
+                    )
+                    _ep_size = (
+                        _pdist.get_world_size(group=_ep_group)
+                        if _ep_group is not None
+                        else 1
                     )
                     _acc_sum = paddle.zeros([1], dtype=paddle.float32)
                     for _ in range(_ep_size):

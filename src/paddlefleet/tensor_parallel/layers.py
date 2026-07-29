@@ -35,7 +35,6 @@ from ..parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from ..transformer.moe.moe_utils import _use_accuracy_compatible
 
 # from ..dist_checkpointing.mapping import ShardedStateDict
 # from ..transformer.utils import make_sharded_tensors_for_checkpoint
@@ -779,6 +778,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.use_pow2_scale = use_pow2_scale
         ctx.use_ue8m0 = use_ue8m0
         ctx.save_original_input = save_original_input
+        ctx.use_accuracy_compatible = use_accuracy_compatible
 
         if sequence_parallel:
             dim_size = list(input.shape)
@@ -1057,7 +1057,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 grad_weight = None
         else:
             if (
-                _use_accuracy_compatible()
+                ctx.use_accuracy_compatible
                 and getattr(weight, "is_expert_param", False)
                 and hasattr(weight, "main_grad")
                 and weight.main_grad is not None
