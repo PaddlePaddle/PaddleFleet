@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Re-export from Paddle for backward compatibility (PaddleFormers imports these from paddlefleet)
+# Re-export from Paddle for backward compatibility; PaddleFormers imports these from paddlefleet.
 
 from . import (
     parallel_state as parallel_state,
