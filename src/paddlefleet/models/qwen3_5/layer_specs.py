@@ -82,6 +82,7 @@ def get_qwen3_5_vision_spec(config: TransformerConfig) -> LayerSpec:
                     "rotary_base": config.rope_theta,
                     "rope_scaling": config.rope_scaling,
                     "rotary_percent": config.rotary_percent,
+                    "use_accuracy_compatible": config.use_accuracy_compatible,
                 },
             )
         ),
@@ -95,8 +96,11 @@ def get_qwen3_5_vision_spec(config: TransformerConfig) -> LayerSpec:
     merger_spec = LayerSpec(
         layer=Qwen3VLVisionPathMerger,
         sublayers_spec=Qwen3VLVisionPatchMergerSpec(
-            norm=backend.layer_norm(
-                rms_norm=(config.normalization == "RMSNorm"), for_qk=False
+            norm=LayerSpec(
+                layer=backend.layer_norm(
+                    rms_norm=(config.normalization == "RMSNorm"), for_qk=False
+                ),
+                extra_kwargs={"eps": 1e-6},
             ),
         ),
         extra_kwargs={
