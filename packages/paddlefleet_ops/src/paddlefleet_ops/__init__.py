@@ -416,18 +416,6 @@ if paddle.is_compiled_with_cuda():
         paddle.enable_compat(scope={"fla", "triton"}, silent=True)
         try:
             _safe_load_ecosystem_lib("fla", ops_dir, globals())
-            # FLA uses absolute imports in runtime paths such as
-            # ShortConvolution.forward. Keep both names bound to each bundled
-            # module so `fla.*` and `paddlefleet_ops.fla.*` never load separate
-            # module instances.
-            for module_name, module in list(sys.modules.items()):
-                if (
-                    module_name == "paddlefleet_ops.fla"
-                    or module_name.startswith("paddlefleet_ops.fla.")
-                ):
-                    sys.modules[
-                        module_name.removeprefix("paddlefleet_ops.")
-                    ] = module
         finally:
             paddle.disable_compat()
     else:

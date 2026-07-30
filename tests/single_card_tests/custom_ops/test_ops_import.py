@@ -127,7 +127,7 @@ class TestFastHadamardTransformImport(unittest.TestCase):
 class TestFLAImport(unittest.TestCase):
     def test_bare_fla_import_is_not_public(self):
         result = subprocess.run(
-            [sys.executable, "-c", "import fla"],
+            [sys.executable, "-c", "import paddlefleet_ops; import fla"],
             capture_output=True,
             text=True,
         )
@@ -157,9 +157,11 @@ class TestFLAImport(unittest.TestCase):
         self.assertIs(fla, sys.modules["paddlefleet.fla"])
         self.assertIs(fla, sys.modules["paddlefleet_ops.fla"])
         self.assertIs(chunk_kda, fla.ops.kda.chunk_kda)
-        self.assertIs(
-            sys.modules["fla.ops.kda"],
-            sys.modules["paddlefleet_ops.fla.ops.kda"],
+        self.assertFalse(
+            any(
+                module_name == "fla" or module_name.startswith("fla.")
+                for module_name in sys.modules
+            )
         )
         self.assertTrue(callable(FusedRMSNormGated))
         self.assertTrue(callable(ShortConvolution))
