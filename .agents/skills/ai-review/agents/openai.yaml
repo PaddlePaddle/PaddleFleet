@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Review"
+  short_description: "使用 PaddleFleet 仓库基础规则评审代码与测试变更"
+  default_prompt: "使用 $ai-review 评审此 PaddleFleet 代码变更。"
