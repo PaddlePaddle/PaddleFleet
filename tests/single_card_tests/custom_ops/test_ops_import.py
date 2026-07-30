@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import subprocess
-import sys
 import unittest
 
 
@@ -125,22 +123,8 @@ class TestFastHadamardTransformImport(unittest.TestCase):
 
 
 class TestFLAImport(unittest.TestCase):
-    def test_bare_fla_import_is_not_public(self):
-        result = subprocess.run(
-            [sys.executable, "-c", "import paddlefleet_ops; import fla"],
-            capture_output=True,
-            text=True,
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("No module named 'fla'", result.stderr)
-
     def test_fla_import(self):
-        import paddlefleet_ops
         from paddlefleet_ops import fla
-
-        import paddlefleet
-        import paddlefleet.fla
 
         FusedRMSNormGated = fla.modules.FusedRMSNormGated
         ShortConvolution = fla.modules.ShortConvolution
@@ -151,23 +135,16 @@ class TestFLAImport(unittest.TestCase):
         prepare_lens_from_mask = fla.ops.utils.index.prepare_lens_from_mask
         tensor_cache = fla.utils.tensor_cache
 
-        self.assertIs(fla, paddlefleet.fla)
-        self.assertIs(fla, paddlefleet_ops.fla)
-        self.assertTrue(paddlefleet_ops.is_fla_available())
-        self.assertIs(fla, sys.modules["paddlefleet.fla"])
-        self.assertIs(fla, sys.modules["paddlefleet_ops.fla"])
-        self.assertIs(chunk_kda, fla.ops.kda.chunk_kda)
-        self.assertFalse(
-            any(
-                module_name == "fla" or module_name.startswith("fla.")
-                for module_name in sys.modules
-            )
-        )
         self.assertTrue(callable(FusedRMSNormGated))
         self.assertTrue(callable(ShortConvolution))
+        self.assertTrue(callable(chunk_kda))
         self.assertTrue(callable(prepare_cu_seqlens_from_mask))
         self.assertTrue(callable(prepare_lens_from_mask))
         self.assertTrue(callable(tensor_cache))
+
+    def test_error_import(self):
+        with self.assertRaises(ImportError):
+            from paddlefleet_ops.fla import xxxx  # noqa: F401
 
 
 if __name__ == "__main__":

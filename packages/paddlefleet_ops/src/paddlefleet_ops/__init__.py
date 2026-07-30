@@ -414,10 +414,8 @@ if paddle.is_compiled_with_cuda():
 
     if is_fla_available():
         paddle.enable_compat(scope={"fla", "triton"}, silent=True)
-        try:
-            _safe_load_ecosystem_lib("fla", ops_dir, globals())
-        finally:
-            paddle.disable_compat()
+        _safe_load_ecosystem_lib("fla", ops_dir, globals())
+        paddle.disable_compat()
     else:
         warning, error = _build_notice(
             "paddlefleet_ops.fla",
