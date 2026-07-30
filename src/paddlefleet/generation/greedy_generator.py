@@ -478,6 +478,8 @@ class GreedyGenerator:
         """
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be [B, L]")
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens should be >= 0")
         self.model.eval()
 
         bsz, prompt_len = input_ids.shape
