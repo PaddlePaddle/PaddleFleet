@@ -1503,6 +1503,9 @@ jobs:
           set -e
           python -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
           source \$work_dir/../../../proxy
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
+          rm -rf /var/lib/apt/lists/*
           cd /workspace/PaddleFleet
           python -m pip install --upgrade pip
           python -m pip install dist/${{ needs.build_whl.outputs.root_whl_name }} \

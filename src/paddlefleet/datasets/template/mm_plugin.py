@@ -64,7 +64,7 @@ os.environ["http_proxy"] = os.environ.get("HTTP_PROXY", "")
 def _create_video_decoder(video_src):
     """Create a paddlecodec VideoDecoder via the Paddle proxy import."""
     try:
-        del sys.modules["torchcodec"]
+        sys.modules.pop("torchcodec", None)
         paddle.enable_compat(scope={"torchcodec"})
         from torchcodec.decoders import VideoDecoder
 

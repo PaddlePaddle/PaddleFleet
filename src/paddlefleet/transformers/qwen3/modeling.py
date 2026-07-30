@@ -359,8 +359,8 @@ class Qwen3PretrainedModel(PretrainedModel):
         if is_fleet:
             aoa_config["aoa_statements"] += [
                 f"model.embed_tokens.weight -> {model_prefix}embedding.embed_tokens.weight{dtype_suffix}",
-                f"model.layers.$LAYER_ID.self_attn.q_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.q_layernorm.weight{dtype_suffix}",
-                f"model.layers.$LAYER_ID.self_attn.k_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.k_layernorm.weight{dtype_suffix}",
+                f"model.layers.$LAYER_ID.self_attn.q_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.q_norm.weight{dtype_suffix}",
+                f"model.layers.$LAYER_ID.self_attn.k_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.k_norm.weight{dtype_suffix}",
             ]
         else:
             aoa_config["aoa_statements"] += [
@@ -369,21 +369,35 @@ class Qwen3PretrainedModel(PretrainedModel):
                 f"model.layers.$LAYER_ID.self_attn.k_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.k_norm.weight",
             ]
 
+        # Cast fused inputs before the macros assign to the bfloat16 Fleet targets.
+        if is_fleet and dtype_suffix:
+            aoa_config["aoa_statements"] += [
+                f"model.layers.$LAYER_ID.self_attn.{proj}_proj.weight -> model.layers.$LAYER_ID.self_attn.{proj}_proj.weight{dtype_suffix}"
+                for proj in ("q", "k", "v")
+            ]
+
         # attention qkv
         aoa_config["aoa_statements"] += [
             f"model.layers.$LAYER_ID.self_attn.q_proj.weight^T, model.layers.$LAYER_ID.self_attn.k_proj.weight^T, model.layers.$LAYER_ID.self_attn.v_proj.weight^T -> {model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.weight, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}",
-            f"{model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.weight -> {model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.weight{dtype_suffix}",
         ]
         if config.attention_bias:
+            if is_fleet and dtype_suffix:
+                aoa_config["aoa_statements"] += [
+                    f"model.layers.$LAYER_ID.self_attn.{proj}_proj.bias -> model.layers.$LAYER_ID.self_attn.{proj}_proj.bias{dtype_suffix}"
+                    for proj in ("q", "k", "v")
+                ]
             aoa_config["aoa_statements"] += [
                 f"model.layers.$LAYER_ID.self_attn.q_proj.bias, model.layers.$LAYER_ID.self_attn.k_proj.bias, model.layers.$LAYER_ID.self_attn.v_proj.bias -> {model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.bias, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}, axis=0",
-                f"{model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.bias -> {model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.bias{dtype_suffix}",
             ]
 
         # FFN
+        if is_fleet and dtype_suffix:
+            aoa_config["aoa_statements"] += [
+                f"model.layers.$LAYER_ID.mlp.{proj}_proj.weight -> model.layers.$LAYER_ID.mlp.{proj}_proj.weight{dtype_suffix}"
+                for proj in ("gate", "up")
+            ]
         aoa_config["aoa_statements"] += [
             f"model.layers.$LAYER_ID.mlp.gate_proj.weight^T, model.layers.$LAYER_ID.mlp.up_proj.weight^T -> {model_prefix}layers.$LAYER_ID.mlp.up_gate_proj.weight, fused_ffn",
-            f"{model_prefix}layers.$LAYER_ID.mlp.up_gate_proj.weight -> {model_prefix}layers.$LAYER_ID.mlp.up_gate_proj.weight{dtype_suffix}",
         ]
 
         # lm_head
@@ -416,8 +430,8 @@ class Qwen3PretrainedModel(PretrainedModel):
         if is_fleet:
             aoa_statements += [
                 f"{model_prefix}embedding.embed_tokens.weight -> model.embed_tokens.weight",
-                f"{model_prefix}layers.$LAYER_ID.self_attn.q_layernorm.weight -> model.layers.$LAYER_ID.self_attn.q_norm.weight",
-                f"{model_prefix}layers.$LAYER_ID.self_attn.k_layernorm.weight -> model.layers.$LAYER_ID.self_attn.k_norm.weight",
+                f"{model_prefix}layers.$LAYER_ID.self_attn.q_norm.weight -> model.layers.$LAYER_ID.self_attn.q_norm.weight",
+                f"{model_prefix}layers.$LAYER_ID.self_attn.k_norm.weight -> model.layers.$LAYER_ID.self_attn.k_norm.weight",
             ]
         else:
             aoa_statements += [
