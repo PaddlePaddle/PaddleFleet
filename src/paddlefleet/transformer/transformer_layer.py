@@ -1299,17 +1299,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             layer_number=self.layer_number,
         )
 
-        # Whether to skip the fp32→bf16 cast between attention and MLP
-        # to avoid redundant fp32→bf16→fp32 round-trip.
-        self._skip_inter_cast = (
-            config.high_precision_mhc
-            and config.use_fused_mhc
-            and isinstance(self.cross_attention, IdentityOp)
-        )
-        # Will be set to the original input dtype on first forward call,
-        # used for final output cast at the end of _forward_mlp.
-        self._ori_dtype = None
-
         # The hyper-connection submodules are created after super().__init__()
         # (which already ran _mark_shared_no_hook_params on the base params), so
         # their params (mapping_proj.weight, alpha_pre/post/res, bias, ...) are
@@ -1340,8 +1329,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # Save n-stream residual for H_res mixing
         original_residual = hidden_states
         ori_dtype = hidden_states.dtype
-        # Cache the original input dtype for _forward_mlp output cast
-        self._ori_dtype = ori_dtype
 
         # mHC: aggregate n-stream → 1-stream
         aggregated, h_res, h_post = self.self_attention_hyper_connection(
@@ -1405,11 +1392,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 fused=self.config.bias_dropout_fusion,
             )
         )
-        # When high_precision_mhc + fused kernels + no cross attention,
-        # skip the fp32→bf16 cast here to avoid redundant fp32→bf16→fp32
-        # round-trip between _forward_attention and _forward_mlp.
-        if not self._skip_inter_cast:
-            hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = hidden_states.to(ori_dtype)
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -1515,9 +1498,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             training=self.training,
             fused=self.config.bias_dropout_fusion,
         )
-        # Always cast back to the original input dtype at the end of MLP for layer interface.
-        # ori_dtype may be fp32 if attention skipped the cast (_skip_inter_cast optimization).
-        hidden_states = hidden_states.to(self._ori_dtype)
+        hidden_states = hidden_states.to(ori_dtype)
 
         if is_first_fwd:
             hidden_states.stop_gradient = False

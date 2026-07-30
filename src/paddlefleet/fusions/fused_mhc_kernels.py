@@ -344,27 +344,27 @@ if _CUTILE_AVAILABLE:
         num_c_tiles = ct.num_tiles(x, axis=1, shape=(TILE_SIZE, TILE_C))
         hp_tile = ct.load(
             hp, index=(pid, 0), shape=(TILE_SIZE, N), padding_mode=PAD_ZERO
-        ).astype(ct.float32)
+        )
         hp_exp = ct.expand_dims(hp_tile, axis=2)  # (TILE_SIZE, N, 1)
         hr_tile = ct.load(
             hr,
             index=(pid, 0, 0),
             shape=(TILE_SIZE, N, N),
             padding_mode=PAD_ZERO,
-        ).astype(ct.float32)
+        )
         for ct_idx in range(num_c_tiles):
             orig_tile = ct.load(
                 orig,
                 index=(pid, 0, ct_idx),
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             x_tile = ct.load(
                 x,
                 index=(pid, ct_idx),
                 shape=(TILE_SIZE, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             x_exp = ct.expand_dims(x_tile, axis=1)  # (TILE_SIZE, 1, TILE_C)
             out_tile = hp_exp * x_exp  # (TILE_SIZE, N, TILE_C)
             for j in range(N):
@@ -394,30 +394,30 @@ if _CUTILE_AVAILABLE:
         num_c_tiles = ct.num_tiles(x, axis=1, shape=(TILE_SIZE, TILE_C))
         hp_tile = ct.load(
             hp, index=(pid, 0), shape=(TILE_SIZE, N), padding_mode=PAD_ZERO
-        ).astype(ct.float32)
+        )
         hp_exp = ct.expand_dims(hp_tile, axis=2)  # (TILE_SIZE, N, 1)
         hr_tile = ct.load(
             hr,
             index=(pid, 0, 0),
             shape=(TILE_SIZE, N, N),
             padding_mode=PAD_ZERO,
-        ).astype(ct.float32)
+        )
         for ct_idx in range(num_c_tiles):
             orig_tile = ct.load(
                 orig,
                 index=(pid, 0, ct_idx),
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             x_tile = ct.load(
                 x,
                 index=(pid, ct_idx),
                 shape=(TILE_SIZE, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             bias_tile = ct.load(
                 bias, index=(ct_idx,), shape=(TILE_C,), padding_mode=PAD_ZERO
-            ).astype(ct.float32)
+            )
             xb_exp = ct.expand_dims(
                 x_tile + bias_tile, axis=1
             )  # (TILE_SIZE, 1, TILE_C)
@@ -450,16 +450,14 @@ if _CUTILE_AVAILABLE:
     ):
         pid = ct.bid(0)
         num_c_tiles = ct.cdiv(go.shape[2], TILE_C)
-        hp_tile = ct.load(hp, index=(pid, 0), shape=(TILE_SIZE, N)).astype(
-            ct.float32
-        )
+        hp_tile = ct.load(hp, index=(pid, 0), shape=(TILE_SIZE, N))
         hp_2d = ct.reshape(hp_tile, (1, N))
         hr_tile = ct.load(
             hr,
             index=(pid, 0, 0),
             shape=(TILE_SIZE, N, N),
             padding_mode=PAD_ZERO,
-        ).astype(ct.float32)
+        )
         hr_2d = ct.reshape(hr_tile, (N, N))
         acc_g_hp_2d = ct.full((N, 1), 0, dtype=ct.float32)
         acc_g_hr_2d = ct.full((N, N), 0, dtype=ct.float32)
@@ -469,24 +467,24 @@ if _CUTILE_AVAILABLE:
                 index=(pid, ct_idx),
                 shape=(TILE_SIZE, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             x_2d = ct.reshape(x_tile, (1, TILE_C))
             go_tile = ct.load(
                 go,
                 index=(pid, 0, ct_idx),
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             go_2d = ct.reshape(go_tile, (N, TILE_C))
             orig_tile = ct.load(
                 orig,
                 index=(pid, 0, ct_idx),
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             orig_2d = ct.reshape(orig_tile, (N, TILE_C))
-            g_x_2d = ct.full((1, TILE_C), 0, dtype=ct.float32)
-            g_orig_2d = ct.full((N, TILE_C), 0, dtype=ct.float32)
+            g_x_2d = ct.full((1, TILE_C), 0, dtype=hp.dtype)
+            g_orig_2d = ct.full((N, TILE_C), 0, dtype=hp.dtype)
             for j in range(N):
                 g_x_2d += ct.extract(
                     hp_2d, (0, j), shape=(1, 1)
@@ -540,16 +538,14 @@ if _CUTILE_AVAILABLE:
     ):
         pid = ct.bid(0)
         num_c_tiles = ct.cdiv(go.shape[2], TILE_C)
-        hp_tile = ct.load(hp, index=(pid, 0), shape=(TILE_SIZE, N)).astype(
-            ct.float32
-        )
+        hp_tile = ct.load(hp, index=(pid, 0), shape=(TILE_SIZE, N))
         hp_2d = ct.reshape(hp_tile, (1, N))
         hr_tile = ct.load(
             hr,
             index=(pid, 0, 0),
             shape=(TILE_SIZE, N, N),
             padding_mode=PAD_ZERO,
-        ).astype(ct.float32)
+        )
         hr_2d = ct.reshape(hr_tile, (N, N))
         acc_g_hp_2d = ct.full((N, 1), 0, dtype=ct.float32)
         acc_g_hr_2d = ct.full((N, N), 0, dtype=ct.float32)
@@ -559,10 +555,10 @@ if _CUTILE_AVAILABLE:
                 index=(pid, ct_idx),
                 shape=(TILE_SIZE, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             bias_tile = ct.load(
                 bias, index=(ct_idx,), shape=(TILE_C,), padding_mode=PAD_ZERO
-            ).astype(ct.float32)
+            )
             xb_2d = ct.reshape(x_tile, (1, TILE_C)) + ct.reshape(
                 bias_tile, (1, TILE_C)
             )
@@ -571,17 +567,17 @@ if _CUTILE_AVAILABLE:
                 index=(pid, 0, ct_idx),
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             go_2d = ct.reshape(go_tile, (N, TILE_C))
             orig_tile = ct.load(
                 orig,
                 index=(pid, 0, ct_idx),
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             orig_2d = ct.reshape(orig_tile, (N, TILE_C))
-            g_x_2d = ct.full((1, TILE_C), 0, dtype=ct.float32)
-            g_orig_2d = ct.full((N, TILE_C), 0, dtype=ct.float32)
+            g_x_2d = ct.full((1, TILE_C), 0, dtype=hp.dtype)
+            g_orig_2d = ct.full((N, TILE_C), 0, dtype=hp.dtype)
             for j in range(N):
                 g_x_2d += ct.extract(
                     hp_2d, (0, j), shape=(1, 1)
@@ -1297,19 +1293,15 @@ else:
         h_post: Tensor,
         x: Tensor,
         bias: Tensor | None,
-        output_dtype: str | None = None,
     ) -> Tensor:
         """Fused H_res @ residual + H_post * (x + bias).
 
         Args:
             h_res: [s, b, n, n] residual mixing matrix
-            original_residual: [s, b, n, C] n-stream residual (can be bf16 or fp32)
+            original_residual: [s, b, n, C] n-stream residual
             h_post: [s, b, n] expansion weights
-            x: [s, b, C] layer output (can be bf16 or fp32)
-            bias: [C] or None (can be bf16 or fp32)
-            output_dtype: If specified, cast output to this dtype.
-                         None means keep same dtype as h_res.
-                         Use "float32" for high_precision_mhc mode to fuse the cast.
+            x: [s, b, C] layer output
+            bias: [C] or None
 
         Returns:
             [s, b, n, C] fused output
@@ -1338,10 +1330,7 @@ else:
         assert C <= _INT32_MAX, (
             f"fused_h_post_bda: C={C} exceeds int32 max ({_INT32_MAX})"
         )
-        out = FusedHPostBDA.apply(h_res, original_residual, h_post, x, bias)
-        if output_dtype is not None and out.dtype.name != output_dtype:
-            out = out.astype(output_dtype)
-        return out
+        return FusedHPostBDA.apply(h_res, original_residual, h_post, x, bias)
 
     def fused_proj_rms(
         x: Tensor, weight: Tensor, eps: float = 1e-6
