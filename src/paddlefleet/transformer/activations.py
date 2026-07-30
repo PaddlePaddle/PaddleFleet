@@ -14,30 +14,15 @@
 
 from __future__ import annotations
 
-import math
-from numbers import Real
-
 import paddle
 import paddle.nn.functional as F
-
-
-def _validate_situ_scale(name: str, value: float) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, Real)
-        or not math.isfinite(value)
-        or value <= 0
-    ):
-        raise ValueError(
-            f"{name} must be a finite positive number, but got {value!r}."
-        )
-    return float(value)
 
 
 def situ(x: paddle.Tensor, beta: float = 1.0) -> paddle.Tensor:
     """Apply the SiTU gate activation with float32 intermediates."""
 
-    beta = _validate_situ_scale("beta", beta)
+    assert beta >= 0
+
     input_dtype = x.dtype
     x = x.astype("float32")
     output = beta * paddle.tanh(x / beta) * F.sigmoid(x)
@@ -57,9 +42,8 @@ def situ_glu(
             f"concatenated [gate, up] projections, but got {x.shape[-1]}."
         )
 
-    beta = _validate_situ_scale("beta", beta)
-    if linear_beta is not None:
-        linear_beta = _validate_situ_scale("linear_beta", linear_beta)
+    assert beta >= 0
+    assert linear_beta is None or linear_beta >= 0
 
     input_dtype = x.dtype
     gate, up = paddle.chunk(x, chunks=2, axis=-1)
