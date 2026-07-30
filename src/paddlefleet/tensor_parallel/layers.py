@@ -764,6 +764,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
+        ctx.use_accuracy_compatible = use_accuracy_compatible
+        # Cache input.stop_gradient: ``_new_shared_tensor()`` does not
+        # necessarily preserve this flag, and Paddle's PyLayer contract
+        # requires backward to return None at position 0 iff the original
+        # forward input had stop_gradient=True.
         ctx.input_stop_gradient = bool(input.stop_gradient)
         ctx.fp8 = fp8
         ctx.fp8_wgrad = fp8_wgrad
@@ -1049,7 +1054,25 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            if wgrad_compute:
+            if (
+                wgrad_compute
+                and ctx.use_accuracy_compatible
+                and getattr(weight, "is_expert_param", False)
+                and hasattr(weight, "main_grad")
+                and weight.main_grad is not None
+                and weight.main_grad.dtype == paddle.float32
+            ):
+                weight.main_grad.add_(
+                    paddle.matmul(
+                        grad_output.astype("float32"),
+                        total_input.astype("float32"),
+                        transpose_x=True,
+                    ).t()
+                )
+                if hasattr(weight, "grad_added_to_main_grad"):
+                    weight.grad_added_to_main_grad = True
+                grad_weight = paddle.zeros(weight.shape, dtype=input.dtype)
+            elif wgrad_compute:
                 if total_input is not None:
                     grad_weight, _ = general_gemm(total_input.t(), grad_output)
                 elif inp_t_fp8 is not None:
@@ -1363,6 +1386,7 @@ class Linear(paddle.nn.Layer):
             # Weight is duplicated across TP ranks; reduce gradient on DP group.
             self.weight.allreduce = True
             self.weight.is_distributed = False
+            self.weight.is_expert_param = self.is_expert
         else:
             self.weight = None
 
@@ -1826,6 +1850,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
                 self.is_expert and self.expert_parallel
             )
             self.weight.is_distributed = True if self.world_size > 1 else False
+            self.weight.is_expert_param = self.is_expert
         else:
             self.weight = None
 
@@ -2217,6 +2242,7 @@ class RowParallelLinear(paddle.nn.Layer):
                 )
         self.weight.allreduce = not (self.is_expert and self.expert_parallel)
         self.weight.is_distributed = True if self.world_size > 1 else False
+        self.weight.is_expert_param = self.is_expert
 
         if bias:
             self.bias = self.create_parameter(
