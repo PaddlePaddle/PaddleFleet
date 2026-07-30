@@ -23,6 +23,7 @@ from typing import Any
 import paddle
 
 
+# rebuild
 # ---------------------------------------------------------------------------
 # Patch CUTLASS DSL scalar types to cache __c_pointers__ results.
 # Prevents pymalloc arena fragmentation from short-lived ctypes objects
