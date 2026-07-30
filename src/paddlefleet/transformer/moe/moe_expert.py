@@ -565,9 +565,6 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.sonic_moe_config.fuse_y1_quant = True
         self.sonic_moe_config.fuse_y1_bf16_trunc = True
         self.sonic_moe_config.recompute_z = False
-        self.sonic_moe_config.save_z_fp8 = (
-            self.config.sonicmoe_save_upgate_out_in_fp8
-        )
         clamp_value = self.config.activation_func_clamp_value
         self.sonic_moe_config.swiglu_clamp_value = (
             0.0 if clamp_value is None else float(clamp_value)
@@ -607,7 +604,7 @@ class SonicMoEExpert(GroupedMLPExpert):
 
     def _release_fp8_weight_after_fwd(self, recompute_moe_gate_up):
         release_fp8_weight_after_fwd = (
-            self.config.sonicmoe_quant_format == "1x32"
+            self.config.fp8_weight_quant_format == "1x32"
             and self._is_last_micro_batch
             and not g_shard_bypass_dygraph_optimizer
             and not recompute_moe_gate_up
@@ -698,9 +695,9 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.convert_weights_to_sonic_layout()
         self.clear_fp8_weights()
 
-        iso32 = self.config.sonicmoe_quant_format == "32x32"
-        assert self.config.sonicmoe_quant_format in ["32x32", "1x32"], (
-            f"sonic_moe_quant_format {self.config.sonicmoe_quant_format} is not supported."
+        iso32 = self.config.fp8_weight_quant_format == "32x32"
+        assert self.config.fp8_weight_quant_format in ["32x32", "1x32"], (
+            f"fp8_weight_quant_format {self.config.fp8_weight_quant_format} is not supported."
         )
         payload = quantize_native_fp8_weights(
             self.weight1,
