@@ -160,6 +160,7 @@ class _UnpermuteGatherSumAlignedPyLayer(PyLayer):
         ctx,
         permuted_tokens,
         reverse_indices_flat,
+        valid_token_indices,
         num_total_tokens,
         num_tokens,
         topk,
@@ -170,27 +171,32 @@ class _UnpermuteGatherSumAlignedPyLayer(PyLayer):
         ctx.num_tokens = num_tokens
         ctx.topk = topk
         ctx.hidden = hidden
-        ctx.save_for_backward(reverse_indices_flat)
+        ctx.save_for_backward(reverse_indices_flat, valid_token_indices)
         gathered = permuted_tokens.index_select(
             axis=0, index=reverse_indices_flat
         )
-        gathered = gathered.reshape([num_tokens, topk, hidden])
-        output_tokens = gathered.sum(axis=1)
+        gathered = gathered.reshape([-1, topk, hidden])
+        output_valid = gathered.sum(axis=1)
+        output_tokens = paddle.zeros(
+            [num_tokens, hidden], dtype=output_valid.dtype
+        )
+        output_tokens = paddle.scatter(
+            output_tokens, valid_token_indices, output_valid, overwrite=True
+        )
         return output_tokens.cast(ctx.input_dtype)
 
     @staticmethod
     def backward(ctx, grad_out):
-        (reverse_indices_flat,) = ctx.saved_tensor()
-        # Broadcast in fp32: [N, H] → [N, topk, H] → [N*topk, H]
+        reverse_indices_flat, valid_token_indices = ctx.saved_tensor()
+        grad_valid = grad_out.index_select(axis=0, index=valid_token_indices)
         grad_expand = (
-            grad_out.cast("float32")
+            grad_valid.cast("float32")
             .unsqueeze(1)
-            .expand([ctx.num_tokens, ctx.topk, ctx.hidden])
-            .reshape([ctx.num_tokens * ctx.topk, ctx.hidden])
+            .expand([-1, ctx.topk, ctx.hidden])
+            .reshape([-1, ctx.hidden])
         )
-        N_total = ctx.num_total_tokens
-        inverse_perm = paddle.zeros([N_total], dtype="int64")
-        src_idx = paddle.arange(ctx.num_tokens * ctx.topk, dtype="int64")
+        inverse_perm = paddle.zeros([ctx.num_total_tokens], dtype="int64")
+        src_idx = paddle.arange(reverse_indices_flat.shape[0], dtype="int64")
         inverse_perm = paddle.scatter(
             inverse_perm,
             reverse_indices_flat,
@@ -198,7 +204,7 @@ class _UnpermuteGatherSumAlignedPyLayer(PyLayer):
             overwrite=True,  # UNIQUE indices → deterministic
         )
         grad_permuted = grad_expand.index_select(axis=0, index=inverse_perm)
-        return grad_permuted.cast(ctx.input_dtype)
+        return grad_permuted.cast(ctx.input_dtype), None, None
 
 
 def _unpermute_gather_sum_aligned(
@@ -228,16 +234,28 @@ def _unpermute_gather_sum_aligned(
     )  # [num_experts, num_tokens]
     global_position_per_token = global_position.T  # [num_tokens, num_experts]
 
-    topk = int(routing_map_bool.cast("int64").sum(axis=-1)[0].item())
+    per_token_k = routing_map_bool.cast("int64").sum(axis=-1)
+    valid_token_indices = paddle.nonzero(per_token_k > 0).flatten()
+    if valid_token_indices.numel() == 0:
+        return paddle.zeros(restore_shape, dtype=permuted_tokens.dtype)
+    valid_ks = per_token_k.index_select(axis=0, index=valid_token_indices)
+    topk = int(valid_ks[0].item())
+    if int(valid_ks.min().item()) != topk or int(valid_ks.max().item()) != topk:
+        raise ValueError(
+            "accuracy-compatible unpermute requires a fixed top-k for all "
+            "valid (non-padding) tokens."
+        )
     valid_positions = global_position_per_token * routing_map_bool.cast("int64")
     reverse_indices_flat = paddle.masked_select(
         valid_positions, routing_map_bool
-    ).reshape([num_tokens * topk])
+    ).reshape([-1])
     reverse_indices_flat.stop_gradient = True
+    valid_token_indices.stop_gradient = True
 
     return _UnpermuteGatherSumAlignedPyLayer.apply(
         permuted_tokens,
         reverse_indices_flat,
+        valid_token_indices,
         num_total_tokens,
         num_tokens,
         topk,
@@ -278,6 +296,7 @@ class _PermuteAlignedPyLayer(PyLayer):
         tokens,
         sorted_indices,
         reverse_indices_flat,
+        valid_token_indices,
         num_tokens,
         topk,
         hidden,
@@ -286,20 +305,25 @@ class _PermuteAlignedPyLayer(PyLayer):
         ctx.num_tokens = num_tokens
         ctx.topk = topk
         ctx.hidden = hidden
-        ctx.save_for_backward(reverse_indices_flat)
+        ctx.save_for_backward(reverse_indices_flat, valid_token_indices)
         permuted_input = tokens.index_select(axis=0, index=sorted_indices)
         return permuted_input
 
     @staticmethod
     def backward(ctx, grad_permuted):
-        (reverse_indices_flat,) = ctx.saved_tensor()
-        # gather → [N*topk, H] in fp32 → reshape [N, topk, H] → sum(axis=1)
+        reverse_indices_flat, valid_token_indices = ctx.saved_tensor()
         gathered = grad_permuted.cast("float32").index_select(
             axis=0, index=reverse_indices_flat
         )
-        gathered = gathered.reshape([ctx.num_tokens, ctx.topk, ctx.hidden])
-        grad_tokens = gathered.sum(axis=1)
-        return grad_tokens.cast(ctx.input_dtype)
+        gathered = gathered.reshape([-1, ctx.topk, ctx.hidden])
+        grad_valid = gathered.sum(axis=1)
+        grad_tokens = paddle.zeros(
+            [ctx.num_tokens, ctx.hidden], dtype=grad_valid.dtype
+        )
+        grad_tokens = paddle.scatter(
+            grad_tokens, valid_token_indices, grad_valid, overwrite=True
+        )
+        return grad_tokens.cast(ctx.input_dtype), None, None, None
 
 
 def permute(
@@ -350,7 +374,9 @@ def permute(
         per_token_k = rm_bool_token.cast("int64").sum(axis=-1)
         # Filter out padding tokens (k=0) before checking fixed top-k
         valid_mask = per_token_k > 0
+        valid_token_indices = paddle.nonzero(valid_mask).flatten()
         valid_ks = per_token_k.masked_select(valid_mask)
+        valid_token_indices.stop_gradient = True
         if valid_ks.numel() == 0:
             topk_val = 0
         else:
@@ -370,6 +396,7 @@ def permute(
             tokens,
             sorted_indices,
             reverse_indices_flat,
+            valid_token_indices,
             num_tokens,
             topk_val,
             hidden,

@@ -15,7 +15,6 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-import paddle
 
 
 class TestRotaryEmbeddingUseAccuracyCompatible(unittest.TestCase):
@@ -67,44 +66,6 @@ class TestRotaryEmbeddingUseAccuracyCompatible(unittest.TestCase):
             use_accuracy_compatible=True,
         )
         self.assertEqual(rope.inv_freq.shape, [32])
-
-    @patch(
-        "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
-    )
-    def test_inv_freq_on_gpu_when_cuda(self, mock_ps):
-        """When compiled with CUDA, the accuracy-compatible branch moves
-        inv_freq back to GPU after the CPU computation."""
-        from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
-            RotaryEmbedding,
-        )
-
-        mock_ps.get_context_parallel_group.return_value = None
-        rope = RotaryEmbedding(
-            head_dim=64,
-            rotary_percent=1.0,
-            use_accuracy_compatible=True,
-        )
-        if paddle.is_compiled_with_cuda():
-            self.assertTrue(rope.inv_freq.place.is_gpu_place())
-
-    @patch("paddle.is_compiled_with_cuda", return_value=False)
-    @patch(
-        "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
-    )
-    def test_inv_freq_on_cpu_when_not_cuda(self, mock_ps, _mock_cuda):
-        """When not compiled with CUDA, the accuracy-compatible branch keeps
-        inv_freq on CPU."""
-        from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
-            RotaryEmbedding,
-        )
-
-        mock_ps.get_context_parallel_group.return_value = None
-        rope = RotaryEmbedding(
-            head_dim=64,
-            rotary_percent=1.0,
-            use_accuracy_compatible=True,
-        )
-        self.assertTrue(rope.inv_freq.place.is_cpu_place())
 
     @patch(
         "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"

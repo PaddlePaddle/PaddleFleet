@@ -563,12 +563,14 @@ class _DeepEPManager(_DispatchManager):
         num_experts: int | None = None,
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
+        use_accuracy_compatible: bool = False,
     ):
         self.group = group
         self.router_topk = router_topk
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
         self.moe_ep_barrier = moe_ep_barrier
+        self.use_accuracy_compatible = use_accuracy_compatible
 
         # Metadata
         self.token_indices = None
@@ -867,6 +869,8 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         if manager_cls is _HybridEPManager:
             manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
             manager_kwargs["moe_deep_gemm"] = moe_deep_gemm
+        else:
+            manager_kwargs["use_accuracy_compatible"] = use_accuracy_compatible
         self._comm_manager = manager_cls(**manager_kwargs)
 
     def dispatch_preprocess(

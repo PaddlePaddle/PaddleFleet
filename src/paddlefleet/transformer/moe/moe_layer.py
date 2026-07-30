@@ -492,7 +492,9 @@ class MoELayer(nn.Layer):
                         config, "hybridep_buffer_configs", None
                     ),
                     moe_deep_gemm=self.moe_deep_gemm,
-                    use_accuracy_compatible=self.use_accuracy_compatible,
+                    use_accuracy_compatible=getattr(
+                        self, "use_accuracy_compatible", False
+                    ),
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"
@@ -512,7 +514,9 @@ class MoELayer(nn.Layer):
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
                     local_expert_indices,
-                    use_accuracy_compatible=self.use_accuracy_compatible,
+                    use_accuracy_compatible=getattr(
+                        self, "use_accuracy_compatible", False
+                    ),
                 )
             elif self.moe_token_dispatcher_type == "allgather":
                 self.token_dispatcher = AllGatherTokenDispatcher(
@@ -709,7 +713,7 @@ class MoELayer(nn.Layer):
                 self.token_dispatcher, "global_input_probs", None
             )
             if per_token_scale is None:
-                if not self.use_accuracy_compatible:
+                if not getattr(self, "use_accuracy_compatible", False):
                     raise RuntimeError(
                         "FLAGS_use_accuracy_compatible_kernel requires dispatched "
                         "router probabilities from the token dispatcher."
@@ -724,7 +728,7 @@ class MoELayer(nn.Layer):
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            if self.use_accuracy_compatible:
+            if getattr(self, "use_accuracy_compatible", False):
                 # Pad small-M experts to 32 rows for cross-framework GEMM alignment
                 _m_real = int(chunk.shape[0])
                 if 0 < _m_real < 17:
@@ -989,7 +993,7 @@ class MoELayer(nn.Layer):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
-        if self.use_accuracy_compatible:
+        if getattr(self, "use_accuracy_compatible", False) is True:
             return self.custom_forward(
                 hidden_states,
                 probs,
@@ -1321,7 +1325,7 @@ class MoELayer(nn.Layer):
         layer_idx = getattr(self, "layer_number", None)
 
         _three_paths_enabled = (
-            self.use_accuracy_compatible
+            getattr(self, "use_accuracy_compatible", False)
             and hidden_states.stop_gradient is False
         )
         if _three_paths_enabled:
@@ -1541,7 +1545,9 @@ class MoELayer(nn.Layer):
                 hidden_states,
                 routing_map,
                 tokens_per_expert,
-                use_accuracy_compatible=self.use_accuracy_compatible,
+                use_accuracy_compatible=getattr(
+                    self, "use_accuracy_compatible", False
+                ),
             )
             grouped_expert_out = self.grouped_gemm_experts(
                 permuted_local_hidden_states, tokens_per_expert
@@ -1552,7 +1558,9 @@ class MoELayer(nn.Layer):
                 restore_shape=hidden_states.shape,
                 probs=probs,
                 routing_map=routing_map,
-                use_accuracy_compatible=self.use_accuracy_compatible,
+                use_accuracy_compatible=getattr(
+                    self, "use_accuracy_compatible", False
+                ),
             )
             return final_hidden_states.cast(hidden_states.dtype)
 

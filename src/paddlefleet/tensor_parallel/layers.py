@@ -1057,7 +1057,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 grad_weight = None
         else:
             if (
-                ctx.use_accuracy_compatible
+                wgrad_compute
+                and ctx.use_accuracy_compatible
                 and getattr(weight, "is_expert_param", False)
                 and hasattr(weight, "main_grad")
                 and weight.main_grad is not None
