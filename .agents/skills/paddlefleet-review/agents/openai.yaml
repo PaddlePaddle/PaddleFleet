@@ -1,0 +1,4 @@
+interface:
+  display_name: "PaddleFleet Review"
+  short_description: "Review PaddleFleet changes with repository checks"
+  default_prompt: "Use $paddlefleet-review to review this PaddleFleet change."
