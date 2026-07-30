@@ -30,7 +30,7 @@ def change_pwd():
         os.chdir(path)
 
 
-common_dependencies: list[str] = []
+common_dependencies: list[str] = ["einops"]
 
 
 def get_special_setup_deps():

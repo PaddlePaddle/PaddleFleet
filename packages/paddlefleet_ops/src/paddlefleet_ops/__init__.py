@@ -413,9 +413,8 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet_ops.flash_mla"] = error
 
     if is_fla_available():
-        paddle.enable_compat(scope={"fla", "triton"}, silent=True)
-        _safe_load_ecosystem_lib("fla", ops_dir, globals())
-        paddle.disable_compat()
+        with paddle.use_compat_guard(scope={"fla", "triton"}, silent=True):
+            _safe_load_ecosystem_lib("fla", ops_dir, globals())
     else:
         warning, error = _build_notice(
             "paddlefleet_ops.fla",
