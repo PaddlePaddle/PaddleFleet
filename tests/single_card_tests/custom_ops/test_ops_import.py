@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import unittest
 
 
@@ -120,6 +121,36 @@ class TestFastHadamardTransformImport(unittest.TestCase):
             from paddlefleet_ops.fast_hadamard_transform import (
                 xxxx,  # noqa: F401
             )
+
+
+class TestFLAImport(unittest.TestCase):
+    def test_fla_import(self):
+        import paddlefleet_ops
+        from paddlefleet_ops import fla
+
+        FusedRMSNormGated = fla.modules.FusedRMSNormGated
+        ShortConvolution = fla.modules.ShortConvolution
+        chunk_kda = fla.ops.kda.chunk_kda
+        prepare_cu_seqlens_from_mask = (
+            fla.ops.utils.index.prepare_cu_seqlens_from_mask
+        )
+        prepare_lens_from_mask = fla.ops.utils.index.prepare_lens_from_mask
+        tensor_cache = fla.utils.tensor_cache
+
+        self.assertIs(fla, paddlefleet_ops.fla)
+        self.assertTrue(paddlefleet_ops.is_fla_available())
+        self.assertIs(fla, sys.modules["fla"])
+        self.assertIs(fla, sys.modules["paddlefleet_ops.fla"])
+        self.assertIs(chunk_kda, fla.ops.kda.chunk_kda)
+        self.assertIs(
+            sys.modules["fla.ops.kda"],
+            sys.modules["paddlefleet_ops.fla.ops.kda"],
+        )
+        self.assertTrue(callable(FusedRMSNormGated))
+        self.assertTrue(callable(ShortConvolution))
+        self.assertTrue(callable(prepare_cu_seqlens_from_mask))
+        self.assertTrue(callable(prepare_lens_from_mask))
+        self.assertTrue(callable(tensor_cache))
 
 
 if __name__ == "__main__":
