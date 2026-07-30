@@ -132,6 +132,8 @@ def _test_domain_module_imports(module, subdomains: list):
 def test_domain_core():
     import paddlefleet
 
+    assert paddlefleet.transformer.__name__ == "paddlefleet.transformer"
+
     all_passed = _test_domain_module_imports(
         paddlefleet, subdomains=["transformer"]
     )

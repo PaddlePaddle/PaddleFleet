@@ -2074,7 +2074,7 @@ def load_LLM(args):
         kwargs["paddle_worker_timeout_s"] = args.paddle_worker_timeout_s
         if args.rope_theta is not None:
             logger.warning(
-                "rope_theta override is not handled by PaddleWorkerModel; use a PaddleFormers config instead"
+                "rope_theta override is not handled by PaddleWorkerModel; use a PaddleFleet config instead"
             )
 
     logger.info(

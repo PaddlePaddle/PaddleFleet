@@ -485,8 +485,8 @@ jobs:
           chmod +x /usr/local/bin/yq
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -500,19 +500,15 @@ jobs:
           if [ ${CUDA_VERSION} == "cu130" ]; then
             pip install blinker==1.9.0 --ignore-installed
           fi
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
-          git config --global --add safe.directory /workspace/PaddleFormers
+          cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
-          git checkout ${formers_branch}
           git log -1
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
+          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
+          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -525,18 +521,18 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          echo "paddleformers Commit"
-          python -c "import paddleformers; print(paddleformers.version.commit)"
+          echo "paddlefleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
 
       - name: Proprocess for integration test
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/preprocess.sh
+          bash -x PaddleFleet/test/formers/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
@@ -547,13 +543,13 @@ jobs:
           '
 
       - name: Integration test (GLM4.5 single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             export case_name="glm45_single_card"
@@ -564,13 +560,13 @@ jobs:
           '
 
       - name: Integration test (Qwen3-30B-A3B single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             export case_name="qwen3_single_card"
@@ -581,14 +577,14 @@ jobs:
           '
 
       - name: Qwen3-vl-8k-single-card
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_single_card"
@@ -728,8 +724,8 @@ jobs:
           chmod +x /usr/local/bin/yq
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -743,18 +739,14 @@ jobs:
           if [ ${CUDA_VERSION} == "cu130" ]; then
             pip install blinker==1.9.0 --ignore-installed
           fi
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
+          cd PaddleFleet
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
-          git config --global --add safe.directory /workspace/PaddleFormers
+          git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
-          git checkout ${formers_branch}
           git log -1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -767,18 +759,18 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          echo "paddleformers Commit"
-          python -c "import paddleformers; print(paddleformers.version.commit)"
+          echo "paddlefleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
 
       - name: GLM4.5 pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt"
@@ -789,13 +781,13 @@ jobs:
           '
 
       - name: GLM4.5 sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft"
@@ -806,7 +798,7 @@ jobs:
           '
 
       - name: GLM4.5 sft cp
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -815,7 +807,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_sft_cp.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft_cp"
@@ -826,13 +818,13 @@ jobs:
           '
 
       - name: GLM4.5 lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_lora"
@@ -843,13 +835,13 @@ jobs:
           '
 
       - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_dpo"
@@ -860,14 +852,14 @@ jobs:
           '
 
       - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo_lora.sh
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="glm45_dpo_lora"
@@ -879,7 +871,7 @@ jobs:
 
 
       - name: GLM4.5 pre-train (Grouped GEMM)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -888,7 +880,7 @@ jobs:
           fi
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_grouped_gemm"
@@ -900,7 +892,7 @@ jobs:
 
 
       - name: Integration test (GLM4.5 multi-card FP8)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -909,7 +901,7 @@ jobs:
           fi
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_fp8"
@@ -920,13 +912,13 @@ jobs:
           '
 
       - name: GLM4.5 pre-train (EP4)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_ep4.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_ep4"
@@ -937,13 +929,13 @@ jobs:
           '
 
       - name: Qwen pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh pt
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_pt"
@@ -954,13 +946,13 @@ jobs:
           '
 
       - name: Qwen sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh sft
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_sft"
@@ -971,13 +963,13 @@ jobs:
           '
 
       - name: Qwen lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh lora
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_lora"
@@ -988,14 +980,14 @@ jobs:
           '
 
       - name: Qwen vl sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_tp8_multi_card"
@@ -1006,14 +998,14 @@ jobs:
           '
 
       - name: Qwen vl lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_lora_h20_multi_card"
@@ -1024,14 +1016,14 @@ jobs:
           '
 
       - name: Qwen vl moe
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_moe_multi_card"
@@ -1042,14 +1034,14 @@ jobs:
           '
 
       - name: Qwen3-vl-8k-fsdp
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh fsdp h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_fsdp_multi_card"
@@ -1189,8 +1181,8 @@ jobs:
           chmod +x /usr/local/bin/yq
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -1204,17 +1196,13 @@ jobs:
           if [ ${CUDA_VERSION} == "cu130" ]; then
             pip install blinker==1.9.0 --ignore-installed
           fi
-          git clone https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
-          git config --global --add safe.directory /workspace/PaddleFormers
+          cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
-          git checkout ${formers_branch}
           git log -1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -1227,8 +1215,8 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          echo "paddleformers Commit"
-          python -c "import paddleformers; print(paddleformers.version.commit)"
+          echo "paddlefleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
 
       - name: GLM4.5 pre-train
@@ -1237,7 +1225,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_pt_multi_card_a100"
@@ -1248,14 +1236,14 @@ jobs:
           '
 
       - name: GLM4.5 sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_sft_multi_card_a100"
@@ -1266,14 +1254,14 @@ jobs:
           '
 
       - name: GLM4.5 lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_lora_multi_card_a100"
@@ -1284,14 +1272,14 @@ jobs:
           '
 
       - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_multi_card_a100"
@@ -1302,14 +1290,14 @@ jobs:
           '
 
       - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo_lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_lora_multi_card_a100"
@@ -1320,14 +1308,14 @@ jobs:
           '
 
       - name: Qwen pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_pt_multi_card_a100"
@@ -1338,14 +1326,14 @@ jobs:
           '
 
       - name: Qwen sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_sft_multi_card_a100"
@@ -1356,14 +1344,14 @@ jobs:
           '
 
       - name: Qwen lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_lora_multi_card_a100"
@@ -1374,14 +1362,14 @@ jobs:
           '
 
       - name: Qwen vl sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_tp8_multi_card"
@@ -1392,14 +1380,14 @@ jobs:
           '
 
       - name: Qwen vl lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_lora_a100_multi_card"
@@ -1410,14 +1398,14 @@ jobs:
           '
 
       - name: Qwen vl moe
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_moe_multi_card"

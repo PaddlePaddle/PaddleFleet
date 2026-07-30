@@ -285,21 +285,19 @@ jobs:
           chmod +x /usr/local/bin/yq
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
-          git config --global --add safe.directory /workspace/PaddleFormers
+          cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
+          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
+          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
@@ -312,16 +310,16 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          echo "paddleformers Commit"
-          python -c "import paddleformers; print(paddleformers.version.commit)"
+          echo "paddlefleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
 
       - name: Proprocess for integration test
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/preprocess.sh
+          bash -x PaddleFleet/test/formers/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
@@ -332,11 +330,11 @@ jobs:
           '
 
       - name: Integration test (GLM4.5 single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
@@ -347,11 +345,11 @@ jobs:
           '
 
       - name: Integration test (Qwen3-30B-A3B single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
@@ -362,12 +360,12 @@ jobs:
           '
 
       - name: Qwen3-vl-8k-single-card
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-vl-8k-single-card.\033[0m"
@@ -445,20 +443,18 @@ jobs:
           chmod +x /usr/local/bin/yq
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
+          cd PaddleFleet
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
-          git config --global --add safe.directory /workspace/PaddleFormers
+          git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
@@ -471,16 +467,16 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          echo "paddleformers Commit"
-          python -c "import paddleformers; print(paddleformers.version.commit)"
+          echo "paddlefleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
 
       - name: GLM4.5 pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -491,11 +487,11 @@ jobs:
           '
 
       - name: GLM4.5 sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -505,20 +501,20 @@ jobs:
           fi
           '
       - name: GLM4.5 sft cp
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_sft_cp.sh
           '
 
       - name: GLM4.5 lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -529,11 +525,11 @@ jobs:
           '
 
       - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
@@ -544,21 +540,21 @@ jobs:
           '
 
       - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo_lora.sh
           '
 
 
       - name: GLM4.5 pre-train (Grouped GEMM)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
@@ -569,72 +565,72 @@ jobs:
           '
 
       - name: GLM4.5 pre-train (EP4)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_ep4.sh
           '
 
       - name: Qwen pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh pt
           '
 
       - name: Qwen sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh sft
           '
 
       - name: Qwen lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh lora
           '
 
       - name: Qwen vl sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
       - name: Qwen vl lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh h20
           '
 
       - name: Qwen vl moe
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe h20
           '
 
       - name: Qwen3-vl-8k-fsdp
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh fsdp h20
           '
 
       - name: Terminate and delete the container
@@ -707,19 +703,17 @@ jobs:
           chmod +x /usr/local/bin/yq
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
-          git config --global --add safe.directory /workspace/PaddleFormers
+          cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
@@ -732,106 +726,106 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          echo "paddleformers Commit"
-          python -c "import paddleformers; print(paddleformers.version.commit)"
+          echo "paddlefleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
 
       - name: GLM4.5 pre-train
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh pt
           '
 
       - name: GLM4.5 sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh sft
           '
 
       - name: GLM4.5 lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh lora
           '
 
       - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo
           glm45_exit_code=$?
           '
 
       - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo_lora
           '
 
       - name: Qwen pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh pt
           '
 
       - name: Qwen sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh sft
           '
 
       - name: Qwen lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh lora
           '
 
       - name: Qwen vl sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 a100
           '
 
       - name: Qwen vl lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh a100
           '
 
       - name: Qwen vl moe
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe a100
           '
 
       - name: Terminate and delete the container
