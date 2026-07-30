@@ -287,8 +287,11 @@ class HyperConnectionModule(nn.Layer):
     def _init_weights(self) -> None:
         """Initialize weights for stable training."""
         # Xavier uniform for mapping projection.
-        # Use model-parallel RNG tracker to keep initialization deterministic
-        # regardless of layer_index shifts.
+        # Use the model-parallel RNG tracker so that the initialization is
+        # controlled by PaddleFleet's RNG state (seeded once at model init)
+        # rather than the per-layer pipeline seed (base_seed + layer_index).
+        # This prevents layer_index shifts (e.g. from MTPEmbeddingLayer insertion
+        # in magic_send mode) from changing the weights.
         if paddle.distributed.get_world_size() <= 1:
             nn.initializer.XavierUniform()(self.mapping_proj.weight)
         else:
@@ -692,13 +695,30 @@ class HyperConnectionModule(nn.Layer):
                     [*leading_shape, n, C]
                 )
                 if self.config.high_precision_mhc:
-                    orig_reshaped = orig_reshaped.astype("float32")
-                    x = x.astype("float32")
-                    if bias is not None:
-                        bias = bias.astype("float32")
-                output = self._h_post_bda_op(
-                    h_res, orig_reshaped, h_post, x, bias
-                )
+                    if self.config.use_fused_mhc:
+                        # Fused path: pass bf16 inputs, let kernel handle fp32 computation
+                        # and output via output_dtype parameter.
+                        output = self._h_post_bda_op(
+                            h_res,
+                            orig_reshaped,
+                            h_post,
+                            x,
+                            bias,
+                            output_dtype="float32",
+                        )
+                    else:
+                        # Native path: cast inputs to fp32 before computation.
+                        orig_reshaped = orig_reshaped.astype("float32")
+                        x = x.astype("float32")
+                        if bias is not None:
+                            bias = bias.astype("float32")
+                        output = self._h_post_bda_op(
+                            h_res, orig_reshaped, h_post, x, bias
+                        )
+                else:
+                    output = self._h_post_bda_op(
+                        h_res, orig_reshaped, h_post, x, bias
+                    )
                 return output.reshape([*leading_shape, n * C])
 
             # Sequential path: used when dropout required OR accuracy-compatible kernel is NOT enabled
