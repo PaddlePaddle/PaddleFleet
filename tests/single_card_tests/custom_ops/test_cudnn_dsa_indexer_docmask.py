@@ -42,67 +42,6 @@ from paddlefleet.cudnn_ops.indexer.docmask_utils import (
 )
 
 
-class TestCudnnDocmaskMetadataReuse(unittest.TestCase):
-    def test_thd_fast_path_uses_precomputed_doc_lens(self):
-        from paddlefleet.cudnn_ops.indexer import csa_indexer_fwd_cudnn as mod
-
-        index_q = paddle.zeros([1, 8, 32, 128], dtype="bfloat16")
-        index_k_comp = paddle.zeros([1, 2, 128], dtype="bfloat16")
-        weights = paddle.zeros([1, 8, 32], dtype="bfloat16")
-        valid_range = paddle.zeros([1, 8, 2], dtype="int32")
-        startend_row_indices = paddle.to_tensor(
-            [999] * 8, dtype="int32"
-        ).reshape([1, 1, 8, 1])
-
-        with patch.object(
-            mod,
-            "_doc_lens_from_startend",
-            side_effect=AssertionError("should reuse doc_lens"),
-        ):
-            result = mod._cudnn_indexer_topk_fwd_docmask_thd(
-                index_q,
-                index_k_comp,
-                weights,
-                ratio=4,
-                topk_effective=2,
-                sm_scale=1.0,
-                valid_range=valid_range,
-                startend_row_indices=startend_row_indices,
-                doc_lens=[4, 4],
-            )
-
-        self.assertIsNone(result)
-
-    def test_thd_fast_path_rejects_mismatched_global_startend(self):
-        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
-            _cudnn_indexer_topk_fwd_docmask_thd,
-        )
-
-        ratio, sq_local, sq_global, h, d = 4, 64, 128, 32, 128
-        index_q = paddle.zeros([1, sq_local, h, d], dtype="bfloat16")
-        index_k_comp = paddle.zeros(
-            [1, sq_global // ratio, d], dtype="bfloat16"
-        )
-        weights = paddle.zeros([1, sq_local, h], dtype="bfloat16")
-        valid_range = paddle.zeros([1, sq_local, 2], dtype="int32")
-        startend_row_indices = paddle.full(
-            [1, 1, sq_global, 1], sq_global, dtype="int32"
-        )
-
-        result = _cudnn_indexer_topk_fwd_docmask_thd(
-            index_q,
-            index_k_comp,
-            weights,
-            ratio=ratio,
-            topk_effective=8,
-            sm_scale=1.0,
-            valid_range=valid_range,
-            startend_row_indices=startend_row_indices,
-            doc_lens=[sq_global],
-        )
-        self.assertIsNone(result)
-
-
 class TestTopkLocalGlobal(unittest.TestCase):
     """topk_local_to_global / topk_global_to_local."""
 
@@ -427,6 +366,17 @@ def _assert_topk_sets_equal(testcase, actual, expected, message):
         )
 
 
+def _spec_topk_mask(doc_lens, ratio, topk):
+    """
+    Mask of shape [1, seqlen, topk] that tells the masked slots in topk scores.
+    """
+    pos = paddle.concat([paddle.arange(n) for n in doc_lens])
+    visible = paddle.minimum((pos + 1) // ratio, paddle.to_tensor(topk))
+    col = paddle.arange(topk)
+    mask = col.unsqueeze(0) >= visible.unsqueeze(1)
+    return mask.unsqueeze(0)
+
+
 @unittest.skipIf(
     not paddle.device.is_compiled_with_cuda()
     or paddle.device.cuda.get_device_capability()[0] != 10,
@@ -577,7 +527,7 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
         )
         self.assertTrue(paddle.equal_all(valid_range, expected_range).item())
 
-        actual_idx, actual_len, _ = cudnn_indexer_topk_fwd(
+        actual_idx, actual_len, scores = cudnn_indexer_topk_fwd(
             index_q,
             index_k,
             weights,
@@ -599,6 +549,8 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
             expected_idx,
             f"doc_lens={doc_lens}, real_sk={real_sk}",
         )
+        topk_mask = _spec_topk_mask(doc_lens, ratio, topk)
+        self.assertTrue(paddle.all(scores[topk_mask] == float("-inf")))
         return actual_idx, actual_len, expected_range, real_sk
 
     def test_aligned_docs_match_independent_spec(self):
@@ -674,6 +626,34 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
         _assert_topk_sets_equal(
             self, actual_idx, expected_slice, "CP local query slice"
         )
+
+    def test_no_visible_k_fallback(self):
+        """Case that the last CP rank gets all padding."""
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+            _cudnn_indexer_topk_fwd_docmask_thd,
+        )
+
+        doc_lens, offset, ratio, topk, h, d = [4, 7, 5], 12, 4, 8, 64, 128
+        sq = sum(doc_lens)
+        doc_lens_without_padding = doc_lens[:-1]
+        startend, valid_range, _, sk = _spec_docmask_inputs(doc_lens, ratio)
+        index_q = paddle.randn([1, sq, h, d], "bfloat16")
+        index_k = paddle.randn([1, sk, d], "bfloat16")
+        weights = paddle.randn([1, sq, h], "bfloat16")
+
+        result = _cudnn_indexer_topk_fwd_docmask_thd(
+            index_q[:, offset:],
+            index_k,
+            weights[:, offset:],
+            ratio=ratio,
+            topk_effective=topk,
+            sm_scale=1.0,
+            valid_range=valid_range[:, offset:],
+            seq_offset=offset,
+            doc_lens=doc_lens_without_padding,
+        )
+
+        self.assertIsNone(result)
 
 
 @unittest.skipIf(
