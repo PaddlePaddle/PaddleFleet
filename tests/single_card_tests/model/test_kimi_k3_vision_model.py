@@ -152,19 +152,6 @@ class TestKimiK3VisionModel(_KimiK3VisionTestMixin, unittest.TestCase):
         self.assertIsInstance(model, KimiK3VisionModel)
         self.assertGreater(sum(p.numel().item() for p in model.parameters()), 0)
 
-        # Print the pipeline stages and weights (visible with `pytest -s`).
-        print("\n=== KimiK3VisionModel pipeline stages ===")
-        prefixes = model.get_sequential_name_prefixes()
-        for name, layer in model.named_children():
-            if not name.isdigit():
-                continue
-            print(
-                f"[{name}] {prefixes.get(name, ''):<40} {type(layer).__name__}"
-            )
-        print("=== parameters ===")
-        for name, param in model.named_parameters():
-            print(f"{name:<70} {list(param.shape)}")
-
     def test_forward_single_image(self):
         model, _ = self._create_model()
         grid_thws = paddle.to_tensor([[1, 4, 4]], dtype="int32")
