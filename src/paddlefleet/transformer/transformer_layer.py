@@ -1825,7 +1825,7 @@ class HySparseTransformerLayer(TransformerLayer):
         # 1. 对于 swa 层是输入, 只消费 shared_kv，不生产;
         # 2. 对于 full 层是输出, 只生产 shared_kv, 不消费.
         if self.self_attn.is_swa:
-            if shared_key is None or shared_block_indices is None:
+            if shared_key is None:
                 raise ValueError(
                     f"HySparse SWA layer (layer_number={self.layer_number}) "
                     "requires shared KV latent and top-k block indices from a "
@@ -1835,6 +1835,9 @@ class HySparseTransformerLayer(TransformerLayer):
                     "state -- e.g. set window_attn_skip_freq so that layer 0 "
                     "is full attention rather than SWA."
                 )
+            # ``shared_block_indices`` is None during incremental decode, where
+            # the full layer cannot score blocks one token at a time and the SWA
+            # layer runs window-only.
             shared_kv = [shared_key, shared_block_indices]
         else:
             shared_kv = []
