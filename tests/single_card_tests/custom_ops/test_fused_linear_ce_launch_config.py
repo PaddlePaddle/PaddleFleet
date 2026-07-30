@@ -35,8 +35,13 @@ import unittest
 
 import numpy as np
 import paddle
-import triton
 
+# 注意：不要在这里 `import triton`。当环境没有真 torch 时（CI 即如此），Triton 的
+# nvidia backend 靠 `import torch` 探活 driver，只有在 paddle 的 torch-compat
+# proxy 已启用后导入 triton，其模块才会被标记为 compat 作用域内，`import torch`
+# 才拿得到 proxy；否则 driver 探活失败，kernel 启动时报
+# "0 active drivers"。paddlefleet 的导入会先启用 compat，所以 triton 必须晚于它
+# 被导入 —— 需要 triton 时统一走 `flce_module.triton`。
 from paddlefleet.triton_ops.fused_linear_cross_entropy import (
     fused_linear_cross_entropy as flce_module,
 )
@@ -66,7 +71,7 @@ class TestCELaunchConfigSelection(unittest.TestCase):
             block_size, _ = _select_ce_launch_config(v)
             expected = min(
                 flce_module.MAX_FUSED_SIZE,
-                triton.next_power_of_2(v),
+                flce_module.triton.next_power_of_2(v),
                 flce_module.CE_BLOCK_SIZE_CAP,
             )
             self.assertEqual(block_size, expected, msg=f"V={v}")
