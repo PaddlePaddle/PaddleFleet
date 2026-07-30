@@ -1458,6 +1458,72 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
             float(with_length[:, 19:].cast("float32").abs().max()), 0.0
         )
 
+    def test_mqa_causal_topk_idxs_from_startend_row_indices(self):
+        # Without a prebuilt metadata object the helper builds one itself from
+        # startend_row_indices; both entry points must agree.
+        seqlen = 16
+        startend_row_indices = _make_startend_row_indices([7, 9], seqlen)
+        idxs, lengths = get_mqa_causal_topk_idxs(
+            1, seqlen, startend_row_indices=startend_row_indices
+        )
+        meta = CSADocMaskMetadata.build(
+            1, 1, seqlen, startend_row_indices, seqlen
+        )
+        meta_idxs, meta_lengths = get_mqa_causal_topk_idxs(
+            1, seqlen, docmask_meta=meta
+        )
+        self.assertEqual(idxs.shape, [1, seqlen, seqlen])
+        self.assertEqual(lengths.shape, [1, seqlen])
+        self.assertTrue(paddle.equal_all(idxs, meta_idxs).item())
+        self.assertTrue(paddle.equal_all(lengths, meta_lengths).item())
+        # The causal range restarts at the second document's start (7).
+        self.assertEqual(
+            lengths[0].numpy().tolist(),
+            [i + 1 for i in range(7)] + [i - 7 + 1 for i in range(7, 16)],
+        )
+
+    def test_mqa_rejects_tilelang_backend(self):
+        # tilelang has no topk_length support, so the MQA layer cannot use it.
+        config = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-1],
+            csa_sparse_attn_backend="tilelang",
+        )
+        with self.assertRaisesRegex(NotImplementedError, "'tilelang'"):
+            CompressedSparseAttention(
+                config=config,
+                sublayers_spec=CompressedSparseAttentionSublayersSpec(),
+                layer_number=0,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+                pg_collection=_FakePGCollection(),
+                compress_ratio=-1,
+            )
+
+    def test_mqa_rejects_context_parallelism(self):
+        # CP must fail loudly instead of taking the CSA CP path, which assumes
+        # a compressed KV stream the MQA layer never builds.
+        paddle.seed(_SEED)
+        config = _make_config(num_layers=1, csa_compress_ratios=[-1])
+        core = CompressedSparseAttention(
+            config=config,
+            sublayers_spec=CompressedSparseAttentionSublayersSpec(),
+            layer_number=0,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+            pg_collection=_FakePGCollection(cp_nranks=2),
+            compress_ratio=-1,
+        )
+        self.assertTrue(core.cp_enabled)
+        b, sq = 1, 8
+        query = paddle.randn(
+            [b, sq, config.num_attention_heads, config.v_head_dim],
+            dtype="bfloat16",
+        )
+        key = paddle.randn([b, sq, 1, config.v_head_dim], dtype="bfloat16")
+        with self.assertRaisesRegex(NotImplementedError, "cp=2"):
+            core(query, key, key)
+
     def test_q_head_dim_equals_v_head_dim(self):
         paddle.seed(_SEED)
         config = _make_config()

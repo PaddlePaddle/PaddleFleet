@@ -2021,7 +2021,8 @@ class CompressedSparseAttention(FleetLayer):
                     "with csa_sparse_attn_backend='unfused' materialises a "
                     "dense [b, sq, sq, head_dim] gather and only fits tiny "
                     "sequences (~68 TB at sq=8192). Use 'cudnn' for training; "
-                    "'unfused' is a reference path for tests."
+                    "'unfused' is a reference path for tests.",
+                    stacklevel=2,
                 )
         self.window_size = config.csa_window_size
         self.v_head_dim = config.v_head_dim
