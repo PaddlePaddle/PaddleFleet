@@ -491,7 +491,9 @@ class MoELayer(nn.Layer):
                         config, "hybridep_buffer_configs", None
                     ),
                     moe_deep_gemm=self.moe_deep_gemm,
-                    use_accuracy_compatible=self.use_accuracy_compatible,
+                    use_accuracy_compatible=getattr(
+                        self, "use_accuracy_compatible", False
+                    ),
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"
@@ -511,7 +513,9 @@ class MoELayer(nn.Layer):
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
                     local_expert_indices,
-                    use_accuracy_compatible=self.use_accuracy_compatible,
+                    use_accuracy_compatible=getattr(
+                        self, "use_accuracy_compatible", False
+                    ),
                 )
             elif self.moe_token_dispatcher_type == "allgather":
                 self.token_dispatcher = AllGatherTokenDispatcher(
@@ -1269,7 +1273,7 @@ class MoELayer(nn.Layer):
         layer_idx = getattr(self, "layer_number", None)
 
         _three_paths_enabled = (
-            self.use_accuracy_compatible
+            getattr(self, "use_accuracy_compatible", False)
             and hidden_states.stop_gradient is False
         )
         if _three_paths_enabled:
