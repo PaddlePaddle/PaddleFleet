@@ -319,13 +319,13 @@ class LlamaModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase)
     def test_save_load(self):
         for model_class in self.all_model_classes:
             model1 = model_class.from_pretrained(
-                "Paddleformers/tiny-random-llama3",
+                "PaddleFormers/tiny-random-llama3",
                 download_hub="aistudio",
                 convert_from_hf=True,
                 load_checkpoint_format="",
             )
             model2 = model_class.from_pretrained(
-                "Paddleformers/tiny-random-llama3",
+                "PaddleFormers/tiny-random-llama3",
                 download_hub="aistudio",
                 load_checkpoint_format="flex_checkpoint",
             )
@@ -387,7 +387,7 @@ class LlamaModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase):
     @slow
     def test_inference_no_attention(self):
         model = LlamaModel.from_pretrained(
-            "Paddleformers/tiny-random-llama", save_safetensors=False, save_checkpoint_format=""
+            "PaddleFormers/tiny-random-llama", save_safetensors=False, save_checkpoint_format=""
         )
         model.eval()
         input_ids = paddle.to_tensor([[0, 345, 232, 328, 740, 140, 1695, 69, 6078, 1588, 2]])
@@ -413,7 +413,7 @@ class LlamaModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase):
     @slow
     def test_inference_with_attention(self):
         model = LlamaModel.from_pretrained(
-            "Paddleformers/tiny-random-llama",
+            "PaddleFormers/tiny-random-llama",
             download_hub="aistudio",
             save_safetensors=False,
             save_checkpoint_format="",
@@ -449,7 +449,7 @@ class Llama3ModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase):
     @slow
     def test_inference_no_attention(self):
         model = LlamaModel.from_pretrained(
-            "Paddleformers/tiny-random-llama3",
+            "PaddleFormers/tiny-random-llama3",
             download_hub="aistudio",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
@@ -478,7 +478,7 @@ class Llama3ModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase):
     @slow
     def test_inference_with_attention(self):
         model = LlamaModel.from_pretrained(
-            "Paddleformers/tiny-random-llama3",
+            "PaddleFormers/tiny-random-llama3",
             download_hub="aistudio",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
@@ -505,11 +505,11 @@ class Llama3ModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase):
 
 
 class LlamaGenerationD2STest(GenerationD2STestMixin, unittest.TestCase):
-    internal_testing_model = "Paddleformers/tiny-random-llama"
+    internal_testing_model = "PaddleFormers/tiny-random-llama"
 
 
 class Llama3GenerationD2STest(GenerationD2STestMixin, unittest.TestCase):
-    internal_testing_model = "Paddleformers/tiny-random-llama3"
+    internal_testing_model = "PaddleFormers/tiny-random-llama3"
 
 
 class LlamaCompatibilityTest(unittest.TestCase):

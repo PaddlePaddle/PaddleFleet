@@ -20,7 +20,7 @@ import paddle
 
 from paddlefleet.generation import TextIteratorStreamer, TextStreamer
 from paddlefleet.transformers import AutoModelForCausalLM, AutoTokenizer
-from paddlefleet.transformers.utils import CaptureStd
+from paddlefleet.transformers.utils import CaptureStd, apply_print_resets
 from formers.testing_utils import gpu_device_initializer, slow
 from formers.transformers.test_modeling_common import ids_tensor
 
@@ -41,9 +41,9 @@ class StreamerTester(unittest.TestCase):
         }
 
     def test_text_streamer_matches_non_streaming(self):
-        tokenizer = AutoTokenizer.from_pretrained("Paddleformers/tiny-random-llama")
+        tokenizer = AutoTokenizer.from_pretrained("PaddleFormers/tiny-random-llama")
         model = AutoModelForCausalLM.from_pretrained(
-            "Paddleformers/tiny-random-llama", convert_from_hf=False, load_checkpoint_format=""
+            "PaddleFormers/tiny-random-llama", convert_from_hf=False, load_checkpoint_format=""
         )
         model.config.eos_token_id = -1
 
@@ -57,12 +57,12 @@ class StreamerTester(unittest.TestCase):
         # The greedy text should be printed to stdout, except for the final "\n" in the streamer
         streamer_text = cs.out[:-1]
 
-        self.assertEqual(streamer_text, greedy_text)
+        self.assertEqual(streamer_text, apply_print_resets(greedy_text))
 
     def test_iterator_streamer_matches_non_streaming(self):
-        tokenizer = AutoTokenizer.from_pretrained("Paddleformers/tiny-random-llama")
+        tokenizer = AutoTokenizer.from_pretrained("PaddleFormers/tiny-random-llama")
         model = AutoModelForCausalLM.from_pretrained(
-            "Paddleformers/tiny-random-llama", convert_from_hf=False, load_checkpoint_format=""
+            "PaddleFormers/tiny-random-llama", convert_from_hf=False, load_checkpoint_format=""
         )
         model.config.eos_token_id = -1
 
@@ -104,9 +104,9 @@ class StreamerTester(unittest.TestCase):
         self.assertEqual(streamer_text_tokenized.input_ids.shape, [1, 1])
 
     def test_iterator_streamer_timeout(self):
-        tokenizer = AutoTokenizer.from_pretrained("Paddleformers/tiny-random-llama")
+        tokenizer = AutoTokenizer.from_pretrained("PaddleFormers/tiny-random-llama")
         model = AutoModelForCausalLM.from_pretrained(
-            "Paddleformers/tiny-random-llama", convert_from_hf=False, load_checkpoint_format=""
+            "PaddleFormers/tiny-random-llama", convert_from_hf=False, load_checkpoint_format=""
         )
         model.config.eos_token_id = -1
 

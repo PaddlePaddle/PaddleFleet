@@ -36,7 +36,7 @@ class Ernie4_5_VLProcessorTest(ProcessorTesterMixin, unittest.TestCase):
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp()
         processor = Ernie4_5_VLProcessor.from_pretrained(
-            "PaddleFleet/tiny_random_ernie4_5_vl",
+            "PaddleFormers/tiny_random_ernie4_5_vl",
             download_hub="aistudio",
             patch_size=4,
             max_pixels=56 * 56,

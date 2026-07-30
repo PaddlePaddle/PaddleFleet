@@ -344,6 +344,7 @@ class Qwen3PretrainedModel(PretrainedModel):
     def _gen_aoa_config(cls, config: Qwen3Config):
         model_prefix = "" if cls == cls.base_model_class else "model."
         is_fleet = getattr(cls, "is_fleet", False)
+        dtype_suffix = f", dtype='{config.dtype}'" if is_fleet and getattr(config, "dtype", None) else ""
 
         aoa_config = {
             "aoa_statements": [
@@ -357,9 +358,9 @@ class Qwen3PretrainedModel(PretrainedModel):
 
         if is_fleet:
             aoa_config["aoa_statements"] += [
-                f"model.embed_tokens.weight -> {model_prefix}embedding.embed_tokens.weight",
-                f"model.layers.$LAYER_ID.self_attn.q_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.q_layernorm.weight",
-                f"model.layers.$LAYER_ID.self_attn.k_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.k_layernorm.weight",
+                f"model.embed_tokens.weight -> {model_prefix}embedding.embed_tokens.weight{dtype_suffix}",
+                f"model.layers.$LAYER_ID.self_attn.q_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.q_layernorm.weight{dtype_suffix}",
+                f"model.layers.$LAYER_ID.self_attn.k_norm.weight -> {model_prefix}layers.$LAYER_ID.self_attn.k_layernorm.weight{dtype_suffix}",
             ]
         else:
             aoa_config["aoa_statements"] += [
@@ -385,12 +386,14 @@ class Qwen3PretrainedModel(PretrainedModel):
         # lm_head
         if config.tie_word_embeddings:
             if is_fleet:
-                aoa_config["aoa_statements"] += [f"model.embed_tokens.weight -> {model_prefix}lm_head.weight"]
+                aoa_config["aoa_statements"] += [
+                    f"model.embed_tokens.weight -> {model_prefix}lm_head.weight{dtype_suffix}"
+                ]
             else:
                 aoa_config["aoa_statements"] += ["model.embed_tokens.weight -> lm_head.weight"]
         else:
             if is_fleet:
-                aoa_config["aoa_statements"] += [f"lm_head.weight -> {model_prefix}lm_head.weight"]
+                aoa_config["aoa_statements"] += [f"lm_head.weight -> {model_prefix}lm_head.weight{dtype_suffix}"]
 
         return aoa_config
 

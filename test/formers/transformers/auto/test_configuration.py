@@ -45,7 +45,7 @@ class AutoConfigTest(unittest.TestCase):
 
     def test_community_model_class(self):
         # OPT model do not support PretrainedConfig, but can load it as the AutoConfig object
-        config = AutoConfig.from_pretrained("Paddleformers/tiny-random-llama", download_hub="aistudio")
+        config = AutoConfig.from_pretrained("PaddleFormers/tiny-random-llama", download_hub="aistudio")
 
         self.assertEqual(config.hidden_size, 16)
 
@@ -65,7 +65,7 @@ class AutoConfigTest(unittest.TestCase):
         self.assertEqual(config.hidden_size, 16)
 
     def test_from_aistudio(self):
-        config = AutoConfig.from_pretrained("Paddleformers/tiny-random-llama", download_hub="aistudio")
+        config = AutoConfig.from_pretrained("PaddleFormers/tiny-random-llama", download_hub="aistudio")
         self.assertEqual(config.hidden_size, 16)
 
     def test_from_modelscope(self):

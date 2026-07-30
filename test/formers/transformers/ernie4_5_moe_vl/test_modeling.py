@@ -632,11 +632,11 @@ class Ernie4_5_MoE_VLIntegrationTest(unittest.TestCase):
 
     def test_model_tiny_logits(self):
 
-        config = Ernie4_5_VLConfig.from_pretrained("PaddleFleet/tiny_random_ernie4_5_vl", download_hub="aistudio")
+        config = Ernie4_5_VLConfig.from_pretrained("PaddleFormers/tiny_random_ernie4_5_vl", download_hub="aistudio")
         config["moe_group"] = "dummy"
         config["moe_multimodal_dispatch_use_allgather"] = "v2-alltoall-unpad-text"
         model = Ernie4_5_VLMoeForConditionalGenerationModel.from_pretrained(
-            "PaddleFleet/tiny_random_ernie4_5_vl",
+            "PaddleFormers/tiny_random_ernie4_5_vl",
             config=config,
             dtype="bfloat16",
             convert_from_hf=True,

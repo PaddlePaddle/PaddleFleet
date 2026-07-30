@@ -45,7 +45,7 @@ class AutoModelTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = AutoModel.from_pretrained(
-            "Paddleformers/tiny-random-llama", convert_from_hf=False, load_checkpoint_format=""
+            "PaddleFormers/tiny-random-llama", convert_from_hf=False, load_checkpoint_format=""
         )
 
     def test_from_pretrained_local(self):
@@ -71,7 +71,7 @@ class AutoModelTest(unittest.TestCase):
 
     @slow
     def test_model_from_pretrained_cache_dir(self):
-        model_name = "Paddleformers/tiny-random-llama"
+        model_name = "PaddleFormers/tiny-random-llama"
         with tempfile.TemporaryDirectory() as tempdir:
             AutoModel.from_pretrained(model_name, cache_dir=tempdir, convert_from_hf=False, load_checkpoint_format="")
             self.assertTrue(os.path.exists(os.path.join(tempdir, model_name, CONFIG_NAME)))
@@ -91,7 +91,7 @@ class AutoModelTest(unittest.TestCase):
 
     def test_from_aistudio(self):
         model = AutoModel.from_pretrained(
-            "Paddleformers/tiny-random-llama",
+            "PaddleFormers/tiny-random-llama",
             download_hub="aistudio",
             convert_from_hf=False,
             load_checkpoint_format="",
