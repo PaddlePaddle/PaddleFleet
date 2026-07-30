@@ -538,9 +538,7 @@ std::vector<std::vector<int64_t>> WeightedSwigluInferShape(
 }
 
 std::vector<paddle::DataType> WeightedSwigluInferDtype(
-    paddle::DataType input_dtype,
-    paddle::DataType probs_dtype,
-    double clamp_value) {
+    paddle::DataType input_dtype, paddle::DataType probs_dtype) {
   return {paddle::DataType::FLOAT8_E4M3FN, paddle::DataType::FLOAT32};
 }
 
@@ -575,7 +573,8 @@ PD_BUILD_OP(w4a8_weighted_swiglu_quantize_1x32)
     .Outputs({"output", "scale"})
     .Attrs({"clamp_value: double"})
     .SetKernelFn(PD_KERNEL(W4A8WeightedSwigluQuantize1x32))
-    .SetInferShapeFn(PD_INFER_SHAPE(WeightedSwigluInferShape));
+    .SetInferShapeFn(PD_INFER_SHAPE(WeightedSwigluInferShape))
+    .SetInferDtypeFn(PD_INFER_DTYPE(WeightedSwigluInferDtype));
 
 PD_BUILD_OP(w4a8_dequantize_1x32)
     .Inputs({"input", "scale"})

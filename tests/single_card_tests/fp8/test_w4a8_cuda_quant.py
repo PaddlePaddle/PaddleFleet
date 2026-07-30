@@ -47,6 +47,7 @@ if IS_BLACKWELL:
 
     from paddlefleet.transformer.moe.fp8_utils import (
         _w4a8_quant,
+        _w4a8_weighted_swiglu_quant,
         fuse_stack_fp8_quant_python,
         fuse_stack_transpose_fp8_quant_python,
         fuse_weighted_swiglu_fp8_quant_clamp_python,
@@ -184,6 +185,18 @@ class TestW4A8CudaQuantParity(unittest.TestCase):
                 self.assert_fp8_equal(actual_q, expected_q)
                 self.assert_tensor_equal(
                     actual_scale, expected_scale, "UE8M0 scale differs"
+                )
+                with mock.patch.dict(
+                    os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": "1"}
+                ):
+                    dispatched_q, dispatched_scale = (
+                        _w4a8_weighted_swiglu_quant(value, probs, clamp_value)
+                    )
+                self.assert_fp8_equal(dispatched_q, expected_q)
+                self.assert_tensor_equal(
+                    dispatched_scale,
+                    expected_scale,
+                    "runtime-dispatched UE8M0 scale differs",
                 )
 
     def test_dequantize_fp8(self):
