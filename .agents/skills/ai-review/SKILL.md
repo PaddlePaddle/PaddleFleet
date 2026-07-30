@@ -1,6 +1,6 @@
 ---
 name: ai-review
-description: 使用 PaddleFleet 仓库规则评审 Pull Request 和代码变更。适用于 src/paddlefleet、packages/paddlefleet_ops、tests、ci、auto_configurator 以及构建、配置和依赖文件的正确性、兼容性、分布式行为、性能、安全和测试审查。
+description: 使用 PaddleFleet 仓库规则评审 Pull Request 和全仓库代码变更。适用于正确性、兼容性、分布式行为、性能、安全、测试、构建、配置、依赖和文档审查。
 ---
 
 # AI Review
@@ -9,7 +9,7 @@ description: 使用 PaddleFleet 仓库规则评审 Pull Request 和代码变更�
 
 ## 规则加载
 
-加载本 skill 后、开始评审前，先读取 [基础规则](references/base-rules.md)，再读取同一规则目录中的所有其他 Markdown 文件。扩展规则不按变更路径跳过加载，根据其中声明的适用路径和触发条件决定是否应用。
+加载本 skill 后、开始评审前，读取 `.agents/skills/ai-review/references/` 目录下的全部 Markdown 文件。必须包含 [基础规则](references/base-rules.md)；其他文件均为扩展规则，不按变更路径跳过加载。根据各规则声明的适用路径和触发条件决定是否应用。
 
 ## 评审流程
 
