@@ -287,8 +287,11 @@ class HyperConnectionModule(nn.Layer):
     def _init_weights(self) -> None:
         """Initialize weights for stable training."""
         # Xavier uniform for mapping projection.
-        # Use model-parallel RNG tracker to keep initialization deterministic
-        # regardless of layer_index shifts.
+        # Use the model-parallel RNG tracker so that the initialization is
+        # controlled by PaddleFleet's RNG state (seeded once at model init)
+        # rather than the per-layer pipeline seed (base_seed + layer_index).
+        # This prevents layer_index shifts (e.g. from MTPEmbeddingLayer insertion
+        # in magic_send mode) from changing the weights.
         if paddle.distributed.get_world_size() <= 1:
             nn.initializer.XavierUniform()(self.mapping_proj.weight)
         else:
