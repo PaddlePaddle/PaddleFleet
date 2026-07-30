@@ -442,9 +442,6 @@ class TransformerLayer(nn.Layer):
         # [Layer 10: Block Attention Residuals] Optional
         self.attn_res_block_size = None
         if self.config.block_attention_residuals:
-            assert self.full_recompute is False, (
-                "block_attention_residuals cannot use full_recompute, set full_recompute to False."
-            )
             assert self.recompute_mlp is False, (
                 "block_attention_residuals cannot use selective recompute mlp."
             )
@@ -515,6 +512,21 @@ class TransformerLayer(nn.Layer):
             if isinstance(color, dict) or color not in (None, -1):
                 continue
             p.color = {"color": "dense_weight_no_hook"}
+
+    def _is_block_boundary(self):
+        """Determine if this layer is a block boundary for attention residuals.
+
+        Each block spans ``attn_res_block_size // 2`` transformer layers, and
+        the layer whose index is a multiple of that span closes the previous
+        block.
+        """
+        block_span = self.attn_res_block_size // 2
+        if block_span <= 0:
+            raise ValueError(
+                "attn_res_block_size must be at least 2 when "
+                "block_attention_residuals is enabled."
+            )
+        return self.layer_number % block_span == 0
 
     def build_schedule_node(self):
         return TransformerLayerNode(
@@ -698,6 +710,14 @@ class TransformerLayer(nn.Layer):
             offload_kwargs = self._compute_act_offload_kwargs()
             origin_input_ids = dict_args.get("origin_input_ids", None)
 
+            if self.config.block_attention_residuals:
+                blocks = dict_args.get("blocks", [])
+                blocks_for_recompute = (
+                    tuple(b.clone() for b in blocks) if blocks else None
+                )
+            else:
+                blocks_for_recompute = None
+
             outputs = recompute(
                 self._forward_impl,
                 hidden_states=hidden_states,
@@ -732,8 +752,14 @@ class TransformerLayer(nn.Layer):
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
                 origin_input_ids=origin_input_ids,
+                blocks=blocks_for_recompute,
                 **offload_kwargs,
             )
+            if (
+                self.config.block_attention_residuals
+                and self._is_block_boundary()
+            ):
+                dict_args["blocks"].append(hidden_states)
         else:
             outputs = self._forward_impl(**dict_args)
 
@@ -820,6 +846,7 @@ class TransformerLayer(nn.Layer):
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
         origin_input_ids: Tensor | None = None,
+        blocks: list | tuple | None = None,
         **kwargs,
     ):
         def need_do_attention():
@@ -850,7 +877,16 @@ class TransformerLayer(nn.Layer):
 
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
         if self.config.block_attention_residuals:
-            blocks = kwargs.get("blocks", [])
+            # Recompute path: `blocks` is the immutable tuple built in
+            # `forward()`; copy it into a local list so the append below stays
+            # local and the backward re-run sees the same input. The
+            # authoritative append is done in `forward()` in that case.
+            # Eager path: `blocks` is the shared list from `dict_args`, and the
+            # append below is the authoritative one (original behaviour).
+            if blocks is None:
+                blocks = list(kwargs.get("blocks", []))
+            elif isinstance(blocks, tuple):
+                blocks = list(blocks)
             partial_block = hidden_states
 
             # Before attention: block attnres
@@ -858,8 +894,8 @@ class TransformerLayer(nn.Layer):
                 partial_block, blocks
             )
 
-            # Block boundary check
-            if self.layer_number % (self.attn_res_block_size // 2) == 0:
+            # Block boundary: append current repr and reset partial_block
+            if self._is_block_boundary():
                 blocks.append(partial_block)
                 partial_block = None
 

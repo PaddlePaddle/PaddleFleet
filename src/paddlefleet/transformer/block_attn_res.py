@@ -103,37 +103,25 @@ class BlockAttnRes(FleetLayer):
         self.norm = build_spec_layer(sublayers_spec.norm, **extra_args)
 
     def forward(self, partial_block: Tensor, blocks: list[Tensor]) -> Tensor:
-        """Compute Block Attention Residual.
+        """Compute Block Attention Residual."""
+        all_repr = [*blocks, partial_block]
+        n = len(all_repr)
 
-        Applies learned softmax attention over block representations
-        to produce the input for the next sublayer.
+        logits_list = []
+        for r in all_repr:
+            normed = self.norm(r)
+            logits_list.append((normed * self.proj_weight).sum(axis=-1))
 
-        Args:
-            partial_block: Current in-progress block representation,
-                shape [B, S, H].
-            blocks: List of completed block representations.
-                Each tensor has shape [B, S, H].
-        Returns:
-            Tensor of shape [B, S, H] — the attention-weighted
-            combination of all block representations.
-        """
-        # Stack all representations: [N+1, B, S, H]
-        V = paddle.stack([*blocks, partial_block], axis=0)
-
-        # Apply RMSNorm along last dim
-        # K = RMSNorm(V) with given weight
-        K = self.norm(V)
-
-        # Compute attention logits: [N+1, B, S]
-        # Equivalent to einsum("d, n b s d -> n b s", proj_weight, K)
-        logits = (K * self.proj_weight).sum(axis=-1)
+        # Stack logits only (small tensor: [N, B, S]), safe from alignment issue
+        logits = paddle.stack(logits_list, axis=0)
 
         # Softmax over block dimension (axis=0)
         weights = paddle.nn.functional.softmax(logits, axis=0)
 
-        # Weighted sum: [B, S, H]
-        # Equivalent to einsum("n b s, n b s d -> b s d", weights, V)
-        h = (weights.unsqueeze(-1) * V).sum(axis=0)
+        # Weighted sum via for-loop
+        h = weights[0].unsqueeze(-1) * all_repr[0]
+        for i in range(1, n):
+            h = h + weights[i].unsqueeze(-1) * all_repr[i]
 
         if partial_block is not None and h.dtype != partial_block.dtype:
             h = h.to(partial_block.dtype)
