@@ -186,7 +186,7 @@ def get_downloadable_image(download_path, need_exif_info, retry_max_time=0, retr
 def _load_paddlecodec_decoder(video_src):
     """Load a paddlecodec VideoDecoder, handling the Paddle proxy import."""
     try:
-        del sys.modules["torchcodec"]
+        sys.modules.pop("torchcodec", None)
         paddle.enable_compat(scope={"torchcodec"})
         from torchcodec.decoders import VideoDecoder
 

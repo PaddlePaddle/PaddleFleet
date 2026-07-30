@@ -348,11 +348,11 @@ class Qwen3PretrainedModel(PretrainedModel):
 
         aoa_config = {
             "aoa_statements": [
-                f"model.layers.$LAYER_ID.self_attn.o_proj.weight^T -> {model_prefix}layers.$LAYER_ID.self_attn.o_proj.weight",
-                f"model.layers.$LAYER_ID.mlp.down_proj.weight^T -> {model_prefix}layers.$LAYER_ID.mlp.down_proj.weight",
-                f"model.layers.$LAYER_ID.input_layernorm.weight -> {model_prefix}layers.$LAYER_ID.input_layernorm.weight",
-                f"model.layers.$LAYER_ID.post_attention_layernorm.weight -> {model_prefix}layers.$LAYER_ID.post_attention_layernorm.weight",
-                f"model.norm.weight -> {model_prefix}norm.weight",
+                f"model.layers.$LAYER_ID.self_attn.o_proj.weight^T -> {model_prefix}layers.$LAYER_ID.self_attn.o_proj.weight{dtype_suffix}",
+                f"model.layers.$LAYER_ID.mlp.down_proj.weight^T -> {model_prefix}layers.$LAYER_ID.mlp.down_proj.weight{dtype_suffix}",
+                f"model.layers.$LAYER_ID.input_layernorm.weight -> {model_prefix}layers.$LAYER_ID.input_layernorm.weight{dtype_suffix}",
+                f"model.layers.$LAYER_ID.post_attention_layernorm.weight -> {model_prefix}layers.$LAYER_ID.post_attention_layernorm.weight{dtype_suffix}",
+                f"model.norm.weight -> {model_prefix}norm.weight{dtype_suffix}",
             ]
         }
 
@@ -372,15 +372,18 @@ class Qwen3PretrainedModel(PretrainedModel):
         # attention qkv
         aoa_config["aoa_statements"] += [
             f"model.layers.$LAYER_ID.self_attn.q_proj.weight^T, model.layers.$LAYER_ID.self_attn.k_proj.weight^T, model.layers.$LAYER_ID.self_attn.v_proj.weight^T -> {model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.weight, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}",
+            f"{model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.weight -> {model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.weight{dtype_suffix}",
         ]
         if config.attention_bias:
             aoa_config["aoa_statements"] += [
                 f"model.layers.$LAYER_ID.self_attn.q_proj.bias, model.layers.$LAYER_ID.self_attn.k_proj.bias, model.layers.$LAYER_ID.self_attn.v_proj.bias -> {model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.bias, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}, axis=0",
+                f"{model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.bias -> {model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.bias{dtype_suffix}",
             ]
 
         # FFN
         aoa_config["aoa_statements"] += [
             f"model.layers.$LAYER_ID.mlp.gate_proj.weight^T, model.layers.$LAYER_ID.mlp.up_proj.weight^T -> {model_prefix}layers.$LAYER_ID.mlp.up_gate_proj.weight, fused_ffn",
+            f"{model_prefix}layers.$LAYER_ID.mlp.up_gate_proj.weight -> {model_prefix}layers.$LAYER_ID.mlp.up_gate_proj.weight{dtype_suffix}",
         ]
 
         # lm_head
