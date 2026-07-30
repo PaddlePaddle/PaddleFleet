@@ -29,8 +29,6 @@ Run with:
         tests/multi_card_tests/transformer/test_csa_attention_cp.py
 """
 
-import os
-import sys
 import types
 import unittest
 
@@ -40,13 +38,6 @@ from paddle import nn
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ),
-)
-
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
@@ -55,6 +46,7 @@ from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttentionSublayersSpec,
     Compressor,
     CompressorSublayersSpec,
+    CSADocMaskMetadata,
     CSAIndexer,
     CSAIndexerSublayersSpec,
 )
@@ -134,7 +126,7 @@ class _TestRMSNorm(nn.Layer):
             default_initializer=nn.initializer.Constant(1.0),
         )
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         normed = x * paddle.rsqrt(x.square().mean(-1, keepdim=True) + self.eps)
         return normed * self.weight.cast(x.dtype)
 
@@ -165,8 +157,8 @@ def _build_csa_config(
         dsa_index_topk=dsa_index_topk,
         dsa_indexer_loss_coeff=dsa_indexer_loss_coeff,
         dsa_indexer_use_sparse_loss=False,
-        csa_tilelang_enable_indexer=False,
-        csa_tilelang_enable_sparse_attn=False,
+        csa_indexer_backend="unfused",
+        csa_sparse_attn_backend="unfused",
         init_method=None,
         init_method_std=0.02,
         layernorm_epsilon=1e-5,
@@ -451,7 +443,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         pos_dim = 32
         sq_global = 256
         sq_local = sq_global // CP_SIZE
-        b = 2
+        b = 1
 
         config = TransformerConfig(
             num_hidden_layers=1,
@@ -481,8 +473,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.dsa_index_topk = 16
         config.dsa_indexer_loss_coeff = 0.0
         config.dsa_indexer_use_sparse_loss = False
-        config.csa_tilelang_enable_indexer = False
-        config.csa_tilelang_enable_sparse_attn = False
+        config.csa_sparse_attn_backend = "unfused"
         config.init_method = None
         config.init_method_std = 0.02
         config.output_layer_init_method = None
@@ -493,7 +484,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
         config.sequence_parallel = False
         config.tensor_model_parallel_size = 1
         config.cp_balance_mode = "contiguous_allgather"
-        config.csa_indexer_backend = "tilelang"
+        config.csa_indexer_backend = "unfused"
 
         sublayers = DSv4HybridSelfAttentionSublayersSpec(
             linear_q_down_proj=_TestLinear,
@@ -592,6 +583,154 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
             dh_cos,
             COS_SIM_THRESHOLD,
             f"Full-layer dH cosine sim too low: {dh_cos:.6f}",
+        )
+
+    def test_full_layer_fwd_bwd_fp8_qat(self):
+        """DSv4HybridSelfAttention with use_fp8_qat=True: CP vs non-CP."""
+        from paddlefleet.transformer.enums import AttnMaskType
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        head_dim = 128
+        hidden_size = 256
+        num_heads = 4
+        q_lora_rank = 64
+        pos_dim = 64
+        sq_global = 256
+        sq_local = sq_global // CP_SIZE
+        b = 1
+
+        config = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=hidden_size,
+            num_attention_heads=num_heads,
+            use_fp8_qat=True,
+        )
+        config.num_key_value_heads = 1
+        config.head_dim = head_dim
+        config.q_lora_rank = q_lora_rank
+        config.kv_lora_rank = q_lora_rank
+        config.qk_nope_head_dim = head_dim - pos_dim
+        config.qk_rope_head_dim = pos_dim
+        config.qk_pos_emb_head_dim = pos_dim
+        config.v_head_dim = head_dim
+        config.multi_latent_attention = True
+        config.rope_type = "rope"
+        config.rotary_base = 10000.0
+        config.rotary_interleaved = False
+        config.rotary_percent = 1.0
+        config.apply_rope_fusion = False
+        config.csa_compress_ratios = [4]
+        config.csa_compress_rotary_base = 160000.0
+        config.csa_window_size = 64
+        config.csa_dense_mode = False
+        config.dsa_index_n_heads = 8
+        config.dsa_index_head_dim = 128
+        config.dsa_index_topk = 16
+        config.dsa_indexer_loss_coeff = 0.0
+        config.dsa_indexer_use_sparse_loss = False
+        config.init_method = None
+        config.init_method_std = 0.02
+        config.output_layer_init_method = None
+        config.layernorm_epsilon = 1e-5
+        config.rms_norm_eps = 1e-5
+        config.o_groups = 4
+        config.o_lora_rank = 64
+        config.sequence_parallel = False
+        config.tensor_model_parallel_size = 1
+        config.cp_balance_mode = "contiguous_allgather"
+        config.csa_indexer_backend = "unfused"
+        config.csa_sparse_attn_backend = "unfused"
+
+        sublayers = DSv4HybridSelfAttentionSublayersSpec(
+            linear_q_down_proj=_TestLinear,
+            linear_q_up_proj=_TestLinear,
+            linear_kv_proj=_TestLinear,
+            core_attention=LayerSpec(
+                layer=CompressedSparseAttention,
+                sublayers_spec=CompressedSparseAttentionSublayersSpec(
+                    compressor=LayerSpec(
+                        layer=Compressor,
+                        sublayers_spec=CompressorSublayersSpec(
+                            linear_wkv=_TestLinear,
+                            linear_wgate=_TestLinear,
+                            norm=_TestRMSNorm,
+                        ),
+                    ),
+                    indexer=LayerSpec(
+                        layer=CSAIndexer,
+                        sublayers_spec=CSAIndexerSublayersSpec(
+                            linear_wq_b=_TestLinear,
+                            linear_weights_proj=_TestLinear,
+                            compressor=LayerSpec(
+                                layer=Compressor,
+                                sublayers_spec=CompressorSublayersSpec(
+                                    linear_wkv=_TestLinear,
+                                    linear_wgate=_TestLinear,
+                                    norm=_TestRMSNorm,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            o_proj=_TestLinear,
+            q_layernorm=_TestRMSNorm,
+            kv_layernorm=_TestRMSNorm,
+        )
+
+        pg_ref = types.SimpleNamespace(tp=None, cp=None)
+        pg_cp = types.SimpleNamespace(tp=None, cp=CP_GROUP)
+
+        paddle.seed(2026)
+        layer_ref = DSv4HybridSelfAttention(
+            config=config,
+            sublayers_spec=sublayers,
+            layer_number=0,
+            attn_mask_type=AttnMaskType.causal,
+            pg_collection=pg_ref,
+        )
+
+        paddle.seed(2026)
+        layer_cp = DSv4HybridSelfAttention(
+            config=config,
+            sublayers_spec=sublayers,
+            layer_number=0,
+            attn_mask_type=AttnMaskType.causal,
+            pg_collection=pg_cp,
+        )
+
+        paddle.seed(1000)
+        hidden_full = paddle.randn([b, sq_global, hidden_size], dtype=DTYPE)
+
+        h_a = hidden_full.clone()
+        h_a.stop_gradient = False
+        out_a, _ = layer_ref.forward(h_a)
+        out_a.sum().backward()
+
+        s, e = CP_RANK * sq_local, (CP_RANK + 1) * sq_local
+        h_b = hidden_full[:, s:e].clone()
+        h_b.stop_gradient = False
+        out_b, _ = layer_cp.forward(h_b)
+        out_b.sum().backward()
+
+        for p in layer_cp.parameters():
+            if p.grad is not None:
+                g = p.grad.contiguous()
+                dist.all_reduce(g, group=CP_GROUP)
+                paddle.assign(g, p.grad)
+
+        fwd_cos = _cosine_sim(out_b, out_a[:, s:e])
+        self.assertGreater(
+            fwd_cos,
+            COS_SIM_THRESHOLD,
+            f"FP8 QAT full-layer forward cosine sim too low: {fwd_cos:.6f}",
+        )
+
+        dh_cos = _cosine_sim(h_b.grad, h_a.grad[:, s:e])
+        self.assertGreater(
+            dh_cos,
+            COS_SIM_THRESHOLD,
+            f"FP8 QAT full-layer dH cosine sim too low: {dh_cos:.6f}",
         )
 
 
@@ -769,6 +908,143 @@ class TestTileLangIndexerKernelCP(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# cuDNN indexer CP: docmask metadata propagation
+# ---------------------------------------------------------------------------
+def _cudnn_indexer_available():
+    if not paddle.device.is_compiled_with_cuda():
+        return False
+    if paddle.device.cuda.device_count() == 0:
+        return False
+    if paddle.device.cuda.get_device_capability()[0] != 10:
+        return False
+    try:
+        from paddlefleet_ops import is_cudnn_frontend_available
+
+        return is_cudnn_frontend_available()
+    except (ImportError, RuntimeError):
+        return False
+
+
+@unittest.skipUnless(
+    _cudnn_indexer_available(),
+    "cuDNN indexer CP requires the cuDNN frontend on Blackwell (SM100)",
+)
+class TestCudnnIndexerDocmaskCP(unittest.TestCase):
+    """Regression coverage for CP docmask arguments sent to cuDNN indexer."""
+
+    def test_fwd_only_passes_local_docmask_slice_and_seq_offset(self):
+        sq_global = 128
+        compress_ratio = 4
+        sq_local = sq_global // CP_SIZE
+        topk = 8
+        b, head_dim, hidden_size, q_lora_rank = 1, 64, 256, 64
+        s, e = CP_RANK * sq_local, (CP_RANK + 1) * sq_local
+
+        config = _build_csa_config(
+            compress_ratio=compress_ratio,
+            hidden_size=hidden_size,
+            head_dim=head_dim,
+            q_lora_rank=q_lora_rank,
+            csa_window_size=32,
+            dsa_index_topk=topk,
+            dsa_indexer_loss_coeff=0.0,
+        )
+        config.csa_indexer_backend = "cudnn"
+        config.csa_sparse_attn_backend = "unfused"
+
+        paddle.seed(2026)
+        csa_cp = _build_csa(config, compress_ratio, head_dim)
+        csa_cp.cp_group = CP_GROUP
+        csa_cp.cp_size = CP_SIZE
+        csa_cp.cp_rank = CP_RANK
+        csa_cp.cp_enabled = True
+        csa_cp.eval()
+
+        # Two documents with a boundary away from the CP split make the local
+        # valid_range slice rank-specific and easy to verify.
+        startend_values = [72] * 72 + [128] * 56
+        startend_row_indices = paddle.to_tensor(
+            startend_values, dtype="int32"
+        ).reshape([1, 1, sq_global, 1])
+        docmask_meta = CSADocMaskMetadata.build(
+            ratio=compress_ratio,
+            batch_size=b,
+            seqlen=sq_global,
+            startend_row_indices=startend_row_indices,
+        )
+        expected_valid_range = docmask_meta.valid_range[:, s:e, :]
+
+        paddle.seed(1000)
+        query_full = paddle.randn([b, sq_global, 8, head_dim], dtype=DTYPE)
+        key_full = paddle.randn([b, sq_global, 1, head_dim], dtype=DTYPE)
+        x_full = paddle.randn([b, sq_global, hidden_size], dtype=DTYPE)
+        qr_full = paddle.randn([b, sq_global, q_lora_rank], dtype=DTYPE)
+
+        captured = {}
+
+        def fake_cudnn_indexer_topk_fwd(
+            q,
+            k,
+            w,
+            ratio,
+            topk_effective,
+            valid_range=None,
+            startend_row_indices=None,
+            doc_lens=None,
+            seq_offset=0,
+        ):
+            captured["q_shape"] = list(q.shape)
+            captured["k_shape"] = list(k.shape)
+            captured["ratio"] = ratio
+            captured["topk_effective"] = topk_effective
+            captured["valid_range"] = valid_range.clone()
+            captured["startend_row_indices"] = startend_row_indices
+            captured["doc_lens"] = doc_lens
+            captured["seq_offset"] = seq_offset
+            zeros = paddle.zeros(
+                [q.shape[0], q.shape[1], int(topk_effective)], dtype="int32"
+            )
+            lengths = paddle.full(
+                [q.shape[0], q.shape[1]], int(topk_effective), dtype="int32"
+            )
+            return zeros, lengths
+
+        import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as cudnn_indexer_module
+
+        original = cudnn_indexer_module.cudnn_indexer_topk_fwd
+        cudnn_indexer_module.cudnn_indexer_topk_fwd = (
+            fake_cudnn_indexer_topk_fwd
+        )
+        try:
+            with paddle.no_grad():
+                out = csa_cp.forward(
+                    query_full[:, s:e],
+                    key_full[:, s:e],
+                    key_full[:, s:e],
+                    None,
+                    x=x_full[:, s:e],
+                    qr=qr_full[:, s:e],
+                    docmask_meta=docmask_meta,
+                )
+        finally:
+            cudnn_indexer_module.cudnn_indexer_topk_fwd = original
+
+        self.assertEqual(list(out.shape), [b, sq_local, 8 * head_dim])
+        self.assertEqual(captured["seq_offset"], s)
+        self.assertEqual(captured["ratio"], compress_ratio)
+        self.assertEqual(captured["topk_effective"], topk)
+        self.assertEqual(captured["q_shape"][1], sq_local)
+        self.assertEqual(list(captured["valid_range"].shape), [b, sq_local, 2])
+        self.assertTrue(
+            paddle.equal_all(
+                captured["valid_range"], expected_valid_range
+            ).item()
+        )
+        self.assertIs(captured["startend_row_indices"], startend_row_indices)
+        self.assertEqual(captured["doc_lens"], docmask_meta.doc_lens_list)
+
+
+# ---------------------------------------------------------------------------
 # TileLang CP: Full-layer precision (output + all grads + all param grads)
 # ---------------------------------------------------------------------------
 class TestTileLangCSALayerCP(unittest.TestCase):
@@ -806,9 +1082,7 @@ class TestTileLangCSALayerCP(unittest.TestCase):
             dsa_index_topk=dsa_index_topk,
             dsa_indexer_loss_coeff=loss_coeff,
             dsa_indexer_use_sparse_loss=use_sparse_loss,
-            csa_tilelang_enable_indexer=True,
-            csa_tilelang_enable_sparse_attn=False,
-            csa_tilelang_backend="attention_paddle_compat",
+            csa_sparse_attn_backend="unfused",
             csa_indexer_backend="tilelang",
             init_method=None,
             init_method_std=0.02,

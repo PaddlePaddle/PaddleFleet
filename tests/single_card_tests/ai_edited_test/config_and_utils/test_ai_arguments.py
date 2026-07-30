@@ -13,6 +13,7 @@
 # limitations under the License.
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(
     0,
@@ -158,3 +159,26 @@ class TestCoreTransformerConfigFromArgs(unittest.TestCase):
         # No matching attributes - uses all defaults
         config = core_transformer_config_from_args(args)
         self.assertIsNotNone(config)
+
+    def test_from_args_with_deepep_buffer_configs(self):
+        from paddlefleet.training.arguments import (
+            core_transformer_config_from_args,
+        )
+
+        args = SimpleNamespace(
+            deepep_buffer_configs={
+                "num_sms": 24,
+                "dispatch_config": [60, 256],
+                "combine_config": [20, 256],
+            }
+        )
+
+        config = core_transformer_config_from_args(args)
+        self.assertEqual(
+            config.deepep_buffer_configs,
+            {
+                "num_sms": 24,
+                "dispatch_config": [60, 256],
+                "combine_config": [20, 256],
+            },
+        )

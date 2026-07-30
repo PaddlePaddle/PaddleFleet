@@ -16,12 +16,17 @@ from .fused_mla_yarn_rope_apply import (
     fused_apply_mla_rope_for_kv,
     fused_apply_mla_rope_for_q,
 )
+from .mla_rope_inplace_fusion import fused_apply_mla_rope_inplace
 from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
 from .rms_norm_fusion import RMSNormFusionTriton
 from .sigmoid_gate_fusion import SigmoidGateFusionTriton
 from .ue8m0_scale_transpose_fusion import (
     FuseStackUe8m0ScaleTransposeTriton,
     fuse_stack_ue8m0_scale_transpose,
+)
+from .ulysses_alltoall_fused import (
+    ulysses_alltoall_fused_supported,
+    ulysses_single_all_to_all_fused,
 )
 
 __all__ = [
@@ -33,4 +38,7 @@ __all__ = [
     "fuse_stack_ue8m0_scale_transpose",
     "fused_apply_mla_rope_for_kv",
     "fused_apply_mla_rope_for_q",
+    "fused_apply_mla_rope_inplace",
+    "ulysses_alltoall_fused_supported",
+    "ulysses_single_all_to_all_fused",
 ]

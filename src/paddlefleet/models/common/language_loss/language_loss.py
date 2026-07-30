@@ -31,6 +31,7 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
+    MTPDistillationLossShift,
 )
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
@@ -247,12 +248,18 @@ class LanguageLoss(FleetLayer):
                 LigerFusedLinearCrossEntropyFunction,
             )
 
-            hidden_states, weight, bias = logits
+            hidden_states, weight, bias = logits[:3]
+            # Multimax lm_head fused path: GPTLMHead emits a 5-tuple
+            # (hidden_states, weight, bias, multimax_ranges, multimax_ts)
+            # so SegLU is applied inside the chunked CE kernel without
+            # materializing full [B, S, V] logits.
+            multimax_ranges = logits[3] if len(logits) > 3 else None
+            multimax_ts = logits[4] if len(logits) > 4 else None
             B, S, H = hidden_states.shape
             _input = hidden_states.reshape([-1, H])
             _labels = labels.reshape([-1])
 
-            loss_1d = LigerFusedLinearCrossEntropyFunction.apply(
+            apply_args = [
                 _input,
                 weight,
                 _labels,
@@ -263,7 +270,11 @@ class LanguageLoss(FleetLayer):
                 getattr(
                     self.config, "gpt_model_use_experimental_version", False
                 ),
-            )
+            ]
+            if multimax_ranges is not None and multimax_ts is not None:
+                apply_args.append(multimax_ranges)
+                apply_args.append(multimax_ts)
+            loss_1d = LigerFusedLinearCrossEntropyFunction.apply(*apply_args)
             # Reshape back to [B, S] so downstream CP gather / lossmask
             # handling matches the non-fused path exactly.
             loss = loss_1d.reshape([B, S])
@@ -328,6 +339,11 @@ class LanguageLoss(FleetLayer):
             )
             loss = sb_loss_func(logits, labels)
         else:
+            if (
+                self.config.gpt_model_use_experimental_version
+                and self.config.sequence_parallel
+            ):
+                logits = logits.reshape([labels.shape[0], -1, logits.shape[-1]])
             loss = self.loss_func(logits.cast("float32"), labels)
 
         if get_context_parallel_world_size() > 1:
@@ -396,6 +412,8 @@ class LanguageLoss(FleetLayer):
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
             if self.config.gpt_model_use_experimental_version:
+                if max(get_tensor_model_parallel_world_size(), 1) > 1:
+                    loss = loss.squeeze(-1)
                 loss_2d = loss.cast(paddle.float32) * lossmask.reshape(
                     labels.shape
                 )
@@ -481,6 +499,17 @@ class LanguageLoss(FleetLayer):
                                 labels_cur_depth,
                             )
                         else:
+                            if (
+                                self.config.gpt_model_use_experimental_version
+                                and self.config.sequence_parallel
+                            ):
+                                logits_cur_depth = logits_cur_depth.reshape(
+                                    [
+                                        labels_cur_depth.shape[0],
+                                        -1,
+                                        logits_cur_depth.shape[-1],
+                                    ]
+                                )
                             loss_matrix_cur_depth = self.loss_func(
                                 logits_cur_depth.cast("float32"),
                                 labels_cur_depth,
@@ -529,11 +558,19 @@ class LanguageLoss(FleetLayer):
                 else:
                     target_p_self_op_dist = nn.Softmax(axis=2)(logits[0])
                 if get_context_parallel_world_size() > 1:
-                    target_p_self_op_dist = ContextParallelGatherOp.apply(
-                        target_p_self_op_dist,
-                        axis=1,
-                        mode=self.config.cp_balance_mode,
-                    )
+                    cp_balance_mode = self.config.cp_balance_mode
+                    if cp_balance_mode == "contiguous_allgather":
+                        target_p_self_op_dist = MTPDistillationLossShift.apply(
+                            target_p_self_op_dist,
+                            self.config.num_nextn_predict_layers,
+                            mode=cp_balance_mode,
+                        )
+                    else:
+                        target_p_self_op_dist = ContextParallelGatherOp.apply(
+                            target_p_self_op_dist,
+                            axis=1,
+                            mode=cp_balance_mode,
+                        )
 
                 def padding(tensor, left=False, pad_len=1):
                     zeropadding = paddle.zeros_like(tensor[:, -pad_len:, :])
@@ -566,18 +603,27 @@ class LanguageLoss(FleetLayer):
                                 prediction_scores_cur_depth
                             )
 
-                        target_p = target_p_self_op_dist[
-                            :, (depth + 1) :, :
-                        ].clone()
-                        target_p = padding(
-                            target_p, left=False, pad_len=depth + 1
-                        )
-                        if get_context_parallel_world_size() > 1:
-                            target_p = ContextParallelScatterOp.apply(
-                                target_p,
-                                axis=1,
-                                mode=self.config.cp_balance_mode,
+                        if not (
+                            get_context_parallel_world_size() > 1
+                            and cp_balance_mode == "contiguous_allgather"
+                        ):
+                            target_p = target_p_self_op_dist[
+                                :, (depth + 1) :, :
+                            ].clone()
+                            target_p = padding(
+                                target_p, left=False, pad_len=depth + 1
                             )
+                        if get_context_parallel_world_size() > 1:
+                            if cp_balance_mode == "contiguous_allgather":
+                                target_p = target_p_self_op_dist[
+                                    :, depth : depth + out_logp.shape[1]
+                                ]
+                            else:
+                                target_p = ContextParallelScatterOp.apply(
+                                    target_p,
+                                    axis=1,
+                                    mode=cp_balance_mode,
+                                )
                         plogp = target_p * out_logp
 
                         lossmask = lossmask[..., None]

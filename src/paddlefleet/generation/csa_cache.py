@@ -133,6 +133,11 @@ class CSADynamicCache:
         self._states: list[_CSALayerState] = [
             _CSALayerState() for _ in range(num_layers)
         ]
+        # CSA/HCA layers do their own windowing inside the attention op, so the
+        # generator's SWA KV-cache truncation never applies here. Expose the
+        # attributes anyway to match ``DynamicKVCache``'s interface.
+        self.swa_layers: list[bool] = [False] * num_layers
+        self.window_size: int | None = None
 
     def get_csa_state(self, layer_idx: int) -> _CSALayerState:
         return self._states[layer_idx]

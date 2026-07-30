@@ -182,7 +182,7 @@ def main() -> None:
     model.save_pretrained(
         str(output_dir),
         save_checkpoint_format="sharding_io",
-        save_to_hf=False,
+        save_safetensors=False,
         safe_serialization=False,
         max_shard_size=args.max_shard_size,
     )

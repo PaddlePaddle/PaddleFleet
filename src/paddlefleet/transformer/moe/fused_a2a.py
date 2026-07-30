@@ -14,17 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import queue
 
 import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
-from paddlefleet_ops import is_deep_ep_available, is_hybrid_ep_available
+from paddlefleet_ops import (
+    is_deep_ep_available,
+    is_hybrid_ep_available,
+    is_sonic_moe_available,
+)
 
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
 
-from .fp8_utils import FP8_ALIGN
 from .moe_utils import manual_backward
 
 if is_deep_ep_available():
@@ -44,8 +48,38 @@ if is_hybrid_ep_available():
 else:
     HAVE_HYBRID_EP = False
 
+if is_sonic_moe_available():
+    HAVE_SONIC_MOE = True
+    try:
+        from paddlefleet_ops.sonicmoe.quack_utils import (
+            quantize_activation_blockscaled_fast,
+        )
+    except ImportError:
+        quantize_activation_blockscaled_fast = None
+else:
+    quantize_activation_blockscaled_fast = None
+    HAVE_SONIC_MOE = False
+
 _buffer = None
 _hybrid_ep_buffer = None
+
+# HybridEP dispatch/combine kernels use 128-token chunks to align with default
+# NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API and NUM_OF_TOKENS_PER_CHUNK_COMBINE_API
+HYBRIDEP_TOKEN_ALIGNMENT = 128
+
+
+def _supports_sonic_scale_word_packing(quantizer):
+    if quantizer is None:
+        return False
+    try:
+        return "pack_scale_words" in inspect.signature(quantizer).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+_SONIC_PACK_SCALE_WORDS_AVAILABLE = _supports_sonic_scale_word_packing(
+    quantize_activation_blockscaled_fast
+)
 
 
 def barrier_ep(ep_group):
@@ -69,6 +103,112 @@ def get_hidden_bytes(x: paddle.Tensor) -> int:
         int: Number of hidden bytes
     """
     return x.shape[1] * max(x.element_size(), 2)
+
+
+def _normalize_fp8_scale_for_deepep(
+    x_fp8: paddle.Tensor, scale: paddle.Tensor, use_ue8m0: bool = False
+):
+    num_tokens = x_fp8.shape[0]
+    num_scales = x_fp8.shape[1] // 128
+    if use_ue8m0:
+        num_scales //= 4
+    if scale.shape[0] == num_scales:
+        scale = scale.T.contiguous()
+    else:
+        scale = scale.contiguous()
+    if scale.shape[0] > num_tokens:
+        scale = scale[:num_tokens, :]
+    if scale.shape[0] != num_tokens or scale.shape[1] != num_scales:
+        raise RuntimeError(
+            "Invalid FP8 scale shape for DeepEP dispatch: "
+            f"scale={scale.shape}, x_fp8={x_fp8.shape}, "
+            f"expected [{num_tokens}, {num_scales}]"
+        )
+    return scale
+
+
+def _pack_sonic_fp8_scale_for_deepep(
+    x_fp8: paddle.Tensor, scale: paddle.Tensor
+):
+    """Expose four 1x32 E8M0 bytes as one DeepEP int32 scale word."""
+    num_tokens, hidden = x_fp8.shape
+    num_groups = (hidden + 31) // 32
+    if not scale.is_contiguous():
+        scale = scale.contiguous()
+    packed_groups = (num_groups + 3) // 4
+    if (
+        num_groups % 4 == 0
+        and scale.dtype == paddle.int32
+        and tuple(scale.shape) == (num_tokens, packed_groups)
+    ):
+        return scale
+    if tuple(scale.shape) != (num_tokens, num_groups):
+        raise RuntimeError(
+            "Invalid Sonic FP8 scale shape before DeepEP dispatch: "
+            f"scale={scale.shape}, x_fp8={x_fp8.shape}, "
+            f"expected [{num_tokens}, {num_groups}]"
+        )
+    if scale.dtype != paddle.uint8:
+        raise TypeError(
+            "Sonic FP8 scale carrier expects raw uint8 E8M0 bytes, "
+            f"got {scale.dtype}"
+        )
+    if num_groups % 4 != 0:
+        # DeepEP's tuple ABI requires a 32-bit scale type. Preserve the
+        # previous value-conversion fallback for non-aligned hidden sizes.
+        return scale.cast(paddle.int32)
+    return scale.view(paddle.int32)
+
+
+def _unpack_sonic_fp8_scale_from_deepep(
+    x_fp8: paddle.Tensor, scale: paddle.Tensor
+):
+    """Recover raw 1x32 E8M0 bytes from DeepEP's int32 carrier."""
+    num_tokens, hidden = x_fp8.shape
+    num_groups = (hidden + 31) // 32
+    if not scale.is_contiguous():
+        scale = scale.contiguous()
+    packed_groups = (num_groups + 3) // 4
+    if (
+        num_groups % 4 == 0
+        and scale.dtype == paddle.int32
+        and tuple(scale.shape) == (num_tokens, packed_groups)
+    ):
+        return scale.view(paddle.uint8)
+    if scale.dtype == paddle.int32 and tuple(scale.shape) == (
+        num_tokens,
+        num_groups,
+    ):
+        return scale.cast(paddle.uint8)
+    raise RuntimeError(
+        "Invalid packed Sonic FP8 scale received from DeepEP: "
+        f"scale={scale.shape}/{scale.dtype}, x_fp8={x_fp8.shape}"
+    )
+
+
+def _sonicmoe_quantize(x):
+    if _SONIC_PACK_SCALE_WORDS_AVAILABLE:
+        fp8, scale = quantize_activation_blockscaled_fast(
+            x,
+            pack_scale_words=(x.shape[1] % 128 == 0),
+        )
+        return fp8, _pack_sonic_fp8_scale_for_deepep(fp8, scale)
+    else:
+        return quantize_activation_blockscaled_fast(x, scale_dtype=paddle.int32)
+
+
+def _record_fp8_combine_grad(grad_x, combine_grad_handle):
+    if combine_grad_handle is None:
+        raise RuntimeError(
+            "For fp8_dispatch, combine_grad_handle must be provided in "
+            "combine backward."
+        )
+    grad_data, grad_scale = grad_x
+    if _SONIC_PACK_SCALE_WORDS_AVAILABLE:
+        grad_scale = _unpack_sonic_fp8_scale_from_deepep(grad_data, grad_scale)
+    combine_grad_handle["data"] = grad_data
+    combine_grad_handle["scale"] = grad_scale
+    return grad_data
 
 
 def configure_buffer(num_sms=None, dispatch_config=None, combine_config=None):
@@ -130,7 +270,12 @@ def get_buffer(group: Group, hidden_bytes: int):
         or _buffer.num_nvl_bytes < num_nvl_bytes
         or _buffer.num_rdma_bytes < num_rdma_bytes
     ):
-        _buffer = deep_ep.Buffer(group, num_nvl_bytes, num_rdma_bytes)
+        _buffer = deep_ep.Buffer(
+            group,
+            num_nvl_bytes,
+            num_rdma_bytes,
+            num_qps_per_rank=max(24, deep_ep.Buffer.num_sms),
+        )
     return _buffer
 
 
@@ -380,18 +525,31 @@ class DeepEPDispatch(PyLayer):
         allocate_on_comm_stream: bool = False,
         moe_ep_barrier: bool = True,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         """Forward pass of fused dispatch."""
         if fp8_dispatch:
-            x_fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
-                x,
-                quant_method="1x128",
-                input_transpose=False,
-                output_scale_transpose=True,
-                return_transpose_only=False,
-                using_ue8m0_scale=use_ue8m0,
-            )
-            scale = scale.T.contiguous()
+            if using_sonic_moe:
+                assert quantize_activation_blockscaled_fast is not None, (
+                    "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
+                )
+                if not x.is_contiguous():
+                    x = x.contiguous()
+                x_fp8, scale = _sonicmoe_quantize(x)
+            else:
+                x_fp8, scale = (
+                    paddle.incubate.nn.functional.fp8_quant_blockwise(
+                        x,
+                        quant_method="1x128",
+                        input_transpose=False,
+                        output_scale_transpose=True,
+                        return_transpose_only=False,
+                        using_ue8m0_scale=use_ue8m0,
+                    )
+                )
+                scale = _normalize_fp8_scale_for_deepep(
+                    x_fp8, scale, use_ue8m0=use_ue8m0
+                )
             x = (x_fp8, scale)
         recv_x, recv_token_probs, states, event = fused_dispatch_forward_func(
             x,
@@ -445,6 +603,8 @@ class DeepEPCombine(PyLayer):
         async_finish=False,
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ):
         """Forward pass of fused combine."""
         combined_x = fused_combine_forward_func(
@@ -457,14 +617,24 @@ class DeepEPCombine(PyLayer):
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
         ctx.moe_ep_barrier = moe_ep_barrier
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.combine_grad_handle = combine_grad_handle
 
         return combined_x
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward pass of fused combine."""
-        return fused_combine_backward_func(
-            grad_output,
+        grad_for_comm = grad_output
+        if ctx.fp8_dispatch:
+            assert quantize_activation_blockscaled_fast is not None, (
+                "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
+            )
+            grad_output = grad_output.contiguous()
+            grad_for_comm = _sonicmoe_quantize(grad_output)
+
+        grad_x = fused_combine_backward_func(
+            grad_for_comm,
             ctx.group,
             ctx.handle,
             ctx.previous_event,
@@ -472,6 +642,11 @@ class DeepEPCombine(PyLayer):
             ctx.allocate_on_comm_stream,
             moe_ep_barrier=ctx.moe_ep_barrier,
         )
+
+        if ctx.fp8_dispatch:
+            grad_x = _record_fp8_combine_grad(grad_x, ctx.combine_grad_handle)
+
+        return grad_x
 
 
 class DeepEPCombineAsync(PyLayer):
@@ -486,6 +661,8 @@ class DeepEPCombineAsync(PyLayer):
         *fn_args,
         fn,
         is_first_fwd=False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ):
         """Forward pass of fused combine."""
         combined_x = fused_combine_forward_func(
@@ -500,6 +677,8 @@ class DeepEPCombineAsync(PyLayer):
 
         ctx.handle = states["handle"]
         ctx.group = group
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.combine_grad_handle = combine_grad_handle
 
         wait_for_deepep(group.id)
 
@@ -508,8 +687,16 @@ class DeepEPCombineAsync(PyLayer):
     @staticmethod
     def backward(ctx, grad_output, *fn_out_grads):
         """Backward pass of fused combine."""
+        grad_for_comm = grad_output
+        if ctx.fp8_dispatch:
+            assert quantize_activation_blockscaled_fast is not None, (
+                "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
+            )
+            grad_output = grad_output.contiguous()
+            grad_for_comm = _sonicmoe_quantize(grad_output)
+
         grad_x = fused_combine_backward_func(
-            grad_output,
+            grad_for_comm,
             ctx.group,
             ctx.handle,
             async_finish=True,
@@ -518,6 +705,10 @@ class DeepEPCombineAsync(PyLayer):
         fn_args_grads = ctx.bwf(*fn_out_grads)
 
         wait_for_deepep(ctx.group.id)
+
+        if ctx.fp8_dispatch:
+            grad_x = _record_fp8_combine_grad(grad_x, ctx.combine_grad_handle)
+
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
@@ -533,6 +724,8 @@ class DeepEPCombineAsyncFunctor(PyLayer):
         states,
         *fn_args,
         fn,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ):
         """Forward pass of fused combine with overlap, get cached output directly."""
         combined_x = hold_tensors["res_output"]
@@ -542,14 +735,24 @@ class DeepEPCombineAsyncFunctor(PyLayer):
 
         ctx.handle = states["handle"]
         ctx.group = group
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.combine_grad_handle = combine_grad_handle
 
         return (combined_x,) + fn_out  # noqa: RUF005
 
     @staticmethod
     def backward(ctx, grad_output, *fn_out_grads):
         """Backward pass of fused combine with overlap."""
+        grad_for_comm = grad_output
+        if ctx.fp8_dispatch:
+            assert quantize_activation_blockscaled_fast is not None, (
+                "Cannot find quantize_activation_blockscaled_fast, please update sonicmoe."
+            )
+            grad_output = grad_output.contiguous()
+            grad_for_comm = _sonicmoe_quantize(grad_output)
+
         grad_x = fused_combine_backward_func(
-            grad_output,
+            grad_for_comm,
             ctx.group,
             ctx.handle,
             async_finish=True,
@@ -558,6 +761,10 @@ class DeepEPCombineAsyncFunctor(PyLayer):
         fn_args_grads = ctx.bwf(*fn_out_grads)
 
         wait_for_deepep(ctx.group.id)
+
+        if ctx.fp8_dispatch:
+            grad_x = _record_fp8_combine_grad(grad_x, ctx.combine_grad_handle)
+
         return (grad_x,) + fn_args_grads  # noqa: RUF005
 
 
@@ -641,6 +848,7 @@ if HAVE_DEEP_EP:
         allocate_on_comm_stream=False,
         moe_ep_barrier: bool = True,
         use_ue8m0: bool = False,
+        using_sonic_moe: bool = False,
     ):
         """Perform fused dispatch operation if deep_ep is available.
 
@@ -668,6 +876,7 @@ if HAVE_DEEP_EP:
             allocate_on_comm_stream,
             moe_ep_barrier,
             use_ue8m0,
+            using_sonic_moe,
         )
 
     def fused_combine(
@@ -681,6 +890,8 @@ if HAVE_DEEP_EP:
         async_finish=False,
         moe_ep_barrier: bool = True,
         use_rr_deepep_combine: bool = False,
+        fp8_dispatch: bool = False,
+        combine_grad_handle: dict | None = None,
     ):
         """Perform fused combine operation if deep_ep is available.
 
@@ -711,6 +922,8 @@ if HAVE_DEEP_EP:
                 previous_event,
                 async_finish,
                 moe_ep_barrier=moe_ep_barrier,
+                fp8_dispatch=fp8_dispatch,
+                combine_grad_handle=combine_grad_handle,
             )
         else:
             if previous_event is not None:
@@ -739,6 +952,8 @@ if HAVE_DEEP_EP:
                     *(combine_overlap_handle["fn_args"]),
                     fn=combine_overlap_handle["fn"],
                     is_first_fwd=not framework._dygraph_tracer()._has_grad,
+                    fp8_dispatch=fp8_dispatch,
+                    combine_grad_handle=combine_grad_handle,
                 )
                 combine_overlap_handle["fn_out"] = fn_out
                 return combined_x
@@ -775,8 +990,9 @@ class HybridEPDispatch(PyLayer):
         ctx.buffer = manager._active_buffer
         ctx.handle = manager.handle
         ctx.token_indices = token_indices
+        ctx.num_unpadded_tokens = x.shape[0]
         ctx.hidden_dtype = x.dtype
-        ctx.use_fp8_dispatch = fp8_dispatch
+        ctx.pad_multiple = manager._dispatch_pad_multiple
         ctx.set_grad_in_dtype_consistent(False)
         return recv_x, recv_token_probs, scale
 
@@ -791,8 +1007,12 @@ class HybridEPDispatch(PyLayer):
             if grad_token_probs is None
             else grad_token_probs.astype("float32"),
             handle=ctx.handle,
-            pad_multiple=FP8_ALIGN if ctx.use_fp8_dispatch else None,
+            pad_multiple=ctx.pad_multiple,
         )
+        if grad_x.shape[0] != ctx.num_unpadded_tokens:
+            grad_x = grad_x[: ctx.num_unpadded_tokens]
+            if grad_dense_probs is not None:
+                grad_dense_probs = grad_dense_probs[: ctx.num_unpadded_tokens]
         grad_probs = None
         if grad_dense_probs is not None:
             grad_probs = paddle.take_along_axis(
@@ -809,6 +1029,7 @@ def _replay_hybrid_ep_dispatch_backward(
     grad_output,
     num_permuted_tokens,
     use_fp8_dispatch,
+    pad_multiple,
 ):
     replay_handle = handle
     if use_fp8_dispatch:
@@ -827,7 +1048,7 @@ def _replay_hybrid_ep_dispatch_backward(
         hidden=grad_output.contiguous(),
         handle=replay_handle,
         num_permuted_tokens=num_permuted_tokens,
-        pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
+        pad_multiple=pad_multiple,
         non_blocking=False,
     )
     return grad_x[:num_permuted_tokens]
@@ -837,19 +1058,28 @@ class HybridEPCombine(PyLayer):
     """Fused HybridEP combine bridge for Paddle autograd."""
 
     @staticmethod
-    def forward(ctx, x, manager):
+    def forward(ctx, x, manager, num_permuted_tokens=None):
         handle = manager.handle
-        use_fp8_dispatch = "UINT8" in str(handle[7].token_data_type)
+        if num_permuted_tokens is None:
+            num_permuted_tokens = x.shape[0]
+        assert x.shape[0] == num_permuted_tokens, (
+            "HybridEP combine expects active permuted rows, got "
+            f"{x.shape[0]} rows but num_permuted_tokens is "
+            f"{num_permuted_tokens}."
+        )
+        use_fp8_dispatch = manager._dispatch_uses_fp8
+        pad_multiple = manager._dispatch_pad_multiple
         combined_x, _ = manager._active_buffer.combine_with_unpermute(
             hidden=x,
             handle=handle,
-            pad_multiple=FP8_ALIGN if use_fp8_dispatch else None,
+            pad_multiple=pad_multiple,
         )
         combined_x.stop_gradient = False
         ctx.buffer = manager._active_buffer
         ctx.handle = handle
         ctx.use_fp8_dispatch = use_fp8_dispatch
-        ctx.num_permuted_tokens = x.shape[0]
+        ctx.pad_multiple = pad_multiple
+        ctx.num_permuted_tokens = num_permuted_tokens
         return combined_x
 
     @staticmethod
@@ -859,7 +1089,8 @@ class HybridEPCombine(PyLayer):
             ctx.handle,
             grad_output,
             ctx.num_permuted_tokens,
-            ctx.use_fp8_dispatch,
+            use_fp8_dispatch=ctx.use_fp8_dispatch,
+            pad_multiple=ctx.pad_multiple,
         )
         return grad_x
 
@@ -881,11 +1112,12 @@ def hybrid_ep_dispatch(
     )
 
 
-def hybrid_ep_combine(x, manager):
+def hybrid_ep_combine(x, manager, num_permuted_tokens=None):
     """Perform HybridEP combine_with_unpermute with explicit Paddle autograd."""
     return HybridEPCombine.apply(
         x,
         manager,
+        num_permuted_tokens,
     )
 
 

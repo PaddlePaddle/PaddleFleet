@@ -117,6 +117,7 @@ jobs:
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
+          uv cache clean paddlepaddle-gpu
           source /root/proxy
           git submodule update --init --recursive
           export IS_NVIDIA=True

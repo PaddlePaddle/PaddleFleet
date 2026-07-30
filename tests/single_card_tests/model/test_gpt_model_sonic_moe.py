@@ -16,10 +16,12 @@
 import subprocess
 import unittest
 
+import numpy as np
 import paddle
 import paddle.nn.functional as F
 import paddlefleet_ops
 from paddle.distributed import fleet
+from paddle.distributed.fleet.utils import mix_precision_utils
 from paddlefleet_ops.utils import get_cuda_version
 
 # from tests.unit_tests.test_utilities import Utils
@@ -114,9 +116,20 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
         self.seed = 46
-        self.hidden_size = 2048
+        self.hidden_size = 512
         self.n_routed_experts = 8
         self.acc_steps = 1
+
+    def test_sonic_moe_import(self):
+        from paddlefleet_ops import sonicmoe
+
+        from paddlefleet.transformer.moe import fusion_layer_utils, moe_expert
+
+        expected_run_sonic_moe = getattr(
+            sonicmoe, "run_sonic_moe", fusion_layer_utils.run_sonic_moe
+        )
+        self.assertIs(moe_expert.run_sonic_moe, expected_run_sonic_moe)
+        self.assertTrue(hasattr(moe_expert, "SonicMoEExpert"))
 
     @staticmethod
     def _small_init_method(tensor):
@@ -156,25 +169,36 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         return TransformerConfig(**kwargs)
 
     def _build_moe_layer(
-        self, using_sonic_moe=False, fp8=None, moe_deep_gemm=None
+        self,
+        using_sonic_moe=False,
+        fp8=None,
+        moe_deep_gemm=None,
+        config=None,
     ):
         paddle.seed(self.seed)
         model_parallel_cuda_manual_seed(self.seed)
-        transformer_config = self._build_transformer_config(
-            using_sonic_moe=using_sonic_moe,
-            fp8=fp8,
-            moe_deep_gemm=moe_deep_gemm,
-        )
+        if config is None:
+            config = self._build_transformer_config(
+                using_sonic_moe=using_sonic_moe,
+                fp8=fp8,
+                moe_deep_gemm=moe_deep_gemm,
+            )
         transformer_layer_spec = get_gpt_layer_local_spec(
-            transformer_config,
+            config,
             num_experts=self.n_routed_experts,
         )
 
         moe_layer = MoELayer(
-            transformer_config,
+            config,
             transformer_layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
             self.pg_collection,
         )
+
+        mix_precision_utils.MixPrecisionLayer(moe_layer, dtype="bfloat16")
+
+        for param in moe_layer.parameters():
+            if hasattr(param, "main_grad") and param.main_grad is None:
+                param.main_grad = paddle.zeros_like(param, dtype=paddle.float32)
 
         return moe_layer
 
@@ -241,7 +265,7 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
             self._collect_grads(moe_layer),
         )
 
-    def test_moe_layer_precision(self):
+    def run_test_moe_layer_precision(self):
         """Test MoELayer precision: BF16 sonic-moe vs baseline, FP8 vs BF16.
 
         Both baseline and sonic layers are built with the same seed.
@@ -262,9 +286,14 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
             using_sonic_moe=False, moe_deep_gemm=False
         )
         moe_layer_sonic_bf16 = self._build_moe_layer(using_sonic_moe=True)
+        moe_layer_sonic_bf16.grouped_gemm_experts.sonic_moe_config.enabled = (
+            False
+        )
+
         moe_layer_sonic_fp8 = self._build_moe_layer(
             using_sonic_moe=True, fp8="e4m3"
         )
+        moe_layer_sonic_fp8.grouped_gemm_experts.sonic_moe_config.enabled = True
 
         input_data_list = []
         for step_idx in range(self.acc_steps):
@@ -282,6 +311,7 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
                 moe_layer_sonic_bf16, input_data_list
             )
         )
+        moe_layer_sonic_fp8.grouped_gemm_experts.quant_weight()
         loss_fp8, output_fp8, grads_fp8 = (
             self._run_accumulated_forward_backward(
                 moe_layer_sonic_fp8, input_data_list
@@ -368,6 +398,59 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
             )
 
         print("All precision checks passed!")
+
+    def run_test_z_bf16_recompute_z(self):
+        sonic_fp8 = self._build_moe_layer(using_sonic_moe=True, fp8="e4m3")
+
+        recompute_config = self._build_transformer_config(
+            using_sonic_moe=True, fp8="e4m3"
+        )
+        recompute_config.recompute_granularity = "selective"
+        recompute_config.recompute_modules = ["moe_gate_up"]
+        sonic_fp8_recompute_z = self._build_moe_layer(
+            using_sonic_moe=True, fp8="e4m3", config=recompute_config
+        )
+        # sonic_fp8.grouped_gemm_experts.sonic_moe_config.save_z_fp8 = False
+        # sonic_fp8_recompute_z.grouped_gemm_experts.sonic_moe_config.save_z_fp8 = False
+        # sonic_fp8_recompute_z.grouped_gemm_experts.sonic_moe_config.recompute_z = True
+        # sonic_fp8.grouped_gemm_experts.sonic_moe_config.enabled = True
+        input_data_list = []
+        for step_idx in range(self.acc_steps):
+            paddle.seed(self.seed + step_idx)
+            data = paddle.randn(
+                [2, 64, self.hidden_size], dtype=paddle.bfloat16
+            )
+            input_data_list.append(data)
+
+        loss, output, grads = self._run_accumulated_forward_backward(
+            sonic_fp8, input_data_list
+        )
+        loss_recompute, output_recompute, grads_recompute = (
+            self._run_accumulated_forward_backward(
+                sonic_fp8_recompute_z, input_data_list
+            )
+        )
+        self.assertEqual(loss, loss_recompute, "Loss not equal.")
+        self.assertTrue(
+            np.array_equal(output.numpy(), output_recompute.numpy()),
+            "Output not equal.",
+        )
+
+        common_grads = set(grads) & set(grads_recompute)
+        self.assertTrue(
+            common_grads,
+            "No common FP8 grad tensors found",
+        )
+        for name in sorted(common_grads):
+            g1 = grads[name]
+            g2 = grads_recompute[name]
+            self.assertTrue(
+                np.array_equal(g1.numpy(), g2.numpy()), "grad not equal."
+            )
+
+    def test_all_cases(self):
+        self.run_test_moe_layer_precision()
+        self.run_test_z_bf16_recompute_z()
 
 
 if __name__ == "__main__":

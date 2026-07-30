@@ -112,6 +112,9 @@ class GPTEmbedding(FleetLayer):
                 rotary_interleaved=config.rotary_interleaved,
                 rotary_base=rotary_base,
                 rope_scaling=rope_scaling,
+                use_accuracy_compatible=getattr(
+                    config, "use_accuracy_compatible", False
+                ),
             )
 
             if config.sliding_window is not None:
@@ -143,6 +146,16 @@ class GPTEmbedding(FleetLayer):
         decoder_input: Tensor = None,
         packed_seq_params: PackedSeqParams = None,
     ):
+        if self.config.gpt_model_use_experimental_version:
+            assert (
+                getattr(self.config, "max_sequence_length", None) is not None
+            ), (
+                "config.max_sequence_length must be set when gpt_model_use_experimental_version=True"
+            )
+            if self.config.sequence_parallel:
+                assert not self.config.multi_latent_attention, (
+                    "multi_latent_attention is not supported when gpt_model_use_experimental_version=True and sequence_parallel=True"
+                )
         input_ids = dict_args["input_ids"]
         labels = dict_args.get("labels", None)
         if labels is not None:
@@ -161,6 +174,11 @@ class GPTEmbedding(FleetLayer):
             attn_mask_startend_row_indices = dict_args.get(
                 "startend_row_indices", None
             )
+        attn_mask_startend_row_indices = (
+            attn_mask_startend_row_indices.to(device)
+            if attn_mask_startend_row_indices is not None
+            else None
+        )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
@@ -191,8 +209,12 @@ class GPTEmbedding(FleetLayer):
             if (
                 self.config.expert_model_parallel_size > 1
                 and self.config.tensor_model_parallel_size < 2
+                or self.config.gpt_model_use_experimental_version
             ):
-                text_padding_indices = input_ids == 0
+                pad_token_id = getattr(self.config, "pad_token_id", 0)
+                if pad_token_id is None:
+                    pad_token_id = 0
+                text_padding_indices = input_ids == pad_token_id
                 decoder_input = fill_feature(
                     decoder_input, text_padding_indices, 0
                 )
@@ -246,7 +268,13 @@ class GPTEmbedding(FleetLayer):
                             axis=1,
                             mode=self.config.cp_balance_mode,
                         )
-
+                    if (
+                        self.config.gpt_model_use_experimental_version
+                        and self.config.sequence_parallel
+                    ):
+                        decoder_input = decoder_input.astype(
+                            self.embedding.embed_tokens.weight.dtype
+                        )
                     if self.sequence_parallel:
                         batch_size, seq_length, hidden_size = (
                             decoder_input.shape
@@ -255,11 +283,17 @@ class GPTEmbedding(FleetLayer):
                             [-1, decoder_input.shape[-1]]
                         )
                         decoder_input = ScatterOp.apply(decoder_input)
-                        decoder_input = (
-                            decoder_input.reshape([batch_size, -1, hidden_size])
-                            .permute(1, 0, 2)
-                            .contiguous()
-                        )  # change to [S/tp, B, H]
+                        if not (
+                            self.config.gpt_model_use_experimental_version
+                            and self.config.sequence_parallel
+                        ):
+                            decoder_input = (
+                                decoder_input.reshape(
+                                    [batch_size, -1, hidden_size]
+                                )
+                                .permute(1, 0, 2)
+                                .contiguous()
+                            )  # change to [S/tp, B, H]
                 else:
                     inputs_embeds_extra = decoder_input[
                         :, -self.config.num_nextn_predict_layers :, :
@@ -457,6 +491,11 @@ class GPTEmbedding(FleetLayer):
                 and get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
             ):
+                assert not self.sequence_parallel, (
+                    "sequence_parallel is not supported when context_parallel scatter "
+                    "is applied in the plain (no-MTP, no-multimodal) path before RoPE "
+                    "generation."
+                )
                 decoder_input = ContextParallelScatterOp.apply(
                     decoder_input, axis=1, mode=self.config.cp_balance_mode
                 )
@@ -563,6 +602,15 @@ class GPTEmbedding(FleetLayer):
         if paddle.core._has_grad():
             decoder_input.stop_gradient = False  # Prevent errors in recompute_pylayer during LoRA training caused by base_weight lacking gradients.
 
+        # NOTE(Waynezee):  gpt_model_use_experimental_version currently don't need values below
+        if self.config.gpt_model_use_experimental_version:
+            rotary_pos_emb = None
+            rotary_pos_cos = None
+            rotary_pos_sin = None
+            swa_rotary_pos_emb = None
+            swa_rotary_pos_cos = None
+            swa_rotary_pos_sin = None
+
         if (
             get_context_parallel_world_size() > 1
             and self.config.experimental_dataflow
@@ -593,7 +641,7 @@ class GPTEmbedding(FleetLayer):
                 )
 
         preproc_output = {
-            "hidden_states": decoder_input,
+            "hidden_states": decoder_input.contiguous(),  # prepare for pp send
             "attention_mask": attention_mask,
             "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "rotary_pos_emb": rotary_pos_emb,
@@ -608,6 +656,11 @@ class GPTEmbedding(FleetLayer):
             "labels": labels,
             "input_ids": input_ids_for_moe_mask,
             "mtp_input_ids_for_moe_mask": mtp_input_ids_for_moe_mask,
+            "origin_input_ids": (
+                input_ids
+                if self.config.gpt_model_use_experimental_version
+                else None
+            ),
         }
         # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
         # through dict_args to MTP layer. They must both be present or both be absent.

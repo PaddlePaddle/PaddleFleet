@@ -13,6 +13,14 @@ on:
           - 'false'
         default: 'true'
         required: false
+      update_baseline:
+        description: '是否更新基线'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'false'
+        required: false
 
 permissions: read-all
 
@@ -26,16 +34,15 @@ env:
   work_dir: /paddle/PaddleFleet
   PADDLE_ROOT: /paddle
   ci_scripts: /paddle/ci
-  BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
+  BRANCH: release
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image_cu129: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
   docker_image_cu130: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda130-py312-dev"
   paddle_url_cu129: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/"
   paddle_url_cu130: "https://paddle-qa.bj.bcebos.com/paddle-pipeline/Release-TagBuild-Training-Linux-Gpu-Cuda130-Cudnn913-Trt1013-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl"
-  paddlefleet_url: "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/release/0.3/latest/"
   use_release: ${{ inputs.use_release || 'true' }}
-  fleet_branch: "release/0.3"
-  formers_branch: "release/1.2"
+  update_baseline: ${{ inputs.update_baseline || 'false' }}
+
 defaults:
   run:
     shell: bash
@@ -120,7 +127,6 @@ jobs:
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
-            -e paddlefleet_url \
             -e fleet_branch \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -137,7 +143,7 @@ jobs:
           source /root/proxy
           mkdir -p /home/.cache/pip
           pip cache dir
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -150,9 +156,8 @@ jobs:
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
-          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-          wget "${paddlefleet_url}${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
-          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
+
           echo "Install uv"
           export WITH_COVERAGE=ON
           pip install --upgrade pip
@@ -162,8 +167,13 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git fetch --all
+          fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${fleet_branch}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
@@ -185,28 +195,6 @@ jobs:
           fi
           '
 
-      - name: Single card sonic moe test
-        if: matrix.python == '3.12' && matrix.cuda == '12.9' && always()
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xce '
-          pwd
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${{ matrix.python }}
-          echo "Paddle Commit"
-          python -c "import paddle; print(paddle.version.commit)"
-          echo "PaddleFleet Commit"
-          python -c "import paddlefleet; print(paddlefleet.version.commit)"
-          cd PaddleFleet
-          bash ci/single_card_sonic.sh
-          single_card_exit_code=$?
-          if [[ "$single_card_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mSingle card test failed.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mSingle card test succeeded.\033[0m"
-          fi
-          '
 
       - name: Terminate and delete the container
         if: ${{ always() }}
@@ -289,7 +277,6 @@ jobs:
             -e CUDA_VERSION \
             -e PYTHON_VERSION \
             -e PADDLE_URL \
-            -e paddlefleet_url \
             -e fleet_branch \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
@@ -305,7 +292,7 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -318,9 +305,6 @@ jobs:
             paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
             paddle_url="${PADDLE_URL}${paddle_whl}"
           fi
-          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-          wget "${paddlefleet_url}${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
-          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           rm -rf ./*
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           git config --global --add safe.directory /paddle/PaddleFleet
@@ -329,8 +313,14 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git submodule update --init --recursive
+          git fetch --all
+          fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${fleet_branch}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
@@ -416,7 +406,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${cuda_version}-${python_version}-H20" >> $GITHUB_ENV
+          echo "BASE_NAME=${cuda_version}-3.10-H20" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           GPU_DEVICES: ${{ env.GPU_DEVICES }}
@@ -449,9 +439,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
-            -e paddlefleet_url \
-            -e fleet_branch \
-            -e formers_branch \
+            -e update_baseline \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -469,7 +457,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -477,9 +465,7 @@ jobs:
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
-          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-          wget "${paddlefleet_url}${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
-          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
@@ -487,7 +473,13 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
+          git fetch --all
+          fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${fleet_branch}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -514,6 +506,8 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git fetch --all
+          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
@@ -563,7 +557,7 @@ jobs:
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             export case_name="glm45_single_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 single-card.\033[0m"
           fi
@@ -580,7 +574,7 @@ jobs:
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             export case_name="qwen3_single_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
           fi
@@ -598,7 +592,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_single_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-single-card.\033[0m"
           fi
@@ -657,7 +651,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${cuda_version}-${python_version}-H20" >> $GITHUB_ENV
+          echo "BASE_NAME=${cuda_version}-3.10-H20" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -688,9 +682,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
-            -e paddlefleet_url \
-            -e fleet_branch \
-            -e formers_branch \
+            -e update_baseline \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -707,7 +699,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -715,17 +707,22 @@ jobs:
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
-          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-          wget "${paddlefleet_url}${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
-          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git fetch --all
+          fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
+
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${fleet_branch}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
@@ -753,6 +750,8 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git fetch --all
+          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
@@ -783,7 +782,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -800,7 +799,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -820,7 +819,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft_cp"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 sft cp.\033[0m"
           fi
@@ -837,7 +836,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_lora"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
           fi
@@ -854,7 +853,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_dpo"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
           fi
@@ -872,7 +871,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="glm45_dpo_lora"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo_lora.\033[0m"
           fi
@@ -893,7 +892,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_grouped_gemm"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
           fi
@@ -914,7 +913,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_fp8"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
           fi
@@ -931,7 +930,7 @@ jobs:
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_ep4"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 EP4.\033[0m"
           fi
@@ -948,7 +947,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_pt"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen pre-train.\033[0m"
           fi
@@ -965,7 +964,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_sft"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen sft.\033[0m"
           fi
@@ -982,7 +981,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_lora"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen lora.\033[0m"
           fi
@@ -1000,7 +999,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_tp8_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl sft.\033[0m"
           fi
@@ -1018,7 +1017,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_lora_h20_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl lora.\033[0m"
           fi
@@ -1036,7 +1035,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_moe_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl moe.\033[0m"
           fi
@@ -1054,7 +1053,7 @@ jobs:
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_fsdp_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen3-vl-8k-fsdp.\033[0m"
           fi
@@ -1113,7 +1112,7 @@ jobs:
           echo "CUDA_VERSION=${cuda_version}" >> $GITHUB_ENV
           echo "PYTHON_VERSION=${python_version}" >> $GITHUB_ENV
           echo "PADDLE_URL=${paddle_url}" >> $GITHUB_ENV
-          echo "BASE_NAME=${cuda_version}-${python_version}-A100" >> $GITHUB_ENV
+          echo "BASE_NAME=${cuda_version}-3.10-A100" >> $GITHUB_ENV
       - name: Check docker image and run container
         env:
           DOCKER_IMAGE: ${{ env.DOCKER_IMAGE }}
@@ -1144,9 +1143,7 @@ jobs:
             -e PYTHON_VERSION \
             -e PADDLE_URL \
             -e BASE_NAME \
-            -e fleet_branch \
-            -e formers_branch \
-            -e paddlefleet_url \
+            -e update_baseline \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_REPO_NAME="${{ github.repository }}" \
@@ -1163,7 +1160,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -1171,16 +1168,21 @@ jobs:
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
-          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-          wget "${paddlefleet_url}${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
-          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git fetch --all
+          fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
+
+          fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          wget "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${fleet_branch}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
+          pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install colorlog>=6.10.1
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -1208,6 +1210,8 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          git fetch --all
+          formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
           pip install -e . --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/
@@ -1237,7 +1241,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_pt_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 pre-train.\033[0m"
           fi
@@ -1255,7 +1259,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_sft_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 sft.\033[0m"
           fi
@@ -1273,7 +1277,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_lora_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 lora.\033[0m"
           fi
@@ -1291,7 +1295,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
           fi
@@ -1309,7 +1313,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_lora_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo_lora.\033[0m"
           fi
@@ -1327,7 +1331,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_pt_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen pre-train.\033[0m"
           fi
@@ -1345,7 +1349,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_sft_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen sft.\033[0m"
           fi
@@ -1363,7 +1367,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_lora_multi_card_a100"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen lora.\033[0m"
           fi
@@ -1381,7 +1385,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_tp8_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl sft.\033[0m"
           fi
@@ -1399,7 +1403,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_lora_a100_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl lora.\033[0m"
           fi
@@ -1417,7 +1421,7 @@ jobs:
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_moe_multi_card"
-            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME
+            bash PaddleFleet/ci/check_ce_precision.sh $case_name $BASE_NAME $update_baseline
           else
             echo -e "\033[32mIntegration test succeeded: Qwen vl moe.\033[0m"
           fi

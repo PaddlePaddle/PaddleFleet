@@ -18,15 +18,20 @@ import paddle
 def is_fp8_tensor(x):
     """
     Check if the input is a tuple of FP8 tensor and its corresponding scale.
+
+    The scale is float32 for the regular blockwise recipe and int32 when
+    UE8M0-packed (``using_ue8m0_scale=True`` in
+    ``paddle.incubate.nn.functional.fp8_quant_blockwise``).
     """
     if not isinstance(x, tuple):
+        return False
+    if len(x) != 2:
         return False
     tensor, scale = x
     assert tensor.dtype != paddle.float8_e5m2, (
         "FP8 tensor should not be float8_e5m2 dtype, not supported yet."
     )
-    return (
-        len(x) == 2
-        and tensor.dtype == paddle.float8_e4m3fn
-        and scale.dtype == paddle.float32
+    return tensor.dtype == paddle.float8_e4m3fn and scale.dtype in (
+        paddle.float32,
+        paddle.int32,
     )

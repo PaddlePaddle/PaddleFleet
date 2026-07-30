@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -29,10 +30,13 @@ from ..utils import (
     get_magic_init_method,
     init_method_normal,
     scaled_init_method_normal,
+    truncated_init_method_normal,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,6 +49,9 @@ class TransformerConfig(ModelParallelConfig):
 
     num_hidden_layers: int = 1
     """Number of transformer layers in a transformer block."""
+
+    pad_token_id: int = 0
+    """Token ID used for padding."""
 
     num_nextn_predict_layers: int = 0
     """Number of Multi-Token Prediction (MTP) Layers."""
@@ -69,6 +76,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_dense_mtp: bool = False
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
+
+    mtp_shared_last_layer: bool = False
+    """When True, MTP layers share the last backbone TransformerLayer parameters."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
@@ -203,6 +213,9 @@ class TransformerConfig(ModelParallelConfig):
     use_vha_attention: bool = False
     """If True, enables VHA premix/postmix extensions in standard self-attention."""
 
+    vha_shared_kv: bool = False
+    """If True, enables Shared KV to reduce KVCache"""
+
     vha_postmix_rank: int | None = None
     """Rank of the VHA postmix low-rank head mixing matrices."""
 
@@ -242,6 +255,12 @@ class TransformerConfig(ModelParallelConfig):
     swa_rope_theta: float | None = None
     """The base period of the RoPE embeddings for sliding window attention layers. Defaults to rope_theta."""
 
+    swa_qk_nope_head_dim: int = None
+    """Dimension of the nope part of QK heads for SWA layers. If None, falls back to qk_nope_head_dim."""
+
+    swa_qk_rope_head_dim: int = None
+    """Dimension of the rope part of QK heads for SWA layers. If None, falls back to qk_rope_head_dim."""
+
     head_wise_swa_ratio: float = 0.0
     """Ratio of KV heads that use sliding window attention within an SWA layer.
     0.0 means all heads use SWA; values between 0 and 1 create a mix where
@@ -253,9 +272,11 @@ class TransformerConfig(ModelParallelConfig):
     heterogeneous_block_specs: bool = False
     """Whether to use heterogeneous block specs (nemotron-nas architecture)."""
 
-    sliding_window: tuple[int, int] = None
+    sliding_window: int | tuple[int, int] = None
     """If not None, then will use sliding window attention. The size of the window is specified by
-    the numbers inside the tuple; -1 is special value meaning "infinite window size"."""
+    the numbers inside the tuple; -1 is special value meaning "infinite window size".
+    Accepts a scalar int (HF-compatible causal one-sided semantics) or a (left, right) tuple
+    (Fleet native two-sided semantics); `-1` means infinite window size."""
 
     window_attn_skip_freq: int | list[int] = None
     """Frequency of full attention layers among sliding window attention layers. Accepts either:
@@ -289,11 +310,38 @@ class TransformerConfig(ModelParallelConfig):
     multimodal_embedding: bool = False
     """Whether to use multimodal embedding."""
 
+    multimax_modules: list[str] | None = None
+    """Submodules to apply learnable SegLU-style modulation to before softmax.
+
+    Mirrors the Megatron ``recompute_modules`` style: a list of submodule
+    names. ``None`` (default) disables the feature globally. Currently
+    supported list entries:
+
+    - ``"lm_head"``: apply SegLU(x, ranges, ts) on the LM-head logits before
+      the language-modeling softmax/cross-entropy. Adds two [4]-shape
+      learnable parameters (multimax_ranges, multimax_ts) to the LM head.
+      These are excluded from weight decay via the "multimax" substring
+      filter in the trainer's no-decay rule.
+    - ``"attention"``: apply on attention scores before softmax. Reserved;
+      not implemented yet (emits a warning if listed).
+
+    YAML/JSON behaviour:
+    - unset key, ``multimax_modules: null``, or empty list ``multimax_modules: []``
+      all map to Python ``None`` (feature disabled).
+    - ``multimax_modules: [lm_head]`` enables the LM-head branch.
+    """
+
     gated_attention: bool = False
     """If True, enables gated attention where a learnable sigmoid gate is applied to the
     attention output before the output projection. The gate is produced alongside the query
     from the fused QKV projection (doubling the query projection size). This allows the model
     to dynamically control the information flow from attention. See Qwen3.5 for reference."""
+
+    gated_attn_use_q_lora: bool = False
+    """If True, the gated attention gate uses the q_a_proj output (q_compressed, post
+    q_a_layernorm, dim = q_lora_rank) as the gate input instead of hidden_states. This is a
+    low-rank gate input for MLA networks that also reduces the gate projection parameter count.
+    Requires q_lora_rank is not None. Only applies when gated_attention is True."""
 
     ####################
     # block attention residuals
@@ -321,6 +369,7 @@ class TransformerConfig(ModelParallelConfig):
     apply_query_key_layer_scaling is True."""
 
     high_precision_rope: bool = False
+    swa_high_precision_norm: bool = False
     ####################
     # fusion
     ####################
@@ -395,6 +444,23 @@ class TransformerConfig(ModelParallelConfig):
     dict: keys contains all submodule need recompute, value means submodule in which layers need recompute
     """
 
+    decoderlayer_act_offload_settings: dict = None
+    """Settings for decoder layer activation offloading to CPU.
+
+    A dict with two keys:
+      - "type": str, the offload strategy type. Supported values:
+          - "mod": offload layers where (layer_number % value[0] == value[1]).
+                   "value" should be a list/tuple of two ints [divisor, remainder].
+          - "layer_idxs": offload specific layers by index.
+                   "value" should be a list of layer indices to offload.
+      - "value": the strategy parameter, format depends on "type".
+
+    Example:
+        {"type": "mod", "value": [1, 0]}       # offload all layers (every layer % 1 == 0)
+        {"type": "mod", "value": [2, 0]}       # offload even-numbered layers
+        {"type": "layer_idxs", "value": [0, 5, 10]}  # offload layers 0, 5, 10
+    """
+
     ####################
     # MoE related
     ####################
@@ -423,6 +489,11 @@ class TransformerConfig(ModelParallelConfig):
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
     Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
+
+    moe_allgather_gate_overlap: bool = True
+    """Whether to issue the AllGather before the gate so it overlaps with gate
+    compute. Only honoured when ``moe_token_dispatcher_type='allgather'`` and
+    ``expert_model_parallel_size > 1``; ignored otherwise."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""
@@ -504,11 +575,29 @@ class TransformerConfig(ModelParallelConfig):
     """When True, print auto_subbatch diagnostic info (path, subbatch_rows, zip_unzip_fusion)
     after each forward/backward pass. Useful for debugging memory behavior."""
 
+    auto_subbatch_mode: str | None = None
+    """Auto-subbatch splitting strategy. This only selects the strategy when
+    use_auto_subbatch=True; it does not enable auto-subbatch by itself.
+    - None: use the default "post_permute" strategy.
+    - "post_permute": run full moe_permute first, then subbatch in permuted space.
+    - "pre_permute": split chunks in dispatched space first, then run
+      permute→compute→unpermute independently for each chunk.
+    """
+
     router_z_loss_coef: float = None
     """Scaling coefficient for z-loss. Default is None."""
 
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
+
+    moe_split_feature_routing: bool = False
+    """Enable multi-view (split-feature) MoE routing. When True, the router
+    scores each expert with the sum of two independent views: the existing
+    ``self.weight`` gate plus a new ``self.weight_1`` projection, i.e.
+    ``score_func(logits_0) + score_func(logits_1)`` instead of a single gate
+    projection. The expert FFN compute path is unchanged. Disabled by default;
+    has no effect on hash-routing layers (moe_n_hash_layers), which keep using
+    the original single gate."""
 
     moe_n_hash_layers: int = 0
     """Number of leading transformer layers that use hash-based MoE routing.
@@ -552,6 +641,7 @@ class TransformerConfig(ModelParallelConfig):
     """Context parallel scatter/gather layout mode.
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
+    "contiguous_a2a".
     """
 
     ####################
@@ -574,6 +664,18 @@ class TransformerConfig(ModelParallelConfig):
 
     use_ue8m0: bool = False
     """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
+
+    use_fp8_qat: bool = False
+    """Whether to enable FP8 Quantization-Aware Training (QAT)."""
+
+    use_w4a8: bool = False
+    """Whether to use w4a8 for mlp gemm."""
+
+    full_fp8_computation: bool = False
+    """Master switch for FP8 on Linear / ColumnParallelLinear / RowParallelLinear
+    and DSv4HybridSelfAttention / CSAIndexer. When ``False`` these layers stay
+    in bf16 regardless of ``fp8`` / ``fp8_wgrad`` / ``use_ue8m0``. Pre-existing
+    FP8 paths (e.g. ``moe_layer`` / ``moe_expert``) ignore this flag."""
 
     ####################
     # initialization
@@ -657,8 +759,14 @@ class TransformerConfig(ModelParallelConfig):
     """When set to True, clone the output of scatter_to_sequence_parallel_region in embedding layer
     to facilitate garbage collection of input."""
 
+    ####################
+    # SonicMoE
+    ####################``
     using_sonic_moe: bool = False
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
+
+    fp8_weight_quant_format: str = "32x32"
+    """Quantization format for quantizing weights, options are 32x32 and 1x32. Currently only used in SonicMoE."""
 
     ####################
     # MLA
@@ -722,6 +830,69 @@ class TransformerConfig(ModelParallelConfig):
     to LanguageLoss, which dispatches to LigerFusedLinearCrossEntropyFunction
     with num_chunks=N. Only compatible with tensor_model_parallel_size == 1
     (or parallel_output disabled)."""
+
+    enable_hy_sparse_attention: bool = False
+    """Enable the HySparse Attention variant.
+
+    HySparse has the following features: (1) adding a Block Sparse Attention in SWA
+    layers. (2) KV sharing between full attention and Block Sparse Attention. (3) using
+    MQA instead of MLA.
+    """
+
+    hy_sparse_block_size: int = 64
+    """HySparse key block size (``block_B``) used by the TileLang block-score /
+    block-sparse attention operators. Key columns are grouped into contiguous
+    blocks of this size (document-relative) for scoring and sparse selection.
+
+    Default 64 follows the HySparse paper (arXiv:2602.03560, Table 1: "Sparse
+    Attn Block Size = 64" for all 7B/80B configurations)."""
+
+    hy_sparse_topk: int = 16
+    """Number of key *blocks* selected per query token in the HySparse block-sparse
+    branch (the ``topk`` fed to :func:`select_topk_blocks`). The full attention
+    layer scores all blocks and the top-``hy_sparse_topk`` (shared across the
+    query group by group-wise max) are attended by the SWA layers' block-sparse
+    branch.
+
+    Default 16 follows the HySparse paper (arXiv:2602.03560): the paper reports
+    selection in *tokens* (k = 1024, "Sparse Attn TopK Tokens = 1024"), which maps
+    to k / block_size = 1024 / 64 = 16 blocks. This field counts blocks, so 16 is
+    the block-space equivalent of the paper's 1024-token budget."""
+
+    hy_sparse_full_attn_use_tilelang: bool = False
+    """Route the HySparse **full-attention block-score** branch through the
+    independent TileLang operator (``block_score_mha_attn_fwd``) instead of the
+    production FA4 fused block-score kernel (``block_score_fa4_attn_fwd``).
+
+    Independent from :attr:`hy_sparse_block_sparse_use_tilelang`: the full-score
+    and block-sparse-gather branches each pick their backend separately, so you
+    can mix (e.g. TileLang scorer + production DSA gather) to isolate which
+    branch an anomaly comes from.
+
+    Set from the training YAML as a top-level key::
+
+        enable_hy_sparse_attention: true
+        hy_sparse_full_attn_use_tilelang: true      # default false -> FA4
+
+    The TileLang op is numerically cross-checked against FA4 (bf16-level fwd+bwd
+    agreement, exact block_logit and TopK-index bridge). Leave ``False`` for
+    production runs (FA4 is faster)."""
+
+    hy_sparse_block_sparse_use_tilelang: bool = False
+    """Route the HySparse **block-sparse gather** branch through the independent
+    TileLang operator (``block_sparse_mqa_attention_tl``) instead of the
+    production cuDNN-DSA gather kernel (``block_sparse_mqa_attention_dsa``).
+
+    Independent from :attr:`hy_sparse_full_attn_use_tilelang` (see there).
+
+    Set from the training YAML as a top-level key::
+
+        enable_hy_sparse_attention: true
+        hy_sparse_block_sparse_use_tilelang: true   # default false -> DSA
+
+    The TileLang op is numerically cross-checked against DSA (bf16-level fwd+bwd
+    agreement) and needs no head padding / handles any ``kv_lora_rank`` natively.
+    Leave ``False`` for production runs (DSA is faster)."""
 
     # cache_mla_latents: bool = False
 
@@ -803,11 +974,18 @@ class TransformerConfig(ModelParallelConfig):
     """
 
     csa_compress_ratios: list | None = None
-    """Per-layer compression ratios for CSA. Length must equal num_hidden_layers.
-    Each value must be one of {0, 4, 128}:
+    """Per-layer attention-kind assignment for the DSv4 hybrid attention stack.
+    Length must equal num_hidden_layers (+ mtp_num_layers if present).
+    Each entry encodes the layer kind via its integer ratio value:
       - 0: window-only attention (no compression)
-      - 4: overlapping compression with learned CSAIndexer
-      - 128: non-overlapping compression, attend to all compressed positions
+      - 2..127: CSA layer — overlapping compression (coff=2) with learned
+        Lightning Indexer. The compression rate is a free parameter of CSA;
+        any integer in [2, 127] is accepted (e.g. 4, 8, 16, ...), including
+        non-power-of-2 values such as 3 or 6. The overlap pooling window
+        becomes 2 * ratio tokens.
+      - 128: HCA layer — non-overlapping compression, attend to all
+        compressed positions
+    Value 1 is rejected (ambiguous: no compression yet not window).
     """
 
     csa_compress_rotary_base: float = 40000.0
@@ -816,40 +994,39 @@ class TransformerConfig(ModelParallelConfig):
     """
 
     csa_dense_mode: bool = False
-    """If True, skip CSAIndexer for ratio==4 layers and attend to all compressed positions.
-    Useful for debugging or ablation studies.
-    """
-
-    csa_tilelang_backend: str | None = None
-    """Optional CSA TileLang backend.
-
-    None keeps the default Paddle implementation. 'attention_paddle_compat'
-    enables the TileLang indexer and sparse attention paths by default while
-    preserving Paddle-compatible tensor layouts and algorithm semantics.
-    """
-
-    csa_tilelang_enable_indexer: bool | None = None
-    """Optional override for the CSA TileLang indexer path.
-
-    None follows csa_tilelang_backend. True requires
-    csa_tilelang_backend='attention_paddle_compat'. False disables only the
-    CSA indexer TileLang path.
-    """
-
-    csa_tilelang_enable_sparse_attn: bool | None = None
-    """Optional override for the CSA TileLang sparse attention path.
-
-    None follows csa_tilelang_backend. True requires
-    csa_tilelang_backend='attention_paddle_compat'. False disables only the
-    final sparse MQA attention TileLang path.
+    """If True, skip CSAIndexer for CSA layers (1 < ratio < 128) and attend to all
+    compressed positions.
     """
 
     csa_indexer_backend: str = "tilelang"
-    """CSA indexer backward backend.
+    """CSA indexer backend. Single switch selecting one of three
+    implementations of the compressed top-k indexer.
 
-    One of {"tilelang", "cudnn"}. Default "tilelang" preserves the legacy
-    path.
+    One of {"unfused", "tilelang", "cudnn"}:
+      * "unfused": Paddle/FusedDSAIndexerLoss reference path.
+      * "tilelang" (default): TileLang top-k and selected-set loss path.
+      * "cudnn": cuDNN indexer top-k/forward path.
     """
+
+    csa_sparse_attn_backend: str = "tilelang"
+    """CSA sparse attention backend. Single switch selecting one of three
+    implementations of the final sparse MQA attention.
+
+    One of {"unfused", "tilelang", "cudnn"}:
+      * "unfused": pure-Paddle einsum forward + Paddle autograd backward
+        (non-fused reference path).
+      * "tilelang" (default): TileLang sparse MQA kernel forward + backward.
+      * "cudnn": FlashMLA sparse forward kernel + cuDNN DSA backward
+        kernel.
+    """
+
+    stage1_overlap: bool = False
+    """
+    overlap backward with sharding gradient reduce for non-pipeline parallelism
+    """
+
+    use_fast_hadamard: bool = False
+    """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
 
     o_groups: int = 8
     """Number of groups for grouped low-rank output projection (wo_a) in DSv4 Hybrid.
@@ -868,6 +1045,10 @@ class TransformerConfig(ModelParallelConfig):
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
 
+    use_accuracy_compatible: bool = False
+    """Whether to enable accuracy-compatible kernels for cross-framework numerical
+    alignment. Defaults to False."""
+
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
 
@@ -876,6 +1057,27 @@ class TransformerConfig(ModelParallelConfig):
 
     magic_init: bool = False
     """Use the magic initialization method."""
+
+    use_truncated_normal_init: bool = False
+    """Use truncated normal init N(0, sigma^2) clipped to
+    [-truncated_normal_init_factor*sigma, truncated_normal_init_factor*sigma].
+    Sigma prefers init_method_std, falling back to 0.5/sqrt(hidden_size)
+    when init_method_std is None. Independent switch; takes precedence over
+    magic_init when enabled."""
+
+    truncated_normal_init_factor: float = 3.0
+    """Truncation factor for use_truncated_normal_init: clip range is
+    [-factor*sigma, factor*sigma]."""
+
+    ####################
+    # Ernie Trainer Configs
+    ####################
+
+    moe_logging: bool = False
+    """Whether to enable MoE logging."""
+
+    deepep_buffer_configs: dict | None = None
+    """DeepEP buffer configuration."""
 
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
@@ -892,10 +1094,8 @@ class TransformerConfig(ModelParallelConfig):
         "csa_compress_ratios": "csa_compress_ratios",
         "csa_compress_rotary_base": "csa_compress_rotary_base",
         "csa_dense_mode": "csa_dense_mode",
-        "csa_tilelang_backend": "csa_tilelang_backend",
-        "csa_tilelang_enable_indexer": "csa_tilelang_enable_indexer",
-        "csa_tilelang_enable_sparse_attn": "csa_tilelang_enable_sparse_attn",
         "csa_indexer_backend": "csa_indexer_backend",
+        "csa_sparse_attn_backend": "csa_sparse_attn_backend",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -940,6 +1140,10 @@ class TransformerConfig(ModelParallelConfig):
                 )
         elif key == "dtype":
             self.params_dtype = value
+        elif key == "sonicmoe_quant_format":
+            raise ValueError(
+                "sonicmoe_quant_format is deprecated. Use fp8_weight_quant_format instead."
+            )
         else:
             setattr(self, key, value)
 
@@ -952,10 +1156,30 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
-        if self.enable_mtp_magic_send:
-            assert self.num_nextn_predict_layers == 1, (
-                "enable_mtp_magic_send only supports num_nextn_predict_layers=1"
+        if self.mtp_shared_last_layer:
+            # When MTP reuses the last backbone TransformerLayer's parameters,
+            # the MTP transformer block must have an identical structure to the
+            # backbone-last layer (same MoE / dense shape). Force-disable
+            # use_dense_mtp so the MTP layer matches whatever the backbone is.
+            assert not self.use_dense_mtp, (
+                "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
             )
+
+        if self.enable_mtp_magic_send:
+            assert not getattr(self, "tie_word_embeddings", False), (
+                "enable_mtp_magic_send with tie_word_embeddings=True is not yet validated. "
+                "Please disable tie_word_embeddings when using magic send MTP."
+            )
+            assert not self.mtp_shared_last_layer, (
+                "enable_mtp_magic_send and mtp_shared_last_layer cannot both be True. "
+                "Magic send uses per-layer mtp_embed with broadcast sync, which is "
+                "incompatible with SharedLayerDesc-based last-layer reuse."
+            )
+            if self.num_nextn_predict_layers > 1:
+                assert self.variable_seq_lengths, (
+                    "enable_mtp_magic_send with num_nextn_predict_layers > 1 requires "
+                    "variable_seq_lengths=True (dynamic-shape P2P)."
+                )
             assert self.pipeline_model_parallel_size > 1, (
                 "enable_mtp_magic_send requires pipeline_model_parallel_size > 1"
             )
@@ -1029,7 +1253,31 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
-        if self.magic_init:
+        if self.use_truncated_normal_init:
+            if self.truncated_normal_init_factor <= 0:
+                raise ValueError(
+                    "truncated_normal_init_factor must be positive when use_truncated_normal_init is True."
+                )
+            if self.init_method_std is None and self.hidden_size == 0:
+                raise ValueError(
+                    "hidden_size must be non-zero when init_method_std is None "
+                    "and use_truncated_normal_init is True."
+                )
+            sigma = (
+                self.init_method_std
+                if self.init_method_std is not None
+                else 0.5 / math.sqrt(self.hidden_size)
+            )
+            self.init_method = truncated_init_method_normal(
+                sigma, truncate_factor=self.truncated_normal_init_factor
+            )
+            self.init_method_std = sigma
+            logger.info(
+                f"[init] use_truncated_normal_init=True: TruncNormal(0, sigma^2) clipped to "
+                f"[-{self.truncated_normal_init_factor}*sigma, {self.truncated_normal_init_factor}*sigma], "
+                f"sigma={sigma}"
+            )
+        elif self.magic_init:
             if self.hidden_size == 0:
                 raise ValueError(
                     "hidden_size must be non-zero when magic_init is True."
@@ -1094,7 +1342,7 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
-        if self.magic_init:
+        if self.use_truncated_normal_init or self.magic_init:
             self.output_layer_init_method = self.init_method
         elif self.output_layer_init_method is None:
             self.output_layer_init_method = scaled_init_method_normal(
@@ -1108,7 +1356,7 @@ class TransformerConfig(ModelParallelConfig):
             # By default, use the same init std as you use for every other non-output layer.
             self.embedding_init_method_std = self.init_method_std
 
-        if self.magic_init:
+        if self.use_truncated_normal_init or self.magic_init:
             self.embedding_init_method = self.init_method
             self.embedding_init_method_std = self.init_method_std
         elif self.embedding_init_method is None:
@@ -1134,50 +1382,92 @@ class TransformerConfig(ModelParallelConfig):
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
+            mtp_num_layers = (
+                self.mtp_num_layers
+                if self.mtp_num_layers > 0
+                else self.num_nextn_predict_layers
+            )
             if (
                 len(self.csa_compress_ratios)
-                != self.num_hidden_layers + self.num_nextn_predict_layers
+                != self.num_hidden_layers + mtp_num_layers
             ):
                 raise ValueError(
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
-                    f"must equal num_hidden_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
+                    f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
-            valid_ratios = {0, 4, 128}
             for i, r in enumerate(self.csa_compress_ratios):
-                if r not in valid_ratios:
+                if not (isinstance(r, int) and (r == 0 or 2 <= r <= 128)):
                     raise ValueError(
                         f"csa_compress_ratios[{i}]={r} is invalid. "
-                        f"Must be one of {valid_ratios}."
+                        f"Each value must be 0 (window), an integer in [2, 127] "
+                        f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
 
-            valid_tilelang_backends = {None, "attention_paddle_compat"}
-            if self.csa_tilelang_backend not in valid_tilelang_backends:
-                raise ValueError(
-                    f"csa_tilelang_backend={self.csa_tilelang_backend!r} is invalid. "
-                    f"Must be one of {valid_tilelang_backends}."
-                )
             if (
-                self.csa_tilelang_backend is None
-                and self.csa_tilelang_enable_indexer
+                getattr(self, "csa_tilelang_enable_sparse_attn", None)
+                is not None
             ):
                 raise ValueError(
-                    "csa_tilelang_enable_indexer=True requires csa_tilelang_backend='attention_paddle_compat'."
+                    "csa_tilelang_enable_sparse_attn has been removed. Use "
+                    "csa_sparse_attn_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead (unfused=non-fused Paddle, tilelang=TileLang "
+                    "fwd/bwd, cudnn=FlashMLA fwd + cuDNN bwd)."
                 )
-            if (
-                self.csa_tilelang_backend is None
-                and self.csa_tilelang_enable_sparse_attn
-            ):
+            if getattr(self, "csa_tilelang_enable_indexer", None) is not None:
                 raise ValueError(
-                    "csa_tilelang_enable_sparse_attn=True requires csa_tilelang_backend='attention_paddle_compat'."
+                    "csa_tilelang_enable_indexer has been removed. Use "
+                    "csa_indexer_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead (unfused=non-fused Paddle/FusedDSAIndexerLoss, "
+                    "tilelang=TileLang indexer, cudnn=cuDNN indexer)."
                 )
-            if self.csa_indexer_backend not in {"tilelang", "cudnn"}:
+            if getattr(self, "csa_tilelang_backend", None) is not None:
+                raise ValueError(
+                    "csa_tilelang_backend has been removed. Use "
+                    "csa_indexer_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "and csa_sparse_attn_backend in {'unfused', 'tilelang', 'cudnn'} "
+                    "instead."
+                )
+            valid_indexer_backends = {"unfused", "tilelang", "cudnn"}
+            if self.csa_indexer_backend not in valid_indexer_backends:
                 raise ValueError(
                     f"csa_indexer_backend={self.csa_indexer_backend!r} is invalid. "
-                    "Must be one of {'tilelang', 'cudnn'}."
+                    "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+            if self.csa_sparse_attn_backend not in {
+                "unfused",
+                "tilelang",
+                "cudnn",
+            }:
+                raise ValueError(
+                    f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
+                    "Must be one of {'unfused', 'tilelang', 'cudnn'}."
+                )
+
+        # swa_high_precision_norm is only supported for DSv4 models.
+        if (
+            self.swa_high_precision_norm
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
+            raise ValueError(
+                "swa_high_precision_norm=True is only supported when "
+                "experimental_attention_variant='dsv4_hybrid'. "
+                "High-precision norm mode is only adapted for DSv4 to align "
+                "training and inference numerical behavior."
+            )
 
         # Hash-based MoE routing consistency checks.
         if self.moe_n_hash_layers > 0:
+            if (
+                self.first_k_dense_replace is not None
+                and self.first_k_dense_replace > 0
+            ):
+                raise ValueError(
+                    f"first_k_dense_replace ({self.first_k_dense_replace}) and "
+                    f"moe_n_hash_layers ({self.moe_n_hash_layers}) are mutually "
+                    f"exclusive; the first_k_dense_replace dense layers would "
+                    f"suppress hash routing. Set first_k_dense_replace=0 if you "
+                    f"want hash routing."
+                )
             if self.actual_vocab_size is None:
                 raise ValueError(
                     "actual_vocab_size must be set when moe_n_hash_layers > 0; "
@@ -1248,6 +1538,42 @@ class TransformerConfig(ModelParallelConfig):
                     f"self.window_attn_skip_freq ({len(self.window_attn_skip_freq)}) "
                     f"must equal num_hidden_layers + num_nextn_predict_layers ({self.num_hidden_layers + self.num_nextn_predict_layers})."
                 )
+            # HySparse: MTP layers must be FULL attention layers, never SWA.
+            # An SWA layer consumes shared_kv (compressed KV latent + block
+            # indices) produced by an upstream full layer. The MTP boundary
+            # (MultiTokenPredictionLayer._proj_and_transformer_layer) rebuilds a
+            # fresh input_dict and does NOT forward shared_key/shared_block_indices
+            # from the backbone, so an SWA MTP layer would receive shared_kv=[None,
+            # None] and crash at shared_key.squeeze(2) in the block-sparse branch.
+            # Fail fast here with a clear message instead.
+            if self.enable_hy_sparse_attention:
+                mtp_window_flags = self.window_attn_skip_freq[
+                    self.num_hidden_layers :
+                ]
+                if any(flag != 0 for flag in mtp_window_flags):
+                    raise ValueError(
+                        "When enable_hy_sparse_attention is True, the MTP portion "
+                        f"of window_attn_skip_freq (indices "
+                        f"[{self.num_hidden_layers}:], i.e. {mtp_window_flags}) "
+                        "must be all 0 (full attention layers). MTP layers cannot "
+                        "be sliding-window (SWA) layers because they do not receive "
+                        "the shared KV latent from the backbone across the MTP "
+                        "boundary. Set the MTP entries to 0."
+                    )
+
+        # HySparse: the block-score (FA4) and block-sparse (DSA) backends only
+        # support hy_sparse_block_size == 64. The FA4 block-score op requires
+        # 128 % block_B == 0 and the SM100 DSA block-sparse gather requires
+        # block_B == 64 (one block == one TopK tile chunk). Other values either
+        # silently mis-bucket keys or fail deep in the CUDA kernels, so reject
+        # them up front.
+        if self.enable_hy_sparse_attention and self.hy_sparse_block_size != 64:
+            raise ValueError(
+                "hy_sparse_block_size must be 64 when enable_hy_sparse_attention "
+                f"is True (got {self.hy_sparse_block_size}). The FA4 block-score "
+                "op requires 128 % block_B == 0 and the SM100 DSA block-sparse "
+                "gather requires block_B == 64 (TopK tile alignment)."
+            )
 
         if (
             self.num_nextn_predict_layers == 0
@@ -1266,4 +1592,70 @@ class TransformerConfig(ModelParallelConfig):
             raise ValueError(
                 f"head_wise_swa_ratio must be between 0.0 and 1.0, "
                 f"but got {self.head_wise_swa_ratio}."
+            )
+
+        # Multimax validation + grep-friendly confirmation banner.
+        # Operators can verify the setting reached the model with:
+        #   grep MULTIMAX <train.log>
+        import warnings as _warnings
+
+        _multimax = getattr(self, "multimax_modules", None)
+        # YAML entry path returns OmegaConf containers (ListConfig), not
+        # builtin list. Normalize to a plain Python list before any
+        # isinstance(_multimax, list) check; otherwise the recommended
+        # `multimax_modules: [lm_head]` form is rejected.
+        try:
+            from omegaconf import (
+                ListConfig as _ListConfig,
+                OmegaConf as _OmegaConf,
+            )
+
+            if isinstance(_multimax, _ListConfig):
+                _multimax = _OmegaConf.to_container(_multimax, resolve=True)
+                self.multimax_modules = _multimax
+        except ImportError:
+            pass
+        # Allow yaml/json to leave the field unset, set to ``null``, pass an
+        # empty string, or pass an empty list -- all map to the canonical
+        # disabled sentinel ``None``.
+        if _multimax in ("", []):
+            _multimax = None
+            self.multimax_modules = None
+        # Back-compat: a plain string is treated as a single-element list
+        # so older configs (multimax_modules: lm_head) keep working.
+        if isinstance(_multimax, str):
+            _multimax = [_multimax]
+            self.multimax_modules = _multimax
+        if _multimax is not None:
+            if not isinstance(_multimax, list) or not all(
+                isinstance(x, str) for x in _multimax
+            ):
+                raise ValueError(
+                    f"multimax_modules must be None or a list[str], "
+                    f"got {_multimax!r}."
+                )
+            _valid = {"lm_head", "attention"}
+            _bad = [x for x in _multimax if x not in _valid]
+            if _bad:
+                raise ValueError(
+                    f"multimax_modules entries must each be one of "
+                    f"{sorted(_valid)}, got invalid entries {_bad!r} "
+                    f"in {_multimax!r}."
+                )
+            if "attention" in _multimax:
+                _warnings.warn(
+                    f"[MULTIMAX-CONFIG] multimax_modules={_multimax}: "
+                    "'attention' branch is not implemented yet; only the "
+                    "lm_head modulation will take effect."
+                )
+            _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
+
+        if self.cp_balance_mode not in {
+            "dualchunk_allgather",
+            "contiguous_allgather",
+            "contiguous_a2a",
+        }:
+            raise ValueError(
+                f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
+                "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
             )

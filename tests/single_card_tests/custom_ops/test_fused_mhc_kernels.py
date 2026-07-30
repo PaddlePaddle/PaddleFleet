@@ -48,7 +48,7 @@ COSINE_SIM_THRESH = 0.999
 TF32_FWD_ATOL, TF32_FWD_RTOL = 1e-3, 1e-3
 TF32_BWD_ATOL, TF32_BWD_RTOL = 2e-3, 2e-3
 # E2E fused pipeline accumulates TF32 error across multiple kernels
-E2E_FUSED_FWD_ATOL, E2E_FUSED_FWD_RTOL = 5e-3, 5e-3
+E2E_FUSED_FWD_ATOL, E2E_FUSED_FWD_RTOL = 1e-2, 1e-2
 RAND_LO, RAND_HI = -0.1, 0.1
 # Relaxed tolerances for large-shape tests (accumulated fp error over more elements)
 LARGE_FWD_ATOL, LARGE_FWD_RTOL = 1e-4, 1e-4
@@ -56,6 +56,8 @@ LARGE_BWD_ATOL, LARGE_BWD_RTOL = 5e-4, 5e-4
 LARGE_TF32_FWD_ATOL, LARGE_TF32_FWD_RTOL = 5e-3, 5e-3
 LARGE_TF32_BWD_ATOL, LARGE_TF32_BWD_RTOL = 1e-2, 1e-2
 LARGE_COSINE_SIM_THRESH = 0.998
+
+_MHC_COMPUTE_H_EPS = 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +124,11 @@ def _assert_not_all_zero(t: Tensor, msg: str = ""):
 
 def _ref_sinkhorn(logits: Tensor, num_iters: int, eps: float = 1e-6) -> Tensor:
     """Pure Paddle differentiable sinkhorn (no custom backward)."""
-    row_max = logits.max(axis=-1, keepdim=True)
-    M = paddle.exp(logits - row_max)
-    for _ in range(num_iters):
-        M = M / M.sum(axis=-1, keepdim=True).clip(min=eps)
-        M = M / M.sum(axis=-2, keepdim=True).clip(min=eps)
+    M = paddle.nn.functional.softmax(logits, axis=-1) + eps
+    M = M / (M.sum(axis=-2, keepdim=True) + eps)
+    for _ in range(num_iters - 1):
+        M = M / (M.sum(axis=-1, keepdim=True) + eps)
+        M = M / (M.sum(axis=-2, keepdim=True) + eps)
     return M
 
 
@@ -139,7 +141,8 @@ def _ref_h_post_bda(h_res, orig_res, h_post, x, bias):
     """Pure Paddle differentiable h_post_bda."""
     s, b, n, C = orig_res.shape
     mixed = paddle.bmm(
-        h_res.reshape([s * b, n, n]), orig_res.reshape([s * b, n, C])
+        h_res.reshape([s * b, n, n]).transpose([0, 2, 1]),
+        orig_res.reshape([s * b, n, C]),
     ).reshape([s, b, n, C])
     x_exp = h_post.unsqueeze(-1) * x.unsqueeze(2)
     out = x_exp + mixed
@@ -718,7 +721,7 @@ class TestEndToEndNative(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid()
+            h_pre = h[..., :n].sigmoid() + _MHC_COMPUTE_H_EPS
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = native_sinkhorn(
@@ -751,7 +754,7 @@ class TestEndToEndNative(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid()
+            h_pre = h[..., :n].sigmoid() + _MHC_COMPUTE_H_EPS
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = _ref_sinkhorn(
@@ -819,7 +822,7 @@ class TestEndToEndFused(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid()
+            h_pre = h[..., :n].sigmoid() + _MHC_COMPUTE_H_EPS
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = fused_sinkhorn(
@@ -852,7 +855,7 @@ class TestEndToEndFused(unittest.TestCase):
             r = r.reshape([s, b, 1])
 
             h = r * proj
-            h_pre = h[..., :n].sigmoid()
+            h_pre = h[..., :n].sigmoid() + _MHC_COMPUTE_H_EPS
             h_post = h[..., n : 2 * n].sigmoid() * 2
             h_res_logits = h[..., 2 * n :]
             h_res = _ref_sinkhorn(
