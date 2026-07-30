@@ -42,7 +42,7 @@
 
 ## 测试质量
 
-- 行为变化应放入最接近模块的 `tests/single_card_tests/` 或 `tests/multi_card_tests/`，分布式行为需要代表性的多卡覆盖。
+- 行为变化应放入最接近变更模块的现有测试目录，例如 `tests/single_card_tests/`、`tests/multi_card_tests/` 或 `auto_configurator/tests/`；分布式行为需要代表性的多卡覆盖。
 - 测试必须覆盖关键边界和异常路径，并使用 `pytest.raises` 等机制验证预期错误。
 - 测试之间不得相互依赖；外部网络、文件系统或服务应隔离，不能依赖不稳定的共享状态。
 - 断言应验证核心结果，不接受吞掉异常、`assert True` 或通过 mock 掉被测函数来制造成功。
