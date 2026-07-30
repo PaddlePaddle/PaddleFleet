@@ -61,6 +61,42 @@ class TestSituGLU(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "even last dimension"):
             situ_glu(paddle.ones([2, 7]))
 
+    def test_rejects_non_positive_or_non_finite_scales(self):
+        x = paddle.ones([2, 8])
+        invalid_scales = (
+            0.0,
+            -1.0,
+            float("inf"),
+            float("-inf"),
+            float("nan"),
+        )
+
+        for beta in invalid_scales:
+            with (
+                self.subTest(beta=beta, function="situ"),
+                self.assertRaisesRegex(
+                    ValueError, "beta must be a finite positive number"
+                ),
+            ):
+                situ(x, beta=beta)
+            with (
+                self.subTest(beta=beta, function="situ_glu"),
+                self.assertRaisesRegex(
+                    ValueError, "beta must be a finite positive number"
+                ),
+            ):
+                situ_glu(x, beta=beta)
+
+        for linear_beta in invalid_scales:
+            with (
+                self.subTest(linear_beta=linear_beta),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "linear_beta must be a finite positive number",
+                ),
+            ):
+                situ_glu(x, linear_beta=linear_beta)
+
     def test_grouped_bf16_expert_forward_backward(self):
         model_parallel_cuda_manual_seed(2026)
         config = TransformerConfig(
@@ -191,7 +227,3 @@ class TestSituGLU(unittest.TestCase):
         self.assertEqual(list(output.shape), [4, 2, config.hidden_size])
         self.assertTrue(bool(paddle.isfinite(output).all().item()))
         self.assertTrue(bool(paddle.isfinite(hidden_states.grad).all().item()))
-
-
-if __name__ == "__main__":
-    unittest.main()
