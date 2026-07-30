@@ -32,58 +32,40 @@ Or standalone after each optimizer step:
 
 from __future__ import annotations
 
-import logging
-
 import paddle
 import paddle.distributed as dist
 
-logger = logging.getLogger(__name__)
-
 
 def _try_get_comm_groups():
-    """Get communication groups needed for QB histogram all-reduce.
+    """Get the (tp, cp, dp, sharding) groups to all-reduce the QB histogram over.
 
-    Returns (tp_group, cp_group, dp_group, sd_group) where each is None if not
-    applicable (group missing, or a single-rank group that needs no reduction).
+    These are the groups whose ranks route a *different* set of tokens, so their
+    histograms must be summed to recover global-batch statistics. EP is absent
+    because all EP ranks see the same router scores.
 
-    Every group listed here corresponds to ranks whose routers observe a
-    *different* set of tokens, so their histograms must be summed to recover the
-    global-batch statistics:
-
-    - TP: When SP is enabled with EP > 1, the router only sees a 1/TP fraction of
-      the sequence on each TP rank (moe_layer skips the AllGather when EP > 1).
-      Guarded at the call site, since with EP == 1 the AllGather already restores
-      the full sequence.
-    - CP: Context Parallel always splits the sequence, so each CP rank's router
-      sees S/CP tokens. Unlike SP there is no gather back inside the router, so
-      this reduction is unconditional.
-    - DP / Sharding: different ranks process different micro-batches.
-
-    EP is deliberately absent: all EP ranks see the same router scores.
-
-    Communication order (TP -> CP -> DP -> Sharding) is irrelevant
-    mathematically, since summation commutes.
+    A group is None when the reduction does not apply: distributed training is
+    not initialized, the group does not exist (e.g. CP is off), or it is a single
+    rank. TP is additionally guarded at the call site (only needed under SP with
+    EP > 1, where moe_layer skips the AllGather).
     """
-    try:
-        from paddle.distributed import fleet
+    from paddle.distributed import fleet
 
-        from paddlefleet.parallel_state import get_context_parallel_group
+    from paddlefleet.parallel_state import get_context_parallel_group
 
-        if not hasattr(fleet, "_hcg"):
-            return None, None, None, None
-        hcg = fleet.get_hybrid_communicate_group()
-
-        def _needs_reduce(group):
-            return group if group is not None and group.nranks > 1 else None
-
-        return (
-            _needs_reduce(hcg.get_model_parallel_group()),
-            _needs_reduce(get_context_parallel_group()),
-            _needs_reduce(hcg.get_data_parallel_group()),
-            _needs_reduce(hcg.get_sharding_parallel_group()),
-        )
-    except Exception:
+    if not dist.is_initialized():
         return None, None, None, None
+
+    hcg = fleet.get_hybrid_communicate_group()
+
+    def _needs_reduce(group):
+        return group if group is not None and group.nranks > 1 else None
+
+    tp_group = _needs_reduce(hcg.get_model_parallel_group())
+    dp_group = _needs_reduce(hcg.get_data_parallel_group())
+    sd_group = _needs_reduce(hcg.get_sharding_parallel_group())
+    cp_group = _needs_reduce(get_context_parallel_group())
+
+    return tp_group, cp_group, dp_group, sd_group
 
 
 class MoEQuantileBalancingCallback:
@@ -91,15 +73,7 @@ class MoEQuantileBalancingCallback:
 
     After each optimizer step, this callback:
       1. Collects qb_histogram from all QB-enabled router layers.
-      2. All-reduces histograms across TP + CP + DP + Sharding ranks to aggregate
-         statistics from all tokens in the global batch:
-         - TP: When SP+EP>1, each TP rank only sees S/TP tokens (moe_layer
-           skips AllGather when EP>1). Must reduce across TP to merge SP shards.
-         - CP: Context Parallel always splits the sequence, so each CP rank's
-           router sees S/CP tokens. Reduced unconditionally.
-         - DP: Different DP ranks process different micro-batches.
-         - Sharding: Same as DP (different data slices).
-         - EP: NOT reduced (all EP ranks see the same router scores).
+      2. All-reduces them over the groups from `_try_get_comm_groups`.
       3. Recovers the (k/n)-quantile from the merged histogram via cumsum + interpolation.
       4. Assigns the recovered quantile as the new expert bias (zero-mean normalized).
       5. Resets histograms and updates binning range for the next step.
@@ -145,12 +119,6 @@ class MoEQuantileBalancingCallback:
         n = layer.num_experts
 
         # --- Step 1: All-reduce histogram across all ranks that see different tokens ---
-        # When SP+EP>1: each TP rank only sees S/TP tokens (SP splits the sequence,
-        # and moe_layer skips AllGather when EP>1). Must reduce across TP to get
-        # the full sequence's histogram.
-        # CP always splits the sequence, so each CP rank's router sees S/CP tokens
-        # and the reduction is unconditional.
-        # DP/Sharding ranks see different micro-batches, so also reduce there.
         hist_float = histogram.cast(paddle.float32)
         if (
             tp_group is not None
@@ -253,5 +221,4 @@ class MoEQuantileBalancingCallback:
 
         # --- Step 8: Reset histogram and expert_usage ---
         layer.qb_histogram.zero_()
-        if hasattr(layer, "expert_usage"):
-            layer.expert_usage.zero_()
+        layer.expert_usage.zero_()

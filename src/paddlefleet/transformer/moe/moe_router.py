@@ -362,6 +362,20 @@ class StandardMoERouter(nn.Layer):
                 "bias update, and enabling both causes incorrect gate normalization. "
                 "Please set moe_topk_fusion=False when using quantile_balancing."
             )
+            assert self.routing_type == "none", (
+                "quantile_balancing is a self-contained load balancing method, "
+                "so the auxiliary-loss based balancing must be turned off "
+                "explicitly. Please set moe_router_load_balancing_type='none', "
+                f"but got {self.routing_type!r}."
+            )
+            assert not self.config.router_aux_loss_coef, (
+                "quantile_balancing is a self-contained load balancing method. "
+                "A non-zero router_aux_loss_coef keeps the auxiliary load "
+                "balancing loss active and optimizes a second, competing "
+                "balancing objective. Please set router_aux_loss_coef=0 when "
+                "using quantile_balancing, but got "
+                f"{self.config.router_aux_loss_coef!r}."
+            )
             # Bias vector -- same name as noaux_tc for checkpoint compatibility
             if not self.config.gpt_model_use_experimental_version:
                 self.register_buffer(
@@ -931,7 +945,12 @@ class StandardMoERouter(nn.Layer):
         return topk_weight, topk_idx
 
     def _topk_quantile_balancing(
-        self, scores: paddle.Tensor, k: int, n_group: int, topk_group: int
+        self,
+        scores: paddle.Tensor,
+        k: int,
+        n_group: int,
+        topk_group: int,
+        valid_mask: paddle.Tensor | None = None,
     ) -> tuple[paddle.Tensor, paddle.Tensor]:
         """Quantile Balancing top-k selection.
 
@@ -944,6 +963,12 @@ class StandardMoERouter(nn.Layer):
             k (int): number of experts to select per token
             n_group (int): number of expert groups
             topk_group (int): number of groups selected
+            valid_mask (paddle.Tensor | None): [bsz*seq_len, 1] mask marking
+                non-padding tokens. Padding rows must not enter the histogram:
+                their scores have been zeroed out by the caller, so they would
+                all collapse into a single bin and skew the recovered quantile.
+                None means no padding information is available and every row is
+                treated as a valid token.
 
         Returns:
             tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
@@ -984,7 +1009,9 @@ class StandardMoERouter(nn.Layer):
 
         # Step 4: Accumulate histogram for QB (only during training)
         if framework._dygraph_tracer()._has_grad:
-            self._accumulate_qb_histogram(scores, scores_for_choice, k)
+            self._accumulate_qb_histogram(
+                scores, scores_for_choice, k, valid_mask
+            )
 
         return topk_weight, topk_idx
 
@@ -994,6 +1021,7 @@ class StandardMoERouter(nn.Layer):
         raw_scores: paddle.Tensor,
         biased_scores: paddle.Tensor,
         k: int,
+        valid_mask: paddle.Tensor | None = None,
     ):
         """Accumulate required_bias into the QB histogram.
 
@@ -1003,10 +1031,19 @@ class StandardMoERouter(nn.Layer):
 
         We bin required_bias into self.qb_histogram[e, bin_idx].
 
+        Padding tokens must be excluded. The caller zeroes out the gating
+        scores of padding rows, so for such a row alpha is the (k+1)-th largest
+        bias and required_bias equals that same constant for *every* expert:
+        each padding token would add one count to one identical bin of all
+        experts, inflating the per-expert total (and therefore the target
+        quantile) and spiking the CDF exactly where it is read out.
+
         Args:
             raw_scores: [N, E] original gating scores (without bias)
             biased_scores: [N, E] scores with bias added (used for cutoff)
             k: top-k value
+            valid_mask: [N, 1] mask marking non-padding tokens, or None when no
+                padding information is available (all rows count).
         """
         N, E = raw_scores.shape
         B = self.qb_n_bins
@@ -1041,8 +1078,19 @@ class StandardMoERouter(nn.Layer):
         )  # [1, E]
         flat_bins = (bin_idx + offsets).reshape([-1])  # [N*E]
         counts = paddle.zeros([E * B], dtype=paddle.int32)
-        ones = paddle.ones([N * E], dtype=paddle.int32)
-        counts.put_along_axis_(flat_bins, ones, axis=0, reduce="add")
+        if valid_mask is None:
+            weights = paddle.ones([N * E], dtype=paddle.int32)
+        else:
+            # [N,1] -> [N,E] -> [N*E]: padding rows carry weight 0, so their
+            # bins receive += 0. Keeping the shape static (instead of selecting
+            # valid rows) avoids a data-dependent N and an empty-tensor case.
+            weights = (
+                valid_mask.reshape([N, 1])
+                .cast(paddle.int32)
+                .expand([N, E])
+                .reshape([-1])
+            )
+        counts.put_along_axis_(flat_bins, weights, axis=0, reduce="add")
         self.qb_histogram += counts.reshape([E, B])
 
         # Also accumulate expert_usage for diagnostics
@@ -1115,7 +1163,13 @@ class StandardMoERouter(nn.Layer):
         return top_gate, top_idx
 
     def _call_topk_method(
-        self, topk_method, gates, k, n_group=None, topk_group=None
+        self,
+        topk_method,
+        gates,
+        k,
+        n_group=None,
+        topk_group=None,
+        valid_mask=None,
     ):
         if topk_method == "greedy":
             top_gate, top_idx = self._topk_greedy(gates, k=k)
@@ -1139,6 +1193,7 @@ class StandardMoERouter(nn.Layer):
                 k,
                 n_group,
                 topk_group,
+                valid_mask=valid_mask,
             )
         else:
             raise NotImplementedError(f"Invalid topk_method: {topk_method}")
@@ -1532,6 +1587,10 @@ class TopKRouter(StandardMoERouter):
                 k=self.num_experts_per_tok,
                 n_group=self.n_group,
                 topk_group=self.topk_group,
+                # Only quantile_balancing consumes this: padding rows have
+                # already been zeroed out above and must stay out of the QB
+                # histogram.
+                valid_mask=input_ids_none_zero_mask,
             )
 
             _log_moe_md5(

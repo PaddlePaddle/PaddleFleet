@@ -23,7 +23,9 @@ Tests cover:
 5. Paddle-based tests: actual tensor operations matching the real code paths
 """
 
+import contextlib
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -501,42 +503,84 @@ class TestAccumulateHistogramPaddle(unittest.TestCase):
 # =============================================================================
 
 
+class _FakeGroup:
+    def __init__(self, nranks):
+        self.nranks = nranks
+
+
+class _FakeHCG:
+    """Stands in for paddle's HybridCommunicateGroup."""
+
+    def __init__(self, tp=1, dp=1, sd=1):
+        self.get_model_parallel_group = lambda: _FakeGroup(tp)
+        self.get_data_parallel_group = lambda: _FakeGroup(dp)
+        self.get_sharding_parallel_group = lambda: _FakeGroup(sd)
+
+
+def _fake_fleet_module(hcg):
+    """Mimic `paddle.distributed.fleet`, whose module-level
+    ``get_hybrid_communicate_group`` is bound to the singleton Fleet instance.
+
+    A MagicMock must not be used here: it answers every attribute lookup, so a
+    lookup on the wrong object or under the wrong name would appear to succeed
+    and hide the bug.
+    """
+    return SimpleNamespace(get_hybrid_communicate_group=lambda: hcg)
+
+
+@contextlib.contextmanager
+def _initialized_fleet(hcg, cp_group=None):
+    """Pretend distributed is up with `hcg` as the hybrid group and `cp_group` as CP."""
+    with (
+        patch("paddle.distributed.is_initialized", return_value=True),
+        patch("paddle.distributed.fleet", _fake_fleet_module(hcg)),
+        patch(
+            "paddlefleet.parallel_state.get_context_parallel_group",
+            return_value=cp_group,
+        ),
+    ):
+        yield
+
+
 class TestTryGetCommGroups(unittest.TestCase):
     """Test the communication group retrieval function."""
 
     def test_no_fleet_returns_none(self):
-        """Without fleet initialized, should return (None, None, None)."""
+        """Without fleet initialized, should return four Nones."""
         tp, cp, dp, sd = _try_get_comm_groups()
-        # In single-process test, fleet is not initialized
+        # In single-process tests fleet.init() may have run, but every group
+        # holds a single rank, so nothing needs reducing.
         self.assertIsNone(tp)
+        self.assertIsNone(cp)
         self.assertIsNone(dp)
         self.assertIsNone(sd)
 
-    @patch("paddlefleet.transformer.moe.qb_callback.fleet", create=True)
-    def test_fleet_no_hcg(self, mock_fleet):
-        """If fleet has no _hcg attribute, return (None, None, None)."""
-        del mock_fleet._hcg  # simulate missing _hcg
-        mock_fleet.configure_mock(**{"_hcg": None})
-        # hasattr check
-        if hasattr(mock_fleet, "_hcg"):
-            delattr(mock_fleet, "_hcg")
+    def test_uninitialized_distributed_returns_none(self):
+        """The is_initialized() guard must short-circuit before touching fleet.
 
-        tp, cp, dp, sd = _try_get_comm_groups()
-        self.assertIsNone(tp)
-        self.assertIsNone(dp)
-        self.assertIsNone(sd)
-
-    def test_exception_returns_none(self):
-        """If any exception occurs, should return (None, None, None) gracefully."""
-        with patch(
-            "paddlefleet.transformer.moe.qb_callback.fleet",
-            side_effect=Exception("test"),
-            create=True,
+        fleet.get_hybrid_communicate_group() asserts on an unset _hcg, so
+        reaching it in a single-process run would raise instead of no-op.
+        """
+        with (
+            patch("paddle.distributed.is_initialized", return_value=False),
+            patch(
+                "paddle.distributed.fleet",
+                _fake_fleet_module(_FakeHCG(tp=2, dp=8, sd=4)),
+            ),
         ):
+            self.assertEqual(_try_get_comm_groups(), (None, None, None, None))
+
+    def test_initialized_multi_rank_groups_are_returned(self):
+        """Regression guard: groups must be found on a realistically shaped fleet.
+
+        An earlier implementation probed ``hasattr(fleet, "_hcg")`` on the
+        module instead of the instance, which is always False, so every group
+        came back None and the histogram was never merged across ranks.
+        """
+        with _initialized_fleet(_FakeHCG(tp=2, dp=8, sd=4)):
             tp, cp, dp, sd = _try_get_comm_groups()
-            self.assertIsNone(tp)
-            self.assertIsNone(dp)
-            self.assertIsNone(sd)
+        self.assertEqual((tp.nranks, dp.nranks, sd.nranks), (2, 8, 4))
+        self.assertIsNone(cp)  # CP is not enabled in this test process
 
 
 # =============================================================================
@@ -972,102 +1016,47 @@ class TestOnOptimizerEndWithRealRouter(unittest.TestCase):
 class TestCommGroupsHappyPath(unittest.TestCase):
     """Test _try_get_comm_groups when fleet IS initialized (mocked)."""
 
-    @patch("paddle.distributed.fleet")
-    def test_all_groups_available(self, mock_fleet):
+    def test_all_groups_available(self):
         """When all groups are available and have nranks > 1, return them."""
-        mock_hcg = MagicMock()
-        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
-
-        tp_group = MagicMock()
-        tp_group.nranks = 4
-        dp_group = MagicMock()
-        dp_group.nranks = 8
-        sd_group = MagicMock()
-        sd_group.nranks = 2
-
-        mock_hcg.get_model_parallel_group.return_value = tp_group
-        mock_hcg.get_data_parallel_group.return_value = dp_group
-        mock_hcg.get_sharding_parallel_group.return_value = sd_group
-
-        tp, cp, dp, sd = _try_get_comm_groups()
-        self.assertIs(tp, tp_group)
-        self.assertIs(dp, dp_group)
-        self.assertIs(sd, sd_group)
-        # CP is read from paddlefleet.parallel_state, which is uninitialized here.
+        with _initialized_fleet(_FakeHCG(tp=4, dp=8, sd=2)):
+            tp, cp, dp, sd = _try_get_comm_groups()
+        self.assertEqual((tp.nranks, dp.nranks, sd.nranks), (4, 8, 2))
         self.assertIsNone(cp)
 
-    @patch("paddle.distributed.fleet")
-    def test_cp_group_picked_up(self, mock_fleet):
+    def test_cp_group_picked_up(self):
         """A multi-rank CP group must be returned so its histogram is merged."""
-        mock_hcg = MagicMock()
-        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
-        mock_hcg.get_model_parallel_group.return_value = None
-        mock_hcg.get_data_parallel_group.return_value = None
-        mock_hcg.get_sharding_parallel_group.return_value = None
-
-        cp_group = MagicMock()
-        cp_group.nranks = 4
-        with patch(
-            "paddlefleet.parallel_state.get_context_parallel_group",
-            return_value=cp_group,
-        ):
+        cp_group = _FakeGroup(4)
+        with _initialized_fleet(_FakeHCG(), cp_group=cp_group):
             tp, cp, dp, sd = _try_get_comm_groups()
         self.assertIs(cp, cp_group)
         self.assertIsNone(tp)
         self.assertIsNone(dp)
         self.assertIsNone(sd)
 
-    @patch("paddle.distributed.fleet")
-    def test_single_rank_cp_group_filtered(self, mock_fleet):
+    def test_single_rank_cp_group_filtered(self):
         """CP=1 needs no reduction, so the group is filtered out."""
-        mock_hcg = MagicMock()
-        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
-        mock_hcg.get_model_parallel_group.return_value = None
-        mock_hcg.get_data_parallel_group.return_value = None
-        mock_hcg.get_sharding_parallel_group.return_value = None
-
-        cp_group = MagicMock()
-        cp_group.nranks = 1
-        with patch(
-            "paddlefleet.parallel_state.get_context_parallel_group",
-            return_value=cp_group,
-        ):
+        with _initialized_fleet(_FakeHCG(), cp_group=_FakeGroup(1)):
             _, cp, _, _ = _try_get_comm_groups()
         self.assertIsNone(cp)
 
-    @patch("paddle.distributed.fleet")
-    def test_single_rank_groups_filtered(self, mock_fleet):
+    def test_single_rank_groups_filtered(self):
         """Groups with nranks <= 1 should be filtered to None."""
-        mock_hcg = MagicMock()
-        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
-
-        tp_group = MagicMock()
-        tp_group.nranks = 1  # Single rank → should be None
-        dp_group = MagicMock()
-        dp_group.nranks = 4
-        sd_group = MagicMock()
-        sd_group.nranks = 1  # Single rank → should be None
-
-        mock_hcg.get_model_parallel_group.return_value = tp_group
-        mock_hcg.get_data_parallel_group.return_value = dp_group
-        mock_hcg.get_sharding_parallel_group.return_value = sd_group
-
-        tp, cp, dp, sd = _try_get_comm_groups()
+        with _initialized_fleet(_FakeHCG(tp=1, dp=4, sd=1)):
+            tp, cp, dp, sd = _try_get_comm_groups()
         self.assertIsNone(tp)
-        self.assertIs(dp, dp_group)
+        self.assertEqual(dp.nranks, 4)
         self.assertIsNone(sd)
 
-    @patch("paddle.distributed.fleet")
-    def test_none_groups_handled(self, mock_fleet):
-        """If hcg returns None for a group, it should become None."""
-        mock_hcg = MagicMock()
-        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
+    def test_none_groups_handled(self):
+        """If hcg returns None for a group, it should stay None."""
 
-        mock_hcg.get_model_parallel_group.return_value = None
-        mock_hcg.get_data_parallel_group.return_value = None
-        mock_hcg.get_sharding_parallel_group.return_value = None
+        class _NoneHCG:
+            get_model_parallel_group = staticmethod(lambda: None)
+            get_data_parallel_group = staticmethod(lambda: None)
+            get_sharding_parallel_group = staticmethod(lambda: None)
 
-        tp, cp, dp, sd = _try_get_comm_groups()
+        with _initialized_fleet(_NoneHCG()):
+            tp, cp, dp, sd = _try_get_comm_groups()
         self.assertIsNone(tp)
         self.assertIsNone(dp)
         self.assertIsNone(sd)
@@ -1653,6 +1642,210 @@ class TestRealRouterWithCallback(unittest.TestCase):
         # QB layer was updated (histogram reset), plain layer untouched.
         self.assertEqual(int(router_qb.qb_histogram.sum().item()), 0)
         self.assertFalse(hasattr(router_plain, "qb_histogram"))
+
+
+class TestQBPaddingExclusion(unittest.TestCase):
+    """Padding tokens must not enter the QB histogram.
+
+    forward() zeroes out the gating scores of padding rows, so a padding token's
+    required_bias collapses to one constant for every expert. Counting those
+    rows would inflate the per-expert total (hence the target quantile) and
+    spike the CDF right where it is read out, shifting the recovered bias by a
+    different amount per expert.
+    """
+
+    E = 8
+    H = 32
+
+    def setUp(self):
+        paddle.seed(11)
+        np.random.seed(11)
+        self.weight = paddle.to_tensor(
+            (np.random.randn(self.E, self.H) * 0.1).astype("float32")
+        )
+        # Deliberately off-center so the routing is imbalanced and QB has real
+        # work to do (a balanced router would hide small bias shifts).
+        self.valid_rows = (np.random.randn(48, self.H) * 0.5 + 0.3).astype(
+            "float32"
+        )
+
+    def _run(self, hidden, input_ids):
+        """Forward once, then recover the bias. Returns (hist, usage, bias)."""
+        router = _build_qb_router()
+        router.weight.set_value(self.weight)
+        kwargs = {}
+        if input_ids is not None:
+            kwargs["input_ids"] = paddle.to_tensor(input_ids)
+        router(paddle.to_tensor(hidden), **kwargs)
+        hist = router.qb_histogram.numpy().copy()
+        usage = router.expert_usage.numpy().copy()
+        MoEQuantileBalancingCallback()._update_single_layer(
+            router, None, None, None, None
+        )
+        return hist, usage, router.e_score_correction_bias.numpy().copy()
+
+    def _valid_only(self, rows):
+        """Reference run: only the valid rows, laid out as [1, N, H]."""
+        hidden = rows.reshape([1, -1, self.H])
+        ids = np.ones((1, rows.shape[0]), dtype="int64")
+        return self._run(hidden, ids)
+
+    def test_trailing_padding_changes_nothing(self):
+        rows = self.valid_rows
+        hist_ref, usage_ref, bias_ref = self._valid_only(rows)
+
+        n_pad = 16
+        hidden = np.concatenate(
+            [rows, np.zeros((n_pad, self.H), dtype="float32")], axis=0
+        ).reshape([1, -1, self.H])
+        ids = np.concatenate(
+            [
+                np.ones((1, rows.shape[0]), dtype="int64"),
+                np.zeros((1, n_pad), dtype="int64"),
+            ],
+            axis=1,
+        )
+        hist, usage, bias = self._run(hidden, ids)
+
+        np.testing.assert_array_equal(hist, hist_ref)
+        np.testing.assert_array_equal(usage, usage_ref)
+        np.testing.assert_array_equal(bias, bias_ref)
+
+    def test_padding_scattered_inside_the_sequence(self):
+        rows = self.valid_rows
+        n_tokens = rows.shape[0]
+        valid = np.ones(n_tokens, dtype=bool)
+        valid[np.random.choice(n_tokens, 14, replace=False)] = False
+
+        hist_ref, _, bias_ref = self._valid_only(rows[valid])
+
+        hidden = np.where(valid[:, None], rows, 0.0).astype("float32")
+        hidden = hidden.reshape([1, -1, self.H])
+        ids = valid.astype("int64").reshape([1, -1])
+        hist, _, bias = self._run(hidden, ids)
+
+        np.testing.assert_array_equal(hist, hist_ref)
+        np.testing.assert_array_equal(bias, bias_ref)
+
+    def test_histogram_total_is_valid_token_count(self):
+        n_valid, n_pad = 48, 16
+        hidden = np.concatenate(
+            [self.valid_rows, np.zeros((n_pad, self.H), dtype="float32")],
+            axis=0,
+        ).reshape([1, -1, self.H])
+        ids = np.concatenate(
+            [
+                np.ones((1, n_valid), dtype="int64"),
+                np.zeros((1, n_pad), dtype="int64"),
+            ],
+            axis=1,
+        )
+        router = _build_qb_router()
+        router.weight.set_value(self.weight)
+        router(paddle.to_tensor(hidden), input_ids=paddle.to_tensor(ids))
+        # One sample per (valid token, expert) pair, padding contributes none.
+        np.testing.assert_array_equal(
+            router.qb_histogram.numpy().sum(axis=1),
+            np.full(self.E, n_valid, dtype=np.int32),
+        )
+
+    def test_all_padding_batch_is_a_no_op(self):
+        hidden = np.zeros((1, 16, self.H), dtype="float32")
+        ids = np.zeros((1, 16), dtype="int64")
+        router = _build_qb_router()
+        router.weight.set_value(self.weight)
+        bias_before = router.e_score_correction_bias.numpy().copy()
+        router(paddle.to_tensor(hidden), input_ids=paddle.to_tensor(ids))
+        self.assertEqual(int(router.qb_histogram.sum().item()), 0)
+
+        # An empty histogram must leave the bias untouched.
+        MoEQuantileBalancingCallback()._update_single_layer(
+            router, None, None, None, None
+        )
+        np.testing.assert_array_equal(
+            router.e_score_correction_bias.numpy(), bias_before
+        )
+
+    def test_without_input_ids_all_rows_count(self):
+        """input_ids=None carries no padding info: behaviour must be unchanged."""
+        hidden = self.valid_rows.reshape([1, -1, self.H])
+        hist_none, _, bias_none = self._run(hidden, None)
+        hist_ones, _, bias_ones = self._valid_only(self.valid_rows)
+        np.testing.assert_array_equal(hist_none, hist_ones)
+        np.testing.assert_array_equal(bias_none, bias_ones)
+
+
+class TestQBRejectsAuxLossBalancing(unittest.TestCase):
+    """QB must not silently coexist with the auxiliary load balancing loss.
+
+    These build the router from a real ``TransformerConfig`` rather than the
+    ``QBRouterConfig`` stand-in above, because the stand-in already disables
+    aux loss and therefore cannot catch the default configuration.
+    """
+
+    @staticmethod
+    def _build_router(**overrides):
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+        from paddlefleet.transformer.transformer_config import (
+            TransformerConfig,
+        )
+
+        config = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=32,
+            num_attention_heads=4,
+        )
+        config.n_routed_experts = 8
+        config.num_experts_per_tok = 2
+        config.topk_method = "quantile_balancing"
+        config.scoring_func = "sigmoid"
+        config.init_method = paddle.nn.initializer.Normal(mean=0.0, std=0.02)
+        for key, value in overrides.items():
+            setattr(config, key, value)
+
+        with patch(
+            "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+            return_value=1,
+        ):
+            return TopKRouter(config)
+
+    def test_default_config_is_rejected(self):
+        """Defaults are aux_loss / 1e-2, which must not pass silently."""
+        with self.assertRaises(AssertionError) as ctx:
+            self._build_router()
+        self.assertIn("moe_router_load_balancing_type", str(ctx.exception))
+
+    def test_nonzero_aux_loss_coef_is_rejected(self):
+        with self.assertRaises(AssertionError) as ctx:
+            self._build_router(
+                moe_router_load_balancing_type="none",
+                router_aux_loss_coef=1e-2,
+            )
+        self.assertIn("router_aux_loss_coef", str(ctx.exception))
+
+    def test_seq_aux_loss_is_rejected(self):
+        with self.assertRaises(AssertionError):
+            self._build_router(
+                moe_router_load_balancing_type="seq_aux_loss",
+                router_aux_loss_coef=1e-4,
+            )
+
+    def test_explicitly_disabled_balancing_is_accepted(self):
+        router = self._build_router(
+            moe_router_load_balancing_type="none",
+            router_aux_loss_coef=0.0,
+        )
+        self.assertEqual(router.topk_method, "quantile_balancing")
+        self.assertEqual(router.qb_histogram.shape, [8, 1000])
+
+    def test_topk_fusion_is_rejected(self):
+        with self.assertRaises(AssertionError) as ctx:
+            self._build_router(
+                moe_router_load_balancing_type="none",
+                router_aux_loss_coef=0.0,
+                moe_topk_fusion=True,
+            )
+        self.assertIn("moe_topk_fusion", str(ctx.exception))
 
 
 if __name__ == "__main__":

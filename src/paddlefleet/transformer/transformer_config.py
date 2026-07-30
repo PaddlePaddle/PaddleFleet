@@ -499,7 +499,9 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use fusion node for MoE layer. Default is True"""
 
     moe_router_load_balancing_type: str = "aux_loss"
-    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
+    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn, none.
+    Use 'none' together with router_aux_loss_coef=0 when the router balances
+    load on its own (required by topk_method='quantile_balancing')."""
 
     moe_layer_freq: int | list[int] | None = None
     """Frequency between MoE layers and Dense layers. Accepts either:
