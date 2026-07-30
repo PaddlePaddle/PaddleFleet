@@ -32,6 +32,7 @@ from ..utils import (
     scaled_init_method_normal,
     truncated_init_method_normal,
 )
+from .activations import situ
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -190,6 +191,12 @@ class TransformerConfig(ModelParallelConfig):
 
     hidden_act: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
+
+    activation_situ_beta: float = 1.0
+    """Scale of the tanh term in the SiTU gate activation."""
+
+    activation_situ_linear_beta: float | None = None
+    """Optional tanh scale applied to the linear branch of SiTU-GLU."""
 
     use_bias: bool = False
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
@@ -1174,6 +1181,8 @@ class TransformerConfig(ModelParallelConfig):
             if isinstance(value, str):
                 if value == "gelu_pytorch_tanh":
                     func = functools.partial(F.gelu, approximate=True)
+                elif value == "situ":
+                    func = situ
                 else:
                     func = getattr(F, value)
                 setattr(self, key, func)
