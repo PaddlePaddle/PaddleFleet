@@ -585,12 +585,12 @@ class Qwen3VLMoeIntegrationTest(unittest.TestCase):
     @gpu_device_initializer(log_prefix="Qwen3VLMoeIntegrationTest", gpu_id=0)
     def setUp(self):
         self.model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3vlmoev2",
+            "PaddleFormers/tiny-random-qwen3vlmoev2",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
         )
 
-        self.processor = AutoProcessor.from_pretrained("PaddleFleet/tiny-random-qwen3vlmoev2")
+        self.processor = AutoProcessor.from_pretrained("PaddleFormers/tiny-random-qwen3vlmoev2")
         self.messages = [
             {
                 "role": "user",

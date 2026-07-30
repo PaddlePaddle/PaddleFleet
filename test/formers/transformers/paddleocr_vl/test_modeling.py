@@ -457,12 +457,12 @@ class PaddleOCRVLIntegrationTest(unittest.TestCase):
     @gpu_device_initializer(log_prefix="PaddleOCRVLIntegrationTest")
     def setUp(self):
         self.model = PaddleOCRVLForConditionalGeneration.from_pretrained(
-            "PaddleFleet/tiny-random-paddleocr-vl-bf16",
+            "PaddleFormers/tiny-random-paddleocr-vl-bf16",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
         )
 
-        self.processor = AutoProcessor.from_pretrained("PaddleFleet/tiny-random-paddleocr-vl-bf16")
+        self.processor = AutoProcessor.from_pretrained("PaddleFormers/tiny-random-paddleocr-vl-bf16")
         image_path = (
             "https://paddle-model-ecology.bj.bcebos.com/PPOCRVL/dataset/exam_paper_0829/part_0000/img_000040676.png"
         )

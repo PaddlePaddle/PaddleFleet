@@ -377,7 +377,7 @@ class DeepseekV3IntegrationTest(unittest.TestCase):
     def test_model_tiny_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
         model = DeepseekV3ForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-deepseek-v3",
+            "PaddleFormers/tiny-random-deepseek-v3",
             dtype="float32",
             download_hub="aistudio",
             seq_length=len(input_ids),
@@ -434,19 +434,19 @@ class DeepseekV3IntegrationTest(unittest.TestCase):
     def test_fd_fallback(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
         model = DeepseekV3ForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-deepseek-v3",
+            "PaddleFormers/tiny-random-deepseek-v3",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
             fd_fallback=False,
         )
         model_fd_fallback = DeepseekV3ForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-deepseek-v3",
+            "PaddleFormers/tiny-random-deepseek-v3",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
             fd_fallback=True,
         )
         model_fd_fallback_fused_ffn = DeepseekV3ForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-deepseek-v3",
+            "PaddleFormers/tiny-random-deepseek-v3",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
             fd_fallback=True,

@@ -31,7 +31,7 @@ from ...utils.test_module.custom_configuration import CustomConfig
 
 class AutoConfigTest(unittest.TestCase):
     def test_built_in_model_class_config(self):
-        config = AutoConfig.from_pretrained("PaddleFleet/tiny-random-qwen3", download_hub="aistudio")
+        config = AutoConfig.from_pretrained("PaddleFormers/tiny-random-qwen3", download_hub="aistudio")
         number = random.randint(0, 10000)
         self.assertEqual(config.hidden_size, 128)
         config.hidden_size = number
@@ -110,7 +110,7 @@ class AutoConfigTest(unittest.TestCase):
 
     @slow
     def test_from_pretrained_cache_dir(self):
-        model_id = "PaddleFleet/tiny-random-qwen3"
+        model_id = "PaddleFormers/tiny-random-qwen3"
         with tempfile.TemporaryDirectory() as tempdir:
             AutoConfig.from_pretrained(model_id, download_hub="aistudio", cache_dir=tempdir)
             self.assertTrue(os.path.exists(os.path.join(tempdir, model_id, CONFIG_NAME)))

@@ -330,7 +330,7 @@ class Qwen2MoeIntegrationTest(unittest.TestCase):
     def test_model_tiny_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
         model = Qwen2MoeForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-qwen2moev2",
+            "PaddleFormers/tiny-random-qwen2moev2",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
         )
@@ -356,19 +356,19 @@ class Qwen2MoeIntegrationTest(unittest.TestCase):
     def test_fd_fallback(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
         model = Qwen2MoeForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-qwen2moev2",
+            "PaddleFormers/tiny-random-qwen2moev2",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
             fd_fallback=False,
         )
         model_fd_fallback = Qwen2MoeForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-qwen2moev2",
+            "PaddleFormers/tiny-random-qwen2moev2",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
             fd_fallback=True,
         )
         model_fd_fallback_fused_ffn = Qwen2MoeForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-qwen2moev2",
+            "PaddleFormers/tiny-random-qwen2moev2",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
             fd_fallback=True,
@@ -384,7 +384,7 @@ class Qwen2MoeIntegrationTest(unittest.TestCase):
 
 
 class Qwen2MoeGenerationD2STest(GenerationD2STestMixin, unittest.TestCase):
-    internal_testing_model = "PaddleFleet/tiny-random-qwen2moev2"
+    internal_testing_model = "PaddleFormers/tiny-random-qwen2moev2"
 
 
 class Qwen2MoeCompatibilityTest(unittest.TestCase):

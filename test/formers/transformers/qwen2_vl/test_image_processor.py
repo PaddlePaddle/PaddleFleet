@@ -35,7 +35,7 @@ class Qwen2VLImageProcessorTest(unittest.TestCase):
     def test_slow_image_processor_consistency_with_hf(self):
         with tempfile.TemporaryDirectory() as tempdir:
             image_processor_pd = AutoImageProcessor.from_pretrained(
-                "PaddleFleet/tiny-random-qwen25vlv2", use_fast=False
+                "PaddleFormers/tiny-random-qwen25vlv2", use_fast=False
             )
             image_processor_pd.save_pretrained(tempdir)
 
@@ -53,7 +53,7 @@ class Qwen2VLImageProcessorTest(unittest.TestCase):
     def test_fast_image_processor_consistency_with_hf(self):
         with tempfile.TemporaryDirectory() as tempdir:
             image_processor_pd = AutoImageProcessor.from_pretrained(
-                "PaddleFleet/tiny-random-qwen25vlv2", use_fast=True
+                "PaddleFormers/tiny-random-qwen25vlv2", use_fast=True
             )
             image_processor_pd.save_pretrained(tempdir)
 

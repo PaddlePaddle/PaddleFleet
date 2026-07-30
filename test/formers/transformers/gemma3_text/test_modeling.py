@@ -455,7 +455,7 @@ class Gemma3TextIntegrationTest(unittest.TestCase):
 
     def test_inference_no_attention(self):
         model = Gemma3TextModel.from_pretrained(
-            "PaddleFleet/tiny-random-gemma3",
+            "PaddleFormers/tiny-random-gemma3",
             download_hub="aistudio",
             dtype=self.test_dtype,
             load_checkpoint_format="flex_checkpoint",
@@ -489,7 +489,7 @@ class Gemma3TextIntegrationTest(unittest.TestCase):
 
     def test_inference_with_attention(self):
         model = Gemma3TextModel.from_pretrained(
-            "PaddleFleet/tiny-random-gemma3",
+            "PaddleFormers/tiny-random-gemma3",
             download_hub="aistudio",
             dtype=self.test_dtype,
             load_checkpoint_format="flex_checkpoint",

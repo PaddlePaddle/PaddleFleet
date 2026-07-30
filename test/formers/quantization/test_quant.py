@@ -32,12 +32,12 @@ class TestQuantedModel(unittest.TestCase):
         )
         quantization_config = QuantizationConfig.from_dict(quantization_config)
         model_config = AutoConfig.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3",
+            "PaddleFormers/tiny-random-qwen3",
             dtype="bfloat16",
             quantization_config=quantization_config,
         )
         cls.model = AutoModelForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3",
+            "PaddleFormers/tiny-random-qwen3",
             config=model_config,
             load_checkpoint_format="flex_checkpoint",
         )

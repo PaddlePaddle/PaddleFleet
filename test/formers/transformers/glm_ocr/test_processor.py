@@ -30,7 +30,7 @@ class Glm46VProcessorTest(ProcessorTesterMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp()
-        processor = Glm46VProcessor.from_pretrained("PaddleFleet/tiny-random-glmocr")
+        processor = Glm46VProcessor.from_pretrained("PaddleFormers/tiny-random-glmocr")
         processor.save_pretrained(cls.tmpdir)
         cls.image_token = processor.image_token
 

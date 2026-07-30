@@ -350,14 +350,14 @@ class Phi3ModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
         for model_class in self.all_model_classes:
             # test from_pretrained
             model1 = model_class.from_pretrained(
-                "PaddleFleet/tiny-random-phi4",
+                "PaddleFormers/tiny-random-phi4",
                 download_hub="aistudio",
                 convert_from_hf=True,
                 load_checkpoint_format="",
             )
 
             model2 = model_class.from_pretrained(
-                "PaddleFleet/tiny-random-phi4", download_hub="aistudio", load_checkpoint_format="flex_checkpoint"
+                "PaddleFormers/tiny-random-phi4", download_hub="aistudio", load_checkpoint_format="flex_checkpoint"
             )
 
             model_state_1 = model1.state_dict()
@@ -419,7 +419,7 @@ class Phi3IntegrationTest(unittest.TestCase):
         input_ids = [[1, 306, 4658, 278, 6593, 310, 2834, 338]]
 
         model = Phi3ForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-phi4",
+            "PaddleFormers/tiny-random-phi4",
             download_hub="aistudio",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
@@ -474,7 +474,7 @@ class Phi3IntegrationTest(unittest.TestCase):
 
 
 class Phi3GenerationD2STest(GenerationD2STestMixin, unittest.TestCase):
-    internal_testing_model = "PaddleFleet/tiny-random-phi4"
+    internal_testing_model = "PaddleFormers/tiny-random-phi4"
 
 
 class Phi3CompatibilityTest(unittest.TestCase):

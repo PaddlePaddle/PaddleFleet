@@ -30,7 +30,7 @@ from formers.transformers.test_processing_common import ProcessorTesterMixin
 
 class Glm4vMoeProcessorTest(ProcessorTesterMixin, unittest.TestCase):
     processor_class = Glm4vProcessor
-    model_path = "PaddleFleet/tiny-random-glm4vmoe-bf16"
+    model_path = "PaddleFormers/tiny-random-glm4vmoe-bf16"
 
     @classmethod
     def setUpClass(cls):

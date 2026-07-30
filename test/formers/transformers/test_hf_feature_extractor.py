@@ -44,7 +44,7 @@ class TestHFMultiSourceAudioProcessor(unittest.TestCase):
     # TODO: Temporarily use repo_id oftiny model, replace later.
     def test_aistudio(self):
         feature_extractor = AutoFeatureExtractor.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3omni", download_hub="aistudio"
+            "PaddleFormers/tiny-random-qwen3omni", download_hub="aistudio"
         )
         self.preprocess(feature_extractor)
 

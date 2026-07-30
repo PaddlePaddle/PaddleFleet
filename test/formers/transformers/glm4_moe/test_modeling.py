@@ -381,7 +381,7 @@ class Glm4MoeModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCas
         for model_class in self.all_model_classes:
             # test from_pretrained
             model1 = model_class.from_pretrained(
-                "PaddleFleet/tiny-random-glm4moe-bf16",
+                "PaddleFormers/tiny-random-glm4moe-bf16",
                 download_hub="aistudio",
                 load_checkpoint_format="flex_checkpoint",
                 num_nextn_predict_layers=0,
@@ -420,7 +420,7 @@ class Glm4MoeModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase)
 
     def test_inference_no_attention(self):
         model = Glm4MoeModel.from_pretrained(
-            "PaddleFleet/tiny-random-glm4moe",
+            "PaddleFormers/tiny-random-glm4moe",
             download_hub="aistudio",
             load_checkpoint_format="flex_checkpoint",
             num_nextn_predict_layers=0,
@@ -445,7 +445,7 @@ class Glm4MoeModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase)
 
     def test_inference_with_attention(self):
         model = Glm4MoeModel.from_pretrained(
-            "PaddleFleet/tiny-random-glm4moe",
+            "PaddleFormers/tiny-random-glm4moe",
             download_hub="aistudio",
             load_checkpoint_format="flex_checkpoint",
             num_nextn_predict_layers=0,
@@ -472,7 +472,7 @@ class Glm4MoeModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase)
         input_ids = paddle.to_tensor([0, 345, 232, 328, 740, 140, 1695, 69, 6078, 1588, 2])
         attention_mask = paddle.to_tensor([[0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]])
         model = Glm4MoeModel.from_pretrained(
-            "PaddleFleet/tiny-random-glm4moe",
+            "PaddleFormers/tiny-random-glm4moe",
             dtype="float32",
             download_hub="aistudio",
             load_checkpoint_format="flex_checkpoint",
@@ -480,7 +480,7 @@ class Glm4MoeModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase)
             num_nextn_predict_layers=0,
         )
         model_fd_fallback = Glm4MoeModel.from_pretrained(
-            "PaddleFleet/tiny-random-glm4moe",
+            "PaddleFormers/tiny-random-glm4moe",
             dtype="float32",
             download_hub="aistudio",
             load_checkpoint_format="flex_checkpoint",
@@ -488,7 +488,7 @@ class Glm4MoeModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase)
             num_nextn_predict_layers=0,
         )
         model_fd_fallback_fused_ffn = Glm4MoeModel.from_pretrained(
-            "PaddleFleet/tiny-random-glm4moe",
+            "PaddleFormers/tiny-random-glm4moe",
             dtype="float32",
             download_hub="aistudio",
             load_checkpoint_format="flex_checkpoint",

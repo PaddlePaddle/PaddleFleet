@@ -35,7 +35,7 @@ class Qwen3VLProcessorTest(ProcessorTesterMixin, unittest.TestCase):
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp()
         processor = Qwen3VLProcessor.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3vlv2",
+            "PaddleFormers/tiny-random-qwen3vlv2",
             patch_size=4,
             max_pixels=56 * 56,
             min_pixels=28 * 28,

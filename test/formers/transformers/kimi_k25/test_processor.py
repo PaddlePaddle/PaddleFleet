@@ -36,7 +36,7 @@ class KimiK25ProcessorTest(ProcessorTesterMixin, unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmpdir = tempfile.mkdtemp()
-        processor = KimiK25Processor.from_pretrained("PaddleFleet/tiny-random-kimi-k25")
+        processor = KimiK25Processor.from_pretrained("PaddleFormers/tiny-random-kimi-k25")
         processor.save_pretrained(cls.tmpdir)
 
     # Use GPU 0 to prevent CUDA illegal memory access during resize

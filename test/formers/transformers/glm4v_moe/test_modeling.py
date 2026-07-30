@@ -480,7 +480,7 @@ class Glm4vMoeIntegrationTest(unittest.TestCase):
     base_model_class = Glm4vMoeModel
     test_dtype = "float32"  # "bfloat16"
 
-    model_path = "PaddleFleet/tiny-random-glm4vmoe-bf16"
+    model_path = "PaddleFormers/tiny-random-glm4vmoe-bf16"
     image_url = "https://paddlenlp.bj.bcebos.com/datasets/paddlemix/demo_images/example1.jpg"
     video_url = "https://paddlenlp.bj.bcebos.com/datasets/paddlemix/demo_video/example_video.mp4"
 

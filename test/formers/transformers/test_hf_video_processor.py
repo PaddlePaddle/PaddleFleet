@@ -75,7 +75,7 @@ class TestHFMultiSourceVideoProcessor(unittest.TestCase):
         self.preprocess(video_processor)
 
     def test_preprocess_consistency_with_hf_static(self):
-        video_processor = AutoVideoProcessor.from_pretrained("PaddleFleet/tiny-random-qwen25vlv2")
+        video_processor = AutoVideoProcessor.from_pretrained("PaddleFormers/tiny-random-qwen25vlv2")
         self.preprocess(video_processor)
 
     @skip_for_none_ce_case

@@ -28,7 +28,7 @@ class TestMergeModel(unittest.TestCase):
     def test_merge_model_np(self, merge_method):
         with TemporaryDirectory() as tempdir:
             model = AutoModelForCausalLM.from_pretrained(
-                "PaddleFleet/tiny-random-qwen3", convert_from_hf=True, dtype="bfloat16", load_checkpoint_format=""
+                "PaddleFormers/tiny-random-qwen3", convert_from_hf=True, dtype="bfloat16", load_checkpoint_format=""
             )
             pd_path = os.path.join(tempdir, "pd_model")
             model.save_pretrained(pd_path, save_safetensors=False, save_checkpoint_format="")
@@ -76,7 +76,7 @@ class TestMergeModel(unittest.TestCase):
     def test_merge_model_pd(self, merge_method):
         with TemporaryDirectory() as tempdir:
             model = AutoModelForCausalLM.from_pretrained(
-                "PaddleFleet/tiny-random-qwen3", convert_from_hf=True, dtype="bfloat16", load_checkpoint_format=""
+                "PaddleFormers/tiny-random-qwen3", convert_from_hf=True, dtype="bfloat16", load_checkpoint_format=""
             )
             pd_path = os.path.join(tempdir, "pd_model")
             model.save_pretrained(pd_path, save_safetensors=False, save_checkpoint_format="")
@@ -198,7 +198,7 @@ class TestMergeModel(unittest.TestCase):
                 lora_alpha=8,
             )
             model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
-                "PaddleFleet/tiny-random-qwen3vlmoev2",
+                "PaddleFormers/tiny-random-qwen3vlmoev2",
                 dtype="float32",
                 load_checkpoint_format="flex_checkpoint",
             )

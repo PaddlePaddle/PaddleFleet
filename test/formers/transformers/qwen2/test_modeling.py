@@ -376,7 +376,7 @@ class Qwen2IntegrationTest(unittest.TestCase):
     def test_model_tiny_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
         model = Qwen2ForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-qwen2v2",
+            "PaddleFormers/tiny-random-qwen2v2",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
         )
@@ -401,7 +401,7 @@ class Qwen2IntegrationTest(unittest.TestCase):
 
 
 class Qwen2GenerationD2STest(GenerationD2STestMixin, unittest.TestCase):
-    internal_testing_model = "PaddleFleet/tiny-random-qwen2v2"
+    internal_testing_model = "PaddleFormers/tiny-random-qwen2v2"
 
 
 class Qwen2CompatibilityTest(unittest.TestCase):

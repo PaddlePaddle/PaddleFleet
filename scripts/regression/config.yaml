@@ -1,5 +1,5 @@
 qwen3moe:
-    repo_id: PaddleFleet/tiny-random-qwen3moev2
+    repo_id: PaddleFormers/tiny-random-qwen3moev2
     model_type: text
     cli_args:
         template: qwen3
@@ -64,7 +64,7 @@ qwen3moe:
         dpo_full_function_call_excepted_result:
         - [94529, 130950, 94529, 138785, 11615, 90320, 84803, 138785, 791, 104475]
 qwen3:
-    repo_id: PaddleFleet/tiny-random-qwen3v2
+    repo_id: PaddleFormers/tiny-random-qwen3v2
     model_type: text
     cli_args:
         save_checkpoint_format: flex_checkpoint
@@ -129,7 +129,7 @@ qwen3:
         dpo_full_function_call_excepted_result:
         - [61700, 106616, 133770, 61700, 131731, 79170, 61700, 116702, 130187, 743]
 glm4_moe:
-    repo_id: PaddleFleet/tiny-random-glm4moe-bf16
+    repo_id: PaddleFormers/tiny-random-glm4moe-bf16
     model_type: text
     cli_args:
         save_checkpoint_format: flex_checkpoint
@@ -198,7 +198,7 @@ glm4_moe:
         dpo_full_function_call_excepted_result:
         - [10564, 10564, 102954, 47231, 47231, 47231, 47231, 47231, 47231, 47231]
 qwen2:
-    repo_id: PaddleFleet/tiny-random-qwen2v2
+    repo_id: PaddleFormers/tiny-random-qwen2v2
     model_type: text
     cli_args:
         save_checkpoint_format: flex_checkpoint
@@ -249,7 +249,7 @@ qwen2:
         sft_full_function_call_excepted_result: []
         dpo_full_function_call_excepted_result: []
 llama:
-    repo_id: PaddleFleet/tiny-random-llama3
+    repo_id: PaddleFormers/tiny-random-llama3
     model_type: text
     cli_args:
         save_checkpoint_format: flex_checkpoint
@@ -314,7 +314,7 @@ llama:
         dpo_full_function_call_excepted_result:
         - [8027, 8027, 8027, 8027, 8027, 8027, 8027, 8027, 8027, 8027]
 qwen3_next:
-    repo_id: PaddleFleet/tiny-random-qwen3next
+    repo_id: PaddleFormers/tiny-random-qwen3next
     model_type: text
     cli_args:
         save_checkpoint_format: flex_checkpoint
@@ -379,7 +379,7 @@ qwen3_next:
         dpo_full_function_call_excepted_result:
         - [71143, 5315, 145839, 92761, 23999, 75384, 34454, 24393, 73235, 124473]
 phi3:
-    repo_id: PaddleFleet/tiny-random-phi4-bf16
+    repo_id: PaddleFormers/tiny-random-phi4-bf16
     model_type: text
     cli_args:
         save_checkpoint_format: flex_checkpoint
@@ -444,7 +444,7 @@ phi3:
         dpo_full_function_call_excepted_result:
         - [68784, 5802, 68784, 96218, 46803, 68784, 96218, 6051, 6051, 6051]
 gemma3_text:
-    repo_id: PaddleFleet/tiny-random-gemma3
+    repo_id: PaddleFormers/tiny-random-gemma3
     model_type: text
     cli_args:
         save_checkpoint_format: flex_checkpoint
@@ -511,7 +511,7 @@ gemma3_text:
         dpo_full_function_call_excepted_result:
         - [90659, 223589, 199098, 132132, 123851, 26914, 97962, 10543, 137989, 132257]
 deepseek_v3:
-    repo_id: PaddleFleet/tiny-random-deepseek-v3
+    repo_id: PaddleFormers/tiny-random-deepseek-v3
     model_type: text
     cli_args:
         save_checkpoint_format: flex_checkpoint
@@ -576,7 +576,7 @@ deepseek_v3:
         dpo_full_function_call_excepted_result:
         - [90659, 223589, 199098, 132132, 123851, 26914, 97962, 10543, 137989, 132257]
 paddleocr_vl:
-    repo_id: PaddleFleet/tiny-random-paddleocr-vl-bf16
+    repo_id: PaddleFormers/tiny-random-paddleocr-vl-bf16
     model_type: vl
     cli_args:
         template: ernie_vl_nothink

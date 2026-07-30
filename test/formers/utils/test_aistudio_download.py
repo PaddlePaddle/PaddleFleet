@@ -24,7 +24,7 @@ class TestAistudioDownload(unittest.TestCase):
     @unittest.skip("TODO: Temporarily skipped because of unstable download logic (fix later)")
     def test_aistudio_download(self):
         # 设置测试数据
-        repo_id = "PaddleFleet/tiny-random-qwen2v2"
+        repo_id = "PaddleFormers/tiny-random-qwen2v2"
         filename = "model.safetensors"
         revision = "master"
         cache_dir = "./local/model"
@@ -44,7 +44,7 @@ class TestAistudioDownload(unittest.TestCase):
     @slow
     @unittest.skip("TODO: Temporarily skipped because of unstable download logic (fix later)")
     def test_aistudio_download_transformer(self):
-        repo_id = "PaddleFleet/tiny-random-qwen2v2"
+        repo_id = "PaddleFormers/tiny-random-qwen2v2"
         filename = "model.safetensors"
         revision = "master"
         cache_dir = "./local/model"

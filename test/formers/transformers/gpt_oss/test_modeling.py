@@ -387,7 +387,7 @@ class GptOssModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase):
 
     def test_inference_no_attention(self):
         model = GptOssModel.from_pretrained(
-            "PaddleFleet/tiny-random-gptoss",
+            "PaddleFormers/tiny-random-gptoss",
             download_hub="aistudio",
             load_checkpoint_format="flex_checkpoint",
         )
@@ -411,7 +411,7 @@ class GptOssModelIntegrationTest(ModelTesterPretrainedMixin, unittest.TestCase):
 
     def test_inference_with_attention(self):
         model = GptOssModel.from_pretrained(
-            "PaddleFleet/tiny-random-gptoss",
+            "PaddleFormers/tiny-random-gptoss",
             download_hub="aistudio",
             load_checkpoint_format="flex_checkpoint",
         )

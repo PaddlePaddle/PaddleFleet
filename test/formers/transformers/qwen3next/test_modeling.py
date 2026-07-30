@@ -284,7 +284,7 @@ class Qwen3NextModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestC
         for model_class in self.all_model_classes:
             # test from_pretrained
             model1 = model_class.from_pretrained(
-                "PaddleFleet/tiny-random-qwen3next",
+                "PaddleFormers/tiny-random-qwen3next",
                 download_hub="aistudio",
                 load_checkpoint_format="flex_checkpoint",
                 num_nextn_predict_layers=0,
@@ -316,7 +316,7 @@ class Qwen3NextIntegrationTest(unittest.TestCase):
     def test_model_tiny_logits(self):
         input_ids = [1, 306, 4658, 278, 6593, 310, 2834, 338]
         model = Qwen3NextForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3next",
+            "PaddleFormers/tiny-random-qwen3next",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
         )
@@ -341,7 +341,7 @@ class Qwen3NextIntegrationTest(unittest.TestCase):
 
 
 class Qwen3NextGenerationD2STest(GenerationD2STestMixin, unittest.TestCase):
-    internal_testing_model = "PaddleFleet/tiny-random-qwen3next"
+    internal_testing_model = "PaddleFormers/tiny-random-qwen3next"
 
 
 class Qwen3NextCompatibilityTest:

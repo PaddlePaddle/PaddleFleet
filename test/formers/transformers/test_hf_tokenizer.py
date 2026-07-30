@@ -49,9 +49,9 @@ class TestHFMultiSourceTokenizer(unittest.TestCase):
 
     @slow
     def test_default(self):
-        tokenizer = AutoTokenizer.from_pretrained("PaddleFleet/tiny-random-qwen3")
+        tokenizer = AutoTokenizer.from_pretrained("PaddleFormers/tiny-random-qwen3")
         self.encode(tokenizer)
-        tokenizer = Qwen2Tokenizer.from_pretrained("PaddleFleet/tiny-random-qwen2")
+        tokenizer = Qwen2Tokenizer.from_pretrained("PaddleFormers/tiny-random-qwen2")
         self.encode(tokenizer)
 
     @slow
@@ -72,7 +72,7 @@ class TestHFMultiSourceTokenizer(unittest.TestCase):
 
 class TestHFTokenizer(unittest.TestCase):
     def setUp(self):
-        self.tokenizer = AutoTokenizer.from_pretrained("PaddleFleet/tiny-random-qwen2v2")
+        self.tokenizer = AutoTokenizer.from_pretrained("PaddleFormers/tiny-random-qwen2v2")
 
     def test_encode(self):
         input_text = "hello world, this is paddle format checker"
@@ -129,7 +129,7 @@ class TestHFTokenizer(unittest.TestCase):
 
 class TestPaddleTokenizerMethod(unittest.TestCase):
     def test_tokenizer_decode_token(self) -> None:
-        tokenizer = AutoTokenizer.from_pretrained("PaddleFleet/tiny-random-qwen2v2", download_hub="aistudio")
+        tokenizer = AutoTokenizer.from_pretrained("PaddleFormers/tiny-random-qwen2v2", download_hub="aistudio")
         test_cases = ["1. 百度 2. 腾讯", "hello world! I like eating banana", "🤓😖", "🤓😖testtest"]
         for test_case in test_cases:
             input_ids = tokenizer(test_case)["input_ids"]

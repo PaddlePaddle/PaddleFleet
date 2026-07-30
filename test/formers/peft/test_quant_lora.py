@@ -103,7 +103,7 @@ class TestQuantedLoRAModel(unittest.TestCase):
             lora_alpha=8,
         )
         cls.model = AutoModelForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-llama3", convert_from_hf=True, dtype=paddle.float32
+            "PaddleFormers/tiny-random-llama3", convert_from_hf=True, dtype=paddle.float32
         )
         cls.lora_model = LoRAModel(cls.model, lora_config)
         cls.lora_model.mark_only_lora_as_trainable()

@@ -29,7 +29,7 @@ class Qwen3_Omni_ProcessorTest(ProcessorTesterMixin, unittest.TestCase):
         cls.tmpdir = tempfile.mkdtemp()
 
         processor = Qwen3OmniMoeProcessor.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3omni", download_hub="aistudio"
+            "PaddleFormers/tiny-random-qwen3omni", download_hub="aistudio"
         )
 
         processor.save_pretrained(cls.tmpdir)

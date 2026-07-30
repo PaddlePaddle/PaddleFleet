@@ -508,12 +508,12 @@ class Qwen2_5_VLIntegrationTest(unittest.TestCase):
     @gpu_device_initializer(log_prefix="Qwen2_5_VLIntegrationTest", gpu_id=0)
     def setUp(self):
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            "PaddleFleet/tiny-random-qwen25vlv2",
+            "PaddleFormers/tiny-random-qwen25vlv2",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
         )
 
-        self.processor = AutoProcessor.from_pretrained("PaddleFleet/tiny-random-qwen25vlv2")
+        self.processor = AutoProcessor.from_pretrained("PaddleFormers/tiny-random-qwen25vlv2")
         self.messages = [
             {
                 "role": "user",

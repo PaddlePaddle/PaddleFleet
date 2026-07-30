@@ -24,7 +24,7 @@ class GlmOcrImageProcessorTest(unittest.TestCase):
         IMAGE_URL = "https://paddlenlp.bj.bcebos.com/datasets/paddlemix/demo_images/example1.jpg"
         response = requests.get(IMAGE_URL, stream=True)
         cls.image = Image.open(response.raw).convert("RGB")
-        cls.model_path = "PaddleFleet/tiny-random-glmocr"
+        cls.model_path = "PaddleFormers/tiny-random-glmocr"
 
     def test_image_processor_output_keys(self):
         """Verify that output contains pixel_values and image_grid_thw"""

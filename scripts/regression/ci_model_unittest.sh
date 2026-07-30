@@ -96,13 +96,13 @@ upload_baseline(){
     cp config_${PR_NUMBER}.yaml upload/
 
     if echo "${FLAGS_enable_CE}" | grep -q "CE_Release"; then
-        python upload.py upload "paddle-qa/paddlefleet/ce_release_config/"
+        python upload.py upload "paddle-qa/paddleformers/ce_release_config/"
     elif echo "${FLAGS_enable_CE}" | grep -q "CE_Develop"; then
-        python upload.py upload "paddle-qa/paddlefleet/ce_develop_config/"
+        python upload.py upload "paddle-qa/paddleformers/ce_develop_config/"
     elif [[ "${FLAGS_enable_CI}" == "True" ]] && [[ "$BRANCH" == "develop" ]];then
-        python upload.py upload "paddle-qa/paddlefleet/ci_develop_config/"
+        python upload.py upload "paddle-qa/paddleformers/ci_develop_config/"
     else
-        python upload.py upload "paddle-qa/paddlefleet/ci_release_config/"
+        python upload.py upload "paddle-qa/paddleformers/ci_release_config/"
     fi
 }
 print_info() {

@@ -151,11 +151,11 @@ class GptOssWeightChangeTest(unittest.TestCase):
     @slow
     def test_change_weight(self):
 
-        repo_id = "PaddleFleet/tiny-random-gpt-oss-fp4"
+        repo_id = "PaddleFormers/tiny-random-gpt-oss-fp4"
         filename = "model.safetensors"
         aistudio_download(repo_id, filename, None, False, os.path.join(self.tempdir, "tiny-random-gpt-oss-fp4/"))
 
-        repo_id = "PaddleFleet/tiny-random-gpt-oss-bf16"
+        repo_id = "PaddleFormers/tiny-random-gpt-oss-bf16"
         filename = "model.safetensors"
         aistudio_download(repo_id, filename, None, False, os.path.join(self.tempdir, "tiny-random-gpt-oss-bf16/"))
 

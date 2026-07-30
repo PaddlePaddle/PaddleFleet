@@ -603,11 +603,11 @@ class GlmOcrIntegrationTest(unittest.TestCase):
     def setUpClass(self):
         # NOTE: replace with actual tiny checkpoint path once available
         self.model = GlmOcrForConditionalGeneration.from_pretrained(
-            "PaddleFleet/tiny-random-glmocr",
+            "PaddleFormers/tiny-random-glmocr",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
         )
-        self.processor = AutoProcessor.from_pretrained("PaddleFleet/tiny-random-glmocr")
+        self.processor = AutoProcessor.from_pretrained("PaddleFormers/tiny-random-glmocr")
 
         image_path = (
             "https://paddle-model-ecology.bj.bcebos.com/PPOCRVL/dataset/exam_paper_0829/part_0000/img_000040676.png"

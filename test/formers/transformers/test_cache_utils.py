@@ -385,7 +385,7 @@ class ModelIntegrationTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.model_id = "PaddleFleet/tiny-random-qwen3"
+        self.model_id = "PaddleFormers/tiny-random-qwen3"
         self.device = paddle.get_device()
 
     def test_model_inference_standard(self):
@@ -471,7 +471,7 @@ class CacheOffloadingTest(unittest.TestCase):
         Integration test: Load a tiny random Qwen3 model, enable offloading in cache,
         and perform inference. Verify that generation works and cache is used.
         """
-        model_id = "PaddleFleet/tiny-random-qwen3"
+        model_id = "PaddleFormers/tiny-random-qwen3"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
         from paddlefleet.transformers import (

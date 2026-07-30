@@ -102,7 +102,7 @@ class TestLoraModel(unittest.TestCase):
         )
         # turn off plm dropout for to test train vs test
         model = AutoModelForCausalLM.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3",
+            "PaddleFormers/tiny-random-qwen3",
             convert_from_hf=True,
         )
         lora_model = LoRAModel(model, lora_config)
@@ -139,19 +139,19 @@ class TestLoraModel(unittest.TestCase):
                 r=4,
                 lora_alpha=8,
             )
-            model = AutoModelForCausalLM.from_pretrained("PaddleFleet/tiny-random-qwen3", convert_from_hf=True)
+            model = AutoModelForCausalLM.from_pretrained("PaddleFormers/tiny-random-qwen3", convert_from_hf=True)
             lora_model = LoRAModel(model, lora_config)
             lora_model.eval()
             original_results = lora_model(inputs)
             lora_model.save_pretrained(tempdir)
 
-            model = AutoModelForCausalLM.from_pretrained("PaddleFleet/tiny-random-qwen3", convert_from_hf=True)
+            model = AutoModelForCausalLM.from_pretrained("PaddleFormers/tiny-random-qwen3", convert_from_hf=True)
             loaded_lora_model = LoRAModel.from_pretrained(model, tempdir)
             loaded_lora_model.eval()
             loaded_results = loaded_lora_model(inputs)
             self.assertTrue(paddle.allclose(original_results[0], loaded_results[0]))
 
-            model = AutoModelForCausalLM.from_pretrained("PaddleFleet/tiny-random-qwen3", convert_from_hf=True)
+            model = AutoModelForCausalLM.from_pretrained("PaddleFormers/tiny-random-qwen3", convert_from_hf=True)
             config_loaded_lora_model = LoRAModel.from_pretrained(model, tempdir, lora_config=lora_config)
             config_loaded_lora_model.eval()
             config_loaded_results = config_loaded_lora_model(inputs)
@@ -165,13 +165,13 @@ class TestLoraModel(unittest.TestCase):
             lora_alpha=8,
             enable_lora_list=None,
         )
-        model = AutoModelForCausalLM.from_pretrained("PaddleFleet/tiny-random-qwen3", convert_from_hf=True)
+        model = AutoModelForCausalLM.from_pretrained("PaddleFormers/tiny-random-qwen3", convert_from_hf=True)
         with self.assertRaises(ValueError):
             LoRAModel(model, lora_config)
 
     def test_lora_get_merge_state_dict(self):
         lora_config = LoRAConfig(target_modules=[".*qkv_proj.*"], r=4, lora_alpha=8)
-        model = AutoModelForCausalLM.from_pretrained("PaddleFleet/tiny-random-qwen3", convert_from_hf=True)
+        model = AutoModelForCausalLM.from_pretrained("PaddleFormers/tiny-random-qwen3", convert_from_hf=True)
         model.eval()
         lora_model = LoRAModel(model, lora_config)
         lora_model.model._set_pipeline_name_mapping()
@@ -222,7 +222,7 @@ class TestLoraModel(unittest.TestCase):
             lora_alpha=8,
         )
         model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
-            "PaddleFleet/tiny-random-qwen3vlmoev2",
+            "PaddleFormers/tiny-random-qwen3vlmoev2",
             dtype="float32",
             load_checkpoint_format="flex_checkpoint",
         )
@@ -294,7 +294,7 @@ class TestLoraModelFC(unittest.TestCase):
                 lora_alpha=8,
             )
             model = Glm4MoeModel.from_pretrained(
-                "PaddleFleet/tiny-random-glm4moe-bf16",
+                "PaddleFormers/tiny-random-glm4moe-bf16",
                 download_hub="aistudio",
                 convert_from_hf=True,
                 dtype="float32",
