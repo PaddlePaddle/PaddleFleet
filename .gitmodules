@@ -25,3 +25,6 @@
 [submodule "packages/paddlefleet_ops/third_party/fast-hadamard-transform"]
 	path = packages/paddlefleet_ops/third_party/fast-hadamard-transform
 	url = https://github.com/PFCCLab/fast-hadamard-transform.git
+[submodule "packages/paddlefleet_ops/third_party/MoonEP"]
+	path = packages/paddlefleet_ops/third_party/MoonEP
+	url = https://github.com/PFCCLab/MoonEP.git
