@@ -287,7 +287,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer = self._make_mock_layer(E, B, k, n, histogram_np, b_min, b_max)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         actual = layer._bias_value.numpy()
@@ -311,7 +311,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
 
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         # set_value should NOT have been called since histogram is all-zero
@@ -328,7 +328,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer = self._make_mock_layer(E, B, k, n, histogram_np)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         actual = layer._bias_value.numpy()
@@ -343,7 +343,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer = self._make_mock_layer(E, B, k, n, histogram_np)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         b_new = layer._bias_value.numpy()
@@ -365,7 +365,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer.qb_histogram.zero_ = MagicMock()
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         layer.qb_histogram.zero_.assert_called_once()
@@ -390,7 +390,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
 
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         self.assertEqual(list(stored["val"].shape), [1, E])
@@ -404,7 +404,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer = self._make_mock_layer(E, B, k, n, histogram_np)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         actual = layer._bias_value.numpy()
@@ -506,7 +506,7 @@ class TestTryGetCommGroups(unittest.TestCase):
 
     def test_no_fleet_returns_none(self):
         """Without fleet initialized, should return (None, None, None)."""
-        tp, dp, sd = _try_get_comm_groups()
+        tp, cp, dp, sd = _try_get_comm_groups()
         # In single-process test, fleet is not initialized
         self.assertIsNone(tp)
         self.assertIsNone(dp)
@@ -521,7 +521,7 @@ class TestTryGetCommGroups(unittest.TestCase):
         if hasattr(mock_fleet, "_hcg"):
             delattr(mock_fleet, "_hcg")
 
-        tp, dp, sd = _try_get_comm_groups()
+        tp, cp, dp, sd = _try_get_comm_groups()
         self.assertIsNone(tp)
         self.assertIsNone(dp)
         self.assertIsNone(sd)
@@ -533,7 +533,7 @@ class TestTryGetCommGroups(unittest.TestCase):
             side_effect=Exception("test"),
             create=True,
         ):
-            tp, dp, sd = _try_get_comm_groups()
+            tp, cp, dp, sd = _try_get_comm_groups()
             self.assertIsNone(tp)
             self.assertIsNone(dp)
             self.assertIsNone(sd)
@@ -595,7 +595,7 @@ class TestOnOptimizerEnd(unittest.TestCase):
         # Directly test _update_single_layer (bypasses isinstance in on_optimizer_end)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         # Verify histogram was reset (zero_() was called on the tensor)
@@ -757,7 +757,7 @@ class TestEndToEnd(unittest.TestCase):
 
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         # Step 3: Verify result — bias should be non-zero and zero-mean
@@ -892,7 +892,7 @@ class TestDegenerateRange(unittest.TestCase):
 
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
         )
 
         # Should still produce valid result (not crash or NaN)
@@ -989,10 +989,51 @@ class TestCommGroupsHappyPath(unittest.TestCase):
         mock_hcg.get_data_parallel_group.return_value = dp_group
         mock_hcg.get_sharding_parallel_group.return_value = sd_group
 
-        tp, dp, sd = _try_get_comm_groups()
+        tp, cp, dp, sd = _try_get_comm_groups()
         self.assertIs(tp, tp_group)
         self.assertIs(dp, dp_group)
         self.assertIs(sd, sd_group)
+        # CP is read from paddlefleet.parallel_state, which is uninitialized here.
+        self.assertIsNone(cp)
+
+    @patch("paddle.distributed.fleet")
+    def test_cp_group_picked_up(self, mock_fleet):
+        """A multi-rank CP group must be returned so its histogram is merged."""
+        mock_hcg = MagicMock()
+        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
+        mock_hcg.get_model_parallel_group.return_value = None
+        mock_hcg.get_data_parallel_group.return_value = None
+        mock_hcg.get_sharding_parallel_group.return_value = None
+
+        cp_group = MagicMock()
+        cp_group.nranks = 4
+        with patch(
+            "paddlefleet.parallel_state.get_context_parallel_group",
+            return_value=cp_group,
+        ):
+            tp, cp, dp, sd = _try_get_comm_groups()
+        self.assertIs(cp, cp_group)
+        self.assertIsNone(tp)
+        self.assertIsNone(dp)
+        self.assertIsNone(sd)
+
+    @patch("paddle.distributed.fleet")
+    def test_single_rank_cp_group_filtered(self, mock_fleet):
+        """CP=1 needs no reduction, so the group is filtered out."""
+        mock_hcg = MagicMock()
+        mock_fleet.get_hybrid_communicate_group.return_value = mock_hcg
+        mock_hcg.get_model_parallel_group.return_value = None
+        mock_hcg.get_data_parallel_group.return_value = None
+        mock_hcg.get_sharding_parallel_group.return_value = None
+
+        cp_group = MagicMock()
+        cp_group.nranks = 1
+        with patch(
+            "paddlefleet.parallel_state.get_context_parallel_group",
+            return_value=cp_group,
+        ):
+            _, cp, _, _ = _try_get_comm_groups()
+        self.assertIsNone(cp)
 
     @patch("paddle.distributed.fleet")
     def test_single_rank_groups_filtered(self, mock_fleet):
@@ -1011,7 +1052,7 @@ class TestCommGroupsHappyPath(unittest.TestCase):
         mock_hcg.get_data_parallel_group.return_value = dp_group
         mock_hcg.get_sharding_parallel_group.return_value = sd_group
 
-        tp, dp, sd = _try_get_comm_groups()
+        tp, cp, dp, sd = _try_get_comm_groups()
         self.assertIsNone(tp)
         self.assertIs(dp, dp_group)
         self.assertIsNone(sd)
@@ -1026,7 +1067,7 @@ class TestCommGroupsHappyPath(unittest.TestCase):
         mock_hcg.get_data_parallel_group.return_value = None
         mock_hcg.get_sharding_parallel_group.return_value = None
 
-        tp, dp, sd = _try_get_comm_groups()
+        tp, cp, dp, sd = _try_get_comm_groups()
         self.assertIsNone(tp)
         self.assertIsNone(dp)
         self.assertIsNone(sd)
@@ -1069,7 +1110,11 @@ class TestTPAllReduceCondition(unittest.TestCase):
         tp_group = MagicMock()
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=tp_group, dp_group=None, sd_group=None
+            layer,
+            tp_group=tp_group,
+            cp_group=None,
+            dp_group=None,
+            sd_group=None,
         )
 
         # TP all_reduce should have been called
@@ -1089,7 +1134,11 @@ class TestTPAllReduceCondition(unittest.TestCase):
         tp_group = MagicMock()
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=tp_group, dp_group=None, sd_group=None
+            layer,
+            tp_group=tp_group,
+            cp_group=None,
+            dp_group=None,
+            sd_group=None,
         )
 
         # TP all_reduce should NOT have been called
@@ -1109,7 +1158,11 @@ class TestTPAllReduceCondition(unittest.TestCase):
         tp_group = MagicMock()
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=tp_group, dp_group=None, sd_group=None
+            layer,
+            tp_group=tp_group,
+            cp_group=None,
+            dp_group=None,
+            sd_group=None,
         )
 
         # TP all_reduce should NOT have been called
@@ -1130,11 +1183,476 @@ class TestTPAllReduceCondition(unittest.TestCase):
         sd_group = MagicMock()
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, dp_group=dp_group, sd_group=sd_group
+            layer,
+            tp_group=None,
+            cp_group=None,
+            dp_group=dp_group,
+            sd_group=sd_group,
         )
 
         # DP and SD all_reduce should each have been called
         self.assertEqual(mock_dist.all_reduce.call_count, 2)
+
+    @patch("paddlefleet.transformer.moe.qb_callback.dist")
+    def test_cp_reduce_called_unconditionally(self, mock_dist):
+        """CP always splits the sequence, so its reduce is not gated on SP/EP."""
+        np.random.seed(42)
+        E, B, k, n = 4, 50, 2, 4
+        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+
+        cp_group = MagicMock()
+        callback = MoEQuantileBalancingCallback()
+        # SP=False and EP=1 disable the TP reduce; CP must still fire.
+        for sp, ep_size in ((False, 1), (True, 1), (False, 4)):
+            mock_dist.reset_mock()
+            layer = self._make_layer_with_config(
+                E, B, k, n, histogram_np, sp=sp, ep_size=ep_size
+            )
+            callback._update_single_layer(
+                layer,
+                tp_group=None,
+                cp_group=cp_group,
+                dp_group=None,
+                sd_group=None,
+            )
+            mock_dist.all_reduce.assert_called_once_with(
+                mock_dist.all_reduce.call_args.args[0], group=cp_group
+            )
+
+    @patch("paddlefleet.transformer.moe.qb_callback.dist")
+    def test_all_four_groups_reduce(self, mock_dist):
+        """TP+CP+DP+Sharding together produce exactly four all-reduces."""
+        np.random.seed(42)
+        E, B, k, n = 4, 50, 2, 4
+        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+
+        layer = self._make_layer_with_config(
+            E, B, k, n, histogram_np, sp=True, ep_size=4
+        )
+        groups = [MagicMock() for _ in range(4)]
+        callback = MoEQuantileBalancingCallback()
+        callback._update_single_layer(
+            layer,
+            tp_group=groups[0],
+            cp_group=groups[1],
+            dp_group=groups[2],
+            sd_group=groups[3],
+        )
+
+        self.assertEqual(mock_dist.all_reduce.call_count, 4)
+        reduced_groups = [
+            call.kwargs["group"] for call in mock_dist.all_reduce.call_args_list
+        ]
+        self.assertEqual(reduced_groups, groups)
+
+    @patch("paddlefleet.transformer.moe.qb_callback.dist")
+    def test_cp_histograms_merge_to_global_quantile(self, mock_dist):
+        """A CP-sharded histogram pair must recover the same bias as the pooled one.
+
+        Each CP rank's router only sees S/CP tokens, so without the CP reduce the
+        recovered quantile is a local one. Summing the shards must reproduce the
+        result of running on the full sequence.
+        """
+        np.random.seed(11)
+        E, B, k, n = 4, 60, 2, 4
+        shard_a = np.random.randint(0, 15, (E, B)).astype(np.int32)
+        shard_b = np.random.randint(0, 15, (E, B)).astype(np.int32)
+        pooled = shard_a + shard_b
+
+        cp_group = MagicMock()
+
+        def _fake_all_reduce(tensor, group=None):
+            # Emulate summing shard_a (local) with shard_b (the peer CP rank).
+            tensor.add_(paddle.to_tensor(shard_b, dtype=tensor.dtype))
+
+        mock_dist.all_reduce.side_effect = _fake_all_reduce
+
+        layer = self._make_layer_with_config(
+            E, B, k, n, shard_a, sp=False, ep_size=1
+        )
+        callback = MoEQuantileBalancingCallback()
+        callback._update_single_layer(
+            layer,
+            tp_group=None,
+            cp_group=cp_group,
+            dp_group=None,
+            sd_group=None,
+        )
+        merged_bias = layer._bias_value.numpy()
+
+        expected = _numpy_recover_bias(pooled, k, n, -1.0, 1.0)
+        np.testing.assert_allclose(merged_bias, expected, rtol=1e-5, atol=1e-6)
+
+        # Sanity check: the un-merged (single-shard) bias differs, i.e. skipping
+        # the CP reduce really would have produced a wrong answer.
+        local_only = _numpy_recover_bias(shard_a, k, n, -1.0, 1.0)
+        self.assertFalse(np.allclose(local_only, expected, atol=1e-6))
+
+
+# =============================================================================
+# Real TopKRouter tests (exercise moe_router.py QB code paths directly)
+# =============================================================================
+
+
+class QBRouterConfig:
+    """Minimal TransformerConfig stand-in for building a real TopKRouter."""
+
+    def __init__(self, **overrides):
+        self.hidden_size = 32
+        self.n_routed_experts = 8
+        self.num_experts_per_tok = 2
+        self.n_group = 1
+        self.topk_group = 1
+        self.init_method = paddle.nn.initializer.Normal(mean=0.0, std=0.02)
+        self.topk_method = "quantile_balancing"
+        self.norm_topk_prob = True
+        self.routed_scaling_factor = 1.0
+        self.routed_scaling_factor_learnable = False
+        self.scoring_func = "sigmoid"
+        self.moe_router_load_balancing_type = "none"
+        self.moe_router_force_load_balancing = False
+        self.moe_router_fusion = False
+        self.moe_topk_fusion = False
+        self.router_z_loss_coef = 0.0
+        self.router_aux_loss_coef = 0.0
+        self.tensor_model_parallel_size = 1
+        self.context_parallel_size = 1
+        self.sequence_parallel = False
+        self.expert_model_parallel_size = 1
+        self.gpt_model_use_experimental_version = False
+        self.qb_n_bins = 100
+        self._extra_conf = {"seq_aux": False}
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+    def get(self, key, default=None):
+        return self._extra_conf.get(key, getattr(self, key, default))
+
+
+def _build_qb_router(**overrides):
+    """Build a real TopKRouter with quantile_balancing enabled."""
+    from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+    with patch(
+        "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+        return_value=1,
+    ):
+        return TopKRouter(QBRouterConfig(**overrides))
+
+
+class TestQBRouterInit(unittest.TestCase):
+    """QB-specific state created in StandardMoERouter.__init__."""
+
+    def test_bias_and_histogram_created(self):
+        router = _build_qb_router()
+        self.assertEqual(router.e_score_correction_bias.shape, [8])
+        np.testing.assert_allclose(
+            router.e_score_correction_bias.numpy(),
+            np.zeros(8, dtype=np.float32),
+        )
+        self.assertEqual(router.qb_histogram.shape, [8, 100])
+        self.assertEqual(int(router.qb_histogram.sum().item()), 0)
+        self.assertEqual(router.qb_histogram.dtype, paddle.int32)
+        self.assertTrue(router.qb_histogram.stop_gradient)
+        self.assertEqual(router.expert_usage.shape, [8])
+        self.assertTrue(router.expert_usage.stop_gradient)
+        self.assertEqual(router.qb_bin_min, -1.0)
+        self.assertEqual(router.qb_bin_max, 1.0)
+        self.assertFalse(router._cast_to_low_precision)
+
+    def test_experimental_version_bias_is_2d(self):
+        router = _build_qb_router(gpt_model_use_experimental_version=True)
+        self.assertEqual(router.e_score_correction_bias.shape, [1, 8])
+
+    def test_default_n_bins_is_1000(self):
+        config = QBRouterConfig()
+        del config.qb_n_bins
+        from paddlefleet.transformer.moe.moe_router import TopKRouter
+
+        with patch(
+            "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+            return_value=1,
+        ):
+            router = TopKRouter(config)
+        self.assertEqual(router.qb_n_bins, 1000)
+        self.assertEqual(router.qb_histogram.shape, [8, 1000])
+
+    def test_moe_topk_fusion_is_rejected(self):
+        with self.assertRaises(AssertionError) as ctx:
+            _build_qb_router(moe_topk_fusion=True)
+        self.assertIn("incompatible with moe_topk_fusion", str(ctx.exception))
+
+    def test_non_qb_router_has_no_qb_state(self):
+        router = _build_qb_router(topk_method="greedy")
+        self.assertFalse(hasattr(router, "qb_histogram"))
+
+
+class TestTopkQuantileBalancingReal(unittest.TestCase):
+    """StandardMoERouter._topk_quantile_balancing."""
+
+    def setUp(self):
+        paddle.seed(2026)
+        np.random.seed(2026)
+        self.router = _build_qb_router()
+
+    def test_output_shapes_and_gate_from_raw_scores(self):
+        scores = paddle.nn.functional.sigmoid(paddle.randn([16, 8]))
+        weight, idx = self.router._topk_quantile_balancing(scores, 2, 1, 1)
+        self.assertEqual(weight.shape, [16, 2])
+        self.assertEqual(idx.shape, [16, 2])
+        # Gate weights must come from the ORIGINAL scores, not the biased ones.
+        expected = scores.take_along_axis(idx, axis=1)
+        np.testing.assert_allclose(
+            weight.numpy(), expected.numpy(), rtol=1e-6, atol=1e-7
+        )
+
+    def test_bias_shifts_selection_but_not_weights(self):
+        scores = paddle.nn.functional.sigmoid(paddle.randn([12, 8]))
+        _, idx_before = self.router._topk_quantile_balancing(scores, 2, 1, 1)
+        self.assertFalse(bool((idx_before == 7).all().item()))
+
+        # Force expert 7 to always win by giving it an overwhelming bias.
+        bias = np.zeros(8, dtype=np.float32)
+        bias[7] = 10.0
+        self.router.e_score_correction_bias.set_value(paddle.to_tensor(bias))
+        weight, idx = self.router._topk_quantile_balancing(scores, 2, 1, 1)
+        self.assertTrue(bool((idx[:, 0] == 7).all().item()))
+        # Weight for expert 7 is still the raw score, unaffected by the +10 bias.
+        np.testing.assert_allclose(
+            weight[:, 0].numpy(), scores[:, 7].numpy(), rtol=1e-6, atol=1e-7
+        )
+
+    def test_experimental_version_bias_broadcast(self):
+        router = _build_qb_router(gpt_model_use_experimental_version=True)
+        scores = paddle.nn.functional.sigmoid(paddle.randn([10, 8]))
+        weight, idx = router._topk_quantile_balancing(scores, 2, 1, 1)
+        self.assertEqual(weight.shape, [10, 2])
+        self.assertGreater(int(router.qb_histogram.sum().item()), 0)
+
+    def test_histogram_accumulates_only_when_grad_enabled(self):
+        scores = paddle.nn.functional.sigmoid(paddle.randn([16, 8]))
+        with paddle.no_grad():
+            self.router._topk_quantile_balancing(scores, 2, 1, 1)
+        self.assertEqual(int(self.router.qb_histogram.sum().item()), 0)
+
+        self.router._topk_quantile_balancing(scores, 2, 1, 1)
+        self.assertEqual(int(self.router.qb_histogram.sum().item()), 16 * 8)
+
+    def test_n_group_greater_than_one_rejected(self):
+        scores = paddle.nn.functional.sigmoid(paddle.randn([4, 8]))
+        with self.assertRaises(AssertionError) as ctx:
+            self.router._topk_quantile_balancing(scores, 2, 2, 1)
+        self.assertIn("only supports n_group=1", str(ctx.exception))
+
+    def test_missing_bias_rejected(self):
+        self.router.e_score_correction_bias = None
+        scores = paddle.nn.functional.sigmoid(paddle.randn([4, 8]))
+        with self.assertRaises(AssertionError) as ctx:
+            self.router._topk_quantile_balancing(scores, 2, 1, 1)
+        self.assertIn("e_score_correction_bias is None", str(ctx.exception))
+
+
+class TestAccumulateQBHistogramReal(unittest.TestCase):
+    """StandardMoERouter._accumulate_qb_histogram."""
+
+    def setUp(self):
+        paddle.seed(7)
+        np.random.seed(7)
+
+    def test_matches_numpy_reference(self):
+        router = _build_qb_router()
+        scores_np = np.random.rand(24, 8).astype(np.float32)
+        bias_np = np.linspace(-0.2, 0.2, 8).astype(np.float32)
+        router.e_score_correction_bias.set_value(paddle.to_tensor(bias_np))
+
+        scores = paddle.to_tensor(scores_np)
+        biased = scores + paddle.to_tensor(bias_np).unsqueeze(0)
+        router._accumulate_qb_histogram(scores, biased, 2)
+
+        expected = _numpy_accumulate_histogram(
+            scores_np, bias_np, 2, router.qb_bin_min, router.qb_bin_max, 100
+        )
+        np.testing.assert_array_equal(router.qb_histogram.numpy(), expected)
+
+    def test_topk_val_clamped_when_k_plus_one_exceeds_experts(self):
+        # k == n_experts, so k+1 must be clamped to E inside the accumulator.
+        router = _build_qb_router(num_experts_per_tok=8)
+        scores = paddle.to_tensor(np.random.rand(6, 8).astype(np.float32))
+        router._accumulate_qb_histogram(scores, scores, 8)
+        self.assertEqual(int(router.qb_histogram.sum().item()), 6 * 8)
+
+    def test_degenerate_bin_range_falls_back(self):
+        router = _build_qb_router()
+        router.qb_bin_min = 0.0
+        router.qb_bin_max = 0.0  # zero range -> fallback to 2.0
+        scores = paddle.to_tensor(np.random.rand(6, 8).astype(np.float32))
+        router._accumulate_qb_histogram(scores, scores, 2)
+        self.assertEqual(int(router.qb_histogram.sum().item()), 6 * 8)
+
+    def test_out_of_range_values_are_clipped(self):
+        router = _build_qb_router()
+        router.qb_bin_min = 0.0
+        router.qb_bin_max = 0.01  # almost everything lands beyond the last bin
+        scores = paddle.to_tensor(np.full([4, 8], 0.5, dtype=np.float32))
+        router._accumulate_qb_histogram(scores, scores, 2)
+        hist = router.qb_histogram.numpy()
+        self.assertEqual(int(hist.sum()), 4 * 8)
+        # All mass must sit inside [0, B-1]; nothing is dropped.
+        self.assertTrue(hist[:, 0].sum() + hist[:, -1].sum() == 4 * 8)
+
+    def test_accumulation_is_additive_across_microbatches(self):
+        router = _build_qb_router()
+        scores = paddle.to_tensor(np.random.rand(5, 8).astype(np.float32))
+        router._accumulate_qb_histogram(scores, scores, 2)
+        first = router.qb_histogram.numpy().copy()
+        router._accumulate_qb_histogram(scores, scores, 2)
+        np.testing.assert_array_equal(router.qb_histogram.numpy(), first * 2)
+
+
+class TestCallTopkMethodDispatch(unittest.TestCase):
+    """_call_topk_method routes to the QB implementation."""
+
+    def test_quantile_balancing_branch(self):
+        router = _build_qb_router()
+        scores = paddle.nn.functional.sigmoid(paddle.randn([8, 8]))
+        weight, idx = router._call_topk_method(
+            "quantile_balancing", scores, k=2, n_group=1, topk_group=1
+        )
+        self.assertEqual(weight.shape, [8, 2])
+        self.assertEqual(idx.shape, [8, 2])
+        self.assertGreater(int(router.qb_histogram.sum().item()), 0)
+
+    def test_unknown_method_raises(self):
+        router = _build_qb_router()
+        scores = paddle.nn.functional.sigmoid(paddle.randn([8, 8]))
+        with self.assertRaises(NotImplementedError):
+            router._call_topk_method("no_such_method", scores, k=2)
+
+
+class TestQBRouterForward(unittest.TestCase):
+    """Full TopKRouter.forward with quantile_balancing."""
+
+    def setUp(self):
+        paddle.seed(11)
+        np.random.seed(11)
+
+    def test_forward_updates_histogram_and_usage(self):
+        router = _build_qb_router()
+        hidden = paddle.randn([4, 6, 32])
+        _, top_gate, top_idx, probs, mask, _, _, _ = router(hidden)
+
+        num_tokens = 4 * 6
+        self.assertEqual(top_gate.shape, [num_tokens, 2])
+        self.assertEqual(top_idx.shape, [num_tokens, 2])
+        self.assertEqual(probs.shape, [num_tokens, 8])
+        self.assertEqual(mask.shape, [num_tokens, 8])
+        # Histogram covers every (token, expert) pair.
+        self.assertEqual(int(router.qb_histogram.sum().item()), num_tokens * 8)
+        # expert_usage counts one entry per routed slot.
+        self.assertEqual(int(router.expert_usage.sum().item()), num_tokens * 2)
+
+    def test_forward_under_no_grad_leaves_state_untouched(self):
+        router = _build_qb_router()
+        hidden = paddle.randn([2, 4, 32])
+        with paddle.no_grad():
+            router(hidden)
+        self.assertEqual(int(router.qb_histogram.sum().item()), 0)
+        self.assertEqual(int(router.expert_usage.sum().item()), 0)
+
+    def test_forward_gate_weights_are_normalized(self):
+        router = _build_qb_router(norm_topk_prob=True)
+        hidden = paddle.randn([2, 5, 32])
+        _, top_gate, _, _, _, _, _, _ = router(hidden)
+        np.testing.assert_allclose(
+            top_gate.sum(axis=-1).numpy(),
+            np.ones(2 * 5, dtype=np.float32),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+    def test_forward_is_differentiable(self):
+        router = _build_qb_router()
+        hidden = paddle.randn([2, 4, 32])
+        hidden.stop_gradient = False
+        _, top_gate, _, _, _, _, _, _ = router(hidden)
+        top_gate.sum().backward()
+        self.assertIsNotNone(router.weight.grad)
+        # QB bias is a buffer updated by the callback, never by autograd.
+        self.assertTrue(router.e_score_correction_bias.stop_gradient)
+
+
+class TestCommGroupsExceptionPath(unittest.TestCase):
+    """_try_get_comm_groups swallows failures from the fleet API."""
+
+    def test_hcg_lookup_failure_returns_none(self):
+        import paddle.distributed.fleet as real_fleet
+
+        with (
+            patch.object(real_fleet, "_hcg", MagicMock(), create=True),
+            patch.object(
+                real_fleet,
+                "get_hybrid_communicate_group",
+                side_effect=RuntimeError("hcg unavailable"),
+            ),
+        ):
+            tp, cp, dp, sd = _try_get_comm_groups()
+        self.assertIsNone(tp)
+        self.assertIsNone(dp)
+        self.assertIsNone(sd)
+
+
+class TestRealRouterWithCallback(unittest.TestCase):
+    """End-to-end: real router forward + callback update reduces imbalance."""
+
+    def test_bias_reduces_load_imbalance(self):
+        paddle.seed(3)
+        np.random.seed(3)
+        router = _build_qb_router(qb_n_bins=1000)
+        callback = MoEQuantileBalancingCallback()
+        model = paddle.nn.Sequential(router)
+        hidden = paddle.randn([8, 64, 32])
+
+        # Skew the gate so experts 0/1 systematically win: without QB the
+        # router sends far more than its fair share of tokens to them.
+        weight = (np.random.randn(8, 32) * 0.3).astype(np.float32)
+        weight[0] += 1.5
+        weight[1] += 1.0
+        router.weight.set_value(paddle.to_tensor(weight))
+
+        def measure():
+            router.expert_usage.zero_()
+            router.qb_histogram.zero_()
+            router(hidden)
+            usage = router.expert_usage.numpy().astype(np.float64)
+            return usage.std() / max(usage.mean(), 1e-9)
+
+        cv_before = measure()
+        for _ in range(6):
+            router.qb_histogram.zero_()
+            router.expert_usage.zero_()
+            router(hidden)
+            callback.on_optimizer_end(model=model)
+        cv_after = measure()
+
+        # QB should cut the imbalance by at least half.
+        self.assertLess(cv_after, cv_before / 2)
+        # Bias stays zero-mean after every update.
+        self.assertAlmostEqual(
+            float(router.e_score_correction_bias.mean().item()), 0.0, places=5
+        )
+
+    def test_callback_discovers_qb_layers_in_a_model(self):
+        router_qb = _build_qb_router()
+        router_plain = _build_qb_router(topk_method="greedy")
+        model = paddle.nn.Sequential(router_plain, router_qb)
+        hidden = paddle.randn([2, 8, 32])
+        router_qb(hidden)
+        self.assertGreater(int(router_qb.qb_histogram.sum().item()), 0)
+
+        MoEQuantileBalancingCallback().on_optimizer_end(model=model)
+        # QB layer was updated (histogram reset), plain layer untouched.
+        self.assertEqual(int(router_qb.qb_histogram.sum().item()), 0)
+        self.assertFalse(hasattr(router_plain, "qb_histogram"))
 
 
 if __name__ == "__main__":
