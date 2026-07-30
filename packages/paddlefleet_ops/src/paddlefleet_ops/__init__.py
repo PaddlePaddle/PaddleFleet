@@ -382,11 +382,10 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet_ops.hybrid_ep"] = error
 
     if is_sonic_moe_available():
-        paddle.enable_compat(
-            scope={"sonicmoe", "quack", "triton"},
-            silent=True,
-        )
-        _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
+        with paddle.use_compat_guard(
+            enable=True, scope={"sonicmoe", "quack", "triton"}, silent=True
+        ):
+            _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
     else:
         warning, error = _sonic_moe_requirement(
             "paddlefleet_ops.sonicmoe", hint=SONIC_MOE_HINT
