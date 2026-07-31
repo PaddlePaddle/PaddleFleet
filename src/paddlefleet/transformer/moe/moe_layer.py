@@ -1243,6 +1243,21 @@ class MoELayer(nn.Layer):
         """Post-process shared expert output before combining. Default: identity."""
         return shared_output
 
+    def _supports_three_path_clone(self) -> bool:
+        """Whether the MG-aligned three-path clone applies to this topology.
+
+        The clone assumes router / dispatcher / shared branches all consume the
+        same ``hidden_states``. Subclasses overriding the gate/expert input
+        hooks (e.g. Gemma4MoELayer routes on ``residual`` and applies
+        ``pre_feedforward_layernorm_2``) have a different topology, so the
+        clone must not be used there.
+        """
+        cls = type(self)
+        return (
+            cls._prepare_gate_input is MoELayer._prepare_gate_input
+            and cls._prepare_expert_input is MoELayer._prepare_expert_input
+        )
+
     def forward(
         self,
         hidden_states: paddle.Tensor,
@@ -1275,18 +1290,19 @@ class MoELayer(nn.Layer):
         _three_paths_enabled = (
             getattr(self, "use_accuracy_compatible", False)
             and hidden_states.stop_gradient is False
+            and self._supports_three_path_clone()
         )
         if _three_paths_enabled:
             _hs_router_path, _hs_dispatcher_path, _hs_shared_path = (
                 ThreePathCloneAlignMG.apply(hidden_states)
             )
             residuals = _hs_shared_path
+        else:
+            _hs_router_path = _hs_dispatcher_path = hidden_states
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
 
         self._maybe_pre_allgather_overlap(hidden_states)
-        gate_input = self._prepare_gate_input(hidden_states, residual)
-        if _three_paths_enabled:
-            gate_input = _hs_router_path
+        gate_input = self._prepare_gate_input(_hs_router_path, residual)
 
         (
             capacity,
@@ -1325,9 +1341,7 @@ class MoELayer(nn.Layer):
         else:
             combine_overlap_handle = None
 
-        expert_input = self._prepare_expert_input(hidden_states, residual)
-        if _three_paths_enabled:
-            expert_input = _hs_dispatcher_path
+        expert_input = self._prepare_expert_input(_hs_dispatcher_path, residual)
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(

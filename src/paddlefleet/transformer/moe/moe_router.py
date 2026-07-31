@@ -649,10 +649,18 @@ class StandardMoERouter(nn.Layer):
                 )  # [B, E]
                 _aggregated = all_probs.sum(axis=seq_axis)  # [B, E]
                 _per_expert = _aggregated * tokens_per_expert  # [B, E]
+                # MG normalizes by the (fixed) sequence length, not by the
+                # per-line valid token count, so `denom` is intentionally
+                # unused here: using it would break the MG alignment.
                 _scalar = float(self.num_experts) / (
                     float(top_k) * float(max_seq_len) * float(max_seq_len)
                 )
                 seq_aux_loss = _per_expert.sum() * _scalar
+                # sequence-level loss is averaged over the batch; keep the
+                # single-line case bit-identical (no extra op).
+                _num_lines = _per_expert.shape[0]
+                if _num_lines > 1:
+                    seq_aux_loss = seq_aux_loss / float(_num_lines)
             else:
                 cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
                     denom
@@ -1375,10 +1383,8 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
-        if self.use_accuracy_compatible:
-            gates_ori = paddle.nn.functional.sigmoid(
-                logits.cast(paddle.float32)
-            ).cast(logits.dtype)
+        if self.use_accuracy_compatible and not use_split:
+            gates_ori = self.gate_score_func(logits).cast(logits.dtype)
             if input_ids_none_zero_mask is not None:
                 gates_ori = gates_ori * valid_mask
         else:

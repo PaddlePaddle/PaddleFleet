@@ -83,10 +83,9 @@ class TestRouterAccuracyCompatible(unittest.TestCase):
         self.assertTrue(router.use_accuracy_compatible)
 
     @patch(_CP_PATCH, return_value=1)
-    def test_seq_aux_loss_scalar_and_formula(self, _cp):
+    def test_seq_aux_loss_scalar_and_matches_default(self, _cp):
         from paddlefleet.transformer.moe.moe_router import StandardMoERouter
 
-        router = StandardMoERouter(_make_router_config())
         B, S, E, K = 2, 3, 4, 2
         paddle.seed(0)
         probs = paddle.nn.functional.softmax(paddle.randn([B * S, E]), axis=-1)
@@ -95,18 +94,74 @@ class TestRouterAccuracyCompatible(unittest.TestCase):
             idx, paddle.to_tensor(1.0), axis=-1
         )
 
-        loss = router._cal_seq_aux_loss(probs, K, routing_map, S, B)
-        self.assertEqual(loss.shape, [])
-
-        # Reference computation of the accuracy-compatible branch.
-        rm3 = routing_map.reshape([B, S, E])
-        probs3 = probs.reshape([B, S, E])
-        tokens_per_expert = rm3.sum(axis=1, dtype="float32")
-        aggregated = probs3.sum(axis=1)
-        scalar = float(E) / (float(K) * float(S) * float(S))
-        expected = (aggregated * tokens_per_expert).sum() * scalar
+        aligned = StandardMoERouter(_make_router_config())
+        default = StandardMoERouter(
+            _make_router_config(use_accuracy_compatible=False)
+        )
+        loss_a = aligned._cal_seq_aux_loss(probs, K, routing_map, S, B)
+        loss_d = default._cal_seq_aux_loss(probs, K, routing_map, S, B)
+        self.assertEqual(loss_a.shape, [])
+        # The aligned branch only reorders float ops; the value must match the
+        # reference (batch-mean) formula of the default branch.
         np.testing.assert_allclose(
-            loss.numpy(), expected.numpy(), rtol=1e-5, atol=1e-5
+            loss_a.numpy(), loss_d.numpy(), rtol=1e-5, atol=1e-6
+        )
+
+    @patch(_CP_PATCH, return_value=1)
+    def test_seq_aux_loss_is_batch_mean(self, _cp):
+        """Duplicating a sequence across the batch must not change the loss."""
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        S, E, K = 3, 4, 2
+        paddle.seed(3)
+        probs1 = paddle.nn.functional.softmax(paddle.randn([S, E]), axis=-1)
+        idx1 = paddle.topk(probs1, k=K, axis=-1).indices
+        rm1 = paddle.zeros([S, E]).put_along_axis_(
+            idx1, paddle.to_tensor(1.0), axis=-1
+        )
+
+        router = StandardMoERouter(_make_router_config())
+        loss_b1 = router._cal_seq_aux_loss(probs1, K, rm1, S, 1)
+        loss_b2 = router._cal_seq_aux_loss(
+            paddle.concat([probs1, probs1], axis=0),
+            K,
+            paddle.concat([rm1, rm1], axis=0),
+            S,
+            2,
+        )
+        np.testing.assert_allclose(
+            loss_b2.numpy(), loss_b1.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+    @patch(_CP_PATCH, return_value=1)
+    def test_seq_aux_loss_padding_uses_sequence_length(self, _cp):
+        """The aligned branch follows MG and normalizes by the (fixed) sequence
+        length, so per-line padding info must not change the loss. Covers B > 1
+        with a different padding length per line."""
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        B, S, E, K = 3, 5, 4, 2
+        valid_lens = [5, 3, 1]
+        paddle.seed(5)
+        probs = paddle.nn.functional.softmax(paddle.randn([B, S, E]), axis=-1)
+        idx = paddle.topk(probs, k=K, axis=-1).indices
+        rm = paddle.zeros([B, S, E]).put_along_axis_(
+            idx, paddle.to_tensor(1.0), axis=-1
+        )
+        ids = paddle.zeros([B, S], dtype="int64")
+        for b, n in enumerate(valid_lens):
+            ids[b, :n] = 1
+            if n < S:
+                probs[b, n:] = 0.0
+                rm[b, n:] = 0.0
+
+        router = StandardMoERouter(_make_router_config())
+        args = (probs.reshape([B * S, E]), K, rm.reshape([B * S, E]), S, B)
+        loss_with_ids = router._cal_seq_aux_loss(*args, input_ids=ids)
+        loss_no_ids = router._cal_seq_aux_loss(*args)
+        self.assertTrue(bool(paddle.isfinite(loss_with_ids).all().numpy()))
+        np.testing.assert_allclose(
+            loss_with_ids.numpy(), loss_no_ids.numpy(), rtol=1e-6, atol=1e-6
         )
 
     @patch(_CP_PATCH, return_value=1)

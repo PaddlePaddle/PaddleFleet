@@ -51,6 +51,23 @@ def _make_fixed_topk_routing_map(num_tokens, num_experts, topk, seed=0):
     return routing_map
 
 
+def _make_padded_routing_map():
+    """Routing map mixing all-zero (padding) rows with fixed top-k=2 rows.
+
+    Row 0 is padding on purpose: the top-k probe must not read it.
+    """
+    return paddle.to_tensor(
+        [
+            [0.0, 0.0, 0.0, 0.0],  # padding
+            [1.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],  # padding
+            [0.0, 1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0, 1.0],
+        ],
+        dtype="float32",
+    )
+
+
 class TestPermuteAligned(unittest.TestCase):
     def test_permute_forward_matches_default(self):
         rm = _make_fixed_topk_routing_map(6, 4, 2)
@@ -92,6 +109,26 @@ class TestPermuteAligned(unittest.TestCase):
             tokens, rm, use_accuracy_compatible=True
         )
         self.assertEqual(permuted.shape[0], 0)
+
+    def test_permute_mixed_padding_forward_matches_default(self):
+        rm = _make_padded_routing_map()
+        tokens = paddle.randn([5, 8])
+        p_a, si_a = permute(tokens, rm, use_accuracy_compatible=True)
+        p_s, si_s = permute(tokens, rm, use_accuracy_compatible=False)
+        self.assertEqual(p_a.shape[0], 6)  # 3 valid rows * topk 2
+        np.testing.assert_allclose(p_a.numpy(), p_s.numpy(), atol=1e-6)
+        np.testing.assert_array_equal(si_a.numpy(), si_s.numpy())
+
+    def test_permute_mixed_padding_backward_zeroes_padding_rows(self):
+        rm = _make_padded_routing_map()
+        tokens = paddle.randn([5, 4])
+        tokens.stop_gradient = False
+        permuted, _ = permute(tokens, rm, use_accuracy_compatible=True)
+        permuted.sum().backward()
+        expected = np.full([5, 4], 2.0, dtype="float32")
+        expected[0] = 0.0
+        expected[2] = 0.0
+        np.testing.assert_allclose(tokens.grad.numpy(), expected, atol=1e-6)
 
 
 class TestUnpermuteAligned(unittest.TestCase):
@@ -155,6 +192,85 @@ class TestUnpermuteAligned(unittest.TestCase):
         )
         self.assertEqual(out_a.shape, [6, 8])
         np.testing.assert_allclose(out_a.numpy(), out_s.numpy(), atol=1e-5)
+
+
+class TestAlignedPaddedRoutingMap(unittest.TestCase):
+    """Mixed valid / all-zero routing rows must work in forward and backward."""
+
+    def test_unpermute_mixed_padding_forward_matches_default(self):
+        rm = _make_padded_routing_map()
+        tokens = paddle.randn([5, 8])
+        p, si = permute(tokens, rm, use_accuracy_compatible=True)
+        out_a = unpermute(
+            p, si, tokens.shape, routing_map=rm, use_accuracy_compatible=True
+        )
+        out_s = unpermute(
+            p, si, tokens.shape, routing_map=rm, use_accuracy_compatible=False
+        )
+        self.assertEqual(out_a.shape, [5, 8])
+        np.testing.assert_allclose(out_a.numpy(), out_s.numpy(), atol=1e-5)
+        # Padding rows produce zero output.
+        np.testing.assert_allclose(
+            out_a.numpy()[[0, 2]], np.zeros([2, 8], dtype="float32"), atol=0
+        )
+
+    def test_unpermute_mixed_padding_roundtrip(self):
+        rm = _make_padded_routing_map()
+        tokens = paddle.randn([5, 8])
+        p, si = permute(tokens, rm, use_accuracy_compatible=True)
+        out = unpermute(
+            p, si, tokens.shape, routing_map=rm, use_accuracy_compatible=True
+        )
+        expected = (2 * tokens).numpy()
+        expected[[0, 2]] = 0.0
+        np.testing.assert_allclose(out.numpy(), expected, atol=1e-5)
+
+    def test_unpermute_mixed_padding_backward(self):
+        rm = _make_padded_routing_map()
+        permuted = paddle.randn([6, 4])
+        permuted.stop_gradient = False
+        out = unpermute(
+            permuted,
+            None,
+            [5, 4],
+            routing_map=rm,
+            use_accuracy_compatible=True,
+        )
+        out.sum().backward()
+        # Every permuted row feeds exactly one valid output row.
+        np.testing.assert_allclose(
+            permuted.grad.numpy(),
+            np.ones([6, 4], dtype="float32"),
+            atol=1e-6,
+        )
+
+    def test_permute_unpermute_mixed_padding_backward(self):
+        rm = _make_padded_routing_map()
+        tokens = paddle.randn([5, 4])
+        tokens.stop_gradient = False
+        p, si = permute(tokens, rm, use_accuracy_compatible=True)
+        out = unpermute(
+            p, si, tokens.shape, routing_map=rm, use_accuracy_compatible=True
+        )
+        out.sum().backward()
+        expected = np.full([5, 4], 2.0, dtype="float32")
+        expected[0] = 0.0
+        expected[2] = 0.0
+        np.testing.assert_allclose(tokens.grad.numpy(), expected, atol=1e-6)
+
+    def test_unpermute_all_padding_returns_zeros(self):
+        rm = paddle.zeros([3, 4])
+        permuted = paddle.zeros([0, 8])
+        out = unpermute(
+            permuted,
+            None,
+            [3, 8],
+            routing_map=rm,
+            use_accuracy_compatible=True,
+        )
+        np.testing.assert_allclose(
+            out.numpy(), np.zeros([3, 8], dtype="float32"), atol=0
+        )
 
 
 if __name__ == "__main__":
