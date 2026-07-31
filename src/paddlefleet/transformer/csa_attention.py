@@ -2438,8 +2438,12 @@ class CompressedSparseAttention(FleetLayer):
                 "CSA incremental decode does not support context parallel."
             )
             assert attention_mask is None, (
-                "CSA incremental decode does not support attention_mask. "
-                "(no document packing)."
+                "CSA incremental decode does not support attention_mask."
+            )
+            assert docmask_meta is None, (
+                "CSA incremental decode does not support packed documents; "
+                "pass attn_mask_startend_row_indices=None when decoding with "
+                "a cache."
             )
             state = past_key_values.get_csa_state(layer_idx)
             return self._forward_decode(query, key, x, qr, state)

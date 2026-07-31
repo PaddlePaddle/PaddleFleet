@@ -560,12 +560,11 @@ class GreedyGenerator:
                     [round(v, 3) for v in _topk_val.tolist()],
                 )
                 _kv_lens = [
-                    self.cache._seq_len[i]
-                    for i in range(min(3, len(self.cache._seq_len)))
-                    if self.cache._seq_len[i] > 0
+                    self.cache.get_seq_len(i)
+                    for i in range(min(3, len(self.cache.swa_layers)))
                 ]
                 logger.info(
-                    "[kv-debug][prefill] cache seq_lens (first 3 non-zero layers): %s",
+                    "[kv-debug][prefill] cache seq_lens (first 3 layers): %s",
                     _kv_lens,
                 )
 
