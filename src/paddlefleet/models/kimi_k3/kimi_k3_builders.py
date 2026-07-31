@@ -13,6 +13,7 @@
 # limitations under the License.
 import functools
 
+import numpy as np
 from paddle.distributed.fleet.meta_parallel import (
     LayerSpec,
     build_spec_layer,
@@ -101,6 +102,10 @@ def build_kimi_k3_vision_config(**overrides) -> TransformerConfig:
         "use_qk_norm": False,
         "hidden_dropout_prob": 0.0,
         "attention_dropout": 0.0,
+        # HF builds the encoder norms as ``nn.RMSNorm(dim)`` without an explicit
+        # eps, so torch falls back to ``finfo(dtype).eps``. Mirror the fp32 value
+        # so that forward alignment against the reference is apples-to-apples.
+        "rms_norm_eps": float(np.finfo(np.float32).eps),
     }
     base.update(overrides)
 

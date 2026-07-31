@@ -148,9 +148,14 @@ def merge_input_ids_with_image_features(
             (batch_indices, text_to_overwrite),
             paddle.zeros([batch_indices.shape[0]], dtype="bool"),
         )
-    pad_bound = (
-        paddle.cumsum(image_to_overwrite.astype("int64"), axis=-1) - 1
-    ) >= nb_image_pad.unsqueeze(1)
+    # Each row has ``nb_image_pad`` unwritten slots that belong to padding
+    # rather than to an image, and they sit on the padding side.
+    slot_rank = paddle.cumsum(image_to_overwrite.astype("int64"), axis=-1) - 1
+    if left_padding:
+        pad_bound = slot_rank >= nb_image_pad.unsqueeze(1)
+    else:
+        n_slots = image_to_overwrite.astype("int64").sum(-1, keepdim=True)
+        pad_bound = slot_rank < (n_slots - nb_image_pad.unsqueeze(1))
     image_to_overwrite = paddle.logical_and(image_to_overwrite, pad_bound)
 
     n_image_slots = int(image_to_overwrite.astype("int64").sum().item())

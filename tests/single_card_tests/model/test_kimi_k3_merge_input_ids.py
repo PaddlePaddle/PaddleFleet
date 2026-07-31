@@ -91,16 +91,22 @@ class TestKimiK3Fusion(unittest.TestCase):
         expected = np.array([5, IGNORE, IGNORE, 7])
         np.testing.assert_array_equal(out_labels[0].numpy(), expected)
 
-    def test_batch_token_conservation(self):
-        # sample0: [5,6,IMG,7] img_len 3 ; sample1: [8,IMG,9,PAD] img_len 2
+    def test_right_padding_exact_order(self):
+        # sample0: [5,6,IMG,7] img_len 3 -> 6 slots (no padding)
+        # sample1: [8,IMG,9,PAD] img_len 2 -> 5 used slots, 1 trailing pad slot
         input_ids = paddle.to_tensor(
             [[5, 6, IMG, 7], [8, IMG, 9, PAD]], dtype="int64"
         )
         attention_mask = paddle.to_tensor(
             [[1, 1, 1, 1], [1, 1, 1, 0]], dtype="int64"
         )
-        inputs_embeds = paddle.randn([2, 4, EMBED_DIM])
-        feats = [paddle.randn([3, EMBED_DIM]), paddle.randn([2, EMBED_DIM])]
+        inputs_embeds = paddle.arange(
+            1, 2 * 4 * EMBED_DIM + 1, dtype="float32"
+        ).reshape([2, 4, EMBED_DIM])
+        feats = [
+            paddle.full([3, EMBED_DIM], 100.0),
+            paddle.full([2, EMBED_DIM], 200.0),
+        ]
 
         emb, mask, _, pos = merge_input_ids_with_image_features(
             feats,
@@ -109,11 +115,78 @@ class TestKimiK3Fusion(unittest.TestCase):
             attention_mask,
             image_token_index=IMG,
             pad_token_id=PAD,
-            ignore_index=IGNORE,
         )
-        # max_embed_dim = max(6, 5) = 6
+
         self.assertEqual(list(emb.shape), [2, 6, EMBED_DIM])
-        self.assertTrue(paddle.isfinite(emb).all().item())
+        # row0: emb(5), emb(6), img0 x3, emb(7)
+        expected0 = paddle.concat(
+            [inputs_embeds[0, 0:2], feats[0], inputs_embeds[0, 3:4]], axis=0
+        )
+        # row1: emb(8), img1 x2, emb(9), zeroed pad, unused slot
+        expected1 = paddle.concat(
+            [
+                inputs_embeds[1, 0:1],
+                feats[1],
+                inputs_embeds[1, 2:3],
+                paddle.zeros([2, EMBED_DIM]),
+            ],
+            axis=0,
+        )
+        np.testing.assert_allclose(
+            emb.numpy(),
+            paddle.stack([expected0, expected1]).numpy(),
+            rtol=0,
+            atol=0,
+        )
+        np.testing.assert_array_equal(
+            mask.numpy(), np.array([[1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 0]])
+        )
+        np.testing.assert_array_equal(pos[0].numpy(), np.arange(6))
+        np.testing.assert_array_equal(pos[1, :4].numpy(), np.arange(4))
+
+    def test_left_padding_exact_order(self):
+        # sample0: [5,6,IMG,7] img_len 3 -> 6 slots
+        # sample1: [PAD,8,IMG,9] img_len 2 -> 5 used slots, 1 leading pad slot
+        input_ids = paddle.to_tensor(
+            [[5, 6, IMG, 7], [PAD, 8, IMG, 9]], dtype="int64"
+        )
+        attention_mask = paddle.to_tensor(
+            [[1, 1, 1, 1], [0, 1, 1, 1]], dtype="int64"
+        )
+        inputs_embeds = paddle.arange(
+            1, 2 * 4 * EMBED_DIM + 1, dtype="float32"
+        ).reshape([2, 4, EMBED_DIM])
+        feats = [
+            paddle.full([3, EMBED_DIM], 100.0),
+            paddle.full([2, EMBED_DIM], 200.0),
+        ]
+
+        emb, mask, _, pos = merge_input_ids_with_image_features(
+            feats,
+            inputs_embeds,
+            input_ids,
+            attention_mask,
+            image_token_index=IMG,
+            pad_token_id=PAD,
+        )
+
+        # row1: unused slot, zeroed pad, emb(8), img1 x2, emb(9)
+        expected1 = paddle.concat(
+            [
+                paddle.zeros([2, EMBED_DIM]),
+                inputs_embeds[1, 1:2],
+                feats[1],
+                inputs_embeds[1, 3:4],
+            ],
+            axis=0,
+        )
+        np.testing.assert_allclose(
+            emb[1].numpy(), expected1.numpy(), rtol=0, atol=0
+        )
+        np.testing.assert_array_equal(
+            mask.numpy(), np.array([[1, 1, 1, 1, 1, 1], [0, 0, 1, 1, 1, 1]])
+        )
+        np.testing.assert_array_equal(pos[1, 2:].numpy(), np.arange(4))
 
     def test_two_images_one_sample(self):
         # two image placeholders in one sample, different feature lengths

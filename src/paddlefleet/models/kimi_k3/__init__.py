@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .embedding import KimiK3VisionEmbedding, KimiK3VisionEmbeddingSpec
+from .embedding import (
+    KimiK3VisionEmbedding,
+    KimiK3VisionEmbeddingSpec,
+    build_vision_attn_mask,
+)
 from .kimi_k3_builders import (
     build_kimi_k3_vision_config,
     kimi_k3_vision_builder,
@@ -33,6 +37,7 @@ __all__ = [
     "KimiK3VisionSd2TpoolMerger",
     "KimiK3VisionSublayersSpec",
     "build_kimi_k3_vision_config",
+    "build_vision_attn_mask",
     "get_kimi_k3_vision_spec",
     "kimi_k3_vision_builder",
     "merge_input_ids_with_image_features",

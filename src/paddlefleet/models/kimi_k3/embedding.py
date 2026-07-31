@@ -63,6 +63,50 @@ def get_1d_sincos_pos_embed(embed_dim: int, t_size: int):
     return get_1d_sincos_pos_embed_from_grid(embed_dim, grid_t)  # (t_size, D)
 
 
+def _vision_cu_seqlens(grid_thws: paddle.Tensor) -> paddle.Tensor:
+    """Exclusive-scan patch boundaries of each media, as ``[N + 1]`` int32."""
+    lengths = grid_thws[:, 0] * grid_thws[:, 1] * grid_thws[:, 2]
+    return (
+        paddle.concat([paddle.zeros([1], dtype=lengths.dtype), lengths])
+        .cumsum(axis=0)
+        .astype("int32")
+    )
+
+
+def build_vision_attn_mask(grid_thws: paddle.Tensor, dtype):
+    """Per-media attention bounds derived from ``grid_thws``.
+
+    The HF reference (``MoonViT3dEncoder.forward``) derives ``cu_seqlens`` from
+    ``grid_thws`` inside the encoder and always attends non-causally within a
+    single media, so the bounds must not be left to the caller.
+
+    Returns ``(attn_mask_startend_row_indices, attention_mask)``; which one is
+    populated depends on the ``DotProductAttention`` branch ``dtype`` selects:
+    bf16/fp16 consume flashmask row indices, while the float32 dense branch only
+    looks at ``attention_mask``.
+    """
+    cu_seqlens = _vision_cu_seqlens(grid_thws)
+    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+
+    if dtype in (paddle.bfloat16, paddle.float16):
+        # Rows [start_i, end_i) mask everything from end_i downwards and
+        # everything above start_i, i.e. a block-diagonal (packed) mask.
+        lower_start = paddle.repeat_interleave(cu_seqlens[1:], lengths).reshape(
+            [1, 1, -1, 1]
+        )
+        upper_end = paddle.repeat_interleave(cu_seqlens[:-1], lengths).reshape(
+            [1, 1, -1, 1]
+        )
+        return paddle.concat([lower_start, upper_end], axis=-1), None
+
+    # float32 / eager: mask_func expects bool masks where True means masked-out.
+    media_ids = paddle.repeat_interleave(
+        paddle.arange(lengths.shape[0]), lengths
+    )
+    same_media = media_ids.unsqueeze(0) == media_ids.unsqueeze(1)
+    return None, paddle.logical_not(same_media).unsqueeze(0).unsqueeze(0)
+
+
 class Learnable2DInterpPosEmbDivided(nn.Layer):
     """Learnable 2D position embedding interpolated to arbitrary (h, w), plus a
     fixed sincos temporal embedding applied when ``t > 1``.
@@ -266,12 +310,17 @@ class KimiK3VisionEmbedding(FleetLayer):
         hidden_states = self.embedding(pixel_values, grid_thws)
         rope_freqs_cis = self.rotary_pos_emb.get_freqs_cis(grid_thws)
 
+        startend_row_indices = dict_args.get("attn_mask_startend_row_indices")
+        attention_mask = dict_args.get("attention_mask")
+        if startend_row_indices is None and attention_mask is None:
+            startend_row_indices, attention_mask = build_vision_attn_mask(
+                grid_thws, hidden_states.dtype
+            )
+
         return {
             "hidden_states": hidden_states.unsqueeze(0),
             "grid_thws": grid_thws,
-            "attention_mask": dict_args.get("attention_mask"),
-            "attn_mask_startend_row_indices": dict_args.get(
-                "attn_mask_startend_row_indices"
-            ),
+            "attention_mask": attention_mask,
+            "attn_mask_startend_row_indices": startend_row_indices,
             "rope_freqs_cis": rope_freqs_cis,
         }
