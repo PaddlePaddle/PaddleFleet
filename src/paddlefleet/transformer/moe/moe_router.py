@@ -356,26 +356,29 @@ class StandardMoERouter(nn.Layer):
             self.expert_usage.stop_gradient = True
 
         if self.topk_method == "quantile_balancing":
-            assert not getattr(self.config, "moe_topk_fusion", False), (
-                "quantile_balancing is incompatible with moe_topk_fusion. "
-                "The MoETopkFusion kernel does not support QB's histogram-based "
-                "bias update, and enabling both causes incorrect gate normalization. "
-                "Please set moe_topk_fusion=False when using quantile_balancing."
-            )
-            assert self.routing_type == "none", (
-                "quantile_balancing is a self-contained load balancing method, "
-                "so the auxiliary-loss based balancing must be turned off "
-                "explicitly. Please set moe_router_load_balancing_type='none', "
-                f"but got {self.routing_type!r}."
-            )
-            assert not self.config.router_aux_loss_coef, (
-                "quantile_balancing is a self-contained load balancing method. "
-                "A non-zero router_aux_loss_coef keeps the auxiliary load "
-                "balancing loss active and optimizes a second, competing "
-                "balancing objective. Please set router_aux_loss_coef=0 when "
-                "using quantile_balancing, but got "
-                f"{self.config.router_aux_loss_coef!r}."
-            )
+            if getattr(self.config, "moe_topk_fusion", False):
+                raise ValueError(
+                    "quantile_balancing is incompatible with moe_topk_fusion. "
+                    "The MoETopkFusion kernel does not support QB's histogram-based "
+                    "bias update, and enabling both causes incorrect gate normalization. "
+                    "Please set moe_topk_fusion=False when using quantile_balancing."
+                )
+            if self.routing_type != "none":
+                raise ValueError(
+                    "quantile_balancing is a self-contained load balancing method, "
+                    "so the auxiliary-loss based balancing must be turned off "
+                    "explicitly. Please set moe_router_load_balancing_type='none', "
+                    f"but got {self.routing_type!r}."
+                )
+            if self.config.router_aux_loss_coef:
+                raise ValueError(
+                    "quantile_balancing is a self-contained load balancing method. "
+                    "A non-zero router_aux_loss_coef keeps the auxiliary load "
+                    "balancing loss active and optimizes a second, competing "
+                    "balancing objective. Please set router_aux_loss_coef=0 when "
+                    "using quantile_balancing, but got "
+                    f"{self.config.router_aux_loss_coef!r}."
+                )
             # Bias vector -- same name as noaux_tc for checkpoint compatibility
             if not self.config.gpt_model_use_experimental_version:
                 self.register_buffer(

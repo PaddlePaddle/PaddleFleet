@@ -1811,12 +1811,12 @@ class TestQBRejectsAuxLossBalancing(unittest.TestCase):
 
     def test_default_config_is_rejected(self):
         """Defaults are aux_loss / 1e-2, which must not pass silently."""
-        with self.assertRaises(AssertionError) as ctx:
+        with self.assertRaises(ValueError) as ctx:
             self._build_router()
         self.assertIn("moe_router_load_balancing_type", str(ctx.exception))
 
     def test_nonzero_aux_loss_coef_is_rejected(self):
-        with self.assertRaises(AssertionError) as ctx:
+        with self.assertRaises(ValueError) as ctx:
             self._build_router(
                 moe_router_load_balancing_type="none",
                 router_aux_loss_coef=1e-2,
@@ -1824,7 +1824,7 @@ class TestQBRejectsAuxLossBalancing(unittest.TestCase):
         self.assertIn("router_aux_loss_coef", str(ctx.exception))
 
     def test_seq_aux_loss_is_rejected(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             self._build_router(
                 moe_router_load_balancing_type="seq_aux_loss",
                 router_aux_loss_coef=1e-4,
@@ -1839,7 +1839,7 @@ class TestQBRejectsAuxLossBalancing(unittest.TestCase):
         self.assertEqual(router.qb_histogram.shape, [8, 1000])
 
     def test_topk_fusion_is_rejected(self):
-        with self.assertRaises(AssertionError) as ctx:
+        with self.assertRaises(ValueError) as ctx:
             self._build_router(
                 moe_router_load_balancing_type="none",
                 router_aux_loss_coef=0.0,
