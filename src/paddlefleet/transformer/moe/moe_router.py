@@ -987,13 +987,14 @@ class StandardMoERouter(nn.Layer):
             topk_idx: [bsz*seq_len, k] -- selected expert indices
         """
         bsz_seq_len, n_experts = scores.shape
-        assert n_group == 1, (
-            "Quantile Balancing currently only supports n_group=1. "
-            "Multi-group routing (n_group>1) is not compatible with QB because "
-            "the group pre-selection changes the effective cutoff in a way that "
-            "cannot be captured by a single per-expert histogram. "
-            f"Got n_group={n_group}."
-        )
+        if n_group != 1:
+            raise ValueError(
+                "Quantile Balancing currently only supports n_group=1. "
+                "Multi-group routing (n_group>1) is not compatible with QB because "
+                "the group pre-selection changes the effective cutoff in a way that "
+                "cannot be captured by a single per-expert histogram. "
+                f"Got n_group={n_group}."
+            )
 
         assert self.e_score_correction_bias is not None, (
             "e_score_correction_bias is None for quantile_balancing"
