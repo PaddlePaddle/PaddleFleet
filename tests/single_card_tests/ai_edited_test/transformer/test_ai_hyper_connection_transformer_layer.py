@@ -919,6 +919,210 @@ class TestHyperConnectionTransformerLayerRecompute(unittest.TestCase):
         self.assertEqual(list(result["hidden_states"].shape), [S, B, n * C])
         self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
 
+    def test_selective_recompute_mhc_forward_flag(self):
+        """recompute_mhc_forward flag should be set correctly."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+        )
+        layer = _make_hc_layer(config)
+        self.assertTrue(layer.recompute_mhc_forward)
+
+    def test_selective_recompute_mhc_forward_disabled(self):
+        """recompute_mhc_forward should be False when not in modules list."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mlp"],
+        )
+        layer = _make_hc_layer(config)
+        self.assertFalse(layer.recompute_mhc_forward)
+
+    def test_selective_recompute_mhc_forward_eval(self):
+        """Forward with recompute_mhc_forward in eval mode should skip recompute."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+        )
+        layer = _make_hc_layer(config)
+        layer.eval()
+        B, S = 2, 4
+        n = config.num_residual_streams
+        C = config.hidden_size
+        hidden_states = paddle.randn([S, B, n * C])
+        dict_args = {"hidden_states": hidden_states, "attention_mask": None}
+        result = layer.forward(dict_args)
+        self.assertEqual(list(result["hidden_states"].shape), [S, B, n * C])
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+
+    def test_selective_recompute_mhc_forward_train(self):
+        """Forward with recompute_mhc_forward in train mode should use RecomputeWithoutOutput."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+        )
+        layer = _make_hc_layer(config)
+        layer.train()
+        B, S = 2, 4
+        n = config.num_residual_streams
+        C = config.hidden_size
+        hidden_states = paddle.randn([S, B, n * C])
+        hidden_states.stop_gradient = False
+        dict_args = {"hidden_states": hidden_states, "attention_mask": None}
+        result = layer.forward(dict_args)
+        self.assertEqual(list(result["hidden_states"].shape), [S, B, n * C])
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+        # Verify recompute objects were cleaned up
+        self.assertFalse(
+            hasattr(layer, "_attn_mhc_recompute")
+            and layer._attn_mhc_recompute is not None
+        )
+        self.assertFalse(
+            hasattr(layer, "_mlp_mhc_recompute")
+            and layer._mlp_mhc_recompute is not None
+        )
+
+    def test_selective_recompute_mhc_forward_dict_mode(self):
+        """Dict mode: mhc_forward with per-module recompute_num_layers."""
+        config = _make_hc_config(
+            num_hidden_layers=4,
+            recompute_granularity="selective",
+            recompute_modules={"mhc_forward": 2},
+            recompute_method="block",
+            pipeline_model_parallel_size=1,
+        )
+        # Layer 1 should be in recompute range, layer 4 should not
+        layer1 = _make_hc_layer(config, layer_number=1)
+        layer4 = _make_hc_layer(config, layer_number=4)
+        self.assertTrue(layer1.recompute_mhc_forward)
+        self.assertFalse(layer4.recompute_mhc_forward)
+
+    def test_selective_recompute_mhc_forward_list_with_num_layers(self):
+        """List mode + recompute_num_layers: only first N layers get mhc_forward."""
+        config = _make_hc_config(
+            num_hidden_layers=4,
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+            recompute_num_layers=2,
+            recompute_method="block",
+            pipeline_model_parallel_size=1,
+        )
+        layer1 = _make_hc_layer(config, layer_number=1)
+        layer4 = _make_hc_layer(config, layer_number=4)
+        self.assertTrue(layer1.recompute_mhc_forward)
+        self.assertFalse(layer4.recompute_mhc_forward)
+
+    def test_selective_recompute_mhc_forward_backward_correctness(self):
+        """Backward with mhc_forward recompute produces same grads as without."""
+        paddle.seed(42)
+        # Create two layers with identical weights — one with mhc_forward, one without
+        config_recompute = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+        )
+        config_no_recompute = _make_hc_config(
+            recompute_granularity=None,
+            recompute_modules=None,
+        )
+        layer_rc = _make_hc_layer(config_recompute)
+        layer_no = _make_hc_layer(config_no_recompute)
+
+        # Copy weights from layer_rc to layer_no
+        state = layer_rc.state_dict()
+        layer_no.set_state_dict(state)
+
+        layer_rc.train()
+        layer_no.train()
+
+        B, S = 2, 4
+        n = config_recompute.num_residual_streams
+        C = config_recompute.hidden_size
+
+        # Same input
+        x_data = paddle.randn([S, B, n * C])
+        x_rc = x_data.clone()
+        x_rc.stop_gradient = False
+        x_no = x_data.clone()
+        x_no.stop_gradient = False
+
+        # Forward
+        dict_rc = {"hidden_states": x_rc, "attention_mask": None}
+        dict_no = {"hidden_states": x_no, "attention_mask": None}
+        out_rc = layer_rc.forward(dict_rc)["hidden_states"]
+        out_no = layer_no.forward(dict_no)["hidden_states"]
+
+        # Check forward outputs match
+        self.assertTrue(
+            paddle.allclose(out_rc, out_no, atol=1e-5, rtol=1e-4).item(),
+            "Forward outputs differ between recompute and no-recompute",
+        )
+
+        # Backward
+        loss_rc = out_rc.sum()
+        loss_no = out_no.sum()
+        loss_rc.backward()
+        loss_no.backward()
+
+        # Check input grads match
+        self.assertTrue(
+            paddle.allclose(x_rc.grad, x_no.grad, atol=1e-5, rtol=1e-4).item(),
+            "Input gradients differ between recompute and no-recompute",
+        )
+
+        # Check mHC parameter grads match — specifically verify hyper-connection
+        # critical params have non-None grads on both sides before comparing.
+        mhc_critical_patterns = [
+            "self_attention_hyper_connection.mapping_proj.weight",
+            "self_attention_hyper_connection.alpha_pre",
+            "self_attention_hyper_connection.alpha_post",
+            "self_attention_hyper_connection.alpha_res",
+            "self_attention_hyper_connection.bias",
+            "mlp_hyper_connection.mapping_proj.weight",
+            "mlp_hyper_connection.alpha_pre",
+            "mlp_hyper_connection.alpha_post",
+            "mlp_hyper_connection.alpha_res",
+            "mlp_hyper_connection.bias",
+        ]
+        rc_params = dict(layer_rc.named_parameters())
+        no_params = dict(layer_no.named_parameters())
+
+        # First, assert all critical mHC params have non-None grads on BOTH sides
+        for pattern in mhc_critical_patterns:
+            matched = [n for n in rc_params if pattern in n]
+            self.assertTrue(
+                len(matched) > 0,
+                f"No parameter matching '{pattern}' found in layer",
+            )
+            for name in matched:
+                self.assertIsNotNone(
+                    rc_params[name].grad,
+                    f"Recompute side grad is None for {name}",
+                )
+                self.assertIsNotNone(
+                    no_params[name].grad,
+                    f"No-recompute side grad is None for {name}",
+                )
+                self.assertTrue(
+                    paddle.allclose(
+                        rc_params[name].grad,
+                        no_params[name].grad,
+                        atol=1e-5,
+                        rtol=1e-4,
+                    ).item(),
+                    f"Grad mismatch for mHC param {name}",
+                )
+
+        # Also check remaining params (non-critical) where both have grads
+        for (name_rc, param_rc), (name_no, param_no) in zip(
+            layer_rc.named_parameters(), layer_no.named_parameters()
+        ):
+            if param_rc.grad is not None and param_no.grad is not None:
+                self.assertTrue(
+                    paddle.allclose(
+                        param_rc.grad, param_no.grad, atol=1e-5, rtol=1e-4
+                    ).item(),
+                    f"Grad mismatch for param {name_rc}",
+                )
+
 
 # ==============================================================================
 # Tests for get_gpt_layer_local_spec with HC

@@ -905,6 +905,7 @@ class MoELayer(nn.Layer):
                 self.moe_group,
                 self.num_experts_per_tok,
                 self.token_dispatcher.get_dispatched_routing()[2],
+                is_mtp_layer=self.is_mtp_layer,
             )
         with profile("fusion_mlp"):
             hidden_states = self.routed_experts_compute(hidden_states)
@@ -943,6 +944,7 @@ class MoELayer(nn.Layer):
                 self.moe_group,
                 self.num_experts_per_tok,
                 tokens_per_expert,
+                is_mtp_layer=self.is_mtp_layer,
             )
         fp8_combine_grad_handle = {} if self.fp8_dispatch_bwd else None
         # fp8_combine_grad_handle = None

@@ -701,6 +701,14 @@ class DSv4HybridAttention(Attention):
             and "gated_attn" in config.recompute_modules
         )
 
+        self.recompute_full_attn = (
+            config.recompute_granularity == "selective"
+            and config.recompute_modules is not None
+            and "full_attn" in config.recompute_modules
+        )
+        self._full_attn_recompute = None
+        self._gate_recompute = None
+
     def forward(
         self,
         hidden_states: Tensor,
@@ -761,6 +769,75 @@ class DSv4HybridAttention(Attention):
                 dense_mode=self.config.csa_dense_mode,
             )
 
+        # Full attention recompute: wrap qkv + core_attn + inv_rope + o_group_proj + gated_attn
+        # into one RecomputeWithoutOutput block. All intermediates (query, key, value, etc.)
+        # are freed after forward (no_grad), and the output is discarded after o_proj.
+        input_ids = kwargs.get("input_ids", None)
+        if self.recompute_full_attn and self.training:
+            self._full_attn_recompute = RecomputeWithoutOutput()
+            core_attn_out = self._full_attn_recompute.recompute(
+                self._full_attn_forward,
+                hidden_states,
+                attention_mask,
+                position_offset,
+                docmask_meta,
+                input_ids,
+                True,  # _in_full_recompute
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+
+            # Output projection
+            output, bias = self.o_proj(core_attn_out)
+
+            # Discard full_attn output (core_attn_out) — frees ~512 MB
+            self._full_attn_recompute.discard_output_and_register_recompute(
+                output
+            )
+            self._full_attn_recompute = None
+        else:
+            core_attn_out = self._full_attn_forward(
+                hidden_states,
+                attention_mask,
+                position_offset,
+                docmask_meta,
+                input_ids,
+            )
+
+            # Output projection
+            output, bias = self.o_proj(core_attn_out)
+
+            # Discard gated_attn output if it was independently recomputed
+            if (
+                hasattr(self, "_gate_recompute")
+                and self._gate_recompute is not None
+            ):
+                self._gate_recompute.discard_output_and_register_recompute(
+                    output
+                )
+                self._gate_recompute = None
+
+        if original_b > 1:
+            output = _unpack_dsv4_logical_batch(output, original_b, original_sq)
+
+        return output, bias
+
+    def _full_attn_forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask,
+        position_offset: int,
+        docmask_meta,
+        input_ids,
+        _in_full_recompute: bool = False,
+    ) -> Tensor:
+        """Full attention forward: qkv_proj + core_attn + inv_rope + o_group_proj + gated_attn.
+
+        Factored out so that paddle.distributed.fleet.utils.recompute can wrap it.
+        The large intermediate tensors (query, key, value) are internal to this function
+        and will be freed after this function returns during forward, then recomputed
+        during backward.
+        """
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(
                 hidden_states=hidden_states,
@@ -770,7 +847,6 @@ class DSv4HybridAttention(Attention):
         )
 
         # Core attention (CompressedSparseAttention)
-        input_ids = kwargs.get("input_ids", None)
         core_attn_out = self.core_attention(
             query,
             key,
@@ -807,8 +883,6 @@ class DSv4HybridAttention(Attention):
             ):
                 from paddlefleet.triton_ops import fused_apply_mla_rope_inplace
 
-                # The clone is necessary because sparse attention depends on core_attn_out
-                # for backward. However, it is still 10x faster than the unfused path.
                 core_attn_out = fused_apply_mla_rope_inplace(
                     core_attn_out,
                     freqs,
@@ -859,14 +933,18 @@ class DSv4HybridAttention(Attention):
 
         # Apply gated attention
         if self.gated_attention:
-            # Gate input source: q_compressed (post q_layernorm, dim=q_lora_rank)
-            # when gated_attn_use_q_lora is set, otherwise hidden_states.
             gate_source = (
                 q_compressed if self.gated_attn_use_q_lora else hidden_states
             )
-            if self.recompute_gated_attn:
-                gate_recompute = RecomputeWithoutOutput()
-                core_attn_out = gate_recompute.recompute(
+            # When NOT inside full_attn recompute, gated_attn can have its own
+            # independent RecomputeWithoutOutput wrapper for lighter memory saving.
+            if (
+                self.recompute_gated_attn
+                and self.training
+                and not _in_full_recompute
+            ):
+                self._gate_recompute = RecomputeWithoutOutput()
+                core_attn_out = self._gate_recompute.recompute(
                     self._gate,
                     gate_source,
                     core_attn_out,
@@ -876,16 +954,7 @@ class DSv4HybridAttention(Attention):
             else:
                 core_attn_out = self._gate(gate_source, core_attn_out)
 
-        # Output projection
-        output, bias = self.o_proj(core_attn_out)
-
-        if self.gated_attention and self.recompute_gated_attn:
-            gate_recompute.discard_output_and_register_recompute(output)
-
-        if original_b > 1:
-            output = _unpack_dsv4_logical_batch(output, original_b, original_sq)
-
-        return output, bias
+        return core_attn_out
 
     def _gate(self, gate_source: Tensor, core_attn_out: Tensor) -> Tensor:
         gate, _ = self.gate_proj(gate_source)
@@ -1003,6 +1072,23 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             hidden_size=config.v_head_dim,
             eps=getattr(config, "rms_norm_eps", 1e-5),
         )
+
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the DSv4 hybrid q-up projection."""
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        return {
+            "linear_q_up_proj.weight": (
+                ortho_per_head,
+                {"heads": self.num_attention_heads_per_partition},
+            ),
+        }
 
     def get_query_key_value_tensors(
         self,

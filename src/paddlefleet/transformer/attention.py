@@ -923,6 +923,75 @@ class SelfAttention(Attention):
         else:
             self.k_norm = None
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice specs for this module's fused QKV weight.
+
+        Returns {relative_param_path: (slice_fn, kwargs)}. Uses per-partition
+        head counts (TP-local), so it naturally slices only this rank's shard.
+        """
+        from paddlefleet.transformer.muon_utils import (
+            ortho_per_head,
+            ortho_qkv_contiguous,
+            ortho_qkv_interleaved,
+        )
+
+        mode = muon_configs.get("muon_qkv_update_mode", "split_head")
+        if mode not in ("split_head", "split_qkv"):
+            return {}
+
+        num_query_groups = self.num_query_groups_per_partition
+        head_dim = self.hidden_size_per_attention_head
+        v_head_dim = self.value_hidden_size_per_attention_head
+
+        if self.config.gpt_model_use_experimental_version:
+            # EC layout: qkv_proj is non-interleaved [all_Q | all_K | all_V]
+            # and gate lives in a separate gate_proj, so use the dedicated EC
+            # slice_fn. split_qkv mode is not supported for this layout yet.
+            if mode != "split_head":
+                return {}
+            specs = {
+                "qkv_proj.weight": (
+                    ortho_qkv_contiguous,
+                    {
+                        "heads": self.num_attention_heads_per_partition,
+                        "groups": num_query_groups,
+                        "head_dim": head_dim,
+                        "v_head_dim": v_head_dim,
+                    },
+                ),
+            }
+            if self.gated_attention:
+                specs["gate_proj.weight"] = (
+                    ortho_per_head,
+                    {
+                        "heads": self.num_attention_heads_per_partition,
+                        "head_sizes": [v_head_dim],
+                    },
+                )
+            return specs
+
+        q_heads_per_group = (
+            self.num_attention_heads_per_partition // num_query_groups
+        )
+        q_dim = q_heads_per_group * head_dim
+        if self.gated_attention:
+            gate_dim = q_heads_per_group * v_head_dim
+            split_dims = [q_dim, gate_dim, head_dim, v_head_dim]
+        else:
+            split_dims = [q_dim, head_dim, v_head_dim]
+
+        return {
+            "qkv_proj.weight": (
+                ortho_qkv_interleaved,
+                {
+                    "groups": num_query_groups,
+                    "role_sizes": split_dims,
+                    "heads_per_group": q_heads_per_group,
+                    "per_head": mode == "split_head",
+                },
+            ),
+        }
+
     def get_query_key_value_tensors(
         self, hidden_states, key_value_states=None, split_qkv=True
     ):
@@ -1321,6 +1390,61 @@ class SelfAttentionVHA(Attention):
         )
 
         vha_postmix_rank_val = vha_postmix_rank
+
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice specs for VHA independent projections.
+
+        Only the ``split_head`` mode is supported (VHA has no fused QKV).
+        Optional projections are guarded so only weights that actually exist on
+        this rank produce specs.
+        """
+        from paddlefleet.transformer.muon_utils import (
+            ortho_per_head,
+            ortho_stacked,
+        )
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        num_kv_heads = self.num_query_groups_per_partition
+        specs = {
+            "q_proj.weight": (
+                ortho_per_head,
+                {
+                    "heads": self.num_attention_heads_per_partition,
+                    "head_sizes": [self.q_head_dim],
+                },
+            ),
+        }
+        if hasattr(self, "shared_kv_proj"):
+            specs["shared_kv_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_kv_heads, "head_sizes": [self.v_head_dim]},
+            )
+        if hasattr(self, "k_proj"):
+            specs["k_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_kv_heads, "head_sizes": [self.head_dim]},
+            )
+        if hasattr(self, "v_proj"):
+            specs["v_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_kv_heads, "head_sizes": [self.v_head_dim]},
+            )
+        if getattr(self, "gate_proj", None) is not None:
+            specs["gate_proj.weight"] = (
+                ortho_per_head,
+                {
+                    "heads": self.num_attention_heads,
+                    "head_sizes": [self.v_head_dim],
+                },
+            )
+        if hasattr(self, "vha_premix_weight"):
+            specs["vha_premix_weight"] = (ortho_stacked, {})
+        return specs
 
     def _apply_vha_premix(self, query: Tensor) -> Tensor:
         # query: [b, sq, g, q_head_dim], premix: [nkv, q_head_dim, head_dim]

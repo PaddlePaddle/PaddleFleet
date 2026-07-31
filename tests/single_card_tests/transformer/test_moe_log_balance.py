@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import paddle
 
@@ -23,6 +25,7 @@ from paddlefleet.training.global_vars import (
     unset_global_variables,
 )
 from paddlefleet.transformer.moe import moe_utils
+from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.moe.moe_utils import (
     _all_gather_local_tokens,
     global_moe_balance_training_logs_enabled,
@@ -120,6 +123,130 @@ class TestMoeBalanceLogging(unittest.TestCase):
         self.assertAlmostEqual(logs["local_tokens_per_card_layer_1_mean"], 16.0)
         self.assertAlmostEqual(
             logs["local_tokens_per_card_layer_1_max_mean_ratio"], 1.0
+        )
+
+    def test_mtp_balance_logs_do_not_overwrite_backbone_layer(self):
+        log_moe_balance(
+            layer_number=0,
+            moe_group=None,
+            num_experts_per_tok=2,
+            tokens_per_expert=[2, 4, 6, 8],
+        )
+        log_moe_balance(
+            layer_number=0,
+            moe_group=None,
+            num_experts_per_tok=2,
+            tokens_per_expert=[1, 3, 5, 7],
+            is_mtp_layer=True,
+        )
+        logs = get_global_training_logs()
+
+        self.assertAlmostEqual(logs["tokens_per_expert_layer_0_mean"], 5.0)
+        self.assertAlmostEqual(logs["tokens_per_expert_mtp_layer_0_mean"], 4.0)
+        self.assertAlmostEqual(logs["tokens_per_expert_avg_layer_0_mean"], 0.5)
+        self.assertAlmostEqual(
+            logs["tokens_per_expert_avg_mtp_layer_0_mean"], 0.5
+        )
+        self.assertAlmostEqual(logs["local_tokens_per_card_layer_0_mean"], 20.0)
+        self.assertAlmostEqual(
+            logs["local_tokens_per_card_mtp_layer_0_mean"], 16.0
+        )
+
+    def test_custom_forward_marks_mtp_balance_logs(self):
+        tokens_per_expert = paddle.to_tensor([1, 3, 5, 7], dtype="int64")
+        hidden_states = paddle.ones([2, 4])
+        moe_layer = SimpleNamespace(
+            use_latent_moe=False,
+            dispatch=MagicMock(return_value=(hidden_states, None)),
+            layer_number=0,
+            is_mtp_layer=True,
+            moe_group=None,
+            num_experts_per_tok=2,
+            token_dispatcher=SimpleNamespace(
+                get_dispatched_routing=MagicMock(
+                    return_value=(None, None, tokens_per_expert)
+                )
+            ),
+            routed_experts_compute=lambda value: value,
+            combine=lambda value: value,
+        )
+
+        with (
+            patch(
+                "paddlefleet.transformer.moe.moe_layer.framework."
+                "_dygraph_tracer",
+                return_value=SimpleNamespace(_has_grad=True),
+            ),
+            patch(
+                "paddlefleet.transformer.moe.moe_layer."
+                "global_moe_balance_training_logs_enabled",
+                return_value=True,
+            ),
+            patch(
+                "paddlefleet.transformer.moe.moe_layer.log_moe_balance"
+            ) as log_moe_balance_mock,
+        ):
+            MoELayer.custom_forward(moe_layer, hidden_states, None, None)
+
+        log_moe_balance_mock.assert_called_once_with(
+            0,
+            None,
+            2,
+            tokens_per_expert,
+            is_mtp_layer=True,
+        )
+
+    def test_fusion_forward_marks_mtp_balance_logs(self):
+        tokens_per_expert = paddle.to_tensor([1, 3, 5, 7], dtype="int64")
+        hidden_states = paddle.ones([2, 4])
+        moe_layer = SimpleNamespace(
+            _project_to_latent=lambda value: value,
+            dispatch=MagicMock(return_value=(hidden_states, None)),
+            layer_number=0,
+            is_mtp_layer=True,
+            moe_group=None,
+            num_experts_per_tok=2,
+            token_dispatcher=SimpleNamespace(
+                get_dispatched_routing=MagicMock(
+                    return_value=(None, None, tokens_per_expert)
+                )
+            ),
+            fp8_dispatch_bwd=False,
+            _use_hybrid_ep_fusion=lambda: True,
+            _run_hybrid_ep_fusion=lambda value, probs, **kwargs: value,
+            combine=lambda value, **kwargs: value,
+            use_latent_moe=False,
+        )
+
+        with (
+            patch(
+                "paddlefleet.transformer.moe.moe_layer.framework."
+                "_dygraph_tracer",
+                return_value=SimpleNamespace(_has_grad=True),
+            ),
+            patch(
+                "paddlefleet.transformer.moe.moe_layer."
+                "global_moe_balance_training_logs_enabled",
+                return_value=True,
+            ),
+            patch(
+                "paddlefleet.transformer.moe.moe_layer.log_moe_balance"
+            ) as log_moe_balance_mock,
+        ):
+            MoELayer.fusion_moe_forward(
+                moe_layer,
+                hidden_states,
+                None,
+                None,
+                combine_overlap_handle={},
+            )
+
+        log_moe_balance_mock.assert_called_once_with(
+            0,
+            None,
+            2,
+            tokens_per_expert,
+            is_mtp_layer=True,
         )
 
     def test_logs_object_enable_balance_gate(self):
