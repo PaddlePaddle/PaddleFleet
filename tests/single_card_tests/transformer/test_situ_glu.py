@@ -26,6 +26,7 @@ from paddlefleet.transformer.moe.moe_expert import (
     GroupedMLPExpert,
     SonicMoEExpert,
 )
+from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -123,6 +124,52 @@ class TestSituGLU(unittest.TestCase):
                 .item()
             )
         )
+
+    def test_moe_layer_rejects_situ_fusion_options(self):
+        model_parallel_cuda_manual_seed(2026)
+        config_kwargs = {
+            "hidden_size": 8,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "intermediate_size": 8,
+            "n_routed_experts": 2,
+            "n_shared_experts": 0,
+            "num_experts_per_tok": 1,
+            "moe_intermediate_size": 4,
+            "moe_deep_gemm": False,
+            "gated_linear_unit": True,
+            "hidden_act": situ,
+        }
+
+        for option in ("moe_use_fusion_node", "moe_expert_fusion"):
+            with self.subTest(option=option):
+                config = TransformerConfig(
+                    **config_kwargs,
+                    moe_use_fusion_node=option == "moe_use_fusion_node",
+                    moe_expert_fusion=option == "moe_expert_fusion",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "support will be added in a future release",
+                ):
+                    MoELayer(config)
+
+        config = TransformerConfig(
+            **config_kwargs,
+            moe_use_fusion_node=False,
+            moe_expert_fusion=False,
+        )
+        layer_spec = get_gpt_layer_local_spec(
+            config,
+            num_experts=config.n_routed_experts,
+        )
+        layer = MoELayer(
+            config,
+            layer_spec.sublayers_spec.mlp.extra_kwargs["sublayers"],
+            SimpleNamespace(ep=None, expt_dp=None),
+        )
+        self.assertFalse(layer.moe_use_fusion_node)
+        self.assertFalse(layer.moe_expert_fusion)
 
     def test_grouped_expert_preserves_standard_activation_config(self):
         model_parallel_cuda_manual_seed(2026)

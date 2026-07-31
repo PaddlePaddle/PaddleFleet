@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 from paddlefleet import utils
 from paddlefleet.recompute_utils import need_recompute_in_first_n
+from paddlefleet.transformer.activations import situ
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
@@ -186,6 +187,14 @@ class MoELayer(nn.Layer):
             self.fp8_dispatch and self.using_sonic_moe and self.fp8_wgrad
         )
         self.moe_expert_fusion = config.moe_expert_fusion
+        if self.hidden_act == situ and (
+            config.moe_use_fusion_node or self.moe_expert_fusion
+        ):
+            raise ValueError(
+                "SiTU-GLU does not support moe_use_fusion_node=True or "
+                "moe_expert_fusion=True yet; support will be added in a future "
+                "release. Please set both options to False."
+            )
         self.moe_subbatch_token_num_after_dispatch = (
             config.moe_subbatch_token_num_after_dispatch
         )
