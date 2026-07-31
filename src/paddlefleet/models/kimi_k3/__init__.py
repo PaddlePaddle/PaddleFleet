@@ -15,7 +15,9 @@
 from .embedding import (
     KimiK3VisionEmbedding,
     KimiK3VisionEmbeddingSpec,
-    build_vision_attn_mask,
+    build_vision_block_diag_mask,
+    build_vision_startend_row_indices,
+    merge_vision_block_diag_mask,
 )
 from .kimi_k3_builders import (
     build_kimi_k3_vision_config,
@@ -37,8 +39,10 @@ __all__ = [
     "KimiK3VisionSd2TpoolMerger",
     "KimiK3VisionSublayersSpec",
     "build_kimi_k3_vision_config",
-    "build_vision_attn_mask",
+    "build_vision_block_diag_mask",
+    "build_vision_startend_row_indices",
     "get_kimi_k3_vision_spec",
     "kimi_k3_vision_builder",
     "merge_input_ids_with_image_features",
+    "merge_vision_block_diag_mask",
 ]

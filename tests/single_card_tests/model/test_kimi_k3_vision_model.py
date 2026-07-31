@@ -23,9 +23,11 @@ from paddle.distributed import fleet
 
 import paddlefleet.parallel_state as ps
 from paddlefleet.models.kimi_k3 import (
+    KimiK3VisionEmbedding,
     KimiK3VisionModel,
     build_kimi_k3_vision_config,
     kimi_k3_vision_builder,
+    merge_vision_block_diag_mask,
 )
 
 PATCH_SIZE = 4
@@ -88,6 +90,20 @@ def _attn_mask_startend_row_indices(grid_thws: paddle.Tensor):
     return paddle.concat([lts, ute], axis=-1)
 
 
+def _dense_block_diag_mask(grid_thws: paddle.Tensor):
+    """Reference dense mask (True == masked out) for the float32 branch."""
+    lengths = (
+        (grid_thws[:, 0] * grid_thws[:, 1] * grid_thws[:, 2]).numpy().tolist()
+    )
+    total = sum(lengths)
+    mask = np.ones([total, total], dtype=bool)
+    start = 0
+    for length in lengths:
+        mask[start : start + length, start : start + length] = False
+        start += length
+    return mask
+
+
 class _KimiK3VisionTestMixin:
     """Shared model construction / forward helpers."""
 
@@ -125,7 +141,7 @@ class _KimiK3VisionTestMixin:
         )
         return model, config
 
-    def _forward(self, model, grid_thws, pixel_values=None):
+    def _forward(self, model, grid_thws, pixel_values=None, dict_args=None):
         if pixel_values is None:
             num_patches = int(
                 (grid_thws[:, 0] * grid_thws[:, 1] * grid_thws[:, 2])
@@ -135,15 +151,20 @@ class _KimiK3VisionTestMixin:
             pixel_values = paddle.randn(
                 [num_patches, IN_CHANNELS, PATCH_SIZE, PATCH_SIZE]
             )
-        return model(
-            {
-                "pixel_values": pixel_values,
-                "grid_thws": grid_thws,
+        args = {
+            "pixel_values": pixel_values,
+            "grid_thws": grid_thws,
+        }
+        if dict_args is None:
+            # Most tests keep supplying the bounds explicitly; the tests that
+            # exercise the derived masks pass their own dict_args instead.
+            dict_args = {
                 "attn_mask_startend_row_indices": _attn_mask_startend_row_indices(
                     grid_thws
-                ),
+                )
             }
-        )["hidden_states"]
+        args.update(dict_args)
+        return model(args)["hidden_states"]
 
 
 class TestKimiK3VisionModel(_KimiK3VisionTestMixin, unittest.TestCase):
@@ -373,6 +394,152 @@ class TestKimiK3VisionModelConfigVariations(
                 perturbed[1].astype("float32").numpy(),
             )
         )
+
+
+class TestKimiK3VisionDefaultMask(_KimiK3VisionTestMixin, unittest.TestCase):
+    """The tower must derive per-media bounds itself, whatever the caller sends.
+
+    `DotProductAttention` reads `attn_mask_startend_row_indices` only on the
+    bf16/fp16 flashmask branch and `attention_mask` only on the dense branch, so
+    a caller passing just one of them must still get media isolation.
+    """
+
+    def _embedding_stage(self, model):
+        stages = [
+            layer
+            for layer in model.sublayers()
+            if isinstance(layer, KimiK3VisionEmbedding)
+        ]
+        self.assertEqual(len(stages), 1)
+        return stages[0]
+
+    def _isolation_diff(self, model, grid_thws, dict_args):
+        """Max change in media 0 output when media 1 pixels are replaced."""
+        first = int(
+            (grid_thws[0, 0] * grid_thws[0, 1] * grid_thws[0, 2]).item()
+        )
+        total = int(
+            (grid_thws[:, 0] * grid_thws[:, 1] * grid_thws[:, 2]).sum().item()
+        )
+        pixel_values = paddle.randn(
+            [total, IN_CHANNELS, PATCH_SIZE, PATCH_SIZE]
+        )
+        perturbed = pixel_values.clone()
+        perturbed[first:] = (
+            paddle.randn([total - first, IN_CHANNELS, PATCH_SIZE, PATCH_SIZE])
+            * 5
+        )
+
+        baseline = self._forward(
+            model, grid_thws, pixel_values=pixel_values, dict_args=dict_args
+        )
+        changed = self._forward(
+            model, grid_thws, pixel_values=perturbed, dict_args=dict_args
+        )
+        return float((baseline[0] - changed[0]).abs().max())
+
+    def test_no_mask_isolates_media_in_float32(self):
+        model, _ = self._create_model()
+        grid_thws = paddle.to_tensor([[1, 4, 4], [1, 2, 6]], dtype="int32")
+        self.assertEqual(self._isolation_diff(model, grid_thws, {}), 0.0)
+
+    def test_startend_only_still_isolates_media_in_float32(self):
+        # float32 takes the dense branch, which ignores the varlen bounds, so
+        # the tower has to add the equivalent dense mask on top of them.
+        model, _ = self._create_model()
+        grid_thws = paddle.to_tensor([[1, 4, 4], [1, 2, 6]], dtype="int32")
+        dict_args = {
+            "attn_mask_startend_row_indices": _attn_mask_startend_row_indices(
+                grid_thws
+            )
+        }
+        self.assertEqual(self._isolation_diff(model, grid_thws, dict_args), 0.0)
+
+    def test_attention_mask_only_still_builds_startend_bounds(self):
+        # bf16 takes the flashmask branch, which ignores attention_mask, so the
+        # bounds must be filled in even though a mask was supplied.
+        model, _ = self._create_model(params_dtype=paddle.bfloat16)
+        embedding = self._embedding_stage(model)
+        grid_thws = paddle.to_tensor([[1, 4, 4], [1, 2, 6]], dtype="int32")
+        total = 28
+        out = embedding(
+            {
+                "pixel_values": paddle.randn(
+                    [total, IN_CHANNELS, PATCH_SIZE, PATCH_SIZE]
+                ).astype(paddle.bfloat16),
+                "grid_thws": grid_thws,
+                "attention_mask": paddle.ones(
+                    [1, 1, total, total], dtype="bool"
+                ),
+            }
+        )
+        np.testing.assert_array_equal(
+            out["attn_mask_startend_row_indices"].numpy(),
+            _attn_mask_startend_row_indices(grid_thws).numpy(),
+        )
+
+    def test_dense_mask_merges_caller_mask(self):
+        grid_thws = paddle.to_tensor([[1, 2, 2], [1, 1, 2]], dtype="int32")
+        expected = _dense_block_diag_mask(grid_thws)
+
+        derived = merge_vision_block_diag_mask(None, grid_thws)
+        np.testing.assert_array_equal(derived.numpy()[0, 0], expected)
+
+        # Float masks use 1.0 == attend, so masking token 0 must survive the or.
+        caller = paddle.ones([1, 1, 6, 6], dtype="float32")
+        caller[:, :, :, 0] = 0.0
+        merged = merge_vision_block_diag_mask(caller, grid_thws).numpy()[0, 0]
+        self.assertTrue(bool(merged[:, 0].all()))
+        np.testing.assert_array_equal(merged[:, 1:], expected[:, 1:])
+
+    def test_no_mask_isolates_media_in_bfloat16(self):
+        # bf16 takes the flashmask branch; with nothing supplied the tower has
+        # to derive the bounds, otherwise SDPA would apply a causal mask.
+        model, _ = self._create_model(params_dtype=paddle.bfloat16)
+        grid_thws = paddle.to_tensor([[1, 4, 4], [1, 4, 4]], dtype="int32")
+        pixel_values = paddle.randn(
+            [32, IN_CHANNELS, PATCH_SIZE, PATCH_SIZE]
+        ).astype(paddle.bfloat16)
+        perturbed = pixel_values.clone()
+        perturbed[16:] = paddle.randn(
+            [16, IN_CHANNELS, PATCH_SIZE, PATCH_SIZE]
+        ).astype(paddle.bfloat16)
+
+        baseline = self._forward(
+            model, grid_thws, pixel_values=pixel_values, dict_args={}
+        )
+        changed = self._forward(
+            model, grid_thws, pixel_values=perturbed, dict_args={}
+        )
+
+        np.testing.assert_array_equal(
+            baseline[0].astype("float32").numpy(),
+            changed[0].astype("float32").numpy(),
+        )
+        # Sanity check that the perturbation was visible somewhere at all.
+        self.assertFalse(
+            np.allclose(
+                baseline[1].astype("float32").numpy(),
+                changed[1].astype("float32").numpy(),
+            )
+        )
+
+    def test_dense_mask_merges_padding_mask(self):
+        # A [batch, kv] padding mask is broadcast over the query axis.
+        grid_thws = paddle.to_tensor([[1, 2, 2], [1, 1, 2]], dtype="int32")
+        expected = _dense_block_diag_mask(grid_thws)
+        caller = paddle.ones([1, 6], dtype="float32")
+        caller[:, 0] = 0.0
+        merged = merge_vision_block_diag_mask(caller, grid_thws).numpy()[0, 0]
+        self.assertTrue(bool(merged[:, 0].all()))
+        np.testing.assert_array_equal(merged[:, 1:], expected[:, 1:])
+
+    def test_dense_mask_rejects_3d_caller_mask(self):
+        grid_thws = paddle.to_tensor([[1, 2, 2]], dtype="int32")
+        with self.assertRaisesRegex(ValueError, r"\[batch, heads, q, kv\]"):
+            merge_vision_block_diag_mask(
+                paddle.ones([1, 4, 4], dtype="bool"), grid_thws
+            )
 
 
 if __name__ == "__main__":

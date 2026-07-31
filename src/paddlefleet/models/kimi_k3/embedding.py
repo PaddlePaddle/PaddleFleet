@@ -73,38 +73,58 @@ def _vision_cu_seqlens(grid_thws: paddle.Tensor) -> paddle.Tensor:
     )
 
 
-def build_vision_attn_mask(grid_thws: paddle.Tensor, dtype):
-    """Per-media attention bounds derived from ``grid_thws``.
+def build_vision_startend_row_indices(grid_thws: paddle.Tensor):
+    """Flashmask block-diagonal bounds, ``[1, 1, total_patches, 2]`` int32.
 
     The HF reference (``MoonViT3dEncoder.forward``) derives ``cu_seqlens`` from
-    ``grid_thws`` inside the encoder and always attends non-causally within a
-    single media, so the bounds must not be left to the caller.
-
-    Returns ``(attn_mask_startend_row_indices, attention_mask)``; which one is
-    populated depends on the ``DotProductAttention`` branch ``dtype`` selects:
-    bf16/fp16 consume flashmask row indices, while the float32 dense branch only
-    looks at ``attention_mask``.
+    ``grid_thws`` inside the encoder and attends non-causally within a single
+    media, so the bounds must not be left to the caller.
     """
     cu_seqlens = _vision_cu_seqlens(grid_thws)
     lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+    # Rows [start_i, end_i) mask everything from end_i downwards and everything
+    # above start_i, i.e. a block-diagonal (packed) mask.
+    lower_start = paddle.repeat_interleave(cu_seqlens[1:], lengths).reshape(
+        [1, 1, -1, 1]
+    )
+    upper_end = paddle.repeat_interleave(cu_seqlens[:-1], lengths).reshape(
+        [1, 1, -1, 1]
+    )
+    return paddle.concat([lower_start, upper_end], axis=-1)
 
-    if dtype in (paddle.bfloat16, paddle.float16):
-        # Rows [start_i, end_i) mask everything from end_i downwards and
-        # everything above start_i, i.e. a block-diagonal (packed) mask.
-        lower_start = paddle.repeat_interleave(cu_seqlens[1:], lengths).reshape(
-            [1, 1, -1, 1]
-        )
-        upper_end = paddle.repeat_interleave(cu_seqlens[:-1], lengths).reshape(
-            [1, 1, -1, 1]
-        )
-        return paddle.concat([lower_start, upper_end], axis=-1), None
 
-    # float32 / eager: mask_func expects bool masks where True means masked-out.
+def build_vision_block_diag_mask(grid_thws: paddle.Tensor):
+    """Dense per-media mask, ``[1, 1, L, L]`` bool where True means masked out.
+
+    The dense ``DotProductAttention`` branch ignores
+    ``attn_mask_startend_row_indices``, so float32 / eager needs this instead.
+    """
+    cu_seqlens = _vision_cu_seqlens(grid_thws)
+    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
     media_ids = paddle.repeat_interleave(
         paddle.arange(lengths.shape[0]), lengths
     )
     same_media = media_ids.unsqueeze(0) == media_ids.unsqueeze(1)
-    return None, paddle.logical_not(same_media).unsqueeze(0).unsqueeze(0)
+    return paddle.logical_not(same_media).unsqueeze(0).unsqueeze(0)
+
+
+def merge_vision_block_diag_mask(attention_mask, grid_thws: paddle.Tensor):
+    """OR the per-media isolation into a caller-supplied dense mask."""
+    block_diag = build_vision_block_diag_mask(grid_thws)
+    if attention_mask is None:
+        return block_diag
+    if attention_mask.dtype != paddle.bool:
+        # Collate emits float masks where 1.0 means attend.
+        attention_mask = attention_mask < 0.5
+    if attention_mask.ndim == 2:
+        # [batch, kv] padding mask -> broadcast over the query axis.
+        attention_mask = attention_mask.unsqueeze(1).unsqueeze(1)
+    elif attention_mask.ndim != 4:
+        raise ValueError(
+            "Kimi-K3 vision attention_mask must be [batch, kv] or "
+            f"[batch, heads, q, kv], got {list(attention_mask.shape)}"
+        )
+    return paddle.logical_or(attention_mask, block_diag)
 
 
 class Learnable2DInterpPosEmbDivided(nn.Layer):
@@ -302,6 +322,12 @@ class KimiK3VisionEmbedding(FleetLayer):
                 f"but pixel_values contains {pixel_values.shape[0]}"
             )
 
+    def _uses_dense_attention(self, dtype) -> bool:
+        """Whether ``DotProductAttention`` will take its dense (eager) branch."""
+        return getattr(
+            self.config, "_attn_implementation", None
+        ) == "eager" or dtype not in (paddle.bfloat16, paddle.float16)
+
     def forward(self, dict_args: dict) -> dict:
         pixel_values = dict_args["pixel_values"]
         grid_thws = self._get_grid_thw(dict_args)
@@ -312,10 +338,16 @@ class KimiK3VisionEmbedding(FleetLayer):
 
         startend_row_indices = dict_args.get("attn_mask_startend_row_indices")
         attention_mask = dict_args.get("attention_mask")
-        if startend_row_indices is None and attention_mask is None:
-            startend_row_indices, attention_mask = build_vision_attn_mask(
-                grid_thws, hidden_states.dtype
+        if self._uses_dense_attention(hidden_states.dtype):
+            # The dense branch ignores startend_row_indices, so the isolation
+            # has to live in attention_mask even when the caller passed bounds.
+            attention_mask = merge_vision_block_diag_mask(
+                attention_mask, grid_thws
             )
+        elif startend_row_indices is None:
+            # A caller-supplied attention_mask alone leaves flashmask without
+            # per-media bounds, so fill them in regardless of attention_mask.
+            startend_row_indices = build_vision_startend_row_indices(grid_thws)
 
         return {
             "hidden_states": hidden_states.unsqueeze(0),
