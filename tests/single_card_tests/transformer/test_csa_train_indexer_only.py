@@ -37,12 +37,13 @@ import paddle
 from paddle import nn
 from paddle.distributed.fleet.utils import recompute
 
+from paddlefleet.recompute_utils import keep_indexer_grad_path
+from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.csa_attention import (
     TileLangCSAIndexerLossAutoScaler,
 )
 from paddlefleet.transformer.dsa_attention import DSAIndexerLossAutoScaler
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.transformer.transformer_layer import keep_indexer_grad_path
 
 
 def _make_dsv4_config(**overrides):
@@ -296,6 +297,64 @@ class TestRecomputeSegmentKeepsIndexerGrad(unittest.TestCase):
     def test_with_flag_indexer_gets_grad(self):
         layer, out = self._run(_make_dsv4_config(csa_train_indexer_only=True))
         self.assertFalse(out.stop_gradient)
+        self.assertIsNotNone(layer.indexer.weight.grad)
+        self.assertGreater(
+            float(paddle.abs(layer.indexer.weight.grad).sum()), 0.0
+        )
+        self.assertIsNone(layer.main.weight.grad)
+
+
+class TestFullAttnRecomputeKeepsIndexerGrad(unittest.TestCase):
+    """``recompute_granularity=selective`` + ``recompute_modules=["full_attn"]``.
+
+    ``DSv4HybridAttention.forward`` wraps qkv + ``core_attention`` (i.e. the CSA
+    Indexer and its side-attached loss) in ``RecomputeWithoutOutput``. The
+    layer-level guard in ``TransformerLayer.forward`` does not cover this: it only
+    runs in the ``full_recompute`` branch, which is off under selective
+    granularity.
+
+    This wrapper fails even more quietly than ``recompute``:
+    ``discard_output_and_register_recompute`` registers its recompute hook only
+    when the hook tensor is differentiable (``tensor_parallel/random.py:590``). A
+    frozen backbone makes the segment input detached, so the whole backward is
+    skipped with no error and not even the WARNING that ``recompute`` logs.
+    """
+
+    def setUp(self):
+        paddle.seed(0)
+        self.hidden_size = 8
+        self.hidden = paddle.randn([2, 4, self.hidden_size])
+        self.hidden.stop_gradient = True
+
+    def _run(self, config):
+        layer = _IndexerBranch(self.hidden_size)
+        layer.freeze_backbone()
+        # Stands in for DSv4HybridAttention.o_proj, which is frozen in phase 2.
+        o_proj = nn.Linear(self.hidden_size, self.hidden_size)
+        o_proj.weight.stop_gradient = True
+        o_proj.bias.stop_gradient = True
+
+        wrapper = RecomputeWithoutOutput()
+        core_attn_out = wrapper.recompute(
+            layer,
+            keep_indexer_grad_path(self.hidden, config),
+            preserve_rng_state=False,
+        )
+        output = o_proj(core_attn_out)
+        wrapper.discard_output_and_register_recompute(output)
+        output.sum().backward()
+        return layer, core_attn_out
+
+    def test_without_flag_indexer_gets_no_grad(self):
+        layer, core_attn_out = self._run(_make_dsv4_config())
+        self.assertTrue(core_attn_out.stop_gradient)
+        self.assertIsNone(layer.indexer.weight.grad)
+
+    def test_with_flag_indexer_gets_grad(self):
+        layer, core_attn_out = self._run(
+            _make_dsv4_config(csa_train_indexer_only=True)
+        )
+        self.assertFalse(core_attn_out.stop_gradient)
         self.assertIsNotNone(layer.indexer.weight.grad)
         self.assertGreater(
             float(paddle.abs(layer.indexer.weight.grad).sum()), 0.0

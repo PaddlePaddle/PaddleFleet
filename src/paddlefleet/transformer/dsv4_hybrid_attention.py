@@ -48,6 +48,7 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
 from paddlefleet.recompute_utils import (
     need_recompute_in_block,
     need_recompute_in_first_n,
+    keep_indexer_grad_path,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.attention import Attention
@@ -912,7 +913,14 @@ class DSv4HybridAttention(Attention):
             self._full_attn_recompute = RecomputeWithoutOutput()
             core_attn_out = self._full_attn_recompute.recompute(
                 self._full_attn_forward,
-                hidden_states,
+                # This segment contains core_attention, i.e. the CSA Indexer and its
+                # side-attached loss. RecomputeWithoutOutput is a PyLayer whose
+                # output is differentiable only if some input is, and with a frozen
+                # backbone (csa_train_indexer_only) hidden_states is detached. It
+                # would then skip registering its recompute hook altogether
+                # (tensor_parallel/random.py:590 checks stop_gradient) and the
+                # Indexer would get no gradient, with no error and no warning.
+                keep_indexer_grad_path(hidden_states, self.config),
                 attention_mask,
                 position_offset,
                 docmask_meta,

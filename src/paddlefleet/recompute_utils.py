@@ -18,9 +18,43 @@ import logging
 import os
 from itertools import chain
 
+import paddle
+
 logger = logging.getLogger(__name__)
 
 g_has_print_recovery_log = False
+
+
+def keep_indexer_grad_path(hidden_states, config):
+    """Keep a recompute segment differentiable when only the CSA Indexer trains.
+
+    Every recompute wrapper in this repo is a PyLayer, so whether its output is
+    differentiable depends only on its input tensors, not on the parameters used
+    inside. With every backbone parameter frozen (``csa_train_indexer_only``) the
+    segment input has ``stop_gradient=True``, the segment output inherits it, and
+    the indexer loss attached inside the segment silently never gets a backward
+    pass. ``RecomputeWithoutOutput`` is worse than ``recompute``: it skips
+    registering its recompute hook entirely when the hook tensor is detached
+    (``tensor_parallel/random.py:590``), so there is not even a warning.
+
+    Re-entering the autograd graph through a scalar anchor restores that path
+    without changing any activation value. Only the first segment whose input is
+    still detached pays for it: once a segment output is differentiable, the
+    following ones short-circuit here.
+
+    Call this on the input of every recompute segment that can contain a CSA
+    Indexer: the base ``TransformerLayer`` layer-level segment, and
+    ``DSv4HybridAttention``'s inner ``full_attn`` segment.
+    """
+    if not getattr(config, "csa_train_indexer_only", False):
+        return hidden_states
+    if not isinstance(hidden_states, paddle.Tensor):
+        return hidden_states
+    if not hidden_states.stop_gradient or not paddle.is_grad_enabled():
+        return hidden_states
+    anchor = paddle.zeros([1], dtype=hidden_states.dtype)
+    anchor.stop_gradient = False
+    return hidden_states + anchor
 
 
 def has_recovered():
