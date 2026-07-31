@@ -328,7 +328,12 @@ class TestGPTOverlapAndStateNoMock(unittest.TestCase):
             "embed", DummyEmbedding, shared_weight_attr="embedding_weight"
         )
         model = LightweightGPT(
-            ["0.0.weight", "0.tail.weight", "shared_layers.embed.weight"]
+            [
+                "0.0.weight",
+                "0.tail.weight",
+                "1.tail.weight",
+                "shared_layers.embed.weight",
+            ]
         )
         model.layers = [shared]
         model._sequential_layers = [
@@ -342,7 +347,17 @@ class TestGPTOverlapAndStateNoMock(unittest.TestCase):
         self.assertEqual(
             mapping["model.embed.weight"], "shared_layers.embed.weight"
         )
-        self.assertEqual(mapping["model.layers.1.weight"], "0.tail.weight")
+        # Layers directly added to the PipelineLayer under VPP are named
+        # `{global_idx}.rest`, so each key resolves against the prefix of its
+        # own index and keeps its submodule name, instead of collapsing onto
+        # the last layer prefix and dropping `tail`.
+        self.assertEqual(mapping["model.embed.tail.weight"], "0.tail.weight")
+        self.assertEqual(mapping["model.layers.1.tail.weight"], "1.tail.weight")
+        self.assertNotIn("model.layers.1.weight", mapping)
+        self.assertEqual(
+            model._pp_to_single_mapping["0.tail.weight"],
+            "model.embed.tail.weight",
+        )
 
     def test_shared_layer_prefix_requires_current_stage(self):
         shared = SharedLayerDesc(

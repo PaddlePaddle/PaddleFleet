@@ -15,15 +15,17 @@
 import functools
 import random
 import unittest
+from unittest import mock
 
 import numpy as np
 import paddle
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import PipelineLayer
 
 # from tests.unit_tests.test_utilities import Utils
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.gpt_builders import gpt_builder
-from paddlefleet.models.gpt import GPTConfig
+from paddlefleet.models.gpt import GPTConfig, GPTModel
 
 
 class TestGPTModelStateDict(unittest.TestCase):
@@ -118,6 +120,71 @@ class TestGPTModelStateDict(unittest.TestCase):
     def test_check_shared_model_state(self):
         """Test _check_shared_model_state method."""
         self.gpt_model._check_shared_model_state()
+
+
+class TestVirtualPipelineNameMapping(unittest.TestCase):
+    """Test _set_pipeline_name_mapping for virtual pipeline parallelism.
+
+    Under VPP, layers directly added to the PipelineLayer (e.g. lm_head) are
+    named `{global_idx}.rest` while layers inside a chunk are named
+    `{chunk_start}.{local_idx}.rest`. Both forms must map back to their single
+    card names without collision.
+    """
+
+    # 4 layers split into 2 chunks of 2 layers, lm_head is the last layer.
+    PREFIXES = {
+        "0": "model.embedding",
+        "1": "model.layers.0",
+        "2": "model.layers.1",
+        "3": "model.lm_head",
+    }
+
+    def _build_mapping(self, pp_keys):
+        model = GPTModel.__new__(GPTModel)
+        with (
+            mock.patch.object(
+                PipelineLayer,
+                "state_dict",
+                return_value=dict.fromkeys(pp_keys),
+            ),
+            mock.patch.object(
+                GPTModel,
+                "get_sequential_name_prefixes",
+                return_value=self.PREFIXES,
+            ),
+        ):
+            model._set_pipeline_name_mapping()
+        return model._pp_to_single_mapping
+
+    def test_directly_added_layer_keys_do_not_collide(self):
+        pp_keys = [
+            # chunk 0: `{chunk_start}.{local_idx}.rest`
+            "0.0.word_embeddings.weight",
+            "0.1.self_attn.o_proj.weight",
+            # chunk 1 and the directly added lm_head, whose composite params
+            # all share the `3.` prefix.
+            "2.0.self_attn.o_proj.weight",
+            "3.weight",
+            "3.norm.weight",
+            "3.enorm.weight",
+            "3.transformer_layer.self_attn.o_proj.weight",
+        ]
+        mapping = self._build_mapping(pp_keys)
+
+        self.assertEqual(
+            mapping,
+            {
+                "0.0.word_embeddings.weight": "model.embedding.word_embeddings.weight",
+                "0.1.self_attn.o_proj.weight": "model.layers.0.self_attn.o_proj.weight",
+                "2.0.self_attn.o_proj.weight": "model.layers.1.self_attn.o_proj.weight",
+                "3.weight": "model.lm_head.weight",
+                "3.norm.weight": "model.lm_head.norm.weight",
+                "3.enorm.weight": "model.lm_head.enorm.weight",
+                "3.transformer_layer.self_attn.o_proj.weight": "model.lm_head.transformer_layer.self_attn.o_proj.weight",
+            },
+        )
+        # every pipeline key keeps a unique single card name
+        self.assertEqual(len(set(mapping.values())), len(pp_keys))
 
 
 if __name__ == "__main__":
