@@ -1677,6 +1677,13 @@ class TransformerConfig(ModelParallelConfig):
                     "dsa_indexer_use_sparse_loss=True with a trainable backbone."
                 )
 
+        # Hyper-connection (mHC) validation
+        if self.use_fused_mhc:
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "use_fused_mhc requires enable_hyper_connections=True."
+                )
+
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:
