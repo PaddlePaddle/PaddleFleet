@@ -126,9 +126,10 @@ ci = [
 test-formers = [
     { include-group = "test" },
     { include-group = "ci" },
-    # Install torch>=2.1,<2.11 separately with --no-deps on Linux. Its wheels
-    # pin CUDA packages that conflict with paddlepaddle-gpu's CUDA 12.9 stack.
-    # Keep Torch's non-CUDA runtime dependencies explicit in this group.
+    # Torch>=2.1,<2.11 is installed separately in CI, with its own dependencies,
+    # so that its bundled nvidia-nvshmem-cu12 (manylinux) takes precedence over
+    # paddle-nvidia-nvshmem-cu12, which needs GLIBC_2.38 at torch import time.
+    # Torch's non-CUDA runtime dependencies are kept explicit in this group.
     "filelock",
     "fsspec>=0.8.5",
     "networkx>=2.5.1",
