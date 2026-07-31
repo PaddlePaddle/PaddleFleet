@@ -61,9 +61,9 @@ class TestSituGLU(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "even last dimension"):
             situ_glu(paddle.ones([2, 7]))
 
-    def test_rejects_negative_scales(self):
+    def test_rejects_non_positive_scales(self):
         x = paddle.ones([2, 8])
-        invalid_scales = (-1.0,)
+        invalid_scales = (-1.0, 0.0)
 
         for beta in invalid_scales:
             with (

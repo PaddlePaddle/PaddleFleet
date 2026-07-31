@@ -21,7 +21,7 @@ import paddle.nn.functional as F
 def situ(x: paddle.Tensor, beta: float = 1.0) -> paddle.Tensor:
     """Apply the SiTU gate activation with float32 intermediates."""
 
-    assert beta >= 0
+    assert beta > 0
 
     input_dtype = x.dtype
     x = x.astype("float32")
@@ -42,8 +42,8 @@ def situ_glu(
             f"concatenated [gate, up] projections, but got {x.shape[-1]}."
         )
 
-    assert beta >= 0
-    assert linear_beta is None or linear_beta >= 0
+    assert beta > 0
+    assert linear_beta is None or linear_beta > 0
 
     input_dtype = x.dtype
     gate, up = paddle.chunk(x, chunks=2, axis=-1)
