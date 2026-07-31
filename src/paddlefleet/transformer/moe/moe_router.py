@@ -379,6 +379,14 @@ class StandardMoERouter(nn.Layer):
                     "using quantile_balancing, but got "
                     f"{self.config.router_aux_loss_coef!r}."
                 )
+            if self.n_group != 1:
+                raise ValueError(
+                    "Quantile Balancing currently only supports n_group=1. "
+                    "Multi-group routing (n_group>1) is not compatible with QB because "
+                    "the group pre-selection changes the effective cutoff in a way that "
+                    "cannot be captured by a single per-expert histogram. "
+                    f"Got n_group={self.n_group}."
+                )
             # Bias vector -- same name as noaux_tc for checkpoint compatibility
             if not self.config.gpt_model_use_experimental_version:
                 self.register_buffer(

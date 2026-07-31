@@ -1428,9 +1428,10 @@ class TestTopkQuantileBalancingReal(unittest.TestCase):
         self.assertEqual(int(self.router.qb_histogram.sum().item()), 16 * 8)
 
     def test_n_group_greater_than_one_rejected(self):
-        scores = paddle.nn.functional.sigmoid(paddle.randn([4, 8]))
-        with self.assertRaises(AssertionError) as ctx:
-            self.router._topk_quantile_balancing(scores, 2, 2, 1)
+        """QB init must reject n_group>1 with ValueError (not assert)."""
+
+        with self.assertRaises(ValueError) as ctx:
+            _build_qb_router(n_group=2, topk_group=1)
         self.assertIn("only supports n_group=1", str(ctx.exception))
 
     def test_missing_bias_rejected(self):
