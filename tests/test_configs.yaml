@@ -147,6 +147,10 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_csa_attention_cp.py]
     products:
       - num_gpus: 2
+  # transformer: KDA context-parallel (packed varlen split across CP=4 ranks)
+  - test_case: [tests/multi_card_tests/transformer/test_kimi_delta_attention_cp.py]
+    products:
+      - num_gpus: 4
   # default fallback for remaining multi_card_tests
   - test_case: [tests/multi_card_tests/pipeline_parallel/*.py]
     products:

@@ -19,12 +19,14 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
 
 from paddlefleet.transformer import kimi_delta_attention as kda_mod
 from paddlefleet.transformer.kimi_delta_attention import (
+    HAVE_FLA,
     KimiDeltaAttention,
     KimiDeltaAttentionSublayersSpec,
     kda_gate,
@@ -261,7 +263,12 @@ class TestPaddleChunkKda(unittest.TestCase):
         self.assertGreater(float(diff[t]), 1e-4)
 
 
-def _build_kda(use_full_rank_gate=True, sequence_parallel=False, **overrides):
+def _build_kda(
+    use_full_rank_gate=True,
+    sequence_parallel=False,
+    deterministic_mode=True,
+    **overrides,
+):
     config = TransformerConfig(
         hidden_size=HIDDEN_SIZE,
         num_attention_heads=NUM_KEY_HEADS,
@@ -270,7 +277,7 @@ def _build_kda(use_full_rank_gate=True, sequence_parallel=False, **overrides):
         rms_norm_eps=1e-5,
         normalization="RMSNorm",
         sequence_parallel=sequence_parallel,
-        deterministic_mode=True,
+        deterministic_mode=deterministic_mode,
     )
     spec = KimiDeltaAttentionSublayersSpec(
         in_proj=NoBiasLinear,
@@ -454,6 +461,143 @@ class TestKimiDeltaAttention(unittest.TestCase):
                     out_norm=SimpleRMSNorm,
                     out_proj=NoBiasLinear,
                 )
+            )
+
+
+@unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels are not available")
+class TestFusedKernels(unittest.TestCase):
+    """The fused triton path must agree with the paddle native fallback."""
+
+    def test_fused_matches_native(self):
+        native = _build_kda()
+        fused = _build_kda(deterministic_mode=False)
+        self.assertFalse(native.use_fused_kernels)
+        self.assertTrue(fused.use_fused_kernels)
+
+        native_params = dict(native.named_parameters())
+        with paddle.no_grad():
+            for name, param in fused.named_parameters():
+                param.set_value(native_params[name])
+
+        paddle.seed(0)
+        x = paddle.randn([2, SEQ_LENGTH, HIDDEN_SIZE])
+        outs = {}
+        for tag, kda in (("native", native), ("fused", fused)):
+            xi = x.clone()
+            xi.stop_gradient = False
+            out, _ = kda(hidden_states=xi, attention_mask=None)
+            out.pow(2).mean().backward()
+            outs[tag] = (out, xi.grad, dict(kda.named_parameters()))
+
+        def rel(a, b):
+            return float((a - b).norm() / b.norm())
+
+        o_f, gx_f, p_f = outs["fused"]
+        o_n, gx_n, p_n = outs["native"]
+        # Both run the same math but the triton kernel uses TF32 matmuls, so the
+        # floor is ~2e-3 rather than round-off (see check_paddle_kda_module.py).
+        self.assertLess(rel(o_f, o_n), 5e-3)
+        self.assertLess(rel(gx_f, gx_n), 5e-3)
+        for name in p_n:
+            err = rel(p_f[name].grad, p_n[name].grad)
+            # The gate parameters sit behind softplus/sigmoid, which amplifies it
+            tol = 5e-2 if name in ("A_log", "dt_bias") else 2e-2
+            self.assertLess(err, tol, f"grad[{name}] rel_err={err:.3e}")
+
+
+def _startend_row_indices(docs_per_row, seq_len):
+    """[b, 1, s, 1] where each entry is the exclusive end of its document."""
+    rows = []
+    for lens in docs_per_row:
+        row, end = [], 0
+        for length in lens:
+            end += length
+            row += [end] * length
+        assert len(row) == seq_len, (len(row), seq_len)
+        rows.append(row)
+    return paddle.to_tensor(rows, dtype="int32").reshape(
+        [len(rows), 1, seq_len, 1]
+    )
+
+
+@unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels are not available")
+class TestVarlen(unittest.TestCase):
+    """Packed variable-length input must equal running each document alone."""
+
+    DOCS = [[12, 20], [8, 24]]
+
+    def setUp(self):
+        self.kda = _build_kda(deterministic_mode=False)
+        paddle.seed(0)
+        self.x = paddle.randn([len(self.DOCS), SEQ_LENGTH, HIDDEN_SIZE])
+
+    def _forward_backward(self, x, indices=None):
+        """Returns (out, grad_x, {param: grad}) for a fresh backward."""
+        self.kda.clear_gradients()
+        xi = x.clone()
+        xi.stop_gradient = False
+        out, _ = self.kda(
+            hidden_states=xi, attn_mask_startend_row_indices=indices
+        )
+        # sum (not mean) so the packed loss equals the sum of the per-doc losses
+        out.pow(2).sum().backward()
+        return (
+            out.numpy(),
+            xi.grad.numpy(),
+            {n: p.grad.numpy() for n, p in self.kda.named_parameters()},
+        )
+
+    def _rel(self, a, b):
+        a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+        return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+
+    def test_matches_per_document(self):
+        indices = _startend_row_indices(self.DOCS, SEQ_LENGTH)
+        out, grad_x, grads = self._forward_backward(self.x, indices)
+
+        # Reference: every document on its own, gradients summed
+        self.kda.clear_gradients()
+        ref_out = np.zeros_like(out)
+        ref_grad_x = np.zeros_like(grad_x)
+        for row, lens in enumerate(self.DOCS):
+            offset = 0
+            for length in lens:
+                seg = self.x[row : row + 1, offset : offset + length]
+                si = seg.clone()
+                si.stop_gradient = False
+                o, _ = self.kda(hidden_states=si)
+                o.pow(2).sum().backward()
+                ref_out[row, offset : offset + length] = o.numpy()[0]
+                ref_grad_x[row, offset : offset + length] = si.grad.numpy()[0]
+                offset += length
+        ref_grads = {n: p.grad.numpy() for n, p in self.kda.named_parameters()}
+
+        # Not bit-exact: the packed run feeds [b*s, h] to the projections while
+        # the reference feeds [L, h], so the GEMMs accumulate in a different
+        # order. Measured ~1.4e-5 (out) / 6e-5 (grad_x) / 1.8e-4 (dt_bias).
+        self.assertLess(self._rel(out, ref_out), 1e-4, "output mismatch")
+        self.assertLess(self._rel(grad_x, ref_grad_x), 5e-4, "grad_x mismatch")
+        for name in ref_grads:
+            err = self._rel(grads[name], ref_grads[name])
+            self.assertLess(err, 1e-3, f"grad[{name}] rel_err={err:.3e}")
+
+    def test_row_seam_is_a_boundary(self):
+        """One document per row must reproduce plain batched execution."""
+        docs = [[SEQ_LENGTH]] * len(self.DOCS)
+        indices = _startend_row_indices(docs, SEQ_LENGTH)
+        packed = self._forward_backward(self.x, indices)
+        batched = self._forward_backward(self.x)
+        self.assertLess(self._rel(packed[0], batched[0]), 5e-4)
+        self.assertLess(self._rel(packed[1], batched[1]), 5e-3)
+
+    def test_native_path_rejects_varlen(self):
+        native = _build_kda()
+        self.assertFalse(native.use_fused_kernels)
+        indices = _startend_row_indices(self.DOCS, SEQ_LENGTH)
+        with self.assertRaises(NotImplementedError):
+            native(
+                hidden_states=self.x,
+                attn_mask_startend_row_indices=indices,
             )
 
 
