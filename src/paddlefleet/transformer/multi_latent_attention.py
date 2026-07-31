@@ -734,11 +734,12 @@ class MultiLatentAttention(Attention):
             # HySparse full layers is handled at the layer level
             # (HySparseTransformerLayer.full_recompute).
             #
-            # Incremental decode (``is_decode``) skips this branch: block
-            # scoring needs the full attention logits of a whole query row, and
-            # the downstream SWA layers run window-only at decode, so the
-            # generic core_attention path (which maintains the KV cache) is used
-            # instead.
+            # Incremental decode (``is_decode``) skips this branch: the fused
+            # block-score kernels score a whole query row against the keys of
+            # the same forward, which a one-token step cannot provide. Decode
+            # instead runs the generic core_attention path (which maintains the
+            # KV cache) and re-derives the block scores from the cache in
+            # ``_hy_sparse_decode_block_indices`` below.
             core_attn_out, block_indices = self._hy_sparse_full_attention(
                 query,
                 key,
@@ -808,6 +809,21 @@ class MultiLatentAttention(Attention):
         _log(core_attn_out, "core_attn_out", layer_num)
 
         if hy_sparse_full:
+            if use_cache and past_key_values is not None:
+                missing = [
+                    name
+                    for name in ("update_shared", "get_layer_kv")
+                    if not hasattr(past_key_values, name)
+                ]
+                if missing:
+                    raise ValueError(
+                        "HySparse attention needs a KV cache implementing "
+                        f"{missing} (see generation.DynamicKVCache). Without "
+                        "them the cross-layer shared latent and the decode-time "
+                        "block selection cannot be maintained, which would "
+                        "silently change the attention pattern; pass a "
+                        "compatible cache or generate with no_cache=True."
+                    )
             # Compressed KV latent shared with block-sparse attention in SWA
             # layers (single MQA head): [B, S, 1, kv_lora_rank + qk_rope_head_dim].
             shared_key = paddle.concat(
@@ -819,9 +835,17 @@ class MultiLatentAttention(Attention):
                 shared_key = past_key_values.update_shared(
                     shared_key, layer_idx
                 )
+            if is_decode:
+                # The decode attention kernel carries no block-scoring epilogue,
+                # so score the single new query row against the cached keys
+                # here. This keeps the SWA layers' sparse branch -- and hence
+                # the model's output -- the same as a cache-less forward.
+                block_indices = self._hy_sparse_decode_block_indices(
+                    query, past_key_values, layer_idx
+                )
             shared_kv.append(shared_key)
-            # block_indices produced by the MHA block-score path above; ``None``
-            # while decoding, where the SWA layers run window-only.
+            # block_indices from the prefill block-score kernel above, or from
+            # the decode-time scoring pass.
             shared_kv.append(block_indices)
 
         # =================
@@ -1028,6 +1052,59 @@ class MultiLatentAttention(Attention):
         )
         core_attn_out = out.reshape([b, q_s, h * _dv])
         return core_attn_out, block_indices
+
+    def _hy_sparse_decode_block_indices(
+        self, query, past_key_values, layer_idx
+    ):
+        """Select top-k key blocks for one incremental-decode query token.
+
+        Prefill gets the block scores for free from the fused block-score kernel
+        (:meth:`_hy_sparse_full_attention`); the decode kernel has no such
+        epilogue, so the scoring row is recomputed from this layer's cached keys.
+        Without it the downstream SWA layers would have to drop their
+        block-sparse branch and quietly stop matching a cache-less forward.
+
+        Args:
+            query: [B, 1, H, Dk] this step's query (post-RoPE, decompressed).
+            past_key_values: cache exposing ``get_layer_kv``.
+            layer_idx: this layer's cache slot.
+
+        Returns:
+            [B, 1, topk] int32 document-relative block ids (-1 padding).
+        """
+        from paddlefleet.tilelang_ops.hysparse import (
+            decode_block_logit,
+            select_topk_blocks,
+        )
+
+        cached_key, _ = past_key_values.get_layer_kv(layer_idx)
+        kv_len = cached_key.shape[1]
+        block_B = self.config.hy_sparse_block_size
+        # Generation feeds one document per batch row, so the block grid is
+        # anchored at column 0 -- the same document layout the prefill
+        # valid_range describes (``attn_mask_startend_row_indices`` filled with
+        # the prompt length).
+        valid_range = paddle.concat(
+            [
+                paddle.zeros([query.shape[0], 1, 1], dtype="int32"),
+                paddle.full([query.shape[0], 1, 1], kv_len, dtype="int32"),
+            ],
+            axis=-1,
+        )
+        block_logit, lse = decode_block_logit(
+            query,
+            cached_key,
+            valid_range,
+            sm_scale=self.softmax_scale,
+            block_B=block_B,
+        )
+        return select_topk_blocks(
+            block_logit,
+            lse,
+            valid_range,
+            self.config.hy_sparse_topk,
+            block_B,
+        )
 
 
 class MLASelfAttention(MultiLatentAttention):
@@ -1955,7 +2032,8 @@ class MQASelfAttention(MLASelfAttention):
                 ],
                 axis=-1,
             )
-            doc_valid_range = None
+            # The block-sparse branch runs against the (untruncated) shared
+            # latent, so its range is built from that length further below.
         else:
             # Windowed valid_range for the sliding-window main path;
             # document-anchored valid_range (no window clamp) for the
@@ -2030,87 +2108,90 @@ class MQASelfAttention(MLASelfAttention):
         # =================
         # Sparse attention computation
         # =================
-        # Skipped while decoding: block scoring needs the full attention logits
-        # of a whole query row, which the full layer cannot produce one token at
-        # a time. The sliding-window branch above already covers the local
-        # dependency, so decode runs window-only.
-        sparse_core_attn_out = None
-        if not is_decode:
-            shared_key, shared_block_indices = shared_kv
-            if shared_block_indices is None:
-                raise ValueError(
-                    "HySparse MQA layer "
-                    f"(layer_number={getattr(self, 'layer_number', -1)}) needs "
-                    "top-k block indices from its full-attention layer, but "
-                    "none were provided."
-                )
-            if get_context_parallel_world_size() > 1:
-                cp_mode = getattr(
-                    self.config, "cp_balance_mode", "dualchunk_allgather"
-                )
-                shared_key = ContextParallelAllGatherOp.apply(
-                    shared_key, 1, cp_mode
-                )
-
-            # Shared compressed KV latent from the full layer, with
-            # Dk=kv_lora_rank+qk_rope_head_dim. Squeeze to [B, S_kv, D]; its
-            # leading kv_lora_rank channels are the values.
-            shared_key_sq = shared_key.squeeze(2).contiguous()
-
-            # Block-sparse gather branch over the absorbed-MQA shared-head
-            # layout (value == the leading kv_lora_rank slice of the shared
-            # latent).
-            use_tl = getattr(
-                self.config, "hy_sparse_block_sparse_use_tilelang", False
+        shared_key, shared_block_indices = shared_kv
+        if shared_block_indices is None:
+            raise ValueError(
+                "HySparse MQA layer "
+                f"(layer_number={getattr(self, 'layer_number', -1)}) needs "
+                "top-k block indices from its full-attention layer, but none "
+                "were provided."
             )
-            if use_tl:
-                from paddlefleet.tilelang_ops.hysparse.block_sparse_mqa_tl import (
-                    block_sparse_mqa_attention_tl,
-                )
-
-                sparse_core_attn_out, _ = block_sparse_mqa_attention_tl(
-                    query,
-                    shared_key_sq,
-                    shared_block_indices,
-                    doc_valid_range,
-                    sm_scale=sm_scale,
-                    block_B=block_B,
-                    kv_lora_rank=self.config.kv_lora_rank,
-                    attn_sink=getattr(self, "sparse_attn_sink", None),
-                )
-            else:
-                from paddlefleet.cudnn_ops import (
-                    block_sparse_mqa_attention_dsa,
-                    is_dsa_available,
-                )
-
-                if not is_dsa_available():
-                    raise RuntimeError(
-                        "HySparse block-sparse attention requires the DSA "
-                        "backend (FlashMLA sparse fwd + cuDNN DSA bwd), "
-                        "unavailable here: it needs SM100 + FlashMLA + the "
-                        "cuDNN frontend."
-                    )
-                sparse_core_attn_out, _ = block_sparse_mqa_attention_dsa(
-                    query,
-                    shared_key_sq,
-                    shared_block_indices,
-                    doc_valid_range,
-                    sm_scale=sm_scale,
-                    block_B=block_B,
-                    kv_lora_rank=self.config.kv_lora_rank,
-                    attn_sink=getattr(self, "sparse_attn_sink", None),
-                )
-            sparse_core_attn_out = sparse_core_attn_out.reshape(
+        if is_decode:
+            # The shared latent is never window-truncated, so its length is the
+            # whole KV history; the decode query's document range covers all of
+            # it (generation runs one document per batch row).
+            doc_valid_range = paddle.concat(
                 [
-                    b,
-                    s,
-                    self.num_attention_heads_per_partition
-                    * self.config.kv_lora_rank,
-                ]
+                    paddle.zeros([b, 1, 1], dtype="int32"),
+                    paddle.full([b, 1, 1], shared_key.shape[1], dtype="int32"),
+                ],
+                axis=-1,
+            )
+        if get_context_parallel_world_size() > 1:
+            cp_mode = getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            )
+            shared_key = ContextParallelAllGatherOp.apply(
+                shared_key, 1, cp_mode
             )
 
-            sparse_core_attn_out = compute_absorbed_v(sparse_core_attn_out)
+        # Shared compressed KV latent from the full layer, with
+        # Dk=kv_lora_rank+qk_rope_head_dim. Squeeze to [B, S_kv, D]; its leading
+        # kv_lora_rank channels are the values.
+        shared_key_sq = shared_key.squeeze(2).contiguous()
+
+        # Block-sparse gather branch over the absorbed-MQA shared-head layout
+        # (value == the leading kv_lora_rank slice of the shared latent).
+        use_tl = getattr(
+            self.config, "hy_sparse_block_sparse_use_tilelang", False
+        )
+        if use_tl:
+            from paddlefleet.tilelang_ops.hysparse.block_sparse_mqa_tl import (
+                block_sparse_mqa_attention_tl,
+            )
+
+            sparse_core_attn_out, _ = block_sparse_mqa_attention_tl(
+                query,
+                shared_key_sq,
+                shared_block_indices,
+                doc_valid_range,
+                sm_scale=sm_scale,
+                block_B=block_B,
+                kv_lora_rank=self.config.kv_lora_rank,
+                attn_sink=getattr(self, "sparse_attn_sink", None),
+            )
+        else:
+            from paddlefleet.cudnn_ops import (
+                block_sparse_mqa_attention_dsa,
+                is_dsa_available,
+            )
+
+            if not is_dsa_available():
+                raise RuntimeError(
+                    "HySparse block-sparse attention requires the DSA backend "
+                    "(FlashMLA sparse fwd + cuDNN DSA bwd), unavailable here: "
+                    "it needs SM100 + FlashMLA + the cuDNN frontend."
+                )
+            sparse_core_attn_out, _ = block_sparse_mqa_attention_dsa(
+                query,
+                shared_key_sq,
+                shared_block_indices,
+                doc_valid_range,
+                sm_scale=sm_scale,
+                block_B=block_B,
+                kv_lora_rank=self.config.kv_lora_rank,
+                attn_sink=getattr(self, "sparse_attn_sink", None),
+            )
+        sparse_core_attn_out = sparse_core_attn_out.reshape(
+            [
+                b,
+                s,
+                self.num_attention_heads_per_partition
+                * self.config.kv_lora_rank,
+            ]
+        )
+
+        sparse_core_attn_out = compute_absorbed_v(sparse_core_attn_out)
 
         # =================
         # Output. [b, sq, h]
@@ -2125,13 +2206,12 @@ class MQASelfAttention(MLASelfAttention):
             core_attn_out = self._gate(gate_source, core_attn_out)
 
         # Add sparse attention output
-        if sparse_core_attn_out is not None:
-            if self.gated_attention:
-                gate, _ = self.sparse_gate_proj(gate_source)
-                sparse_core_attn_out = (
-                    sparse_core_attn_out * paddle.nn.functional.sigmoid(gate)
-                )
-            core_attn_out += sparse_core_attn_out
+        if self.gated_attention:
+            gate, _ = self.sparse_gate_proj(gate_source)
+            sparse_core_attn_out = (
+                sparse_core_attn_out * paddle.nn.functional.sigmoid(gate)
+            )
+        core_attn_out += sparse_core_attn_out
 
         output, bias = self.o_proj(core_attn_out)
 

@@ -19,13 +19,15 @@ HySparse stack:
 
 * :class:`DynamicKVCache` gained a cross-layer ``shared_k`` slot so a full layer
   can publish its compressed KV latent across decode steps.
-* The full (MLA) layer seeds its own KV cache during the block-score prefill and
-  routes decode through ``core_attention``.
+* The full (MLA) layer seeds its own KV cache during the block-score prefill,
+  routes decode through ``core_attention``, and re-scores the decode token's
+  top-k blocks from that cache so the SWA layers keep their sparse branch.
 * The SWA (MQA) layer caches its own absorbed K/V, maps the sliding window into
-  cache-local coordinates at decode, and runs window-only (the block-sparse
-  branch needs whole-row logits that decode cannot produce).
+  cache-local coordinates at decode, and gathers the selected blocks from the
+  accumulated shared latent.
 """
 
+import dataclasses
 import os
 import unittest
 
@@ -241,7 +243,8 @@ class TestHySparseLayerPrefillDecode(unittest.TestCase):
             kv_a_layernorm=WrappedPaddleNorm,
         )
 
-    def _build_layers(self):
+    def _build_layers(self, config=None):
+        config = config or self.config
         layer_spec = TransformerLayerSublayersSpec(
             self_attn=LayerSpec(
                 layer=MQASelfAttention,
@@ -254,7 +257,7 @@ class TestHySparseLayerPrefillDecode(unittest.TestCase):
         # layer 1 -> SWA / MQA (consumes them).
         for layer_number in (0, 1):
             layer = HySparseTransformerLayer(
-                self.config, layer_spec, layer_number=layer_number
+                config, layer_spec, layer_number=layer_number
             )
             layer.self_attn.attn_mask_type = AttnMaskType.causal
             layer = paddle.amp.decorate(layer, level="O2", dtype="bfloat16")
@@ -265,6 +268,29 @@ class TestHySparseLayerPrefillDecode(unittest.TestCase):
         self.assertFalse(layers[0].self_attn.is_swa)
         self.assertTrue(layers[1].self_attn.is_mqa)
         return layers
+
+    def _prefill_args(self, hidden, cache=None):
+        b, seq_len = hidden.shape[0], hidden.shape[1]
+        return {
+            "hidden_states": hidden,
+            "attn_mask_startend_row_indices": paddle.full(
+                [b, 1, seq_len, 1], seq_len, dtype="int32"
+            ),
+            "position_ids": paddle.arange(seq_len, dtype="int64")
+            .unsqueeze(0)
+            .expand([b, seq_len]),
+            "past_key_values": cache,
+            "use_cache": cache is not None,
+        }
+
+    def _decode_args(self, hidden, position, cache):
+        b = hidden.shape[0]
+        return {
+            "hidden_states": hidden,
+            "position_ids": paddle.full([b, 1], position, dtype="int64"),
+            "past_key_values": cache,
+            "use_cache": True,
+        }
 
     @paddle.no_grad()
     def test_prefill_then_decode(self):
@@ -323,8 +349,12 @@ class TestHySparseLayerPrefillDecode(unittest.TestCase):
                 "use_cache": True,
             }
             dict_args = full_layer(dict_args)
-            # Decode cannot score blocks one token at a time -> window-only SWA.
-            self.assertIsNone(dict_args["shared_block_indices"])
+            # Decode re-derives the block scores from the cache, so the SWA
+            # layer keeps its block-sparse branch.
+            self.assertEqual(
+                dict_args["shared_block_indices"].shape,
+                [b, 1, self.config.hy_sparse_topk],
+            )
             dict_args = swa_layer(dict_args)
 
             self.assertEqual(
@@ -363,37 +393,18 @@ class TestHySparseLayerPrefillDecode(unittest.TestCase):
         total = prompt_len + 1
         full_hidden = paddle.concat([prompt, next_token], axis=1)
 
-        def run_prefill(hidden, cache):
-            seq_len = hidden.shape[1]
-            return full_layer(
-                {
-                    "hidden_states": hidden,
-                    "attn_mask_startend_row_indices": paddle.full(
-                        [b, 1, seq_len, 1], seq_len, dtype="int32"
-                    ),
-                    "position_ids": paddle.arange(seq_len, dtype="int64")
-                    .unsqueeze(0)
-                    .expand([b, seq_len]),
-                    "past_key_values": cache,
-                    "use_cache": cache is not None,
-                }
-            )
-
         # Reference: one dense pass over prompt + next token.
-        ref = run_prefill(full_hidden, None)["hidden_states"][:, -1]
+        ref = full_layer(self._prefill_args(full_hidden))["hidden_states"][
+            :, -1
+        ]
 
         cache = DynamicKVCache(
             num_layers=2, swa_layers=[False, True], window_size=WINDOW
         )
-        run_prefill(prompt, cache)
-        decoded = full_layer(
-            {
-                "hidden_states": next_token,
-                "position_ids": paddle.full([b, 1], prompt_len, dtype="int64"),
-                "past_key_values": cache,
-                "use_cache": True,
-            }
-        )["hidden_states"][:, 0]
+        full_layer(self._prefill_args(prompt, cache))
+        decoded = full_layer(self._decode_args(next_token, prompt_len, cache))[
+            "hidden_states"
+        ][:, 0]
 
         self.assertEqual(cache.get_seq_len(0), total)
         np.testing.assert_allclose(
@@ -402,6 +413,114 @@ class TestHySparseLayerPrefillDecode(unittest.TestCase):
             atol=3e-2,
             rtol=3e-2,
         )
+
+    @paddle.no_grad()
+    def test_decode_block_indices_match_prefill_scoring(self):
+        """Decode picks the same top-k blocks the prefill kernel would pick.
+
+        ``hy_sparse_topk`` is dropped below the number of blocks so the
+        selection is genuinely sparse (with the default topk every valid block
+        is selected and the comparison would be vacuous).
+        """
+        _hysparse_backend_or_skip(self)
+        topk = 2
+        config = dataclasses.replace(self.config, hy_sparse_topk=topk)
+        full_layer, _ = self._build_layers(config)
+        b, prompt_len = self.BATCH, self.PROMPT
+
+        prompt = paddle.randn(
+            [b, prompt_len, config.hidden_size], dtype="bfloat16"
+        )
+        next_token = paddle.randn([b, 1, config.hidden_size], dtype="bfloat16")
+        full_hidden = paddle.concat([prompt, next_token], axis=1)
+
+        # Prefill over prompt + next token: the FA4 block-score epilogue picks
+        # the blocks for the last row.
+        prefill_idx = full_layer(self._prefill_args(full_hidden))[
+            "shared_block_indices"
+        ][:, -1]
+
+        cache = DynamicKVCache(
+            num_layers=2, swa_layers=[False, True], window_size=WINDOW
+        )
+        full_layer(self._prefill_args(prompt, cache))
+        decode_idx = full_layer(
+            self._decode_args(next_token, prompt_len, cache)
+        )["shared_block_indices"][:, 0]
+
+        self.assertEqual(decode_idx.shape, [b, topk])
+        # topk order follows the (numerically noisy) scores; the selected set is
+        # what the gather branch consumes.
+        np.testing.assert_array_equal(
+            np.sort(prefill_idx.numpy(), axis=-1),
+            np.sort(decode_idx.numpy(), axis=-1),
+        )
+
+    @paddle.no_grad()
+    def test_full_and_swa_pair_cache_matches_no_cache(self):
+        """Cached decode == cache-less rerun for a full + SWA pair.
+
+        Sequence length exceeds the SWA window, so the SWA layer's own cache is
+        truncated while its block-sparse branch still reaches outside the
+        window; ``hy_sparse_topk`` is below the block count so that branch
+        really selects a subset. Any divergence here would mean the cache path
+        silently changed the model's attention pattern.
+
+        Tolerances: the element-wise check is a coarse guard (a single bf16 ulp
+        at this output scale is already ~8e-3). The mean-absolute check is the
+        sensitive one -- measured cache-vs-no-cache noise is ~3e-5, whereas
+        dropping the SWA layer's sparse branch moves the mean to ~5e-3.
+        """
+        _hysparse_backend_or_skip(self)
+        config = dataclasses.replace(self.config, hy_sparse_topk=2)
+        full_layer, swa_layer = self._build_layers(config)
+        b, prompt_len = self.BATCH, self.PROMPT
+        steps = 3
+        self.assertGreater(prompt_len, WINDOW)
+
+        hidden = paddle.randn(
+            [b, prompt_len + steps, config.hidden_size], dtype="bfloat16"
+        )
+
+        def no_cache_last(seq_len):
+            out = swa_layer(full_layer(self._prefill_args(hidden[:, :seq_len])))
+            return out["hidden_states"][:, -1]
+
+        def assert_matches(got, want, label):
+            got = got.astype("float32").numpy()
+            want = want.astype("float32").numpy()
+            np.testing.assert_allclose(
+                got, want, atol=2e-2, rtol=2e-2, err_msg=label
+            )
+            mean_abs = float(np.abs(got - want).mean())
+            self.assertLess(mean_abs, 5e-4, f"{label}: mean|diff|={mean_abs}")
+
+        cache = DynamicKVCache(
+            num_layers=2, swa_layers=[False, True], window_size=WINDOW
+        )
+        cached = swa_layer(
+            full_layer(self._prefill_args(hidden[:, :prompt_len], cache))
+        )
+        assert_matches(
+            cached["hidden_states"][:, -1],
+            no_cache_last(prompt_len),
+            "prefill (cache vs no cache)",
+        )
+
+        for step in range(steps):
+            position = prompt_len + step
+            cached = swa_layer(
+                full_layer(
+                    self._decode_args(
+                        hidden[:, position : position + 1], position, cache
+                    )
+                )
+            )
+            assert_matches(
+                cached["hidden_states"][:, 0],
+                no_cache_last(position + 1),
+                f"decode step {step} (cache vs no cache)",
+            )
 
 
 if __name__ == "__main__":

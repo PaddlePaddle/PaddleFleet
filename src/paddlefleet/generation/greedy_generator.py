@@ -211,6 +211,16 @@ class DynamicKVCache:
         """
         return self.k[layer_idx] is not None
 
+    def get_layer_kv(
+        self, layer_idx: int
+    ) -> tuple[paddle.Tensor | None, paddle.Tensor | None]:
+        """Cached ``(k, v)`` of ``layer_idx`` (window-truncated for SWA layers).
+
+        HySparse full layers read their own cached keys back to score blocks for
+        the current decode token.
+        """
+        return self.k[layer_idx], self.v[layer_idx]
+
     def update_shared(
         self, shared_key: paddle.Tensor, layer_idx: int
     ) -> paddle.Tensor:
