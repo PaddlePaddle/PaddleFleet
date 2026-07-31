@@ -19,7 +19,10 @@ import logging
 import paddle
 import paddlefleet_ops
 
-from paddlefleet.transformer.moe.fp8_utils import ExpertsGroupGemmContiguousNode
+from paddlefleet.transformer.moe.fp8_utils import (
+    ExpertsGroupGemmContiguousNode,
+    expert_weights_all_frozen,
+)
 
 from .fp8_utils import (
     FP8_ALIGN,
@@ -859,7 +862,12 @@ class MlpNode:
     # ==================== forward methods ====================
 
     def _ensure_weight_grad(self):
-        """Pre-allocate weight grads so VMM free-memory query reflects true availability."""
+        """Pre-allocate weight grads so VMM free-memory query reflects true availability.
+
+        Frozen experts are skipped: their wgrad GEMMs are skipped too (see
+        ``fp8_utils.expert_weights_all_frozen``), so an fp32 buffer the size of
+        the expert weights would only waste memory.
+        """
         if self.experts is not None:
             for expert in self.experts:
                 if expert is None:
@@ -868,6 +876,8 @@ class MlpNode:
                     expert.up_gate_proj.weight,
                     expert.down_proj.weight,
                 ):
+                    if expert_weights_all_frozen(weight):
+                        continue
                     grad_attr = (
                         "main_grad" if hasattr(weight, "main_grad") else "grad"
                     )
@@ -893,6 +903,8 @@ class MlpNode:
 
         for attr in ("weight1", "weight2"):
             pw = getattr(parent, attr)
+            if expert_weights_all_frozen(pw):
+                continue
             grad_attr = "main_grad" if hasattr(pw, "main_grad") else "grad"
             if getattr(pw, grad_attr) is None:
                 setattr(
@@ -911,6 +923,10 @@ class MlpNode:
                 pw = getattr(parent, attr)
                 sw = getattr(sliced, attr)
                 grad_attr = "main_grad" if hasattr(pw, "main_grad") else "grad"
+                # Frozen experts keep no parent grad buffer, so there is nothing
+                # to build a view on.
+                if getattr(pw, grad_attr, None) is None:
+                    continue
                 if getattr(sw, grad_attr, None) is None:
                     setattr(
                         sw,

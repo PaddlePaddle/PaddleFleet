@@ -103,6 +103,31 @@ def is_mtp_shared_last_layer(config, layer_number, is_mtp_layer):
     return layer_number == last_layer_number
 
 
+def keep_indexer_grad_path(hidden_states, config):
+    """Keep a recompute segment differentiable when only the CSA Indexer trains.
+
+    ``recompute`` is a PyLayer, so whether its output is differentiable depends
+    only on its input tensors, not on the parameters used inside. With every
+    backbone parameter frozen (``csa_train_indexer_only``), the segment input has
+    ``stop_gradient=True``, the segment output inherits it, and the indexer loss
+    attached inside the segment silently never gets a backward pass.
+
+    Re-entering the autograd graph through a scalar anchor restores that path
+    without changing any activation value. Only the first layer whose input is
+    still detached pays for it: once a segment output is differentiable, the
+    following layers short-circuit here.
+    """
+    if not getattr(config, "csa_train_indexer_only", False):
+        return hidden_states
+    if not isinstance(hidden_states, paddle.Tensor):
+        return hidden_states
+    if not hidden_states.stop_gradient or not paddle.is_grad_enabled():
+        return hidden_states
+    anchor = paddle.zeros([1], dtype=hidden_states.dtype)
+    anchor.stop_gradient = False
+    return hidden_states + anchor
+
+
 def tensors_clone(outputs):
     """
     The tensors required for recompute_forward need to be cloned to prevent them from being released prematurely and becoming inaccessible.
@@ -874,6 +899,7 @@ class TransformerLayer(nn.Layer):
 
         if self.full_recompute or (not has_recovered()):
             hidden_states = dict_args["hidden_states"]
+            hidden_states = keep_indexer_grad_path(hidden_states, self.config)
             attention_mask = dict_args.get("attention_mask", None)
             attn_mask_startend_row_indices = dict_args.get(
                 "attn_mask_startend_row_indices", None

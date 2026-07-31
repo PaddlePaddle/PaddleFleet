@@ -556,6 +556,27 @@ def has_config(config_map, key):
     )
 
 
+def expert_weights_all_frozen(weights):
+    """True when every expert weight in ``weights`` has ``stop_gradient=True``.
+
+    The MoE expert backward writes weight gradients straight into
+    ``main_grad`` / ``grad`` instead of returning them through autograd, so
+    ``stop_gradient`` is not honored automatically. Callers use this to skip the
+    wgrad GEMMs and their fp32 buffers when the experts are frozen (for example
+    DSv4 phase 2, ``csa_train_indexer_only``). Mixed groups keep the original
+    behavior so no gradient is silently dropped.
+
+    ``weights`` is either a stacked tensor (grouped path) or a list of
+    per-expert tensors (split path).
+    """
+    if weights is None:
+        return False
+    if isinstance(weights, (list, tuple)):
+        entries = [w for w in weights if w is not None]
+        return bool(entries) and all(w.stop_gradient for w in entries)
+    return bool(weights.stop_gradient)
+
+
 def kitchen_gemm(
     x_fp8,
     x_scale,
@@ -1913,6 +1934,8 @@ class ExpertsGroupGemmContiguousNode:
         dw2 = do2_t * do3
         [n, k] = [n, m_sum] * [m_sum, k] (m_sum = sum(tokens_per_expert))
         """
+        if expert_weights_all_frozen(expert_w2):
+            return
         o2_t_fp8, o2_t_scale = self.fused_transpose_split_quant(
             o2, None, self.tokens_per_expert, True
         )
@@ -1978,6 +2001,12 @@ class ExpertsGroupGemmContiguousNode:
         dw1 = dx_t * do1
         [k, n] = [k, m_sum] * [m_sum, n] (m_sum = sum(tokens_per_expert))
         """
+        if expert_weights_all_frozen(expert_w1):
+            if clear_input:
+                self.input = None
+                self.input_fp8 = None
+                self.input_scale = None
+            return
 
         if input_x is None:
             if self.dequant_input:
@@ -2161,6 +2190,11 @@ class ExpertsGroupGemmContiguousNode:
                     if expert is None:
                         continue
 
+                    if expert_weights_all_frozen(
+                        [expert.down_proj.weight, expert.up_gate_proj.weight]
+                    ):
+                        continue
+
                     if hasattr(expert.down_proj.weight, "main_grad"):
                         if expert.down_proj.weight.main_grad is None:
                             expert.down_proj.weight.main_grad = paddle.zeros(
@@ -2187,34 +2221,20 @@ class ExpertsGroupGemmContiguousNode:
                                 dtype=paddle.float32,
                             )
             else:
-                if hasattr(self.grouped_gemm_experts.weight1, "main_grad"):
-                    if self.grouped_gemm_experts.weight1.main_grad is None:
-                        self.grouped_gemm_experts.weight1.main_grad = (
-                            paddle.zeros(
-                                shape=self.grouped_gemm_experts.weight1.shape,
-                                dtype=paddle.float32,
+                for weight in (
+                    self.grouped_gemm_experts.weight1,
+                    self.grouped_gemm_experts.weight2,
+                ):
+                    if expert_weights_all_frozen(weight):
+                        continue
+                    if hasattr(weight, "main_grad"):
+                        if weight.main_grad is None:
+                            weight.main_grad = paddle.zeros(
+                                shape=weight.shape, dtype=paddle.float32
                             )
-                        )
-                else:
-                    if self.grouped_gemm_experts.weight1.grad is None:
-                        self.grouped_gemm_experts.weight1.grad = paddle.zeros(
-                            shape=self.grouped_gemm_experts.weight1.shape,
-                            dtype=paddle.float32,
-                        )
-
-                if hasattr(self.grouped_gemm_experts.weight2, "main_grad"):
-                    if self.grouped_gemm_experts.weight2.main_grad is None:
-                        self.grouped_gemm_experts.weight2.main_grad = (
-                            paddle.zeros(
-                                shape=self.grouped_gemm_experts.weight2.shape,
-                                dtype=paddle.float32,
-                            )
-                        )
-                else:
-                    if self.grouped_gemm_experts.weight2.grad is None:
-                        self.grouped_gemm_experts.weight2.grad = paddle.zeros(
-                            shape=self.grouped_gemm_experts.weight2.shape,
-                            dtype=paddle.float32,
+                    elif weight.grad is None:
+                        weight.grad = paddle.zeros(
+                            shape=weight.shape, dtype=paddle.float32
                         )
 
             if a2a_async_fn:
@@ -2560,6 +2580,8 @@ class ExpertsGroupGemmContiguousNode:
         """
         BF16 GEMM for weight grad
         """
+        if expert_weights_all_frozen(weights):
+            return
         if x is None:
             if self.dequant_input:
                 if self.use_w4a8:

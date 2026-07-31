@@ -1114,6 +1114,42 @@ class TransformerConfig(ModelParallelConfig):
     compressed positions.
     """
 
+    csa_indexer_init_from_scratch: bool | None = None
+    """Whether the CSA Indexer weights are initialized instead of loaded.
+
+    This is about the *checkpoint*, not the training strategy, and is therefore
+    separate from ``csa_train_indexer_only``:
+
+    * ``True`` -- resuming a phase-1 checkpoint: it has no Indexer tensors at all
+      (phase 1 runs with ``csa_dense_mode=true``), so they must be initialized
+      from scratch. Leaving it ``False`` makes the AOA engine abort with
+      ``... indexer.linear_wq_b.weight should be assigned before!``.
+    * ``False`` -- resuming a phase-2/3 checkpoint (e.g. a fault-tolerant restart):
+      it does contain Indexer weights, and re-initializing them would
+      **silently** throw away all Indexer training done so far.
+
+    The flag is only read by the model's ``_gen_aoa_config``, which only runs on the
+    HF-loading path. There it is **mandatory**: leaving it ``None`` raises, because
+    which checkpoint a run starts from is a deliberate decision and must not be
+    guessed. Non-HF paths (flex/DCP resume, fresh start) never read it at all.
+    """
+
+    csa_train_indexer_only: bool = False
+    """Phase 2 training strategy: train only the CSA Indexer parameters.
+
+    Requires ``csa_dense_mode=False`` so the Indexer modules exist, and a
+    positive ``dsa_indexer_loss_coeff`` so they receive a training signal. The
+    backbone is frozen by the trainer before the optimizer is created; this flag
+    additionally keeps the recompute segments differentiable so the attached
+    indexer loss still gets a backward pass. It does not change any attention
+    value, the KL candidate range, or the main attention sparsity.
+
+    Only the base ``TransformerLayer`` keeps its recompute segment differentiable,
+    so ``enable_hy_sparse_attention=True`` (which swaps in
+    ``HySparseTransformerLayer``) is rejected rather than silently producing a
+    gradient-free Indexer.
+    """
+
     csa_indexer_backend: str = "tilelang"
     """CSA indexer backend. Single switch selecting one of three
     implementations of the compressed top-k indexer.
@@ -1629,6 +1665,49 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+            if self.csa_train_indexer_only:
+                if self.csa_dense_mode:
+                    raise ValueError(
+                        "csa_train_indexer_only=True requires csa_dense_mode=False; "
+                        "with csa_dense_mode=True no CSAIndexer is created and there "
+                        "would be no trainable parameter left."
+                    )
+                loss_coeff = getattr(self, "dsa_indexer_loss_coeff", None)
+                if not loss_coeff or float(loss_coeff) <= 0:
+                    raise ValueError(
+                        "csa_train_indexer_only=True requires a positive "
+                        f"dsa_indexer_loss_coeff, got {loss_coeff!r}; otherwise the "
+                        "Indexer receives no training signal."
+                    )
+                if not any(
+                    1 < int(ratio) < 128 for ratio in self.csa_compress_ratios
+                ):
+                    raise ValueError(
+                        "csa_train_indexer_only=True requires at least one CSA layer "
+                        "with 1 < csa_compress_ratios[i] < 128, got "
+                        f"{self.csa_compress_ratios}."
+                    )
+                if getattr(self, "enable_hy_sparse_attention", False):
+                    # enable_hy_sparse_attention swaps the layer class for
+                    # HySparseTransformerLayer, whose recompute call does not go
+                    # through keep_indexer_grad_path(). With a frozen backbone the
+                    # recompute segment output would stay stop_gradient=True and the
+                    # attached indexer loss would *silently* never get a backward
+                    # pass. HySparse also feeds a ``shared_kv`` kwarg that the CSA
+                    # attention forward swallows via **kwargs without using it, so
+                    # this combination is untested anyway. Fail loudly instead.
+                    raise ValueError(
+                        "csa_train_indexer_only=True is incompatible with "
+                        "enable_hy_sparse_attention=True: HySparseTransformerLayer "
+                        "does not keep its recompute segment differentiable, so the "
+                        "Indexer would silently receive no gradient."
+                    )
+        elif getattr(self, "csa_train_indexer_only", False):
+            raise ValueError(
+                "csa_train_indexer_only=True is only supported with "
+                "experimental_attention_variant='dsv4_hybrid', got "
+                f"{self.experimental_attention_variant!r}."
+            )
 
         # swa_high_precision_norm is only supported for DSv4 models.
         if (
