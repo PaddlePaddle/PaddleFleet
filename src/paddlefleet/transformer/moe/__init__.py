@@ -42,6 +42,7 @@ from .moe_utils import (
     AddAuxiliaryLoss,
     _AllToAll,
 )
+from .moonep import finalize_moonep
 
 # MoE token dispatcher
 from .token_dispatcher import (
@@ -66,6 +67,7 @@ __all__ = [
     # Layer and sublayers
     "MoELayer",
     "MoESublayers",
+    "finalize_moonep",
     # Router
     "StandardMoERouter",
     # Utilities

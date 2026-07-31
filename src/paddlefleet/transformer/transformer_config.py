@@ -488,7 +488,9 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
-    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
+    Options are 'allgather', 'alltoall', 'deepep', 'hybridep', and 'moonep'.
+    Call ``paddlefleet.transformer.moe.finalize_moonep`` before destroying
+    the process group when using MoonEP."""
 
     moe_allgather_gate_overlap: bool = True
     """Whether to issue the AllGather before the gate so it overlaps with gate
