@@ -809,21 +809,6 @@ class MultiLatentAttention(Attention):
         _log(core_attn_out, "core_attn_out", layer_num)
 
         if hy_sparse_full:
-            if use_cache and past_key_values is not None:
-                missing = [
-                    name
-                    for name in ("update_shared", "get_layer_kv")
-                    if not hasattr(past_key_values, name)
-                ]
-                if missing:
-                    raise ValueError(
-                        "HySparse attention needs a KV cache implementing "
-                        f"{missing} (see generation.DynamicKVCache). Without "
-                        "them the cross-layer shared latent and the decode-time "
-                        "block selection cannot be maintained, which would "
-                        "silently change the attention pattern; pass a "
-                        "compatible cache or generate with no_cache=True."
-                    )
             # Compressed KV latent shared with block-sparse attention in SWA
             # layers (single MQA head): [B, S, 1, kv_lora_rank + qk_rope_head_dim].
             shared_key = paddle.concat(
@@ -2120,6 +2105,9 @@ class MQASelfAttention(MLASelfAttention):
             # The shared latent is never window-truncated, so its length is the
             # whole KV history; the decode query's document range covers all of
             # it (generation runs one document per batch row).
+            assert get_context_parallel_world_size() == 1, (
+                "doc_valid_range is not built for CP > 1"
+            )
             doc_valid_range = paddle.concat(
                 [
                     paddle.zeros([b, 1, 1], dtype="int32"),
