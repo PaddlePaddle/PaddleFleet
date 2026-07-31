@@ -44,16 +44,14 @@ class TestSituGLU(unittest.TestCase):
     def test_matches_official_formula(self):
         x = paddle.linspace(-8.0, 8.0, 32).reshape([2, 16])
         gate, up = paddle.chunk(x, chunks=2, axis=-1)
-        expected = (
-            4.0
-            * paddle.tanh(gate / 4.0)
-            * F.sigmoid(gate)
-            * (25.0 * paddle.tanh(up / 25.0))
-        )
+        expected_gate = 4.0 * paddle.tanh(gate / 4.0) * F.sigmoid(gate)
+        expected = expected_gate * (25.0 * paddle.tanh(up / 25.0))
 
+        gate_actual = situ(gate, beta=4.0)
         actual = situ_glu(x, beta=4.0, linear_beta=25.0)
         layer_actual = SituAndMul(beta=4.0, linear_beta=25.0)(x)
 
+        self.assertTrue(paddle.allclose(gate_actual, expected_gate))
         self.assertTrue(paddle.allclose(actual, expected))
         self.assertTrue(paddle.equal_all(actual, layer_actual))
 
