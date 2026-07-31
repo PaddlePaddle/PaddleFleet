@@ -42,6 +42,7 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
+from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
@@ -1303,6 +1304,48 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # idempotent: already-colored base params are skipped.
         self._mark_shared_no_hook_params()
 
+        # mHC forward recompute config
+        self.recompute_mhc_forward = False
+        if (
+            config.recompute_granularity == "selective"
+            and config.recompute_modules is not None
+        ):
+            if isinstance(config.recompute_modules, list):
+                if "mhc_forward" in config.recompute_modules:
+                    if config.recompute_num_layers is None:
+                        self.recompute_mhc_forward = True
+                    else:
+                        assert config.recompute_method in ["first_n", "block"]
+                        self.recompute_mhc_forward = (
+                            need_recompute_in_block(
+                                self.layer_number,
+                                config,
+                                config.recompute_num_layers,
+                            )
+                            if config.recompute_method == "block"
+                            else need_recompute_in_first_n(
+                                self.layer_number,
+                                config,
+                                config.recompute_num_layers,
+                            )
+                        )
+            elif isinstance(config.recompute_modules, dict):
+                if "mhc_forward" in config.recompute_modules:
+                    assert config.recompute_method in ["first_n", "block"]
+                    self.recompute_mhc_forward = (
+                        need_recompute_in_block(
+                            self.layer_number,
+                            config,
+                            config.recompute_modules["mhc_forward"],
+                        )
+                        if config.recompute_method == "block"
+                        else need_recompute_in_first_n(
+                            self.layer_number,
+                            config,
+                            config.recompute_modules["mhc_forward"],
+                        )
+                    )
+
     def _forward_attention(
         self,
         hidden_states: Tensor,
@@ -1327,9 +1370,18 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         ori_dtype = hidden_states.dtype
 
         # mHC: aggregate n-stream → 1-stream
-        aggregated, h_res, h_post = self.self_attention_hyper_connection(
-            hidden_states
-        )
+        if self.recompute_mhc_forward and self.training:
+            self._attn_mhc_recompute = RecomputeWithoutOutput()
+            aggregated, h_res, h_post = self._attn_mhc_recompute.recompute(
+                self.self_attention_hyper_connection,
+                hidden_states,
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+        else:
+            aggregated, h_res, h_post = self.self_attention_hyper_connection(
+                hidden_states
+            )
         aggregated = aggregated.to(ori_dtype)
 
         # LayerNorm on aggregated single stream
@@ -1388,6 +1440,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 fused=self.config.bias_dropout_fusion,
             )
         )
+        # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
+        if self.recompute_mhc_forward and self.training:
+            self._attn_mhc_recompute.discard_output_and_register_recompute(
+                hidden_states
+            )
+            self._attn_mhc_recompute = None
         hidden_states = hidden_states.to(ori_dtype)
 
         # Cross attention (unchanged)
@@ -1430,7 +1488,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         ori_dtype = hidden_states.dtype
 
         # mHC: aggregate n-stream → 1-stream
-        aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
+        if self.recompute_mhc_forward and self.training:
+            self._mlp_mhc_recompute = RecomputeWithoutOutput()
+            aggregated, h_res, h_post = self._mlp_mhc_recompute.recompute(
+                self.mlp_hyper_connection,
+                hidden_states,
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+        else:
+            aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
         aggregated = aggregated.to(ori_dtype)
 
         # LayerNorm on aggregated single stream
@@ -1494,6 +1561,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             training=self.training,
             fused=self.config.bias_dropout_fusion,
         )
+        # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
+        if self.recompute_mhc_forward and self.training:
+            self._mlp_mhc_recompute.discard_output_and_register_recompute(
+                hidden_states
+            )
+            self._mlp_mhc_recompute = None
         hidden_states = hidden_states.to(ori_dtype)
 
         if is_first_fwd:
