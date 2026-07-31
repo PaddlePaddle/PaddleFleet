@@ -201,6 +201,7 @@ def check_submodule_updated():
             "quack",
             "sonic-moe",
             "flash-attention",
+            "flash-linear-attention",
             "FlashMLA",
             "fast-hadamard-transform",
             "MoonEP",
@@ -429,6 +430,13 @@ def get_libs():
                     (cuda_major, cuda_minor) <= (12, 8)
                 ),
             },
+        ),
+        EcosystemLibrary(
+            name="flash-linear-attention",
+            source_rel_path="third_party/flash-linear-attention",
+            artifacts=[
+                Artifact("fla", "fla"),
+            ],
         ),
         EcosystemLibrary(
             name="fast-hadamard-transform",

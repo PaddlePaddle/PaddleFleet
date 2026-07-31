@@ -448,7 +448,7 @@ def _all_gather_local_tokens(local_tokens_per_expert, group):
     return output.reshape([get_pg_size(group), -1])
 
 
-def _log_summary(key, layer_number, summary_data):
+def _log_summary(key, layer_number, summary_data, is_mtp_layer=False):
     logs = get_global_training_logs()
     if logs is None or not hasattr(logs, "update"):
         return
@@ -466,7 +466,8 @@ def _log_summary(key, layer_number, summary_data):
     max_mean_ratio = max_value / mean_value if mean_value != 0 else 1.0
     min_mean_ratio = min_value / mean_value if mean_value != 0 else 1.0
 
-    prefix = f"{key}_layer_{layer_number}"
+    layer_prefix = "mtp_layer" if is_mtp_layer else "layer"
+    prefix = f"{key}_{layer_prefix}_{layer_number}"
     logs.update(
         **{
             f"{prefix}_max": max_value,
@@ -480,21 +481,42 @@ def _log_summary(key, layer_number, summary_data):
     )
 
 
-def _log_tokens_per_expert(layer_number, key, summary_data, count):
+def _log_tokens_per_expert(
+    layer_number,
+    key,
+    summary_data,
+    count,
+    is_mtp_layer=False,
+):
     count = count.reshape([1]).astype("float32")
     count = paddle.ones_like(count) if count.item() == 0 else count
     avg_data = summary_data.astype("float32") / count
 
-    _log_summary(f"{key}_avg", layer_number, avg_data)
-    _log_summary(key, layer_number, summary_data)
+    _log_summary(
+        f"{key}_avg",
+        layer_number,
+        avg_data,
+        is_mtp_layer=is_mtp_layer,
+    )
+    _log_summary(
+        key,
+        layer_number,
+        summary_data,
+        is_mtp_layer=is_mtp_layer,
+    )
 
 
-def _log_local_tokens_per_card(layer_number, local_tokens_by_rank):
+def _log_local_tokens_per_card(
+    layer_number,
+    local_tokens_by_rank,
+    is_mtp_layer=False,
+):
     card_totals = local_tokens_by_rank.sum(axis=1)
     _log_summary(
         "local_tokens_per_card",
         layer_number,
         card_totals,
+        is_mtp_layer=is_mtp_layer,
     )
 
 
@@ -503,6 +525,7 @@ def log_moe_balance(
     moe_group,
     num_experts_per_tok,
     tokens_per_expert,
+    is_mtp_layer=False,
 ):
     """Log fixed-topk MoE balance summaries from dispatched expert counts."""
     if tokens_per_expert is None:
@@ -536,8 +559,13 @@ def log_moe_balance(
             "tokens_per_expert",
             summary.clone() if isinstance(summary, paddle.Tensor) else summary,
             count,
+            is_mtp_layer=is_mtp_layer,
         )
-        _log_local_tokens_per_card(layer_number, local_tokens_by_rank)
+        _log_local_tokens_per_card(
+            layer_number,
+            local_tokens_by_rank,
+            is_mtp_layer=is_mtp_layer,
+        )
 
 
 def is_tensor(data):
