@@ -1367,7 +1367,7 @@ class TestQBRouterInit(unittest.TestCase):
         self.assertEqual(router.qb_histogram.shape, [8, 1000])
 
     def test_moe_topk_fusion_is_rejected(self):
-        with self.assertRaises(AssertionError) as ctx:
+        with self.assertRaises(ValueError) as ctx:
             _build_qb_router(moe_topk_fusion=True)
         self.assertIn("incompatible with moe_topk_fusion", str(ctx.exception))
 
