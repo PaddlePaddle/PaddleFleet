@@ -21,6 +21,21 @@ from unittest import mock
 import numpy as np
 import paddle
 
+from paddlefleet.transformer.moe import fp8_utils
+from paddlefleet.transformer.moe.fp8_utils import (
+    ExpertsGroupGemmContiguousNode,
+    _w4a8_dequant,
+    _w4a8_quant,
+    _w4a8_stack_quant,
+    _w4a8_weighted_swiglu_quant,
+    fuse_stack_fp8_quant_python,
+    fuse_stack_transpose_fp8_quant_python,
+    fuse_weighted_swiglu_fp8_quant_clamp_python,
+    fuse_weighted_swiglu_fp8_quant_python,
+    fused_act_dequant_python,
+    quant_blockwize,
+)
+
 
 def _prepare_blackwell():
     if (
@@ -45,20 +60,335 @@ if IS_BLACKWELL:
         w4a8_weighted_swiglu_quantize_1x32,
     )
 
-    from paddlefleet.transformer.moe.fp8_utils import (
-        _w4a8_quant,
-        _w4a8_weighted_swiglu_quant,
-        fuse_stack_fp8_quant_python,
-        fuse_stack_transpose_fp8_quant_python,
-        fuse_weighted_swiglu_fp8_quant_clamp_python,
-        fuse_weighted_swiglu_fp8_quant_python,
-        fused_act_dequant_python,
-        quant_blockwize,
-    )
-
 
 def _fp8_bits(value):
     return value.view("int8")
+
+
+class TestW4A8RuntimeDispatch(unittest.TestCase):
+    def test_fused_quant_flag_requires_custom_ops(self):
+        with (
+            mock.patch.dict(os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": "0"}),
+            mock.patch.object(fp8_utils, "HAS_W4A8_FUSED_QUANT", False),
+        ):
+            self.assertFalse(fp8_utils._use_w4a8_fused_quant())
+
+        with (
+            mock.patch.dict(os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": "1"}),
+            mock.patch.object(fp8_utils, "HAS_W4A8_FUSED_QUANT", True),
+        ):
+            self.assertTrue(fp8_utils._use_w4a8_fused_quant())
+
+        with (
+            mock.patch.dict(os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": "1"}),
+            mock.patch.object(fp8_utils, "HAS_W4A8_FUSED_QUANT", False),
+            self.assertRaisesRegex(RuntimeError, "requires paddlefleet_ops"),
+        ):
+            fp8_utils._use_w4a8_fused_quant()
+
+    def test_quant_dispatches_to_fused_and_python_ops(self):
+        value = mock.sentinel.value
+        fused_result = (mock.sentinel.fused_q, mock.sentinel.fused_scale)
+        python_result = (mock.sentinel.python_q, mock.sentinel.python_scale)
+
+        with (
+            mock.patch.object(
+                fp8_utils, "_use_w4a8_fused_quant", return_value=True
+            ),
+            mock.patch.object(
+                fp8_utils,
+                "w4a8_quantize_1x32",
+                create=True,
+                return_value=fused_result,
+            ) as fused_quant,
+        ):
+            self.assertEqual(_w4a8_quant(value, "fp8"), fused_result)
+            self.assertEqual(_w4a8_quant(value, "fp4"), fused_result)
+            fused_quant.assert_has_calls(
+                [mock.call(value, 0), mock.call(value, 1)]
+            )
+
+        with (
+            mock.patch.object(
+                fp8_utils, "_use_w4a8_fused_quant", return_value=False
+            ),
+            mock.patch.object(
+                fp8_utils, "quant_blockwize", return_value=python_result
+            ) as python_quant,
+        ):
+            self.assertEqual(_w4a8_quant(value, "fp8"), python_result)
+            python_quant.assert_called_once_with(value, quant_dtype="fp8")
+
+    def test_stack_quant_dispatches_to_fused_and_python_ops(self):
+        weights = mock.sentinel.weights
+        stacked = mock.sentinel.stacked
+        fused_result = (mock.sentinel.fused_q, mock.sentinel.fused_scale)
+
+        with (
+            mock.patch.object(
+                fp8_utils, "_use_w4a8_fused_quant", return_value=True
+            ),
+            mock.patch.object(
+                fp8_utils, "_stack_expert_weights", return_value=stacked
+            ) as stack_weights,
+            mock.patch.object(
+                fp8_utils,
+                "w4a8_stack_quantize_1x32",
+                create=True,
+                return_value=fused_result,
+            ) as fused_quant,
+        ):
+            self.assertEqual(_w4a8_stack_quant(weights, True), fused_result)
+            stack_weights.assert_called_once_with(weights)
+            fused_quant.assert_called_once_with(stacked, True)
+
+        for transpose, function_name in (
+            (False, "fuse_stack_fp8_quant_python"),
+            (True, "fuse_stack_transpose_fp8_quant_python"),
+        ):
+            python_result = (mock.sentinel.python_q, mock.sentinel.python_scale)
+            with (
+                self.subTest(transpose=transpose),
+                mock.patch.object(
+                    fp8_utils, "_use_w4a8_fused_quant", return_value=False
+                ),
+                mock.patch.object(
+                    fp8_utils, function_name, return_value=python_result
+                ) as python_quant,
+            ):
+                self.assertEqual(
+                    _w4a8_stack_quant(weights, transpose), python_result
+                )
+                python_quant.assert_called_once_with(weights, quant_dtype="fp4")
+
+    def test_weighted_swiglu_dispatches_all_paths(self):
+        value = mock.sentinel.value
+        probs = mock.sentinel.probs
+        result = (mock.sentinel.quantized, mock.sentinel.scale)
+
+        with (
+            mock.patch.object(
+                fp8_utils, "_use_w4a8_fused_quant", return_value=True
+            ),
+            mock.patch.object(
+                fp8_utils,
+                "w4a8_weighted_swiglu_quantize_1x32",
+                create=True,
+                return_value=result,
+            ) as fused_quant,
+        ):
+            self.assertEqual(_w4a8_weighted_swiglu_quant(value, probs), result)
+            self.assertEqual(
+                _w4a8_weighted_swiglu_quant(value, probs, 10), result
+            )
+            fused_quant.assert_has_calls(
+                [mock.call(value, probs, 0.0), mock.call(value, probs, 10.0)]
+            )
+
+        for clamp_value, function_name in (
+            (None, "fuse_weighted_swiglu_fp8_quant_python"),
+            (0.0, "fuse_weighted_swiglu_fp8_quant_python"),
+            (10.0, "fuse_weighted_swiglu_fp8_quant_clamp_python"),
+        ):
+            with (
+                self.subTest(clamp_value=clamp_value),
+                mock.patch.object(
+                    fp8_utils, "_use_w4a8_fused_quant", return_value=False
+                ),
+                mock.patch.object(
+                    fp8_utils, function_name, return_value=result
+                ) as python_quant,
+            ):
+                self.assertEqual(
+                    _w4a8_weighted_swiglu_quant(
+                        value, probs, clamp_value=clamp_value
+                    ),
+                    result,
+                )
+                expected_args = (
+                    (value, probs, clamp_value)
+                    if clamp_value
+                    else (value, probs)
+                )
+                python_quant.assert_called_once_with(*expected_args)
+
+    def test_dequant_dispatches_to_fused_and_python_ops(self):
+        value = mock.sentinel.value
+        scale = mock.sentinel.scale
+
+        for enabled, function_name in (
+            (True, "w4a8_dequantize_1x32"),
+            (False, "fused_act_dequant_python"),
+        ):
+            result = mock.sentinel.dequantized
+            with (
+                self.subTest(enabled=enabled),
+                mock.patch.object(
+                    fp8_utils,
+                    "_use_w4a8_fused_quant",
+                    return_value=enabled,
+                ),
+                mock.patch.object(
+                    fp8_utils,
+                    function_name,
+                    create=True,
+                    return_value=result,
+                ) as dequant,
+            ):
+                self.assertIs(_w4a8_dequant(value, scale), result)
+                dequant.assert_called_once_with(value, scale)
+
+    @staticmethod
+    def _make_node():
+        node = object.__new__(ExpertsGroupGemmContiguousNode)
+        node._w4a8_grouped_gemm = mock.Mock(
+            side_effect=lambda _x, _xs, _w, _ws, output: output
+        )
+        return node
+
+    def test_w4a8_forward_methods_use_dispatch_helpers(self):
+        node = self._make_node()
+        node.dequant_input = False
+        node.clamp_value = 10.0
+        x = mock.sentinel.x
+        weights = mock.sentinel.weights
+        probs = mock.sentinel.probs
+        x_q = mock.Mock(shape=[3, 32])
+        x_scale = mock.sentinel.x_scale
+        weight_q = mock.Mock(shape=[2, 64, 16])
+        weight_scale = mock.sentinel.weight_scale
+        gate_output = mock.Mock(shape=[3, 64])
+
+        with (
+            mock.patch.object(
+                fp8_utils,
+                "_w4a8_stack_quant",
+                return_value=(weight_q, weight_scale),
+            ) as stack_quant,
+            mock.patch.object(
+                fp8_utils, "_w4a8_quant", return_value=(x_q, x_scale)
+            ) as quant,
+            mock.patch.object(
+                fp8_utils.paddle, "empty", return_value=gate_output
+            ),
+        ):
+            self.assertIs(node._fwd_gate_up_w4a8(x, weights), gate_output)
+            stack_quant.assert_called_once_with(weights, transpose=True)
+            quant.assert_called_once_with(x, quant_dtype="fp8")
+
+        swiglu_q = mock.Mock(shape=[3, 64])
+        swiglu_scale = mock.sentinel.swiglu_scale
+        down_output = mock.Mock(shape=[3, 64])
+        with (
+            mock.patch.object(
+                fp8_utils,
+                "_w4a8_stack_quant",
+                return_value=(weight_q, weight_scale),
+            ) as stack_quant,
+            mock.patch.object(
+                fp8_utils,
+                "_w4a8_weighted_swiglu_quant",
+                return_value=(swiglu_q, swiglu_scale),
+            ) as swiglu_quant,
+            mock.patch.object(
+                fp8_utils.paddle, "empty", return_value=down_output
+            ),
+        ):
+            self.assertIs(
+                node._fwd_down_w4a8(
+                    mock.sentinel.o1, probs, weights, clear_o1=False
+                ),
+                down_output,
+            )
+            stack_quant.assert_called_once_with(weights, transpose=True)
+            swiglu_quant.assert_called_once_with(
+                mock.sentinel.o1, probs, node.clamp_value
+            )
+
+    def test_w4a8_backward_methods_use_dispatch_helpers(self):
+        node = self._make_node()
+        node.clamp_value = None
+        weights = mock.sentinel.weights
+        grad = mock.Mock(dtype=paddle.bfloat16)
+        weight_q = mock.Mock(shape=[2, 64, 16])
+        weight_scale = mock.sentinel.weight_scale
+        grad_q = mock.Mock(shape=[3, 32])
+        grad_scale = mock.sentinel.grad_scale
+        gemm_output = mock.Mock(shape=[3, 64])
+        backward_result = (
+            mock.sentinel.do1,
+            mock.sentinel.probs_grad,
+            mock.sentinel.o2,
+        )
+
+        with (
+            mock.patch.object(
+                fp8_utils,
+                "_w4a8_stack_quant",
+                return_value=(weight_q, weight_scale),
+            ) as stack_quant,
+            mock.patch.object(
+                fp8_utils, "_w4a8_quant", return_value=(grad_q, grad_scale)
+            ) as quant,
+            mock.patch.object(
+                fp8_utils.paddle, "empty", return_value=gemm_output
+            ),
+            mock.patch.object(fp8_utils.paddle.amp, "auto_cast") as auto_cast,
+            mock.patch.object(fp8_utils, "USE_INPLACE_SWIGLU_BWD", True),
+            mock.patch.object(
+                fp8_utils,
+                "_fused_swiglu_probs_bwd",
+                return_value=backward_result,
+            ),
+        ):
+            auto_cast.return_value.__enter__.return_value = None
+            result = node._bwd_down_input_w4a8(
+                weights, grad, mock.sentinel.o1, mock.sentinel.probs
+            )
+            self.assertEqual(
+                result,
+                (
+                    mock.sentinel.do1,
+                    mock.sentinel.o2,
+                    mock.sentinel.probs_grad,
+                ),
+            )
+            stack_quant.assert_called_once_with(weights, transpose=False)
+            quant.assert_called_once_with(grad, quant_dtype="fp8")
+
+        dx = mock.Mock(shape=[3, 64])
+        with (
+            mock.patch.object(
+                fp8_utils,
+                "_w4a8_stack_quant",
+                return_value=(weight_q, weight_scale),
+            ) as stack_quant,
+            mock.patch.object(
+                fp8_utils, "_w4a8_quant", return_value=(grad_q, grad_scale)
+            ) as quant,
+            mock.patch.object(fp8_utils.paddle, "empty", return_value=dx),
+        ):
+            self.assertIs(node._bwd_gate_up_input_w4a8(grad, weights), dx)
+            stack_quant.assert_called_once_with(weights, transpose=False)
+            quant.assert_called_once_with(grad, quant_dtype="fp8")
+
+    def test_w4a8_weight_grad_uses_dispatch_dequant(self):
+        class DequantCalled(Exception):
+            pass
+
+        node = self._make_node()
+        node.dequant_input = True
+        node.use_w4a8 = True
+        node.input_fp8 = mock.sentinel.input_fp8
+        node.input_scale = mock.sentinel.input_scale
+        with mock.patch.object(
+            fp8_utils, "_w4a8_dequant", side_effect=DequantCalled
+        ) as dequant:
+            with self.assertRaises(DequantCalled):
+                node.bf16_weight_grad(
+                    mock.sentinel.dy, None, mock.sentinel.weights
+                )
+            dequant.assert_called_once_with(node.input_fp8, node.input_scale)
 
 
 @unittest.skipUnless(IS_BLACKWELL, "requires a Blackwell CUDA device")
