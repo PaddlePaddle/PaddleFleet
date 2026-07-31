@@ -380,6 +380,9 @@ class ModelParallelConfig:
         if self.tensor_model_parallel_size <= 1:
             self.sequence_parallel = False
 
+        if getattr(self, "use_accuracy_compatible", False):
+            self.deterministic_mode = True
+
         if self.sequence_parallel:
             if self.tensor_model_parallel_size <= 1:
                 raise ValueError(

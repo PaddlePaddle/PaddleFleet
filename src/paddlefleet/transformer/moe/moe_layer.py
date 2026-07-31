@@ -52,7 +52,10 @@ from .fusion_layer_utils import (
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
-from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
+from .moe_utils import (
+    AddAuxiliaryLoss,
+    use_accuracy_compatible_kernel,
+)
 from .token_dispatcher import (
     AllGatherTokenDispatcher,
     AllToAllTokenDispatcher,
@@ -127,6 +130,20 @@ class GradDtypeUnguard(PyLayer):
         return grad
 
 
+class ThreePathCloneAlignMG(PyLayer):
+    """Three-way differentiable identity clone with MG-aligned backward sum order."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.clone(), x.clone(), x.clone()
+
+    @staticmethod
+    def backward(ctx, g_router, g_dispatcher, g_shared):
+        partial = g_dispatcher + g_shared
+        out = partial + g_router
+        return out
+
+
 @dataclass
 class MoESublayers:
     """MoE Layer Sublayers spec"""
@@ -143,6 +160,9 @@ class MoELayer(nn.Layer):
     ):
         super().__init__()
         self.config = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
         self.moe_sublayers = sublayers
         routed_expert_config = deepcopy(config)
         shared_expert_config = deepcopy(config)
@@ -172,6 +192,9 @@ class MoELayer(nn.Layer):
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
+        if self.use_accuracy_compatible:
+            if self.moe_token_dispatcher_type != "alltoall":
+                self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
@@ -474,6 +497,9 @@ class MoELayer(nn.Layer):
                         config, "hybridep_buffer_configs", None
                     ),
                     moe_deep_gemm=self.moe_deep_gemm,
+                    use_accuracy_compatible=getattr(
+                        self, "use_accuracy_compatible", False
+                    ),
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"
@@ -493,6 +519,9 @@ class MoELayer(nn.Layer):
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
                     local_expert_indices,
+                    use_accuracy_compatible=getattr(
+                        self, "use_accuracy_compatible", False
+                    ),
                 )
             elif self.moe_token_dispatcher_type == "allgather":
                 self.token_dispatcher = AllGatherTokenDispatcher(
@@ -689,25 +718,68 @@ class MoELayer(nn.Layer):
                 self.token_dispatcher, "global_input_probs", None
             )
             if per_token_scale is None:
-                raise RuntimeError(
-                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
-                    "router probabilities from the token dispatcher."
+                if not getattr(self, "use_accuracy_compatible", False):
+                    raise RuntimeError(
+                        "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                        "router probabilities from the token dispatcher."
+                    )
+            else:
+                scale_chunks = paddle.split(
+                    per_token_scale, num_or_sections=tokens_per_expert, axis=0
                 )
-            scale_chunks = paddle.split(
-                per_token_scale, num_or_sections=tokens_per_expert, axis=0
-            )
         for i, chunk in enumerate(chunks):
             if tokens_per_expert[i] == 0:
                 continue
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            if scale_chunks is None:
-                expert_output = expert(chunk)[0]
+            if getattr(self, "use_accuracy_compatible", False):
+                # Pad small-M experts to 32 rows for cross-framework GEMM alignment
+                _m_real = int(chunk.shape[0])
+                if 0 < _m_real < 17:
+                    _padrows = 32 - _m_real
+                    chunk = paddle.concat(
+                        [
+                            chunk,
+                            paddle.zeros(
+                                [_padrows, chunk.shape[1]], dtype=chunk.dtype
+                            ),
+                        ],
+                        axis=0,
+                    )
+                    if scale_chunks is not None:
+                        _scale_i = paddle.concat(
+                            [
+                                scale_chunks[i],
+                                paddle.zeros(
+                                    [_padrows], dtype=scale_chunks[i].dtype
+                                ),
+                            ],
+                            axis=0,
+                        )
+                    else:
+                        _scale_i = None
+                    if _scale_i is None:
+                        expert_output = expert(chunk)[0]
+                    else:
+                        expert_output = expert(chunk, per_token_scale=_scale_i)[
+                            0
+                        ]
+                    expert_output = expert_output[:_m_real]
+                else:
+                    if scale_chunks is None:
+                        expert_output = expert(chunk)[0]
+                    else:
+                        expert_output = expert(
+                            chunk, per_token_scale=scale_chunks[i]
+                        )[0]
             else:
-                expert_output = expert(chunk, per_token_scale=scale_chunks[i])[
-                    0
-                ]
+                if scale_chunks is None:
+                    expert_output = expert(chunk)[0]
+                else:
+                    expert_output = expert(
+                        chunk, per_token_scale=scale_chunks[i]
+                    )[0]
             outputs += [expert_output]
 
         if not outputs:
@@ -927,6 +999,14 @@ class MoELayer(nn.Layer):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
+        if getattr(self, "use_accuracy_compatible", False) is True:
+            return self.custom_forward(
+                hidden_states,
+                probs,
+                routing_map,
+                topk_weights=topk_weights,
+                topk_indices=topk_indices,
+            )
         hidden_states = self._project_to_latent(hidden_states)
 
         should_log_balance = framework._dygraph_tracer()._has_grad
@@ -1250,10 +1330,22 @@ class MoELayer(nn.Layer):
         residuals = hidden_states
 
         layer_idx = getattr(self, "layer_number", None)
+
+        _three_paths_enabled = (
+            getattr(self, "use_accuracy_compatible", False)
+            and hidden_states.stop_gradient is False
+        )
+        if _three_paths_enabled:
+            _hs_router_path, _hs_dispatcher_path, _hs_shared_path = (
+                ThreePathCloneAlignMG.apply(hidden_states)
+            )
+            residuals = _hs_shared_path
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
 
         self._maybe_pre_allgather_overlap(hidden_states)
         gate_input = self._prepare_gate_input(hidden_states, residual)
+        if _three_paths_enabled:
+            gate_input = _hs_router_path
 
         (
             capacity,
@@ -1293,6 +1385,8 @@ class MoELayer(nn.Layer):
             combine_overlap_handle = None
 
         expert_input = self._prepare_expert_input(hidden_states, residual)
+        if _three_paths_enabled:
+            expert_input = _hs_dispatcher_path
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
@@ -1455,7 +1549,12 @@ class MoELayer(nn.Layer):
         else:
             tokens_per_expert = routing_map.sum(axis=0)
             permuted_local_hidden_states, sorted_indices = permute(
-                hidden_states, routing_map, tokens_per_expert
+                hidden_states,
+                routing_map,
+                tokens_per_expert,
+                use_accuracy_compatible=getattr(
+                    self, "use_accuracy_compatible", False
+                ),
             )
             grouped_expert_out = self.grouped_gemm_experts(
                 permuted_local_hidden_states, tokens_per_expert
@@ -1466,6 +1565,9 @@ class MoELayer(nn.Layer):
                 restore_shape=hidden_states.shape,
                 probs=probs,
                 routing_map=routing_map,
+                use_accuracy_compatible=getattr(
+                    self, "use_accuracy_compatible", False
+                ),
             )
             return final_hidden_states.cast(hidden_states.dtype)
 
