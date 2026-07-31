@@ -359,7 +359,12 @@ class DSv4HybridAttention(Attention):
         # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
         if compress_ratio > 1:
-            rope_base = config.csa_compress_rotary_base
+            # Every shipped model_config.json writes csa_compress_rotary_base as
+            # a *string* ("160000.0"). pretrain.py coerces numeric strings
+            # before building the config, but any path that calls from_config
+            # directly (unit tests, offline inference, tooling) would reach
+            # YarnRotaryEmbedding's math.log() with a str and raise TypeError.
+            rope_base = float(config.csa_compress_rotary_base)
 
         use_compressed_yarn = compress_ratio > 1
         if not use_compressed_yarn:

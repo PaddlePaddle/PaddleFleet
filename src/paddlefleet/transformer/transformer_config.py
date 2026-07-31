@@ -1380,10 +1380,18 @@ class TransformerConfig(ModelParallelConfig):
                     f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
             for i, r in enumerate(self.csa_compress_ratios):
-                if not (isinstance(r, int) and (r == 0 or 2 <= r <= 128)):
+                # Accept python int and numpy integer scalars (a ratios list
+                # loaded from npy/np.load yields np.int64, which would otherwise
+                # be rejected); reject bool / np.bool_ so True does not sneak
+                # through as 1, and reject floats.
+                is_integral = hasattr(r, "__index__") and type(
+                    r
+                ).__name__ not in ("bool", "bool_")
+                if not (is_integral and (r == -1 or r == 0 or 2 <= r <= 128)):
                     raise ValueError(
                         f"csa_compress_ratios[{i}]={r} is invalid. "
-                        f"Each value must be 0 (window), an integer in [2, 127] "
+                        f"Each value must be -1 (full-causal MQA), 0 (window), "
+                        f"an integer in [2, 127] "
                         f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
 

@@ -42,6 +42,7 @@ from paddlefleet.transformer.csa_attention import (
     _resolve_csa_indexer_attn_topk_effective,
     _resolve_csa_indexer_loss_topk_effective,
     get_compress_topk_idxs,
+    get_mqa_causal_topk_idxs,
     get_valid_range,
     get_window_topk_idxs,
 )
@@ -201,10 +202,10 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             _make_config(num_layers=1, csa_compress_ratios=[129])
 
     def test_csa_compress_ratios_accepts_general_set(self):
-        # window (0), CSA over the full [2, 127] range (including non-power-of-2
-        # 3 and the boundary 127), and HCA (128) must all be accepted and
-        # round-trip through the config.
-        ratios = [0, 2, 3, 4, 8, 16, 32, 64, 127, 128]
+        # full-causal MQA (-1), window (0), CSA over the full [2, 127] range
+        # (including non-power-of-2 3 and the boundary 127), and HCA (128) must
+        # all be accepted and round-trip through the config.
+        ratios = [-1, 0, 2, 3, 4, 8, 16, 32, 64, 127, 128]
         cfg = _make_config(num_layers=len(ratios), csa_compress_ratios=ratios)
         self.assertEqual(cfg.csa_compress_ratios, ratios)
 
@@ -1003,7 +1004,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
 
     def test_attention_module_document_mask_matches_separate_documents(self):
         paddle.seed(_SEED)
-        for ratio in [0, 4, 128]:
+        for ratio in [-1, 0, 4, 128]:
             config = _make_config(
                 hidden_size=64,
                 num_attention_heads=2,
@@ -1364,6 +1365,161 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         # ratio 129 is above HCA (128) -> rejected.
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[129])
+
+    def test_mqa_ratio_matches_window_covering_full_sequence(self):
+        # ratio=-1 is full-causal MQA: no compressor, no indexer, no window.
+        # A window-only layer (ratio=0) whose window covers the whole sequence
+        # attends to exactly the same key set, so both must agree bit-exactly.
+        seq_len = 32
+        kwargs = {
+            "hidden_size": 64,
+            "num_attention_heads": 2,
+            "v_head_dim": 32,
+            "q_lora_rank": 32,
+            "o_groups": 2,
+            "o_lora_rank": 16,
+            "dsa_indexer_loss_coeff": 0.0,
+            "num_layers": 1,
+        }
+        mqa_config = _make_config(
+            csa_compress_ratios=[-1], csa_window_size=8, **kwargs
+        )
+        window_config = _make_config(
+            csa_compress_ratios=[0], csa_window_size=seq_len, **kwargs
+        )
+
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        mqa_attn = _build_attention(mqa_config, layer_number=0)
+        mqa_attn.eval()
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        window_attn = _build_attention(window_config, layer_number=0)
+        window_attn.eval()
+
+        core = mqa_attn.core_attention
+        self.assertTrue(core.is_mqa_layer)
+        self.assertIsNone(core.compressor)
+        self.assertIsNone(core.indexer)
+        # MQA uses plain RoPE (base rotary_base), never the compressed YaRN.
+        self.assertNotIsInstance(mqa_attn.rotary_pos_emb, YarnRotaryEmbedding)
+
+        hidden = paddle.randn(
+            [1, seq_len, mqa_config.hidden_size], dtype="bfloat16"
+        )
+        with paddle.no_grad():
+            mqa_out, _ = mqa_attn(hidden_states=hidden, attention_mask=None)
+            window_out, _ = window_attn(
+                hidden_states=hidden, attention_mask=None
+            )
+        self.assertTrue(
+            paddle.equal_all(
+                mqa_out.cast("float32"), window_out.cast("float32")
+            ).item()
+        )
+
+    def test_mqa_topk_length_matches_mask_only_indices(self):
+        # The MQA index table carries both -1 padding and topk_length; dropping
+        # topk_length must not change the result (the kernel only stops early).
+        paddle.seed(_SEED)
+        seqlen, heads, dim = 24, 2, 16
+        query = paddle.randn([1, seqlen, heads, dim], dtype="bfloat16")
+        kv = paddle.randn([1, seqlen, dim], dtype="bfloat16")
+        sink = paddle.randn([heads], dtype="float32") * 0.1
+        startend_row_indices = _make_startend_row_indices([10, 9], seqlen)
+        meta = CSADocMaskMetadata.build(
+            1, 1, seqlen, startend_row_indices, seqlen
+        )
+        topk_idxs, topk_length = get_mqa_causal_topk_idxs(
+            1, seqlen, docmask_meta=meta
+        )
+        expected_length = [
+            min(i, 9) + 1 if i < 10 else (i - 10 + 1 if i < 19 else 1)
+            for i in range(seqlen)
+        ]
+        self.assertEqual(topk_length[0].numpy().tolist(), expected_length)
+
+        with_length = unfused_compressed_sparse_attn(
+            query, kv, sink, topk_idxs, dim**-0.5, topk_length=topk_length
+        )
+        mask_only = unfused_compressed_sparse_attn(
+            query, kv, sink, topk_idxs, dim**-0.5
+        )
+        self.assertTrue(
+            paddle.equal_all(
+                with_length.cast("float32"), mask_only.cast("float32")
+            ).item()
+        )
+        # Padding rows (19..23) fall back to the attention sink only.
+        self.assertEqual(
+            float(with_length[:, 19:].cast("float32").abs().max()), 0.0
+        )
+
+    def test_mqa_causal_topk_idxs_from_startend_row_indices(self):
+        # Without a prebuilt metadata object the helper builds one itself from
+        # startend_row_indices; both entry points must agree.
+        seqlen = 16
+        startend_row_indices = _make_startend_row_indices([7, 9], seqlen)
+        idxs, lengths = get_mqa_causal_topk_idxs(
+            1, seqlen, startend_row_indices=startend_row_indices
+        )
+        meta = CSADocMaskMetadata.build(
+            1, 1, seqlen, startend_row_indices, seqlen
+        )
+        meta_idxs, meta_lengths = get_mqa_causal_topk_idxs(
+            1, seqlen, docmask_meta=meta
+        )
+        self.assertEqual(idxs.shape, [1, seqlen, seqlen])
+        self.assertEqual(lengths.shape, [1, seqlen])
+        self.assertTrue(paddle.equal_all(idxs, meta_idxs).item())
+        self.assertTrue(paddle.equal_all(lengths, meta_lengths).item())
+        # The causal range restarts at the second document's start (7).
+        self.assertEqual(
+            lengths[0].numpy().tolist(),
+            [i + 1 for i in range(7)] + [i - 7 + 1 for i in range(7, 16)],
+        )
+
+    def test_mqa_rejects_tilelang_backend(self):
+        # tilelang has no topk_length support, so the MQA layer cannot use it.
+        config = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-1],
+            csa_sparse_attn_backend="tilelang",
+        )
+        with self.assertRaisesRegex(NotImplementedError, "'tilelang'"):
+            CompressedSparseAttention(
+                config=config,
+                sublayers_spec=CompressedSparseAttentionSublayersSpec(),
+                layer_number=0,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+                pg_collection=_FakePGCollection(),
+                compress_ratio=-1,
+            )
+
+    def test_mqa_rejects_context_parallelism(self):
+        # CP must fail loudly instead of taking the CSA CP path, which assumes
+        # a compressed KV stream the MQA layer never builds.
+        paddle.seed(_SEED)
+        config = _make_config(num_layers=1, csa_compress_ratios=[-1])
+        core = CompressedSparseAttention(
+            config=config,
+            sublayers_spec=CompressedSparseAttentionSublayersSpec(),
+            layer_number=0,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+            pg_collection=_FakePGCollection(cp_nranks=2),
+            compress_ratio=-1,
+        )
+        self.assertTrue(core.cp_enabled)
+        b, sq = 1, 8
+        query = paddle.randn(
+            [b, sq, config.num_attention_heads, config.v_head_dim],
+            dtype="bfloat16",
+        )
+        key = paddle.randn([b, sq, 1, config.v_head_dim], dtype="bfloat16")
+        with self.assertRaisesRegex(NotImplementedError, "cp=2"):
+            core(query, key, key)
 
     def test_q_head_dim_equals_v_head_dim(self):
         paddle.seed(_SEED)

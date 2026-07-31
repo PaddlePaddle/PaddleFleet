@@ -47,7 +47,14 @@ def _get_topk_alignment() -> int:
 
 
 def flash_mla_sparse_attn(
-    q, kv, attn_sink, topk_idxs, sm_scale=None, indexer_topk: int = 0, d_v=None
+    q,
+    kv,
+    attn_sink,
+    topk_idxs,
+    sm_scale=None,
+    indexer_topk: int = 0,
+    d_v=None,
+    topk_length=None,
 ):
     if _flash_mla_sparse_fwd is None:
         raise RuntimeError("flash_mla is not available")
@@ -63,6 +70,12 @@ def flash_mla_sparse_attn(
     q_flat = q.reshape([b * sq, h, d])
     kv_flat = kv.reshape([b * skv, d])
     global_idxs = _local_to_global_flat(topk_idxs, skv)
+    # [b, sq] -> [b * sq]: one valid-prefix length per flattened query row.
+    topk_length_flat = (
+        None
+        if topk_length is None
+        else topk_length.reshape([b * sq]).cast("int32")
+    )
 
     topk_align = _get_topk_alignment()
     topk_padded = (topk + topk_align - 1) // topk_align * topk_align
@@ -76,7 +89,7 @@ def flash_mla_sparse_attn(
         sm_scale,
         d_v=d_v,
         attn_sink=attn_sink,
-        topk_length=None,
+        topk_length=topk_length_flat,
         indexer_topk=indexer_topk,
     )
     if indexer_topk > 0:
