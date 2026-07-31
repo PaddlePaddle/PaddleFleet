@@ -1004,6 +1004,23 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the DSv4 hybrid q-up projection."""
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        return {
+            "linear_q_up_proj.weight": (
+                ortho_per_head,
+                {"heads": self.num_attention_heads_per_partition},
+            ),
+        }
+
     def get_query_key_value_tensors(
         self,
         hidden_states: Tensor,

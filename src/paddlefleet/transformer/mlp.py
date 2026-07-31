@@ -179,6 +179,21 @@ class MLP(FleetLayer):
             disable_fp8=disable_fp8,
         )
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the fused gate/up projection.
+
+        Inherited by StandardMLPExpert / StandardMLPSharedExpert, so each expert
+        (auto-prefixed by the module tree) gets its own spec. The gate/up split
+        point is derived from the weight shape inside ``ortho_gate_up``.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_gate_up
+
+        if not self.config.gated_linear_unit or not muon_configs.get(
+            "muon_ffn_split", False
+        ):
+            return {}
+        return {"up_gate_proj.weight": (ortho_gate_up, {})}
+
     def forward(self, hidden_states, per_token_scale=None):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]

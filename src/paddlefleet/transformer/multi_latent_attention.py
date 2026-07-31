@@ -1109,6 +1109,39 @@ class MLASelfAttention(MultiLatentAttention):
             eps=self.config.rms_norm_eps,
         )
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice specs for MLA projections (split_head only)."""
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        num_heads = self.num_attention_heads_per_partition
+        qk_nope = self.qk_nope_head_dim
+        qk_rope = self.qk_rope_head_dim
+        kv_lora = self.config.kv_lora_rank
+
+        specs = {}
+        if hasattr(self, "q_b_proj"):
+            specs["q_b_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_heads, "head_sizes": [qk_nope, qk_rope]},
+            )
+        specs["kv_a_proj_with_mqa.weight"] = (
+            ortho_per_head,
+            {"head_sizes": [kv_lora, qk_rope]},
+        )
+        specs["kv_b_proj.weight"] = (
+            ortho_per_head,
+            {"heads": num_heads, "head_sizes": [qk_nope, self.v_head_dim]},
+        )
+        if getattr(self, "gate_proj", None) is not None:
+            specs["gate_proj.weight"] = (ortho_per_head, {"heads": num_heads})
+        return specs
+
     def _is_cudagraph_active(self) -> bool:
         """Check if CUDA Graph capture or replay is currently active.
 

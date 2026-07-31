@@ -897,6 +897,51 @@ class TransformerConfig(ModelParallelConfig):
     # cache_mla_latents: bool = False
 
     ####################
+    # Linear attention (GatedDeltaNet / KimiDeltaAttention)
+    ####################
+
+    linear_conv_kernel_dim: int = 4
+    """Kernel size of the short causal depthwise convolution applied to q/k/v.
+
+    Corresponds to ``linear_attn_config["short_conv_kernel_size"]`` in Kimi's
+    HuggingFace config."""
+
+    linear_key_head_dim: int = 128
+    """Per-head dimension of the linear-attention query/key vectors."""
+
+    linear_value_head_dim: int = 128
+    """Per-head dimension of the linear-attention value vectors. KDA requires it
+    to equal :attr:`linear_key_head_dim` because its forget gate is per-channel
+    over the key dimension."""
+
+    linear_num_key_heads: int = 16
+    """Number of linear-attention query/key heads. Must divide
+    :attr:`linear_num_value_heads` (GVA) and the tensor parallel size."""
+
+    linear_num_value_heads: int = 32
+    """Number of linear-attention value heads. Must be divisible by the tensor
+    parallel size."""
+
+    linear_gate_lora_rank: int | None = None
+    """KDA only. Bottleneck rank of the forget-gate (and, when
+    :attr:`linear_use_full_rank_gate` is False, the output-gate) low-rank
+    projection. None falls back to :attr:`linear_value_head_dim`, which is what
+    Kimi uses."""
+
+    linear_use_full_rank_gate: bool = True
+    """KDA only. If True the output gate is a single full-rank projection folded
+    into in_proj; if False it is a second low-rank pair (g_a_proj / g_b_proj).
+
+    Corresponds to ``linear_attn_config["use_full_rank_gate"]``."""
+
+    linear_gate_lower_bound: float | None = -5.0
+    """KDA only. Lower bound of the log-space forget gate. When set, the gate is
+    ``lower_bound * sigmoid(exp(A_log) * (a + dt_bias))``, naturally clamped to
+    ``[lower_bound, 0)``. None switches to ``-exp(A_log) * softplus(a + dt_bias)``.
+
+    Corresponds to ``linear_attn_config["gate_lower_bound"]``."""
+
+    ####################
     # DSA (DeepSeek Sparse Attention)
     ####################
 

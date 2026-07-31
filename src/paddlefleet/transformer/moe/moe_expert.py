@@ -259,6 +259,26 @@ class GroupedMLPExpert(FleetLayer):
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice specs for fused grouped-gemm expert weights.
+
+        weight1 (fused gate/up) is split by shape when ``muon_ffn_split`` is on;
+        weight2 (down) is always orthogonalised per-expert (grouped gemm is
+        inherently a fused 3D expert tensor).
+        """
+        from paddlefleet.transformer.muon_utils import (
+            ortho_gate_up,
+            ortho_stacked,
+        )
+
+        specs = {}
+        if self.config.gated_linear_unit and muon_configs.get(
+            "muon_ffn_split", False
+        ):
+            specs["weight1"] = (ortho_gate_up, {})
+        specs["weight2"] = (ortho_stacked, {})
+        return specs
+
     def forward(
         self,
         permuted_local_hidden_states: paddle.Tensor,

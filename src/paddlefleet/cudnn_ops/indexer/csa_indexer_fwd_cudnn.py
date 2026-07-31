@@ -122,217 +122,6 @@ def _validate_indexer_inputs(index_q, index_k_comp, weights):
         raise ValueError(f"cuDNN IndexerForward requires D_i=128, got {dim}")
 
 
-def _doc_lens_from_startend(startend_row_indices, sq):
-    if startend_row_indices is None:
-        return None
-    if int(startend_row_indices.shape[0]) != 1:
-        return None
-
-    # ``startend_row_indices`` is metadata-sized. Reading it on host lets us
-    # build cu_seqlens and max_seqlen values required by the cuDNN THD API.
-    ends = startend_row_indices.reshape([-1]).numpy().astype("int64").tolist()
-    doc_lens = []
-    pos = 0
-    sq = int(sq)
-    while pos < sq:
-        end = int(ends[pos])
-        if end <= pos:
-            break
-        end = min(end, sq)
-        doc_lens.append(end - pos)
-        pos = end
-    return doc_lens
-
-
-def _doc_lens_to_list(doc_lens):
-    if doc_lens is None:
-        return None
-    if isinstance(doc_lens, paddle.Tensor):
-        return doc_lens.reshape([-1]).numpy().astype("int64").tolist()
-    return [int(length) for length in doc_lens]
-
-
-def _make_cu_seqlens(lengths, place):
-    offsets = [0]
-    acc = 0
-    for length in lengths:
-        acc += int(length)
-        offsets.append(acc)
-    return paddle.to_tensor(offsets, dtype="int32", place=place)
-
-
-def _cudnn_indexer_topk_fwd_docmask_thd(
-    index_q,
-    index_k_comp,
-    weights,
-    ratio,
-    topk_effective,
-    sm_scale,
-    valid_range,
-    startend_row_indices,
-    doc_lens=None,
-    return_topk_scores=False,
-):
-    """Docmask fast path: run cuDNN forward in THD/varlen local-K space."""
-    batch = int(index_q.shape[0])
-    sq = int(index_q.shape[1])
-    if batch != 1:
-        return None
-    if int(startend_row_indices.reshape([-1]).shape[0]) != sq:
-        return None
-
-    doc_lens = _doc_lens_to_list(doc_lens)
-    if doc_lens is None:
-        doc_lens = _doc_lens_from_startend(startend_row_indices, sq)
-    if not doc_lens:
-        return None
-    if sum(int(length) for length in doc_lens) > sq:
-        return None
-
-    # The cuDNN ratio-causal forward requires S_q <= S_k * ratio for each THD
-    # segment. PaddleFleet docmask semantics still keep the tail query rows of
-    # a non-ratio-aligned document valid; those rows may attend to the last real
-    # compressed block. Dropping them would change top-k semantics, so use the
-    # packed-global fallback unless every document is ratio-aligned.
-    if any(int(length) % int(ratio) != 0 for length in doc_lens):
-        return None
-
-    q_lens = [int(length) for length in doc_lens]
-    comp_lens = [int(length) // int(ratio) for length in doc_lens]
-    if any(int(length) < 2 for length in comp_lens):
-        return None
-
-    total_q = sum(q_lens)
-    total_k = sum(comp_lens)
-    max_q = max(q_lens) if q_lens else 0
-    max_k = max(comp_lens) if comp_lens else 0
-    if total_q <= 0 or total_k <= 0 or max_k < 2:
-        return None
-    if total_k > int(index_k_comp.shape[1]):
-        raise ValueError(
-            f"docmask compressed length mismatch: documents need {total_k}, "
-            f"but index_k_comp has {int(index_k_comp.shape[1])} rows"
-        )
-
-    _require_cudnn_frontend()
-    from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_forward.api import (
-        indexer_forward_wrapper,
-    )
-    from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_top_k.api import (
-        indexer_top_k_wrapper,
-    )
-
-    from .docmask_utils import topk_local_to_global, valid_range_to_counts
-
-    q_parts = []
-    w_parts = []
-    vr_parts = []
-    q_pos = 0
-    for doc_len in doc_lens:
-        q_parts.append(index_q[0, q_pos : q_pos + int(doc_len)])
-        w_parts.append(weights[0, q_pos : q_pos + int(doc_len)])
-        vr_parts.append(valid_range[0, q_pos : q_pos + int(doc_len)])
-        q_pos += int(doc_len)
-    if not q_parts:
-        return None
-
-    q_thd = paddle.concat(q_parts, axis=0).contiguous()
-    k_thd = index_k_comp[0, :total_k].unsqueeze(1).contiguous()
-    w_thd = paddle.concat(w_parts, axis=0).contiguous()
-    cu_q = _make_cu_seqlens(q_lens, index_q.place)
-    cu_k = _make_cu_seqlens(comp_lens, index_q.place)
-
-    scores = indexer_forward_wrapper(
-        q_thd,
-        k_thd,
-        w_thd,
-        ratio=int(ratio),
-        sm_scale=float(sm_scale),
-        cu_seqlens_q=cu_q,
-        cu_seqlens_k=cu_k,
-        max_seqlen_q=int(max_q),
-        max_seqlen_k=int(max_k),
-    )["scores"]
-
-    topk = int(topk_effective)
-    topk_k = min(topk, int(max_k))
-    vr_thd = paddle.concat(vr_parts, axis=0)
-    counts = valid_range_to_counts(vr_thd)
-    result = indexer_top_k_wrapper(
-        scores.reshape([total_q, int(max_k)]).contiguous(),
-        counts.cast("int32"),
-        top_k=topk_k,
-        next_n=1,
-        return_val=False,
-    )
-    topk_local = result["indices"].reshape([total_q, topk_k]).cast("int32")
-    valid_local = (topk_local >= 0) & (
-        topk_local < counts.reshape([total_q, 1])
-    )
-    topk_local = paddle.where(
-        valid_local, topk_local, paddle.full_like(topk_local, -1)
-    )
-
-    topk_scores = None
-    if return_topk_scores:
-        invalid_mask = topk_local < 0
-        safe_local = paddle.where(
-            invalid_mask, paddle.zeros_like(topk_local), topk_local
-        )
-        topk_scores = paddle.take_along_axis(
-            scores, safe_local.cast("int64"), axis=1
-        )
-        topk_scores = paddle.where(
-            invalid_mask,
-            paddle.full_like(topk_scores, float("-inf")),
-            topk_scores,
-        )
-
-    topk_global = topk_local_to_global(topk_local, vr_thd)
-    if topk_k < topk:
-        pad_shape = [total_q, topk - topk_k]
-        topk_global = paddle.concat(
-            [topk_global, paddle.full(pad_shape, -1, dtype="int32")], axis=-1
-        )
-        if return_topk_scores:
-            topk_scores = paddle.concat(
-                [
-                    topk_scores,
-                    paddle.full(pad_shape, float("-inf"), dtype="float32"),
-                ],
-                axis=-1,
-            )
-
-    if total_q < sq:
-        full_topk = paddle.full([sq, topk], -1, dtype="int32")
-        full_scores = None
-        if return_topk_scores:
-            full_scores = paddle.full(
-                [sq, topk], float("-inf"), dtype="float32"
-            )
-        src_pos = 0
-        dst_pos = 0
-        for doc_len in doc_lens:
-            full_topk[dst_pos : dst_pos + int(doc_len)] = topk_global[
-                src_pos : src_pos + int(doc_len)
-            ]
-            if return_topk_scores:
-                full_scores[dst_pos : dst_pos + int(doc_len)] = topk_scores[
-                    src_pos : src_pos + int(doc_len)
-                ]
-            src_pos += int(doc_len)
-            dst_pos += int(doc_len)
-        topk_global = full_topk
-        if return_topk_scores:
-            topk_scores = full_scores
-
-    topk_global = topk_global.reshape([1, sq, topk])
-    topk_length = (topk_global >= 0).sum(axis=-1).cast("int32")
-    if return_topk_scores:
-        return topk_global, topk_length, topk_scores.reshape([1, sq, topk])
-    return topk_global, topk_length
-
-
 def cudnn_indexer_forward(
     index_q, index_k_comp, weights, ratio=4, sm_scale=None, seq_offset=0
 ):
@@ -547,11 +336,7 @@ def _cudnn_indexer_topk_fwd_impl(
     if float(indexer_softmax_scale) != 1.0:
         _sm = _sm * float(indexer_softmax_scale)
 
-    if (
-        seq_offset == 0
-        and valid_range is not None
-        and startend_row_indices is not None
-    ):
+    if valid_range is not None and doc_lens is not None:
         thd_result = _cudnn_indexer_topk_fwd_docmask_thd(
             index_q,
             index_k_comp,
@@ -560,7 +345,7 @@ def _cudnn_indexer_topk_fwd_impl(
             topk_effective,
             _sm,
             valid_range,
-            startend_row_indices,
+            seq_offset,
             doc_lens=doc_lens,
             return_topk_scores=return_topk_scores,
         )
@@ -617,6 +402,147 @@ def _cudnn_indexer_topk_fwd_impl(
     if return_topk_scores:
         return topk_indices, topk_length, paddle.concat(score_parts, axis=1)
     return topk_indices, topk_length
+
+
+def _make_cu_seqlens(
+    doc_lens: list[int], seq_offset: int, seq_len: int, ratio: int
+):
+    """
+    Generate CP-local cu_seqlens_q/k for the indexer_top_k kernel.
+
+    The cu_seqlens_q only contains the document covered by this CP rank, with
+    both left and right borders clipped. The cu_seqlens_k is similar, but only
+    clips the right border because the left part is causal, thus visible.
+
+    Example:
+    Say there are 4 docs in this batch and the current CP rank covers part of
+    doc1, the total doc2, and part of doc3. The cu_seqlens_q exactly contains
+    the `seq_len` part of q, while the cu_seqlens_k extends its left bound to
+    cover the full doc1.
+
+    q: |<----- doc0 ----->|<-- doc1 -->|<--- doc2 --->|<---- doc3 ---->|
+       {-----  seq_offset  -----}{------  seq_len  ------}
+
+    k: |<----- doc0 ----->|<-- doc1 -->|<--- doc2 --->|<---- doc3 ---->|
+                          {--------   visible_k  --------}
+    """
+    end_q = end_k = 0
+    max_q = max_k = 0
+    cu_seqlens_q = [0]  # q is local, always starts from 0
+    cu_seqlens_k = []  # k is global, may be offsetted
+    q_causal_offsets = []
+
+    for n in doc_lens:
+        start_q, start_k = end_q, end_k
+        end_q += n
+        end_k += n // ratio
+
+        # skip documents that are fully before this CP rank
+        if end_q <= seq_offset:
+            continue
+
+        cu_seqlens_q.append(min(end_q - seq_offset, seq_len))
+        q_causal_offsets.append(max(seq_offset - start_q, 0))
+
+        # the last document in this CP rank can only see the causal part of k
+        n_visible = min(seq_offset + seq_len - start_q, n)
+        n_visible_comp = n_visible // ratio
+        max_q = max(n_visible, max_q)
+        max_k = max(n_visible_comp, max_k)
+
+        if not cu_seqlens_k:
+            cu_seqlens_k.append(start_k)
+        cu_seqlens_k.append(start_k + n_visible_comp)
+
+        # break when the end of the current document exceeds this CP rank
+        if end_q >= seq_offset + seq_len:
+            break
+
+    cu_seqlens_q = paddle.to_tensor(cu_seqlens_q, "int32")
+    cu_seqlens_k = paddle.to_tensor(cu_seqlens_k, "int32")
+    q_causal_offsets = (
+        paddle.to_tensor(q_causal_offsets, "int32") if seq_offset > 0 else None
+    )  # not necessary for non-CP
+    return cu_seqlens_q, cu_seqlens_k, max_q, max_k, q_causal_offsets
+
+
+def _cudnn_indexer_topk_fwd_docmask_thd(
+    index_q: paddle.Tensor,
+    index_k_comp: paddle.Tensor,
+    weights: paddle.Tensor,
+    ratio: int,
+    topk_effective: int,
+    sm_scale: float,
+    valid_range: paddle.Tensor,
+    seq_offset: int,
+    doc_lens: list[int],
+    return_topk_scores: bool = False,
+):
+    batch, seq_len, _, _ = index_q.shape
+    if batch != 1:
+        return None
+
+    _require_cudnn_frontend()
+    from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_forward.api import (
+        indexer_forward_wrapper,
+    )
+    from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_top_k.api import (
+        indexer_top_k_wrapper,
+    )
+
+    from .docmask_utils import topk_local_to_global, valid_range_to_counts
+
+    cu_q, cu_k, max_q, max_k, q_causal_offsets = _make_cu_seqlens(
+        doc_lens, seq_offset, seq_len, ratio
+    )
+    # Fallback to dense path if there is no visible doc in this CP rank.
+    if len(cu_k) == 0:
+        return None
+
+    # The indexer kernel requires the last dim (max_k) padded to 16-byte.
+    # If we don't pad it here, the kernel will allocate a padded scratch buffer
+    # and copying results back, which causes extra contiguous kernels.
+    TMA_ALIGN_ELEMS = 4
+    max_k = (max_k + TMA_ALIGN_ELEMS - 1) // TMA_ALIGN_ELEMS * TMA_ALIGN_ELEMS
+
+    q_thd = index_q.squeeze(0)  # [local_seqlen, heads, dim]
+    # [global_seqlen // ratio, 1, dim]
+    k_thd = index_k_comp.squeeze(0).unsqueeze(1)
+    w_thd = weights.squeeze(0)  # [local_seqlen, heads]
+
+    # Compute scores in THD compacted shape [local_seqlen, max_k]
+    scores = indexer_forward_wrapper(
+        q_thd,
+        k_thd,
+        w_thd,
+        ratio=ratio,
+        sm_scale=sm_scale,
+        cu_seqlens_q=cu_q,
+        cu_seqlens_k=cu_k,
+        max_seqlen_q=max_q,
+        max_seqlen_k=max_k,
+        q_causal_offsets=q_causal_offsets,
+    )["scores"]
+
+    counts = valid_range_to_counts(valid_range)
+
+    # Compute topk indices [local_seqlen, topk]
+    results = indexer_top_k_wrapper(
+        scores,
+        counts.squeeze(0),
+        top_k=topk_effective,
+        return_val=return_topk_scores,
+    )
+
+    topk_global = topk_local_to_global(
+        results["indices"].unsqueeze(0), valid_range
+    )
+    topk_length = counts.clip(max=topk_effective)
+
+    if return_topk_scores:
+        topk_scores = results["values"].unsqueeze(0)
+        return topk_global, topk_length, topk_scores
+    return topk_global, topk_length
 
 
 def _dense_indexer_topk_single(

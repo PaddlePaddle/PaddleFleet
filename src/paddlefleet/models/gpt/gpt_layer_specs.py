@@ -82,6 +82,10 @@ from paddlefleet.transformer.gated_delta_net import (
     GatedDeltaNetSublayersSpec,
 )
 from paddlefleet.transformer.identity_op import IdentityOp
+from paddlefleet.transformer.kimi_delta_attention import (
+    KimiDeltaAttention,
+    KimiDeltaAttentionSublayersSpec,
+)
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
@@ -121,8 +125,8 @@ def get_attention_spec(
     Args:
         config: Transformer configuration.
         attention_layer_type: ``"self_attention"`` for standard multi-head
-            attention or ``"gated_delta_net"`` for the GDN linear-attention
-            variant.
+            attention, ``"gated_delta_net"`` for the GDN linear-attention
+            variant or ``"kimi_delta_attention"`` for the KDA variant.
         attn_mask_type: Attention mask type (only used for SelfAttention).
 
     Returns:
@@ -228,6 +232,35 @@ def get_attention_spec(
                 out_proj=backend.row_parallel_linear(),
             ),
             extra_kwargs=gdn_extra_kwargs,
+        )
+    elif attention_layer_type == "kimi_delta_attention":
+        out_norm = backend.layer_norm(
+            rms_norm=(config.normalization == "RMSNorm"), for_qk=False
+        )
+        # f_a_proj / g_a_proj must be replicated: they are the low-rank
+        # bottleneck and their full-rank output feeds the column-parallel
+        # b_proj, which is also what all-gathers the sequence dim under SP.
+        return LayerSpec(
+            layer=KimiDeltaAttention,
+            sublayers_spec=KimiDeltaAttentionSublayersSpec(
+                in_proj=backend.column_parallel_linear(),
+                f_a_proj=backend.linear(),
+                f_b_proj=backend.column_parallel_linear(),
+                g_a_proj=backend.linear(),
+                g_b_proj=backend.column_parallel_linear(),
+                out_norm=out_norm,
+                out_proj=backend.row_parallel_linear(),
+            ),
+            extra_kwargs={
+                "conv_kernel_dim": config.linear_conv_kernel_dim,
+                "key_head_dim": config.linear_key_head_dim,
+                "value_head_dim": config.linear_value_head_dim,
+                "num_key_heads": config.linear_num_key_heads,
+                "num_value_heads": config.linear_num_value_heads,
+                "gate_lora_rank": config.linear_gate_lora_rank,
+                "use_full_rank_gate": config.linear_use_full_rank_gate,
+                "gate_lower_bound": config.linear_gate_lower_bound,
+            },
         )
     elif attention_layer_type == "multi_latent_attention":
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
@@ -362,7 +395,8 @@ def get_attention_spec(
     else:
         raise ValueError(
             f"Unknown attention_layer_type: {attention_layer_type!r}. "
-            f"Expected 'self_attention', 'gated_delta_net', 'multi_latent_attention', "
+            f"Expected 'self_attention', 'gated_delta_net', "
+            f"'kimi_delta_attention', 'multi_latent_attention', "
             f"'dsv4_hybrid_attention', or 'gemma4'."
         )
 
@@ -391,7 +425,8 @@ def get_gpt_layer_local_spec(
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
         attention_layer_type (str, optional): Type of attention layer.
             ``"self_attention"`` for standard multi-head attention,
-            ``"gated_delta_net"`` for the GDN linear-attention variant.
+            ``"gated_delta_net"`` for the GDN linear-attention variant,
+            ``"kimi_delta_attention"`` for the KDA linear-attention variant.
             Defaults to ``"self_attention"``.
 
     Returns:
