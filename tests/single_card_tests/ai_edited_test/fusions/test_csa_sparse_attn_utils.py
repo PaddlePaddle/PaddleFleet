@@ -321,7 +321,6 @@ class TestCudnnBackendDispatch(unittest.TestCase):
             attn_sink,
             topk_idxs_flat,
             softmax_scale=None,
-            topk_length=None,
         ):
             return (
                 paddle.ones_like(q_flat),
