@@ -68,6 +68,40 @@ class TestMoonEPDispatcher(unittest.TestCase):
         self.assertEqual(manager.token_probs.dtype, paddle.float32)
         self.assertEqual(manager.tokens_per_expert.tolist(), [1, 2, 0, 1])
 
+    def test_setup_metadata_sanitizes_padding_routes(self):
+        manager = object.__new__(_MoonEPManager)
+        manager.router_topk = 2
+        manager.num_experts = 4
+        routing_map = paddle.to_tensor(
+            [[1, 1, 0, 0], [0, 0, 0, 0]], dtype="bool"
+        )
+        probs = paddle.to_tensor(
+            [[0.6, 0.4, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+            dtype="float32",
+        )
+        topk_weights = paddle.to_tensor(
+            [[0.6, 0.4], [0.7, 0.3]], dtype="float32"
+        )
+        topk_weights.stop_gradient = False
+        topk_indices = paddle.to_tensor([[0, 1], [-1, -1]], dtype="int64")
+
+        manager.setup_metadata(routing_map, probs, topk_weights, topk_indices)
+
+        self.assertEqual(manager.token_indices.tolist(), [[0, 1], [0, 0]])
+        self.assertTrue(
+            bool(
+                paddle.allclose(
+                    manager.token_probs,
+                    paddle.to_tensor([[0.6, 0.4], [0.0, 0.0]], dtype="float32"),
+                )
+            )
+        )
+        self.assertEqual(manager.tokens_per_expert.tolist(), [3, 1, 0, 0])
+        self.assertEqual(int(manager.tokens_per_expert.sum().item()), 4)
+
+        manager.token_probs.sum().backward()
+        self.assertEqual(topk_weights.grad.tolist(), [[1.0, 1.0], [0.0, 0.0]])
+
     def test_dispatch_rejects_non_bf16_hidden_states(self):
         manager = object.__new__(_MoonEPManager)
         manager._bridge = object()
@@ -160,6 +194,7 @@ class TestMoonEPBalanceLog(unittest.TestCase):
         layer.use_latent_moe = False
         layer.moe_token_dispatcher_type = dispatcher_type
         layer.layer_number = 1
+        layer.is_mtp_layer = False
         layer.moe_group = object()
         layer.num_experts_per_tok = 2
         layer.token_dispatcher = mock.Mock()

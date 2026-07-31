@@ -603,7 +603,21 @@ class _MoonEPManager(_DispatchManager):
             )
         self.token_probs = self.token_probs.astype("float32")
         self.token_indices = self.token_indices.astype("int32")
-        self.tokens_per_expert = routing_map.astype("int32").sum(axis=0)
+        padding_mask = self.token_indices < 0
+        self.token_probs = paddle.where(
+            padding_mask,
+            paddle.zeros_like(self.token_probs),
+            self.token_probs,
+        )
+        self.token_indices = paddle.where(
+            padding_mask,
+            paddle.zeros_like(self.token_indices),
+            self.token_indices,
+        )
+        self.token_indices.stop_gradient = True
+        self.tokens_per_expert = _tokens_per_expert_histogram(
+            self.token_indices, self.num_experts
+        )
 
     def _ensure_buffer(self, hidden_states: paddle.Tensor) -> None:
         if self._bridge is None:

@@ -100,7 +100,7 @@ class TestMoonEP(unittest.TestCase):
         finally:
             buffer.destroy()
 
-    def test_moe_layer_forward_backward_matches_reference(self):
+    def test_moe_layer_forward_backward_with_padding_matches_reference(self):
         import paddle.nn.functional as F
 
         from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -193,6 +193,15 @@ class TestMoonEP(unittest.TestCase):
             ],
             axis=1,
         )
+        valid_token_mask = (
+            paddle.arange(S, dtype="int32").reshape([S, 1]) < S - 16
+        )
+        valid_route_mask = valid_token_mask.expand([S, K])
+        topk_indices = paddle.where(
+            valid_route_mask,
+            topk_indices,
+            paddle.full_like(topk_indices, -1),
+        )
         weights_base = paddle.stack(
             [
                 paddle.full([S], 0.4, dtype="float32"),
@@ -204,11 +213,19 @@ class TestMoonEP(unittest.TestCase):
         topk_weights.stop_gradient = False
         reference_topk_weights = weights_base.detach()
         reference_topk_weights.stop_gradient = False
-        one_hot = F.one_hot(topk_indices.astype("int64"), num_classes=E).astype(
-            "float32"
+        safe_topk_indices = paddle.where(
+            valid_route_mask,
+            topk_indices,
+            paddle.zeros_like(topk_indices),
         )
-        routing_map = one_hot.sum(axis=1).astype("bool")
-        probs = (one_hot * topk_weights.detach().unsqueeze(-1)).sum(axis=1)
+        one_hot = F.one_hot(
+            safe_topk_indices.astype("int64"), num_classes=E
+        ).astype("float32")
+        route_mask = valid_route_mask.astype("float32")
+        routing_map = one_hot.sum(axis=1).astype("bool") & valid_token_mask
+        probs = (
+            one_hot * (topk_weights.detach() * route_mask).unsqueeze(-1)
+        ).sum(axis=1)
 
         output = layer.custom_forward(
             hidden,
@@ -218,9 +235,9 @@ class TestMoonEP(unittest.TestCase):
             topk_indices=topk_indices,
         )
 
-        reference_route = (one_hot * reference_topk_weights.unsqueeze(-1)).sum(
-            axis=1
-        )
+        reference_route = (
+            one_hot * (reference_topk_weights * route_mask).unsqueeze(-1)
+        ).sum(axis=1)
         reference_output = paddle.zeros_like(reference_hidden)
         for expert_id in range(E):
             fc1 = paddle.matmul(reference_hidden, reference_w1[expert_id])
@@ -273,6 +290,23 @@ class TestMoonEP(unittest.TestCase):
                     )
                 ),
                 f"{name} mismatch",
+            )
+
+        padding_slice = slice(S - 16, S)
+        for actual, name in (
+            (output[padding_slice], "padding_output"),
+            (hidden.grad[padding_slice], "padding_hidden_grad"),
+            (topk_weights.grad[padding_slice], "padding_router_grad"),
+        ):
+            actual = actual.astype("float32")
+            self.assertTrue(
+                bool(
+                    paddle.equal_all(
+                        actual,
+                        paddle.zeros_like(actual),
+                    )
+                ),
+                f"{name} must be zero",
             )
 
 
