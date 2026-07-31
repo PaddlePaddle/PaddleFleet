@@ -748,7 +748,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )
 
     def muon_slice_specs(self, muon_configs):
-        """Muon orthogonal-slice spec for the DSv4 hybrid q-up projection."""
+        """Muon orthogonal-slice specs for the DSv4 hybrid projections."""
         from paddlefleet.transformer.muon_utils import ortho_per_head
 
         if (
@@ -757,12 +757,28 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         ):
             return {}
 
-        return {
+        specs = {
             "linear_q_up_proj.weight": (
                 ortho_per_head,
                 {"heads": self.num_attention_heads_per_partition},
             ),
+            # Stored as [o_groups * o_lora_rank, d] but used as [g, r, d] in a
+            # grouped gemm, so the leading axis packs o_groups independent
+            # matrices and must be split along axis 0.
+            "linear_o_group_proj": (
+                ortho_per_head,
+                {"heads": self.o_local_groups, "axis": 0},
+            ),
         }
+        if getattr(self, "gate_proj", None) is not None:
+            # The gate multiplies the flattened grouped-projection output, whose
+            # columns are group-major (group g owns o_lora_rank columns), so the
+            # gate weight is fused per o-group rather than per head.
+            specs["gate_proj.weight"] = (
+                ortho_per_head,
+                {"heads": self.o_local_groups},
+            )
+        return specs
 
     def get_query_key_value_tensors(
         self,

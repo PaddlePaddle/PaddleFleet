@@ -27,14 +27,19 @@ from types import SimpleNamespace
 
 import paddle
 
-from paddlefleet.transformer.attention import SelfAttention, SelfAttentionVHA
+from paddlefleet.transformer.attention import (
+    SelfAttention,
+    SelfAttentionVHA,
+)
 from paddlefleet.transformer.csa_attention import Compressor, CSAIndexer
 from paddlefleet.transformer.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
 )
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
-from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
+from paddlefleet.transformer.multi_latent_attention import (
+    MLASelfAttention,
+)
 from paddlefleet.transformer.muon_utils import (
     ortho_blocks,
     ortho_gate_up,
@@ -396,16 +401,65 @@ class TestMLASpecs(unittest.TestCase):
 
 
 class TestDSv4HybridSpecs(unittest.TestCase):
+    def _fake(self, gated=False):
+        return SimpleNamespace(
+            num_attention_heads_per_partition=4,
+            o_local_groups=2,
+            gate_proj=object() if gated else None,
+        )
+
     def test_specs(self):
-        fake = SimpleNamespace(num_attention_heads_per_partition=4)
+        fake = self._fake()
         specs = DSv4HybridSelfAttention.muon_slice_specs(fake, {})
-        self.assertEqual(set(specs), {"linear_q_up_proj.weight"})
-        _run_specs(specs, {"linear_q_up_proj.weight": [HIDDEN, 4 * 4]})
+        self.assertEqual(
+            set(specs), {"linear_q_up_proj.weight", "linear_o_group_proj"}
+        )
+        recorders = _run_specs(
+            specs,
+            {
+                "linear_q_up_proj.weight": [HIDDEN, 4 * 4],
+                # [o_local_groups * o_lora_rank, d], split along axis 0.
+                "linear_o_group_proj": [2 * 3, HIDDEN],
+            },
+        )
+        self.assertEqual(
+            recorders["linear_o_group_proj"].shapes,
+            [(3, HIDDEN), (3, HIDDEN)],
+        )
+
+    def test_gated_slices_gate_per_o_group(self):
+        fake = self._fake(gated=True)
+        specs = DSv4HybridSelfAttention.muon_slice_specs(fake, {})
+        self.assertEqual(
+            set(specs),
+            {
+                "linear_q_up_proj.weight",
+                "linear_o_group_proj",
+                "gate_proj.weight",
+            },
+        )
+        # gate width == o_local_groups * o_lora_rank, sliced into o_lora_rank
+        # wide blocks.
+        recorders = _run_specs(
+            specs,
+            {
+                "linear_q_up_proj.weight": [HIDDEN, 4 * 4],
+                "linear_o_group_proj": [2 * 3, HIDDEN],
+                "gate_proj.weight": [HIDDEN, 2 * 3],
+            },
+        )
+        self.assertEqual(
+            recorders["gate_proj.weight"].shapes,
+            [(HIDDEN, 3), (HIDDEN, 3)],
+        )
+
+    def test_gate_proj_absent_is_guarded(self):
+        specs = DSv4HybridSelfAttention.muon_slice_specs(self._fake(), {})
+        self.assertNotIn("gate_proj.weight", specs)
 
     def test_non_split_head_mode(self):
-        fake = SimpleNamespace(num_attention_heads_per_partition=4)
         specs = DSv4HybridSelfAttention.muon_slice_specs(
-            fake, {"muon_qkv_update_mode": "split_qkv"}
+            self._fake(gated=True), {"muon_qkv_update_mode": "split_qkv"}
         )
         self.assertEqual(specs, {})
 
