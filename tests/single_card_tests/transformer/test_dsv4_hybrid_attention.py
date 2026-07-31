@@ -57,6 +57,10 @@ from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 _SEED = 42
+# An index_topk larger than any n_compressed reached in the decode-alignment
+# tests, so ``min(index_topk, n_compressed)`` always selects every valid block
+# and no tie-break at the top-k boundary can occur.
+_SATURATING_TOPK = 4096
 
 
 class _FakeGroup:
@@ -1948,12 +1952,27 @@ class TestCSAHybridDecodeAlignment(unittest.TestCase):
     at every position must match the token-by-token decode output produced
     through ``CSADynamicCache`` (which drives the overlapping incremental
     compressor and the indexer's own incremental compressor + top-k).
+
+    ``dsa_index_topk`` is saturated (>= any n_compressed reached here) on
+    purpose. With a selective top-k, bf16 indexer scores produce exact ties at
+    the k-th boundary (dozens of query positions per sequence), and which of two
+    equal-scoring blocks wins is decided by the kernel's tie-break order. Prefill
+    scores all queries in one batched call while decode scores one query at a
+    time, so the two can legitimately pick different blocks -- swapping one of
+    ~24 attended keys shifts that row's output by ~10%, which is not a decode
+    bug and is not reproducible across hardware. Saturating the top-k forces both
+    paths onto the same block set, leaving only benign rounding, so this test
+    isolates what it is meant to check: the compressor / overlap / window / RoPE
+    / cache bookkeeping. Score-level agreement of the indexer itself is covered
+    by :class:`TestCSAHybridDecodeIndexerScores`.
     """
 
     def setUp(self):
         paddle.seed(_SEED)
         model_parallel_cuda_manual_seed(_SEED)
-        self.config = _make_config(dsa_indexer_loss_coeff=0.0)
+        self.config = _make_config(
+            dsa_indexer_loss_coeff=0.0, dsa_index_topk=_SATURATING_TOPK
+        )
         self.csa_layer = 1  # ratio=4
 
     def _decode_all(self, attn, hidden, layer_idx):
@@ -2045,6 +2064,85 @@ class TestCSAHybridDecodeAlignment(unittest.TestCase):
         self._assert_close(full_out[:, prefix:, :], decode_out)
 
 
+class TestCSAHybridDecodeIndexerScores(unittest.TestCase):
+    """The decode indexer must reproduce prefill's indexer scores.
+
+    :class:`TestCSAHybridDecodeAlignment` saturates ``dsa_index_topk`` to keep
+    block selection deterministic, which means it cannot see a drift in the
+    indexer's own score computation -- a uniform rescale, for instance, leaves a
+    saturated selection unchanged. This test compares the raw scores instead, so
+    a divergence between ``CSAIndexer.forward`` and
+    ``_compute_indexer_compressed_topk_idxs_decode`` (weight scalings, query RoPE
+    position, Hadamard rotation) shows up directly and independently of any
+    tie-break.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        self.config = _make_config(dsa_indexer_loss_coeff=0.0)
+        self.csa_layer = 1  # ratio=4
+
+    def test_decode_indexer_scores_match_prefill(self):
+        import paddlefleet.transformer.csa_attention as csa_mod
+
+        n = 64
+        ratio = 4
+        attn = _build_attention(self.config, layer_number=self.csa_layer)
+        attn.eval()
+        paddle.seed(_SEED + n)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+
+        captured = []
+        original = csa_mod.fused_qk_topk_naive
+
+        def _spy(q, k, weights, topk, mask):
+            scores, idxs = original(q, k, weights, topk, mask)
+            captured.append(scores)
+            return scores, idxs
+
+        csa_mod.fused_qk_topk_naive = _spy
+        try:
+            with paddle.no_grad():
+                captured.clear()
+                attn(hidden_states=hidden, attention_mask=None)
+                prefill_scores = captured[-1]  # [1, n, n_compressed]
+
+                decode_rows = {}
+                cache = CSADynamicCache(
+                    num_layers=self.config.num_hidden_layers
+                )
+                for t in range(n):
+                    before = len(captured)
+                    attn(
+                        hidden_states=hidden[:, t : t + 1, :],
+                        attention_mask=None,
+                        past_key_values=cache,
+                        layer_idx=self.csa_layer,
+                        use_cache=True,
+                    )
+                    if len(captured) > before:
+                        decode_rows[t] = captured[-1]  # [1, 1, n_comp]
+        finally:
+            csa_mod.fused_qk_topk_naive = original
+
+        self.assertEqual(prefill_scores.shape[1], n)
+        self.assertGreater(len(decode_rows), 0)
+        for t, row in decode_rows.items():
+            n_comp = (t + 1) // ratio
+            self.assertEqual(row.shape[-1], n_comp)
+            ref = prefill_scores[0, t, :n_comp].cast("float32")
+            got = row[0, 0, :n_comp].cast("float32")
+            diff = float(paddle.abs(ref - got).max())
+            self.assertLess(
+                diff,
+                1e-4,
+                f"indexer score mismatch at t={t}: max abs diff {diff}",
+            )
+
+
 class TestCSAHybridSharedCacheDispatch(unittest.TestCase):
     """One ``CSADynamicCache`` dispatched across mixed CSA + HCA layers.
 
@@ -2052,12 +2150,18 @@ class TestCSAHybridSharedCacheDispatch(unittest.TestCase):
     shared cache must keep independent per-``layer_idx`` state. Here layer 1
     (CSA, ratio=4) and layer 2 (HCA, ratio=128) share one cache. Interleaved
     token-by-token decode of both layers must match each layer's full prefill.
+
+    ``dsa_index_topk`` is saturated for the same reason as in
+    :class:`TestCSAHybridDecodeAlignment`: a selective top-k over bf16 scores has
+    exact ties whose resolution is kernel- and shape-dependent.
     """
 
     def setUp(self):
         paddle.seed(_SEED)
         model_parallel_cuda_manual_seed(_SEED)
-        self.config = _make_config(dsa_indexer_loss_coeff=0.0)
+        self.config = _make_config(
+            dsa_indexer_loss_coeff=0.0, dsa_index_topk=_SATURATING_TOPK
+        )
         self.csa_layer = 1  # ratio=4
         self.hca_layer = 2  # ratio=128
 

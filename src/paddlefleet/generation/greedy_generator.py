@@ -478,7 +478,7 @@ class GreedyGenerator:
         """
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be [B, L]")
-        if max_new_tokens < 0:
+        if max_new_tokens <= 0:
             raise ValueError("max_new_tokens should be >= 0")
         self.model.eval()
 
@@ -593,6 +593,14 @@ class GreedyGenerator:
             for step in range(max_new_tokens - 1):
                 cur_len = self.cache.get_seq_len()
                 position_ids = paddle.full([bsz, 1], cur_len, dtype="int64")
+                if _DEBUG and _r == 0 and step < 3:
+                    logger.info(
+                        "[fwd-debug][decode step=%d] next_tok=%s position_ids=%s cache_seq_len=%d",
+                        step,
+                        next_tok.tolist(),
+                        position_ids.tolist(),
+                        cur_len,
+                    )
                 logits = self.model(
                     {
                         "input_ids": next_tok,
