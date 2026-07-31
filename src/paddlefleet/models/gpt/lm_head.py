@@ -65,7 +65,6 @@ import warnings
 import paddle
 from paddle.distributed.fleet.meta_parallel import (
     ScheduleNode,
-    build_spec_layer,
 )
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
@@ -131,8 +130,8 @@ class GPTLMHead(ColumnParallelLinear):
         ]
         self._dtype = self.config.params_dtype
 
-        # Extract block_attn_res spec before passing kwargs to super
-        block_attn_res_spec = kwargs.pop("block_attn_res", IdentityOp)
+        # Remove block_attn_res from kwargs (not used in LM head)
+        kwargs.pop("block_attn_res", None)
 
         kwargs["skip_weight_param_allocation"] = True
         if self.config.gpt_model_use_experimental_version:
@@ -185,11 +184,6 @@ class GPTLMHead(ColumnParallelLinear):
                         is_expert=self.is_expert,
                     )
             self.weight.is_distributed = True if self.world_size > 1 else False
-
-        # Final Block Attention Residual (applied before LM head projection)
-        self.block_attn_res = build_spec_layer(
-            block_attn_res_spec, config=self.config
-        )
 
         # Multimax: learnable SegLU-style modulation on logits before softmax.
         # Names contain the "multimax" substring so the trainer's no-decay
@@ -314,11 +308,6 @@ class GPTLMHead(ColumnParallelLinear):
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
 
-        # Apply final Block Attention Residual if enabled
-        if self.config.block_attention_residuals:
-            blocks = dict_args.get("blocks", [])
-            hidden_states = self.block_attn_res(hidden_states, blocks)
-
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
@@ -364,11 +353,7 @@ class GPTMainLMHead(GPTLMHead):
     """Main LM Head with block_attn_res, single prediction."""
 
     def __init__(self, **kwargs):
-        block_attn_res_spec = kwargs.pop("block_attn_res", IdentityOp)
         super().__init__(**kwargs)
-        self.block_attn_res = build_spec_layer(
-            block_attn_res_spec, config=self.config
-        )
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTMainLMHead")
@@ -376,9 +361,6 @@ class GPTMainLMHead(GPTLMHead):
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
         mtp_loss = dict_args.get("mtp_loss", None)
-        if self.config.block_attention_residuals:
-            blocks = dict_args.get("blocks", [])
-            hidden_states = self.block_attn_res(hidden_states, blocks)
 
         tensor_list = paddle.split(
             hidden_states,
@@ -406,7 +388,6 @@ class GPTMTPLMHead(GPTLMHead):
     """MTP LM Head: splits concatenated hidden_states and computes per-MTP logits."""
 
     def __init__(self, **kwargs):
-        kwargs.pop("block_attn_res", None)
         super().__init__(**kwargs)
 
     def build_schedule_node(self):

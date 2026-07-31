@@ -443,18 +443,21 @@ class TransformerLayer(nn.Layer):
         # [Layer 10: Block Attention Residuals] Optional
         self.attn_res_block_size = None
         if self.config.block_attention_residuals:
-            assert self.full_recompute is False, (
-                "block_attention_residuals cannot use full_recompute, set full_recompute to False."
-            )
             assert self.recompute_mlp is False, (
                 "block_attention_residuals cannot use selective recompute mlp."
             )
-            self.block_attn_res_before_attention = build_spec_layer(
-                sublayers_spec.block_attn_res, config=self.config
-            )
-            self.block_attn_res_before_mlp = build_spec_layer(
-                sublayers_spec.block_attn_res, config=self.config
-            )
+            if self._should_skip_block_attn_res():
+                # MTP layers and last full attention layer do not use
+                # attention residual — use IdentityOp to avoid creating params.
+                self.block_attn_res_before_attention = IdentityOp()
+                self.block_attn_res_before_mlp = IdentityOp()
+            else:
+                self.block_attn_res_before_attention = build_spec_layer(
+                    sublayers_spec.block_attn_res, config=self.config
+                )
+                self.block_attn_res_before_mlp = build_spec_layer(
+                    sublayers_spec.block_attn_res, config=self.config
+                )
             self.attn_res_block_size = self.config.attn_res_block_size
 
         if hasattr(self.mlp, "rr_recompute_update"):
@@ -516,6 +519,82 @@ class TransformerLayer(nn.Layer):
             if isinstance(color, dict) or color not in (None, -1):
                 continue
             p.color = {"color": "dense_weight_no_hook"}
+
+    def _is_block_boundary(self):
+        """Determine if this layer is a block boundary for attention residuals.
+
+        If window_attn_skip_freq is configured, MLA (full attention) layers
+        are block start-points: each block = 1 MLA layer + consecutive SWA layers.
+        The boundary is at the MLA layer (i.e., the previous block ends just before
+        the next MLA layer starts).
+        Otherwise fall back to fixed attn_res_block_size.
+        """
+        if (
+            self.config.sliding_window is not None
+            and self.config.window_attn_skip_freq is not None
+        ):
+            # MLA layer (not SWA) = start of new block = boundary for previous block
+            return not self.self_attn.is_swa
+        else:
+            # Fixed block size fallback
+            block_span = self.attn_res_block_size // 2
+            if block_span <= 0:
+                raise ValueError(
+                    "attn_res_block_size must be at least 2 when "
+                    "block_attention_residuals is enabled without "
+                    "window_attn_skip_freq."
+                )
+            return self.layer_number % block_span == 0
+
+    def _should_skip_block_attn_res(self):
+        """Determine if this layer should skip block attention residuals.
+
+        MTP layers and the last full attention layer should NOT do attention
+        residual — they use standard residual connections instead.
+        """
+        # MTP layers skip block attn res
+        if self.is_mtp_layer:
+            return True
+        # Last full attention layer skips block attn res
+        if (
+            self.config.sliding_window is not None
+            and self.config.window_attn_skip_freq is not None
+        ):
+            # Check if this is a full attention (non-SWA) layer
+            if not self.self_attn.is_swa:
+                # Check if this is the last full attention layer
+                # by examining window_attn_skip_freq
+                freq = self.config.window_attn_skip_freq
+                if isinstance(freq, list):
+                    # Only look at main decoder layers (exclude MTP layers)
+                    main_freq = freq[: self.config.num_hidden_layers]
+                    # Find the last full attention layer index (value == 0)
+                    last_full_attn_idx = None
+                    for i in range(len(main_freq) - 1, -1, -1):
+                        if not main_freq[i]:  # 0 means full attention
+                            last_full_attn_idx = i
+                            break
+                    if last_full_attn_idx is not None:
+                        # Compare with this layer's real index
+                        real_idx = (
+                            self.layer_number
+                            - self.config.num_empty_layers_add_in_head
+                        )
+                        if real_idx == last_full_attn_idx:
+                            return True
+                elif isinstance(freq, int):
+                    # int mode: full attention at layer_number % freq == 0
+                    # Last full attention = largest multiple of freq < num_hidden_layers
+                    last_full_attn_idx = (
+                        (self.config.num_hidden_layers - 1) // freq
+                    ) * freq
+                    real_idx = (
+                        self.layer_number
+                        - self.config.num_empty_layers_add_in_head
+                    )
+                    if real_idx == last_full_attn_idx:
+                        return True
+        return False
 
     def build_schedule_node(self):
         return TransformerLayerNode(
@@ -678,6 +757,19 @@ class TransformerLayer(nn.Layer):
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
 
+        # For block_attention_residuals: handle boundary logic OUTSIDE
+        # recompute so that blocks list mutation doesn't happen twice
+        # during backward re-execution.
+        skip_block_attn_res = (
+            self._should_skip_block_attn_res()
+            if self.config.block_attention_residuals
+            else True
+        )
+        if self.config.block_attention_residuals and skip_block_attn_res:
+            # Remove blocks from dict_args so that _forward_impl does not
+            # receive unused tensors that cause backward errors.
+            dict_args.pop("blocks", None)
+
         if self.full_recompute or (not has_recovered()):
             hidden_states = dict_args["hidden_states"]
             attention_mask = dict_args.get("attention_mask", None)
@@ -698,6 +790,20 @@ class TransformerLayer(nn.Layer):
             input_ids = dict_args.get("input_ids", None)
             offload_kwargs = self._compute_act_offload_kwargs()
             origin_input_ids = dict_args.get("origin_input_ids", None)
+
+            # For block_attention_residuals: pass blocks as a tuple of cloned
+            # tensors. PyLayer natively tracks tuple-of-tensors as a unit
+            # (recompute.py line 295-313), so no wrapper is needed.
+            if (
+                self.config.block_attention_residuals
+                and not skip_block_attn_res
+            ):
+                blocks = dict_args.get("blocks", [])
+                blocks_for_recompute = (
+                    tuple(b.clone() for b in blocks) if blocks else None
+                )
+            else:
+                blocks_for_recompute = None
 
             outputs = recompute(
                 self._forward_impl,
@@ -733,8 +839,18 @@ class TransformerLayer(nn.Layer):
                 packed_seq_params=packed_seq_params,
                 input_ids=input_ids,
                 origin_input_ids=origin_input_ids,
+                blocks=blocks_for_recompute,
                 **offload_kwargs,
             )
+            # In recompute path, _forward_impl operates on a cloned tuple
+            # converted to a local list, so its blocks.append(partial_block)
+            # does not mutate dict_args["blocks"]. We must do it here.
+            if (
+                self.config.block_attention_residuals
+                and not skip_block_attn_res
+                and self._is_block_boundary()
+            ):
+                dict_args["blocks"].append(hidden_states)
         else:
             outputs = self._forward_impl(**dict_args)
 
@@ -821,6 +937,7 @@ class TransformerLayer(nn.Layer):
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
         origin_input_ids: Tensor | None = None,
+        blocks: list | tuple | None = None,
         **kwargs,
     ):
         def need_do_attention():
@@ -850,8 +967,14 @@ class TransformerLayer(nn.Layer):
                 return True
 
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
-        if self.config.block_attention_residuals:
-            blocks = kwargs.get("blocks", [])
+        if (
+            self.config.block_attention_residuals
+            and not self._should_skip_block_attn_res()
+        ):
+            if blocks is None:
+                blocks = []
+            elif isinstance(blocks, tuple):
+                blocks = list(blocks)
             partial_block = hidden_states
 
             # Before attention: block attnres
@@ -859,8 +982,8 @@ class TransformerLayer(nn.Layer):
                 partial_block, blocks
             )
 
-            # Block boundary check
-            if self.layer_number % (self.attn_res_block_size // 2) == 0:
+            # Block boundary: append current repr and reset partial_block
+            if self._is_block_boundary():
                 blocks.append(partial_block)
                 partial_block = None
 
