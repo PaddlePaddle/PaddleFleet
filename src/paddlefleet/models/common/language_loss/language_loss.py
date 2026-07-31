@@ -354,6 +354,15 @@ class LanguageLoss(FleetLayer):
                 labels, axis=1, mode=self.config.cp_balance_mode
             )
 
+        if _use_accuracy_compatible_kernel():
+            # 定位锚点 1：CP gather 后、mask/归一化前的 per-token CE，
+            # 两侧语义唯一，未掺入归一化差异。
+            print(
+                f"\nper_token_loss: rank={dist.get_rank()} "
+                f"shape={list(loss.shape)} md5={loss.cast('float32')._md5sum()}",
+                flush=True,
+            )
+
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
             loss = paddle.mean(loss) * 0.0
@@ -434,6 +443,15 @@ class LanguageLoss(FleetLayer):
                     loss.cast(paddle.float32).reshape([-1]) * lossmask
                 )
                 loss = loss / lossmask.sum()
+
+        if _use_accuracy_compatible_kernel():
+            # 定位锚点 2：mask + 归一化后的标量 loss，与锚点 1 配合可切开
+            # 「CE 上游差异」和「lossmask / valid_token / 除法差异」。
+            print(
+                f"\nfinal_loss: rank={dist.get_rank()} "
+                f"val={float(loss):.20f} md5={loss.cast('float32')._md5sum()}",
+                flush=True,
+            )
 
         return loss
 

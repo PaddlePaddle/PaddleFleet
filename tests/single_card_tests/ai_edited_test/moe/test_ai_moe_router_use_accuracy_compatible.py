@@ -14,29 +14,36 @@
 """Coverage for the ``use_accuracy_compatible`` router branches added in
 commit 80a72f9: MG-aligned seq aux-loss and gather_nd top-k weight lookup."""
 
-import os
-import sys
-
-# Walk up to find the repo root and import the working-tree source so the
-# ``use_accuracy_compatible`` branches under test are the ones exercised
-# (the installed paddlefleet may predate this commit).
-_test_file = os.path.abspath(__file__)
-_repo_root = _test_file
-for _ in range(10):
-    _repo_root = os.path.dirname(_repo_root)
-    if os.path.isdir(os.path.join(_repo_root, "src", "paddlefleet")):
-        break
-sys.path.insert(0, _repo_root)
-sys.path.insert(0, os.path.join(_repo_root, "src"))
-for _mod in list(sys.modules.keys()):
-    if _mod == "paddlefleet" or _mod.startswith("paddlefleet."):
-        del sys.modules[_mod]
-
 import unittest
 from unittest.mock import patch
 
 import numpy as np
 import paddle
+
+
+def _mg_seq_aux_loss_ref(probs, routing_map, top_k, num_experts, batch_size):
+    """Independent reference mirroring Megatron-LM.
+
+    ``switch_load_balancing_loss_func`` (moe_utils.py) computes
+    ``sum(agg_probs_per_expert * tokens_per_expert) * E / (topk * T^2)`` and
+    ``_apply_seq_aux_loss`` (router.py) divides it by ``bsz``, where
+    ``get_tokens_per_expert_and_token_count`` sets
+    ``T = tokens_per_expert.sum() / (topk * bsz)`` (the valid routing token
+    count per line) once a padding mask is in play.
+    """
+    p = probs.numpy().reshape([batch_size, -1, num_experts]).astype("float64")
+    rm = (
+        routing_map.numpy()
+        .reshape([batch_size, -1, num_experts])
+        .astype("float64")
+    )
+    tokens_per_expert = rm.sum(axis=1)  # [B, E]
+    aggregated = p.sum(axis=1)  # [B, E]
+    total_num_tokens = tokens_per_expert.sum() / (top_k * batch_size)
+    loss = (aggregated * tokens_per_expert).sum() * (
+        num_experts / (top_k * total_num_tokens * total_num_tokens)
+    )
+    return loss / batch_size
 
 
 def _make_router_config(**overrides):
@@ -134,10 +141,9 @@ class TestRouterAccuracyCompatible(unittest.TestCase):
         )
 
     @patch(_CP_PATCH, return_value=1)
-    def test_seq_aux_loss_padding_uses_sequence_length(self, _cp):
-        """The aligned branch follows MG and normalizes by the (fixed) sequence
-        length, so per-line padding info must not change the loss. Covers B > 1
-        with a different padding length per line."""
+    def test_seq_aux_loss_padding_uses_valid_token_count(self, _cp):
+        """With padding rows the denominator must be the valid routing token
+        count per line (MG semantics), not the fixed sequence length."""
         from paddlefleet.transformer.moe.moe_router import StandardMoERouter
 
         B, S, E, K = 3, 5, 4, 2
@@ -156,12 +162,51 @@ class TestRouterAccuracyCompatible(unittest.TestCase):
                 rm[b, n:] = 0.0
 
         router = StandardMoERouter(_make_router_config())
-        args = (probs.reshape([B * S, E]), K, rm.reshape([B * S, E]), S, B)
-        loss_with_ids = router._cal_seq_aux_loss(*args, input_ids=ids)
-        loss_no_ids = router._cal_seq_aux_loss(*args)
-        self.assertTrue(bool(paddle.isfinite(loss_with_ids).all().numpy()))
+        loss = router._cal_seq_aux_loss(
+            probs.reshape([B * S, E]),
+            K,
+            rm.reshape([B * S, E]),
+            S,
+            B,
+            input_ids=ids,
+        )
+
+        expected = _mg_seq_aux_loss_ref(
+            probs.reshape([B * S, E]), rm.reshape([B * S, E]), K, E, B
+        )
         np.testing.assert_allclose(
-            loss_with_ids.numpy(), loss_no_ids.numpy(), rtol=1e-6, atol=1e-6
+            loss.numpy(), np.float32(expected), rtol=1e-5, atol=1e-7
+        )
+        # Guard against normalizing by the fixed sequence length: the mean
+        # valid length is 3, so an S=5 normalization is off by (3/5)^2.
+        mean_valid = sum(valid_lens) / B
+        seq_len_normalized = expected * (mean_valid / S) ** 2
+        self.assertFalse(
+            np.allclose(
+                loss.numpy(),
+                np.float32(seq_len_normalized),
+                rtol=1e-3,
+                atol=1e-8,
+            )
+        )
+
+    @patch(_CP_PATCH, return_value=1)
+    def test_seq_aux_loss_matches_mg_reference_without_padding(self, _cp):
+        from paddlefleet.transformer.moe.moe_router import StandardMoERouter
+
+        B, S, E, K = 2, 4, 4, 2
+        paddle.seed(6)
+        probs = paddle.nn.functional.softmax(paddle.randn([B * S, E]), axis=-1)
+        idx = paddle.topk(probs, k=K, axis=-1).indices
+        rm = paddle.zeros([B * S, E]).put_along_axis_(
+            idx, paddle.to_tensor(1.0), axis=-1
+        )
+
+        router = StandardMoERouter(_make_router_config())
+        loss = router._cal_seq_aux_loss(probs, K, rm, S, B)
+        expected = _mg_seq_aux_loss_ref(probs, rm, K, E, B)
+        np.testing.assert_allclose(
+            loss.numpy(), np.float32(expected), rtol=1e-5, atol=1e-7
         )
 
     @patch(_CP_PATCH, return_value=1)

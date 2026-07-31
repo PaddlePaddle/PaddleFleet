@@ -649,18 +649,28 @@ class StandardMoERouter(nn.Layer):
                 )  # [B, E]
                 _aggregated = all_probs.sum(axis=seq_axis)  # [B, E]
                 _per_expert = _aggregated * tokens_per_expert  # [B, E]
-                # MG normalizes by the (fixed) sequence length, not by the
-                # per-line valid token count, so `denom` is intentionally
-                # unused here: using it would break the MG alignment.
+                _bsz = _per_expert.shape[0]
+                # MG get_tokens_per_expert_and_token_count():
+                #   total_num_tokens = tokens_per_expert.sum() / (topk * bsz)
+                # i.e. the number of *valid routing* tokens per line (padding
+                # rows contribute no routing entry). Without padding this is
+                # exactly max_seq_len, so the no-padding path stays bit-exact.
+                # Kept as a Python scalar (single division) to match MG's
+                # scalar arithmetic instead of a multi-kernel tensor path.
+                _total_num_tokens = float(
+                    tokens_per_expert.sum().item()
+                ) / float(top_k * _bsz)
+                if _total_num_tokens <= 0.0:
+                    # Every line is padding: no routed token, no loss.
+                    return _per_expert.sum() * 0.0
                 _scalar = float(self.num_experts) / (
-                    float(top_k) * float(max_seq_len) * float(max_seq_len)
+                    float(top_k) * _total_num_tokens * _total_num_tokens
                 )
                 seq_aux_loss = _per_expert.sum() * _scalar
-                # sequence-level loss is averaged over the batch; keep the
-                # single-line case bit-identical (no extra op).
-                _num_lines = _per_expert.shape[0]
-                if _num_lines > 1:
-                    seq_aux_loss = seq_aux_loss / float(_num_lines)
+                # MG divides the sequence-level loss by bsz; keep the
+                # single-line case free of the extra op (bit-exact).
+                if _bsz > 1:
+                    seq_aux_loss = seq_aux_loss / float(_bsz)
             else:
                 cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
                     denom
