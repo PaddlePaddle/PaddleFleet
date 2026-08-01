@@ -584,11 +584,8 @@ class DSv4HybridAttention(Attention):
         )
 
         self.num_attention_heads = config.num_attention_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        self.v_head_dim = config.v_head_dim or config.head_dim
-        self.qk_pos_emb_head_dim = (
-            getattr(config, "qk_pos_emb_head_dim", 0) or 0
-        )
+        self.v_head_dim = config.v_head_dim
+        self.qk_pos_emb_head_dim = config.qk_pos_emb_head_dim or 0
         self.query_projection_size = self.num_attention_heads * self.v_head_dim
         self.q_head_dim = self.v_head_dim
         self.key_hidden_size = self.q_head_dim
