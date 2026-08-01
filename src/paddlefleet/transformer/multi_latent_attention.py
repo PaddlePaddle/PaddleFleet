@@ -370,17 +370,28 @@ class MultiLatentAttention(Attention):
                     config, layer_number, is_mtp_layer
                 )
             else:
+
+                def _int_config_value(name, default=None):
+                    value = getattr(config, name, default)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        return value
+                    return default
+
+                num_attention_heads = _int_config_value("num_attention_heads")
+                v_head_dim = _int_config_value("v_head_dim")
                 attention_config = LayerAttentionConfig(
                     layer_kind="mla",
                     logical_index=layer_number,
                     compress_ratio=-2,
-                    q_lora_rank=config.q_lora_rank,
-                    kv_lora_rank=config.kv_lora_rank,
-                    qk_nope_head_dim=config.qk_nope_head_dim,
-                    qk_rope_head_dim=config.qk_rope_head_dim,
-                    v_head_dim=config.v_head_dim,
-                    num_attention_heads=config.num_attention_heads,
-                    num_key_value_heads=config.num_key_value_heads,
+                    q_lora_rank=_int_config_value("q_lora_rank"),
+                    kv_lora_rank=_int_config_value("kv_lora_rank", v_head_dim),
+                    qk_nope_head_dim=_int_config_value("qk_nope_head_dim"),
+                    qk_rope_head_dim=_int_config_value("qk_rope_head_dim"),
+                    v_head_dim=v_head_dim,
+                    num_attention_heads=num_attention_heads,
+                    num_key_value_heads=_int_config_value(
+                        "num_key_value_heads", num_attention_heads
+                    ),
                 )
         super().__init__(
             config=config,
@@ -392,6 +403,24 @@ class MultiLatentAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
+        if not hasattr(self, "config"):
+            self.config = config
+        if not hasattr(self, "layer_number"):
+            self.layer_number = layer_number
+        if not hasattr(self, "attn_mask_type"):
+            self.attn_mask_type = attn_mask_type
+        if not hasattr(self, "attention_type"):
+            self.attention_type = attention_type
+        if not hasattr(self, "is_mtp_layer"):
+            self.is_mtp_layer = is_mtp_layer
+        if not hasattr(self, "is_swa"):
+            self.is_swa = False
+        if not hasattr(self, "pg_collection"):
+            self.pg_collection = (
+                pg_collection
+                if pg_collection is not None
+                else ProcessGroupCollection.use_mpu_process_groups()
+            )
         self.attention_config = attention_config
         self.v_head_dim = attention_config.v_head_dim
         self.num_attention_heads = attention_config.num_attention_heads

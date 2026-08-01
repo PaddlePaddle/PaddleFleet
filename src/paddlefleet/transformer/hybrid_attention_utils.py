@@ -171,6 +171,12 @@ def get_effective_mtp_layers(config: _HybridAttentionConfig) -> int:
     """
     mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
     nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
+    if not isinstance(mtp_num_layers, int) or isinstance(mtp_num_layers, bool):
+        mtp_num_layers = 0
+    if not isinstance(nextn_num_layers, int) or isinstance(
+        nextn_num_layers, bool
+    ):
+        nextn_num_layers = 0
     if (
         mtp_num_layers > 0
         and nextn_num_layers > 0
@@ -227,13 +233,18 @@ def resolve_hybrid_attention_layer(
         )
 
     ratio = ratios[logical_index]
-    if not isinstance(ratio, int) or isinstance(ratio, bool):
+    is_integral = hasattr(ratio, "__index__") and type(ratio).__name__ not in (
+        "bool",
+        "bool_",
+    )
+    if not is_integral:
         raise ValueError(
             f"csa_compress_ratios[{logical_index}]={ratio!r} must be an integer"
         )
+    ratio = int(ratio)
     if ratio == -2:
         layer_kind: HybridAttentionKind = "mla"
-    elif ratio == 128:
+    elif ratio in (-1, 128):
         layer_kind = "hca"
     elif 2 <= ratio < 128:
         layer_kind = "csa"
