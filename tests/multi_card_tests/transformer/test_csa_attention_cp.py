@@ -534,6 +534,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
             layer_number=0,
             attn_mask_type=AttnMaskType.causal,
             pg_collection=pg_ref,
+            compress_ratio=4,
         )
 
         paddle.seed(2026)
@@ -543,6 +544,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
             layer_number=0,
             attn_mask_type=AttnMaskType.causal,
             pg_collection=pg_cp,
+            compress_ratio=4,
         )
 
         # Generate inputs
@@ -688,6 +690,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
             layer_number=0,
             attn_mask_type=AttnMaskType.causal,
             pg_collection=pg_ref,
+            compress_ratio=4,
         )
 
         paddle.seed(2026)
@@ -697,6 +700,7 @@ class TestDSv4HybridAttentionCP(unittest.TestCase):
             layer_number=0,
             attn_mask_type=AttnMaskType.causal,
             pg_collection=pg_cp,
+            compress_ratio=4,
         )
 
         paddle.seed(1000)

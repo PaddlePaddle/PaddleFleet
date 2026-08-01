@@ -77,47 +77,6 @@ def _fleet_fp8_wo_a_gemm_enabled():
 FLEET_FP8_WO_A_GEMM = _fleet_fp8_wo_a_gemm_enabled()
 
 
-def _resolve_dsv4_compress_ratio(
-    config, layer_number: int, is_mtp_layer: bool
-) -> int:
-    ratios = getattr(config, "csa_compress_ratios", None)
-    if ratios is None:
-        return -1
-    if is_mtp_layer:
-        mtp_num_layers = (
-            getattr(config, "mtp_num_layers", 0)
-            or getattr(config, "num_nextn_predict_layers", 0)
-            or 0
-        )
-        if not 0 <= layer_number < mtp_num_layers:
-            raise IndexError(
-                f"MTP layer_number {layer_number} is outside [0, {mtp_num_layers})"
-            )
-        logical_index = config.num_hidden_layers + layer_number
-    else:
-        head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
-        logical_index = layer_number - head_offset
-        if not 0 <= logical_index < config.num_hidden_layers:
-            raise IndexError(
-                f"decoder layer_number {layer_number} resolves to logical index "
-                f"{logical_index}, outside [0, {config.num_hidden_layers})"
-            )
-    if logical_index >= len(ratios):
-        raise IndexError(
-            f"logical layer index {logical_index} has no csa_compress_ratios entry "
-            f"(length {len(ratios)})"
-        )
-    ratio = ratios[logical_index]
-    if not hasattr(ratio, "__index__") or type(ratio).__name__ in (
-        "bool",
-        "bool_",
-    ):
-        raise ValueError(
-            f"csa_compress_ratios[{logical_index}]={ratio!r} must be an integer"
-        )
-    return int(ratio)
-
-
 def _q_rms_norm(
     q: Tensor,
     eps: float,
@@ -612,7 +571,7 @@ class DSv4HybridAttention(Attention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
-        compress_ratio: int | None = None,
+        compress_ratio: int = -1,
     ):
         super().__init__(
             config=config,
@@ -624,11 +583,6 @@ class DSv4HybridAttention(Attention):
             pg_collection=pg_collection,
             is_mtp_layer=is_mtp_layer,
         )
-
-        if compress_ratio is None:
-            compress_ratio = _resolve_dsv4_compress_ratio(
-                config, layer_number, is_mtp_layer
-            )
 
         if compress_ratio not in {-1, 0, 128} and not 2 <= compress_ratio < 128:
             raise ValueError(
@@ -1061,7 +1015,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
-        compress_ratio: int | None = None,
+        compress_ratio: int = -1,
     ):
         super().__init__(
             config=config,
