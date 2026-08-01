@@ -630,13 +630,7 @@ class DSv4HybridAttention(Attention):
                 config, layer_number, is_mtp_layer
             )
 
-        if compress_ratio == -1 or compress_ratio == 128:
-            self.layer_kind = "hca"
-        elif compress_ratio == 0:
-            self.layer_kind = "window"
-        elif 2 <= compress_ratio < 128:
-            self.layer_kind = "csa"
-        else:
+        if compress_ratio not in {-1, 0, 128} and not 2 <= compress_ratio < 128:
             raise ValueError(
                 f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
             )

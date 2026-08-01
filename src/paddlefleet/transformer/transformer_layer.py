@@ -43,9 +43,11 @@ from paddlefleet.recompute_utils import (
     need_recompute_in_first_n,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
+from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
+from paddlefleet.transformer.multi_latent_attention import MultiLatentAttention
 from paddlefleet.transformer.utils import profile
 from paddlefleet.utils import log_single_rank
 
@@ -99,67 +101,6 @@ def is_mtp_shared_last_layer(config, layer_number, is_mtp_layer):
         + getattr(config, "num_empty_layers_add_in_head", 0)
     )
     return layer_number == last_layer_number
-
-
-def build_self_attention_forward_kwargs(
-    self_attn,
-    *,
-    attention_mask=None,
-    attn_mask_startend_row_indices=None,
-    rotary_pos_emb=None,
-    rotary_pos_cos=None,
-    rotary_pos_sin=None,
-    rope_freqs_cis=None,
-    swa_rotary_pos_emb=None,
-    swa_rotary_pos_cos=None,
-    swa_rotary_pos_sin=None,
-    position_ids=None,
-    attention_bias=None,
-    packed_seq_params=None,
-    in_recompute=False,
-    input_ids=None,
-    shared_kv=None,
-    past_key_values=None,
-    layer_idx=None,
-    use_cache=False,
-):
-    """Normalize the kwargs contract for the constructed attention family."""
-    layer_kind = getattr(self_attn, "layer_kind", None)
-    attention_kwargs = {
-        "attention_mask": attention_mask,
-        "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
-        "position_ids": position_ids,
-        "packed_seq_params": packed_seq_params,
-        "in_recompute": in_recompute,
-        "past_key_values": past_key_values,
-        "layer_idx": layer_idx,
-        "use_cache": use_cache,
-    }
-    if shared_kv is not None:
-        attention_kwargs["shared_kv"] = shared_kv
-
-    # MLA owns RoPE construction and rejects externally generated rotary data
-    # and attention bias. All DSV4 variants retain the established contract.
-    if layer_kind == "mla":
-        return attention_kwargs
-
-    attention_kwargs["attention_bias"] = attention_bias
-    if rope_freqs_cis is not None:
-        attention_kwargs["rope_freqs_cis"] = rope_freqs_cis
-    else:
-        attention_kwargs.update(
-            {
-                "rotary_pos_emb": rotary_pos_emb,
-                "rotary_pos_cos": rotary_pos_cos,
-                "rotary_pos_sin": rotary_pos_sin,
-                "swa_rotary_pos_emb": swa_rotary_pos_emb,
-                "swa_rotary_pos_cos": swa_rotary_pos_cos,
-                "swa_rotary_pos_sin": swa_rotary_pos_sin,
-            }
-        )
-    if input_ids is not None and layer_kind in {"hca", "csa", "window"}:
-        attention_kwargs["input_ids"] = input_ids
-    return attention_kwargs
 
 
 def tensors_clone(outputs):
@@ -1078,30 +1019,62 @@ class TransformerLayer(nn.Layer):
             input_layernorm_output, "input_layernorm_out", self.layer_number
         )
 
-        attention_kwargs = build_self_attention_forward_kwargs(
-            self.self_attn,
-            attention_mask=attention_mask,
-            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            rope_freqs_cis=rope_freqs_cis,
-            swa_rotary_pos_emb=swa_rotary_pos_emb,
-            swa_rotary_pos_cos=swa_rotary_pos_cos,
-            swa_rotary_pos_sin=swa_rotary_pos_sin,
-            position_ids=position_ids,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            in_recompute=in_recompute,
-            input_ids=input_ids,
-            shared_kv=kwargs.get("shared_kv"),
-            past_key_values=kwargs.get("past_key_values"),
-            layer_idx=self.layer_number,
-            use_cache=kwargs.get("use_cache", False),
-        )
-        attention_output_with_bias = self.self_attn(
-            input_layernorm_output, **attention_kwargs
-        )
+        extra_kwargs = {}
+        if input_ids is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["input_ids"] = input_ids
+        if "shared_kv" in kwargs:
+            extra_kwargs["shared_kv"] = kwargs["shared_kv"]
+
+        if isinstance(self.self_attn, MultiLatentAttention):
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                position_ids=position_ids,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
+            )
+        elif rope_freqs_cis is not None:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rope_freqs_cis=rope_freqs_cis,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
+            )
+        else:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                swa_rotary_pos_sin=swa_rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
+            )
 
         with paddle.enable_grad():
             if block_attention_residuals:
@@ -1490,26 +1463,57 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         )
 
         # Self-attention
-        attention_kwargs = build_self_attention_forward_kwargs(
-            self.self_attn,
-            attention_mask=attention_mask,
-            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-            rotary_pos_emb=rotary_pos_emb,
-            rotary_pos_cos=rotary_pos_cos,
-            rotary_pos_sin=rotary_pos_sin,
-            rope_freqs_cis=rope_freqs_cis,
-            position_ids=position_ids,
-            attention_bias=attention_bias,
-            packed_seq_params=packed_seq_params,
-            in_recompute=in_recompute,
-            input_ids=kwargs.get("input_ids"),
-            past_key_values=kwargs.get("past_key_values"),
-            layer_idx=self.layer_number,
-            use_cache=kwargs.get("use_cache", False),
-        )
-        attention_output_with_bias = self.self_attn(
-            input_layernorm_output, **attention_kwargs
-        )
+        extra_kwargs = {}
+        if kwargs.get("input_ids") is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["input_ids"] = kwargs["input_ids"]
+
+        if isinstance(self.self_attn, MultiLatentAttention):
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                position_ids=position_ids,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
+            )
+        elif rope_freqs_cis is not None:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rope_freqs_cis=rope_freqs_cis,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
+            )
+        else:
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                position_ids=position_ids,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
+            )
 
         # mHC: fused H_res + H_post + bias-dropout-add
         hidden_states = (

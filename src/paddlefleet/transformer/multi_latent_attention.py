@@ -418,7 +418,6 @@ class MultiLatentAttention(Attention):
                 if pg_collection is not None
                 else ProcessGroupCollection.use_mpu_process_groups()
             )
-        self.layer_kind = "mla"
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.v_head_dim = v_head_dim

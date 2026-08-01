@@ -135,11 +135,13 @@ def _get_effective_mtp_layers(config: TransformerConfig) -> int:
     return mtp_num_layers if mtp_num_layers > 0 else nextn_num_layers
 
 
-def _get_dsv4_hybrid_layer_kind(
+def _get_dsv4_hybrid_attention_layer_type(
     config: TransformerConfig,
     layer_number: int,
     is_mtp_layer: bool = False,
-) -> tuple[int, Literal["mla", "hca", "csa", "window"], int]:
+) -> tuple[
+    int, Literal["multi_latent_attention", "dsv4_hybrid_attention"], int
+]:
     if is_mtp_layer:
         mtp_num_layers = _get_effective_mtp_layers(config)
         if not 0 <= layer_number < mtp_num_layers:
@@ -177,19 +179,15 @@ def _get_dsv4_hybrid_layer_kind(
         )
     ratio = int(ratio)
     if ratio == -2:
-        layer_kind = "mla"
-    elif ratio in (-1, 128):
-        layer_kind = "hca"
-    elif 2 <= ratio < 128:
-        layer_kind = "csa"
-    elif ratio == 0:
-        layer_kind = "window"
+        attention_layer_type = "multi_latent_attention"
+    elif ratio in (-1, 0, 128) or 2 <= ratio < 128:
+        attention_layer_type = "dsv4_hybrid_attention"
     else:
         raise ValueError(
             f"csa_compress_ratios[{logical_index}]={ratio!r} does not identify "
-            "an MLA, HCA, CSA, or window layer"
+            "an MLA or DSV4 hybrid attention layer"
         )
-    return logical_index, layer_kind, ratio
+    return logical_index, attention_layer_type, ratio
 
 
 def get_attention_spec(
@@ -610,23 +608,23 @@ def get_gpt_layer_local_spec(
             transformer_cls = TransformerLayerWithOverlap
     exp_variant = getattr(config, "experimental_attention_variant", None)
     if exp_variant == "dsv4_hybrid":
-        logical_index, layer_kind, compress_ratio = _get_dsv4_hybrid_layer_kind(
+        (
+            logical_index,
+            attention_layer_type,
+            compress_ratio,
+        ) = _get_dsv4_hybrid_attention_layer_type(
             config, layer_number, is_mtp_layer
         )
         print(
             "[HybridAttentionConfig] "
             f"logical_index={logical_index} "
-            f"kind={layer_kind} "
+            f"attention_layer_type={attention_layer_type} "
             f"ratio={compress_ratio}",
             flush=True,
         )
         self_attn_spec = get_attention_spec(
             config=config,
-            attention_layer_type=(
-                "multi_latent_attention"
-                if layer_kind == "mla"
-                else "dsv4_hybrid_attention"
-            ),
+            attention_layer_type=attention_layer_type,
             attn_mask_type=AttnMaskType.causal,
             is_mtp_layer=is_mtp_layer,
             compress_ratio=compress_ratio,

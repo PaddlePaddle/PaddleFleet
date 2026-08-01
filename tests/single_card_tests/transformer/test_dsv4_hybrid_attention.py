@@ -14,7 +14,6 @@
 
 import sys
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -58,80 +57,8 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.transformer.transformer_layer import (
-    build_self_attention_forward_kwargs,
-)
 
 _SEED = 42
-
-
-class TestLayerAwareAttentionDispatch(unittest.TestCase):
-    def _kwargs(self, layer_kind, in_recompute=False, rope_freqs_cis=None):
-        attention = SimpleNamespace(layer_kind=layer_kind)
-        values = {
-            "attention_mask": object(),
-            "attn_mask_startend_row_indices": object(),
-            "rotary_pos_emb": object(),
-            "rotary_pos_cos": object(),
-            "rotary_pos_sin": object(),
-            "swa_rotary_pos_emb": object(),
-            "swa_rotary_pos_cos": object(),
-            "swa_rotary_pos_sin": object(),
-            "position_ids": object(),
-            "attention_bias": object(),
-            "packed_seq_params": object(),
-            "input_ids": object(),
-            "past_key_values": object(),
-            "layer_idx": 7,
-            "use_cache": True,
-            "in_recompute": in_recompute,
-            "rope_freqs_cis": rope_freqs_cis,
-        }
-        return values, build_self_attention_forward_kwargs(attention, **values)
-
-    def test_mla_owns_rotary_and_rejects_external_bias(self):
-        for in_recompute in (False, True):
-            values, kwargs = self._kwargs("mla", in_recompute=in_recompute)
-            self.assertIs(kwargs["position_ids"], values["position_ids"])
-            self.assertEqual(kwargs["in_recompute"], in_recompute)
-            self.assertIs(kwargs["past_key_values"], values["past_key_values"])
-            self.assertTrue(kwargs["use_cache"])
-            for incompatible in (
-                "rotary_pos_emb",
-                "rotary_pos_cos",
-                "rotary_pos_sin",
-                "swa_rotary_pos_emb",
-                "swa_rotary_pos_cos",
-                "swa_rotary_pos_sin",
-                "rope_freqs_cis",
-                "attention_bias",
-                "input_ids",
-            ):
-                self.assertNotIn(incompatible, kwargs)
-
-    def test_dsv4_receives_external_rotary_bias_and_input_ids(self):
-        for layer_kind in ("hca", "csa", "window"):
-            values, kwargs = self._kwargs(layer_kind, in_recompute=True)
-            for forwarded in (
-                "rotary_pos_emb",
-                "rotary_pos_cos",
-                "rotary_pos_sin",
-                "swa_rotary_pos_emb",
-                "swa_rotary_pos_cos",
-                "swa_rotary_pos_sin",
-                "attention_bias",
-                "input_ids",
-            ):
-                self.assertIs(kwargs[forwarded], values[forwarded])
-            self.assertTrue(kwargs["in_recompute"])
-
-    def test_precomputed_rope_replaces_external_rotary_tensors(self):
-        rope_freqs_cis = object()
-        _, kwargs = self._kwargs("hca", rope_freqs_cis=rope_freqs_cis)
-        self.assertIs(kwargs["rope_freqs_cis"], rope_freqs_cis)
-        self.assertNotIn("rotary_pos_emb", kwargs)
-        self.assertNotIn("rotary_pos_cos", kwargs)
-        self.assertNotIn("rotary_pos_sin", kwargs)
 
 
 class _FakeGroup:
