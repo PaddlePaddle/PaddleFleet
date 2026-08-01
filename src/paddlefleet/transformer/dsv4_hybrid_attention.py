@@ -571,7 +571,6 @@ class DSv4HybridAttention(Attention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
-        compress_ratio: int = -1,
     ):
         super().__init__(
             config=config,
@@ -584,10 +583,6 @@ class DSv4HybridAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
 
-        if compress_ratio not in {-1, 0, 128} and not 2 <= compress_ratio < 128:
-            raise ValueError(
-                f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
-            )
         self.num_attention_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.v_head_dim = config.v_head_dim or config.head_dim
@@ -598,6 +593,21 @@ class DSv4HybridAttention(Attention):
         self.q_head_dim = self.v_head_dim
         self.key_hidden_size = self.q_head_dim
         self.val_hidden_size = self.v_head_dim
+
+        # Per-layer compress ratio
+        if is_mtp_layer:
+            layer_idx = self.config.num_hidden_layers + layer_number
+            compress_ratio = self.config.csa_compress_ratios[layer_idx]
+        else:
+            layer_idx = layer_number - self.config.num_empty_layers_add_in_head
+            compress_ratio = self.config.csa_compress_ratios[layer_idx]
+        assert compress_ratio != -2, (
+            "DSv4HybridAttention should not be constructed for MLA ratio -2"
+        )
+        if compress_ratio not in {-1, 0, 128} and not 2 <= compress_ratio < 128:
+            raise ValueError(
+                f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
+            )
 
         # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
@@ -633,7 +643,7 @@ class DSv4HybridAttention(Attention):
         self.core_attention = build_spec_layer(
             sublayers_spec.core_attention,
             config=config,
-            layer_number=layer_number,
+            layer_number=layer_number if is_mtp_layer else layer_idx + 1,
             attn_mask_type=attn_mask_type,
             attention_type=attention_type,
             attention_dropout=None,
@@ -1015,7 +1025,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
-        compress_ratio: int = -1,
     ):
         super().__init__(
             config=config,
@@ -1026,7 +1035,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             is_mtp_layer=is_mtp_layer,
-            compress_ratio=compress_ratio,
         )
 
         self.q_lora_rank = config.q_lora_rank

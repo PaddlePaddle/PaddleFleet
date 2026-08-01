@@ -195,7 +195,6 @@ def get_attention_spec(
     attention_layer_type: str,
     attn_mask_type: AttnMaskType = AttnMaskType.causal,
     is_mtp_layer: bool = False,
-    compress_ratio: int | None = None,
 ) -> LayerSpec:
     """Build the self_attn LayerSpec based on attention_layer_type.
 
@@ -449,9 +448,6 @@ def get_attention_spec(
             extra_kwargs={
                 "attn_mask_type": attn_mask_type,
                 "is_mtp_layer": is_mtp_layer,
-                "compress_ratio": -1
-                if compress_ratio is None
-                else compress_ratio,
             },
             sublayers_spec=DSv4HybridSelfAttentionSublayersSpec(
                 linear_q_down_proj=backend.linear(),
@@ -627,7 +623,6 @@ def get_gpt_layer_local_spec(
             attention_layer_type=attention_layer_type,
             attn_mask_type=AttnMaskType.causal,
             is_mtp_layer=is_mtp_layer,
-            compress_ratio=compress_ratio,
         )
     elif multi_latent_attention:
         self_attn_spec = get_attention_spec(
