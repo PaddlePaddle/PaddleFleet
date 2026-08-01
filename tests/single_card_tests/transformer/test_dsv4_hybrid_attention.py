@@ -48,6 +48,7 @@ from paddlefleet.transformer.csa_attention import (
     get_window_topk_idxs,
 )
 from paddlefleet.transformer.dsa_attention import (
+    DSAttention,
     fused_qk_topk_naive,
 )
 from paddlefleet.transformer.dsv4_hybrid_attention import (
@@ -118,9 +119,9 @@ def _make_config(
     hybrid_mla_v_head_dim=256,
     hybrid_mla_num_attention_heads=64,
     hybrid_mla_num_key_value_heads=64,
-    hybrid_index_n_heads=None,
-    hybrid_index_head_dim=None,
-    hybrid_index_topk=None,
+    hybrid_index_n_heads=4,
+    hybrid_index_head_dim=128,
+    hybrid_index_topk=8,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -284,6 +285,24 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         self.assertEqual(list(key.shape), [1, 4, 128])
         self.assertEqual(list(weights.shape), [1, 4, 4])
 
+    def test_hybrid_mla_without_hybrid_index_uses_standard_attention(self):
+        config = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-2],
+            hybrid_index_n_heads=None,
+            hybrid_index_head_dim=None,
+            hybrid_index_topk=None,
+        )
+        mla_spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=0,
+        ).sublayers_spec.self_attn
+
+        self.assertIsNot(
+            mla_spec.sublayers_spec.core_attention.layer, DSAttention
+        )
+
     def test_legacy_all_mla_constructs_with_local_dimensions(self):
         model_parallel_cuda_manual_seed(_SEED)
         config = _make_config(
@@ -339,6 +358,13 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 num_layers=1,
                 csa_compress_ratios=[-2],
                 hybrid_mla_v_head_dim=None,
+            )
+
+        with self.assertRaisesRegex(ValueError, "hybrid_index_head_dim"):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_index_head_dim=None,
             )
 
     def test_csa_compress_ratios_accepts_general_set(self):

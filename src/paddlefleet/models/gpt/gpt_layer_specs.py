@@ -349,15 +349,25 @@ def get_attention_spec(
         # Gated attention
         gated_attention = getattr(config, "gated_attention", False)
 
-        # Decide core_attention: DSAttention if dsa_index_n_heads is configured, else standard
-        use_dsa = (
-            config is not None
-            and getattr(config, "dsa_index_n_heads", None) is not None
-        )
         is_hybrid_mla_indexer = (
             getattr(config, "experimental_attention_variant", None)
             == "dsv4_hybrid"
         )
+        if is_hybrid_mla_indexer:
+            use_dsa = all(
+                getattr(config, name, None) is not None
+                for name in (
+                    "hybrid_index_n_heads",
+                    "hybrid_index_head_dim",
+                    "hybrid_index_topk",
+                )
+            )
+        else:
+            # Decide core_attention: DSAttention if dsa_index_n_heads is configured, else standard
+            use_dsa = (
+                config is not None
+                and getattr(config, "dsa_index_n_heads", None) is not None
+            )
 
         if use_dsa:
             # DSA Indexer sublayers spec (duplicated linear, NOT tensor-parallel)

@@ -287,21 +287,26 @@ class DSAIndexer(paddle.nn.Layer):
         self.pg_collection = pg_collection
 
         if is_hybrid_mla_indexer:
-            self.n_heads = (
-                config.hybrid_index_n_heads
-                if config.hybrid_index_n_heads is not None
-                else config.dsa_index_n_heads
+            required_fields = (
+                "hybrid_index_n_heads",
+                "hybrid_index_head_dim",
+                "hybrid_index_topk",
+                "hybrid_mla_q_lora_rank",
+                "hybrid_mla_qk_rope_head_dim",
             )
-            self.head_dim = (
-                config.hybrid_index_head_dim
-                if config.hybrid_index_head_dim is not None
-                else config.dsa_index_head_dim
-            )
-            self.index_topk = (
-                config.hybrid_index_topk
-                if config.hybrid_index_topk is not None
-                else config.dsa_index_topk
-            )
+            missing = [
+                name
+                for name in required_fields
+                if getattr(config, name, None) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "hybrid MLA DSA indexer requires explicit hybrid config fields; "
+                    f"missing fields: {', '.join(missing)}"
+                )
+            self.n_heads = config.hybrid_index_n_heads
+            self.head_dim = config.hybrid_index_head_dim
+            self.index_topk = config.hybrid_index_topk
             q_lora_rank = config.hybrid_mla_q_lora_rank
             self.rope_head_dim = config.hybrid_mla_qk_rope_head_dim
         else:

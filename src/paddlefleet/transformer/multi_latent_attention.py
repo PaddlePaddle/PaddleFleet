@@ -359,37 +359,6 @@ class MultiLatentAttention(Attention):
         pg_collection: ProcessGroupCollection | None = None,
         is_mtp_layer: bool = False,
     ) -> None:
-        def _int_config_value(name, default=None):
-            value = getattr(config, name, default)
-            if isinstance(value, int) and not isinstance(value, bool):
-                return value
-            return default
-
-        if (
-            getattr(config, "experimental_attention_variant", None)
-            == "dsv4_hybrid"
-        ):
-            q_lora_rank = _int_config_value("hybrid_mla_q_lora_rank")
-            kv_lora_rank = _int_config_value("hybrid_mla_kv_lora_rank")
-            qk_nope_head_dim = _int_config_value("hybrid_mla_qk_nope_head_dim")
-            qk_rope_head_dim = _int_config_value("hybrid_mla_qk_rope_head_dim")
-            v_head_dim = _int_config_value("hybrid_mla_v_head_dim")
-            num_attention_heads = _int_config_value(
-                "hybrid_mla_num_attention_heads"
-            )
-            num_key_value_heads = _int_config_value(
-                "hybrid_mla_num_key_value_heads"
-            )
-        else:
-            num_attention_heads = _int_config_value("num_attention_heads")
-            v_head_dim = _int_config_value("v_head_dim")
-            q_lora_rank = _int_config_value("q_lora_rank")
-            kv_lora_rank = _int_config_value("kv_lora_rank", v_head_dim)
-            qk_nope_head_dim = _int_config_value("qk_nope_head_dim")
-            qk_rope_head_dim = _int_config_value("qk_rope_head_dim")
-            num_key_value_heads = _int_config_value(
-                "num_key_value_heads", num_attention_heads
-            )
         super().__init__(
             config=config,
             sublayers_spec=sublayers_spec,
@@ -400,29 +369,25 @@ class MultiLatentAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
-        if not hasattr(self, "config"):
-            self.config = config
-        if not hasattr(self, "layer_number"):
-            self.layer_number = layer_number
-        if not hasattr(self, "attn_mask_type"):
-            self.attn_mask_type = attn_mask_type
-        if not hasattr(self, "attention_type"):
-            self.attention_type = attention_type
-        if not hasattr(self, "is_mtp_layer"):
-            self.is_mtp_layer = is_mtp_layer
-        if not hasattr(self, "is_swa"):
-            self.is_swa = False
-        if not hasattr(self, "pg_collection"):
-            self.pg_collection = (
-                pg_collection
-                if pg_collection is not None
-                else ProcessGroupCollection.use_mpu_process_groups()
-            )
-        self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
-        self.v_head_dim = v_head_dim
-        self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_key_value_heads
+        if (
+            getattr(config, "experimental_attention_variant", None)
+            == "dsv4_hybrid"
+        ):
+            self.q_lora_rank = config.hybrid_mla_q_lora_rank
+            self.kv_lora_rank = config.hybrid_mla_kv_lora_rank
+            self.qk_nope_head_dim = config.hybrid_mla_qk_nope_head_dim
+            self.qk_rope_head_dim = config.hybrid_mla_qk_rope_head_dim
+            self.v_head_dim = config.hybrid_mla_v_head_dim
+            self.num_attention_heads = config.hybrid_mla_num_attention_heads
+            self.num_key_value_heads = config.hybrid_mla_num_key_value_heads
+        else:
+            self.q_lora_rank = config.q_lora_rank
+            self.kv_lora_rank = config.kv_lora_rank
+            self.qk_nope_head_dim = config.qk_nope_head_dim
+            self.qk_rope_head_dim = config.qk_rope_head_dim
+            self.v_head_dim = config.v_head_dim
+            self.num_attention_heads = config.num_attention_heads
+            self.num_key_value_heads = config.num_key_value_heads
         tp_size = get_pg_size(self.pg_collection.tp)
         assert self.num_attention_heads % tp_size == 0
         assert self.num_key_value_heads % tp_size == 0
@@ -440,16 +405,12 @@ class MultiLatentAttention(Attention):
             and getattr(self.config, "swa_qk_nope_head_dim", None) is not None
         ):
             self.qk_nope_head_dim = self.config.swa_qk_nope_head_dim
-        else:
-            self.qk_nope_head_dim = qk_nope_head_dim
 
         if (
             self.is_swa
             and getattr(self.config, "swa_qk_rope_head_dim", None) is not None
         ):
             self.qk_rope_head_dim = self.config.swa_qk_rope_head_dim
-        else:
-            self.qk_rope_head_dim = qk_rope_head_dim
 
         self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
         self.head_dim = self.q_head_dim

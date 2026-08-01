@@ -1531,21 +1531,25 @@ class TransformerConfig(ModelParallelConfig):
                     "hybrid_index_head_dim",
                     "hybrid_index_topk",
                 )
-                invalid_index = [
+                configured_index_fields = [
                     name
                     for name in hybrid_index_fields
                     if getattr(self, name, None) is not None
-                    and (
-                        not isinstance(getattr(self, name), int)
-                        or isinstance(getattr(self, name), bool)
-                        or getattr(self, name) <= 0
-                    )
                 ]
-                if invalid_index:
-                    raise ValueError(
-                        "hybrid MLA indexer dimensions must be positive integers when set; "
-                        f"invalid fields: {', '.join(invalid_index)}"
-                    )
+                if configured_index_fields:
+                    invalid_index = [
+                        name
+                        for name in hybrid_index_fields
+                        if not isinstance(getattr(self, name, None), int)
+                        or isinstance(getattr(self, name, None), bool)
+                        or getattr(self, name) <= 0
+                    ]
+                    if invalid_index:
+                        raise ValueError(
+                            "hybrid MLA indexer dimensions must either all be unset "
+                            "or all be explicit positive integers; "
+                            f"invalid fields: {', '.join(invalid_index)}"
+                        )
 
             if (
                 getattr(self, "csa_tilelang_enable_sparse_attn", None)
