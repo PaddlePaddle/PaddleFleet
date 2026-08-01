@@ -1155,7 +1155,7 @@ class MLASelfAttention(MultiLatentAttention):
         num_heads = self.num_attention_heads_per_partition
         qk_nope = self.qk_nope_head_dim
         qk_rope = self.qk_rope_head_dim
-        kv_lora = self.config.kv_lora_rank
+        kv_lora = self.kv_lora_rank
 
         specs = {}
         if hasattr(self, "q_b_proj"):

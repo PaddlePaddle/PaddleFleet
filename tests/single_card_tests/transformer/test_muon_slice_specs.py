@@ -353,6 +353,7 @@ class TestMLASpecs(unittest.TestCase):
     def _fake(self):
         return SimpleNamespace(
             config=SimpleNamespace(kv_lora_rank=8),
+            kv_lora_rank=8,
             num_attention_heads_per_partition=2,
             qk_nope_head_dim=4,
             qk_rope_head_dim=2,
@@ -382,6 +383,23 @@ class TestMLASpecs(unittest.TestCase):
                 "gate_proj.weight": [HIDDEN, 2 * 4],
             },
         )
+
+    def test_uses_effective_kv_lora_rank(self):
+        fake = SimpleNamespace(
+            config=SimpleNamespace(kv_lora_rank=99),
+            kv_lora_rank=8,
+            num_attention_heads_per_partition=2,
+            qk_nope_head_dim=4,
+            qk_rope_head_dim=2,
+            v_head_dim=4,
+            q_b_proj=object(),
+            gate_proj=None,
+        )
+        specs = MLASelfAttention.muon_slice_specs(fake, {})
+        self.assertEqual(
+            specs["kv_a_proj_with_mqa.weight"][1]["head_sizes"], [8, 2]
+        )
+        self.assertEqual(specs["kv_b_proj.weight"][1]["head_sizes"], [4, 4])
 
     def test_without_optional_projections(self):
         fake = self._fake()
