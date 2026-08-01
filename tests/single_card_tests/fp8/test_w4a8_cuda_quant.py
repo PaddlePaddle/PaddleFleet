@@ -14,8 +14,8 @@
 
 """Bit-exact parity tests for the fused W4A8 1x32 CUDA custom ops."""
 
-import os
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -35,6 +35,8 @@ from paddlefleet.transformer.moe.fp8_utils import (
     fused_act_dequant_python,
     quant_blockwize,
 )
+from paddlefleet.transformer.moe.fusion_layer_utils import MlpNode
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 def _prepare_blackwell():
@@ -66,25 +68,47 @@ def _fp8_bits(value):
 
 
 class TestW4A8RuntimeDispatch(unittest.TestCase):
+    def test_fused_quant_model_config(self):
+        self.assertFalse(TransformerConfig().use_w4a8_fused_quant)
+        self.assertTrue(
+            TransformerConfig(use_w4a8_fused_quant=True).use_w4a8_fused_quant
+        )
+
+    def test_mlp_node_forwards_fused_quant_model_config(self):
+        custom_map = SimpleNamespace(
+            token_dispatcher=SimpleNamespace(
+                _comm_manager=SimpleNamespace(tokens_per_expert=[1])
+            ),
+            num_experts_per_device=1,
+        )
+        with mock.patch(
+            "paddlefleet.transformer.moe.fusion_layer_utils."
+            "ExpertsGroupGemmContiguousNode"
+        ) as gemm_node:
+            MlpNode(
+                custom_map,
+                num_experts_per_tok=1,
+                moe_expert_fusion=True,
+                moe_deep_gemm=True,
+                use_w4a8=True,
+                use_w4a8_fused_quant=True,
+            )
+
+        self.assertTrue(gemm_node.call_args.kwargs["use_w4a8"])
+        self.assertTrue(gemm_node.call_args.kwargs["use_w4a8_fused_quant"])
+
     def test_fused_quant_flag_requires_custom_ops(self):
-        with (
-            mock.patch.dict(os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": "0"}),
-            mock.patch.object(fp8_utils, "HAS_W4A8_FUSED_QUANT", False),
-        ):
-            self.assertFalse(fp8_utils._use_w4a8_fused_quant())
+        with mock.patch.object(fp8_utils, "HAS_W4A8_FUSED_QUANT", False):
+            self.assertFalse(fp8_utils._use_w4a8_fused_quant(False))
+
+        with mock.patch.object(fp8_utils, "HAS_W4A8_FUSED_QUANT", True):
+            self.assertTrue(fp8_utils._use_w4a8_fused_quant(True))
 
         with (
-            mock.patch.dict(os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": "1"}),
-            mock.patch.object(fp8_utils, "HAS_W4A8_FUSED_QUANT", True),
-        ):
-            self.assertTrue(fp8_utils._use_w4a8_fused_quant())
-
-        with (
-            mock.patch.dict(os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": "1"}),
             mock.patch.object(fp8_utils, "HAS_W4A8_FUSED_QUANT", False),
             self.assertRaisesRegex(RuntimeError, "requires paddlefleet_ops"),
         ):
-            fp8_utils._use_w4a8_fused_quant()
+            fp8_utils._use_w4a8_fused_quant(True)
 
     def test_quant_dispatches_to_fused_and_python_ops(self):
         value = mock.sentinel.value
@@ -102,8 +126,8 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 return_value=fused_result,
             ) as fused_quant,
         ):
-            self.assertEqual(_w4a8_quant(value, "fp8"), fused_result)
-            self.assertEqual(_w4a8_quant(value, "fp4"), fused_result)
+            self.assertEqual(_w4a8_quant(value, "fp8", True), fused_result)
+            self.assertEqual(_w4a8_quant(value, "fp4", True), fused_result)
             fused_quant.assert_has_calls(
                 [mock.call(value, 0), mock.call(value, 1)]
             )
@@ -138,7 +162,10 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 return_value=fused_result,
             ) as fused_quant,
         ):
-            self.assertEqual(_w4a8_stack_quant(weights, True), fused_result)
+            self.assertEqual(
+                _w4a8_stack_quant(weights, True, use_w4a8_fused_quant=True),
+                fused_result,
+            )
             stack_weights.assert_called_once_with(weights)
             fused_quant.assert_called_once_with(stacked, True)
 
@@ -177,9 +204,17 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 return_value=result,
             ) as fused_quant,
         ):
-            self.assertEqual(_w4a8_weighted_swiglu_quant(value, probs), result)
             self.assertEqual(
-                _w4a8_weighted_swiglu_quant(value, probs, 10), result
+                _w4a8_weighted_swiglu_quant(
+                    value, probs, use_w4a8_fused_quant=True
+                ),
+                result,
+            )
+            self.assertEqual(
+                _w4a8_weighted_swiglu_quant(
+                    value, probs, 10, use_w4a8_fused_quant=True
+                ),
+                result,
             )
             fused_quant.assert_has_calls(
                 [mock.call(value, probs, 0.0), mock.call(value, probs, 10.0)]
@@ -235,12 +270,20 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                     return_value=result,
                 ) as dequant,
             ):
-                self.assertIs(_w4a8_dequant(value, scale), result)
+                self.assertIs(
+                    _w4a8_dequant(
+                        value,
+                        scale,
+                        use_w4a8_fused_quant=enabled,
+                    ),
+                    result,
+                )
                 dequant.assert_called_once_with(value, scale)
 
     @staticmethod
     def _make_node():
         node = object.__new__(ExpertsGroupGemmContiguousNode)
+        node.use_w4a8_fused_quant = True
         node._w4a8_grouped_gemm = mock.Mock(
             side_effect=lambda _x, _xs, _w, _ws, output: output
         )
@@ -273,8 +316,16 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
             ),
         ):
             self.assertIs(node._fwd_gate_up_w4a8(x, weights), gate_output)
-            stack_quant.assert_called_once_with(weights, transpose=True)
-            quant.assert_called_once_with(x, quant_dtype="fp8")
+            stack_quant.assert_called_once_with(
+                weights,
+                transpose=True,
+                use_w4a8_fused_quant=True,
+            )
+            quant.assert_called_once_with(
+                x,
+                quant_dtype="fp8",
+                use_w4a8_fused_quant=True,
+            )
 
         swiglu_q = mock.Mock(shape=[3, 64])
         swiglu_scale = mock.sentinel.swiglu_scale
@@ -300,9 +351,16 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 ),
                 down_output,
             )
-            stack_quant.assert_called_once_with(weights, transpose=True)
+            stack_quant.assert_called_once_with(
+                weights,
+                transpose=True,
+                use_w4a8_fused_quant=True,
+            )
             swiglu_quant.assert_called_once_with(
-                mock.sentinel.o1, probs, node.clamp_value
+                mock.sentinel.o1,
+                probs,
+                node.clamp_value,
+                use_w4a8_fused_quant=True,
             )
 
     def test_w4a8_backward_methods_use_dispatch_helpers(self):
@@ -353,8 +411,16 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                     mock.sentinel.probs_grad,
                 ),
             )
-            stack_quant.assert_called_once_with(weights, transpose=False)
-            quant.assert_called_once_with(grad, quant_dtype="fp8")
+            stack_quant.assert_called_once_with(
+                weights,
+                transpose=False,
+                use_w4a8_fused_quant=True,
+            )
+            quant.assert_called_once_with(
+                grad,
+                quant_dtype="fp8",
+                use_w4a8_fused_quant=True,
+            )
 
         dx = mock.Mock(shape=[3, 64])
         with (
@@ -369,8 +435,16 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
             mock.patch.object(fp8_utils.paddle, "empty", return_value=dx),
         ):
             self.assertIs(node._bwd_gate_up_input_w4a8(grad, weights), dx)
-            stack_quant.assert_called_once_with(weights, transpose=False)
-            quant.assert_called_once_with(grad, quant_dtype="fp8")
+            stack_quant.assert_called_once_with(
+                weights,
+                transpose=False,
+                use_w4a8_fused_quant=True,
+            )
+            quant.assert_called_once_with(
+                grad,
+                quant_dtype="fp8",
+                use_w4a8_fused_quant=True,
+            )
 
     def test_w4a8_weight_grad_uses_dispatch_dequant(self):
         class DequantCalled(Exception):
@@ -388,7 +462,11 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 node.bf16_weight_grad(
                     mock.sentinel.dy, None, mock.sentinel.weights
                 )
-            dequant.assert_called_once_with(node.input_fp8, node.input_scale)
+            dequant.assert_called_once_with(
+                node.input_fp8,
+                node.input_scale,
+                use_w4a8_fused_quant=True,
+            )
 
 
 @unittest.skipUnless(IS_BLACKWELL, "requires a Blackwell CUDA device")
@@ -419,14 +497,13 @@ class TestW4A8CudaQuantParity(unittest.TestCase):
     def test_quantize_runtime_dispatch(self):
         value = paddle.randn([37, 256], dtype="bfloat16") * 3.0
         expected_q, expected_scale = quant_blockwize(value, quant_dtype="fp8")
-        for enabled in ("0", "1"):
-            with (
-                self.subTest(enabled=enabled),
-                mock.patch.dict(
-                    os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": enabled}
-                ),
-            ):
-                actual_q, actual_scale = _w4a8_quant(value, quant_dtype="fp8")
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                actual_q, actual_scale = _w4a8_quant(
+                    value,
+                    quant_dtype="fp8",
+                    use_w4a8_fused_quant=enabled,
+                )
                 self.assert_fp8_equal(actual_q, expected_q)
                 self.assert_tensor_equal(
                     actual_scale, expected_scale, "UE8M0 scale differs"
@@ -516,12 +593,12 @@ class TestW4A8CudaQuantParity(unittest.TestCase):
                 self.assert_tensor_equal(
                     actual_scale, expected_scale, "UE8M0 scale differs"
                 )
-                with mock.patch.dict(
-                    os.environ, {"PADDLEFLEET_W4A8_FUSED_QUANT": "1"}
-                ):
-                    dispatched_q, dispatched_scale = (
-                        _w4a8_weighted_swiglu_quant(value, probs, clamp_value)
-                    )
+                dispatched_q, dispatched_scale = _w4a8_weighted_swiglu_quant(
+                    value,
+                    probs,
+                    clamp_value,
+                    use_w4a8_fused_quant=True,
+                )
                 self.assert_fp8_equal(dispatched_q, expected_q)
                 self.assert_tensor_equal(
                     dispatched_scale,

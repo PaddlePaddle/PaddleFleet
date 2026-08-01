@@ -671,6 +671,9 @@ class TransformerConfig(ModelParallelConfig):
     use_w4a8: bool = False
     """Whether to use w4a8 for mlp gemm."""
 
+    use_w4a8_fused_quant: bool = False
+    """Whether to use fused CUDA operators for W4A8 online quantization."""
+
     full_fp8_computation: bool = False
     """Master switch for FP8 on Linear / ColumnParallelLinear / RowParallelLinear
     and DSv4HybridSelfAttention / CSAIndexer. When ``False`` these layers stay
