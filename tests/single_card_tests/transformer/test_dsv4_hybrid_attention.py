@@ -14,6 +14,7 @@
 
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -55,14 +56,90 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
     build_document_rope_freqs,
 )
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.transformer_layer import (
+    build_self_attention_forward_kwargs,
+)
 
 _SEED = 42
+
+
+class TestLayerAwareAttentionDispatch(unittest.TestCase):
+    def _kwargs(self, layer_kind, in_recompute=False, rope_freqs_cis=None):
+        attention = SimpleNamespace(
+            attention_config=SimpleNamespace(layer_kind=layer_kind)
+        )
+        values = {
+            "attention_mask": object(),
+            "attn_mask_startend_row_indices": object(),
+            "rotary_pos_emb": object(),
+            "rotary_pos_cos": object(),
+            "rotary_pos_sin": object(),
+            "swa_rotary_pos_emb": object(),
+            "swa_rotary_pos_cos": object(),
+            "swa_rotary_pos_sin": object(),
+            "position_ids": object(),
+            "attention_bias": object(),
+            "packed_seq_params": object(),
+            "input_ids": object(),
+            "past_key_values": object(),
+            "layer_idx": 7,
+            "use_cache": True,
+            "in_recompute": in_recompute,
+            "rope_freqs_cis": rope_freqs_cis,
+        }
+        return values, build_self_attention_forward_kwargs(attention, **values)
+
+    def test_mla_owns_rotary_and_rejects_external_bias(self):
+        for in_recompute in (False, True):
+            values, kwargs = self._kwargs("mla", in_recompute=in_recompute)
+            self.assertIs(kwargs["position_ids"], values["position_ids"])
+            self.assertEqual(kwargs["in_recompute"], in_recompute)
+            self.assertIs(kwargs["past_key_values"], values["past_key_values"])
+            self.assertTrue(kwargs["use_cache"])
+            for incompatible in (
+                "rotary_pos_emb",
+                "rotary_pos_cos",
+                "rotary_pos_sin",
+                "swa_rotary_pos_emb",
+                "swa_rotary_pos_cos",
+                "swa_rotary_pos_sin",
+                "rope_freqs_cis",
+                "attention_bias",
+                "input_ids",
+            ):
+                self.assertNotIn(incompatible, kwargs)
+
+    def test_dsv4_receives_external_rotary_bias_and_input_ids(self):
+        for layer_kind in ("hca", "csa", "window"):
+            values, kwargs = self._kwargs(layer_kind, in_recompute=True)
+            for forwarded in (
+                "rotary_pos_emb",
+                "rotary_pos_cos",
+                "rotary_pos_sin",
+                "swa_rotary_pos_emb",
+                "swa_rotary_pos_cos",
+                "swa_rotary_pos_sin",
+                "attention_bias",
+                "input_ids",
+            ):
+                self.assertIs(kwargs[forwarded], values[forwarded])
+            self.assertTrue(kwargs["in_recompute"])
+
+    def test_precomputed_rope_replaces_external_rotary_tensors(self):
+        rope_freqs_cis = object()
+        _, kwargs = self._kwargs("hca", rope_freqs_cis=rope_freqs_cis)
+        self.assertIs(kwargs["rope_freqs_cis"], rope_freqs_cis)
+        self.assertNotIn("rotary_pos_emb", kwargs)
+        self.assertNotIn("rotary_pos_cos", kwargs)
+        self.assertNotIn("rotary_pos_sin", kwargs)
 
 
 class _FakeGroup:
     def __init__(self, nranks=1):
         self.nranks = nranks
+        self.world_size = nranks
         self.ranks = list(range(nranks))
         self.rank = 0
 
@@ -108,6 +185,17 @@ def _make_config(
     tensor_model_parallel_size=1,
     context_parallel_size=1,
     csa_dense_mode=False,
+    experimental_attention_variant="dsv4_hybrid",
+    hybrid_mla_q_lora_rank=1536,
+    hybrid_mla_kv_lora_rank=512,
+    hybrid_mla_qk_nope_head_dim=192,
+    hybrid_mla_qk_rope_head_dim=64,
+    hybrid_mla_v_head_dim=256,
+    hybrid_mla_num_attention_heads=64,
+    hybrid_mla_num_key_value_heads=64,
+    hybrid_index_n_heads=None,
+    hybrid_index_head_dim=None,
+    hybrid_index_topk=None,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -121,13 +209,23 @@ def _make_config(
         bf16=True,
         use_bias=False,
         multi_latent_attention=multi_latent_attention,
-        experimental_attention_variant="dsv4_hybrid",
+        experimental_attention_variant=experimental_attention_variant,
         q_lora_rank=q_lora_rank,
         kv_lora_rank=v_head_dim - qk_pos_emb_head_dim,
         qk_nope_head_dim=v_head_dim - qk_pos_emb_head_dim,
         qk_rope_head_dim=qk_pos_emb_head_dim,
         qk_pos_emb_head_dim=qk_pos_emb_head_dim,
         v_head_dim=v_head_dim,
+        hybrid_mla_q_lora_rank=hybrid_mla_q_lora_rank,
+        hybrid_mla_kv_lora_rank=hybrid_mla_kv_lora_rank,
+        hybrid_mla_qk_nope_head_dim=hybrid_mla_qk_nope_head_dim,
+        hybrid_mla_qk_rope_head_dim=hybrid_mla_qk_rope_head_dim,
+        hybrid_mla_v_head_dim=hybrid_mla_v_head_dim,
+        hybrid_mla_num_attention_heads=hybrid_mla_num_attention_heads,
+        hybrid_mla_num_key_value_heads=hybrid_mla_num_key_value_heads,
+        hybrid_index_n_heads=hybrid_index_n_heads,
+        hybrid_index_head_dim=hybrid_index_head_dim,
+        hybrid_index_topk=hybrid_index_topk,
         o_groups=o_groups,
         o_lora_rank=o_lora_rank,
         rope_type=rope_type,
@@ -177,6 +275,115 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         self_attn_spec = spec.sublayers_spec.self_attn
         self.assertIs(self_attn_spec.layer, DSv4HybridSelfAttention)
 
+    def test_hybrid_mla_and_dsv4_construct_with_local_dimensions(self):
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=2,
+            hidden_size=256,
+            csa_compress_ratios=[-2, 128],
+            dsa_index_n_heads=None,
+        )
+        pg_collection = _FakePGCollection()
+
+        mla_spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=0,
+        ).sublayers_spec.self_attn
+        dsv4_spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=1,
+        ).sublayers_spec.self_attn
+        mla = build_spec_layer(
+            mla_spec, config=config, layer_number=0, pg_collection=pg_collection
+        )
+        dsv4 = build_spec_layer(
+            dsv4_spec,
+            config=config,
+            layer_number=1,
+            pg_collection=pg_collection,
+        )
+
+        self.assertIsInstance(mla, MLASelfAttention)
+        self.assertEqual(mla.q_head_dim, 256)
+        self.assertEqual(mla.v_head_dim, 256)
+        self.assertEqual(list(mla.q_a_proj.weight.shape), [256, 1536])
+        self.assertEqual(list(mla.q_b_proj.weight.shape), [1536, 64 * 256])
+        self.assertEqual(list(mla.kv_a_proj_with_mqa.weight.shape), [256, 576])
+        self.assertEqual(list(mla.kv_b_proj.weight.shape), [512, 64 * 448])
+        self.assertEqual(list(mla.o_proj.weight.shape), [64 * 256, 256])
+
+        self.assertIsInstance(dsv4, DSv4HybridSelfAttention)
+        self.assertEqual(dsv4.q_head_dim, 32)
+        self.assertEqual(dsv4.v_head_dim, 32)
+        self.assertEqual(dsv4.qk_pos_emb_head_dim, 16)
+        self.assertEqual(list(dsv4.linear_q_down_proj.weight.shape), [256, 64])
+        self.assertEqual(list(dsv4.linear_q_up_proj.weight.shape), [64, 8 * 32])
+        self.assertEqual(list(dsv4.linear_kv_proj.weight.shape), [256, 32])
+
+    def test_hybrid_mla_local_rank_reaches_dsa_indexer(self):
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=1,
+            hidden_size=256,
+            q_lora_rank=1024,
+            csa_compress_ratios=[-2],
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=128,
+        )
+        mla_spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=0,
+        ).sublayers_spec.self_attn
+        mla = build_spec_layer(
+            mla_spec,
+            config=config,
+            layer_number=0,
+            pg_collection=_FakePGCollection(),
+        )
+
+        indexer = mla.core_attention.indexer
+        self.assertEqual(config.q_lora_rank, 1024)
+        self.assertEqual(mla.attention_config.q_lora_rank, 1536)
+        self.assertEqual(indexer.rope_head_dim, 64)
+        self.assertEqual(list(indexer.wq_b.weight.shape), [1536, 4 * 128])
+
+        hidden_states = paddle.randn([1, 4, 256], dtype=paddle.bfloat16)
+        q_latent = paddle.randn([1, 4, 1536], dtype=paddle.bfloat16)
+        query, key, weights = indexer.forward_before_topk(
+            hidden_states, q_latent
+        )
+        self.assertEqual(list(query.shape), [1, 4, 4, 128])
+        self.assertEqual(list(key.shape), [1, 4, 128])
+        self.assertEqual(list(weights.shape), [1, 4, 4])
+
+    def test_legacy_all_mla_constructs_without_attention_config(self):
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[0],
+            experimental_attention_variant=None,
+            dsa_index_n_heads=None,
+        )
+        spec = get_attention_spec(
+            config=config,
+            attention_layer_type="multi_latent_attention",
+            attn_mask_type=AttnMaskType.causal,
+        )
+
+        mla = build_spec_layer(
+            spec,
+            config=config,
+            layer_number=0,
+            pg_collection=_FakePGCollection(),
+        )
+
+        self.assertIsInstance(mla, MLASelfAttention)
+        self.assertEqual(mla.attention_config.q_lora_rank, config.q_lora_rank)
+        self.assertEqual(mla.attention_config.kv_lora_rank, config.kv_lora_rank)
+
     def test_config_validation_errors(self):
         with self.assertRaisesRegex(
             ValueError, "csa_compress_ratios to be set"
@@ -201,6 +408,13 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         # ratio 129 is above HCA (128) and rejected.
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[129])
+
+        with self.assertRaisesRegex(ValueError, "hybrid_mla_v_head_dim"):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_mla_v_head_dim=None,
+            )
 
     def test_csa_compress_ratios_accepts_general_set(self):
         # full-causal MQA (-1), window (0), CSA over the full [2, 127] range

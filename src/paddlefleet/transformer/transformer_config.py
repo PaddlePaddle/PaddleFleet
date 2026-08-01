@@ -793,6 +793,36 @@ class TransformerConfig(ModelParallelConfig):
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
 
+    hybrid_mla_q_lora_rank: int | None = None
+    """Layer-local query low-rank width for MLA entries in a DSV4 hybrid model."""
+
+    hybrid_mla_kv_lora_rank: int | None = None
+    """Layer-local KV low-rank width for MLA entries in a DSV4 hybrid model."""
+
+    hybrid_mla_qk_nope_head_dim: int | None = None
+    """Layer-local non-positional QK width for hybrid MLA entries."""
+
+    hybrid_mla_qk_rope_head_dim: int | None = None
+    """Layer-local rotary QK width for hybrid MLA entries."""
+
+    hybrid_mla_v_head_dim: int | None = None
+    """Layer-local value-head width for hybrid MLA entries."""
+
+    hybrid_mla_num_attention_heads: int | None = None
+    """Layer-local query-head count for hybrid MLA entries."""
+
+    hybrid_mla_num_key_value_heads: int | None = None
+    """Layer-local KV-head count for hybrid MLA entries."""
+
+    hybrid_index_n_heads: int | None = None
+    """Layer-local DSA indexer head count for hybrid MLA entries."""
+
+    hybrid_index_head_dim: int | None = None
+    """Layer-local DSA indexer head dimension for hybrid MLA entries."""
+
+    hybrid_index_topk: int | None = None
+    """Layer-local DSA indexer top-k for hybrid MLA entries."""
+
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
@@ -1433,16 +1463,17 @@ class TransformerConfig(ModelParallelConfig):
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
+            from paddlefleet.transformer.hybrid_attention_utils import (
+                get_effective_mtp_layers,
+                resolve_layer_attention_config,
+            )
+
             if self.csa_compress_ratios is None:
                 raise ValueError(
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
-            mtp_num_layers = (
-                self.mtp_num_layers
-                if self.mtp_num_layers > 0
-                else self.num_nextn_predict_layers
-            )
+            mtp_num_layers = get_effective_mtp_layers(self)
             if (
                 len(self.csa_compress_ratios)
                 != self.num_hidden_layers + mtp_num_layers
@@ -1459,12 +1490,25 @@ class TransformerConfig(ModelParallelConfig):
                 is_integral = hasattr(r, "__index__") and type(
                     r
                 ).__name__ not in ("bool", "bool_")
-                if not (is_integral and (r == -1 or r == 0 or 2 <= r <= 128)):
+                if not (is_integral and (r in (-2, -1, 0) or 2 <= r <= 128)):
                     raise ValueError(
                         f"csa_compress_ratios[{i}]={r} is invalid. "
-                        f"Each value must be -1 (full-causal MQA), 0 (window), "
-                        f"an integer in [2, 127] "
+                        f"Each value must be -2 (MLA), -1 (full-causal MQA), "
+                        f"0 (window), an integer in [2, 127] "
                         f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
+                    )
+            if -2 in self.csa_compress_ratios:
+                mla_index = self.csa_compress_ratios.index(-2)
+                if mla_index < self.num_hidden_layers:
+                    resolve_layer_attention_config(
+                        self,
+                        mla_index + self.num_empty_layers_add_in_head,
+                    )
+                else:
+                    resolve_layer_attention_config(
+                        self,
+                        mla_index - self.num_hidden_layers,
+                        is_mtp_layer=True,
                     )
 
             if (

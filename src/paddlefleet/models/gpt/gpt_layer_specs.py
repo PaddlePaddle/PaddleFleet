@@ -119,6 +119,7 @@ def get_attention_spec(
     attention_layer_type: str,
     attn_mask_type: AttnMaskType = AttnMaskType.causal,
     is_mtp_layer: bool = False,
+    attention_config=None,
 ) -> LayerSpec:
     """Build the self_attn LayerSpec based on attention_layer_type.
 
@@ -306,6 +307,7 @@ def get_attention_spec(
             extra_kwargs={
                 "attn_mask_type": attn_mask_type,
                 "is_mtp_layer": is_mtp_layer,
+                "attention_config": attention_config,
             },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
@@ -365,6 +367,7 @@ def get_attention_spec(
             extra_kwargs={
                 "attn_mask_type": attn_mask_type,
                 "is_mtp_layer": is_mtp_layer,
+                "attention_config": attention_config,
             },
             sublayers_spec=DSv4HybridSelfAttentionSublayersSpec(
                 linear_q_down_proj=backend.linear(),
@@ -521,12 +524,35 @@ def get_gpt_layer_local_spec(
             transformer_cls = TransformerLayerWithOverlap
     exp_variant = getattr(config, "experimental_attention_variant", None)
     if exp_variant == "dsv4_hybrid":
-        # Route to DSv4 Hybrid if configured
+        from paddlefleet.transformer.hybrid_attention_utils import (
+            resolve_layer_attention_config,
+        )
+
+        attention_config = resolve_layer_attention_config(
+            config, layer_number, is_mtp_layer
+        )
+        print(
+            "[HybridAttentionConfig] "
+            f"logical_index={attention_config.logical_index} "
+            f"kind={attention_config.layer_kind} "
+            f"ratio={attention_config.compress_ratio} "
+            f"q_lora_rank={attention_config.q_lora_rank} "
+            f"v_head_dim={attention_config.v_head_dim} "
+            f"qk_pos_emb_head_dim={attention_config.qk_pos_emb_head_dim} "
+            f"qk_nope_head_dim={attention_config.qk_nope_head_dim} "
+            f"qk_rope_head_dim={attention_config.qk_rope_head_dim}",
+            flush=True,
+        )
         self_attn_spec = get_attention_spec(
             config=config,
-            attention_layer_type="dsv4_hybrid_attention",
+            attention_layer_type=(
+                "multi_latent_attention"
+                if attention_config.layer_kind == "mla"
+                else "dsv4_hybrid_attention"
+            ),
             attn_mask_type=AttnMaskType.causal,
             is_mtp_layer=is_mtp_layer,
+            attention_config=attention_config,
         )
     elif multi_latent_attention:
         self_attn_spec = get_attention_spec(
@@ -738,10 +764,11 @@ def get_gpt_mtp_layers_spec_for_backend(
 ) -> list[LayerSpec]:
     assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
 
-    if config.mtp_num_layers > 0:
-        mtp_num_layers = config.mtp_num_layers
-    else:
-        mtp_num_layers = config.num_nextn_predict_layers or 0
+    from paddlefleet.transformer.hybrid_attention_utils import (
+        get_effective_mtp_layers,
+    )
+
+    mtp_num_layers = get_effective_mtp_layers(config)
 
     mtp_layer_specs = []
     for i in range(mtp_num_layers):

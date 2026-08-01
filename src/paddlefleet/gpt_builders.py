@@ -50,7 +50,11 @@ def gpt_builder(config, **kwargs):
                 transformer_layer_spec_func(layer_number=real_layer_number)
             )
     mtp_layers_spec = None
-    if config.num_nextn_predict_layers is not None:
+    from paddlefleet.transformer.hybrid_attention_utils import (
+        get_effective_mtp_layers,
+    )
+
+    if get_effective_mtp_layers(config) > 0:
         if (
             hasattr(transformer_layers_spec, "layer_specs")
             and len(transformer_layers_spec.layer_specs) == 0
