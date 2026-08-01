@@ -23,6 +23,7 @@ from paddlefleet.models.common.language_loss.language_loss import (
     MainLanguageLoss,
 )
 from paddlefleet.models.gpt.gpt_layer_specs import (
+    _get_effective_mtp_layers,
     get_gpt_decoder_layers_spec,
     get_gpt_layer_local_spec,
     get_gpt_mtp_layers_spec,
@@ -50,11 +51,8 @@ def gpt_builder(config, **kwargs):
                 transformer_layer_spec_func(layer_number=real_layer_number)
             )
     mtp_layers_spec = None
-    from paddlefleet.transformer.hybrid_attention_utils import (
-        get_effective_mtp_layers,
-    )
 
-    if get_effective_mtp_layers(config) > 0:
+    if _get_effective_mtp_layers(config) > 0:
         if (
             hasattr(transformer_layers_spec, "layer_specs")
             and len(transformer_layers_spec.layer_specs) == 0

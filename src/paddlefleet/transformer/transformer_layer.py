@@ -124,8 +124,7 @@ def build_self_attention_forward_kwargs(
     use_cache=False,
 ):
     """Normalize the kwargs contract for the constructed attention family."""
-    attention_config = getattr(self_attn, "attention_config", None)
-    layer_kind = getattr(attention_config, "layer_kind", None)
+    layer_kind = getattr(self_attn, "layer_kind", None)
     attention_kwargs = {
         "attention_mask": attention_mask,
         "attn_mask_startend_row_indices": attn_mask_startend_row_indices,

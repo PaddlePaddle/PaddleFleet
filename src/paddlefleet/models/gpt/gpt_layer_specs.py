@@ -114,12 +114,90 @@ from paddlefleet.transformer.paddle_norm import (
 LNImpl = WrappedPaddleNorm
 
 
+def _get_effective_mtp_layers(config: TransformerConfig) -> int:
+    mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
+    nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
+    if not isinstance(mtp_num_layers, int) or isinstance(mtp_num_layers, bool):
+        mtp_num_layers = 0
+    if not isinstance(nextn_num_layers, int) or isinstance(
+        nextn_num_layers, bool
+    ):
+        nextn_num_layers = 0
+    if (
+        mtp_num_layers > 0
+        and nextn_num_layers > 0
+        and mtp_num_layers != nextn_num_layers
+    ):
+        raise ValueError(
+            "mtp_num_layers and num_nextn_predict_layers must be equal when "
+            f"both are positive, got {mtp_num_layers} and {nextn_num_layers}"
+        )
+    return mtp_num_layers if mtp_num_layers > 0 else nextn_num_layers
+
+
+def _get_dsv4_hybrid_layer_kind(
+    config: TransformerConfig,
+    layer_number: int,
+    is_mtp_layer: bool = False,
+) -> tuple[int, Literal["mla", "hca", "csa", "window"], int]:
+    if is_mtp_layer:
+        mtp_num_layers = _get_effective_mtp_layers(config)
+        if not 0 <= layer_number < mtp_num_layers:
+            raise IndexError(
+                f"MTP layer_number {layer_number} is outside [0, {mtp_num_layers})"
+            )
+        logical_index = config.num_hidden_layers + layer_number
+    else:
+        head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+        logical_index = layer_number - head_offset
+        if not 0 <= logical_index < config.num_hidden_layers:
+            raise IndexError(
+                f"decoder layer_number {layer_number} resolves to logical index "
+                f"{logical_index}, outside [0, {config.num_hidden_layers})"
+            )
+
+    ratios = getattr(config, "csa_compress_ratios", None)
+    if ratios is None:
+        raise ValueError(
+            "csa_compress_ratios must be set for DSV4 hybrid attention"
+        )
+    if logical_index >= len(ratios):
+        raise IndexError(
+            f"logical layer index {logical_index} has no csa_compress_ratios entry "
+            f"(length {len(ratios)})"
+        )
+    ratio = ratios[logical_index]
+    is_integral = hasattr(ratio, "__index__") and type(ratio).__name__ not in (
+        "bool",
+        "bool_",
+    )
+    if not is_integral:
+        raise ValueError(
+            f"csa_compress_ratios[{logical_index}]={ratio!r} must be an integer"
+        )
+    ratio = int(ratio)
+    if ratio == -2:
+        layer_kind = "mla"
+    elif ratio in (-1, 128):
+        layer_kind = "hca"
+    elif 2 <= ratio < 128:
+        layer_kind = "csa"
+    elif ratio == 0:
+        layer_kind = "window"
+    else:
+        raise ValueError(
+            f"csa_compress_ratios[{logical_index}]={ratio!r} does not identify "
+            "an MLA, HCA, CSA, or window layer"
+        )
+    return logical_index, layer_kind, ratio
+
+
 def get_attention_spec(
     config: TransformerConfig,
     attention_layer_type: str,
     attn_mask_type: AttnMaskType = AttnMaskType.causal,
     is_mtp_layer: bool = False,
-    attention_config=None,
+    compress_ratio: int | None = None,
 ) -> LayerSpec:
     """Build the self_attn LayerSpec based on attention_layer_type.
 
@@ -279,6 +357,10 @@ def get_attention_spec(
             config is not None
             and getattr(config, "dsa_index_n_heads", None) is not None
         )
+        is_hybrid_mla_indexer = (
+            getattr(config, "experimental_attention_variant", None)
+            == "dsv4_hybrid"
+        )
 
         if use_dsa:
             # DSA Indexer sublayers spec (duplicated linear, NOT tensor-parallel)
@@ -295,6 +377,9 @@ def get_attention_spec(
                     indexer=LayerSpec(
                         layer=DSAIndexer,
                         sublayers_spec=dsa_indexer_sublayers,
+                        extra_kwargs={
+                            "is_hybrid_mla_indexer": is_hybrid_mla_indexer,
+                        },
                     ),
                 ),
             )
@@ -307,7 +392,6 @@ def get_attention_spec(
             extra_kwargs={
                 "attn_mask_type": attn_mask_type,
                 "is_mtp_layer": is_mtp_layer,
-                "attention_config": attention_config,
             },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
@@ -367,7 +451,9 @@ def get_attention_spec(
             extra_kwargs={
                 "attn_mask_type": attn_mask_type,
                 "is_mtp_layer": is_mtp_layer,
-                "attention_config": attention_config,
+                "compress_ratio": -1
+                if compress_ratio is None
+                else compress_ratio,
             },
             sublayers_spec=DSv4HybridSelfAttentionSublayersSpec(
                 linear_q_down_proj=backend.linear(),
@@ -524,35 +610,26 @@ def get_gpt_layer_local_spec(
             transformer_cls = TransformerLayerWithOverlap
     exp_variant = getattr(config, "experimental_attention_variant", None)
     if exp_variant == "dsv4_hybrid":
-        from paddlefleet.transformer.hybrid_attention_utils import (
-            resolve_layer_attention_config,
-        )
-
-        attention_config = resolve_layer_attention_config(
+        logical_index, layer_kind, compress_ratio = _get_dsv4_hybrid_layer_kind(
             config, layer_number, is_mtp_layer
         )
         print(
             "[HybridAttentionConfig] "
-            f"logical_index={attention_config.logical_index} "
-            f"kind={attention_config.layer_kind} "
-            f"ratio={attention_config.compress_ratio} "
-            f"q_lora_rank={attention_config.q_lora_rank} "
-            f"v_head_dim={attention_config.v_head_dim} "
-            f"qk_pos_emb_head_dim={attention_config.qk_pos_emb_head_dim} "
-            f"qk_nope_head_dim={attention_config.qk_nope_head_dim} "
-            f"qk_rope_head_dim={attention_config.qk_rope_head_dim}",
+            f"logical_index={logical_index} "
+            f"kind={layer_kind} "
+            f"ratio={compress_ratio}",
             flush=True,
         )
         self_attn_spec = get_attention_spec(
             config=config,
             attention_layer_type=(
                 "multi_latent_attention"
-                if attention_config.layer_kind == "mla"
+                if layer_kind == "mla"
                 else "dsv4_hybrid_attention"
             ),
             attn_mask_type=AttnMaskType.causal,
             is_mtp_layer=is_mtp_layer,
-            attention_config=attention_config,
+            compress_ratio=compress_ratio,
         )
     elif multi_latent_attention:
         self_attn_spec = get_attention_spec(
@@ -764,11 +841,7 @@ def get_gpt_mtp_layers_spec_for_backend(
 ) -> list[LayerSpec]:
     assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
 
-    from paddlefleet.transformer.hybrid_attention_utils import (
-        get_effective_mtp_layers,
-    )
-
-    mtp_num_layers = get_effective_mtp_layers(config)
+    mtp_num_layers = _get_effective_mtp_layers(config)
 
     mtp_layer_specs = []
     for i in range(mtp_num_layers):

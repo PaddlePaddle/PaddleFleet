@@ -48,10 +48,6 @@ from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
 )
-from paddlefleet.transformer.hybrid_attention_utils import (
-    LayerAttentionConfig,
-    resolve_layer_attention_config,
-)
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -79,6 +75,47 @@ def _fleet_fp8_wo_a_gemm_enabled():
 
 
 FLEET_FP8_WO_A_GEMM = _fleet_fp8_wo_a_gemm_enabled()
+
+
+def _resolve_dsv4_compress_ratio(
+    config, layer_number: int, is_mtp_layer: bool
+) -> int:
+    ratios = getattr(config, "csa_compress_ratios", None)
+    if ratios is None:
+        return -1
+    if is_mtp_layer:
+        mtp_num_layers = (
+            getattr(config, "mtp_num_layers", 0)
+            or getattr(config, "num_nextn_predict_layers", 0)
+            or 0
+        )
+        if not 0 <= layer_number < mtp_num_layers:
+            raise IndexError(
+                f"MTP layer_number {layer_number} is outside [0, {mtp_num_layers})"
+            )
+        logical_index = config.num_hidden_layers + layer_number
+    else:
+        head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+        logical_index = layer_number - head_offset
+        if not 0 <= logical_index < config.num_hidden_layers:
+            raise IndexError(
+                f"decoder layer_number {layer_number} resolves to logical index "
+                f"{logical_index}, outside [0, {config.num_hidden_layers})"
+            )
+    if logical_index >= len(ratios):
+        raise IndexError(
+            f"logical layer index {logical_index} has no csa_compress_ratios entry "
+            f"(length {len(ratios)})"
+        )
+    ratio = ratios[logical_index]
+    if not hasattr(ratio, "__index__") or type(ratio).__name__ in (
+        "bool",
+        "bool_",
+    ):
+        raise ValueError(
+            f"csa_compress_ratios[{logical_index}]={ratio!r} must be an integer"
+        )
+    return int(ratio)
 
 
 def _q_rms_norm(
@@ -575,7 +612,7 @@ class DSv4HybridAttention(Attention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
-        attention_config: LayerAttentionConfig | None = None,
+        compress_ratio: int | None = None,
     ):
         super().__init__(
             config=config,
@@ -588,22 +625,32 @@ class DSv4HybridAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
 
-        if attention_config is None:
-            attention_config = resolve_layer_attention_config(
+        if compress_ratio is None:
+            compress_ratio = _resolve_dsv4_compress_ratio(
                 config, layer_number, is_mtp_layer
             )
-        self.attention_config = attention_config
-        self.num_attention_heads = attention_config.num_attention_heads
-        self.num_key_value_heads = attention_config.num_key_value_heads
-        self.v_head_dim = attention_config.v_head_dim
-        self.qk_pos_emb_head_dim = attention_config.qk_pos_emb_head_dim or 0
+
+        if compress_ratio == -1 or compress_ratio == 128:
+            self.layer_kind = "hca"
+        elif compress_ratio == 0:
+            self.layer_kind = "window"
+        elif 2 <= compress_ratio < 128:
+            self.layer_kind = "csa"
+        else:
+            raise ValueError(
+                f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
+            )
+        self.num_attention_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.v_head_dim = config.v_head_dim or config.head_dim
+        self.qk_pos_emb_head_dim = (
+            getattr(config, "qk_pos_emb_head_dim", 0) or 0
+        )
         self.query_projection_size = self.num_attention_heads * self.v_head_dim
         self.q_head_dim = self.v_head_dim
         self.key_hidden_size = self.q_head_dim
         self.val_hidden_size = self.v_head_dim
 
-        # Resolve physical decoder and zero-based MTP numbering in one place.
-        compress_ratio = attention_config.compress_ratio
         # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
         if compress_ratio > 1:
@@ -695,10 +742,10 @@ class DSv4HybridAttention(Attention):
             # Gate input source: q_compressed (post q_layernorm, dim=q_lora_rank)
             # when gated_attn_use_q_lora is set, otherwise the full hidden_states.
             if self.gated_attn_use_q_lora:
-                assert attention_config.q_lora_rank is not None, (
+                assert config.q_lora_rank is not None, (
                     "gated_attn_use_q_lora=True requires q_lora_rank is not None"
                 )
-                gate_in_dim = attention_config.q_lora_rank
+                gate_in_dim = config.q_lora_rank
             else:
                 gate_in_dim = config.hidden_size
             self.gate_proj = build_spec_layer(
@@ -1020,7 +1067,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection = None,
         is_mtp_layer: bool = False,
-        attention_config: LayerAttentionConfig | None = None,
+        compress_ratio: int | None = None,
     ):
         super().__init__(
             config=config,
@@ -1031,10 +1078,10 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             is_mtp_layer=is_mtp_layer,
-            attention_config=attention_config,
+            compress_ratio=compress_ratio,
         )
 
-        self.q_lora_rank = self.attention_config.q_lora_rank
+        self.q_lora_rank = config.q_lora_rank
         q_head_dim = self.v_head_dim  # In DSv4 Hybrid, q_head_dim == v_head_dim
 
         # Q down projection: hidden_size -> q_lora_rank (duplicated)

@@ -1463,17 +1463,24 @@ class TransformerConfig(ModelParallelConfig):
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
-            from paddlefleet.transformer.hybrid_attention_utils import (
-                get_effective_mtp_layers,
-                resolve_layer_attention_config,
-            )
-
             if self.csa_compress_ratios is None:
                 raise ValueError(
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
-            mtp_num_layers = get_effective_mtp_layers(self)
+            mtp_num_layers = (
+                self.mtp_num_layers or self.num_nextn_predict_layers
+            )
+            if (
+                self.mtp_num_layers > 0
+                and self.num_nextn_predict_layers > 0
+                and self.mtp_num_layers != self.num_nextn_predict_layers
+            ):
+                raise ValueError(
+                    "mtp_num_layers and num_nextn_predict_layers must be equal when "
+                    f"both are positive, got {self.mtp_num_layers} and "
+                    f"{self.num_nextn_predict_layers}"
+                )
             if (
                 len(self.csa_compress_ratios)
                 != self.num_hidden_layers + mtp_num_layers
@@ -1498,17 +1505,46 @@ class TransformerConfig(ModelParallelConfig):
                         f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
             if -2 in self.csa_compress_ratios:
-                mla_index = self.csa_compress_ratios.index(-2)
-                if mla_index < self.num_hidden_layers:
-                    resolve_layer_attention_config(
-                        self,
-                        mla_index + self.num_empty_layers_add_in_head,
+                hybrid_mla_fields = (
+                    "hybrid_mla_q_lora_rank",
+                    "hybrid_mla_kv_lora_rank",
+                    "hybrid_mla_qk_nope_head_dim",
+                    "hybrid_mla_qk_rope_head_dim",
+                    "hybrid_mla_v_head_dim",
+                    "hybrid_mla_num_attention_heads",
+                    "hybrid_mla_num_key_value_heads",
+                )
+                invalid = [
+                    name
+                    for name in hybrid_mla_fields
+                    if not isinstance(getattr(self, name, None), int)
+                    or isinstance(getattr(self, name, None), bool)
+                    or getattr(self, name) <= 0
+                ]
+                if invalid:
+                    raise ValueError(
+                        "hybrid MLA dimensions must be explicit positive integers; "
+                        f"invalid fields: {', '.join(invalid)}"
                     )
-                else:
-                    resolve_layer_attention_config(
-                        self,
-                        mla_index - self.num_hidden_layers,
-                        is_mtp_layer=True,
+                hybrid_index_fields = (
+                    "hybrid_index_n_heads",
+                    "hybrid_index_head_dim",
+                    "hybrid_index_topk",
+                )
+                invalid_index = [
+                    name
+                    for name in hybrid_index_fields
+                    if getattr(self, name, None) is not None
+                    and (
+                        not isinstance(getattr(self, name), int)
+                        or isinstance(getattr(self, name), bool)
+                        or getattr(self, name) <= 0
+                    )
+                ]
+                if invalid_index:
+                    raise ValueError(
+                        "hybrid MLA indexer dimensions must be positive integers when set; "
+                        f"invalid fields: {', '.join(invalid_index)}"
                     )
 
             if (

@@ -59,9 +59,6 @@ except (ImportError, RuntimeError):
 
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
-    from paddlefleet.transformer.hybrid_attention_utils import (
-        LayerAttentionConfig,
-    )
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -279,7 +276,7 @@ class DSAIndexer(paddle.nn.Layer):
         sublayers_spec: DSAIndexerSublayersSpec,
         layer_number: int,
         pg_collection: ProcessGroupCollection | None = None,
-        attention_config: LayerAttentionConfig | None = None,
+        is_hybrid_mla_indexer: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -289,42 +286,30 @@ class DSAIndexer(paddle.nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
-        use_hybrid_mla_indexer = (
-            attention_config is not None
-            and attention_config.layer_kind == "mla"
-            and getattr(config, "experimental_attention_variant", None)
-            == "dsv4_hybrid"
-        )
-        if use_hybrid_mla_indexer:
+        if is_hybrid_mla_indexer:
             self.n_heads = (
-                attention_config.hybrid_index_n_heads
-                if attention_config.hybrid_index_n_heads is not None
+                config.hybrid_index_n_heads
+                if config.hybrid_index_n_heads is not None
                 else config.dsa_index_n_heads
             )
             self.head_dim = (
-                attention_config.hybrid_index_head_dim
-                if attention_config.hybrid_index_head_dim is not None
+                config.hybrid_index_head_dim
+                if config.hybrid_index_head_dim is not None
                 else config.dsa_index_head_dim
             )
             self.index_topk = (
-                attention_config.hybrid_index_topk
-                if attention_config.hybrid_index_topk is not None
+                config.hybrid_index_topk
+                if config.hybrid_index_topk is not None
                 else config.dsa_index_topk
             )
+            q_lora_rank = config.hybrid_mla_q_lora_rank
+            self.rope_head_dim = config.hybrid_mla_qk_rope_head_dim
         else:
             self.n_heads = config.dsa_index_n_heads
             self.head_dim = config.dsa_index_head_dim
             self.index_topk = config.dsa_index_topk
-        q_lora_rank = (
-            attention_config.q_lora_rank
-            if attention_config is not None
-            else config.q_lora_rank
-        )
-        self.rope_head_dim = (
-            attention_config.qk_rope_head_dim
-            if attention_config is not None
-            else config.qk_rope_head_dim
-        )
+            q_lora_rank = config.q_lora_rank
+            self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.softmax_scale = self.head_dim**-0.5
 
@@ -1323,7 +1308,6 @@ class DSAttention(FleetLayer):
         num_key_value_heads: int | None = None,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
-        attention_config: LayerAttentionConfig | None = None,
     ):
         super().__init__(config=config)
 
@@ -1347,7 +1331,6 @@ class DSAttention(FleetLayer):
         self.indexer = build_spec_layer(
             sublayers_spec.indexer,
             config=config,
-            attention_config=attention_config,
             layer_number=layer_number,
             pg_collection=pg_collection,
         )

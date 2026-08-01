@@ -67,9 +67,7 @@ _SEED = 42
 
 class TestLayerAwareAttentionDispatch(unittest.TestCase):
     def _kwargs(self, layer_kind, in_recompute=False, rope_freqs_cis=None):
-        attention = SimpleNamespace(
-            attention_config=SimpleNamespace(layer_kind=layer_kind)
-        )
+        attention = SimpleNamespace(layer_kind=layer_kind)
         values = {
             "attention_mask": object(),
             "attn_mask_startend_row_indices": object(),
@@ -346,7 +344,7 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
 
         indexer = mla.core_attention.indexer
         self.assertEqual(config.q_lora_rank, 1024)
-        self.assertEqual(mla.attention_config.q_lora_rank, 1536)
+        self.assertEqual(mla.q_lora_rank, 1536)
         self.assertEqual(indexer.rope_head_dim, 64)
         self.assertEqual(list(indexer.wq_b.weight.shape), [1536, 4 * 128])
 
@@ -359,7 +357,7 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         self.assertEqual(list(key.shape), [1, 4, 128])
         self.assertEqual(list(weights.shape), [1, 4, 4])
 
-    def test_legacy_all_mla_constructs_without_attention_config(self):
+    def test_legacy_all_mla_constructs_with_local_dimensions(self):
         model_parallel_cuda_manual_seed(_SEED)
         config = _make_config(
             num_layers=1,
@@ -381,8 +379,8 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         )
 
         self.assertIsInstance(mla, MLASelfAttention)
-        self.assertEqual(mla.attention_config.q_lora_rank, config.q_lora_rank)
-        self.assertEqual(mla.attention_config.kv_lora_rank, config.kv_lora_rank)
+        self.assertEqual(mla.q_lora_rank, config.q_lora_rank)
+        self.assertEqual(mla.kv_lora_rank, config.kv_lora_rank)
 
     def test_config_validation_errors(self):
         with self.assertRaisesRegex(
