@@ -423,6 +423,7 @@ class TestDSv4HybridSpecs(unittest.TestCase):
         return SimpleNamespace(
             num_attention_heads_per_partition=4,
             o_local_groups=2,
+            use_vha_premix=False,
             gate_proj=object() if gated else None,
         )
 
