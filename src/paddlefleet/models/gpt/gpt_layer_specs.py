@@ -621,13 +621,6 @@ def get_gpt_layer_local_spec(
         ) = _get_dsv4_hybrid_attention_layer_type(
             config, layer_number, is_mtp_layer
         )
-        print(
-            "[HybridAttentionConfig] "
-            f"logical_index={logical_index} "
-            f"attention_layer_type={attention_layer_type} "
-            f"ratio={compress_ratio}",
-            flush=True,
-        )
         self_attn_spec = get_attention_spec(
             config=config,
             attention_layer_type=attention_layer_type,
