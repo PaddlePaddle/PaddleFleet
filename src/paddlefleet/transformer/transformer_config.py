@@ -219,6 +219,26 @@ class TransformerConfig(ModelParallelConfig):
     vha_postmix_rank: int | None = None
     """Rank of the VHA postmix low-rank head mixing matrices."""
 
+    vha_postmix_grouped: bool = False
+    """Postmix head-mixing topology (DSv4 hybrid only). False (default): ungrouped
+    full cross-head mixing over all num_attention_heads (the earlier VHA design),
+    which is NOT absorbable into the grouped output projection. True: within-group
+    block-diagonal mixing that only recombines heads inside each o_group, so it folds
+    into linear_o_group_proj at inference (fuse_vha_postmix_into_o_group_proj)."""
+
+    use_vha_premix: bool = False
+    """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
+    (linear_q_up_proj) with a structured VHA premix: the compressed Q is reshaped into
+    vha_premix_groups groups of dim d_q = q_lora_rank // vha_premix_groups, and each group is
+    expanded into k = num_attention_heads // vha_premix_groups heads via a per-group weight.
+    Requires q_lora_rank % vha_premix_groups == 0 and num_attention_heads % vha_premix_groups
+    == 0. DSv4 hybrid attention only; postmix is unaffected (still keyed on use_vha_attention)."""
+
+    vha_premix_groups: int | None = None
+    """Number of groups g_q the compressed Q is split into for the VHA premix. Per-group latent
+    dim is q_lora_rank // vha_premix_groups; per-group head expansion is num_attention_heads //
+    vha_premix_groups. Only used when use_vha_premix is True."""
+
     vha_q_lora_rank: int | None = None
     """Rank of the VHA Q low-rank projection. When set, Q projects to this rank per head before premix expansion."""
 

@@ -25,12 +25,14 @@ Components:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
+from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.fp8.qat import fp8_simulate_qat
 from paddlefleet.models.common.embeddings.rope_utils import (
@@ -494,6 +496,51 @@ class DSv4HybridAttention(Attention):
         self._full_attn_recompute = None
         self._gate_recompute = None
 
+        # VHA postmix: low-rank cross-head mixing of the attention output, applied
+        # after inverse RoPE (head space) and before the grouped output projection.
+        # Two topologies, selected by config.vha_postmix_grouped:
+        #   grouped=False (default): ungrouped full cross-head mixing over all heads
+        #                  (the earlier VHA design). Higher capacity, but NOT absorbable.
+        #   grouped=True:  within-group block-diagonal mixing (per o_group), which folds
+        #                  into linear_o_group_proj at inference
+        #                  (fuse_vha_postmix_into_o_group_proj).
+        # Reuses the shared use_vha_attention / vha_postmix_rank knobs; premix is
+        # wired separately (use_vha_premix).
+        self.use_vha_postmix = getattr(config, "use_vha_attention", False)
+        self.vha_postmix_grouped = getattr(config, "vha_postmix_grouped", False)
+        if self.use_vha_postmix:
+            group_heads = self.num_attention_heads // self.o_local_groups
+            if self.vha_postmix_grouped:
+                # Per-group mixing on the group_heads axis; rank capped at
+                # group_heads (full-rank), beyond which it is redundant.
+                mix_heads = group_heads
+                u_shape = [self.o_local_groups, group_heads, None]
+            else:
+                # Full cross-head mixing on the nh axis; rank capped at nh.
+                mix_heads = self.num_attention_heads
+                u_shape = [self.num_attention_heads, None]
+            vha_postmix_rank = config.vha_postmix_rank
+            if vha_postmix_rank is None:
+                vha_postmix_rank = mix_heads // 4
+            vha_postmix_rank = max(1, min(vha_postmix_rank, mix_heads))
+            self.vha_postmix_rank = vha_postmix_rank
+            u_shape[-1] = vha_postmix_rank
+            self.vha_postmix_U = self.create_parameter(
+                shape=u_shape,
+                default_initializer=nn.initializer.Normal(mean=0.0, std=0.01),
+            )
+            self.vha_postmix_V = self.create_parameter(
+                shape=u_shape,
+                default_initializer=nn.initializer.Constant(0.0),
+            )
+        # Selective recompute for the VHA postmix scatter chain (independently
+        # configurable via the "vha_postmix" entry in recompute_modules).
+        self.recompute_vha_postmix = (
+            config.recompute_granularity == "selective"
+            and config.recompute_modules is not None
+            and "vha_postmix" in config.recompute_modules
+        )
+
     def forward(
         self,
         hidden_states: Tensor,
@@ -693,6 +740,23 @@ class DSv4HybridAttention(Attention):
                 core_attn_out = paddle.concat([content_part, rot_part], axis=-1)
                 core_attn_out = core_attn_out.reshape([b, sq, -1])
 
+        # VHA postmix: low-rank cross-head mixing while still in head space
+        # ([b, sq, nh, v_head_dim]), after inverse RoPE and before the grouped
+        # output projection. When the whole block is already wrapped in a
+        # full_attn RecomputeWithoutOutput, skip the nested selective recompute
+        # (the full block recompute already frees these activations).
+        if self.use_vha_postmix:
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not _in_full_recompute
+            ):
+                core_attn_out = recompute(
+                    self._apply_vha_postmix, core_attn_out
+                )
+            else:
+                core_attn_out = self._apply_vha_postmix(core_attn_out)
+
         # Grouped output projection
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
         wo_a_weight = self.linear_o_group_proj.reshape(
@@ -737,6 +801,90 @@ class DSv4HybridAttention(Attention):
         else:
             core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
         return core_attn_out
+
+    def _apply_vha_postmix(self, attn_out: Tensor) -> Tensor:
+        """Low-rank cross-head mixing of the attention output.
+
+        attn_out: [b, sq, nh * v_head_dim] (head space, post inverse RoPE).
+
+        Two topologies (config.vha_postmix_grouped):
+
+        - grouped=True: reshape to [b, sq, o_groups, group_heads, v_head_dim] and,
+          within each o_group, recombine that group's heads via a low-rank
+          correction (I + U_g V_g^T) on the head axis, shared across v_head_dim.
+          Block-diagonal w.r.t. o_groups, so at inference it folds into
+          linear_o_group_proj (see fuse_vha_postmix_into_o_group_proj).
+
+        - grouped=False: reshape to [b, sq, nh, v_head_dim] and recombine ALL heads
+          via a single low-rank correction (I + U V^T) on the nh axis. Full
+          cross-head mixing (higher capacity); NOT absorbable into the grouped
+          output projection.
+
+        V is zero-initialized so this is identity at the start of training.
+        """
+        b, sq = attn_out.shape[0], attn_out.shape[1]
+        if self.vha_postmix_grouped:
+            g = self.o_local_groups
+            gh = self.num_attention_heads // g
+            mixed = attn_out.reshape([b, sq, g, gh, self.v_head_dim])
+            z = paddle.einsum("btgjd,gjr->btgrd", mixed, self.vha_postmix_U)
+            delta = paddle.einsum("btgrd,gjr->btgjd", z, self.vha_postmix_V)
+            mixed = mixed + delta
+        else:
+            nh = self.num_attention_heads
+            mixed = attn_out.reshape([b, sq, nh, self.v_head_dim])
+            z = paddle.einsum("bthd,hr->btrd", mixed, self.vha_postmix_U)
+            delta = paddle.einsum("btrd,hr->bthd", z, self.vha_postmix_V)
+            mixed = mixed + delta
+        return mixed.reshape(
+            [b, sq, self.num_attention_heads * self.v_head_dim]
+        )
+
+    def fuse_vha_postmix_into_o_group_proj(self) -> Tensor:
+        """Fold the VHA postmix into linear_o_group_proj for inference.
+
+        Since the postmix head mixing is block-diagonal w.r.t. o_groups, it can
+        be absorbed into the grouped output projection weight, after which the
+        vha_postmix_U/V parameters are no longer needed at inference time.
+
+        Per group g (with B_g = I + U_g V_g^T, shape [group_heads, group_heads]),
+        the fused weight is
+            W_fused[g][r, j', d] = sum_j B_g[j', j] * W[g][r, j, d]
+        where W[g] = linear_o_group_proj.reshape(o_groups, o_lora_rank,
+        group_heads, v_head_dim). The returned tensor has the exact same shape
+        as linear_o_group_proj ([o_groups * o_lora_rank, group_heads *
+        v_head_dim]) and can replace it directly; inference cost is unchanged.
+
+        Returns a detached tensor in linear_o_group_proj's dtype. If postmix is
+        disabled, returns a clone of linear_o_group_proj unchanged.
+        """
+        with paddle.no_grad():
+            if not self.use_vha_postmix:
+                return self.linear_o_group_proj.clone()
+            if not self.vha_postmix_grouped:
+                raise RuntimeError(
+                    "Ungrouped VHA postmix (vha_postmix_grouped=False) performs "
+                    "full cross-head mixing and cannot be folded into the "
+                    "block-diagonal linear_o_group_proj. Use grouped postmix if "
+                    "inference-time absorption is required."
+                )
+            g = self.o_local_groups
+            gh = self.num_attention_heads // g
+            vd = self.v_head_dim
+            r_out = self.config.o_lora_rank
+            orig_dtype = self.linear_o_group_proj.dtype
+            # M_g[j', j] = sum_r U[g, j', r] * V[g, j, r]; B_g = I + M_g.
+            U = self.vha_postmix_U.astype("float32")
+            V = self.vha_postmix_V.astype("float32")
+            M = paddle.einsum("gpr,gjr->gpj", U, V)
+            B = paddle.eye(gh, dtype="float32").unsqueeze(0) + M
+            W = self.linear_o_group_proj.astype("float32").reshape(
+                [g, r_out, gh, vd]
+            )
+            # W_fused[g, r, p, d] = sum_j B[g, p, j] * W[g, r, j, d], p = j'.
+            W_fused = paddle.einsum("gpj,grjd->grpd", B, W)
+            W_fused = W_fused.reshape([g * r_out, gh * vd])
+            return W_fused.astype(orig_dtype)
 
     def get_query_key_value_tensors(
         self,
@@ -807,19 +955,69 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
-        # Q up projection: q_lora_rank -> num_heads * q_head_dim (column parallel)
-        self.linear_q_up_proj = build_spec_layer(
-            sublayers_spec.linear_q_up_proj,
-            self.q_lora_rank,
-            self.num_attention_heads * q_head_dim,
-            config=config,
-            init_method=config.init_method,
-            gather_output=False,
-            bias=False,
-            skip_bias_add=False,
-            is_expert=False,
-            tp_group=self.pg_collection.tp,
-        )
+        # Q up projection: q_lora_rank -> num_heads * q_head_dim (column parallel).
+        # When use_vha_premix is enabled, linear_q_up_proj is replaced by a
+        # structured VHA premix (block-diagonal per group), built below.
+        self.use_vha_premix = getattr(
+            config, "use_vha_attention", False
+        ) and getattr(config, "use_vha_premix", False)
+        if self.use_vha_premix:
+            g_q = config.vha_premix_groups
+            assert g_q is not None, (
+                "use_vha_premix=True requires config.vha_premix_groups to be set"
+            )
+            assert self.num_attention_heads % g_q == 0, (
+                "num_attention_heads must be divisible by vha_premix_groups"
+            )
+            assert self.q_lora_rank % g_q == 0, (
+                "q_lora_rank must be divisible by vha_premix_groups"
+            )
+            self.vha_premix_groups = g_q
+            self.vha_premix_expand = self.num_attention_heads // g_q  # k
+            self.vha_premix_dq = self.q_lora_rank // g_q  # d_q
+            # Structured up-projection (VHA premix, Variant A / shared): the
+            # compressed Q is split into g_q groups of d_q dims, and a SINGLE set
+            # of k = nh // g_q expansion matrices [d_q, q_head_dim] is broadcast
+            # across all groups (weight has no group axis -> 3-D, matching the
+            # attention.py premix convention). Head (kk, g) reads only group g's
+            # d_q dims, so it is still block-diagonal and materializes to a
+            # standard up_proj at inference via export_premix_as_up_proj().
+            # Init matches the prior VHA premix (attention.py) non-square branch:
+            # each [d_q, q_head_dim] block is semi-orthogonal, scaled by
+            # sqrt(q_head_dim / d_q) so the pre-(q_rms_norm) per-element RMS is
+            # preserved across the d_q -> q_head_dim expansion. Cannot zero-init
+            # (there is no residual around Q).
+            premix_scale = math.sqrt(q_head_dim / self.vha_premix_dq)
+            init_blocks = []
+            for _ in range(self.vha_premix_expand):
+                block = paddle.empty([self.vha_premix_dq, q_head_dim])
+                nn.initializer.Orthogonal()(block)
+                init_blocks.append(block * premix_scale)
+            init_weight = paddle.stack(init_blocks).reshape(
+                [self.vha_premix_expand, self.vha_premix_dq, q_head_dim]
+            )
+            self.vha_premix_weight = self.create_parameter(
+                shape=[
+                    self.vha_premix_expand,
+                    self.vha_premix_dq,
+                    q_head_dim,
+                ],
+                default_initializer=nn.initializer.Assign(init_weight),
+            )
+            self.linear_q_up_proj = None
+        else:
+            self.linear_q_up_proj = build_spec_layer(
+                sublayers_spec.linear_q_up_proj,
+                self.q_lora_rank,
+                self.num_attention_heads * q_head_dim,
+                config=config,
+                init_method=config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_group=self.pg_collection.tp,
+            )
 
         # KV projection: hidden_size -> v_head_dim (single head)
         self.linear_kv_proj = build_spec_layer(
@@ -845,7 +1043,10 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
 
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice specs for the DSv4 hybrid projections."""
-        from paddlefleet.transformer.muon_utils import ortho_per_head
+        from paddlefleet.transformer.muon_utils import (
+            ortho_per_head,
+            ortho_stacked,
+        )
 
         if (
             muon_configs.get("muon_qkv_update_mode", "split_head")
@@ -854,10 +1055,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             return {}
 
         specs = {
-            "linear_q_up_proj.weight": (
-                ortho_per_head,
-                {"heads": self.num_attention_heads_per_partition},
-            ),
             # Stored as [o_groups * o_lora_rank, d] but used as [g, r, d] in a
             # grouped gemm, so the leading axis packs o_groups independent
             # matrices and must be split along axis 0.
@@ -866,6 +1063,19 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
                 {"heads": self.o_local_groups, "axis": 0},
             ),
         }
+        if self.use_vha_premix:
+            # VHA premix replaces linear_q_up_proj (which is None here). The
+            # premix weight is a 3D grouped fuse [k, d_q, q_head_dim] whose
+            # leading axis enumerates the k independent expansion matrices, so
+            # orthogonalise per leading-axis slice (split along dim 0). Postmix
+            # (vha_postmix_U/V) is a plain 2D matrix and is intentionally left
+            # unmarked so muon handles it directly.
+            specs["vha_premix_weight"] = (ortho_stacked, {})
+        else:
+            specs["linear_q_up_proj.weight"] = (
+                ortho_per_head,
+                {"heads": self.num_attention_heads_per_partition},
+            )
         if getattr(self, "gate_proj", None) is not None:
             # The gate multiplies the flattened grouped-projection output, whose
             # columns are group-major (group g owns o_lora_rank columns), so the
@@ -910,8 +1120,22 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )  # [b, sq, q_lora_rank]
         q_compressed = self.q_layernorm(q_compressed)
 
-        q, _ = self.linear_q_up_proj(q_compressed)  # [b, sq, n * v_head_dim]
-        q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
+        if self.use_vha_premix:
+            # Structured premix (Variant A / shared): reshape compressed Q into
+            # g_q groups, then expand each group into k heads with a single set of
+            # k weight matrices broadcast across all groups. Head layout is
+            # kk * g_q + g (k outer, g inner), matching export_premix_as_up_proj().
+            g_q = self.vha_premix_groups
+            q = q_compressed.reshape([b, sq, g_q, self.vha_premix_dq])
+            q = paddle.einsum(
+                "btgr,krd->btkgd", q, self.vha_premix_weight
+            )  # [b, sq, k, g_q, q_head_dim]
+            q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
+        else:
+            q, _ = self.linear_q_up_proj(
+                q_compressed
+            )  # [b, sq, n * v_head_dim]
+            q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
         q = _q_rms_norm(
             q,
             getattr(self.config, "rms_norm_eps", 1e-5),
@@ -1009,3 +1233,34 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         value = key
 
         return query, key, value, q_compressed, hidden_states
+
+    def export_premix_as_up_proj(self) -> Tensor:
+        """Materialize the structured VHA premix into a dense standard up-projection
+        weight ``[q_lora_rank, num_attention_heads * q_head_dim]`` (absorption type 1).
+
+        Placement is block-diagonal: group ``g``'s ``d_q`` latent dims feed only the
+        heads ``kk * g_q + g`` (kk = 0..k-1); all other entries are zero. Because the
+        premix is Variant A (shared), every group reuses the same ``k`` weight blocks.
+        The result is equivalent to the training-time einsum and can be dropped into a
+        plain up_proj. NOTE: the structured einsum is cheaper at inference; this dense
+        export exists only for compatibility with kernels expecting a standard up_proj.
+        """
+        with paddle.no_grad():
+            if not self.use_vha_premix:
+                raise RuntimeError(
+                    "export_premix_as_up_proj requires use_vha_premix=True"
+                )
+            g_q = self.vha_premix_groups
+            k = self.vha_premix_expand
+            d_q = self.vha_premix_dq
+            hd = self.v_head_dim
+            nh = self.num_attention_heads
+            orig_dtype = self.vha_premix_weight.dtype
+            W = self.vha_premix_weight.astype("float32")  # [k, d_q, hd]
+            # W_up[g, rr, head, d] = W[kk, rr, d] for head = kk*g_q + g; else 0.
+            W_up = paddle.zeros([g_q, d_q, nh, hd], dtype="float32")
+            for g in range(g_q):
+                for kk in range(k):
+                    W_up[g, :, kk * g_q + g, :] = W[kk]  # [d_q, hd]
+            W_up = W_up.reshape([g_q * d_q, nh * hd])
+            return W_up.astype(orig_dtype)
