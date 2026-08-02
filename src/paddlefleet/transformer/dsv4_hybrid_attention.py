@@ -1317,7 +1317,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             # matrices and must be split along axis 0.
             "linear_o_group_proj": (
                 ortho_per_head,
-                {"heads": self.o_local_groups, "axis": 0},
+                {"heads": self.o_local_groups, "axis": -2},
             ),
         }
         if self.use_vha_premix:
