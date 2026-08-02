@@ -740,6 +740,16 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
         inst = self._build_mla_instance(config)
         self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
+    def test_mla_rejects_non_mha_kv_heads(self):
+        """MLA is MHA-only and should reject num_key_value_heads != num_attention_heads."""
+        config = self._make_config()
+        config.num_key_value_heads = config.num_attention_heads // 2
+
+        with self.assertRaisesRegex(
+            ValueError, "MLA currently supports MHA only"
+        ):
+            self._build_mla_instance(config)
+
 
 class TestForwardDiscardOutputAndRegisterRecompute(unittest.TestCase):
     """Tests for the forward path that calls discard_output_and_register_recompute

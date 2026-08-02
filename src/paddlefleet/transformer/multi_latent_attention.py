@@ -388,6 +388,13 @@ class MultiLatentAttention(Attention):
             self.v_head_dim = config.v_head_dim
             self.num_attention_heads = config.num_attention_heads
             self.num_key_value_heads = config.num_key_value_heads
+        if self.num_key_value_heads != self.num_attention_heads:
+            raise ValueError(
+                "MLA currently supports MHA only; num_key_value_heads must equal "
+                "num_attention_heads. For DSV4 hybrid MLA, set "
+                "hybrid_mla_num_key_value_heads equal to "
+                "hybrid_mla_num_attention_heads."
+            )
         tp_size = get_pg_size(self.pg_collection.tp)
         assert self.num_attention_heads % tp_size == 0
         assert self.num_key_value_heads % tp_size == 0
