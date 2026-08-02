@@ -791,5 +791,134 @@ class TestBlocksPropagation(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Test 8: ValueError for block_attn_res + full_recompute + act_offload
+# ---------------------------------------------------------------------------
+class TestOffloadIncompatibility(unittest.TestCase):
+    """block_attn_res + full_recompute + activation offload must raise."""
+
+    def setUp(self):
+        self.strategy = _init_fleet()
+
+    def test_raises_value_error(self):
+        """Should raise ValueError when all three are enabled."""
+        with self.assertRaises(ValueError) as ctx:
+            config = GPTConfig(
+                num_hidden_layers=4,
+                hidden_size=128,
+                rotary_base=10000,
+                vocab_size=100,
+                rotary_percent=1.0,
+                rope_scaling=1.0,
+                position_embedding_type="rope",
+                num_attention_heads=4,
+                intermediate_size=256,
+                max_sequence_length=32,
+                normalization="RMSNorm",
+                hidden_dropout_prob=0.0,
+                attention_dropout=0.0,
+                init_method=functools.partial(
+                    paddle.nn.init.xavier_uniform_, gain=1.0
+                ),
+                output_layer_init_method=functools.partial(
+                    paddle.nn.init.xavier_uniform_, gain=1.0
+                ),
+                tie_word_embeddings=True,
+                use_qk_norm=True,
+                block_attention_residuals=True,
+                attn_res_block_size=4,
+                recompute_granularity="full",
+                recompute_method="uniform",
+                recompute_num_layers=1,
+                decoderlayer_act_offload_settings={
+                    "type": "full",
+                    "value": "all",
+                },
+            )
+            gpt_builder(config, num_stages=1)
+        self.assertIn("decoderlayer_act_offload", str(ctx.exception))
+
+    def test_no_error_without_offload(self):
+        """No error when offload is disabled."""
+        config = GPTConfig(
+            num_hidden_layers=4,
+            hidden_size=128,
+            rotary_base=10000,
+            vocab_size=100,
+            rotary_percent=1.0,
+            rope_scaling=1.0,
+            position_embedding_type="rope",
+            num_attention_heads=4,
+            intermediate_size=256,
+            max_sequence_length=32,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            tie_word_embeddings=True,
+            use_qk_norm=True,
+            block_attention_residuals=True,
+            attn_res_block_size=4,
+            recompute_granularity="full",
+            recompute_method="uniform",
+            recompute_num_layers=1,
+        )
+        # Should not raise
+        model = gpt_builder(config, num_stages=1)
+        self.assertIsNotNone(model)
+
+
+# ---------------------------------------------------------------------------
+# Test 9: _use_pylayer gating
+# ---------------------------------------------------------------------------
+class TestUsePylayerGating(unittest.TestCase):
+    """BlockAttnRes._use_pylayer is True only for RMSNorm."""
+
+    def setUp(self):
+        self.strategy = _init_fleet()
+
+    def test_rmsnorm_uses_pylayer(self):
+        """With RMSNorm, _use_pylayer should be True."""
+        config = GPTConfig(
+            num_hidden_layers=2,
+            hidden_size=64,
+            rotary_base=10000,
+            vocab_size=100,
+            rotary_percent=1.0,
+            rope_scaling=1.0,
+            position_embedding_type="rope",
+            num_attention_heads=4,
+            intermediate_size=128,
+            max_sequence_length=16,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            tie_word_embeddings=True,
+            use_qk_norm=True,
+            block_attention_residuals=True,
+            attn_res_block_size=2,
+        )
+        model = gpt_builder(config, num_stages=1)
+
+        found = False
+        for m in model.sublayers():
+            if isinstance(m, BlockAttnRes):
+                self.assertTrue(m._use_pylayer)
+                found = True
+                break
+        self.assertTrue(found, "No BlockAttnRes found in model")
+
+
 if __name__ == "__main__":
     unittest.main()

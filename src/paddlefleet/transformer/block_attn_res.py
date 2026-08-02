@@ -42,7 +42,7 @@ from paddle.distributed.fleet.meta_parallel import (
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
 
-from .paddle_norm import get_norm_extra_args
+from .paddle_norm import RMSNorm, get_norm_extra_args
 
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
@@ -222,6 +222,10 @@ class BlockAttnRes(FleetLayer):
         )
         self.norm = build_spec_layer(sublayers_spec.norm, **extra_args)
 
+        # BlockAttnResFunc (PyLayer) hardcodes RMSNorm math internally;
+        # fall back to the standard autograd path for other norms.
+        self._use_pylayer = isinstance(self.norm, RMSNorm)
+
     def forward(self, partial_block: Tensor, blocks: list[Tensor]) -> Tensor:
         """Compute Block Attention Residual.
 
@@ -238,7 +242,7 @@ class BlockAttnRes(FleetLayer):
             Tensor of shape [B, S, H] — the attention-weighted
             combination of all block representations.
         """
-        if self.training:
+        if self.training and self._use_pylayer:
             h = BlockAttnResFunc.apply(
                 partial_block,
                 self.proj_weight,

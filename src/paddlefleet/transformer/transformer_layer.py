@@ -446,6 +446,18 @@ class TransformerLayer(nn.Layer):
             assert self.recompute_mlp is False, (
                 "block_attention_residuals cannot use selective recompute mlp."
             )
+            if self.full_recompute:
+                offload_settings = getattr(
+                    self.config,
+                    "decoderlayer_act_offload_settings",
+                    {"type": "", "value": ""},
+                ) or {"type": "", "value": ""}
+                if offload_settings.get("type", ""):
+                    raise ValueError(
+                        "block_attention_residuals with full_recompute does not "
+                        "support decoderlayer_act_offload_settings. Please "
+                        "disable activation offload or block_attention_residuals."
+                    )
             if self._should_skip_block_attn_res():
                 # MTP layers do not use attention residual — use IdentityOp
                 # to avoid creating params.
