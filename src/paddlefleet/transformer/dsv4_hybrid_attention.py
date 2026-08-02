@@ -511,6 +511,20 @@ class DSv4HybridAttention(Attention):
         if self.use_vha_postmix:
             group_heads = self.num_attention_heads // self.o_local_groups
             if self.vha_postmix_grouped:
+                # Grouped postmix mixes heads within each o_group on the
+                # group_heads axis, so it requires an exact head split across
+                # groups. The constructor only guarantees
+                # (num_attention_heads * v_head_dim) % o_groups == 0, which is
+                # weaker (e.g. nh=6, v_head_dim=4, o_groups=4 passes but yields
+                # group_heads=1 and a 6->4 head reshape mismatch). Enforce the
+                # stronger head-level divisibility here with an explicit
+                # ValueError (assertions are stripped under `python -O`).
+                if self.num_attention_heads % self.o_local_groups != 0:
+                    raise ValueError(
+                        "grouped VHA postmix requires num_attention_heads "
+                        f"({self.num_attention_heads}) to be divisible by "
+                        f"o_groups ({self.o_local_groups})"
+                    )
                 # Per-group mixing on the group_heads axis; rank capped at
                 # group_heads (full-rank), beyond which it is redundant.
                 mix_heads = group_heads
@@ -963,15 +977,28 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         ) and getattr(config, "use_vha_premix", False)
         if self.use_vha_premix:
             g_q = config.vha_premix_groups
-            assert g_q is not None, (
-                "use_vha_premix=True requires config.vha_premix_groups to be set"
-            )
-            assert self.num_attention_heads % g_q == 0, (
-                "num_attention_heads must be divisible by vha_premix_groups"
-            )
-            assert self.q_lora_rank % g_q == 0, (
-                "q_lora_rank must be divisible by vha_premix_groups"
-            )
+            # Explicit ValueError (not assert): assertions are stripped under
+            # `python -O`, which would let an invalid grouping silently produce
+            # a wrong Q expansion instead of failing fast at construction.
+            if g_q is None:
+                raise ValueError(
+                    "use_vha_premix=True requires config.vha_premix_groups "
+                    "to be set"
+                )
+            if g_q <= 0:
+                raise ValueError(
+                    f"vha_premix_groups must be a positive integer, got {g_q}"
+                )
+            if self.num_attention_heads % g_q != 0:
+                raise ValueError(
+                    f"num_attention_heads ({self.num_attention_heads}) must be "
+                    f"divisible by vha_premix_groups ({g_q})"
+                )
+            if self.q_lora_rank % g_q != 0:
+                raise ValueError(
+                    f"q_lora_rank ({self.q_lora_rank}) must be divisible by "
+                    f"vha_premix_groups ({g_q})"
+                )
             self.vha_premix_groups = g_q
             self.vha_premix_expand = self.num_attention_heads // g_q  # k
             self.vha_premix_dq = self.q_lora_rank // g_q  # d_q

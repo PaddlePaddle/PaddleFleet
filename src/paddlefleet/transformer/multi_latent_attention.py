@@ -588,9 +588,15 @@ class MultiLatentAttention(Attention):
         # MLA/MQA have no grouped o_proj to fold a block-diagonal mixer into.
         self.use_vha_postmix = getattr(config, "use_vha_attention", False)
         if self.use_vha_postmix:
-            assert get_pg_size(self.pg_collection.tp) == 1, (
-                "VHA postmix currently supports tensor parallel size 1 only."
-            )
+            # Use an explicit ValueError (not assert): assertions are stripped
+            # under `python -O`, which would silently let TP>1 mix only the
+            # local heads of each rank and deviate from the declared full-head
+            # postmix semantics.
+            if get_pg_size(self.pg_collection.tp) != 1:
+                raise ValueError(
+                    "VHA postmix currently supports tensor parallel size 1 "
+                    f"only, got tp={get_pg_size(self.pg_collection.tp)}."
+                )
             nh = (
                 self.num_attention_heads_per_partition
             )  # == num_attention_heads (TP=1)
