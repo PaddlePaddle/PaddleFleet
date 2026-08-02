@@ -221,10 +221,9 @@ class TransformerConfig(ModelParallelConfig):
 
     vha_postmix_grouped: bool = False
     """Postmix head-mixing topology (DSv4 hybrid only). False (default): ungrouped
-    full cross-head mixing over all num_attention_heads (the earlier VHA design),
-    which is NOT absorbable into the grouped output projection. True: within-group
-    block-diagonal mixing that only recombines heads inside each o_group, so it folds
-    into linear_o_group_proj at inference (fuse_vha_postmix_into_o_group_proj)."""
+    full cross-head mixing over all num_attention_heads (the earlier VHA design).
+    True: within-group block-diagonal mixing that only recombines heads inside each
+    o_group (mixing stays within a group)."""
 
     use_vha_premix: bool = False
     """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection

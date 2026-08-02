@@ -617,11 +617,36 @@ class MultiLatentAttention(Attention):
                     0.0
                 ),  # identity at init
             )
-        self.recompute_vha_postmix = (
+        # Selective recompute for the VHA postmix. Only list configuration is
+        # supported; honours recompute_num_layers + recompute_method
+        # (first_n / block) like the other selective modules.
+        modules = self.config.recompute_modules
+        self.recompute_vha_postmix = False
+        if (
             self.config.recompute_granularity == "selective"
-            and self.config.recompute_modules is not None
-            and "vha_postmix" in self.config.recompute_modules
-        )
+            and modules is not None
+        ):
+            if isinstance(modules, dict) and "vha_postmix" in modules:
+                raise ValueError(
+                    "recompute_modules['vha_postmix'] only supports list "
+                    "configuration"
+                )
+            if isinstance(modules, list) and "vha_postmix" in modules:
+                n = self.config.recompute_num_layers
+                if n is None:
+                    self.recompute_vha_postmix = True
+                elif self.config.recompute_method == "block":
+                    self.recompute_vha_postmix = need_recompute_in_block(
+                        self.layer_number, self.config, n
+                    )
+                elif self.config.recompute_method == "first_n":
+                    self.recompute_vha_postmix = need_recompute_in_first_n(
+                        self.layer_number, self.config, n
+                    )
+                else:
+                    raise ValueError(
+                        "recompute_method must be 'first_n' or 'block'"
+                    )
 
     def _apply_vha_postmix(self, attn_out, U=None, V=None):
         # attn_out: [b, sq, nh_pp * v_head_dim] (head space, pre-gate / pre output proj).

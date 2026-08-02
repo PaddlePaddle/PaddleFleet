@@ -44,6 +44,10 @@ from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
+from paddlefleet.recompute_utils import (
+    need_recompute_in_block,
+    need_recompute_in_first_n,
+)
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.csa_attention import (
@@ -500,10 +504,9 @@ class DSv4HybridAttention(Attention):
         # after inverse RoPE (head space) and before the grouped output projection.
         # Two topologies, selected by config.vha_postmix_grouped:
         #   grouped=False (default): ungrouped full cross-head mixing over all heads
-        #                  (the earlier VHA design). Higher capacity, but NOT absorbable.
-        #   grouped=True:  within-group block-diagonal mixing (per o_group), which folds
-        #                  into linear_o_group_proj at inference
-        #                  (fuse_vha_postmix_into_o_group_proj).
+        #                  (the earlier VHA design). Higher capacity.
+        #   grouped=True:  within-group block-diagonal mixing (per o_group); mixing
+        #                  stays within each o_group.
         # Reuses the shared use_vha_attention / vha_postmix_rank knobs; premix is
         # wired separately (use_vha_premix).
         self.use_vha_postmix = getattr(config, "use_vha_attention", False)
@@ -548,12 +551,33 @@ class DSv4HybridAttention(Attention):
                 default_initializer=nn.initializer.Constant(0.0),
             )
         # Selective recompute for the VHA postmix scatter chain (independently
-        # configurable via the "vha_postmix" entry in recompute_modules).
-        self.recompute_vha_postmix = (
-            config.recompute_granularity == "selective"
-            and config.recompute_modules is not None
-            and "vha_postmix" in config.recompute_modules
-        )
+        # configurable via the "vha_postmix" entry in recompute_modules). Only
+        # list configuration is supported; honours recompute_num_layers +
+        # recompute_method (first_n / block) like the other selective modules.
+        modules = config.recompute_modules
+        self.recompute_vha_postmix = False
+        if config.recompute_granularity == "selective" and modules is not None:
+            if isinstance(modules, dict) and "vha_postmix" in modules:
+                raise ValueError(
+                    "recompute_modules['vha_postmix'] only supports list "
+                    "configuration"
+                )
+            if isinstance(modules, list) and "vha_postmix" in modules:
+                n = config.recompute_num_layers
+                if n is None:
+                    self.recompute_vha_postmix = True
+                elif config.recompute_method == "block":
+                    self.recompute_vha_postmix = need_recompute_in_block(
+                        self.layer_number, config, n
+                    )
+                elif config.recompute_method == "first_n":
+                    self.recompute_vha_postmix = need_recompute_in_first_n(
+                        self.layer_number, config, n
+                    )
+                else:
+                    raise ValueError(
+                        "recompute_method must be 'first_n' or 'block'"
+                    )
 
     def forward(
         self,
@@ -826,13 +850,11 @@ class DSv4HybridAttention(Attention):
         - grouped=True: reshape to [b, sq, o_groups, group_heads, v_head_dim] and,
           within each o_group, recombine that group's heads via a low-rank
           correction (I + U_g V_g^T) on the head axis, shared across v_head_dim.
-          Block-diagonal w.r.t. o_groups, so at inference it folds into
-          linear_o_group_proj (see fuse_vha_postmix_into_o_group_proj).
+          Block-diagonal w.r.t. o_groups (mixing stays within a group).
 
         - grouped=False: reshape to [b, sq, nh, v_head_dim] and recombine ALL heads
           via a single low-rank correction (I + U V^T) on the nh axis. Full
-          cross-head mixing (higher capacity); NOT absorbable into the grouped
-          output projection.
+          cross-head mixing (higher capacity).
 
         V is zero-initialized so this is identity at the start of training.
         """
@@ -853,52 +875,6 @@ class DSv4HybridAttention(Attention):
         return mixed.reshape(
             [b, sq, self.num_attention_heads * self.v_head_dim]
         )
-
-    def fuse_vha_postmix_into_o_group_proj(self) -> Tensor:
-        """Fold the VHA postmix into linear_o_group_proj for inference.
-
-        Since the postmix head mixing is block-diagonal w.r.t. o_groups, it can
-        be absorbed into the grouped output projection weight, after which the
-        vha_postmix_U/V parameters are no longer needed at inference time.
-
-        Per group g (with B_g = I + U_g V_g^T, shape [group_heads, group_heads]),
-        the fused weight is
-            W_fused[g][r, j', d] = sum_j B_g[j', j] * W[g][r, j, d]
-        where W[g] = linear_o_group_proj.reshape(o_groups, o_lora_rank,
-        group_heads, v_head_dim). The returned tensor has the exact same shape
-        as linear_o_group_proj ([o_groups * o_lora_rank, group_heads *
-        v_head_dim]) and can replace it directly; inference cost is unchanged.
-
-        Returns a detached tensor in linear_o_group_proj's dtype. If postmix is
-        disabled, returns a clone of linear_o_group_proj unchanged.
-        """
-        with paddle.no_grad():
-            if not self.use_vha_postmix:
-                return self.linear_o_group_proj.clone()
-            if not self.vha_postmix_grouped:
-                raise RuntimeError(
-                    "Ungrouped VHA postmix (vha_postmix_grouped=False) performs "
-                    "full cross-head mixing and cannot be folded into the "
-                    "block-diagonal linear_o_group_proj. Use grouped postmix if "
-                    "inference-time absorption is required."
-                )
-            g = self.o_local_groups
-            gh = self.num_attention_heads // g
-            vd = self.v_head_dim
-            r_out = self.config.o_lora_rank
-            orig_dtype = self.linear_o_group_proj.dtype
-            # M_g[j', j] = sum_r U[g, j', r] * V[g, j, r]; B_g = I + M_g.
-            U = self.vha_postmix_U.astype("float32")
-            V = self.vha_postmix_V.astype("float32")
-            M = paddle.einsum("gpr,gjr->gpj", U, V)
-            B = paddle.eye(gh, dtype="float32").unsqueeze(0) + M
-            W = self.linear_o_group_proj.astype("float32").reshape(
-                [g, r_out, gh, vd]
-            )
-            # W_fused[g, r, p, d] = sum_j B[g, p, j] * W[g, r, j, d], p = j'.
-            W_fused = paddle.einsum("gpj,grjd->grpd", B, W)
-            W_fused = W_fused.reshape([g * r_out, gh * vd])
-            return W_fused.astype(orig_dtype)
 
     def get_query_key_value_tensors(
         self,
@@ -1007,8 +983,8 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             # of k = nh // g_q expansion matrices [d_q, q_head_dim] is broadcast
             # across all groups (weight has no group axis -> 3-D, matching the
             # attention.py premix convention). Head (kk, g) reads only group g's
-            # d_q dims, so it is still block-diagonal and materializes to a
-            # standard up_proj at inference via export_premix_as_up_proj().
+            # d_q dims, so it is still block-diagonal (mathematically equivalent
+            # to a dense up_proj on the compressed Q).
             # Init matches the prior VHA premix (attention.py) non-square branch:
             # each [d_q, q_head_dim] block is semi-orthogonal, scaled by
             # sqrt(q_head_dim / d_q) so the pre-(q_rms_norm) per-element RMS is
@@ -1151,7 +1127,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             # Structured premix (Variant A / shared): reshape compressed Q into
             # g_q groups, then expand each group into k heads with a single set of
             # k weight matrices broadcast across all groups. Head layout is
-            # kk * g_q + g (k outer, g inner), matching export_premix_as_up_proj().
+            # kk * g_q + g (k outer, g inner).
             g_q = self.vha_premix_groups
             q = q_compressed.reshape([b, sq, g_q, self.vha_premix_dq])
             q = paddle.einsum(
@@ -1260,34 +1236,3 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         value = key
 
         return query, key, value, q_compressed, hidden_states
-
-    def export_premix_as_up_proj(self) -> Tensor:
-        """Materialize the structured VHA premix into a dense standard up-projection
-        weight ``[q_lora_rank, num_attention_heads * q_head_dim]`` (absorption type 1).
-
-        Placement is block-diagonal: group ``g``'s ``d_q`` latent dims feed only the
-        heads ``kk * g_q + g`` (kk = 0..k-1); all other entries are zero. Because the
-        premix is Variant A (shared), every group reuses the same ``k`` weight blocks.
-        The result is equivalent to the training-time einsum and can be dropped into a
-        plain up_proj. NOTE: the structured einsum is cheaper at inference; this dense
-        export exists only for compatibility with kernels expecting a standard up_proj.
-        """
-        with paddle.no_grad():
-            if not self.use_vha_premix:
-                raise RuntimeError(
-                    "export_premix_as_up_proj requires use_vha_premix=True"
-                )
-            g_q = self.vha_premix_groups
-            k = self.vha_premix_expand
-            d_q = self.vha_premix_dq
-            hd = self.v_head_dim
-            nh = self.num_attention_heads
-            orig_dtype = self.vha_premix_weight.dtype
-            W = self.vha_premix_weight.astype("float32")  # [k, d_q, hd]
-            # W_up[g, rr, head, d] = W[kk, rr, d] for head = kk*g_q + g; else 0.
-            W_up = paddle.zeros([g_q, d_q, nh, hd], dtype="float32")
-            for g in range(g_q):
-                for kk in range(k):
-                    W_up[g, :, kk * g_q + g, :] = W[kk]  # [d_q, hd]
-            W_up = W_up.reshape([g_q * d_q, nh * hd])
-            return W_up.astype(orig_dtype)
