@@ -350,8 +350,8 @@ class TestSelfAttentionVHASpecs(unittest.TestCase):
 
 
 class TestMLASpecs(unittest.TestCase):
-    def _fake(self):
-        return SimpleNamespace(
+    def _fake(self, sparse_gated=False):
+        fake = SimpleNamespace(
             config=SimpleNamespace(kv_lora_rank=8),
             kv_lora_rank=8,
             num_attention_heads_per_partition=2,
@@ -361,6 +361,10 @@ class TestMLASpecs(unittest.TestCase):
             q_b_proj=object(),
             gate_proj=object(),
         )
+        if sparse_gated:
+            # Only MQASelfAttention builds this second gated branch.
+            fake.sparse_gate_proj = object()
+        return fake
 
     def test_full_specs(self):
         fake = self._fake()
@@ -409,6 +413,35 @@ class TestMLASpecs(unittest.TestCase):
         self.assertEqual(
             set(specs),
             {"kv_a_proj_with_mqa.weight", "kv_b_proj.weight"},
+        )
+
+    def test_sparse_gate_proj_absent_is_guarded(self):
+        # Plain MLA has no block-sparse branch, so no spec should appear.
+        specs = MLASelfAttention.muon_slice_specs(self._fake(), {})
+        self.assertNotIn("sparse_gate_proj.weight", specs)
+
+    def test_sparse_gate_proj_sliced_per_head(self):
+        # MQA subclass adds a second gated branch whose weight mirrors
+        # gate_proj: width == heads * v_head_dim, sliced into per-head blocks.
+        fake = self._fake(sparse_gated=True)
+        specs = MLASelfAttention.muon_slice_specs(fake, {})
+        self.assertIn("sparse_gate_proj.weight", specs)
+        self.assertEqual(
+            specs["sparse_gate_proj.weight"], specs["gate_proj.weight"]
+        )
+        recorders = _run_specs(
+            specs,
+            {
+                "q_b_proj.weight": [HIDDEN, 2 * (4 + 2)],
+                "kv_a_proj_with_mqa.weight": [HIDDEN, 8 + 2],
+                "kv_b_proj.weight": [HIDDEN, 2 * (4 + 4)],
+                "gate_proj.weight": [HIDDEN, 2 * 4],
+                "sparse_gate_proj.weight": [HIDDEN, 2 * 4],
+            },
+        )
+        self.assertEqual(
+            recorders["sparse_gate_proj.weight"].shapes,
+            [(HIDDEN, 4), (HIDDEN, 4)],
         )
 
     def test_non_split_head_mode(self):

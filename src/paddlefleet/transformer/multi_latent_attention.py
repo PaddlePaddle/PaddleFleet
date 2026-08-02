@@ -1180,6 +1180,14 @@ class MLASelfAttention(MultiLatentAttention):
         )
         if getattr(self, "gate_proj", None) is not None:
             specs["gate_proj.weight"] = (ortho_per_head, {"heads": num_heads})
+        # MQA (subclass) runs a second gated branch for block-sparse attention.
+        # sparse_gate_proj is built from gate_proj's in/out sizes, so it shares
+        # the head-major column layout and needs the same per-head slicing.
+        if getattr(self, "sparse_gate_proj", None) is not None:
+            specs["sparse_gate_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_heads},
+            )
         return specs
 
     def _is_cudagraph_active(self) -> bool:
