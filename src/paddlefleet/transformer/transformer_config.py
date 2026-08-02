@@ -788,6 +788,36 @@ class TransformerConfig(ModelParallelConfig):
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
 
+    hybrid_mla_q_lora_rank: int | None = None
+    """Layer-local query low-rank width for MLA entries in a DSV4 hybrid model."""
+
+    hybrid_mla_kv_lora_rank: int | None = None
+    """Layer-local KV low-rank width for MLA entries in a DSV4 hybrid model."""
+
+    hybrid_mla_qk_nope_head_dim: int | None = None
+    """Layer-local non-positional QK width for hybrid MLA entries."""
+
+    hybrid_mla_qk_rope_head_dim: int | None = None
+    """Layer-local rotary QK width for hybrid MLA entries."""
+
+    hybrid_mla_v_head_dim: int | None = None
+    """Layer-local value-head width for hybrid MLA entries."""
+
+    hybrid_mla_num_attention_heads: int | None = None
+    """Layer-local query-head count for hybrid MLA entries."""
+
+    hybrid_mla_num_key_value_heads: int | None = None
+    """Layer-local KV-head count for hybrid MLA entries."""
+
+    hybrid_index_n_heads: int | None = None
+    """Layer-local DSA indexer head count for hybrid MLA entries."""
+
+    hybrid_index_head_dim: int | None = None
+    """Layer-local DSA indexer head dimension for hybrid MLA entries."""
+
+    hybrid_index_topk: int | None = None
+    """Layer-local DSA indexer top-k for hybrid MLA entries."""
+
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
@@ -1371,10 +1401,18 @@ class TransformerConfig(ModelParallelConfig):
                     "csa_compress_ratios to be set."
                 )
             mtp_num_layers = (
-                self.mtp_num_layers
-                if self.mtp_num_layers > 0
-                else self.num_nextn_predict_layers
+                self.mtp_num_layers or self.num_nextn_predict_layers
             )
+            if (
+                self.mtp_num_layers > 0
+                and self.num_nextn_predict_layers > 0
+                and self.mtp_num_layers != self.num_nextn_predict_layers
+            ):
+                raise ValueError(
+                    "mtp_num_layers and num_nextn_predict_layers must be equal when "
+                    f"both are positive, got {self.mtp_num_layers} and "
+                    f"{self.num_nextn_predict_layers}"
+                )
             if (
                 len(self.csa_compress_ratios)
                 != self.num_hidden_layers + mtp_num_layers
@@ -1391,13 +1429,59 @@ class TransformerConfig(ModelParallelConfig):
                 is_integral = hasattr(r, "__index__") and type(
                     r
                 ).__name__ not in ("bool", "bool_")
-                if not (is_integral and (r == -1 or r == 0 or 2 <= r <= 128)):
+                if not (is_integral and (r in (-2, -1, 0) or 2 <= r <= 128)):
                     raise ValueError(
                         f"csa_compress_ratios[{i}]={r} is invalid. "
-                        f"Each value must be -1 (full-causal MQA), 0 (window), "
-                        f"an integer in [2, 127] "
+                        f"Each value must be -2 (MLA), -1 (full-causal MQA), "
+                        f"0 (window), an integer in [2, 127] "
                         f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
+            if -2 in self.csa_compress_ratios:
+                hybrid_mla_fields = (
+                    "hybrid_mla_q_lora_rank",
+                    "hybrid_mla_kv_lora_rank",
+                    "hybrid_mla_qk_nope_head_dim",
+                    "hybrid_mla_qk_rope_head_dim",
+                    "hybrid_mla_v_head_dim",
+                    "hybrid_mla_num_attention_heads",
+                    "hybrid_mla_num_key_value_heads",
+                )
+                invalid = [
+                    name
+                    for name in hybrid_mla_fields
+                    if not isinstance(getattr(self, name, None), int)
+                    or isinstance(getattr(self, name, None), bool)
+                    or getattr(self, name) <= 0
+                ]
+                if invalid:
+                    raise ValueError(
+                        "hybrid MLA dimensions must be explicit positive integers; "
+                        f"invalid fields: {', '.join(invalid)}"
+                    )
+                hybrid_index_fields = (
+                    "hybrid_index_n_heads",
+                    "hybrid_index_head_dim",
+                    "hybrid_index_topk",
+                )
+                configured_index_fields = [
+                    name
+                    for name in hybrid_index_fields
+                    if getattr(self, name, None) is not None
+                ]
+                if configured_index_fields:
+                    invalid_index = [
+                        name
+                        for name in hybrid_index_fields
+                        if not isinstance(getattr(self, name, None), int)
+                        or isinstance(getattr(self, name, None), bool)
+                        or getattr(self, name) <= 0
+                    ]
+                    if invalid_index:
+                        raise ValueError(
+                            "hybrid MLA indexer dimensions must either all be unset "
+                            "or all be explicit positive integers; "
+                            f"invalid fields: {', '.join(invalid_index)}"
+                        )
 
             if (
                 getattr(self, "csa_tilelang_enable_sparse_attn", None)
