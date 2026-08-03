@@ -1341,11 +1341,16 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         ctx.loss_coeff = float(loss_coeff)
         ctx.indexer_backend = str(indexer_backend)
         ctx.loss_mask = loss_mask
+        # When the backbone is frozen (phase 2), ``output`` is a leaf tensor with
+        # ``stop_gradient=True``. Returning it unchanged would be treated as an
+        # inplace alias, which Paddle rejects for leaf tensors on a grad-enabled
+        # node, so return a fresh tensor and skip its gradient in backward.
+        ctx.output_needs_grad = not output.stop_gradient
         if num_rows_override is not None:
             ctx.num_rows = num_rows_override
         else:
             ctx.num_rows = float(target.shape[0] * target.shape[1])
-        return output
+        return output if ctx.output_needs_grad else output.clone()
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
@@ -1441,7 +1446,8 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         if grad_k.dtype != index_k_comp.dtype:
             grad_k = grad_k.cast(index_k_comp.dtype)
 
-        grads = (grad_output, grad_q, grad_weights, grad_k, None, None, None)
+        grad_main = grad_output if ctx.output_needs_grad else None
+        grads = (grad_main, grad_q, grad_weights, grad_k, None, None, None)
         if getattr(ctx, "loss_mask", None) is not None:
             grads += (None,)
         return grads
