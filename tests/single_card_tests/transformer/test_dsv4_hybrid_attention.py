@@ -2650,6 +2650,101 @@ class TestCSAHybridSharedCacheDispatch(unittest.TestCase):
         self._assert_close(hca_prefill, paddle.concat(hca_dec, axis=1))
 
 
+@_REQUIRES_USABLE_CUDA
+class TestMQADecodeAlignment(unittest.TestCase):
+    """Prefill-vs-decode alignment for a full-causal MQA layer (ratio=-1).
+
+    An MQA layer has no sliding window and no compressor, so its decode step
+    must attend every cached raw position instead of taking the windowed CSA
+    path. Reusing the window index table here would silently truncate the
+    context to ``csa_window_size`` keys, so ``csa_window_size`` is deliberately
+    much smaller than the sequence length to make that failure visible.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        self.config = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-1],
+            csa_window_size=8,
+            dsa_indexer_loss_coeff=0.0,
+        )
+        self.mqa_layer = 0
+
+    def _assert_close(self, ref, got, tol=1e-4):
+        diff = (
+            paddle.abs(ref.cast("float32") - got.cast("float32")).max().item()
+        )
+        self.assertLess(diff, tol, f"max abs diff {diff} exceeds tol {tol}")
+
+    def test_mqa_decode_matches_prefill(self):
+        attn = _build_attention(self.config, layer_number=self.mqa_layer)
+        attn.eval()
+        self.assertTrue(attn.core_attention.is_mqa_layer)
+        n = 48  # > csa_window_size=8, so a windowed decode would diverge
+        paddle.seed(_SEED + n)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        with paddle.no_grad():
+            prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            outs = []
+            for t in range(n):
+                out_t, _ = attn(
+                    hidden_states=hidden[:, t : t + 1, :],
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.mqa_layer,
+                    use_cache=True,
+                )
+                outs.append(out_t)
+            decode_out = paddle.concat(outs, axis=1)
+        self.assertEqual(list(decode_out.shape), list(prefill_out.shape))
+        self._assert_close(prefill_out, decode_out)
+
+    def test_mqa_prefill_prime_then_decode(self):
+        """MQA prefill must populate the cache so decode keeps the history."""
+        attn = _build_attention(self.config, layer_number=self.mqa_layer)
+        attn.eval()
+        n, prefix = 48, 20
+        paddle.seed(_SEED + 21)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        with paddle.no_grad():
+            full_out, _ = attn(hidden_states=hidden, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            prime_out, _ = attn(
+                hidden_states=hidden[:, :prefix, :],
+                attention_mask=None,
+                past_key_values=cache,
+                layer_idx=self.mqa_layer,
+                use_cache=True,
+            )
+            self._assert_close(full_out[:, :prefix, :], prime_out)
+            # The prefill must have handed the whole raw KV prefix to the cache.
+            self.assertEqual(
+                cache.get_csa_state(self.mqa_layer).raw_seq_len(), prefix
+            )
+
+            decode_outs = []
+            for t in range(prefix, n):
+                out_t, _ = attn(
+                    hidden_states=hidden[:, t : t + 1, :],
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.mqa_layer,
+                    use_cache=True,
+                )
+                decode_outs.append(out_t)
+            decode_out = paddle.concat(decode_outs, axis=1)
+        self._assert_close(full_out[:, prefix:, :], decode_out)
+
+
 class TestDSv4PackedForwardBackwardEquivalence(unittest.TestCase):
     """Verify packed B=2 forward/backward matches two independent B=1 runs.
 

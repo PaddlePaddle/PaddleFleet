@@ -838,6 +838,24 @@ def get_compress_topk_idxs_decode(
     )
 
 
+def get_mqa_causal_topk_idxs_decode(
+    batch_size: int,
+    position: int,
+) -> Tensor:
+    """Full-causal MQA indices for a single decode query at ``position``.
+
+    Decode counterpart of :func:`get_mqa_causal_topk_idxs`. An MQA layer has no
+    sliding window and no compressor, so the query at absolute position ``t``
+    attends every cached raw position ``[0, t]``. All ``t + 1`` slots are valid,
+    so no ``-1`` padding and no ``topk_length`` are needed.
+    Returns ``[batch_size, 1, position + 1]``.
+    """
+    idxs = paddle.arange(position + 1)
+    return idxs.reshape([1, 1, position + 1]).expand(
+        [batch_size, 1, position + 1]
+    )
+
+
 def get_mqa_causal_topk_idxs(
     batch_size: int,
     seqlen: int,
@@ -2686,7 +2704,18 @@ class CompressedSparseAttention(FleetLayer):
             )
 
         if self.is_mqa_layer:
-            return self._forward_mqa(query, key, docmask_meta=docmask_meta)
+            output = self._forward_mqa(query, key, docmask_meta=docmask_meta)
+            # MQA has no compressor and no window: the raw KV stream is the
+            # whole cache, so prime it directly instead of going through
+            # _prime_cache_prefill's group bookkeeping.
+            if use_cache and past_key_values is not None:
+                state = past_key_values.get_csa_state(layer_idx)
+                state.raw_kv = key.squeeze(2)  # [b, sq, v_head_dim]
+                state.compressed_kv = None
+                state.idx_compressed_k = None
+                state.x_prev = None
+                state.x_cur = None
+            return output
 
         if docmask_meta is not None and self.compress_ratio > 1:
             actual_n_compressed = docmask_meta.actual_n_compressed
@@ -2886,24 +2915,31 @@ class CompressedSparseAttention(FleetLayer):
             kv_full = state.raw_kv
         offset = state.raw_kv.shape[1]  # == t + 1
 
-        # 4. Sliding-window indices for the single query at absolute pos t.
-        window_idxs = get_window_topk_idxs_decode(self.window_size, b, t)
-
-        # 5. Compressed indices.
-        if ratio > 1 and n_comp > 0:
-            if self.indexer is not None:
-                compress_idxs = (
-                    self._compute_indexer_compressed_topk_idxs_decode(
-                        query, qr, x, state, t, offset, n_comp
-                    )
-                )
-            else:
-                compress_idxs = get_compress_topk_idxs_decode(b, offset, n_comp)
-            if compress_idxs.dtype != window_idxs.dtype:
-                compress_idxs = compress_idxs.cast(window_idxs.dtype)
-            topk_idxs = paddle.concat([window_idxs, compress_idxs], axis=-1)
+        # 4. Index table for the single query at absolute pos t.
+        if self.is_mqa_layer:
+            # Full-causal MQA: no window, no compressor -> attend every cached
+            # raw position [0, t]. n_comp is 0, so kv_full == state.raw_kv.
+            topk_idxs = get_mqa_causal_topk_idxs_decode(b, t)
         else:
-            topk_idxs = window_idxs
+            window_idxs = get_window_topk_idxs_decode(self.window_size, b, t)
+
+            # 5. Compressed indices.
+            if ratio > 1 and n_comp > 0:
+                if self.indexer is not None:
+                    compress_idxs = (
+                        self._compute_indexer_compressed_topk_idxs_decode(
+                            query, qr, x, state, t, offset, n_comp
+                        )
+                    )
+                else:
+                    compress_idxs = get_compress_topk_idxs_decode(
+                        b, offset, n_comp
+                    )
+                if compress_idxs.dtype != window_idxs.dtype:
+                    compress_idxs = compress_idxs.cast(window_idxs.dtype)
+                topk_idxs = paddle.concat([window_idxs, compress_idxs], axis=-1)
+            else:
+                topk_idxs = window_idxs
 
         topk_idxs = topk_idxs.cast("int32")
 
