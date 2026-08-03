@@ -951,7 +951,7 @@ def get_gpt_spec(
     )
 
     # Build output_block_attn_res spec: a pipeline layer placed BEFORE the
-    # final RMSNorm (K3 alignment, see BLOCK_ATTN_RES_K3_ALIGNMENT.md Diff 2).
+    # final RMSNorm (K3 alignment).
     # LM heads no longer own the block_attn_res module.
     output_block_attn_res_spec = None
     if config.block_attention_residuals:
