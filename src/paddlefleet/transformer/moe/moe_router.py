@@ -649,10 +649,28 @@ class StandardMoERouter(nn.Layer):
                 )  # [B, E]
                 _aggregated = all_probs.sum(axis=seq_axis)  # [B, E]
                 _per_expert = _aggregated * tokens_per_expert  # [B, E]
+                _bsz = _per_expert.shape[0]
+                # MG get_tokens_per_expert_and_token_count():
+                #   total_num_tokens = tokens_per_expert.sum() / (topk * bsz)
+                # i.e. the number of *valid routing* tokens per line (padding
+                # rows contribute no routing entry). Without padding this is
+                # exactly max_seq_len, so the no-padding path stays bit-exact.
+                # Kept as a Python scalar (single division) to match MG's
+                # scalar arithmetic instead of a multi-kernel tensor path.
+                _total_num_tokens = float(
+                    tokens_per_expert.sum().item()
+                ) / float(top_k * _bsz)
+                if _total_num_tokens <= 0.0:
+                    # Every line is padding: no routed token, no loss.
+                    return _per_expert.sum() * 0.0
                 _scalar = float(self.num_experts) / (
-                    float(top_k) * float(max_seq_len) * float(max_seq_len)
+                    float(top_k) * _total_num_tokens * _total_num_tokens
                 )
                 seq_aux_loss = _per_expert.sum() * _scalar
+                # MG divides the sequence-level loss by bsz; keep the
+                # single-line case free of the extra op (bit-exact).
+                if _bsz > 1:
+                    seq_aux_loss = seq_aux_loss / float(_bsz)
             else:
                 cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
                     denom
@@ -1375,10 +1393,8 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
-        if self.use_accuracy_compatible:
-            gates_ori = paddle.nn.functional.sigmoid(
-                logits.cast(paddle.float32)
-            ).cast(logits.dtype)
+        if self.use_accuracy_compatible and not use_split:
+            gates_ori = self.gate_score_func(logits).cast(logits.dtype)
             if input_ids_none_zero_mask is not None:
                 gates_ori = gates_ori * valid_mask
         else:

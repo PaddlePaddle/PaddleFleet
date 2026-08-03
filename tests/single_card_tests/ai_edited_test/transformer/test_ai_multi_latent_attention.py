@@ -24,6 +24,7 @@ sys.path.insert(
 )
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -142,6 +143,8 @@ class TestMultiLatentAttentionRopeTypeValidation(unittest.TestCase):
         config.qk_nope_head_dim = 8
         config.qk_rope_head_dim = 8
         config.q_lora_rank = 8
+        config.kv_lora_rank = 8
+        config.num_key_value_heads = 4
 
         spec = MLASelfAttentionSublayersSpec(
             q_a_layernorm=MagicMock(),
@@ -157,6 +160,11 @@ class TestMultiLatentAttentionRopeTypeValidation(unittest.TestCase):
             self_inner.config = config
             self_inner.v_head_dim = config.v_head_dim
             self_inner.num_attention_heads = config.num_attention_heads
+            self_inner.num_key_value_heads = config.num_key_value_heads
+            self_inner.pg_collection = SimpleNamespace(tp=None, cp=None)
+            self_inner.layer_number = kw.get("layer_number", 1)
+            self_inner.attn_mask_type = kw.get("attn_mask_type")
+            self_inner.attention_type = kw.get("attention_type")
             self_inner.is_swa = False
             self_inner.is_mtp_layer = False
 

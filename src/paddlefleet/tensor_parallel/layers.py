@@ -770,6 +770,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
+        ctx.use_accuracy_compatible = use_accuracy_compatible
+        # Cache input.stop_gradient: ``_new_shared_tensor()`` does not
+        # necessarily preserve this flag, and Paddle's PyLayer contract
+        # requires backward to return None at position 0 iff the original
+        # forward input had stop_gradient=True.
         ctx.input_stop_gradient = bool(input.stop_gradient)
         ctx.fp8 = fp8
         ctx.fp8_wgrad = fp8_wgrad

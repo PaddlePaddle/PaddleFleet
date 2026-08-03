@@ -25,3 +25,6 @@
 [submodule "packages/paddlefleet_ops/third_party/fast-hadamard-transform"]
 	path = packages/paddlefleet_ops/third_party/fast-hadamard-transform
 	url = https://github.com/PFCCLab/fast-hadamard-transform.git
+[submodule "packages/paddlefleet_ops/third_party/flash-linear-attention"]
+	path = packages/paddlefleet_ops/third_party/flash-linear-attention
+	url = https://github.com/PFCCLab/flash-linear-attention.git

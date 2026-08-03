@@ -305,7 +305,13 @@ class TestCudnnBackendDispatch(unittest.TestCase):
         b, sq, h, hn, s_kv, topk = 1, 2, 3, 4, 6, 4
 
         def fake_fwd(
-            q, kv, attn_sink, topk_idxs, sm_scale=None, indexer_topk=0
+            q,
+            kv,
+            attn_sink,
+            topk_idxs,
+            sm_scale=None,
+            indexer_topk=0,
+            topk_length=None,
         ):
             bb, ss, hh, dd = q.shape
             out = paddle.ones([bb, ss, hh, dd], dtype=q.dtype)
@@ -349,7 +355,52 @@ class TestCudnnBackendDispatch(unittest.TestCase):
             self.assertEqual(q.grad.shape, [b, sq, h, hn])
             self.assertEqual(kv.grad.shape, [b, s_kv, hn])
             self.assertEqual(sink.grad.shape, [h])
+
+            # With topk_length the PyLayer takes one extra (non-differentiable)
+            # input, so backward has to return one extra placeholder gradient.
+            q2 = paddle.randn([b, sq, h, hn], dtype="float32")
+            q2.stop_gradient = False
+            kv2 = paddle.randn([b, s_kv, hn], dtype="float32")
+            kv2.stop_gradient = False
+            sink2 = paddle.randn([h], dtype="float32")
+            sink2.stop_gradient = False
+            length = paddle.full([b, sq], topk, dtype="int32")
+
+            out = csa_sparse_attn(
+                q2,
+                kv2,
+                sink2,
+                idx,
+                0.5,
+                backend="cudnn",
+                topk_length=length,
+            )
+            out.sum().backward()
+            self.assertEqual(q2.grad.shape, [b, sq, h, hn])
+            self.assertEqual(kv2.grad.shape, [b, s_kv, hn])
+            self.assertEqual(sink2.grad.shape, [h])
         finally:
             fwd.flash_mla_sparse_attn = orig_fwd
             if orig_bwd is not None:
                 cudnn_pkg.csa_sparse_attn_bwd_cudnn = orig_bwd
+
+    def test_topk_length_rejected_by_tilelang_backend(self):
+        from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
+
+        b, sq, h, hn, s_kv, topk = 1, 2, 3, 4, 6, 4
+        q = paddle.randn([b, sq, h, hn], dtype="float32")
+        kv = paddle.randn([b, s_kv, hn], dtype="float32")
+        sink = paddle.randn([h], dtype="float32")
+        idx = paddle.randint(0, s_kv, [b, sq, topk]).cast("int32")
+        length = paddle.full([b, sq], topk, dtype="int32")
+
+        with self.assertRaisesRegex(NotImplementedError, "backend='tilelang'"):
+            csa_sparse_attn(
+                q,
+                kv,
+                sink,
+                idx,
+                0.5,
+                backend="tilelang",
+                topk_length=length,
+            )

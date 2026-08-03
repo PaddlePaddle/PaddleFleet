@@ -33,6 +33,40 @@ from .utils import element_mul_kernel
 
 MAX_FUSED_SIZE = 65536 // 2
 
+# --- CE kernel launch tuning -------------------------------------------------
+# The CE kernels stream the whole vocab row [n_cols] in a BLOCK_SIZE-wide loop,
+# so BLOCK_SIZE controls only the per-program register tile, NOT how much of
+# the row is covered. Sizing BLOCK_SIZE to next_pow2(V) (capped at 32768) means
+# each of the (num_warps*32) threads has to hold V/threads columns; for large
+# vocab (e.g. V=201216) that is 32 fp32/thread plus all the SegLU temporaries,
+# which overflows the register file. The compiler then caps registers at 1
+# block/SM and spills the tile to local memory (HBM) — measured as
+# 52.7 GB actual DRAM traffic vs 9.9 GB ideal (5.3x), ~11x the mem-bound floor.
+#
+# Instead, size the launch from a per-thread element budget: cap the tile small
+# enough to stay register-resident, then pick num_warps so each thread handles
+# ~CE_ELEMENTS_PER_THREAD columns. Tuned to 2048 tile / 4 warps -> 16
+# cols/thread, giving zero local spill and ~2.1x speedup over the old 32768/32.
+CE_BLOCK_SIZE_CAP = 2048
+CE_ELEMENTS_PER_THREAD = 16
+
+
+def _select_ce_launch_config(n_cols):
+    """Pick (BLOCK_SIZE, num_warps) from a per-thread element budget.
+
+    BLOCK_SIZE is capped so the register tile + SegLU temporaries stay in
+    registers (no local-memory spill); num_warps is derived so each thread
+    processes ~CE_ELEMENTS_PER_THREAD columns of the tile.
+    """
+    block_size = min(
+        MAX_FUSED_SIZE,
+        triton.next_power_of_2(n_cols),
+        CE_BLOCK_SIZE_CAP,
+    )
+    num_warps = block_size // (32 * CE_ELEMENTS_PER_THREAD)
+    num_warps = max(1, min(32, num_warps))
+    return block_size, num_warps
+
 
 def fused_linear_cross_entropy_forward(
     _input,
@@ -86,7 +120,7 @@ def fused_linear_cross_entropy_forward(
 
     BT, H = _input.shape
     V = weight.shape[0]  # weight 是 [V, H]
-    BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+    BLOCK_SIZE, ce_num_warps = _select_ce_launch_config(V)
 
     chunk_size = triton.cdiv(BT, num_chunks)
 
@@ -191,7 +225,7 @@ def fused_linear_cross_entropy_forward(
                 HAS_GRADIENTS=needs_grad_logits,
                 HAS_MULTIMAX_GRADIENTS=multimax_requires_grad,
                 BLOCK_SIZE=BLOCK_SIZE,
-                num_warps=32,
+                num_warps=ce_num_warps,
             )
         else:
             liger_cross_entropy_kernel[(n_rows,)](
@@ -207,7 +241,7 @@ def fused_linear_cross_entropy_forward(
                 reduction=reduction,
                 HAS_GRADIENTS=needs_grad_logits,
                 BLOCK_SIZE=BLOCK_SIZE,
-                num_warps=32,
+                num_warps=ce_num_warps,
             )
 
         loss_1d[start_idx:end_idx] = loss_1d_slice
