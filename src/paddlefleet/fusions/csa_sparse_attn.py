@@ -21,6 +21,8 @@ final sparse MQA attention:
   - "cudnn": FlashMLA sparse forward + cuDNN DSA backward
 """
 
+import functools
+
 import paddle
 from paddle import Tensor
 
@@ -126,6 +128,24 @@ def _csa_compute_topk_length(topk_idxs_flat: Tensor) -> Tensor:
     return trailing_len
 
 
+@functools.cache
+def _csa_bwd_honours_topk_length_holes() -> bool:
+    """Whether the cuDNN DSA backward kernel guards ``-1`` inside ``topk_length``.
+
+    ``_csa_compute_topk_length`` returns a *trailing* bound, so ``-1`` entries may
+    still appear inside ``[0, topk_length)`` (multi-doc leading/interior holes).
+    The SM100 kernel keeps its ``topk_idx >= 0`` guard on that path, but the SM90
+    kernel drops it once ``topk_length`` is given: it dereferences ``mKV[-1]``
+    while loading KV and atomically adds dKV at a negative row offset -> CUDA 700.
+
+    Until the SM90 kernel is fixed upstream, report False there so the caller
+    falls back to the ``topk_length=None`` path, which keeps both guards. That
+    path is functionally identical; it only loses the early-stop speedup.
+    """
+    major, _ = paddle.device.cuda.get_device_capability()
+    return major >= 10
+
+
 class CSASparseAttention(paddle.autograd.PyLayer):
     @staticmethod
     def forward(
@@ -209,7 +229,13 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             lse_flat = lse.reshape([b * sq, np_heads])
             topk_idxs_flat = _local_to_global_flat(topk_idxs, s_kv)
 
-            topk_length = _csa_compute_topk_length(topk_idxs_flat)
+            # SM90's backward kernel is unsafe with a trailing topk_length bound
+            # (see _csa_bwd_honours_topk_length_holes), so fall back to None there.
+            topk_length = (
+                _csa_compute_topk_length(topk_idxs_flat)
+                if _csa_bwd_honours_topk_length_holes()
+                else None
+            )
 
             dq_flat, dkv_flat, d_sink = csa_sparse_attn_bwd_cudnn(
                 q_flat,
