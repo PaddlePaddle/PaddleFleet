@@ -205,6 +205,20 @@ class GPTEmbedding(FleetLayer):
                 if self.multimodal_embedding
                 else position_ids,
             )
+            # Inject ngram MoE auxiliary loss (load-balance L_aux) into the
+            # backward pass via AddAuxiliaryLoss, mirroring the MoE router
+            # aux_loss pattern.  When ngram_moe is disabled or
+            # load_balance_coef == 0, ngram_aux_loss is None and this is a
+            # no-op.
+            ngram_aux_loss = getattr(self.embedding, "ngram_aux_loss", None)
+            if self.training and ngram_aux_loss is not None:
+                from paddlefleet.transformer.moe.moe_utils import (
+                    AddAuxiliaryLoss,
+                )
+
+                decoder_input = AddAuxiliaryLoss.apply(
+                    decoder_input, ngram_aux_loss
+                )
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
             if (
                 self.config.expert_model_parallel_size > 1
