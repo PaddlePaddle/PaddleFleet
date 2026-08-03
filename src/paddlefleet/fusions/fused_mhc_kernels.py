@@ -172,7 +172,8 @@ if _CUTILE_AVAILABLE:
         original_shape = input_logits.shape
         hc = original_shape[-1]
         N_batch = input_logits.size // (hc * hc)
-        TILE_SIZE = math.gcd(N_batch, 128)
+        # Optimized: TILE_SIZE=64 is fastest for fwd (0.061ms vs 0.071ms@128)
+        TILE_SIZE = math.gcd(N_batch, 64)
         out = paddle.empty(shape=[N_batch, hc, hc], dtype=input_logits.dtype)
         M_init = paddle.empty(shape=[N_batch, hc, hc], dtype=input_logits.dtype)
         ct.launch(
@@ -200,7 +201,8 @@ if _CUTILE_AVAILABLE:
         original_shape = grad_output.shape
         hc = original_shape[-1]
         N_batch = grad_output.size // (hc * hc)
-        TILE_SIZE = math.gcd(N_batch, 128)
+        # Optimized: TILE_SIZE=64 is fastest for bwd (0.158ms vs 0.234ms@128)
+        TILE_SIZE = math.gcd(N_batch, 64)
         ws_M = paddle.empty(
             shape=[N_batch * 2 * num_iterations, hc, hc], dtype="float32"
         )
@@ -310,8 +312,9 @@ if _CUTILE_AVAILABLE:
     ) -> tuple[Tensor, Tensor]:
         s, b, n, C = x.shape
         sb = s * b
-        TILE_C = math.gcd(C, 1024)
-        TILE_M = math.gcd(sb, 4)
+        # Optimized: TM=2, TC=min(C,4096) is fastest for bwd (0.185ms vs 0.190ms@TM=4/TC=1024)
+        TILE_C = min(C, 4096) if C <= 4096 else math.gcd(C, 1024)
+        TILE_M = math.gcd(sb, 2)
         gx = paddle.empty(shape=[sb, n, C], dtype=x.dtype)
         gh = paddle.empty(shape=[sb, n], dtype=x.dtype)
         ct.launch(
@@ -619,7 +622,15 @@ if _CUTILE_AVAILABLE:
     ) -> Tensor:
         s, b, n, C = original_residual.shape
         sb = s * b
-        TILE_C = math.gcd(C, 1024)
+        # Optimized: use largest power-of-2 tile that divides C, up to 4096
+        # cuTile requires TILE_C to be a power of 2
+        TILE_C = (
+            math.gcd(C, 4096)
+            if C % 4096 == 0
+            else math.gcd(C, 2048)
+            if C % 2048 == 0
+            else math.gcd(C, 1024)
+        )
         TILE_SIZE = math.gcd(sb, 1)
         out = paddle.empty(shape=[sb, n, C], dtype=h_res.dtype)
         grid = (math.ceil(sb / TILE_SIZE),)
@@ -668,7 +679,8 @@ if _CUTILE_AVAILABLE:
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
         s, b, n, C = original_residual.shape
         sb = s * b
-        TILE_C = math.gcd(C, 1024)
+        # Optimized: use 2048 when possible (fastest for bwd), fall back to gcd for non-power-of-2 C
+        TILE_C = math.gcd(C, 2048) if C % 2048 == 0 else math.gcd(C, 1024)
         TILE_SIZE = math.gcd(sb, 1)
         g_hr = paddle.empty(shape=[sb, n, n], dtype=h_res.dtype)
         g_res = paddle.empty(shape=[sb, n, C], dtype=h_res.dtype)
@@ -980,7 +992,8 @@ if _CUTILE_AVAILABLE:
     ) -> tuple[Tensor, Tensor, Tensor]:
         M, K = x.shape
         N = weight.shape[0]
-        TILE_M = 128
+        # Optimized: TILE_M=64, TILE_K=128 is fastest (0.113ms vs 0.145ms@128/128)
+        TILE_M = 64
         TILE_N = _next_power_of_2(N)
         TILE_K = 128
         num_tiles_m = math.ceil(M / TILE_M)
@@ -1026,7 +1039,8 @@ if _CUTILE_AVAILABLE:
             paddle.device.cuda.get_device_properties().multi_processor_count
         )
         if K >= 8192:
-            TILE_SIZE_M, TILE_SIZE_K = 128, 128
+            # Optimized: TM=64, TK=128 is fastest (0.186ms vs 0.208ms@128/128)
+            TILE_SIZE_M, TILE_SIZE_K = 64, 128
             grid = (math.ceil(K / TILE_SIZE_K), 1)
             ct.launch(
                 _get_cuda_stream(),

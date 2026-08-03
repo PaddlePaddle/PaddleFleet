@@ -32,6 +32,7 @@ from ..utils import (
     scaled_init_method_normal,
     truncated_init_method_normal,
 )
+from .activations import situ
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -190,6 +191,12 @@ class TransformerConfig(ModelParallelConfig):
 
     hidden_act: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
+
+    activation_situ_beta: float = 1.0
+    """Scale of the tanh term in the SiTU gate activation."""
+
+    activation_situ_linear_beta: float | None = None
+    """Optional tanh scale applied to the linear branch of SiTU-GLU."""
 
     use_bias: bool = False
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
@@ -410,6 +417,14 @@ class TransformerConfig(ModelParallelConfig):
     sigmoid_gate_fusion: bool = False
     """If True, use Triton fused sigmoid gate kernel."""
 
+    dsv4_q_rms_norm_fusion: bool = False
+    """If True, use the Triton weight-free fused kernel for query RMS norm in the
+    DSV4 hybrid attention path. Only takes effect when swa_high_precision_norm=False."""
+    dsv4_yarn_rope_fusion: bool = False
+    """If True, use the Triton fused kernel to build the YaRN RoPE frequency table
+    in the DSV4 hybrid attention path. Only the DSV4 hybrid attention path reads this
+    field; the standard MLA / DSA YaRN paths ignore it."""
+
     ####################
     # activation recomputation
     ####################
@@ -484,7 +499,7 @@ class TransformerConfig(ModelParallelConfig):
     """MoE Feed-Forward Network hidden size"""
 
     topk_method: str = "greedy"
-    """Options are greedy, group_limited_greedy, no_auxtc"""
+    """Options are greedy, group_limited_greedy, noaux_tc, quantile_balancing"""
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
@@ -499,7 +514,9 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use fusion node for MoE layer. Default is True"""
 
     moe_router_load_balancing_type: str = "aux_loss"
-    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
+    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn, none.
+    Use 'none' together with router_aux_loss_coef=0 when the router balances
+    load on its own (required by topk_method='quantile_balancing')."""
 
     moe_layer_freq: int | list[int] | None = None
     """Frequency between MoE layers and Dense layers. Accepts either:
@@ -589,6 +606,11 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
+
+    qb_n_bins: int = 1000
+    """Number of histogram bins for Quantile Balancing. Only used when
+    topk_method='quantile_balancing'. Higher values give more precise
+    quantile estimation at the cost of slightly more communication."""
 
     moe_split_feature_routing: bool = False
     """Enable multi-view (split-feature) MoE routing. When True, the router
@@ -765,11 +787,8 @@ class TransformerConfig(ModelParallelConfig):
     using_sonic_moe: bool = False
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
 
-    sonicmoe_quant_format: str = "32x32"
-    """Quantization format used in SonicMoE for quantizing weights, options are 32x32 and 1x32."""
-
-    sonicmoe_save_upgate_out_in_fp8: bool = False
-    """Save the up-gate output in FP8 or BF16, if True, save in FP8."""
+    fp8_weight_quant_format: str = "32x32"
+    """Quantization format for quantizing weights, options are 32x32 and 1x32. Currently only used in SonicMoE."""
 
     ####################
     # MLA
@@ -791,6 +810,36 @@ class TransformerConfig(ModelParallelConfig):
 
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
+
+    hybrid_mla_q_lora_rank: int | None = None
+    """Layer-local query low-rank width for MLA entries in a DSV4 hybrid model."""
+
+    hybrid_mla_kv_lora_rank: int | None = None
+    """Layer-local KV low-rank width for MLA entries in a DSV4 hybrid model."""
+
+    hybrid_mla_qk_nope_head_dim: int | None = None
+    """Layer-local non-positional QK width for hybrid MLA entries."""
+
+    hybrid_mla_qk_rope_head_dim: int | None = None
+    """Layer-local rotary QK width for hybrid MLA entries."""
+
+    hybrid_mla_v_head_dim: int | None = None
+    """Layer-local value-head width for hybrid MLA entries."""
+
+    hybrid_mla_num_attention_heads: int | None = None
+    """Layer-local query-head count for hybrid MLA entries."""
+
+    hybrid_mla_num_key_value_heads: int | None = None
+    """Layer-local KV-head count for hybrid MLA entries."""
+
+    hybrid_index_n_heads: int | None = None
+    """Layer-local DSA indexer head count for hybrid MLA entries."""
+
+    hybrid_index_head_dim: int | None = None
+    """Layer-local DSA indexer head dimension for hybrid MLA entries."""
+
+    hybrid_index_topk: int | None = None
+    """Layer-local DSA indexer top-k for hybrid MLA entries."""
 
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
@@ -898,6 +947,51 @@ class TransformerConfig(ModelParallelConfig):
     Leave ``False`` for production runs (DSA is faster)."""
 
     # cache_mla_latents: bool = False
+
+    ####################
+    # Linear attention (GatedDeltaNet / KimiDeltaAttention)
+    ####################
+
+    linear_conv_kernel_dim: int = 4
+    """Kernel size of the short causal depthwise convolution applied to q/k/v.
+
+    Corresponds to ``linear_attn_config["short_conv_kernel_size"]`` in Kimi's
+    HuggingFace config."""
+
+    linear_key_head_dim: int = 128
+    """Per-head dimension of the linear-attention query/key vectors."""
+
+    linear_value_head_dim: int = 128
+    """Per-head dimension of the linear-attention value vectors. KDA requires it
+    to equal :attr:`linear_key_head_dim` because its forget gate is per-channel
+    over the key dimension."""
+
+    linear_num_key_heads: int = 16
+    """Number of linear-attention query/key heads. Must divide
+    :attr:`linear_num_value_heads` (GVA) and the tensor parallel size."""
+
+    linear_num_value_heads: int = 32
+    """Number of linear-attention value heads. Must be divisible by the tensor
+    parallel size."""
+
+    linear_gate_lora_rank: int | None = None
+    """KDA only. Bottleneck rank of the forget-gate (and, when
+    :attr:`linear_use_full_rank_gate` is False, the output-gate) low-rank
+    projection. None falls back to :attr:`linear_value_head_dim`, which is what
+    Kimi uses."""
+
+    linear_use_full_rank_gate: bool = True
+    """KDA only. If True the output gate is a single full-rank projection folded
+    into in_proj; if False it is a second low-rank pair (g_a_proj / g_b_proj).
+
+    Corresponds to ``linear_attn_config["use_full_rank_gate"]``."""
+
+    linear_gate_lower_bound: float | None = -5.0
+    """KDA only. Lower bound of the log-space forget gate. When set, the gate is
+    ``lower_bound * sigmoid(exp(A_log) * (a + dt_bias))``, naturally clamped to
+    ``[lower_bound, 0)``. None switches to ``-exp(A_log) * softplus(a + dt_bias)``.
+
+    Corresponds to ``linear_attn_config["gate_lower_bound"]``."""
 
     ####################
     # DSA (DeepSeek Sparse Attention)
@@ -1132,6 +1226,8 @@ class TransformerConfig(ModelParallelConfig):
             if isinstance(value, str):
                 if value == "gelu_pytorch_tanh":
                     func = functools.partial(F.gelu, approximate=True)
+                elif value == "situ":
+                    func = situ
                 else:
                     func = getattr(F, value)
                 setattr(self, key, func)
@@ -1143,6 +1239,10 @@ class TransformerConfig(ModelParallelConfig):
                 )
         elif key == "dtype":
             self.params_dtype = value
+        elif key == "sonicmoe_quant_format":
+            raise ValueError(
+                "sonicmoe_quant_format is deprecated. Use fp8_weight_quant_format instead."
+            )
         else:
             setattr(self, key, value)
 
@@ -1374,6 +1474,13 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
+        # Hyper-connection (mHC) validation
+        if self.use_fused_mhc:
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "use_fused_mhc requires enable_hyper_connections=True."
+                )
+
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:
@@ -1382,10 +1489,18 @@ class TransformerConfig(ModelParallelConfig):
                     "csa_compress_ratios to be set."
                 )
             mtp_num_layers = (
-                self.mtp_num_layers
-                if self.mtp_num_layers > 0
-                else self.num_nextn_predict_layers
+                self.mtp_num_layers or self.num_nextn_predict_layers
             )
+            if (
+                self.mtp_num_layers > 0
+                and self.num_nextn_predict_layers > 0
+                and self.mtp_num_layers != self.num_nextn_predict_layers
+            ):
+                raise ValueError(
+                    "mtp_num_layers and num_nextn_predict_layers must be equal when "
+                    f"both are positive, got {self.mtp_num_layers} and "
+                    f"{self.num_nextn_predict_layers}"
+                )
             if (
                 len(self.csa_compress_ratios)
                 != self.num_hidden_layers + mtp_num_layers
@@ -1395,12 +1510,66 @@ class TransformerConfig(ModelParallelConfig):
                     f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
             for i, r in enumerate(self.csa_compress_ratios):
-                if not (isinstance(r, int) and (r == 0 or 2 <= r <= 128)):
+                # Accept python int and numpy integer scalars (a ratios list
+                # loaded from npy/np.load yields np.int64, which would otherwise
+                # be rejected); reject bool / np.bool_ so True does not sneak
+                # through as 1, and reject floats.
+                is_integral = hasattr(r, "__index__") and type(
+                    r
+                ).__name__ not in ("bool", "bool_")
+                if not (is_integral and (r in (-2, -1, 0) or 2 <= r <= 128)):
                     raise ValueError(
                         f"csa_compress_ratios[{i}]={r} is invalid. "
-                        f"Each value must be 0 (window), an integer in [2, 127] "
+                        f"Each value must be -2 (MLA), -1 (full-causal MQA), "
+                        f"0 (window), an integer in [2, 127] "
                         f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
+            if -2 in self.csa_compress_ratios:
+                hybrid_mla_fields = (
+                    "hybrid_mla_q_lora_rank",
+                    "hybrid_mla_kv_lora_rank",
+                    "hybrid_mla_qk_nope_head_dim",
+                    "hybrid_mla_qk_rope_head_dim",
+                    "hybrid_mla_v_head_dim",
+                    "hybrid_mla_num_attention_heads",
+                    "hybrid_mla_num_key_value_heads",
+                )
+                invalid = [
+                    name
+                    for name in hybrid_mla_fields
+                    if not isinstance(getattr(self, name, None), int)
+                    or isinstance(getattr(self, name, None), bool)
+                    or getattr(self, name) <= 0
+                ]
+                if invalid:
+                    raise ValueError(
+                        "hybrid MLA dimensions must be explicit positive integers; "
+                        f"invalid fields: {', '.join(invalid)}"
+                    )
+                hybrid_index_fields = (
+                    "hybrid_index_n_heads",
+                    "hybrid_index_head_dim",
+                    "hybrid_index_topk",
+                )
+                configured_index_fields = [
+                    name
+                    for name in hybrid_index_fields
+                    if getattr(self, name, None) is not None
+                ]
+                if configured_index_fields:
+                    invalid_index = [
+                        name
+                        for name in hybrid_index_fields
+                        if not isinstance(getattr(self, name, None), int)
+                        or isinstance(getattr(self, name, None), bool)
+                        or getattr(self, name) <= 0
+                    ]
+                    if invalid_index:
+                        raise ValueError(
+                            "hybrid MLA indexer dimensions must either all be unset "
+                            "or all be explicit positive integers; "
+                            f"invalid fields: {', '.join(invalid_index)}"
+                        )
 
             if (
                 getattr(self, "csa_tilelang_enable_sparse_attn", None)

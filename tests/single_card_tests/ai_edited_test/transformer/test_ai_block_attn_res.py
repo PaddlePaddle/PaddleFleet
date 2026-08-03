@@ -99,7 +99,9 @@ class TestBlockAttnResForward(unittest.TestCase):
     def test_forward_with_single_block(self, mock_build):
         """Test forward with a single completed block."""
         mock_norm = MagicMock()
-        mock_norm.return_value = paddle.randn([1, 2, 4, 64])
+        mock_norm.side_effect = lambda x: x
+        mock_norm.weight = paddle.ones([64])
+        mock_norm.variance_epsilon = 1e-5
         mock_build.return_value = mock_norm
 
         config = _make_config()
@@ -116,7 +118,9 @@ class TestBlockAttnResForward(unittest.TestCase):
     def test_forward_with_multiple_blocks(self, mock_build):
         """Test forward with multiple completed blocks."""
         mock_norm = MagicMock()
-        mock_norm.return_value = paddle.randn([3, 2, 4, 64])
+        mock_norm.side_effect = lambda x: x
+        mock_norm.weight = paddle.ones([64])
+        mock_norm.variance_epsilon = 1e-5
         mock_build.return_value = mock_norm
 
         config = _make_config()
@@ -133,7 +137,9 @@ class TestBlockAttnResForward(unittest.TestCase):
     def test_forward_with_no_completed_blocks(self, mock_build):
         """Test forward with no completed blocks (only partial)."""
         mock_norm = MagicMock()
-        mock_norm.return_value = paddle.randn([1, 2, 4, 64])
+        mock_norm.side_effect = lambda x: x
+        mock_norm.weight = paddle.ones([64])
+        mock_norm.variance_epsilon = 1e-5
         mock_build.return_value = mock_norm
 
         config = _make_config()

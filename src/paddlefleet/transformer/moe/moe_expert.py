@@ -31,6 +31,7 @@ from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
 )
+from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -170,7 +171,6 @@ class GroupedMLPExpert(FleetLayer):
     ):
         super().__init__(config=config)
         self.config: TransformerConfig = config
-        self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
         # Intermediate size for the local shard of every expert. When using the
@@ -192,14 +192,26 @@ class GroupedMLPExpert(FleetLayer):
         )
 
         if self.config.gated_linear_unit:
-            if self.config.hidden_act not in [F.silu, F.gelu]:
-                raise ValueError(
-                    "Activation function must be silu or gelu when using GroupedMLP."
-                )
+            if self.config.hidden_act in [F.silu, F.gelu]:
 
-            def glu(x):
-                x = paddle.chunk(x, 2, dim=-1)
-                return self.config.hidden_act(x[0]) * x[1]
+                def glu(x):
+                    x = paddle.chunk(x, 2, dim=-1)
+                    return self.config.hidden_act(x[0]) * x[1]
+
+            elif self.config.hidden_act == situ:
+
+                def glu(x):
+                    return situ_glu(
+                        x,
+                        beta=self.config.activation_situ_beta,
+                        linear_beta=self.config.activation_situ_linear_beta,
+                    )
+
+            else:
+                raise ValueError(
+                    "Activation function must be silu, gelu, or situ when "
+                    "using GroupedMLP."
+                )
 
             self.activation_func = glu
         else:
@@ -258,6 +270,26 @@ class GroupedMLPExpert(FleetLayer):
                 self.config.output_layer_init_method(self.weight2)
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
+
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice specs for fused grouped-gemm expert weights.
+
+        weight1 (fused gate/up) is split by shape when ``muon_ffn_split`` is on;
+        weight2 (down) is always orthogonalised per-expert (grouped gemm is
+        inherently a fused 3D expert tensor).
+        """
+        from paddlefleet.transformer.muon_utils import (
+            ortho_gate_up,
+            ortho_stacked,
+        )
+
+        specs = {}
+        if self.config.gated_linear_unit and muon_configs.get(
+            "muon_ffn_split", False
+        ):
+            specs["weight1"] = (ortho_gate_up, {})
+        specs["weight2"] = (ortho_stacked, {})
+        return specs
 
     def forward(
         self,
@@ -545,9 +577,13 @@ class SonicMoEExpert(GroupedMLPExpert):
         pg_collection: ProcessGroupCollection | None = None,
         intermediate_size_per_partition: int | None = None,
     ):
-        assert config.gated_linear_unit is True, (
-            "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
-        )
+        if config.hidden_act != F.silu or not config.gated_linear_unit:
+            raise ValueError(
+                "SonicMoE only supports SwiGLU (hidden_act=F.silu and "
+                "gated_linear_unit=True), but got "
+                f"hidden_act={config.hidden_act} and "
+                f"gated_linear_unit={config.gated_linear_unit}."
+            )
         super().__init__(
             num_local_experts=num_local_experts,
             config=config,
@@ -565,9 +601,6 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.sonic_moe_config.fuse_y1_quant = True
         self.sonic_moe_config.fuse_y1_bf16_trunc = True
         self.sonic_moe_config.recompute_z = False
-        self.sonic_moe_config.save_z_fp8 = (
-            self.config.sonicmoe_save_upgate_out_in_fp8
-        )
         clamp_value = self.config.activation_func_clamp_value
         self.sonic_moe_config.swiglu_clamp_value = (
             0.0 if clamp_value is None else float(clamp_value)
@@ -607,7 +640,7 @@ class SonicMoEExpert(GroupedMLPExpert):
 
     def _release_fp8_weight_after_fwd(self, recompute_moe_gate_up):
         release_fp8_weight_after_fwd = (
-            self.config.sonicmoe_quant_format == "1x32"
+            self.config.fp8_weight_quant_format == "1x32"
             and self._is_last_micro_batch
             and not g_shard_bypass_dygraph_optimizer
             and not recompute_moe_gate_up
@@ -698,9 +731,9 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.convert_weights_to_sonic_layout()
         self.clear_fp8_weights()
 
-        iso32 = self.config.sonicmoe_quant_format == "32x32"
-        assert self.config.sonicmoe_quant_format in ["32x32", "1x32"], (
-            f"sonic_moe_quant_format {self.config.sonicmoe_quant_format} is not supported."
+        iso32 = self.config.fp8_weight_quant_format == "32x32"
+        assert self.config.fp8_weight_quant_format in ["32x32", "1x32"], (
+            f"fp8_weight_quant_format {self.config.fp8_weight_quant_format} is not supported."
         )
         payload = quantize_native_fp8_weights(
             self.weight1,
