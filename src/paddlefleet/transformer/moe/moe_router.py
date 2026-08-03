@@ -387,6 +387,70 @@ class StandardMoERouter(nn.Layer):
             )  # Used in MoECorrectionBiasAdjustCallback
             self.expert_usage.stop_gradient = True
 
+        if self.topk_method == "quantile_balancing":
+            if getattr(self.config, "moe_topk_fusion", False):
+                raise ValueError(
+                    "quantile_balancing is incompatible with moe_topk_fusion. "
+                    "The MoETopkFusion kernel does not support QB's histogram-based "
+                    "bias update, and enabling both causes incorrect gate normalization. "
+                    "Please set moe_topk_fusion=False when using quantile_balancing."
+                )
+            if self.routing_type != "none":
+                raise ValueError(
+                    "quantile_balancing is a self-contained load balancing method, "
+                    "so the auxiliary-loss based balancing must be turned off "
+                    "explicitly. Please set moe_router_load_balancing_type='none', "
+                    f"but got {self.routing_type!r}."
+                )
+            if self.config.router_aux_loss_coef:
+                raise ValueError(
+                    "quantile_balancing is a self-contained load balancing method. "
+                    "A non-zero router_aux_loss_coef keeps the auxiliary load "
+                    "balancing loss active and optimizes a second, competing "
+                    "balancing objective. Please set router_aux_loss_coef=0 when "
+                    "using quantile_balancing, but got "
+                    f"{self.config.router_aux_loss_coef!r}."
+                )
+            if self.n_group != 1:
+                raise ValueError(
+                    "Quantile Balancing currently only supports n_group=1. "
+                    "Multi-group routing (n_group>1) is not compatible with QB because "
+                    "the group pre-selection changes the effective cutoff in a way that "
+                    "cannot be captured by a single per-expert histogram. "
+                    f"Got n_group={self.n_group}."
+                )
+            # Bias vector -- same name as noaux_tc for checkpoint compatibility
+            if not self.config.gpt_model_use_experimental_version:
+                self.register_buffer(
+                    "e_score_correction_bias",
+                    paddle.zeros((self.num_experts,), dtype=paddle.float32),
+                )
+            else:
+                self.register_buffer(
+                    "e_score_correction_bias",
+                    paddle.zeros((1, self.num_experts), dtype=paddle.float32),
+                )
+            self._cast_to_low_precision = False
+
+            # Histogram accumulator: [n_experts, B]
+            self.qb_n_bins = getattr(config, "qb_n_bins", 1000)
+            self.qb_histogram = paddle.zeros(
+                shape=[self.num_experts, self.qb_n_bins],
+                dtype=paddle.int32,
+            )
+            self.qb_histogram.stop_gradient = True
+
+            # Expert usage for logging/diagnostics
+            self.expert_usage = paddle.zeros(
+                shape=[self.num_experts],
+                dtype=paddle.int64,
+            )
+            self.expert_usage.stop_gradient = True
+
+            # Binning range -- initialized conservatively, updated by callback
+            self.qb_bin_min = -1.0
+            self.qb_bin_max = 1.0
+
         # Hash-routing state. Activated lazily via set_layer_number() so that the
         # router knows its layer index.
         self.is_hash_layer = False
@@ -985,6 +1049,160 @@ class StandardMoERouter(nn.Layer):
 
         return topk_weight, topk_idx
 
+    def _topk_quantile_balancing(
+        self,
+        scores: paddle.Tensor,
+        k: int,
+        n_group: int,
+        topk_group: int,
+        valid_mask: paddle.Tensor | None = None,
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
+        """Quantile Balancing top-k selection.
+
+        Same routing logic as noaux_tc: bias affects only expert selection,
+        not gate weights. Additionally accumulates per-expert required_bias
+        into a histogram for the QB callback to recover quantile-based bias.
+
+        Args:
+            scores (paddle.Tensor): [bsz*seq_len, n_experts] raw gating scores
+            k (int): number of experts to select per token
+            n_group (int): number of expert groups
+            topk_group (int): number of groups selected
+            valid_mask (paddle.Tensor | None): [bsz*seq_len, 1] mask marking
+                non-padding tokens. Padding rows must not enter the histogram:
+                their scores have been zeroed out by the caller, so they would
+                all collapse into a single bin and skew the recovered quantile.
+                None means no padding information is available and every row is
+                treated as a valid token.
+
+        Returns:
+            tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
+            topk_weight: [bsz*seq_len, k] -- gate weights from ORIGINAL scores
+            topk_idx: [bsz*seq_len, k] -- selected expert indices
+        """
+        bsz_seq_len, n_experts = scores.shape
+        if n_group != 1:
+            raise ValueError(
+                "Quantile Balancing currently only supports n_group=1. "
+                "Multi-group routing (n_group>1) is not compatible with QB because "
+                "the group pre-selection changes the effective cutoff in a way that "
+                "cannot be captured by a single per-expert histogram. "
+                f"Got n_group={n_group}."
+            )
+
+        assert self.e_score_correction_bias is not None, (
+            "e_score_correction_bias is None for quantile_balancing"
+        )
+
+        # Step 1: Add bias for selection (detached, no gradient)
+        if not self.config.gpt_model_use_experimental_version:
+            scores_for_choice = scores.reshape(
+                [bsz_seq_len, -1]
+            ) + self.e_score_correction_bias.detach().unsqueeze(0)
+        else:
+            scores_for_choice = (
+                scores.reshape([bsz_seq_len, -1])
+                + self.e_score_correction_bias.detach()
+            )
+
+        # Step 2: Top-k selection (n_group=1, straightforward topk)
+        topk_weight, topk_idx = paddle.topk(
+            scores_for_choice, k=k, axis=-1, sorted=True
+        )
+
+        # Step 3: Gate weight from ORIGINAL scores (bias not in gate)
+        topk_weight = scores.take_along_axis(topk_idx, axis=1)
+
+        # Step 4: Accumulate histogram for QB (only during training)
+        if framework._dygraph_tracer()._has_grad:
+            self._accumulate_qb_histogram(
+                scores, scores_for_choice, k, valid_mask
+            )
+
+        return topk_weight, topk_idx
+
+    @paddle.no_grad()
+    def _accumulate_qb_histogram(
+        self,
+        raw_scores: paddle.Tensor,
+        biased_scores: paddle.Tensor,
+        k: int,
+        valid_mask: paddle.Tensor | None = None,
+    ):
+        """Accumulate required_bias into the QB histogram.
+
+        For each token t and expert e:
+            alpha_t = (k+1)-th largest biased score for token t (the cutoff)
+            required_bias[t, e] = alpha_t - raw_scores[t, e]
+
+        We bin required_bias into self.qb_histogram[e, bin_idx].
+
+        Padding tokens must be excluded. The caller zeroes out the gating
+        scores of padding rows, so for such a row alpha is the (k+1)-th largest
+        bias and required_bias equals that same constant for *every* expert:
+        each padding token would add one count to one identical bin of all
+        experts, inflating the per-expert total (and therefore the target
+        quantile) and spiking the CDF exactly where it is read out.
+
+        Args:
+            raw_scores: [N, E] original gating scores (without bias)
+            biased_scores: [N, E] scores with bias added (used for cutoff)
+            k: top-k value
+            valid_mask: [N, 1] mask marking non-padding tokens, or None when no
+                padding information is available (all rows count).
+        """
+        N, E = raw_scores.shape
+        B = self.qb_n_bins
+
+        # Compute alpha: the (k+1)-th largest biased score per token
+        # This is the "cutoff" -- the highest biased score NOT selected
+        # Clamp k+1 to at most E (in case of degenerate config)
+        topk_val = min(k + 1, int(E))
+        alpha = paddle.topk(biased_scores, k=topk_val, axis=-1, sorted=True)[0][
+            :, -1:
+        ]  # [N, 1] -- the smallest of top-(k+1), i.e., cutoff
+
+        # required_bias[t, e] = alpha[t] - raw_scores[t, e]
+        required_bias = alpha - raw_scores  # [N, E]
+
+        # Bin into histogram
+        b_min = self.qb_bin_min
+        b_max = self.qb_bin_max
+        total_range = b_max - b_min
+        if total_range < 1e-8:
+            total_range = 2.0  # fallback for first step when bias is all-zero
+
+        # Quantize to bin index: [0, B-1]
+        # bin_idx = floor((required_bias - b_min) / total_range * B)
+        bin_idx = ((required_bias - b_min) / total_range * B).cast(paddle.int64)
+        bin_idx = paddle.clip(bin_idx, min=0, max=B - 1)
+
+        # Vectorized histogram accumulation:
+        # Offset each expert's bins by e*B, then do a single flat bincount
+        offsets = (
+            paddle.arange(E, dtype=paddle.int64).unsqueeze(0) * B
+        )  # [1, E]
+        flat_bins = (bin_idx + offsets).reshape([-1])  # [N*E]
+        counts = paddle.zeros([E * B], dtype=paddle.int32)
+        if valid_mask is None:
+            weights = paddle.ones([N * E], dtype=paddle.int32)
+        else:
+            # [N,1] -> [N,E] -> [N*E]: padding rows carry weight 0, so their
+            # bins receive += 0. Keeping the shape static (instead of selecting
+            # valid rows) avoids a data-dependent N and an empty-tensor case.
+            weights = (
+                valid_mask.reshape([N, 1])
+                .cast(paddle.int32)
+                .expand([N, E])
+                .reshape([-1])
+            )
+        counts.put_along_axis_(flat_bins, weights, axis=0, reduce="add")
+        self.qb_histogram += counts.reshape([E, B])
+
+        # Also accumulate expert_usage for diagnostics
+        # Count how many tokens selected each expert (from topk_idx)
+        # This is done separately in forward via exp_counts, so skip here
+
     def _hash_routing(
         self,
         logits: paddle.Tensor,
@@ -1051,7 +1269,13 @@ class StandardMoERouter(nn.Layer):
         return top_gate, top_idx
 
     def _call_topk_method(
-        self, topk_method, gates, k, n_group=None, topk_group=None
+        self,
+        topk_method,
+        gates,
+        k,
+        n_group=None,
+        topk_group=None,
+        valid_mask=None,
     ):
         if topk_method == "greedy":
             top_gate, top_idx = self._topk_greedy(gates, k=k)
@@ -1068,6 +1292,14 @@ class StandardMoERouter(nn.Layer):
                 k,
                 n_group,
                 topk_group,
+            )
+        elif topk_method == "quantile_balancing":
+            top_gate, top_idx = self._topk_quantile_balancing(
+                gates,
+                k,
+                n_group,
+                topk_group,
+                valid_mask=valid_mask,
             )
         else:
             raise NotImplementedError(f"Invalid topk_method: {topk_method}")
@@ -1412,7 +1644,10 @@ class TopKRouter(StandardMoERouter):
                     gates_ori.sum(-1, keepdim=True), min=1e-12
                 )
 
-        if getattr(self.config, "moe_topk_fusion", False):
+        if (
+            getattr(self.config, "moe_topk_fusion", False)
+            and self.topk_method != "quantile_balancing"
+        ):
             # Use MoETopkFusion Triton kernel for bit-exact alignment.
             # This ensures the topk selection + normalization uses the exact same
             # GPU kernel, avoiding FP32 rounding differences between
@@ -1466,6 +1701,10 @@ class TopKRouter(StandardMoERouter):
                 k=self.num_experts_per_tok,
                 n_group=self.n_group,
                 topk_group=self.topk_group,
+                # Only quantile_balancing consumes this: padding rows have
+                # already been zeroed out above and must stay out of the QB
+                # histogram.
+                valid_mask=input_ids_none_zero_mask,
             )
 
             _log_moe_md5(
@@ -1537,7 +1776,7 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
 
         if (
-            self.topk_method == "noaux_tc"
+            self.topk_method in ("noaux_tc", "quantile_balancing")
             and framework._dygraph_tracer()._has_grad
         ):
             with paddle.no_grad():

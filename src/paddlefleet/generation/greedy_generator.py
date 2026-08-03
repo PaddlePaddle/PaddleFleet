@@ -238,6 +238,18 @@ class DynamicKVCache:
 # ---------------------------------------------------------------------------
 
 
+def _uses_dsv4_hybrid_attention(cfg) -> bool:
+    """Return True when the model uses DSv4 Hybrid (CSA/HCA) attention.
+
+    Detected from the config: either the attention-variant selector or the
+    presence of per-layer compression ratios drives the CSA/HCA code path.
+    """
+    if getattr(cfg, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return True
+    ratios = getattr(cfg, "csa_compress_ratios", None)
+    return bool(ratios)
+
+
 class GreedyGenerator:
     """Greedy decode on top of a FleetGPTModel using the native KV cache path.
 
@@ -318,11 +330,20 @@ class GreedyGenerator:
                 "is unsupported because it would break full-attention heads in "
                 "SWA layers."
             )
-        self.cache = DynamicKVCache(
-            num_layers=total_layers,
-            swa_layers=swa_layers,
-            window_size=self.window_size,
-        )
+        # DSv4 Hybrid (CSA/HCA) attention needs the richer per-layer decode
+        # state (raw + compressed KV, group buffers, indexer keys). Its cache
+        # also satisfies the standard ``update(k, v, layer_idx)`` protocol, so
+        # it can serve models that interleave CSA/HCA and standard layers.
+        if _uses_dsv4_hybrid_attention(cfg):
+            from paddlefleet.generation.csa_cache import CSADynamicCache
+
+            self.cache = CSADynamicCache(num_layers=total_layers)
+        else:
+            self.cache = DynamicKVCache(
+                num_layers=total_layers,
+                swa_layers=swa_layers,
+                window_size=self.window_size,
+            )
 
     @paddle.no_grad()
     def _generate_no_cache(
@@ -457,7 +478,8 @@ class GreedyGenerator:
         """
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be [B, L]")
-
+        if max_new_tokens <= 0:
+            raise ValueError("max_new_tokens should be >= 0")
         self.model.eval()
 
         bsz, prompt_len = input_ids.shape
@@ -487,6 +509,7 @@ class GreedyGenerator:
             )
 
         self.cache.reset()
+
         with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
             # ---- Prefill ----
             position_ids = (
@@ -494,6 +517,7 @@ class GreedyGenerator:
                 .unsqueeze(0)
                 .expand([bsz, prompt_len])
             )
+
             if _DEBUG and _r == 0:
                 logger.info(
                     "[fwd-debug][prefill] input_ids=%s position_ids=%s",
@@ -536,12 +560,11 @@ class GreedyGenerator:
                     [round(v, 3) for v in _topk_val.tolist()],
                 )
                 _kv_lens = [
-                    self.cache._seq_len[i]
-                    for i in range(min(3, len(self.cache._seq_len)))
-                    if self.cache._seq_len[i] > 0
+                    self.cache.get_seq_len(i)
+                    for i in range(min(3, len(self.cache.swa_layers)))
                 ]
                 logger.info(
-                    "[kv-debug][prefill] cache seq_lens (first 3 non-zero layers): %s",
+                    "[kv-debug][prefill] cache seq_lens (first 3 layers): %s",
                     _kv_lens,
                 )
 

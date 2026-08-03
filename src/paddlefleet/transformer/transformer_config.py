@@ -226,6 +226,25 @@ class TransformerConfig(ModelParallelConfig):
     vha_postmix_rank: int | None = None
     """Rank of the VHA postmix low-rank head mixing matrices."""
 
+    vha_postmix_grouped: bool = False
+    """Postmix head-mixing topology (DSv4 hybrid only). False (default): ungrouped
+    full cross-head mixing over all num_attention_heads (the earlier VHA design).
+    True: within-group block-diagonal mixing that only recombines heads inside each
+    o_group (mixing stays within a group)."""
+
+    use_vha_premix: bool = False
+    """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
+    (linear_q_up_proj) with a structured VHA premix: the compressed Q is reshaped into
+    vha_premix_groups groups of dim d_q = q_lora_rank // vha_premix_groups, and each group is
+    expanded into k = num_attention_heads // vha_premix_groups heads via a per-group weight.
+    Requires q_lora_rank % vha_premix_groups == 0 and num_attention_heads % vha_premix_groups
+    == 0. DSv4 hybrid attention only; postmix is unaffected (still keyed on use_vha_attention)."""
+
+    vha_premix_groups: int | None = None
+    """Number of groups g_q the compressed Q is split into for the VHA premix. Per-group latent
+    dim is q_lora_rank // vha_premix_groups; per-group head expansion is num_attention_heads //
+    vha_premix_groups. Only used when use_vha_premix is True."""
+
     vha_q_lora_rank: int | None = None
     """Rank of the VHA Q low-rank projection. When set, Q projects to this rank per head before premix expansion."""
 
@@ -499,7 +518,7 @@ class TransformerConfig(ModelParallelConfig):
     """MoE Feed-Forward Network hidden size"""
 
     topk_method: str = "greedy"
-    """Options are greedy, group_limited_greedy, no_auxtc"""
+    """Options are greedy, group_limited_greedy, noaux_tc, quantile_balancing"""
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
@@ -514,7 +533,9 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use fusion node for MoE layer. Default is True"""
 
     moe_router_load_balancing_type: str = "aux_loss"
-    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
+    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn, none.
+    Use 'none' together with router_aux_loss_coef=0 when the router balances
+    load on its own (required by topk_method='quantile_balancing')."""
 
     moe_layer_freq: int | list[int] | None = None
     """Frequency between MoE layers and Dense layers. Accepts either:
@@ -604,6 +625,11 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
+
+    qb_n_bins: int = 1000
+    """Number of histogram bins for Quantile Balancing. Only used when
+    topk_method='quantile_balancing'. Higher values give more precise
+    quantile estimation at the cost of slightly more communication."""
 
     moe_split_feature_routing: bool = False
     """Enable multi-view (split-feature) MoE routing. When True, the router

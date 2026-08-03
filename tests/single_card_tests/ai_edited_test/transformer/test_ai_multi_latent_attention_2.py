@@ -774,6 +774,8 @@ class TestForwardDiscardOutputAndRegisterRecompute(unittest.TestCase):
         instance.config = MagicMock()
         instance.config.sequence_parallel = False
         instance.gated_attention = False
+        instance.use_vha_postmix = False
+        instance.recompute_vha_postmix = False
         instance.config.dw_p2p_overlap = False
         instance.config.use_bias = True
 

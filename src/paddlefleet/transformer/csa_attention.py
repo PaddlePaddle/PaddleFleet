@@ -796,6 +796,66 @@ def get_window_topk_idxs(
     return docmask_meta.get_window_topk_idxs(window_size)
 
 
+def get_window_topk_idxs_decode(
+    window_size: int,
+    batch_size: int,
+    position: int,
+) -> Tensor:
+    """Sliding-window indices for a single decode query at absolute ``position``.
+
+    Simple-causal decode counterpart of :func:`get_window_topk_idxs`. Returns
+    ``[batch_size, 1, window_size]``; the query at absolute position ``t``
+    attends raw positions ``[max(0, t - w + 1), t]``. Slots that would exceed
+    ``t`` (only possible when ``t < window_size - 1``) are ``-1``.
+    """
+    t = position
+    start = max(0, t - window_size + 1)
+    offsets = paddle.arange(window_size)
+    idxs = start + offsets
+    idxs = paddle.where(idxs > t, paddle.full_like(idxs, -1), idxs)
+    return idxs.reshape([1, 1, window_size]).expand(
+        [batch_size, 1, window_size]
+    )
+
+
+def get_compress_topk_idxs_decode(
+    batch_size: int,
+    offset: int,
+    n_compressed: int,
+) -> Tensor:
+    """HCA attend-all compressed indices for a single decode query.
+
+    During decode a compressed token for group ``g`` only becomes available
+    after raw position ``(g + 1) * ratio - 1``; by construction every
+    compressed token already emitted is causally valid for the current query
+    (``n_compressed == (t + 1) // ratio``). So the query attends all
+    ``n_compressed`` compressed blocks, offset into ``kv_full`` by ``offset``
+    (the current raw KV length). Returns ``[batch_size, 1, n_compressed]``.
+    """
+    idxs = paddle.arange(n_compressed) + offset
+    return idxs.reshape([1, 1, n_compressed]).expand(
+        [batch_size, 1, n_compressed]
+    )
+
+
+def get_mqa_causal_topk_idxs_decode(
+    batch_size: int,
+    position: int,
+) -> Tensor:
+    """Full-causal MQA indices for a single decode query at ``position``.
+
+    Decode counterpart of :func:`get_mqa_causal_topk_idxs`. An MQA layer has no
+    sliding window and no compressor, so the query at absolute position ``t``
+    attends every cached raw position ``[0, t]``. All ``t + 1`` slots are valid,
+    so no ``-1`` padding and no ``topk_length`` are needed.
+    Returns ``[batch_size, 1, position + 1]``.
+    """
+    idxs = paddle.arange(position + 1)
+    return idxs.reshape([1, 1, position + 1]).expand(
+        [batch_size, 1, position + 1]
+    )
+
+
 def get_mqa_causal_topk_idxs(
     batch_size: int,
     seqlen: int,
@@ -1805,6 +1865,91 @@ class Compressor(nn.Layer):
                 kv[..., :nope_dim] = fp8_simulate_qat(kv[..., :nope_dim], 64)
         return kv  # [b, n_compressed, head_dim]
 
+    def forward_group(
+        self,
+        x_cur: Tensor,
+        x_prev: Tensor | None,
+        group_index: int,
+    ) -> Tensor:
+        """Incrementally emit a single compressed token for one group (decode).
+
+        Reproduces the simple-causal ``forward`` math for exactly one
+        compressed position ``group_index`` (absolute compressed-token index
+        ``g``). The emitted token's RoPE position is ``g * compress_ratio``,
+        matching the subsampled positions used by prefill.
+
+        Args:
+            x_cur: [b, compress_ratio, hidden_size] hidden states of the just
+                completed group ``g``.
+            x_prev: [b, compress_ratio, hidden_size] hidden states of the
+                previous group ``g-1``, or None when ``g == 0``. Only used for
+                the overlapping (ratio==4) path; ignored otherwise.
+            group_index: absolute compressed-token index ``g``.
+
+        Returns:
+            compressed_kv: [b, 1, head_dim].
+        """
+        b, ratio, _ = x_cur.shape
+        assert ratio == self.compress_ratio, (
+            f"forward_group expects a full group of {self.compress_ratio} "
+            f"tokens, got {ratio}"
+        )
+        d = self.head_dim
+
+        kv_cur, _ = self.linear_wkv(x_cur)  # [b, ratio, coff * head_dim]
+        score_cur, _ = self.linear_wgate(x_cur)  # [b, ratio, coff * head_dim]
+
+        kv_cur = kv_cur.reshape([b, 1, ratio, -1])
+        score_cur = score_cur.reshape([b, 1, ratio, -1])
+
+        ape = self.ape.reshape([1, 1, ratio, -1])
+        ape = ape.cast(score_cur.dtype) if _ACCURACY_COMPATIBLE_KERNEL else ape
+        score_cur = score_cur + ape
+
+        if self.overlap:
+            # Build the single-group overlap tensors [b, 1, 2*ratio, d].
+            # Current group's second half -> positions [ratio:]; previous
+            # group's first half -> positions [:ratio] (fill when g == 0).
+            kv = paddle.full([b, 1, 2 * ratio, d], 0.0, dtype=kv_cur.dtype)
+            score = paddle.full(
+                [b, 1, 2 * ratio, d], float("-inf"), dtype=score_cur.dtype
+            )
+            kv[:, :, ratio:, :] = kv_cur[:, :, :, d:]
+            score[:, :, ratio:, :] = score_cur[:, :, :, d:]
+            if x_prev is not None:
+                kv_prev, _ = self.linear_wkv(x_prev)
+                score_prev, _ = self.linear_wgate(x_prev)
+                kv_prev = kv_prev.reshape([b, 1, ratio, -1])
+                score_prev = score_prev.reshape([b, 1, ratio, -1])
+                score_prev = score_prev + ape
+                kv[:, :, :ratio, :] = kv_prev[:, :, :, :d]
+                score[:, :, :ratio, :] = score_prev[:, :, :, :d]
+        else:
+            kv = kv_cur
+            score = score_cur
+
+        # Gated pooling over the pool dim (axis=2), identical to prefill.
+        kv = (kv * F.softmax(score, axis=2)).sum(axis=2)  # [b, 1, head_dim]
+
+        kv = self.norm(kv.cast(x_cur.dtype))
+
+        if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
+            kv = _apply_rope(
+                kv,
+                self.head_dim - self.qk_pos_emb_head_dim,
+                self.qk_pos_emb_head_dim,
+                self.rotary_pos_emb,
+                self.config,
+                1,  # rotary_seq_len (single compressed token)
+                ratio=ratio,
+                position_offset=group_index,
+            )
+
+        if self.rotate:
+            kv = rotate_activation(kv)
+
+        return kv  # [b, 1, head_dim]
+
 
 # ---------------------------------------------------------------------------
 # CSAIndexer
@@ -2380,6 +2525,73 @@ class CompressedSparseAttention(FleetLayer):
 
         return compress_topk_idxs, indexer_loss, tilelang_indexer_loss_state
 
+    def _compute_indexer_compressed_topk_idxs_decode(
+        self,
+        query: Tensor,
+        qr: Tensor,
+        x_tok: Tensor,
+        state,
+        t: int,
+        offset: int,
+        n_comp: int,
+    ) -> Tensor:
+        """Indexer top-k over the cached compressed keys for one decode token.
+
+        Replicates the eval-time indexer selection (``CSAIndexer.forward``) for
+        a single query at absolute position ``t``. The compressed keys are the
+        incrementally accumulated ``state.idx_compressed_k`` ([b, n_comp,
+        index_head_dim]); the query and per-head weights are recomputed from the
+        current token (``x_tok`` = [b, 1, hidden_size]). All ``n_comp``
+        compressed blocks are causally valid at a decode step
+        (``n_comp == (t + 1) // ratio``), so no mask is needed.
+
+        Returns:
+            [b, 1, effective_topk] int indices into ``kv_full`` (>= offset),
+            with ``-1`` for any invalid slot.
+        """
+        indexer = self.indexer
+        b = query.shape[0]
+
+        # Q path: mirror CSAIndexer.forward_before_topk for a single token.
+        q, _ = indexer.linear_wq_b(qr)  # [b, 1, n_heads * index_head_dim]
+        q = q.reshape([b, 1, indexer.index_n_heads, indexer.index_head_dim])
+        if (
+            indexer.rotary_pos_emb is not None
+            and indexer.qk_pos_emb_head_dim > 0
+        ):
+            q = _apply_rope(
+                q,
+                indexer.index_head_dim - indexer.qk_pos_emb_head_dim,
+                indexer.qk_pos_emb_head_dim,
+                indexer.rotary_pos_emb,
+                indexer.config,
+                1,  # rotary_seq_len (single query token)
+                ratio=1,
+                position_offset=t,
+            )
+        q = rotate_activation(q)
+
+        # Weights: [b, 1, n_heads], pre-scaled exactly as forward_before_topk
+        # and then by softmax_scale exactly as CSAIndexer.forward does.
+        weights, _ = indexer.linear_weights_proj(x_tok)
+        weights = weights * (indexer.index_n_heads**-0.5)
+        weights = weights * indexer.softmax_scale
+
+        k = state.idx_compressed_k  # [b, n_comp, index_head_dim]
+        effective_topk = min(indexer.index_topk, n_comp)
+        _, topk_indices_compressed = fused_qk_topk_naive(
+            q, k, weights, effective_topk, None
+        )  # [b, 1, effective_topk], compressed-space ids (or -1)
+
+        # Every emitted compressed block is causally valid at a decode step, so
+        # offset the valid slots into kv_full and keep -1 for empty slots.
+        valid = topk_indices_compressed >= 0
+        return paddle.where(
+            valid,
+            topk_indices_compressed + offset,
+            paddle.full_like(topk_indices_compressed, -1),
+        )
+
     def forward(
         self,
         query: Tensor,
@@ -2390,6 +2602,9 @@ class CompressedSparseAttention(FleetLayer):
         qr: Tensor = None,
         input_ids: Tensor | None = None,
         docmask_meta: CSADocMaskMetadata | None = None,
+        past_key_values=None,
+        layer_idx: int | None = None,
+        use_cache: bool = False,
     ) -> Tensor:
         """Forward pass for CompressedSparseAttention.
 
@@ -2400,11 +2615,33 @@ class CompressedSparseAttention(FleetLayer):
             attention_mask: unused (causal is implicit)
             x:     [b, sq, hidden_size] original hidden states
             qr:    [b, sq, q_lora_rank] compressed query representation
+            past_key_values: optional ``CSADynamicCache`` (duck-typed) driving
+                incremental decode; when provided with ``use_cache`` it holds
+                a per-layer ``_CSALayerState`` accessed via
+                ``get_csa_state(layer_idx)``.
+            layer_idx: this layer's index into ``past_key_values``.
+            use_cache: enable KV-cache prefill priming / incremental decode.
 
         Returns:
             output: [b, sq, np * v_head_dim]
         """
         b, sq, np_heads, hn = query.shape
+
+        # Incremental decode: single-token step against the cached state.
+        if use_cache and past_key_values is not None and sq == 1:
+            assert not self.cp_enabled, (
+                "CSA incremental decode does not support context parallel."
+            )
+            assert attention_mask is None, (
+                "CSA incremental decode does not support attention_mask."
+            )
+            assert docmask_meta is None, (
+                "CSA incremental decode does not support packed documents; "
+                "pass attn_mask_startend_row_indices=None when decoding with "
+                "a cache."
+            )
+            state = past_key_values.get_csa_state(layer_idx)
+            return self._forward_decode(query, key, x, qr, state)
 
         if docmask_meta is not None:
             assert b == 1, (
@@ -2467,7 +2704,18 @@ class CompressedSparseAttention(FleetLayer):
             )
 
         if self.is_mqa_layer:
-            return self._forward_mqa(query, key, docmask_meta=docmask_meta)
+            output = self._forward_mqa(query, key, docmask_meta=docmask_meta)
+            # MQA has no compressor and no window: the raw KV stream is the
+            # whole cache, so prime it directly instead of going through
+            # _prime_cache_prefill's group bookkeeping.
+            if use_cache and past_key_values is not None:
+                state = past_key_values.get_csa_state(layer_idx)
+                state.raw_kv = key.squeeze(2)  # [b, sq, v_head_dim]
+                state.compressed_kv = None
+                state.idx_compressed_k = None
+                state.x_prev = None
+                state.x_cur = None
+            return output
 
         if docmask_meta is not None and self.compress_ratio > 1:
             actual_n_compressed = docmask_meta.actual_n_compressed
@@ -2572,7 +2820,137 @@ class CompressedSparseAttention(FleetLayer):
         elif indexer_loss is not None and self.training:
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
 
+        # KV-cache prefill priming: populate the per-layer decode state so the
+        # first decode step continues seamlessly from this prefill.
+        if use_cache and past_key_values is not None:
+            state = past_key_values.get_csa_state(layer_idx)
+            self._prime_cache_prefill(state, kv, kv_full, n_compressed, x, sq)
+
         return output
+
+    def _prime_cache_prefill(
+        self,
+        state,
+        kv: Tensor,
+        kv_full: Tensor,
+        n_compressed: int,
+        x: Tensor,
+        sq: int,
+    ) -> None:
+        """Fill a ``_CSALayerState`` from a completed simple-causal prefill.
+
+        Stores the raw single-head KV, the compressed KV emitted during
+        prefill, and the hidden-state group buffers (``x_prev`` = last closed
+        group, ``x_cur`` = partial open group) so that the first decode step
+        resumes exactly where prefill left off.
+        """
+        ratio = self.compress_ratio
+        state.raw_kv = kv  # [b, sq, v_head_dim]
+
+        if n_compressed > 0:
+            # kv_full == concat([raw(sq), compressed]); recover the tail.
+            state.compressed_kv = kv_full[:, sq:, :]  # [b, n_comp, v_head_dim]
+            cutoff = n_compressed * ratio
+            state.x_prev = x[:, cutoff - ratio : cutoff, :]
+            state.x_cur = x[:, cutoff:, :] if cutoff < sq else None
+            # Indexer compressed keys (ratio==4): recompute over the prefill
+            # sequence so the first decode top-k has the full cached key set.
+            if self.indexer is not None:
+                with paddle.no_grad():
+                    state.idx_compressed_k = self.indexer.compressor(x)
+        else:
+            state.compressed_kv = None
+            state.x_prev = None
+            state.idx_compressed_k = None
+            # No group has closed yet; the whole prefix is the open group.
+            state.x_cur = (
+                x if (self.compressor is not None and ratio > 1) else None
+            )
+
+    def _forward_decode(
+        self,
+        query: Tensor,
+        key: Tensor,
+        x: Tensor,
+        qr: Tensor,
+        state,
+    ) -> Tensor:
+        """Single-token incremental decode step against the cached state.
+
+        Mirrors the simple-causal prefill ``forward`` for one query at absolute
+        position ``t`` (= current raw KV length before appending). Emits a new
+        compressed token whenever the current group of ``ratio`` hidden-state
+        tokens closes, then runs sparse attention over the sliding window plus
+        every causally-valid compressed block.
+        """
+        b, sq, np_heads, hn = query.shape  # sq == 1
+        ratio = self.compress_ratio
+
+        # 1. Append the raw single-head KV token; t is the query's absolute pos.
+        k_tok = key.squeeze(2)  # [b, 1, v_head_dim]
+        state.append_raw(k_tok)
+        t = state.raw_kv.shape[1] - 1
+
+        # 2. Accumulate hidden states; emit compressed token when a group closes.
+        if self.compressor is not None and ratio > 1:
+            state.append_x(x)
+            if state.x_cur.shape[1] == ratio:
+                g = t // ratio  # absolute compressed-token index
+                comp_tok = self.compressor.forward_group(
+                    state.x_cur, state.x_prev, g
+                )
+                state.append_compressed(comp_tok)
+                if self.indexer is not None:
+                    idx_tok = self.indexer.compressor.forward_group(
+                        state.x_cur, state.x_prev, g
+                    )
+                    state.append_idx_compressed(idx_tok)
+                state.roll_group()
+
+        # 3. Build kv_full = raw ++ compressed.
+        n_comp = state.n_compressed
+        if n_comp > 0:
+            kv_full = paddle.concat([state.raw_kv, state.compressed_kv], axis=1)
+        else:
+            kv_full = state.raw_kv
+        offset = state.raw_kv.shape[1]  # == t + 1
+
+        # 4. Index table for the single query at absolute pos t.
+        if self.is_mqa_layer:
+            # Full-causal MQA: no window, no compressor -> attend every cached
+            # raw position [0, t]. n_comp is 0, so kv_full == state.raw_kv.
+            topk_idxs = get_mqa_causal_topk_idxs_decode(b, t)
+        else:
+            window_idxs = get_window_topk_idxs_decode(self.window_size, b, t)
+
+            # 5. Compressed indices.
+            if ratio > 1 and n_comp > 0:
+                if self.indexer is not None:
+                    compress_idxs = (
+                        self._compute_indexer_compressed_topk_idxs_decode(
+                            query, qr, x, state, t, offset, n_comp
+                        )
+                    )
+                else:
+                    compress_idxs = get_compress_topk_idxs_decode(
+                        b, offset, n_comp
+                    )
+                if compress_idxs.dtype != window_idxs.dtype:
+                    compress_idxs = compress_idxs.cast(window_idxs.dtype)
+                topk_idxs = paddle.concat([window_idxs, compress_idxs], axis=-1)
+            else:
+                topk_idxs = window_idxs
+
+        topk_idxs = topk_idxs.cast("int32")
+
+        # 6. Sparse attention.
+        return self.compressed_sparse_attn(
+            query,
+            kv_full,
+            self.attn_sink,
+            topk_idxs,
+            self.softmax_scale,
+        )
 
     def _forward_mqa(
         self,
