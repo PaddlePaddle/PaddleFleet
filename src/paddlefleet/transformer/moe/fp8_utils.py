@@ -18,6 +18,7 @@
 import numpy
 import paddle
 import paddle.nn.functional as F
+from paddle.base.framework import EagerParamBase
 
 from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
@@ -557,24 +558,28 @@ def has_config(config_map, key):
 
 
 def expert_weights_all_frozen(weights):
-    """True when every expert weight in ``weights`` has ``stop_gradient=True``.
+    """True when every expert weight in ``weights`` is a frozen parameter.
 
     The MoE expert backward writes weight gradients straight into
     ``main_grad`` / ``grad`` instead of returning them through autograd, so
     ``stop_gradient`` is not honored automatically. Callers use this to skip the
     wgrad GEMMs and their fp32 buffers when the experts are frozen (for example
-    DSv4 phase 2, ``csa_train_indexer_only``). Mixed groups keep the original
-    behavior so no gradient is silently dropped.
+    DSv4 phase 2, ``csa_train_indexer_only``).
 
-    ``weights`` is either a stacked tensor (grouped path) or a list of
-    per-expert tensors (split path).
+    Only an ``EagerParamBase`` counts: ``stop_gradient`` is meaningless on any
+    other tensor (a plain one defaults to True, and so does a ``_slice()`` view of
+    a *trainable* parameter), so callers holding a view must pass the parent
+    parameter instead. Mixed groups keep the original behavior so no gradient is
+    silently dropped.
     """
     if weights is None:
         return False
-    if isinstance(weights, (list, tuple)):
-        entries = [w for w in weights if w is not None]
-        return bool(entries) and all(w.stop_gradient for w in entries)
-    return bool(weights.stop_gradient)
+    if not isinstance(weights, (list, tuple)):
+        weights = [weights]
+    entries = [w for w in weights if w is not None]
+    return bool(entries) and all(
+        isinstance(w, EagerParamBase) and w.stop_gradient for w in entries
+    )
 
 
 def kitchen_gemm(
@@ -2580,7 +2585,10 @@ class ExpertsGroupGemmContiguousNode:
         """
         BF16 GEMM for weight grad
         """
-        if expert_weights_all_frozen(weights):
+        # Under subbatch `weights` is a per-expert view of the stacked parameter,
+        # and a view's own stop_gradient is always True, so read the parameter it
+        # was sliced from. The GEMM below still uses the per-expert `weights`.
+        if expert_weights_all_frozen(getattr(weights, "_parent", weights)):
             return
         if x is None:
             if self.dequant_input:
