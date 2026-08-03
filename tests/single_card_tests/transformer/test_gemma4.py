@@ -1052,6 +1052,44 @@ class TestGemma4MoELayerForward(unittest.TestCase):
         gate_input = layer.gate.call_args[0][0]
         self.assertEqual(gate_input.shape, [2, 4, 64])
 
+    def test_forward_accuracy_compatible_keeps_dual_input_hooks(self):
+        """use_accuracy_compatible must not bypass the dual-input hooks."""
+        layer = self._make_moe_layer()
+        layer.use_accuracy_compatible = True
+        hidden = paddle.randn([2, 4, 64])
+        hidden.stop_gradient = False
+        residual = paddle.randn([2, 4, 64])
+        layer._forward_single_card_moe = MagicMock(
+            return_value=paddle.ones([8, 64])
+        )
+
+        out, _ = layer.forward(hidden, residual=residual)
+        self.assertEqual(out.shape, [2, 4, 64])
+
+        # Three-path clone is disabled for dual-input topology.
+        self.assertFalse(layer._supports_three_path_clone())
+
+        # Router still consumes residual, not a clone of hidden_states.
+        gate_input = layer.gate.call_args[0][0]
+        np.testing.assert_allclose(
+            gate_input.numpy(), residual.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+        # Expert input still goes through pre_feedforward_layernorm_2(residual).
+        expert_input = layer._forward_single_card_moe.call_args[0][0]
+        expected = layer.pre_feedforward_layernorm_2(residual).reshape([-1, 64])
+        np.testing.assert_allclose(
+            expert_input.numpy(), expected.numpy(), rtol=1e-5, atol=1e-5
+        )
+
+    def test_base_moe_layer_supports_three_path_clone(self):
+        """Base MoELayer (single-input topology) still enables the clone."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        layer = MoELayer.__new__(MoELayer)
+        nn.Layer.__init__(layer)
+        self.assertTrue(layer._supports_three_path_clone())
+
 
 # ===========================================================
 # Test: Gemma4TopKRouter full forward (lines 1357-1405)

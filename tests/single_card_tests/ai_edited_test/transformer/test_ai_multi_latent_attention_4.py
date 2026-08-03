@@ -44,6 +44,9 @@ def _make_mla_self_attn(**attrs):
         object.__setattr__(attn, "_non_persistable_buffers", set())
         for k, v in attrs.items():
             object.__setattr__(attn, k, v)
+        config = attrs.get("config", None)
+        if config is not None and not hasattr(attn, "q_lora_rank"):
+            object.__setattr__(attn, "q_lora_rank", config.q_lora_rank)
         return attn
 
 
