@@ -47,6 +47,7 @@ from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
+from paddlefleet.transformer.multi_latent_attention import MultiLatentAttention
 from paddlefleet.transformer.utils import profile
 from paddlefleet.utils import log_single_rank
 
@@ -1026,7 +1027,20 @@ class TransformerLayer(nn.Layer):
         if "shared_kv" in kwargs:
             extra_kwargs["shared_kv"] = kwargs["shared_kv"]
 
-        if rope_freqs_cis is not None:
+        if isinstance(self.self_attn, MultiLatentAttention):
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                position_ids=position_ids,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
+            )
+        elif rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
                 input_layernorm_output,
                 attention_mask=attention_mask,
@@ -1455,7 +1469,20 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         ):
             extra_kwargs["input_ids"] = kwargs["input_ids"]
 
-        if rope_freqs_cis is not None:
+        if isinstance(self.self_attn, MultiLatentAttention):
+            attention_output_with_bias = self.self_attn(
+                input_layernorm_output,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                position_ids=position_ids,
+                packed_seq_params=packed_seq_params,
+                in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
+                **extra_kwargs,
+            )
+        elif rope_freqs_cis is not None:
             attention_output_with_bias = self.self_attn(
                 input_layernorm_output,
                 attention_mask=attention_mask,

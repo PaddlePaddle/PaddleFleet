@@ -240,6 +240,8 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             gpt_model_use_experimental_version=False,
         )
         layer.num_attention_heads_per_partition = heads
+        layer.q_lora_rank = layer.config.q_lora_rank
+        layer.kv_lora_rank = layer.config.kv_lora_rank
         layer.qk_nope_head_dim = qk_nope
         layer.qk_rope_head_dim = qk_rope
         layer.v_head_dim = v_dim

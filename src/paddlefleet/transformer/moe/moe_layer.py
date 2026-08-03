@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 from paddlefleet import utils
 from paddlefleet.recompute_utils import need_recompute_in_first_n
+from paddlefleet.transformer.activations import situ
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
@@ -127,6 +128,20 @@ class GradDtypeUnguard(PyLayer):
         return grad
 
 
+class ThreePathCloneAlignMG(PyLayer):
+    """Three-way differentiable identity clone with MG-aligned backward sum order."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.clone(), x.clone(), x.clone()
+
+    @staticmethod
+    def backward(ctx, g_router, g_dispatcher, g_shared):
+        partial = g_dispatcher + g_shared
+        out = partial + g_router
+        return out
+
+
 @dataclass
 class MoESublayers:
     """MoE Layer Sublayers spec"""
@@ -143,6 +158,9 @@ class MoELayer(nn.Layer):
     ):
         super().__init__()
         self.config = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
         self.moe_sublayers = sublayers
         routed_expert_config = deepcopy(config)
         shared_expert_config = deepcopy(config)
@@ -186,6 +204,14 @@ class MoELayer(nn.Layer):
             self.fp8_dispatch and self.using_sonic_moe and self.fp8_wgrad
         )
         self.moe_expert_fusion = config.moe_expert_fusion
+        if self.hidden_act == situ and (
+            config.moe_use_fusion_node or self.moe_expert_fusion
+        ):
+            raise ValueError(
+                "SiTU-GLU does not support moe_use_fusion_node=True or "
+                "moe_expert_fusion=True yet; support will be added in a future "
+                "release. Please set both options to False."
+            )
         self.moe_subbatch_token_num_after_dispatch = (
             config.moe_subbatch_token_num_after_dispatch
         )
@@ -474,6 +500,9 @@ class MoELayer(nn.Layer):
                         config, "hybridep_buffer_configs", None
                     ),
                     moe_deep_gemm=self.moe_deep_gemm,
+                    use_accuracy_compatible=getattr(
+                        self, "use_accuracy_compatible", False
+                    ),
                 )
                 if (
                     self.moe_token_dispatcher_type == "deepep"
@@ -493,6 +522,9 @@ class MoELayer(nn.Layer):
                     self.expert_model_parallel_size,
                     self.num_experts_per_device,
                     local_expert_indices,
+                    use_accuracy_compatible=getattr(
+                        self, "use_accuracy_compatible", False
+                    ),
                 )
             elif self.moe_token_dispatcher_type == "allgather":
                 self.token_dispatcher = AllGatherTokenDispatcher(
@@ -1222,6 +1254,21 @@ class MoELayer(nn.Layer):
         """Post-process shared expert output before combining. Default: identity."""
         return shared_output
 
+    def _supports_three_path_clone(self) -> bool:
+        """Whether the MG-aligned three-path clone applies to this topology.
+
+        The clone assumes router / dispatcher / shared branches all consume the
+        same ``hidden_states``. Subclasses overriding the gate/expert input
+        hooks (e.g. Gemma4MoELayer routes on ``residual`` and applies
+        ``pre_feedforward_layernorm_2``) have a different topology, so the
+        clone must not be used there.
+        """
+        cls = type(self)
+        return (
+            cls._prepare_gate_input is MoELayer._prepare_gate_input
+            and cls._prepare_expert_input is MoELayer._prepare_expert_input
+        )
+
     def forward(
         self,
         hidden_states: paddle.Tensor,
@@ -1250,10 +1297,23 @@ class MoELayer(nn.Layer):
         residuals = hidden_states
 
         layer_idx = getattr(self, "layer_number", None)
+
+        _three_paths_enabled = (
+            getattr(self, "use_accuracy_compatible", False)
+            and hidden_states.stop_gradient is False
+            and self._supports_three_path_clone()
+        )
+        if _three_paths_enabled:
+            _hs_router_path, _hs_dispatcher_path, _hs_shared_path = (
+                ThreePathCloneAlignMG.apply(hidden_states)
+            )
+            residuals = _hs_shared_path
+        else:
+            _hs_router_path = _hs_dispatcher_path = hidden_states
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
 
         self._maybe_pre_allgather_overlap(hidden_states)
-        gate_input = self._prepare_gate_input(hidden_states, residual)
+        gate_input = self._prepare_gate_input(_hs_router_path, residual)
 
         (
             capacity,
@@ -1292,7 +1352,7 @@ class MoELayer(nn.Layer):
         else:
             combine_overlap_handle = None
 
-        expert_input = self._prepare_expert_input(hidden_states, residual)
+        expert_input = self._prepare_expert_input(_hs_dispatcher_path, residual)
         if self.expert_model_parallel_size > 1:
             if self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(

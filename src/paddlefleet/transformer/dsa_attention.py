@@ -276,6 +276,7 @@ class DSAIndexer(paddle.nn.Layer):
         sublayers_spec: DSAIndexerSublayersSpec,
         layer_number: int,
         pg_collection: ProcessGroupCollection | None = None,
+        is_hybrid_mla_indexer: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -285,17 +286,42 @@ class DSAIndexer(paddle.nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
-        self.n_heads = config.dsa_index_n_heads
-        self.head_dim = config.dsa_index_head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
+        if is_hybrid_mla_indexer:
+            required_fields = (
+                "hybrid_index_n_heads",
+                "hybrid_index_head_dim",
+                "hybrid_index_topk",
+                "hybrid_mla_q_lora_rank",
+                "hybrid_mla_qk_rope_head_dim",
+            )
+            missing = [
+                name
+                for name in required_fields
+                if getattr(config, name, None) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "hybrid MLA DSA indexer requires explicit hybrid config fields; "
+                    f"missing fields: {', '.join(missing)}"
+                )
+            self.n_heads = config.hybrid_index_n_heads
+            self.head_dim = config.hybrid_index_head_dim
+            self.index_topk = config.hybrid_index_topk
+            q_lora_rank = config.hybrid_mla_q_lora_rank
+            self.rope_head_dim = config.hybrid_mla_qk_rope_head_dim
+        else:
+            self.n_heads = config.dsa_index_n_heads
+            self.head_dim = config.dsa_index_head_dim
+            self.index_topk = config.dsa_index_topk
+            q_lora_rank = config.q_lora_rank
+            self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
-        self.index_topk = config.dsa_index_topk
         self.softmax_scale = self.head_dim**-0.5
 
         # wq_b: q_lora_rank -> n_heads * head_dim (duplicated)
         self.wq_b = build_spec_layer(
             sublayers_spec.linear_wq_b,
-            config.q_lora_rank,
+            q_lora_rank,
             self.n_heads * self.head_dim,
             config=self.config,
             init_method=self.config.init_method,

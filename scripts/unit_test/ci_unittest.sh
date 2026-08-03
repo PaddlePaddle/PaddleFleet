@@ -74,7 +74,7 @@ if [[ ${FLAGS_enable_CI} == "true" ]] || [[ ${FLAGS_enable_CE} == "true" ]];then
     export PYTHONFAULTHANDLER=1
     
     DOWNLOAD_SOURCE=aistudio WAIT_UNTIL_DONE=True PADDLEFLEET_TESTING=True \
-    PYTHONPATH=$(pwd) \
+    PYTHONPATH=$(pwd)/src:$(pwd) \
     COVERAGE_SOURCE=paddlefleet \
     timeout 60m \
     python -m pytest -v -s -n 1 test/formers \

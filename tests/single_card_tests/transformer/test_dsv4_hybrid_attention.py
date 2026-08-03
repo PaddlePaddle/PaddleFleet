@@ -14,10 +14,54 @@
 
 import sys
 import unittest
+from functools import wraps
 from unittest.mock import patch
 
 import numpy as np
 import paddle
+
+
+def _try_use_cuda_device():
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        paddle.set_device("gpu:0")
+        place = str(paddle.empty([1]).place).lower()
+    except Exception:
+        return False
+    return paddle.get_device().startswith("gpu") and (
+        "gpu" in place or "cuda" in place
+    )
+
+
+_HAS_USABLE_CUDA = _try_use_cuda_device()
+
+
+def _REQUIRES_USABLE_CUDA(obj):
+    reason = "requires a usable CUDA device to run CUDA/Triton/BF16 kernels"
+
+    def wrap_test(test_func):
+        @wraps(test_func)
+        def wrapper(*args, **kwargs):
+            if not _try_use_cuda_device():
+                raise unittest.SkipTest(reason)
+            return test_func(*args, **kwargs)
+
+        return wrapper
+
+    if isinstance(obj, type):
+        for name, value in list(obj.__dict__.items()):
+            if name.startswith("test") and callable(value):
+                setattr(obj, name, wrap_test(value))
+        return obj
+
+    return wrap_test(obj)
+
+
+if not _HAS_USABLE_CUDA:
+    paddle.cuda.get_device_capability = lambda device=None: (0, 0)
+    paddle.device.cuda.get_device_capability = lambda device=None: (0, 0)
+
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
 from paddlefleet.fusions.csa_sparse_attn import (
@@ -48,6 +92,7 @@ from paddlefleet.transformer.csa_attention import (
     get_window_topk_idxs,
 )
 from paddlefleet.transformer.dsa_attention import (
+    DSAttention,
     fused_qk_topk_naive,
 )
 from paddlefleet.transformer.dsv4_hybrid_attention import (
@@ -55,7 +100,9 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
     build_document_rope_freqs,
 )
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.triton_ops import fused_grouped_matmul
 
 _SEED = 42
 
@@ -63,6 +110,7 @@ _SEED = 42
 class _FakeGroup:
     def __init__(self, nranks=1):
         self.nranks = nranks
+        self.world_size = nranks
         self.ranks = list(range(nranks))
         self.rank = 0
 
@@ -108,6 +156,19 @@ def _make_config(
     tensor_model_parallel_size=1,
     context_parallel_size=1,
     csa_dense_mode=False,
+    experimental_attention_variant="dsv4_hybrid",
+    params_dtype=paddle.bfloat16,
+    bf16=True,
+    hybrid_mla_q_lora_rank=1536,
+    hybrid_mla_kv_lora_rank=512,
+    hybrid_mla_qk_nope_head_dim=192,
+    hybrid_mla_qk_rope_head_dim=64,
+    hybrid_mla_v_head_dim=256,
+    hybrid_mla_num_attention_heads=64,
+    hybrid_mla_num_key_value_heads=64,
+    hybrid_index_n_heads=4,
+    hybrid_index_head_dim=128,
+    hybrid_index_topk=8,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -117,17 +178,27 @@ def _make_config(
         num_nextn_predict_layers=num_nextn_predict_layers,
         hidden_size=hidden_size,
         num_attention_heads=num_attention_heads,
-        params_dtype=paddle.bfloat16,
-        bf16=True,
+        params_dtype=params_dtype,
+        bf16=bf16,
         use_bias=False,
         multi_latent_attention=multi_latent_attention,
-        experimental_attention_variant="dsv4_hybrid",
+        experimental_attention_variant=experimental_attention_variant,
         q_lora_rank=q_lora_rank,
         kv_lora_rank=v_head_dim - qk_pos_emb_head_dim,
         qk_nope_head_dim=v_head_dim - qk_pos_emb_head_dim,
         qk_rope_head_dim=qk_pos_emb_head_dim,
         qk_pos_emb_head_dim=qk_pos_emb_head_dim,
         v_head_dim=v_head_dim,
+        hybrid_mla_q_lora_rank=hybrid_mla_q_lora_rank,
+        hybrid_mla_kv_lora_rank=hybrid_mla_kv_lora_rank,
+        hybrid_mla_qk_nope_head_dim=hybrid_mla_qk_nope_head_dim,
+        hybrid_mla_qk_rope_head_dim=hybrid_mla_qk_rope_head_dim,
+        hybrid_mla_v_head_dim=hybrid_mla_v_head_dim,
+        hybrid_mla_num_attention_heads=hybrid_mla_num_attention_heads,
+        hybrid_mla_num_key_value_heads=hybrid_mla_num_key_value_heads,
+        hybrid_index_n_heads=hybrid_index_n_heads,
+        hybrid_index_head_dim=hybrid_index_head_dim,
+        hybrid_index_topk=hybrid_index_topk,
         o_groups=o_groups,
         o_lora_rank=o_lora_rank,
         rope_type=rope_type,
@@ -177,6 +248,129 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         self_attn_spec = spec.sublayers_spec.self_attn
         self.assertIs(self_attn_spec.layer, DSv4HybridSelfAttention)
 
+    def test_hybrid_mla_and_dsv4_construct_with_local_dimensions(self):
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=2,
+            hidden_size=256,
+            csa_compress_ratios=[-2, 128],
+            dsa_index_n_heads=None,
+        )
+        pg_collection = _FakePGCollection()
+
+        mla_spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=0,
+        ).sublayers_spec.self_attn
+        dsv4_spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=1,
+        ).sublayers_spec.self_attn
+        mla = build_spec_layer(
+            mla_spec, config=config, layer_number=0, pg_collection=pg_collection
+        )
+        dsv4 = build_spec_layer(
+            dsv4_spec,
+            config=config,
+            layer_number=1,
+            pg_collection=pg_collection,
+        )
+
+        self.assertIsInstance(mla, MLASelfAttention)
+        self.assertEqual(mla.q_head_dim, 256)
+        self.assertEqual(mla.v_head_dim, 256)
+        self.assertEqual(list(mla.q_a_proj.weight.shape), [256, 1536])
+        self.assertEqual(list(mla.q_b_proj.weight.shape), [1536, 64 * 256])
+        self.assertEqual(list(mla.kv_a_proj_with_mqa.weight.shape), [256, 576])
+        self.assertEqual(list(mla.kv_b_proj.weight.shape), [512, 64 * 448])
+        self.assertEqual(list(mla.o_proj.weight.shape), [64 * 256, 256])
+
+        self.assertIsInstance(dsv4, DSv4HybridSelfAttention)
+        self.assertEqual(dsv4.q_head_dim, 32)
+        self.assertEqual(dsv4.v_head_dim, 32)
+        self.assertEqual(dsv4.qk_pos_emb_head_dim, 16)
+        self.assertEqual(list(dsv4.linear_q_down_proj.weight.shape), [256, 64])
+        self.assertEqual(list(dsv4.linear_q_up_proj.weight.shape), [64, 8 * 32])
+        self.assertEqual(list(dsv4.linear_kv_proj.weight.shape), [256, 32])
+
+    def test_hybrid_mla_local_rank_reaches_dsa_indexer(self):
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=1,
+            hidden_size=256,
+            q_lora_rank=1024,
+            csa_compress_ratios=[-2],
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=128,
+            params_dtype=paddle.float32,
+            bf16=False,
+        )
+        mla_spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=0,
+        ).sublayers_spec.self_attn
+        mla = build_spec_layer(
+            mla_spec,
+            config=config,
+            layer_number=0,
+            pg_collection=_FakePGCollection(),
+        )
+
+        indexer = mla.core_attention.indexer
+        self.assertEqual(config.q_lora_rank, 1024)
+        self.assertEqual(mla.q_lora_rank, 1536)
+        self.assertEqual(indexer.rope_head_dim, 64)
+        self.assertEqual(list(indexer.wq_b.weight.shape), [1536, 4 * 128])
+        self.assertEqual(list(indexer.wk.weight.shape), [256, 128])
+        self.assertEqual(list(indexer.weights_proj.weight.shape), [256, 4])
+
+    def test_hybrid_mla_without_hybrid_index_uses_standard_attention(self):
+        config = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-2],
+            hybrid_index_n_heads=None,
+            hybrid_index_head_dim=None,
+            hybrid_index_topk=None,
+        )
+        mla_spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=0,
+        ).sublayers_spec.self_attn
+
+        self.assertIsNot(
+            getattr(mla_spec.sublayers_spec.core_attention, "layer", None),
+            DSAttention,
+        )
+
+    def test_legacy_all_mla_constructs_with_local_dimensions(self):
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[0],
+            experimental_attention_variant=None,
+            dsa_index_n_heads=None,
+        )
+        spec = get_attention_spec(
+            config=config,
+            attention_layer_type="multi_latent_attention",
+            attn_mask_type=AttnMaskType.causal,
+        )
+
+        mla = build_spec_layer(
+            spec,
+            config=config,
+            layer_number=0,
+            pg_collection=_FakePGCollection(),
+        )
+
+        self.assertIsInstance(mla, MLASelfAttention)
+        self.assertEqual(mla.q_lora_rank, config.q_lora_rank)
+        self.assertEqual(mla.kv_lora_rank, config.kv_lora_rank)
+
     def test_config_validation_errors(self):
         with self.assertRaisesRegex(
             ValueError, "csa_compress_ratios to be set"
@@ -201,6 +395,20 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         # ratio 129 is above HCA (128) and rejected.
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[129])
+
+        with self.assertRaisesRegex(ValueError, "hybrid_mla_v_head_dim"):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_mla_v_head_dim=None,
+            )
+
+        with self.assertRaisesRegex(ValueError, "hybrid_index_head_dim"):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_index_head_dim=None,
+            )
 
     def test_csa_compress_ratios_accepts_general_set(self):
         # full-causal MQA (-1), window (0), CSA over the full [2, 127] range
@@ -381,6 +589,7 @@ class TestCSAIndexHelpers(unittest.TestCase):
         self.assertEqual(topk_indices.numpy().tolist()[0][0][0], 0)
 
 
+@_REQUIRES_USABLE_CUDA
 class TestCSADocMaskMetadata(unittest.TestCase):
     def _make_docmask(self):
         return paddle.to_tensor(
@@ -577,6 +786,7 @@ class TestCSADocMaskMetadata(unittest.TestCase):
             CSADocMaskMetadata.build(4, 1, 8, self._make_docmask())
 
 
+@_REQUIRES_USABLE_CUDA
 class TestDSv4HybridDocumentRoPE(unittest.TestCase):
     def test_document_rope_freqs_reuses_supplied_doc_lens(self):
         config = _make_config(rope_type="yarn")
@@ -1293,6 +1503,7 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         self.assertTrue(hasattr(attn, "q_layernorm"))
         self.assertTrue(hasattr(attn, "kv_layernorm"))
 
+    @_REQUIRES_USABLE_CUDA
     def test_csa_ratio_builds_and_forward(self):
         # CSA layers accept any integer compress ratio in [2, 127]. Cover small
         # and large powers of two as well as a non-power-of-2 ratio (3).
@@ -1370,6 +1581,7 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is invalid"):
             _make_config(num_layers=1, csa_compress_ratios=[129])
 
+    @_REQUIRES_USABLE_CUDA
     def test_mqa_ratio_matches_window_covering_full_sequence(self):
         # ratio=-1 is full-causal MQA: no compressor, no indexer, no window.
         # A window-only layer (ratio=0) whose window covers the whole sequence
@@ -1422,6 +1634,7 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
             ).item()
         )
 
+    @_REQUIRES_USABLE_CUDA
     def test_mqa_topk_length_matches_mask_only_indices(self):
         # The MQA index table carries both -1 padding and topk_length; dropping
         # topk_length must not change the result (the kernel only stops early).
@@ -1459,6 +1672,7 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
             float(with_length[:, 19:].cast("float32").abs().max()), 0.0
         )
 
+    @_REQUIRES_USABLE_CUDA
     def test_mqa_causal_topk_idxs_from_startend_row_indices(self):
         # Without a prebuilt metadata object the helper builds one itself from
         # startend_row_indices; both entry points must agree.
@@ -1637,6 +1851,7 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         self.assertFalse(attn.linear_o_group_proj.stop_gradient)
 
 
+@_REQUIRES_USABLE_CUDA
 class TestDSv4HybridFusedSparseAttention(unittest.TestCase):
     def test_fused_matches_unfused_forward_backward(self):
         old_flag = paddle.get_flags(["FLAGS_cudnn_deterministic"])[
@@ -1728,6 +1943,7 @@ class TestDSv4HybridFusedSparseAttention(unittest.TestCase):
             paddle.set_flags({"FLAGS_cudnn_deterministic": old_flag})
 
 
+@_REQUIRES_USABLE_CUDA
 class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
     def setUp(self):
         paddle.seed(_SEED)
@@ -1854,6 +2070,66 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         )
         self.assertTrue(paddle.isfinite(output.float()).all().item())
 
+    def test_yarn_rope_fusion(self):
+        batch_size = 1
+        seq_len = 128
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(rope_type="yarn", dsa_indexer_loss_coeff=1.0)
+        attn = _build_attention(config, layer_number=2)
+        attn.train()
+        hidden = paddle.randn(
+            [batch_size, seq_len, config.hidden_size],
+            dtype=paddle.bfloat16,
+        )
+        hidden.stop_gradient = False
+
+        def run(yarn_rope_fusion):
+            attn.rotary_pos_emb.yarn_rope_fusion = yarn_rope_fusion
+            attn.clear_gradients()
+            if hidden.grad is not None:
+                hidden.clear_gradient()
+
+            output, _ = attn(hidden_states=hidden, attention_mask=None)
+            output.cast("float32").sum().backward()
+
+            param_grads = {
+                name: param.grad.clone()
+                for name, param in attn.named_parameters()
+                if param.grad is not None
+            }
+            return output.clone(), hidden.grad.clone(), param_grads
+
+        unfused_out, unfused_hidden_grad, unfused_grads = run(False)
+        fused_out, fused_hidden_grad, fused_grads = run(True)
+
+        self.assertTrue(
+            paddle.allclose(
+                fused_out.cast("float32"),
+                unfused_out.cast("float32"),
+                rtol=1e-2,
+                atol=1e-2,
+            ).item()
+        )
+        self.assertTrue(
+            paddle.allclose(
+                fused_hidden_grad.cast("float32"),
+                unfused_hidden_grad.cast("float32"),
+                rtol=1e-2,
+                atol=1e-2,
+            ).item()
+        )
+        self.assertEqual(set(fused_grads.keys()), set(unfused_grads.keys()))
+        for name in unfused_grads:
+            self.assertTrue(
+                paddle.allclose(
+                    fused_grads[name].cast("float32"),
+                    unfused_grads[name].cast("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item(),
+                f"Gradient mismatch for parameter {name}",
+            )
+
     def test_gated_attention(self):
         batch_size = 1
         seq_len = 64
@@ -1927,6 +2203,7 @@ class TestDSv4HybridAttentionForwardBackward(unittest.TestCase):
         )
 
 
+@_REQUIRES_USABLE_CUDA
 class TestDSv4HybridQKV(unittest.TestCase):
     def setUp(self):
         paddle.seed(_SEED)
@@ -1981,6 +2258,7 @@ class TestDSv4HybridQKV(unittest.TestCase):
         )
 
 
+@_REQUIRES_USABLE_CUDA
 class TestDSv4PackedForwardBackwardEquivalence(unittest.TestCase):
     """Verify packed B=2 forward/backward matches two independent B=1 runs.
 
@@ -2300,9 +2578,9 @@ class TestDSv4PackedForwardBackwardEquivalence(unittest.TestCase):
             )
 
 
+@_REQUIRES_USABLE_CUDA
 @unittest.skipIf(
-    not paddle.is_compiled_with_cuda()
-    or paddle.device.cuda.get_device_capability()[0] < 8,
+    not _HAS_USABLE_CUDA or paddle.device.cuda.get_device_capability()[0] < 8,
     "dsv4_q_rms_norm_fusion requires GPU with SM80+ (bf16 Triton kernel)",
 )
 class TestDSv4QRMSNormFusionIntegration(unittest.TestCase):
@@ -2437,6 +2715,75 @@ class TestDSv4QRMSNormFusionIntegration(unittest.TestCase):
             "fused_q_rms_norm was called even though "
             "dsv4_q_rms_norm_fusion=False",
         )
+
+
+@unittest.skipUnless(
+    paddle.is_compiled_with_cuda(), "fused_grouped_matmul requires CUDA/Triton"
+)
+class TestFusedGroupedMatmul(unittest.TestCase):
+    """Regression tests for fused_grouped_matmul vs paddle.einsum oracle.
+
+    The fused kernel replaces paddle.einsum("...gd,grd->...gr", x, w). These
+    tests use that einsum as the oracle and compare forward output, x.grad and
+    w.grad. Shapes are deliberately chosen so M (=b*sq), R and D are not
+    multiples of the Triton tile sizes (64/128), exercising the mask paths.
+    """
+
+    # M=b*sq=130, R=70, D=100: all cross a tile boundary and are non-divisible.
+    _B, _SQ, _G, _D, _R = 2, 65, 3, 100, 70
+
+    def _compare_against_einsum(self, dtype):
+        model_parallel_cuda_manual_seed(_SEED)
+        x = paddle.randn([self._B, self._SQ, self._G, self._D], dtype="float32")
+        w = paddle.randn([self._G, self._R, self._D], dtype="float32")
+        grad_out = paddle.randn(
+            [self._B, self._SQ, self._G, self._R], dtype="float32"
+        )
+
+        def run(fn):
+            xi = x.astype(dtype).detach()
+            wi = w.astype(dtype).detach()
+            xi.stop_gradient = False
+            wi.stop_gradient = False
+            out = fn(xi, wi)
+            (out.astype("float32") * grad_out).sum().backward()
+            return out, xi.grad, wi.grad
+
+        fused_out, fused_dx, fused_dw = run(fused_grouped_matmul)
+        ref_out, ref_dx, ref_dw = run(
+            lambda a, b: paddle.einsum("...gd,grd->...gr", a, b)
+        )
+
+        self.assertEqual(
+            list(fused_out.shape),
+            [self._B, self._SQ, self._G, self._R],
+        )
+        for fused, ref, name in [
+            (fused_out, ref_out, "output"),
+            (fused_dx, ref_dx, "x.grad"),
+            (fused_dw, ref_dw, "w.grad"),
+        ]:
+            self.assertTrue(
+                paddle.allclose(
+                    fused.astype("float32"),
+                    ref.astype("float32"),
+                    rtol=1e-2,
+                    atol=1e-2,
+                ).item(),
+                msg=f"{name} mismatch for dtype={dtype}",
+            )
+
+    def test_bf16_matches_einsum(self):
+        self._compare_against_einsum(paddle.bfloat16)
+
+    def test_fp16_matches_einsum(self):
+        self._compare_against_einsum(paddle.float16)
+
+    def test_dtype_mismatch_raises(self):
+        x = paddle.randn([1, 4, self._G, self._D], dtype="bfloat16")
+        w = paddle.randn([self._G, self._R, self._D], dtype="float16")
+        with self.assertRaises(ValueError):
+            fused_grouped_matmul(x, w)
 
 
 if __name__ == "__main__":

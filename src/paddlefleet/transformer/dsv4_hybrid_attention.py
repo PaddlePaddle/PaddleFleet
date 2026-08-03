@@ -598,6 +598,14 @@ class DSv4HybridAttention(Attention):
         else:
             layer_idx = layer_number - self.config.num_empty_layers_add_in_head
             compress_ratio = self.config.csa_compress_ratios[layer_idx]
+        assert compress_ratio != -2, (
+            "DSv4HybridAttention should not be constructed for MLA ratio -2"
+        )
+        if compress_ratio not in {-1, 0, 128} and not 2 <= compress_ratio < 128:
+            raise ValueError(
+                f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
+            )
+
         # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
         if compress_ratio > 1:
@@ -627,6 +635,9 @@ class DSv4HybridAttention(Attention):
                 beta_slow=getattr(config, "beta_slow", 1),
                 mscale=getattr(config, "mscale", 1.0),
                 mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+                yarn_rope_fusion=getattr(
+                    config, "dsv4_yarn_rope_fusion", False
+                ),
             )
 
         self.core_attention = build_spec_layer(
@@ -942,9 +953,9 @@ class DSv4HybridAttention(Attention):
             wo_a_weight = self.linear_o_group_proj.reshape(
                 [self.o_local_groups, self.config.o_lora_rank, -1]
             )
-            core_attn_out = paddle.einsum(
-                "...gd,grd->...gr", core_attn_out, wo_a_weight
-            )
+            from paddlefleet.triton_ops import fused_grouped_matmul
+
+            core_attn_out = fused_grouped_matmul(core_attn_out, wo_a_weight)
             core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Apply gated attention
@@ -1033,7 +1044,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         self.linear_q_down_proj = build_spec_layer(
             sublayers_spec.linear_q_down_proj,
             config.hidden_size,
-            config.q_lora_rank,
+            self.q_lora_rank,
             config=config,
             init_method=config.init_method,
             bias=False,
@@ -1047,14 +1058,14 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         self.q_layernorm = build_spec_layer(
             sublayers_spec.q_layernorm,
             config=config,
-            hidden_size=config.q_lora_rank,
+            hidden_size=self.q_lora_rank,
             eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
         # Q up projection: q_lora_rank -> num_heads * q_head_dim (column parallel)
         self.linear_q_up_proj = build_spec_layer(
             sublayers_spec.linear_q_up_proj,
-            config.q_lora_rank,
+            self.q_lora_rank,
             self.num_attention_heads * q_head_dim,
             config=config,
             init_method=config.init_method,
@@ -1070,7 +1081,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         self.linear_kv_proj = build_spec_layer(
             sublayers_spec.linear_kv_proj,
             config.hidden_size,
-            config.v_head_dim,
+            self.v_head_dim,
             config=config,
             init_method=config.init_method,
             gather_output=False,
@@ -1085,7 +1096,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         self.kv_layernorm = build_spec_layer(
             sublayers_spec.kv_layernorm,
             config=config,
-            hidden_size=config.v_head_dim,
+            hidden_size=self.v_head_dim,
             eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
