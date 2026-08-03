@@ -1574,7 +1574,23 @@ class MLASelfAttention(MultiLatentAttention):
             # [num_tokens, qk_rope_head_dim] -> [num_tokens, 1, qk_rope_head_dim]
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
-            if self.config.apply_rope_fusion:
+            if getattr(self.config, "mla_use_nope", False):
+                q_no_pe = q[..., : self.qk_nope_head_dim]
+                q_pos_emb = q[..., self.qk_nope_head_dim :]
+                k_no_pe, value = paddle.split(
+                    kv,
+                    [self.qk_nope_head_dim, self.v_head_dim],
+                    axis=-1,
+                )
+                k_pe = k_pos_emb
+                query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
+                k_pos_emb = k_pos_emb.expand(
+                    *k_pos_emb.shape[:-2],
+                    self.num_attention_heads_per_partition,
+                    k_pos_emb.shape[-1],
+                )
+                key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
+            elif self.config.apply_rope_fusion:
                 from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,

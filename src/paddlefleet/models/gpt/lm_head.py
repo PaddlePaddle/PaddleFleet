@@ -314,11 +314,6 @@ class GPTLMHead(ColumnParallelLinear):
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
 
-        # Apply final Block Attention Residual if enabled
-        if self.config.block_attention_residuals:
-            blocks = dict_args.get("blocks", [])
-            hidden_states = self.block_attn_res(hidden_states, blocks)
-
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
@@ -328,11 +323,22 @@ class GPTLMHead(ColumnParallelLinear):
                 hidden_states,
                 self.config.num_nextn_predict_layers + 1,
             )
+            # The residual bank belongs to the backbone stream. MTP streams
+            # are packed along axis 0 and have their own transformer blocks;
+            # stacking the combined tensor with backbone blocks mixes batch
+            # dimensions and is semantically wrong.
+            if self.config.block_attention_residuals:
+                blocks = dict_args.get("blocks", [])
+                tensor_list[0] = self.block_attn_res(tensor_list[0], blocks)
             logits = [self._forward(tensor_list[0])]
             for i in range(self.config.num_nextn_predict_layers):
                 logits.append(self._forward(tensor_list[i + 1]))
             return logits
         else:
+            # Apply final Block Attention Residual to the sole backbone stream.
+            if self.config.block_attention_residuals:
+                blocks = dict_args.get("blocks", [])
+                hidden_states = self.block_attn_res(hidden_states, blocks)
             return self._forward(hidden_states)
 
     @property
@@ -376,14 +382,13 @@ class GPTMainLMHead(GPTLMHead):
     def forward(self, dict_args: dict):
         hidden_states = dict_args["hidden_states"]
         mtp_loss = dict_args.get("mtp_loss", None)
-        if self.config.block_attention_residuals:
-            blocks = dict_args.get("blocks", [])
-            hidden_states = self.block_attn_res(hidden_states, blocks)
-
         tensor_list = paddle.split(
             hidden_states,
             self.config.num_nextn_predict_layers + 1,
         )
+        if self.config.block_attention_residuals:
+            blocks = dict_args.get("blocks", [])
+            tensor_list[0] = self.block_attn_res(tensor_list[0], blocks)
         logits = self._forward(tensor_list[0])
         ret = {
             "logits": logits,

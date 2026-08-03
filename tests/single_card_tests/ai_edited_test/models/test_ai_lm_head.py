@@ -109,6 +109,32 @@ class TestGPTLMHeadForward(unittest.TestCase):
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 3)  # main + 2 MTP
 
+    def test_mtp_block_residual_only_updates_backbone_stream(self):
+        """AttentionRes must not consume or modify packed MTP streams."""
+        head = _make_head(
+            GPTLMHead,
+            config=MagicMock(
+                block_attention_residuals=True,
+                num_nextn_predict_layers=1,
+                mtp_load_weight_only=False,
+            ),
+        )
+        head._forward = MagicMock(side_effect=lambda hidden: hidden)
+        head.block_attn_res = MagicMock(
+            side_effect=lambda hidden, _blocks: hidden + 100.0
+        )
+        hidden = paddle.arange(24, dtype="float32").reshape([4, 6])
+        blocks = [paddle.randn([2, 6])]
+
+        result = head.forward({"hidden_states": hidden, "blocks": blocks})
+
+        backbone, mtp = paddle.split(hidden, 2)
+        residual_input, residual_blocks = head.block_attn_res.call_args.args
+        self.assertEqual(list(residual_input.shape), [2, 6])
+        self.assertIs(residual_blocks, blocks)
+        self.assertTrue(paddle.equal_all(result[0], backbone + 100.0))
+        self.assertTrue(paddle.equal_all(result[1], mtp))
+
     def test_forward_without_mtp(self):
         """Test forward without MTP layers calls _forward once."""
         head = _make_head(
@@ -327,6 +353,34 @@ class TestGPTMainLMHeadForward(unittest.TestCase):
         result = head.forward(dict_args)
         # mtp_loss not in dict_args, so should not appear in result
         self.assertNotIn("mtp_loss", result)
+
+    def test_block_residual_only_updates_main_stream(self):
+        """The split main head applies AttentionRes after separating MTP."""
+        head = _make_head(
+            GPTMainLMHead,
+            config=MagicMock(
+                block_attention_residuals=True,
+                num_nextn_predict_layers=1,
+            ),
+        )
+        head._forward = MagicMock(side_effect=lambda hidden: hidden)
+        head.block_attn_res = MagicMock(
+            side_effect=lambda hidden, _blocks: hidden - 7.0
+        )
+        hidden = paddle.arange(24, dtype="float32").reshape([4, 6])
+        blocks = [paddle.randn([2, 6])]
+        mtp_loss = [paddle.to_tensor(1.0)]
+
+        result = head.forward(
+            {"hidden_states": hidden, "blocks": blocks, "mtp_loss": mtp_loss}
+        )
+
+        backbone, _ = paddle.split(hidden, 2)
+        residual_input, residual_blocks = head.block_attn_res.call_args.args
+        self.assertEqual(list(residual_input.shape), [2, 6])
+        self.assertIs(residual_blocks, blocks)
+        self.assertTrue(paddle.equal_all(result["logits"], backbone - 7.0))
+        self.assertIs(result["mtp_loss"], mtp_loss)
 
 
 if __name__ == "__main__":

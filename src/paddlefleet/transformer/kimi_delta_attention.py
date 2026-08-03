@@ -57,13 +57,7 @@ from .paddle_norm import (
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
-try:
-    from fla.ops.kda import chunk_kda
-
-    HAVE_FLA = True
-except ImportError:
-    chunk_kda = None
-    HAVE_FLA = False
+from paddlefleet_ops import fla
 
 logger = logging.getLogger(__name__)
 
@@ -464,22 +458,19 @@ class KimiDeltaAttention(FleetLayer):
             key = _l2norm(key.contiguous())
 
         nvtx_range_push(suffix="kimi_delta_rule")
-        if (not HAVE_FLA) or self.config.deterministic_mode:
-            core_attn_out, _ = paddle_chunk_kda(
-                query.contiguous(),
-                key.contiguous(),
-                value.contiguous(),
-                g=alpha.contiguous(),
-                beta=beta.contiguous(),
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                use_gate_in_kernel=True,
-                use_beta_sigmoid_in_kernel=True,
-                safe_gate=self.gate_lower_bound is not None,
-                lower_bound=self.gate_lower_bound,
-            )
-        else:
-            raise NotImplementedError("FLA not supported yet.")
+        core_attn_out, _ = fla.ops.kda.chunk_kda(
+            query.contiguous(),
+            key.contiguous(),
+            value.contiguous(),
+            g=alpha.contiguous(),
+            beta=beta.contiguous(),
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            safe_gate=self.gate_lower_bound is not None,
+            lower_bound=self.gate_lower_bound,
+        )
         nvtx_range_pop(suffix="kimi_delta_rule")
 
         # Gated norm

@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
 
+from paddlefleet.transformer import kimi_delta_attention as kda_mod
 from paddlefleet.transformer.kimi_delta_attention import (
     KimiDeltaAttention,
     KimiDeltaAttentionSublayersSpec,
@@ -352,6 +354,28 @@ class TestKimiDeltaAttention(unittest.TestCase):
         )
         self.assertIsNone(out_bias)
         assert paddle.isfinite(out).all().item()
+
+    def test_forward_always_calls_fla_chunk_kda(self):
+        """Deterministic mode must not select the removed eager fallback."""
+        self.assertTrue(self.kda.config.deterministic_mode)
+        x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
+
+        with patch.object(
+            kda_mod.fla.ops.kda,
+            "chunk_kda",
+            wraps=paddle_chunk_kda,
+        ) as mock_chunk_kda:
+            out, _ = self.kda(hidden_states=x, attention_mask=None)
+
+        mock_chunk_kda.assert_called_once()
+        call_kwargs = mock_chunk_kda.call_args.kwargs
+        self.assertTrue(call_kwargs["use_gate_in_kernel"])
+        self.assertTrue(call_kwargs["use_beta_sigmoid_in_kernel"])
+        self.assertTrue(call_kwargs["safe_gate"])
+        self.assertEqual(call_kwargs["lower_bound"], GATE_LOWER_BOUND)
+        self.assertEqual(
+            list(out.shape), [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
+        )
 
     def test_forward_low_rank_gate(self):
         kda = _build_kda(use_full_rank_gate=False)

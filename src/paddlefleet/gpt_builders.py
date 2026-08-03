@@ -33,7 +33,10 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
 
 def gpt_builder(config, **kwargs):
     print("building GPT model ...")
-    if config.n_routed_experts:
+    if (
+        config.n_routed_experts
+        or getattr(config, "layer_types", None) is not None
+    ):
         # Define the decoder block spec
         transformer_layers_spec = get_gpt_decoder_layers_spec(
             config,

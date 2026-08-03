@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 import paddle
@@ -209,6 +208,10 @@ def get_attention_spec(
         LayerSpec for the attention sublayer inside a TransformerLayer.
     """
     assert config is not None, "config must be specified."
+    attention_layer_type = {
+        "full_attention": "self_attention",
+        "linear_attention": "gated_delta_net",
+    }.get(attention_layer_type, attention_layer_type)
     backend = LocalSpecProvider()
 
     # Standard RMSNorm for general use (MLA, etc.)
@@ -756,27 +759,22 @@ def get_gpt_decoder_layers_spec(
     qk_l2_norm: bool | None = False,
 ) -> list[LayerSpec]:
     """GPT block spec."""
-    dense_layer_spec_func = partial(
-        get_gpt_layer_local_spec,
-        config=config,
-        num_experts=None,
-        moe_expert_fusion=False,
-        use_qk_norm=config.use_qk_norm,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=normalization,
-        qk_l2_norm=qk_l2_norm,
-    )
 
-    moe_layer_spec_func = partial(
-        get_gpt_layer_local_spec,
-        config=config,
-        num_experts=config.n_routed_experts,
-        moe_expert_fusion=config.moe_expert_fusion,
-        use_qk_norm=config.use_qk_norm,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=normalization,
-        qk_l2_norm=qk_l2_norm,
-    )
+    # Per-layer attention types; falls back to a homogeneous model
+    # (driven by config.multi_latent_attention) when config.layer_types is unset.
+    layer_types = getattr(config, "layer_types", None)
+    if layer_types is None:
+        attention_layer_type = (
+            "multi_latent_attention"
+            if config.multi_latent_attention
+            else "self_attention"
+        )
+        layer_types = [attention_layer_type] * config.num_hidden_layers
+    if len(layer_types) != config.num_hidden_layers:
+        raise ValueError(
+            f"layer_types must contain {config.num_hidden_layers} entries, "
+            f"but got {len(layer_types)}."
+        )
 
     # Parse config.moe_layer_freq to determine the pattern of expert/dense layers.
     # 0 stands for dense layers, 1 stands for expert layers.
@@ -801,19 +799,25 @@ def get_gpt_decoder_layers_spec(
 
     # Create the layer specs for the model.
     layer_specs = []
-    for layer_number in range(config.num_hidden_layers):
+    for layer_number, attention_layer_type in enumerate(layer_types):
         real_layer_number = layer_number + config.num_empty_layers_add_in_head
-        if moe_layer_pattern[layer_number] == 1:
-            layer_specs.append(
-                moe_layer_spec_func(layer_number=real_layer_number)
-            )
-        elif moe_layer_pattern[layer_number] == 0:
-            layer_specs.append(
-                dense_layer_spec_func(layer_number=real_layer_number)
-            )
-        else:
+        is_moe_layer = moe_layer_pattern[layer_number]
+        if is_moe_layer not in (0, 1):
             raise ValueError(f"Invalid layer pattern: {moe_layer_pattern}")
-
+        layer_specs.append(
+            get_gpt_layer_local_spec(
+                config=config,
+                num_experts=config.n_routed_experts if is_moe_layer else None,
+                moe_expert_fusion=config.moe_expert_fusion
+                if is_moe_layer
+                else False,
+                use_qk_norm=config.use_qk_norm,
+                normalization=normalization,
+                qk_l2_norm=qk_l2_norm,
+                layer_number=real_layer_number,
+                attention_layer_type=attention_layer_type,
+            )
+        )
     return layer_specs
 
 
