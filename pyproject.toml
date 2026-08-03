@@ -202,6 +202,12 @@ explicit = true
 [tool.pytest.ini_options]
 pythonpath = [".", "test"]
 testpaths = ["tests", "test/formers"]
+filterwarnings = [
+    "ignore::UserWarning",
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]
+log_cli = false
 
 [tool.ruff]
 exclude = ["packages/paddlefleet_ops/third_party"]

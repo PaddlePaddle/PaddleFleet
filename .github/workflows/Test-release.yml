@@ -1557,14 +1557,52 @@ jobs:
       - name: Display Test Summary
         if: always()
         run: |
-          file_success=${{ github.workspace }}/PaddleFleet/unittest_logs/unittest.log
+          file_log=${{ github.workspace }}/PaddleFleet/unittest_logs/unittest.log
           file_failed=${{ github.workspace }}/PaddleFleet/unittest_logs/unittest_FAIL.log
+
           if [[ "${{ steps.test.outcome }}" == "success" ]]; then
-            echo "Test passed successfully"
-            tail -n 1 "${file_success}" || true
+            stats=$(tail -n 1 "${file_log}" 2>/dev/null || echo "")
+            echo "## ✅ All Tests Passed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "${stats}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
           else
-            echo "Test failed with status: ${{ steps.test.outcome }}"
-            grep "^FAILED test/formers" "${file_failed}" | awk '{print $2}' | sort -u || true
+            echo "## ❌ Test Failures" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Collect FAILED lines from log
+            failed_lines=$(grep "^FAILED " "${file_log}" 2>/dev/null | sort -u || true)
+            stats=$(grep -E "[0-9]+ failed" "${file_log}" 2>/dev/null | tail -n 1 || true)
+
+            if [[ -n "${failed_lines}" ]]; then
+              echo "| # | Failed Test |" >> $GITHUB_STEP_SUMMARY
+              echo "|---|-------------|" >> $GITHUB_STEP_SUMMARY
+              i=1
+              while IFS= read -r line; do
+                test_id="${line#FAILED }"
+                echo "| ${i} | \`${test_id}\` |" >> $GITHUB_STEP_SUMMARY
+                i=$((i+1))
+              done <<< "${failed_lines}"
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if [[ -n "${stats}" ]]; then
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              echo "${stats}" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Also print to action log with color for visibility
+            echo ""
+            echo "::error::Test failures detected"
+            if [[ -n "${failed_lines}" ]]; then
+              while IFS= read -r line; do
+                echo "::error::${line}"
+              done <<< "${failed_lines}"
+            fi
+            echo ""
+            [[ -n "${stats}" ]] && echo "${stats}"
           fi
       - name: Upload Products
         if: always()
@@ -1628,32 +1666,6 @@ jobs:
         run: |
           docker rm -f "$container_name" 2>/dev/null || true
 
-  upload-unittest-coverage:
-    name: upload-unittest-coverage
-    needs: [unittest-gpu-ci]
-    if: ${{ always() && needs.unittest-gpu-ci.outputs.pytest_execute_flag == 'true' }}
-    runs-on: 'ernie-cpu'
-    steps:
-      - name: Download coverage.xml
-        run: |
-          bos_prefix="${PR_ID}/${COMMIT_ID}"
-          wget -q --no-proxy --no-check-certificate \
-            "https://paddle-github-action.bj.bcebos.com/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs/coverage.xml" \
-            -O coverage.xml
-      - name: Fix coverage.xml paths
-        run: |
-          old_source=$(grep -oPm1 '(?<=<source>).*?(?=</source>)' coverage.xml || true)
-          if [ -n "$old_source" ]; then
-            sed -i "s|<source>$old_source</source>|<source>src/paddlefleet</source>|g" coverage.xml
-          else
-            sed -i 's|<sources>|<sources>\n        <source>src/paddlefleet</source>|' coverage.xml
-          fi
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: coverage.xml
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   model-unittest-gpu-ci:
     needs: [check-bypass, build_whl, check_documents_type]

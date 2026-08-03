@@ -49,18 +49,64 @@ set_env() {
 
 print_info() {
     if [ $1 -ne 0 ]; then
-        cat ${log_path}/unittest.log | grep -v "Fail to fscanf: Success" \
-            | grep -v "SKIPPED" | grep -v "warning" > ${log_path}/unittest_FAIL.log
-        cat ${log_path}/unittest_FAIL.log
-        tail -n 1 ${log_path}/unittest.log >> ${log_path}/unittest_FAIL.log
-        echo -e "\033[31m ${log_path}/unittest_FAIL \033[0m"
-        tail -n 1 ${log_path}/unittest_FAIL.log
+        # Extract only failures + short summary from full log
+        python3 - "${log_path}/unittest.log" "${log_path}/unittest_FAIL.log" <<'PYEOF'
+import sys, re
+
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, encoding="utf-8", errors="replace") as f:
+    content = f.read()
+
+lines = content.splitlines()
+output = []
+
+# 1. FAILURES section (full tracebacks)
+in_failures = False
+for line in lines:
+    if re.match(r"={3,}\s+FAILURES\s+={3,}", line):
+        in_failures = True
+    elif in_failures and re.match(r"={3,}", line) and "FAILURES" not in line:
+        output.append(line)
+        in_failures = False
+    if in_failures:
+        output.append(line)
+
+# 2. Short test summary (FAILED lines)
+summary_lines = [l for l in lines if l.startswith("FAILED ")]
+if summary_lines:
+    output.append("")
+    output.append("=" * 60)
+    output.append("SHORT TEST SUMMARY")
+    output.append("=" * 60)
+    output.extend(summary_lines)
+
+# 3. Final stats line
+for line in reversed(lines):
+    if re.search(r"\d+ failed", line) or re.search(r"\d+ passed", line):
+        output.append("")
+        output.append(line)
+        break
+
+with open(dst, "w", encoding="utf-8") as f:
+    f.write("\n".join(output) + "\n")
+PYEOF
+
+        cat "${log_path}/unittest_FAIL.log"
+        echo ""
+        echo -e "\033[31m========================================\033[0m"
+        echo -e "\033[31m  FAILED TESTS\033[0m"
+        echo -e "\033[31m========================================\033[0m"
+        grep "^FAILED " "${log_path}/unittest_FAIL.log" | while read -r line; do
+            echo -e "\033[31m  ✗ ${line#FAILED }\033[0m"
+        done || true
+        echo -e "\033[31m========================================\033[0m"
+        tail -n 1 "${log_path}/unittest.log"
         if [ $1 -eq 124 ]; then
-            echo "\033[32m [failed-timeout] Test case execution was terminated after exceeding the ${running_time} min limit."
+            echo -e "\033[33m [failed-timeout] Test execution exceeded time limit.\033[0m"
         fi
     else
         tail -n 1 ${log_path}/unittest.log
-        echo -e "\033[32m ${log_path}/unittest_SUCCESS \033[0m"
+        echo -e "\033[32m All tests passed \033[0m"
     fi
 }
 
@@ -77,7 +123,7 @@ if [[ ${FLAGS_enable_CI} == "true" ]] || [[ ${FLAGS_enable_CE} == "true" ]];then
     PYTHONPATH=$(pwd)/src:$(pwd) \
     COVERAGE_SOURCE=paddlefleet \
     timeout 60m \
-    python -m pytest -v -s -n 1 test/formers \
+    python -m pytest -v -n 1 test/formers \
         --dist no \
         --maxfail=10 \
         --timeout 200 --durations 20 \
