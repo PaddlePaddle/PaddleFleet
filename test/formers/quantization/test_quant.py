@@ -17,8 +17,9 @@ import unittest
 import paddle
 
 from paddlefleet.peft.lora import LoRAConfig, LoRAModel
-from paddlefleet.transformers import AutoConfig, AutoModelForCausalLM
+from paddlefleet.transformers import AutoConfig
 from paddlefleet.transformers.configuration_utils import QuantizationConfig
+from paddlefleet.transformers.qwen3.modeling import Qwen3ForCausalLMDeprecated
 from formers.testing_utils import gpu_device_initializer
 
 
@@ -36,7 +37,7 @@ class TestQuantedModel(unittest.TestCase):
             dtype="bfloat16",
             quantization_config=quantization_config,
         )
-        cls.model = AutoModelForCausalLM.from_pretrained(
+        cls.model = Qwen3ForCausalLMDeprecated.from_pretrained(
             "PaddleFormers/tiny-random-qwen3",
             config=model_config,
             load_checkpoint_format="flex_checkpoint",

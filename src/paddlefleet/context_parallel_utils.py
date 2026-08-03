@@ -15,17 +15,26 @@
 import inspect
 
 import paddle
-import paddlefleet_ops.flash_mask_facade
 from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
-from paddlefleet_ops.flash_mask_facade import get_fa_version
+
+try:
+    import paddlefleet_ops.flash_mask_facade
+    from paddlefleet_ops.flash_mask_facade import get_fa_version
+    _paddlefleet_ops_available = True
+except ImportError:
+    _paddlefleet_ops_available = False
+
+    def get_fa_version():
+        return None
 
 _flash_mask_available = False
 try:
     if (
-        paddle.cuda.is_available()
+        _paddlefleet_ops_available
+        and paddle.cuda.is_available()
         and paddle.cuda.get_device_capability()[0] == 10
     ):
         from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
