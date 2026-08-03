@@ -451,9 +451,12 @@ class LanguageLoss(FleetLayer):
                     _count = lossmask.sum()
                     import paddle.distributed as _pdist
 
-                    _ep_group = get_expert_model_parallel_group(
-                        check_initialized=False
-                    )
+                    _pg_collection = getattr(self, "pg_collection", None)
+                    _ep_group = getattr(_pg_collection, "ep", None)
+                    if _ep_group is None:
+                        _ep_group = get_expert_model_parallel_group(
+                            check_initialized=False
+                        )
                     _ep_size = (
                         _pdist.get_world_size(group=_ep_group)
                         if _ep_group is not None

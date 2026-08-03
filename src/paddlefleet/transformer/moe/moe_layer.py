@@ -714,11 +714,10 @@ class MoELayer(nn.Layer):
                 self.token_dispatcher, "global_input_probs", None
             )
             if per_token_scale is None:
-                if not self.use_accuracy_compatible:
-                    raise RuntimeError(
-                        "FLAGS_use_accuracy_compatible_kernel requires dispatched "
-                        "router probabilities from the token dispatcher."
-                    )
+                raise RuntimeError(
+                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                    "router probabilities from the token dispatcher."
+                )
             else:
                 scale_chunks = paddle.split(
                     per_token_scale, num_or_sections=tokens_per_expert, axis=0
@@ -729,7 +728,10 @@ class MoELayer(nn.Layer):
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            if self.use_accuracy_compatible and 0 < int(chunk.shape[0]) < 17:
+            if (
+                getattr(self, "use_accuracy_compatible", False)
+                and 0 < int(chunk.shape[0]) < 17
+            ):
                 num_rows = int(chunk.shape[0])
                 pad_rows = 32 - num_rows
                 chunk = paddle.concat(
@@ -984,6 +986,15 @@ class MoELayer(nn.Layer):
         topk_indices: paddle.Tensor | None = None,
     ):
         if self.use_accuracy_compatible:
+            if (
+                combine_overlap_handle is not None
+                and "fn_out" not in combine_overlap_handle
+            ):
+                combine_overlap_handle["fn_out"] = tuple(
+                    combine_overlap_handle["fn"](
+                        *combine_overlap_handle["fn_args"]
+                    )
+                )
             return self.custom_forward(
                 hidden_states,
                 probs,

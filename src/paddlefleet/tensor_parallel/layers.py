@@ -783,7 +783,6 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.use_pow2_scale = use_pow2_scale
         ctx.use_ue8m0 = use_ue8m0
         ctx.save_original_input = save_original_input
-        ctx.use_accuracy_compatible = use_accuracy_compatible
 
         if sequence_parallel:
             dim_size = list(input.shape)
