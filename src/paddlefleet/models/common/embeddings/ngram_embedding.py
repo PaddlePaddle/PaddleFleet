@@ -89,6 +89,55 @@ class NgramEmbedding(nn.Layer):
 
         self._vocab_mods_cache = None
 
+        # Usage / collision monitor (optional, no parameters, not a sub-layer).
+        self.monitor = None
+        if getattr(config, "ngram_monitor_enabled", False):
+            from paddlefleet.models.common.embeddings.ngram_monitor import (
+                NgramUsageMonitor,
+            )
+
+            self.monitor = NgramUsageMonitor(
+                config=config,
+                table_sizes=[
+                    int(self.m + i * 2 + 1) for i in range(num_embedders)
+                ],
+                table_orders=[2 + i // self.k for i in range(num_embedders)],
+                vocab_size=vocab_size,
+            )
+        self._valid_mask_cache = {}
+
+    def _valid_mask(self, seq_len: int, ngram: int) -> Tensor:
+        """[1, S] mask that is False where the N-gram window is padding-filled.
+
+        ``_compute_shifted_ids`` pads the first ``ngram - 1`` positions with
+        ``pad_token_id``, so those keys describe an N-gram that does not exist in
+        the data.  They must be excluded from the statistics, otherwise every
+        sequence contributes the same artificial keys and the collision numbers
+        become meaningless.
+        """
+        key = (seq_len, ngram)
+        if key not in self._valid_mask_cache:
+            pos = paddle.arange(seq_len, dtype="int64").reshape([1, seq_len])
+            self._valid_mask_cache[key] = pos >= (ngram - 1)
+        return self._valid_mask_cache[key]
+
+    def _compute_true_key(
+        self, input_ids: Tensor, shifted_ids: dict, ngram: int
+    ) -> Tensor:
+        """Exact (un-modded) N-gram key: sum_j id[t-j] * V^j, j < ngram.
+
+        This is the identity of the N-gram itself.  Two positions collide in a
+        sub-table iff their keys differ but their hashes match, so the monitor
+        needs the key rather than the hash.  Bounded by V^ngram - 1, which fits
+        in int64 for the configured vocabulary and ngram <= 3.
+        """
+        key = input_ids.cast("int64")
+        power = 1
+        for k_offset in range(2, ngram + 1):
+            power *= self.vocab_size
+            key = key + shifted_ids[k_offset].cast("int64") * power
+        return key
+
     def _precompute_vocab_mods(self):
         """Precompute (vocab_size^k) mod emb_vocab_dim for each (n, k) pair."""
         if self._vocab_mods_cache is not None:
@@ -177,6 +226,12 @@ class NgramEmbedding(nn.Layer):
         )
 
         for i in range(2, self.n + 1):
+            true_key = None
+            valid_mask = None
+            if self.monitor is not None:
+                valid_mask = self._valid_mask(input_ids.shape[1], i)
+                if self.monitor.needs_keys:
+                    true_key = self._compute_true_key(input_ids, shifted_ids, i)
             for j in range(self.k):
                 index = (i - 2) * self.k + j
 
@@ -184,8 +239,14 @@ class NgramEmbedding(nn.Layer):
                     input_ids, shifted_ids, vocab_mods, ngram=i, split_idx=j
                 )
 
+                if self.monitor is not None:
+                    self.monitor.observe(index, hash_ids, valid_mask, true_key)
+
                 x_ngram = self.embedders[index](hash_ids)
                 x_proj = self.post_projs[index](x_ngram)
                 ngram_output = ngram_output + x_proj
+
+        if self.monitor is not None:
+            self.monitor.commit()
 
         return ngram_output

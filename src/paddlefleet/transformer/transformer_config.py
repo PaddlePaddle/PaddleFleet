@@ -831,6 +831,54 @@ class TransformerConfig(ModelParallelConfig):
     """Token ID used for padding when shifting sequences for N-gram computation."""
 
     ####################
+    # N-gram Embedding monitoring
+    ####################
+    ngram_monitor_enabled: bool = False
+    """Master switch for the N-gram usage / collision monitor."""
+
+    ngram_monitor_interval: int = 100
+    """Steps between two analyses. Per-step cost is only 2 extra GPU ops."""
+
+    ngram_monitor_usage: bool = True
+    """Track per-row lookup counts (utilization, entropy, staleness, skew)."""
+
+    ngram_monitor_collision: bool = True
+    """Track hash collisions (per sub-table, and jointly across the K splits)."""
+
+    ngram_monitor_collision_max_rows: int = 0
+    """Micro-batch rows used for collision analysis. 0 means all rows."""
+
+    ngram_monitor_signal: bool = True
+    """Track the RMS of the N-gram signal relative to the word embedding."""
+
+    ngram_monitor_signal_rows: int = 1
+    """Micro-batch rows used for the signal RMS estimate."""
+
+    ngram_monitor_per_table_metrics: bool = True
+    """Emit per-sub-table metrics in addition to the aggregated ones."""
+
+    ngram_monitor_distribution: bool = True
+    """Summarise the per-row hit-count distribution (histogram, quantiles,
+    Lorenz mass shares, Gini) for both the current window and the cumulative
+    counts.  Needs no extra collective; costs one sort per sub-table per
+    analysis step."""
+
+    ngram_monitor_stale_windows: int = 10
+    """A row is 'stale' if untouched for more than this many analysis windows."""
+
+    ngram_monitor_reduce_group: str = "auto"
+    """Reduction group: 'auto' (world when TP=PP=CP=1), 'world', or 'dp'."""
+
+    ngram_monitor_save_state: bool = True
+    """Persist the cumulative counters into each checkpoint directory."""
+
+    ngram_monitor_save_full_state: bool = True
+    """Include the full per-row counter tables in the persisted state."""
+
+    ngram_monitor_jsonl: bool = True
+    """Append every analysis result to output_dir/ngram_monitor/metrics.jsonl."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.

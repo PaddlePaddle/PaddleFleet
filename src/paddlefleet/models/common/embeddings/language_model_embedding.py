@@ -173,6 +173,10 @@ class LanguageModelEmbedding(FleetLayer):
         # N-gram Embedding injection with normalization
         if self.ngram_embedding_enabled:
             ngram_signal = self.ngram_embedding(input_ids)
+            if self.ngram_embedding.monitor is not None:
+                self.ngram_embedding.monitor.observe_signal(
+                    embed_tokens, ngram_signal
+                )
             normalizer = 1 + self.ngram_embedding.num_embedders
             embed_tokens = (embed_tokens + ngram_signal) / normalizer
 
