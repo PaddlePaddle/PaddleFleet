@@ -169,13 +169,15 @@ class TestLanguageLoss(unittest.TestCase):
         self.assertFalse(loss_fn.use_subbatch)
 
     def test_accuracy_loss_prefers_explicit_ep_group(self):
+        class FixedLoss(paddle.nn.Layer):
+            def forward(self, logits, labels):
+                return paddle.to_tensor([1.0, 2.0, 3.0, 4.0], dtype="float32")
+
         config = self._make_config(use_accuracy_compatible=True)
         loss_fn = LanguageLoss(config)
         explicit_ep = object()
         loss_fn.pg_collection = SimpleNamespace(ep=explicit_ep)
-        loss_fn.loss_func = lambda logits, labels: paddle.to_tensor(
-            [1.0, 2.0, 3.0, 4.0], dtype="float32"
-        )
+        loss_fn.loss_func = FixedLoss()
 
         with (
             patch(

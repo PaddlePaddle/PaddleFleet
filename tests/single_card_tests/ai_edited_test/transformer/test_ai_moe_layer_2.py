@@ -168,6 +168,41 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
         output.sum().backward()
         np.testing.assert_allclose(dispatched_input.grad.numpy(), 2.0)
 
+    def test_expert_forward_tiny_m_padding_preserves_router_scale(self):
+        class ScaledExpert:
+            def __init__(self):
+                self.scales = []
+
+            def __call__(self, x, per_token_scale):
+                self.scales.append(per_token_scale)
+                return x * per_token_scale.unsqueeze(-1), None
+
+        model = MinimalMoE()
+        model.moe_rank = 0
+        model.num_experts_per_device = 1
+        model.use_accuracy_compatible = True
+        model.token_dispatcher = type("Dispatcher", (), {})()
+        model.token_dispatcher.global_input_probs = paddle.to_tensor(
+            [0.25, 0.75], dtype="float32"
+        )
+        model.experts = [ScaledExpert()]
+        dispatched_input = paddle.ones([2, 3], dtype="float32")
+
+        with patch(
+            "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel",
+            return_value=True,
+        ):
+            output = MoELayer.expert_forward(model, dispatched_input, [2])
+
+        self.assertEqual(model.experts[0].scales[0].shape, [32])
+        np.testing.assert_allclose(
+            model.experts[0].scales[0][:2].numpy(), [0.25, 0.75]
+        )
+        np.testing.assert_allclose(model.experts[0].scales[0][2:].numpy(), 0.0)
+        np.testing.assert_allclose(
+            output.numpy(), [[0.25, 0.25, 0.25], [0.75, 0.75, 0.75]]
+        )
+
     def test_accuracy_fusion_forward_populates_overlap_output(self):
         model = MinimalMoE()
         model.use_accuracy_compatible = True

@@ -900,7 +900,7 @@ class TestLinearWithGradAccumulationFunc(unittest.TestCase):
 
 class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
     """Tests for the use_accuracy_compatible branch in
-    LinearWithGradAccumulationAndAsyncCommunication.forward (no-bias path)."""
+    LinearWithGradAccumulationAndAsyncCommunication.forward."""
 
     def _run(self, use_accuracy_compatible, input_tensor, weight):
         from paddlefleet.tensor_parallel.layers import (
@@ -911,7 +911,7 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         return LinearWithGradAccumulationAndAsyncCommunication.apply(
             input_tensor,
             weight,
-            None,  # bias -> exercises the matmul / F.linear branch
+            None,  # bias -> exercises the no-bias branch
             False,  # gradient_accumulation_fusion
             False,  # allreduce_dgrad
             False,  # sequence_parallel
@@ -922,8 +922,7 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         )
 
     def test_accuracy_compatible_true_matches_default(self):
-        """F.linear (compatible) and matmul (default) must give the same
-        result for the no-bias forward."""
+        """Compatible and default paths agree for the no-bias forward."""
         paddle.seed(2026)
         input_tensor = paddle.randn([4, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 16], dtype=paddle.float32)
@@ -940,7 +939,7 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         )
 
     def test_accuracy_compatible_matches_reference_linear(self):
-        """The compatible branch must equal paddle.nn.functional.linear."""
+        """The compatible branch must match the reference linear result."""
         paddle.seed(0)
         input_tensor = paddle.randn([3, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 5], dtype=paddle.float32)
@@ -949,6 +948,27 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         ref = paddle.nn.functional.linear(input_tensor, weight)
         np.testing.assert_allclose(
             out_compat.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+    def test_accuracy_compatible_with_bias_matches_reference_linear(self):
+        from paddlefleet.tensor_parallel.layers import general_gemm
+
+        paddle.seed(1)
+        input_tensor = paddle.randn([3, 8], dtype=paddle.float32)
+        weight = paddle.randn([8, 5], dtype=paddle.float32)
+        bias = paddle.randn([5], dtype=paddle.float32)
+
+        output, quant_cache = general_gemm(
+            input_tensor,
+            weight,
+            bias=bias,
+            use_accuracy_compatible=True,
+        )
+        reference = paddle.nn.functional.linear(input_tensor, weight, bias)
+
+        self.assertIsNone(quant_cache)
+        np.testing.assert_allclose(
+            output.numpy(), reference.numpy(), rtol=1e-6, atol=1e-6
         )
 
     def test_default_flag_is_matmul(self):
@@ -1006,7 +1026,7 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         )
 
     def test_compatible_backward_grads(self):
-        """Gradients must flow through the F.linear (compatible) branch."""
+        """Gradients must flow through the compatible GEMM branch."""
         paddle.seed(11)
         input_tensor = paddle.randn([4, 8], dtype=paddle.float32)
         input_tensor.stop_gradient = False
