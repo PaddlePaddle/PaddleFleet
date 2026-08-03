@@ -151,8 +151,8 @@ class TestKeepIndexerGradPath(unittest.TestCase):
         self.assertIsNot(out, self.hidden)
         self.assertFalse(out.stop_gradient)
         self.assertFalse(out.is_leaf)
-        # Value must be untouched.
-        paddle.allclose(out, self.hidden)
+        # Value must be untouched: the anchor adds a zero.
+        self.assertTrue(paddle.allclose(out, self.hidden).item())
 
     def test_short_circuits_when_already_differentiable(self):
         config = _make_dsv4_config(csa_train_indexer_only=True)
@@ -265,7 +265,8 @@ class TestAttachUnderFrozenBackbone(unittest.TestCase):
         )
         self.assertIsNot(attached, output)
         self.assertFalse(attached.stop_gradient)
-        paddle.allclose(attached, output)
+        # The frozen path returns a clone, so the value must be identical.
+        self.assertTrue(paddle.allclose(attached, output).item())
 
 
 class TestRecomputeSegmentKeepsIndexerGrad(unittest.TestCase):
