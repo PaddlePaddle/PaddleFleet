@@ -83,6 +83,8 @@ class TestMLASelfAttentionBackwardDW(unittest.TestCase):
 
             mla = MLASelfAttention.__new__(MLASelfAttention)
             mla.config = config
+            mla.q_lora_rank = config.q_lora_rank
+            mla.kv_lora_rank = config.kv_lora_rank
             mla.kv_b_proj = MagicMock()
             mla.kv_a_proj_with_mqa = MagicMock()
             mla.o_proj = MagicMock()
@@ -252,6 +254,8 @@ class TestRecomputeQKVUpProjAndRope(unittest.TestCase):
             gpt_model_use_experimental_version=False,
         )
         layer.num_attention_heads_per_partition = heads
+        layer.q_lora_rank = layer.config.q_lora_rank
+        layer.kv_lora_rank = layer.config.kv_lora_rank
         layer.qk_nope_head_dim = qk_nope
         layer.qk_rope_head_dim = qk_rope
         layer.v_head_dim = v_dim
@@ -735,6 +739,16 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
         config = self._make_config(recompute_modules=None)
         inst = self._build_mla_instance(config)
         self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
+
+    def test_mla_rejects_non_mha_kv_heads(self):
+        """MLA is MHA-only and should reject num_key_value_heads != num_attention_heads."""
+        config = self._make_config()
+        config.num_key_value_heads = config.num_attention_heads // 2
+
+        with self.assertRaisesRegex(
+            ValueError, "MLA currently supports MHA only"
+        ):
+            self._build_mla_instance(config)
 
 
 class TestForwardDiscardOutputAndRegisterRecompute(unittest.TestCase):

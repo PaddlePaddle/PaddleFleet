@@ -153,6 +153,8 @@ if paddle.is_compiled_with_cuda():
         "For users: use a GPU with compute capability >= 9.0 (Hopper or Blackwell) to enable."
     )
 
+    FLA_HINT = "For developers: guard imports with `is_fla_available()` and only call `paddlefleet_ops.fla` when CUDA is enabled."
+
     FAST_HADAMARD_TRANSFORM_HINT = "For developers: guard imports with `is_fast_hadamard_transform_available()` and only call `paddlefleet_ops.fast_hadamard_transform` when CUDA is enabled."
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
@@ -161,6 +163,7 @@ else:
     SONIC_MOE_HINT = "sonicmoe is not supported on XPU backend."
     CUDNN_FRONTEND_HINT = "cudnn frontend is not supported on XPU backend."
     FLASH_MLA_HINT = "flash_mla is not supported on XPU backend."
+    FLA_HINT = "fla is not supported on XPU backend."
     FAST_HADAMARD_TRANSFORM_HINT = (
         "fast_hadamard_transform is not supported on XPU backend."
     )
@@ -231,11 +234,13 @@ _DEEP_EP_AVAILABLE = False
 _HYBRID_EP_AVAILABLE = False
 _SONIC_MOE_AVAILABLE = False
 _FLASH_MLA_AVAILABLE = False
+_FLA_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
 _CUDNN_FRONTEND_AVAILABLE = False
 _FAST_HADAMARD_TRANSFORM_AVAILABLE = False
 
 if paddle.is_compiled_with_cuda():
+    _FLA_AVAILABLE = True
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
@@ -276,6 +281,10 @@ def is_sonic_moe_available():
 
 def is_flash_mla_available():
     return _FLASH_MLA_AVAILABLE
+
+
+def is_fla_available():
+    return _FLA_AVAILABLE
 
 
 def is_flash_mask_available():
@@ -402,6 +411,18 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.flash_mla"] = error
+
+    if is_fla_available():
+        with paddle.use_compat_guard(scope={"fla", "triton"}, silent=True):
+            _safe_load_ecosystem_lib("fla", ops_dir, globals())
+    else:
+        warning, error = _build_notice(
+            "paddlefleet_ops.fla",
+            "CUDA backend is unavailable.",
+            hint_for_error=FLA_HINT,
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet_ops.fla"] = error
 
     if is_flash_mask_available():
         _safe_load_ecosystem_lib("flash_mask", ops_dir, globals())

@@ -99,6 +99,9 @@ class MLP(FleetLayer):
         super().__init__(config=config)
 
         self.config: TransformerConfig = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
 
         self.input_size = (
             input_size if input_size is not None else self.config.hidden_size
@@ -179,6 +182,21 @@ class MLP(FleetLayer):
             disable_fp8=disable_fp8,
         )
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the fused gate/up projection.
+
+        Inherited by StandardMLPExpert / StandardMLPSharedExpert, so each expert
+        (auto-prefixed by the module tree) gets its own spec. The gate/up split
+        point is derived from the weight shape inside ``ortho_gate_up``.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_gate_up
+
+        if not self.config.gated_linear_unit or not muon_configs.get(
+            "muon_ffn_split", False
+        ):
+            return {}
+        return {"up_gate_proj.weight": (ortho_gate_up, {})}
+
     def forward(self, hidden_states, per_token_scale=None):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
@@ -228,6 +246,7 @@ class MLP(FleetLayer):
                             False,
                         ),
                         self.config.activation_func_clamp_value,
+                        use_accuracy_compatible=self.use_accuracy_compatible,
                     )
                 elif (
                     self.hidden_act == quick_gelu
@@ -273,6 +292,7 @@ class MLP(FleetLayer):
                         ),
                         cpu_offload_input=False,
                         clamp_value=self.config.activation_func_clamp_value,
+                        use_accuracy_compatible=self.use_accuracy_compatible,
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")

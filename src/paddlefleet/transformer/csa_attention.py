@@ -26,6 +26,7 @@ Components:
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,11 @@ from paddlefleet.transformer.cp_utils import (
     get_window_topk_idxs_cp,
     map_compressed_topk_to_kv_full_cp,
 )
+
+# Sentinel value in ``config.csa_compress_ratios`` selecting the full-causal
+# MQA layer: no compressor, no indexer and no sliding window, every query
+# attends to all preceding original KV positions of its own document.
+CSA_MQA_RATIO = -1
 
 
 def _normalize_csa_docmask_args(
@@ -158,6 +164,42 @@ def _build_window_topk_idxs_from_doc_bounds(
     )
     result = paddle.where(invalid, paddle.full_like(indices, -1), indices)
     return result.unsqueeze(0).expand([batch_size, -1, -1])
+
+
+def _build_mqa_causal_topk_idxs_from_doc_bounds(
+    batch_size: int,
+    seqlen: int,
+    doc_start_per_pos: Tensor,
+    is_valid: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Build full-causal (per-document) indices + valid lengths for MQA layers.
+
+    Row ``i`` holds ``[doc_start[i], ..., i]`` followed by ``-1`` padding, so a
+    packed multi-document batch is bit-identical to running each document on
+    its own. Padding rows (``is_valid == False``) get a single ``-1`` slot,
+    which degenerates to the attention-sink-only output used by the window
+    path.
+
+    Returns:
+        (topk_idxs, topk_length) with shapes ``[batch_size, seqlen, seqlen]``
+        int32 and ``[batch_size, seqlen]`` int32.
+    """
+    positions = paddle.arange(seqlen, dtype="int64")
+    offsets = paddle.arange(seqlen, dtype="int64").unsqueeze(0)
+    indices = doc_start_per_pos.unsqueeze(1) + offsets
+    invalid = (indices > positions.unsqueeze(1)) | (~is_valid).unsqueeze(
+        1
+    ).expand_as(indices)
+    indices = paddle.where(
+        invalid, paddle.full_like(indices, -1), indices
+    ).cast("int32")
+    lengths = (positions - doc_start_per_pos + 1).cast("int32")
+    # Padding rows keep a single masked slot instead of length 0.
+    lengths = paddle.where(is_valid, lengths, paddle.ones_like(lengths))
+    return (
+        indices.unsqueeze(0).expand([batch_size, -1, -1]),
+        lengths.unsqueeze(0).expand([batch_size, -1]),
+    )
 
 
 def _build_compress_topk_idxs_from_valid_range(
@@ -398,6 +440,7 @@ class CSADocMaskMetadata:
     _compress_offset: int | None = None
     _compressed_causal_mask: Tensor | None = None
     _is_first_compressed_group: Tensor | None = None
+    _mqa_causal_topk: tuple[Tensor, Tensor] | None = None
 
     @classmethod
     def build(
@@ -620,6 +663,40 @@ class CSADocMaskMetadata:
             )
         return self._compressed_causal_mask
 
+    def get_mqa_causal_topk_idxs(self) -> tuple[Tensor, Tensor]:
+        """Return ``([b, seqlen, seqlen], [b, seqlen])`` MQA causal indices.
+
+        Indices reset at each document boundary and ``topk_length`` gives the
+        per-row valid prefix so the kernel can stop early.
+
+        Cached on this metadata object. NOTE: the current DSv4 forward builds a
+        fresh ``CSADocMaskMetadata`` per layer (see
+        ``dsv4_hybrid_attention.py``), so today this cache is effectively
+        per-layer and never hits across layers. Reusing one metadata instance
+        across the MQA layers of a forward would make this build once, but that
+        optimisation requires keying the cache on ``(seqlen, doc layout)``
+        first: the table is a function of build-time document boundaries, and a
+        table built for one layout is silently wrong for another (grad
+        accumulation, ``variable_seq_lengths`` and ``document_mask_prob_text``
+        all produce differing layouts across microbatches).
+        """
+        if self._mqa_causal_topk is None:
+            # ``build`` only derives ``is_valid`` for the indexer path
+            # (``ratio > 1 and not dense_mode``); an MQA layer builds its
+            # metadata with ratio=1, so recover it from the always-present
+            # per-position document bounds using the same definition as
+            # ``_derive_csa_doc_boundaries``.
+            is_valid = self.is_valid
+            if is_valid is None:
+                is_valid = self.pos_in_doc < self.doc_len_per_pos
+            self._mqa_causal_topk = _build_mqa_causal_topk_idxs_from_doc_bounds(
+                self.batch_size,
+                self.seqlen,
+                self.doc_start_per_pos,
+                is_valid,
+            )
+        return self._mqa_causal_topk
+
     def get_is_first_compressed_group(self) -> Tensor:
         """Return ``[actual_n_compressed]`` bool flags marking each document's
         first compressed group (used by overlap transforms to avoid reusing
@@ -759,6 +836,41 @@ def get_compress_topk_idxs_decode(
     return idxs.reshape([1, 1, n_compressed]).expand(
         [batch_size, 1, n_compressed]
     )
+
+
+def get_mqa_causal_topk_idxs(
+    batch_size: int,
+    seqlen: int,
+    startend_row_indices: Tensor | None = None,
+    docmask_meta: CSADocMaskMetadata | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Get full-causal MQA indices + valid lengths.
+
+    Returns ``([b, seqlen, seqlen] int32, [b, seqlen] int32)``. With document
+    boundaries the causal range restarts at each document start, which makes a
+    packed batch equivalent to attending within each document separately.
+    """
+    if docmask_meta is not None:
+        return docmask_meta.get_mqa_causal_topk_idxs()
+
+    if startend_row_indices is None:
+        positions = paddle.arange(seqlen, dtype="int64")
+        matrix = positions.unsqueeze(0).expand([seqlen, -1])
+        matrix = paddle.where(
+            matrix > positions.unsqueeze(1),
+            paddle.full_like(matrix, -1),
+            matrix,
+        ).cast("int32")
+        lengths = (positions + 1).cast("int32")
+        return (
+            matrix.unsqueeze(0).expand([batch_size, -1, -1]),
+            lengths.unsqueeze(0).expand([batch_size, -1]),
+        )
+
+    docmask_meta = CSADocMaskMetadata.build(
+        1, batch_size, seqlen, startend_row_indices, seqlen
+    )
+    return docmask_meta.get_mqa_causal_topk_idxs()
 
 
 def get_valid_range(
@@ -1476,6 +1588,34 @@ class Compressor(nn.Layer):
         )
         self.high_precision_rope = getattr(config, "high_precision_rope", False)
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice specs for the compressor (overlap/ratio-4 only).
+
+        Covers both the core-attention compressor (``self.head_dim`` == v_head_dim)
+        and the indexer compressor (``self.head_dim`` == dsa_index_head_dim); the
+        head_dim is read from ``self`` so the same method serves both.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+        if not self.overlap:
+            return {}
+
+        return {
+            "linear_wkv.weight": (
+                ortho_per_head,
+                {"head_sizes": [self.head_dim, self.head_dim]},
+            ),
+            "linear_wgate.weight": (
+                ortho_per_head,
+                {"head_sizes": [self.head_dim, self.head_dim]},
+            ),
+        }
+
     def _overlap_transform(
         self,
         tensor: Tensor,
@@ -1880,6 +2020,23 @@ class CSAIndexer(nn.Layer):
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
         self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the indexer q-up projection."""
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        return {
+            "linear_wq_b.weight": (
+                ortho_per_head,
+                {"heads": self.index_n_heads},
+            ),
+        }
+
     def forward_before_topk(
         self,
         x: Tensor,  # [b, sq, hidden_size]
@@ -1977,6 +2134,7 @@ class CompressedSparseAttention(FleetLayer):
     """Core attention combining sliding window + compressed KV attention.
 
     Conditionally builds Compressor and CSAIndexer based on compress_ratio:
+      - ratio=-1 (``CSA_MQA_RATIO``): full-causal MQA, no window/compressor
       - ratio=0: window-only attention
       - ratio=4: window + 4x compressed + learned CSAIndexer
       - ratio=128: window + 128x compressed, attend to all compressed positions
@@ -2019,6 +2177,25 @@ class CompressedSparseAttention(FleetLayer):
             )
         self.tp_group = None
         self.compress_ratio = compress_ratio
+        self.is_mqa_layer = compress_ratio == CSA_MQA_RATIO
+        if self.is_mqa_layer:
+            backend = getattr(config, "csa_sparse_attn_backend", "tilelang")
+            if backend not in ("cudnn", "unfused"):
+                raise NotImplementedError(
+                    f"csa_compress_ratios={CSA_MQA_RATIO} (full-causal MQA) "
+                    "requires csa_sparse_attn_backend='cudnn' (the tilelang "
+                    "kernel has no topk_length support), got "
+                    f"{backend!r}."
+                )
+            if backend == "unfused":
+                warnings.warn(
+                    f"csa_compress_ratios={CSA_MQA_RATIO} (full-causal MQA) "
+                    "with csa_sparse_attn_backend='unfused' materialises a "
+                    "dense [b, sq, sq, head_dim] gather and only fits tiny "
+                    "sequences (~68 TB at sq=8192). Use 'cudnn' for training; "
+                    "'unfused' is a reference path for tests.",
+                    stacklevel=2,
+                )
         self.window_size = config.csa_window_size
         self.v_head_dim = config.v_head_dim
         self.n_local_heads = config.num_attention_heads
@@ -2492,6 +2669,12 @@ class CompressedSparseAttention(FleetLayer):
             global_valid_count = None
 
         if self.cp_enabled:
+            if self.is_mqa_layer:
+                raise NotImplementedError(
+                    f"csa_compress_ratios={CSA_MQA_RATIO} (full-causal MQA) "
+                    "does not support context parallelism yet, got "
+                    f"cp={self.cp_size}."
+                )
             return self._forward_cp(
                 query,
                 key,
@@ -2501,6 +2684,9 @@ class CompressedSparseAttention(FleetLayer):
                 global_valid_count=global_valid_count,
                 docmask_meta=docmask_meta,
             )
+
+        if self.is_mqa_layer:
+            return self._forward_mqa(query, key, docmask_meta=docmask_meta)
 
         if docmask_meta is not None and self.compress_ratio > 1:
             actual_n_compressed = docmask_meta.actual_n_compressed
@@ -2722,12 +2908,35 @@ class CompressedSparseAttention(FleetLayer):
         topk_idxs = topk_idxs.cast("int32")
 
         # 6. Sparse attention.
+
+    def _forward_mqa(
+        self,
+        query: Tensor,
+        key: Tensor,
+        docmask_meta: CSADocMaskMetadata | None = None,
+    ) -> Tensor:
+        """Full-causal MQA forward (``compress_ratio == CSA_MQA_RATIO``).
+
+        No sliding window, no compressor and no indexer: every query attends to
+        all preceding original KV positions inside its own document. The CSA
+        sparse kernel is reused with a dense causal index table plus
+        ``topk_length`` so it stops at the diagonal instead of scanning all
+        ``sq`` slots.
+        """
+        b, sq, _, _ = query.shape
+        kv_full = key.squeeze(2)  # [b, sq, v_head_dim]
+        topk_idxs, topk_length = get_mqa_causal_topk_idxs(
+            b,
+            sq,
+            docmask_meta=docmask_meta,
+        )
         return self.compressed_sparse_attn(
             query,
             kv_full,
             self.attn_sink,
             topk_idxs,
             self.softmax_scale,
+            topk_length=topk_length,
         )
 
     def _forward_cp(
@@ -3128,6 +3337,7 @@ class CompressedSparseAttention(FleetLayer):
         attn_sink: Tensor,
         topk_idxs: Tensor,
         softmax_scale: float,
+        topk_length: Tensor | None = None,
     ):
         from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
 
@@ -3146,4 +3356,5 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs,
             softmax_scale,
             backend=sparse_attn_backend,
+            topk_length=topk_length,
         )
