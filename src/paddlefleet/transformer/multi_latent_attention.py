@@ -369,6 +369,41 @@ class MultiLatentAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
+        if (
+            getattr(config, "experimental_attention_variant", None)
+            == "dsv4_hybrid"
+        ):
+            self.q_lora_rank = config.hybrid_mla_q_lora_rank
+            self.kv_lora_rank = config.hybrid_mla_kv_lora_rank
+            self.qk_nope_head_dim = config.hybrid_mla_qk_nope_head_dim
+            self.qk_rope_head_dim = config.hybrid_mla_qk_rope_head_dim
+            self.v_head_dim = config.hybrid_mla_v_head_dim
+            self.num_attention_heads = config.hybrid_mla_num_attention_heads
+            self.num_key_value_heads = config.hybrid_mla_num_key_value_heads
+        else:
+            self.q_lora_rank = config.q_lora_rank
+            self.kv_lora_rank = config.kv_lora_rank
+            self.qk_nope_head_dim = config.qk_nope_head_dim
+            self.qk_rope_head_dim = config.qk_rope_head_dim
+            self.v_head_dim = config.v_head_dim
+            self.num_attention_heads = config.num_attention_heads
+            self.num_key_value_heads = config.num_key_value_heads
+        if self.num_key_value_heads != self.num_attention_heads:
+            raise ValueError(
+                "MLA currently supports MHA only; num_key_value_heads must equal "
+                "num_attention_heads. For DSV4 hybrid MLA, set "
+                "hybrid_mla_num_key_value_heads equal to "
+                "hybrid_mla_num_attention_heads."
+            )
+        tp_size = get_pg_size(self.pg_collection.tp)
+        assert self.num_attention_heads % tp_size == 0
+        assert self.num_key_value_heads % tp_size == 0
+        self.num_attention_heads_per_partition = (
+            self.num_attention_heads // tp_size
+        )
+        self.num_key_value_heads_per_partition = (
+            self.num_key_value_heads // tp_size
+        )
 
         self.out_projection_size = self.v_head_dim * self.num_attention_heads
 
@@ -377,18 +412,21 @@ class MultiLatentAttention(Attention):
             and getattr(self.config, "swa_qk_nope_head_dim", None) is not None
         ):
             self.qk_nope_head_dim = self.config.swa_qk_nope_head_dim
-        else:
-            self.qk_nope_head_dim = self.config.qk_nope_head_dim
 
         if (
             self.is_swa
             and getattr(self.config, "swa_qk_rope_head_dim", None) is not None
         ):
             self.qk_rope_head_dim = self.config.swa_qk_rope_head_dim
-        else:
-            self.qk_rope_head_dim = self.config.qk_rope_head_dim
 
         self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        self.head_dim = self.q_head_dim
+        self.query_projection_size = self.q_head_dim * self.num_attention_heads
+        self.key_projection_size = self.q_head_dim * self.num_key_value_heads
+        self.value_projection_size = self.v_head_dim * self.num_key_value_heads
+        self.out_projection_size = self.v_head_dim * self.num_attention_heads
+        self.hidden_size_per_attention_head = self.q_head_dim
+        self.value_hidden_size_per_attention_head = self.v_head_dim
 
         mscale = _yarn_get_mscale(
             self.config.rotary_scaling_factor, self.config.mscale_all_dim
@@ -471,10 +509,10 @@ class MultiLatentAttention(Attention):
             # Gate input source: q_compressed (post q_a_layernorm, dim=q_lora_rank) when
             # gated_attn_use_q_lora is set, otherwise the full hidden_states.
             if self.gated_attn_use_q_lora:
-                assert self.config.q_lora_rank is not None, (
+                assert self.q_lora_rank is not None, (
                     "gated_attn_use_q_lora=True requires q_lora_rank is not None"
                 )
-                gate_in_dim = self.config.q_lora_rank
+                gate_in_dim = self.q_lora_rank
             else:
                 gate_in_dim = self.config.hidden_size
             self.gate_proj = build_spec_layer(
@@ -494,7 +532,7 @@ class MultiLatentAttention(Attention):
                 f"[GatedAttnCheck][init] layer={getattr(self, 'layer_number', -1)} "
                 f"gated_attention={self.gated_attention} "
                 f"gated_attn_use_q_lora={self.gated_attn_use_q_lora} "
-                f"q_lora_rank={self.config.q_lora_rank} "
+                f"q_lora_rank={self.q_lora_rank} "
                 f"hidden_size={self.config.hidden_size} "
                 f"gate_in_dim={gate_in_dim} "
                 f"gate_out_dim={self.out_projection_size}",
@@ -563,7 +601,7 @@ class MultiLatentAttention(Attention):
         """
         qk_nope_head_dim = self.qk_nope_head_dim
         qk_rope_head_dim = self.qk_rope_head_dim
-        kv_lora_rank = self.config.kv_lora_rank
+        kv_lora_rank = self.kv_lora_rank
         v_head_dim = self.v_head_dim
         num_heads = self.num_attention_heads_per_partition
 
@@ -1021,7 +1059,9 @@ class MLASelfAttention(MultiLatentAttention):
             is_mtp_layer=is_mtp_layer,
         )
 
-        if self.config.q_lora_rank is None:
+        q_lora_rank = self.q_lora_rank
+        kv_lora_rank = self.kv_lora_rank
+        if q_lora_rank is None:
             # Not projecting query
             self.q_proj = build_spec_layer(
                 sublayers_spec.q_proj,
@@ -1040,7 +1080,7 @@ class MLASelfAttention(MultiLatentAttention):
             self.q_a_proj = build_spec_layer(
                 sublayers_spec.q_a_proj,
                 self.config.hidden_size,
-                self.config.q_lora_rank,
+                q_lora_rank,
                 config=self.config,
                 init_method=self.config.init_method,
                 bias=False,
@@ -1053,7 +1093,7 @@ class MLASelfAttention(MultiLatentAttention):
 
             self.q_b_proj = build_spec_layer(
                 sublayers_spec.q_b_proj,
-                self.config.q_lora_rank,
+                q_lora_rank,
                 self.num_attention_heads * self.q_head_dim,
                 config=self.config,
                 init_method=self.config.init_method,
@@ -1068,7 +1108,7 @@ class MLASelfAttention(MultiLatentAttention):
         self.kv_a_proj_with_mqa = build_spec_layer(
             sublayers_spec.kv_a_proj_with_mqa,
             self.config.hidden_size,
-            self.config.kv_lora_rank + self.qk_rope_head_dim,
+            kv_lora_rank + self.qk_rope_head_dim,
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -1081,7 +1121,7 @@ class MLASelfAttention(MultiLatentAttention):
 
         self.kv_b_proj = build_spec_layer(
             sublayers_spec.kv_b_proj,
-            self.config.kv_lora_rank,
+            kv_lora_rank,
             self.num_attention_heads
             * (self.qk_nope_head_dim + self.v_head_dim),
             config=self.config,
@@ -1094,17 +1134,17 @@ class MLASelfAttention(MultiLatentAttention):
             tp_group=pg_collection.tp,
         )
 
-        if self.config.q_lora_rank is not None:
+        if q_lora_rank is not None:
             self.q_a_layernorm = build_spec_layer(
                 sublayers_spec.q_a_layernorm,
-                hidden_size=self.config.q_lora_rank,
+                hidden_size=q_lora_rank,
                 config=self.config,
                 eps=self.config.rms_norm_eps,
             )
 
         self.kv_a_layernorm = build_spec_layer(
             sublayers_spec.kv_a_layernorm,
-            hidden_size=self.config.kv_lora_rank,
+            hidden_size=kv_lora_rank,
             config=self.config,
             eps=self.config.rms_norm_eps,
         )
@@ -1122,7 +1162,7 @@ class MLASelfAttention(MultiLatentAttention):
         num_heads = self.num_attention_heads_per_partition
         qk_nope = self.qk_nope_head_dim
         qk_rope = self.qk_rope_head_dim
-        kv_lora = self.config.kv_lora_rank
+        kv_lora = self.kv_lora_rank
 
         specs = {}
         if hasattr(self, "q_b_proj"):
@@ -1298,7 +1338,7 @@ class MLASelfAttention(MultiLatentAttention):
         # =========================================
         # QKV down projection and layernorm
         # =========================================
-        if self.config.q_lora_rank is not None:
+        if self.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [b, s, q_lora_rank / TP]
             q_compressed, _ = self.q_a_proj(hidden_states)
@@ -1306,7 +1346,7 @@ class MLASelfAttention(MultiLatentAttention):
             # When output is sharded (ColumnParallelLinear):
             # Gather output to restore output dim q_lora_rank;
             # Scatter sequence back to s / TP if sequence-parallel
-            if q_compressed.size(-1) != self.config.q_lora_rank:
+            if q_compressed.size(-1) != self.q_lora_rank:
                 q_compressed = gather_from_tensor_model_parallel_region(
                     q_compressed
                 )
@@ -1320,16 +1360,13 @@ class MLASelfAttention(MultiLatentAttention):
         # if kv_a_proj_with_mqa is ColumnParallelLinear:
         #     kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim) / TP]
         kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
-        if (
-            kv_combined.size(-1)
-            != self.config.kv_lora_rank + self.qk_rope_head_dim
-        ):
+        if kv_combined.size(-1) != self.kv_lora_rank + self.qk_rope_head_dim:
             # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
             # kv_compressed:[b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
-                [self.config.kv_lora_rank, self.qk_rope_head_dim],
+                [self.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
             if self.config.sequence_parallel:
@@ -1341,7 +1378,7 @@ class MLASelfAttention(MultiLatentAttention):
             # kv_compressed:[b, s / TP, kv_lora_rank], k_pos_emb: [b, s / TP, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
-                [self.config.kv_lora_rank, self.qk_rope_head_dim],
+                [self.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
             if (
@@ -1365,7 +1402,7 @@ class MLASelfAttention(MultiLatentAttention):
         # Apply norm
         # =========================================
 
-        if self.config.q_lora_rank is not None:
+        if self.q_lora_rank is not None:
             # q_compressed: [num_tokens, q_lora_rank]
             q_compressed = self.q_a_layernorm(q_compressed)
 
@@ -1398,7 +1435,7 @@ class MLASelfAttention(MultiLatentAttention):
             otherwise, they maintain the unpacked shape [b, s, ...]. In subsequent code comments,
             we uniformly use [num_tokens, ...] to denote [b, s, ...] or [t, ...] for two cases.
             """
-            if self.config.q_lora_rank is not None:
+            if self.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
                 q, _ = self.q_b_proj(q_compressed)
@@ -1705,7 +1742,7 @@ class MLASelfAttention(MultiLatentAttention):
 
     def _backward_q_proj(self):
         """Computes weight gradients of Q projection layers"""
-        if self.config.q_lora_rank is None:
+        if self.q_lora_rank is None:
             self.q_proj.backward_dw()
         else:
             self.q_a_proj.backward_dw()

@@ -77,7 +77,12 @@ def _fleet_fp8_wo_a_gemm_enabled():
 FLEET_FP8_WO_A_GEMM = _fleet_fp8_wo_a_gemm_enabled()
 
 
-def _q_rms_norm(q: Tensor, eps: float, high_precision_norm: bool) -> Tensor:
+def _q_rms_norm(
+    q: Tensor,
+    eps: float,
+    high_precision_norm: bool,
+    use_fusion: bool = False,
+) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
     if high_precision_norm:
         ori_dtype = q.dtype
@@ -85,7 +90,13 @@ def _q_rms_norm(q: Tensor, eps: float, high_precision_norm: bool) -> Tensor:
         q = q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
         return q.astype(ori_dtype)
     else:
-        return q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
+        if use_fusion:
+            from paddlefleet.triton_ops import fused_q_rms_norm
+
+            result = fused_q_rms_norm(q, eps=eps)
+        else:
+            result = q * paddle.rsqrt(q.square().mean(-1, keepdim=True) + eps)
+        return result
 
 
 def _quant_blockwise(x: Tensor, quant_method: str):
@@ -587,10 +598,23 @@ class DSv4HybridAttention(Attention):
         else:
             layer_idx = layer_number - self.config.num_empty_layers_add_in_head
             compress_ratio = self.config.csa_compress_ratios[layer_idx]
+        assert compress_ratio != -2, (
+            "DSv4HybridAttention should not be constructed for MLA ratio -2"
+        )
+        if compress_ratio not in {-1, 0, 128} and not 2 <= compress_ratio < 128:
+            raise ValueError(
+                f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
+            )
+
         # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
         if compress_ratio > 1:
-            rope_base = config.csa_compress_rotary_base
+            # Every shipped model_config.json writes csa_compress_rotary_base as
+            # a *string* ("160000.0"). pretrain.py coerces numeric strings
+            # before building the config, but any path that calls from_config
+            # directly (unit tests, offline inference, tooling) would reach
+            # YarnRotaryEmbedding's math.log() with a str and raise TypeError.
+            rope_base = float(config.csa_compress_rotary_base)
 
         use_compressed_yarn = compress_ratio > 1
         if not use_compressed_yarn:
@@ -611,6 +635,9 @@ class DSv4HybridAttention(Attention):
                 beta_slow=getattr(config, "beta_slow", 1),
                 mscale=getattr(config, "mscale", 1.0),
                 mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
+                yarn_rope_fusion=getattr(
+                    config, "dsv4_yarn_rope_fusion", False
+                ),
             )
 
         self.core_attention = build_spec_layer(
@@ -926,9 +953,9 @@ class DSv4HybridAttention(Attention):
             wo_a_weight = self.linear_o_group_proj.reshape(
                 [self.o_local_groups, self.config.o_lora_rank, -1]
             )
-            core_attn_out = paddle.einsum(
-                "...gd,grd->...gr", core_attn_out, wo_a_weight
-            )
+            from paddlefleet.triton_ops import fused_grouped_matmul
+
+            core_attn_out = fused_grouped_matmul(core_attn_out, wo_a_weight)
             core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Apply gated attention
@@ -1017,7 +1044,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         self.linear_q_down_proj = build_spec_layer(
             sublayers_spec.linear_q_down_proj,
             config.hidden_size,
-            config.q_lora_rank,
+            self.q_lora_rank,
             config=config,
             init_method=config.init_method,
             bias=False,
@@ -1031,14 +1058,14 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         self.q_layernorm = build_spec_layer(
             sublayers_spec.q_layernorm,
             config=config,
-            hidden_size=config.q_lora_rank,
+            hidden_size=self.q_lora_rank,
             eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
         # Q up projection: q_lora_rank -> num_heads * q_head_dim (column parallel)
         self.linear_q_up_proj = build_spec_layer(
             sublayers_spec.linear_q_up_proj,
-            config.q_lora_rank,
+            self.q_lora_rank,
             self.num_attention_heads * q_head_dim,
             config=config,
             init_method=config.init_method,
@@ -1054,7 +1081,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         self.linear_kv_proj = build_spec_layer(
             sublayers_spec.linear_kv_proj,
             config.hidden_size,
-            config.v_head_dim,
+            self.v_head_dim,
             config=config,
             init_method=config.init_method,
             gather_output=False,
@@ -1069,12 +1096,12 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         self.kv_layernorm = build_spec_layer(
             sublayers_spec.kv_layernorm,
             config=config,
-            hidden_size=config.v_head_dim,
+            hidden_size=self.v_head_dim,
             eps=getattr(config, "rms_norm_eps", 1e-5),
         )
 
     def muon_slice_specs(self, muon_configs):
-        """Muon orthogonal-slice spec for the DSv4 hybrid q-up projection."""
+        """Muon orthogonal-slice specs for the DSv4 hybrid projections."""
         from paddlefleet.transformer.muon_utils import ortho_per_head
 
         if (
@@ -1083,12 +1110,28 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         ):
             return {}
 
-        return {
+        specs = {
             "linear_q_up_proj.weight": (
                 ortho_per_head,
                 {"heads": self.num_attention_heads_per_partition},
             ),
+            # Stored as [o_groups * o_lora_rank, d] but used as [g, r, d] in a
+            # grouped gemm, so the leading axis packs o_groups independent
+            # matrices and must be split along axis 0.
+            "linear_o_group_proj": (
+                ortho_per_head,
+                {"heads": self.o_local_groups, "axis": 0},
+            ),
         }
+        if getattr(self, "gate_proj", None) is not None:
+            # The gate multiplies the flattened grouped-projection output, whose
+            # columns are group-major (group g owns o_lora_rank columns), so the
+            # gate weight is fused per o-group rather than per head.
+            specs["gate_proj.weight"] = (
+                ortho_per_head,
+                {"heads": self.o_local_groups},
+            )
+        return specs
 
     def get_query_key_value_tensors(
         self,
@@ -1130,6 +1173,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             q,
             getattr(self.config, "rms_norm_eps", 1e-5),
             high_precision_norm=self.config.swa_high_precision_norm,
+            use_fusion=getattr(self.config, "dsv4_q_rms_norm_fusion", False),
         )
 
         # KV path

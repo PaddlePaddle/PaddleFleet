@@ -811,12 +811,14 @@ class _DeepEPManager(_DispatchManager):
         num_experts: int | None = None,
         num_local_experts: int | None = None,
         moe_ep_barrier: bool = True,
+        use_accuracy_compatible: bool = False,
     ):
         self.group = group
         self.router_topk = router_topk
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
         self.moe_ep_barrier = moe_ep_barrier
+        self.use_accuracy_compatible = use_accuracy_compatible
 
         # Metadata
         self.token_indices = None
@@ -1000,6 +1002,7 @@ class _DeepEPManager(_DispatchManager):
             hidden_states,
             self.dispatched_routing_map,
             num_out_tokens=sum(self.tokens_per_expert),
+            use_accuracy_compatible=self.use_accuracy_compatible,
         )
         return hidden_states
 
@@ -1016,6 +1019,7 @@ class _DeepEPManager(_DispatchManager):
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.dispatched_routing_map,
             probs=self.dispatched_probs,
+            use_accuracy_compatible=self.use_accuracy_compatible,
         )
         return hidden_states.to(input_dtype)
 
@@ -1091,9 +1095,11 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         dispatcher_type: str | None = None,
         hybridep_buffer_configs: dict | None = None,
         moe_deep_gemm: bool = False,
+        use_accuracy_compatible: bool = False,
     ):
         super().__init__(ep_group)
 
+        self.use_accuracy_compatible = use_accuracy_compatible
         self.num_local_experts = num_local_experts
         assert self.ep_size > 1, "Flex token dispatcher requires EP > 1"
         if dispatcher_type == "moonep":
@@ -1112,6 +1118,8 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         if manager_cls is _HybridEPManager:
             manager_kwargs["hybridep_buffer_configs"] = hybridep_buffer_configs
             manager_kwargs["moe_deep_gemm"] = moe_deep_gemm
+        elif manager_cls is _DeepEPManager:
+            manager_kwargs["use_accuracy_compatible"] = use_accuracy_compatible
         self._comm_manager = manager_cls(**manager_kwargs)
 
     def bind_experts(self, grouped_experts) -> None:
@@ -1272,6 +1280,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         expert_model_parallel_size: int,
         num_experts_per_device: int,
         local_expert_indices: list,
+        use_accuracy_compatible: bool = False,
     ):
         nn.Layer.__init__(self)
         self.moe_group = moe_group
@@ -1279,6 +1288,7 @@ class AllToAllTokenDispatcher(nn.Layer):
         self.num_experts_per_device = num_experts_per_device
         self.local_expert_indices = local_expert_indices
         self.num_local_experts = len(local_expert_indices)
+        self.use_accuracy_compatible = use_accuracy_compatible
 
     def dispatch_preprocess(
         self,
@@ -1355,7 +1365,11 @@ class AllToAllTokenDispatcher(nn.Layer):
         (
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
-        ) = permute(reshaped_input, self.routing_map)
+        ) = permute(
+            reshaped_input,
+            self.routing_map,
+            use_accuracy_compatible=self.use_accuracy_compatible,
+        )
         if use_accuracy_compatible_kernel():
             num_routed_tokens = int(tokens_per_expert.sum().item())
             routing_map = self.routing_map.cast(paddle.bool).T.contiguous()
@@ -1481,6 +1495,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             restore_shape=self.reshaped_input_shape,
             probs=(None if use_accuracy_compatible_kernel() else self.probs),
             routing_map=self.routing_map,
+            use_accuracy_compatible=self.use_accuracy_compatible,
         )
         return output
 

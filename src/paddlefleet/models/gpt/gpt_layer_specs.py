@@ -114,6 +114,82 @@ from paddlefleet.transformer.paddle_norm import (
 LNImpl = WrappedPaddleNorm
 
 
+def _get_effective_mtp_layers(config: TransformerConfig) -> int:
+    mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
+    nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
+    if not isinstance(mtp_num_layers, int) or isinstance(mtp_num_layers, bool):
+        mtp_num_layers = 0
+    if not isinstance(nextn_num_layers, int) or isinstance(
+        nextn_num_layers, bool
+    ):
+        nextn_num_layers = 0
+    if (
+        mtp_num_layers > 0
+        and nextn_num_layers > 0
+        and mtp_num_layers != nextn_num_layers
+    ):
+        raise ValueError(
+            "mtp_num_layers and num_nextn_predict_layers must be equal when "
+            f"both are positive, got {mtp_num_layers} and {nextn_num_layers}"
+        )
+    return mtp_num_layers if mtp_num_layers > 0 else nextn_num_layers
+
+
+def _get_dsv4_hybrid_attention_layer_type(
+    config: TransformerConfig,
+    layer_number: int,
+    is_mtp_layer: bool = False,
+) -> tuple[
+    int, Literal["multi_latent_attention", "dsv4_hybrid_attention"], int
+]:
+    if is_mtp_layer:
+        mtp_num_layers = _get_effective_mtp_layers(config)
+        if not 0 <= layer_number < mtp_num_layers:
+            raise IndexError(
+                f"MTP layer_number {layer_number} is outside [0, {mtp_num_layers})"
+            )
+        logical_index = config.num_hidden_layers + layer_number
+    else:
+        head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+        logical_index = layer_number - head_offset
+        if not 0 <= logical_index < config.num_hidden_layers:
+            raise IndexError(
+                f"decoder layer_number {layer_number} resolves to logical index "
+                f"{logical_index}, outside [0, {config.num_hidden_layers})"
+            )
+
+    ratios = getattr(config, "csa_compress_ratios", None)
+    if ratios is None:
+        raise ValueError(
+            "csa_compress_ratios must be set for DSV4 hybrid attention"
+        )
+    if logical_index >= len(ratios):
+        raise IndexError(
+            f"logical layer index {logical_index} has no csa_compress_ratios entry "
+            f"(length {len(ratios)})"
+        )
+    ratio = ratios[logical_index]
+    is_integral = hasattr(ratio, "__index__") and type(ratio).__name__ not in (
+        "bool",
+        "bool_",
+    )
+    if not is_integral:
+        raise ValueError(
+            f"csa_compress_ratios[{logical_index}]={ratio!r} must be an integer"
+        )
+    ratio = int(ratio)
+    if ratio == -2:
+        attention_layer_type = "multi_latent_attention"
+    elif ratio in (-1, 0, 128) or 2 <= ratio < 128:
+        attention_layer_type = "dsv4_hybrid_attention"
+    else:
+        raise ValueError(
+            f"csa_compress_ratios[{logical_index}]={ratio!r} does not identify "
+            "an MLA or DSV4 hybrid attention layer"
+        )
+    return logical_index, attention_layer_type, ratio
+
+
 def get_attention_spec(
     config: TransformerConfig,
     attention_layer_type: str,
@@ -273,11 +349,25 @@ def get_attention_spec(
         # Gated attention
         gated_attention = getattr(config, "gated_attention", False)
 
-        # Decide core_attention: DSAttention if dsa_index_n_heads is configured, else standard
-        use_dsa = (
-            config is not None
-            and getattr(config, "dsa_index_n_heads", None) is not None
+        is_hybrid_mla_indexer = (
+            getattr(config, "experimental_attention_variant", None)
+            == "dsv4_hybrid"
         )
+        if is_hybrid_mla_indexer:
+            use_dsa = all(
+                getattr(config, name, None) is not None
+                for name in (
+                    "hybrid_index_n_heads",
+                    "hybrid_index_head_dim",
+                    "hybrid_index_topk",
+                )
+            )
+        else:
+            # Decide core_attention: DSAttention if dsa_index_n_heads is configured, else standard
+            use_dsa = (
+                config is not None
+                and getattr(config, "dsa_index_n_heads", None) is not None
+            )
 
         if use_dsa:
             # DSA Indexer sublayers spec (duplicated linear, NOT tensor-parallel)
@@ -294,6 +384,9 @@ def get_attention_spec(
                     indexer=LayerSpec(
                         layer=DSAIndexer,
                         sublayers_spec=dsa_indexer_sublayers,
+                        extra_kwargs={
+                            "is_hybrid_mla_indexer": is_hybrid_mla_indexer,
+                        },
                     ),
                 ),
             )
@@ -521,10 +614,16 @@ def get_gpt_layer_local_spec(
             transformer_cls = TransformerLayerWithOverlap
     exp_variant = getattr(config, "experimental_attention_variant", None)
     if exp_variant == "dsv4_hybrid":
-        # Route to DSv4 Hybrid if configured
+        (
+            logical_index,
+            attention_layer_type,
+            compress_ratio,
+        ) = _get_dsv4_hybrid_attention_layer_type(
+            config, layer_number, is_mtp_layer
+        )
         self_attn_spec = get_attention_spec(
             config=config,
-            attention_layer_type="dsv4_hybrid_attention",
+            attention_layer_type=attention_layer_type,
             attn_mask_type=AttnMaskType.causal,
             is_mtp_layer=is_mtp_layer,
         )
@@ -738,10 +837,7 @@ def get_gpt_mtp_layers_spec_for_backend(
 ) -> list[LayerSpec]:
     assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
 
-    if config.mtp_num_layers > 0:
-        mtp_num_layers = config.mtp_num_layers
-    else:
-        mtp_num_layers = config.num_nextn_predict_layers or 0
+    mtp_num_layers = _get_effective_mtp_layers(config)
 
     mtp_layer_specs = []
     for i in range(mtp_num_layers):

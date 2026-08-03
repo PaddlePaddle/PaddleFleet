@@ -32,6 +32,7 @@ from ..utils import (
     scaled_init_method_normal,
     truncated_init_method_normal,
 )
+from .activations import situ
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -190,6 +191,12 @@ class TransformerConfig(ModelParallelConfig):
 
     hidden_act: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
+
+    activation_situ_beta: float = 1.0
+    """Scale of the tanh term in the SiTU gate activation."""
+
+    activation_situ_linear_beta: float | None = None
+    """Optional tanh scale applied to the linear branch of SiTU-GLU."""
 
     use_bias: bool = False
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
@@ -409,6 +416,14 @@ class TransformerConfig(ModelParallelConfig):
 
     sigmoid_gate_fusion: bool = False
     """If True, use Triton fused sigmoid gate kernel."""
+
+    dsv4_q_rms_norm_fusion: bool = False
+    """If True, use the Triton weight-free fused kernel for query RMS norm in the
+    DSV4 hybrid attention path. Only takes effect when swa_high_precision_norm=False."""
+    dsv4_yarn_rope_fusion: bool = False
+    """If True, use the Triton fused kernel to build the YaRN RoPE frequency table
+    in the DSV4 hybrid attention path. Only the DSV4 hybrid attention path reads this
+    field; the standard MLA / DSA YaRN paths ignore it."""
 
     ####################
     # activation recomputation
@@ -790,6 +805,36 @@ class TransformerConfig(ModelParallelConfig):
 
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
+
+    hybrid_mla_q_lora_rank: int | None = None
+    """Layer-local query low-rank width for MLA entries in a DSV4 hybrid model."""
+
+    hybrid_mla_kv_lora_rank: int | None = None
+    """Layer-local KV low-rank width for MLA entries in a DSV4 hybrid model."""
+
+    hybrid_mla_qk_nope_head_dim: int | None = None
+    """Layer-local non-positional QK width for hybrid MLA entries."""
+
+    hybrid_mla_qk_rope_head_dim: int | None = None
+    """Layer-local rotary QK width for hybrid MLA entries."""
+
+    hybrid_mla_v_head_dim: int | None = None
+    """Layer-local value-head width for hybrid MLA entries."""
+
+    hybrid_mla_num_attention_heads: int | None = None
+    """Layer-local query-head count for hybrid MLA entries."""
+
+    hybrid_mla_num_key_value_heads: int | None = None
+    """Layer-local KV-head count for hybrid MLA entries."""
+
+    hybrid_index_n_heads: int | None = None
+    """Layer-local DSA indexer head count for hybrid MLA entries."""
+
+    hybrid_index_head_dim: int | None = None
+    """Layer-local DSA indexer head dimension for hybrid MLA entries."""
+
+    hybrid_index_topk: int | None = None
+    """Layer-local DSA indexer top-k for hybrid MLA entries."""
 
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
@@ -1176,6 +1221,8 @@ class TransformerConfig(ModelParallelConfig):
             if isinstance(value, str):
                 if value == "gelu_pytorch_tanh":
                     func = functools.partial(F.gelu, approximate=True)
+                elif value == "situ":
+                    func = situ
                 else:
                     func = getattr(F, value)
                 setattr(self, key, func)
@@ -1422,6 +1469,13 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
+        # Hyper-connection (mHC) validation
+        if self.use_fused_mhc:
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "use_fused_mhc requires enable_hyper_connections=True."
+                )
+
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:
@@ -1430,10 +1484,18 @@ class TransformerConfig(ModelParallelConfig):
                     "csa_compress_ratios to be set."
                 )
             mtp_num_layers = (
-                self.mtp_num_layers
-                if self.mtp_num_layers > 0
-                else self.num_nextn_predict_layers
+                self.mtp_num_layers or self.num_nextn_predict_layers
             )
+            if (
+                self.mtp_num_layers > 0
+                and self.num_nextn_predict_layers > 0
+                and self.mtp_num_layers != self.num_nextn_predict_layers
+            ):
+                raise ValueError(
+                    "mtp_num_layers and num_nextn_predict_layers must be equal when "
+                    f"both are positive, got {self.mtp_num_layers} and "
+                    f"{self.num_nextn_predict_layers}"
+                )
             if (
                 len(self.csa_compress_ratios)
                 != self.num_hidden_layers + mtp_num_layers
@@ -1443,12 +1505,66 @@ class TransformerConfig(ModelParallelConfig):
                     f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
                 )
             for i, r in enumerate(self.csa_compress_ratios):
-                if not (isinstance(r, int) and (r == 0 or 2 <= r <= 128)):
+                # Accept python int and numpy integer scalars (a ratios list
+                # loaded from npy/np.load yields np.int64, which would otherwise
+                # be rejected); reject bool / np.bool_ so True does not sneak
+                # through as 1, and reject floats.
+                is_integral = hasattr(r, "__index__") and type(
+                    r
+                ).__name__ not in ("bool", "bool_")
+                if not (is_integral and (r in (-2, -1, 0) or 2 <= r <= 128)):
                     raise ValueError(
                         f"csa_compress_ratios[{i}]={r} is invalid. "
-                        f"Each value must be 0 (window), an integer in [2, 127] "
+                        f"Each value must be -2 (MLA), -1 (full-causal MQA), "
+                        f"0 (window), an integer in [2, 127] "
                         f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
+            if -2 in self.csa_compress_ratios:
+                hybrid_mla_fields = (
+                    "hybrid_mla_q_lora_rank",
+                    "hybrid_mla_kv_lora_rank",
+                    "hybrid_mla_qk_nope_head_dim",
+                    "hybrid_mla_qk_rope_head_dim",
+                    "hybrid_mla_v_head_dim",
+                    "hybrid_mla_num_attention_heads",
+                    "hybrid_mla_num_key_value_heads",
+                )
+                invalid = [
+                    name
+                    for name in hybrid_mla_fields
+                    if not isinstance(getattr(self, name, None), int)
+                    or isinstance(getattr(self, name, None), bool)
+                    or getattr(self, name) <= 0
+                ]
+                if invalid:
+                    raise ValueError(
+                        "hybrid MLA dimensions must be explicit positive integers; "
+                        f"invalid fields: {', '.join(invalid)}"
+                    )
+                hybrid_index_fields = (
+                    "hybrid_index_n_heads",
+                    "hybrid_index_head_dim",
+                    "hybrid_index_topk",
+                )
+                configured_index_fields = [
+                    name
+                    for name in hybrid_index_fields
+                    if getattr(self, name, None) is not None
+                ]
+                if configured_index_fields:
+                    invalid_index = [
+                        name
+                        for name in hybrid_index_fields
+                        if not isinstance(getattr(self, name, None), int)
+                        or isinstance(getattr(self, name, None), bool)
+                        or getattr(self, name) <= 0
+                    ]
+                    if invalid_index:
+                        raise ValueError(
+                            "hybrid MLA indexer dimensions must either all be unset "
+                            "or all be explicit positive integers; "
+                            f"invalid fields: {', '.join(invalid_index)}"
+                        )
 
             if (
                 getattr(self, "csa_tilelang_enable_sparse_attn", None)

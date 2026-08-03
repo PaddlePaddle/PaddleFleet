@@ -1519,5 +1519,28 @@ class TestGetMTPLayerSpecWithHC(unittest.TestCase):
         self.assertEqual(specs[0].layer, MultiTokenPredictionLayer)
 
 
+class TestUseFusedMhcValidation(unittest.TestCase):
+    """Tests for use_fused_mhc validation in TransformerConfig."""
+
+    def test_use_fused_mhc_without_hyper_connections_raises(self):
+        """use_fused_mhc=True without enable_hyper_connections should raise ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            _make_config(use_fused_mhc=True, enable_hyper_connections=False)
+        self.assertIn(
+            "use_fused_mhc requires enable_hyper_connections=True",
+            str(ctx.exception),
+        )
+
+    def test_use_fused_mhc_with_hyper_connections_ok(self):
+        """use_fused_mhc=True with enable_hyper_connections=True should not raise."""
+        config = _make_config(
+            use_fused_mhc=True,
+            enable_hyper_connections=True,
+            num_residual_streams=4,
+        )
+        self.assertTrue(config.use_fused_mhc)
+        self.assertTrue(config.enable_hyper_connections)
+
+
 if __name__ == "__main__":
     unittest.main()
