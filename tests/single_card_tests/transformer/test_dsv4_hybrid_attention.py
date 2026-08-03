@@ -2263,6 +2263,7 @@ class TestDSv4HybridQKV(unittest.TestCase):
         )
 
 
+@_REQUIRES_USABLE_CUDA
 class TestDSv4HybridDecodeAlignment(unittest.TestCase):
     """Prefill-vs-decode numerical alignment for the incremental KV cache.
 
@@ -2649,7 +2650,6 @@ class TestCSAHybridSharedCacheDispatch(unittest.TestCase):
         self._assert_close(hca_prefill, paddle.concat(hca_dec, axis=1))
 
 
-@_REQUIRES_USABLE_CUDA
 class TestDSv4PackedForwardBackwardEquivalence(unittest.TestCase):
     """Verify packed B=2 forward/backward matches two independent B=1 runs.
 

@@ -2908,6 +2908,13 @@ class CompressedSparseAttention(FleetLayer):
         topk_idxs = topk_idxs.cast("int32")
 
         # 6. Sparse attention.
+        return self.compressed_sparse_attn(
+            query,
+            kv_full,
+            self.attn_sink,
+            topk_idxs,
+            self.softmax_scale,
+        )
 
     def _forward_mqa(
         self,
