@@ -22,6 +22,7 @@ import paddlefleet_ops
 from paddlefleet.transformer.moe.fp8_utils import (
     ExpertsGroupGemmContiguousNode,
     expert_weights_all_frozen,
+    slice_expert_weight,
 )
 
 from .fp8_utils import (
@@ -1106,17 +1107,12 @@ class MlpNode:
                     )
                 else:
                     sliced = type("_SlicedGroupedExpert", (), {})()
-                    sliced.weight1 = parent.weight1._slice(
-                        local_id, local_id + 1
+                    sliced.weight1 = slice_expert_weight(
+                        parent.weight1, local_id
                     )
-                    sliced.weight2 = parent.weight2._slice(
-                        local_id, local_id + 1
+                    sliced.weight2 = slice_expert_weight(
+                        parent.weight2, local_id
                     )
-                    # `_slice` is a raw view whose stop_gradient is always True;
-                    # remember the parameter it came from so the frozen-expert
-                    # check in `bf16_weight_grad` reads the real flag.
-                    sliced.weight1._parent = parent.weight1
-                    sliced.weight2._parent = parent.weight2
                     sliced._parent = parent
                     sliced._local_id = local_id
                     gemm_node.grouped_gemm_experts = sliced

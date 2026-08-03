@@ -46,9 +46,9 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
 from paddlefleet.recompute_utils import (
+    keep_indexer_grad_path,
     need_recompute_in_block,
     need_recompute_in_first_n,
-    keep_indexer_grad_path,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.attention import Attention

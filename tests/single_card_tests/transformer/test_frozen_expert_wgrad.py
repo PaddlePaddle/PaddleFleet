@@ -35,10 +35,14 @@ These run on CPU except where a kernel is explicitly monkeypatched away.
 """
 
 import unittest
+from types import SimpleNamespace
 
 import paddle
 
-from paddlefleet.transformer.moe.fp8_utils import expert_weights_all_frozen
+from paddlefleet.transformer.moe.fp8_utils import (
+    expert_weights_all_frozen,
+    slice_expert_weight,
+)
 
 
 def _param(trainable, shape=(2, 4)):
@@ -112,9 +116,8 @@ class TestExpertWeightsAllFrozen(unittest.TestCase):
 class TestSlicedViewResolvesToParent(unittest.TestCase):
     """The sliced / subbatch path must consult the parent parameter.
 
-    ``fusion_layer_utils`` builds per-expert views as
-    ``parent.weightN._slice(local_id, local_id + 1)`` and stamps ``_parent`` on
-    each view; ``_PerExpertWeightView`` stores the same thing. So
+    Both per-expert slicing sites go through ``slice_expert_weight``, which stamps
+    ``_parent`` on the view; ``_PerExpertWeightView`` stores the same thing. So
     ``bf16_weight_grad`` can uniformly do
     ``getattr(weights, "_parent", weights)`` before asking
     :func:`expert_weights_all_frozen`, because a view's own ``stop_gradient`` is
@@ -122,11 +125,8 @@ class TestSlicedViewResolvesToParent(unittest.TestCase):
     """
 
     def _view(self, parent_trainable):
-        """Mirror `fusion_layer_utils.py:1108`: slice, then remember the parent."""
         parent = _Parent(trainable=parent_trainable)
-        view = parent.weight1._slice(0, 1)
-        view._parent = parent.weight1
-        return view
+        return slice_expert_weight(parent.weight1, 0)
 
     def _resolve(self, weights):
         """The expression `bf16_weight_grad` uses."""
@@ -158,6 +158,64 @@ class TestSlicedViewResolvesToParent(unittest.TestCase):
         view = _PerExpertWeightView(parent.weight1, 0, 2)
         self.assertIs(view._parent, parent.weight1)
         self.assertTrue(self._resolve(view))
+
+
+class TestStaticSubbatchNodeCarriesParent(unittest.TestCase):
+    """The static per-expert deep_gemm node must not lose the parent pointer.
+
+    ``ExpertsGroupGemmContiguousNode.__init__`` slices the stacked weights for a
+    single expert (static subbatch + deep_gemm, bf16 weights). It used to stamp
+    ``_parent`` only on the outer sliced object, so ``bf16_weight_grad`` saw a raw
+    view and kept computing the wgrad of a frozen expert.
+    """
+
+    def _node(self, trainable):
+        from paddlefleet.transformer.moe.fp8_utils import (
+            ExpertsGroupGemmContiguousNode,
+        )
+
+        parent = _Parent(trainable=trainable)
+        custom_map = SimpleNamespace(
+            grouped_gemm_experts=parent,
+            moe_rank=0,
+            num_experts_per_device=2,
+            experts=None,
+        )
+        node = ExpertsGroupGemmContiguousNode(
+            custom_map,
+            expert_id=1,
+            moe_deep_gemm=True,
+            use_bf16_gemm_weight_grad=True,
+        )
+        return parent, node
+
+    def test_view_points_at_parent_parameter(self):
+        parent, node = self._node(trainable=True)
+        ge = node.grouped_gemm_experts
+        self.assertIs(ge.weight1._parent, parent.weight1)
+        self.assertIs(ge.weight2._parent, parent.weight2)
+        # The view itself still reports stop_gradient=True.
+        self.assertTrue(ge.weight1.stop_gradient)
+
+    def test_frozen_parent_skips_wgrad_kernel(self):
+        parent, node = self._node(trainable=False)
+        ge = node.grouped_gemm_experts
+        called = []
+        node.bf16_gemm = lambda *a, **k: called.append("gemm")
+        for weights in (ge.weight1, ge.weight2):
+            self.assertIsNone(node.bf16_weight_grad(None, None, weights))
+        self.assertEqual(called, [])
+        self.assertIsNone(getattr(parent.weight1, "main_grad", None))
+        self.assertIsNone(parent.weight1.grad)
+
+    def test_trainable_parent_does_not_skip(self):
+        _, node = self._node(trainable=True)
+        ge = node.grouped_gemm_experts
+        # Not frozen, so the early return must not fire: the call proceeds past
+        # the guard and fails on the stubbed-out internals instead (the node
+        # never set up ``tokens_per_expert_tensor``).
+        with self.assertRaisesRegex(AttributeError, "tokens_per_expert_tensor"):
+            node.bf16_weight_grad(None, None, ge.weight1)
 
 
 class _FakeCtx:

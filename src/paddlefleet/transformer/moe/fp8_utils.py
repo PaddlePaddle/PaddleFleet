@@ -627,6 +627,21 @@ def kitchen_gemm(
     return y
 
 
+def slice_expert_weight(parent_weight, local_id):
+    """Per-expert view ``[1, K, N]`` of a stacked expert weight.
+
+    ``_slice`` returns a raw view whose ``stop_gradient`` is always True, even when
+    the parent parameter is trainable, so keep a pointer to the parameter it came
+    from. ``bf16_weight_grad`` reads it back with
+    ``getattr(weights, "_parent", weights)`` to decide whether the expert is
+    frozen. Every per-expert slicing site must go through here, otherwise that
+    path silently loses the frozen-expert wgrad skip.
+    """
+    view = parent_weight._slice(local_id, local_id + 1)
+    view._parent = parent_weight
+    return view
+
+
 class _PerExpertWeightView:
     """A lightweight view into a single expert's slice of the stacked fp8 weight.
 
@@ -782,8 +797,8 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 # Normal: bf16 weight is valid, slice directly
                 sliced = type("_SlicedGroupedExpert", (), {})()
-                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
-                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
+                sliced.weight1 = slice_expert_weight(parent.weight1, local_id)
+                sliced.weight2 = slice_expert_weight(parent.weight2, local_id)
                 sliced._parent = parent
                 sliced._local_id = local_id
                 self.grouped_gemm_experts = sliced
