@@ -919,6 +919,69 @@ class TestUsePylayerGating(unittest.TestCase):
                 break
         self.assertTrue(found, "No BlockAttnRes found in model")
 
+    def test_layernorm_does_not_use_pylayer(self):
+        """With LayerNorm (non-RMSNorm), _use_pylayer should be False and
+        forward/backward still work correctly via standard autograd path."""
+        config = GPTConfig(
+            num_hidden_layers=2,
+            hidden_size=64,
+            rotary_base=10000,
+            vocab_size=100,
+            rotary_percent=1.0,
+            rope_scaling=1.0,
+            position_embedding_type="rope",
+            num_attention_heads=4,
+            intermediate_size=128,
+            max_sequence_length=16,
+            normalization="LayerNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            tie_word_embeddings=True,
+            use_qk_norm=True,
+            block_attention_residuals=True,
+            attn_res_block_size=2,
+        )
+        model = gpt_builder(config, num_stages=1)
+
+        bar = None
+        for m in model.sublayers():
+            if isinstance(m, BlockAttnRes):
+                bar = m
+                break
+        self.assertIsNotNone(bar, "No BlockAttnRes found in model")
+        # LayerNorm is NOT RMSNorm, so _use_pylayer must be False
+        self.assertFalse(
+            bar._use_pylayer,
+            f"Expected _use_pylayer=False for LayerNorm, got True. "
+            f"norm type: {type(bar.norm)}",
+        )
+
+        # Verify forward/backward still work via standard autograd path
+        B, S, H = 2, 16, 64
+        partial_block = paddle.randn([B, S, H])
+        partial_block.stop_gradient = False
+        blocks = [paddle.randn([B, S, H])]
+        blocks[0].stop_gradient = False
+
+        bar.train()
+        result = bar(partial_block, blocks)
+        self.assertEqual(result.shape, [B, S, H])
+        self.assertTrue(paddle.isfinite(result).all().item())
+
+        # Backward should produce valid gradients
+        loss = result.sum()
+        loss.backward()
+        self.assertIsNotNone(partial_block.grad)
+        self.assertTrue(paddle.isfinite(partial_block.grad).all().item())
+        self.assertIsNotNone(blocks[0].grad)
+        self.assertTrue(paddle.isfinite(blocks[0].grad).all().item())
+
 
 if __name__ == "__main__":
     unittest.main()
