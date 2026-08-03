@@ -821,7 +821,7 @@ class DSv4HybridAttention(Attention):
                 position_offset,
                 docmask_meta,
                 input_ids,
-                True,  # _in_full_recompute
+                True,  # _in_full_recompute (last positional; see signature)
                 preserve_rng_state=False,
                 share_grad_holder=True,
             )
@@ -841,9 +841,9 @@ class DSv4HybridAttention(Attention):
                 position_offset,
                 docmask_meta,
                 input_ids,
-                past_key_values,
-                layer_idx,
-                use_cache,
+                past_key_values=past_key_values,
+                layer_idx=layer_idx,
+                use_cache=use_cache,
             )
 
             # Output projection
@@ -871,10 +871,11 @@ class DSv4HybridAttention(Attention):
         position_offset: int,
         docmask_meta,
         input_ids,
+        _in_full_recompute: bool = False,
+        *,
         past_key_values=None,
         layer_idx=None,
         use_cache=False,
-        _in_full_recompute: bool = False,
     ) -> Tensor:
         """Full attention forward: qkv_proj + core_attn + inv_rope + o_group_proj + gated_attn.
 
@@ -882,6 +883,12 @@ class DSv4HybridAttention(Attention):
         The large intermediate tensors (query, key, value) are internal to this function
         and will be freed after this function returns during forward, then recomputed
         during backward.
+
+        ``RecomputeWithoutOutput.recompute()`` forwards only ``*args`` to the
+        wrapped function, so ``_in_full_recompute`` must stay the *last*
+        positional parameter. The KV-cache parameters after it are keyword-only
+        to keep that invariant: they are never used from the recompute path
+        (recompute only runs under ``self.training``).
         """
         query, key, value, q_compressed, kv_compressed = (
             self.get_query_key_value_tensors(
