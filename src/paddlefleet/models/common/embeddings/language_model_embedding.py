@@ -125,12 +125,22 @@ class LanguageModelEmbedding(FleetLayer):
         else:
             self.tokentype_embeddings = None
 
-        # N-gram Embedding (LongCat-style)
+        # N-gram Embedding (LongCat-style, or the routed variant)
         if self.ngram_embedding_enabled:
-            from paddlefleet.models.common.embeddings.ngram_embedding import NgramEmbedding
-            self.ngram_embedding = NgramEmbedding(
-                config=config, vocab_size=self.vocab_size
-            )
+            self.ngram_moe_enabled = getattr(config, "ngram_moe_enabled", False)
+            if self.ngram_moe_enabled:
+                from paddlefleet.models.common.embeddings.ngram_moe_embedding import (
+                    NgramMoeEmbedding,
+                )
+                self.ngram_embedding = NgramMoeEmbedding(
+                    config=config, vocab_size=self.vocab_size
+                )
+            else:
+                from paddlefleet.models.common.embeddings.ngram_embedding import NgramEmbedding
+                self.ngram_embedding = NgramEmbedding(
+                    config=config, vocab_size=self.vocab_size
+                )
+        self.ngram_aux_loss = None
 
         # Embeddings dropout
         self.embedding_dropout = paddle.nn.Dropout(
@@ -172,7 +182,12 @@ class LanguageModelEmbedding(FleetLayer):
 
         # N-gram Embedding injection with normalization
         if self.ngram_embedding_enabled:
-            ngram_signal = self.ngram_embedding(input_ids)
+            if self.ngram_moe_enabled:
+                ngram_signal, self.ngram_aux_loss = self.ngram_embedding(
+                    input_ids, embed_tokens
+                )
+            else:
+                ngram_signal = self.ngram_embedding(input_ids)
             if self.ngram_embedding.monitor is not None:
                 self.ngram_embedding.monitor.observe_signal(
                     embed_tokens, ngram_signal

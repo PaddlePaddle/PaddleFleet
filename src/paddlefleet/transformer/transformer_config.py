@@ -879,6 +879,54 @@ class TransformerConfig(ModelParallelConfig):
     """Append every analysis result to output_dir/ngram_monitor/metrics.jsonl."""
 
     ####################
+    # N-gram MoE routing
+    ####################
+    ngram_moe_enabled: bool = False
+    """Use the routed N-gram embedding instead of the fixed K-split one. False
+    keeps the original implementation untouched. The routed variant is sized by
+    the ngram_moe_* fields alone: it ignores ngram_vocab_size_ratio,
+    ngram_emb_split_num and ngram_emb_dim, and shares only
+    ngram_emb_neighbor_num (N) and ngram_pad_token_id with the baseline."""
+
+    ngram_moe_tables_per_order: int = 16
+    """Sub-tables per N-gram order. Total sub-tables = this * (N - 1)."""
+
+    ngram_moe_active_tables: int = 4
+    """Sub-tables read per token per N-gram order; must be <=
+    ngram_moe_tables_per_order. Lookups per token = this * (N - 1)."""
+
+    ngram_moe_table_rows_ratio: float = 0.0
+    """Rows of one sub-table, as a multiple of vocab_size. Sub-table i actually
+    holds rows + 2*i + 1 rows: the moduli must stay pairwise distinct. Must be
+    set explicitly when ngram_moe_enabled is True."""
+
+    ngram_moe_table_dim: int = 128
+    """Embedding width of one sub-table."""
+
+    ngram_moe_router_dim: int = 64
+    """Bottleneck width of the sub-table router."""
+
+    ngram_moe_router_width: int = 32
+    """Causal receptive field of the router in tokens. Must be >> the N-gram
+    order, otherwise the router can only rediscover a hash of the same N-gram."""
+
+    ngram_moe_shared_router: bool = True
+    """When True (default), one router serves all N-gram orders. When False,
+    each order gets its own router with independent weights, allowing 2-gram
+    and 3-gram to learn different routing strategies."""
+
+    ngram_moe_load_balance_coef: float = 0.0
+    """Coefficient for the Switch-Transformer style load-balancing auxiliary
+    loss. When 0 (default), no auxiliary loss is computed. When > 0, L_aux =
+    coef * N * sum_o sum_i (f_{o,i} * P_{o,i}) is returned from forward and
+    must be added to the total training loss by the caller."""
+
+    ngram_moe_z_loss_coef: float = 0.0
+    """Coefficient for the router z-loss (prevents softmax saturation). When 0
+    (default), no z-loss is computed. Currently a placeholder; not yet
+    implemented."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.
