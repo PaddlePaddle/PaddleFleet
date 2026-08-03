@@ -114,50 +114,78 @@ class TestExpertWeightsAllFrozen(unittest.TestCase):
 
 
 class TestSlicedViewResolvesToParent(unittest.TestCase):
-    """The sliced / subbatch path must consult the parent parameter.
+    """Per-expert views are resolved to their parent parameter.
 
-    Both per-expert slicing sites go through ``slice_expert_weight``, which stamps
-    ``_parent`` on the view; ``_PerExpertWeightView`` stores the same thing. So
-    ``bf16_weight_grad`` can uniformly do
-    ``getattr(weights, "_parent", weights)`` before asking
-    :func:`expert_weights_all_frozen`, because a view's own ``stop_gradient`` is
-    always True.
+    Both per-expert slicing sites go through :func:`slice_expert_weight`, which
+    stamps ``_parent`` on the view; ``_PerExpertWeightView`` stores the same thing.
+    ``expert_weights_all_frozen`` dereferences it, so every call site gets the
+    right answer without having to remember to resolve first.
     """
 
     def _view(self, parent_trainable):
         parent = _Parent(trainable=parent_trainable)
         return slice_expert_weight(parent.weight1, 0)
 
-    def _resolve(self, weights):
-        """The expression `bf16_weight_grad` uses."""
-        return expert_weights_all_frozen(getattr(weights, "_parent", weights))
-
-    def test_view_alone_is_never_frozen(self):
-        # Without resolving through _parent the answer is always "not frozen",
-        # which is safe but loses the optimization.
+    def test_view_of_frozen_parent_is_frozen(self):
         view = self._view(parent_trainable=False)
+        # The view's own flag says nothing; the parent decides.
+        self.assertTrue(view.stop_gradient)
+        self.assertTrue(expert_weights_all_frozen(view))
+
+    def test_view_of_trainable_parent_is_not_frozen(self):
+        view = self._view(parent_trainable=True)
         self.assertTrue(view.stop_gradient)
         self.assertFalse(expert_weights_all_frozen(view))
 
-    def test_resolved_view_of_frozen_expert_is_frozen(self):
-        self.assertTrue(self._resolve(self._view(parent_trainable=False)))
+    def test_view_without_parent_is_not_frozen(self):
+        # Someone slicing by hand instead of using slice_expert_weight loses the
+        # optimization, but must never lose a real gradient.
+        parent = _Parent(trainable=False)
+        raw = parent.weight1._slice(0, 1)
+        self.assertFalse(hasattr(raw, "_parent"))
+        self.assertFalse(expert_weights_all_frozen(raw))
 
-    def test_resolved_view_of_trainable_expert_is_not_frozen(self):
-        self.assertFalse(self._resolve(self._view(parent_trainable=True)))
+    def test_plain_parameter_still_works(self):
+        self.assertTrue(expert_weights_all_frozen(_param(trainable=False)))
+        self.assertFalse(expert_weights_all_frozen(_param(trainable=True)))
 
-    def test_plain_parameter_needs_no_resolution(self):
-        self.assertTrue(self._resolve(_param(trainable=False)))
-        self.assertFalse(self._resolve(_param(trainable=True)))
+    def test_list_of_views(self):
+        frozen = _Parent(trainable=False)
+        trainable = _Parent(trainable=True)
+        self.assertTrue(
+            expert_weights_all_frozen(
+                [
+                    slice_expert_weight(frozen.weight1, 0),
+                    slice_expert_weight(frozen.weight2, 0),
+                ]
+            )
+        )
+        self.assertFalse(
+            expert_weights_all_frozen(
+                [
+                    slice_expert_weight(frozen.weight1, 0),
+                    slice_expert_weight(trainable.weight2, 0),
+                ]
+            )
+        )
 
     def test_fp8_view_carries_its_parent(self):
         # _PerExpertWeightView is not a Tensor and has no stop_gradient at all,
         # but it stores the parent parameter under the same attribute name.
         from paddlefleet.transformer.moe.fp8_utils import _PerExpertWeightView
 
-        parent = _Parent(trainable=False)
-        view = _PerExpertWeightView(parent.weight1, 0, 2)
-        self.assertIs(view._parent, parent.weight1)
-        self.assertTrue(self._resolve(view))
+        frozen = _Parent(trainable=False)
+        trainable = _Parent(trainable=True)
+        self.assertTrue(
+            expert_weights_all_frozen(
+                _PerExpertWeightView(frozen.weight1, 0, 2)
+            )
+        )
+        self.assertFalse(
+            expert_weights_all_frozen(
+                _PerExpertWeightView(trainable.weight1, 0, 2)
+            )
+        )
 
 
 class TestStaticSubbatchNodeCarriesParent(unittest.TestCase):
@@ -216,6 +244,90 @@ class TestStaticSubbatchNodeCarriesParent(unittest.TestCase):
         # never set up ``tokens_per_expert_tensor``).
         with self.assertRaisesRegex(AttributeError, "tokens_per_expert_tensor"):
             node.bf16_weight_grad(None, None, ge.weight1)
+
+
+class TestZeroTokenBranchSkipsFrozenExperts(unittest.TestCase):
+    """The zero-token shortcut must not allocate grads for frozen experts.
+
+    ``ExpertsGroupGemmContiguousNode.backward`` returns early when a rank receives
+    zero tokens, and pre-allocates fp32 grad buffers instead of running the wgrad.
+    Under subbatch the weights it inspects are per-expert views, so the frozen
+    check has to resolve them; for the offline-fp8 view the cost of getting it
+    wrong is a full-size fp32 buffer on the *parent* parameter, because that is
+    what ``_PerExpertWeightView.main_grad``'s setter allocates.
+    """
+
+    def _node(self, trainable, offline_quant):
+        from paddlefleet.transformer.moe.fp8_utils import (
+            ExpertsGroupGemmContiguousNode,
+        )
+
+        parent = _Parent(trainable=trainable)
+        if offline_quant:
+            # Presence of fp8_weight_stacked is what routes the node to
+            # _PerExpertWeightProxy instead of raw slices.
+            for attr in ("weight1", "weight2"):
+                getattr(parent, attr).fp8_weight_stacked = paddle.zeros(
+                    [2, 4], dtype="float8_e4m3fn"
+                )
+        custom_map = SimpleNamespace(
+            grouped_gemm_experts=parent,
+            moe_rank=0,
+            num_experts_per_device=2,
+            experts=None,
+        )
+        node = ExpertsGroupGemmContiguousNode(
+            custom_map,
+            expert_id=1,
+            moe_deep_gemm=True,
+            use_fp8_mlp=True,
+            use_bf16_gemm_weight_grad=True,
+        )
+        return parent, node
+
+    def _run_zero_token_backward(self, node):
+        out_grad = paddle.zeros([0, 8], dtype="bfloat16")
+        unzipped_probs = paddle.zeros([0], dtype="float32")
+        dx, probs_grad = node.backward(out_grad, unzipped_probs)
+        self.assertEqual(dx.shape[0], 0)
+        self.assertEqual(probs_grad.shape[0], 0)
+
+    def _grad_buffers(self, parent, node):
+        """Any fp32 grad buffer reachable from the parent or the per-expert view.
+
+        The two paths allocate in different places: a raw slice gets its own
+        ``grad``, while the offline-fp8 view's setter allocates on the parent.
+        """
+        found = []
+        view_owner = node.grouped_gemm_experts
+        for attr in ("weight1", "weight2"):
+            for owner, label in ((parent, "parent"), (view_owner, "view")):
+                weight = getattr(owner, attr)
+                for kind in ("main_grad", "grad"):
+                    if getattr(weight, kind, None) is not None:
+                        found.append((label, attr, kind))
+        return found
+
+    def test_frozen_raw_slice_allocates_nothing(self):
+        parent, node = self._node(trainable=False, offline_quant=False)
+        self._run_zero_token_backward(node)
+        self.assertEqual(self._grad_buffers(parent, node), [])
+
+    def test_frozen_offline_quant_allocates_nothing(self):
+        parent, node = self._node(trainable=False, offline_quant=True)
+        self._run_zero_token_backward(node)
+        # Would otherwise be a full-size fp32 buffer on the parent parameter.
+        self.assertEqual(self._grad_buffers(parent, node), [])
+
+    def test_trainable_raw_slice_still_allocates(self):
+        parent, node = self._node(trainable=True, offline_quant=False)
+        self._run_zero_token_backward(node)
+        self.assertNotEqual(self._grad_buffers(parent, node), [])
+
+    def test_trainable_offline_quant_still_allocates(self):
+        parent, node = self._node(trainable=True, offline_quant=True)
+        self._run_zero_token_backward(node)
+        self.assertNotEqual(self._grad_buffers(parent, node), [])
 
 
 class _FakeCtx:

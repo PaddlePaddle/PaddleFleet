@@ -566,17 +566,20 @@ def expert_weights_all_frozen(weights):
     wgrad GEMMs and their fp32 buffers when the experts are frozen (for example
     DSv4 phase 2, ``csa_train_indexer_only``).
 
-    Only an ``EagerParamBase`` counts: ``stop_gradient`` is meaningless on any
-    other tensor (a plain one defaults to True, and so does a ``_slice()`` view of
-    a *trainable* parameter), so callers holding a view must pass the parent
-    parameter instead. Mixed groups keep the original behavior so no gradient is
-    silently dropped.
+    ``weights`` is a stacked parameter (grouped path), a list of per-expert
+    parameters (split path), or a **per-expert view** of a stacked parameter
+    (subbatch / sliced deep_gemm path). A view's own ``stop_gradient`` is always
+    True even when its parent parameter is trainable, so each entry is first
+    dereferenced through ``_parent`` -- stamped by :func:`slice_expert_weight` and
+    stored by :class:`_PerExpertWeightView`. Only an ``EagerParamBase`` then
+    counts as frozen; anything else keeps the original behavior so no gradient is
+    silently dropped. Mixed groups are treated as not frozen.
     """
     if weights is None:
         return False
     if not isinstance(weights, (list, tuple)):
         weights = [weights]
-    entries = [w for w in weights if w is not None]
+    entries = [getattr(w, "_parent", w) for w in weights if w is not None]
     return bool(entries) and all(
         isinstance(w, EagerParamBase) and w.stop_gradient for w in entries
     )
@@ -632,10 +635,9 @@ def slice_expert_weight(parent_weight, local_id):
 
     ``_slice`` returns a raw view whose ``stop_gradient`` is always True, even when
     the parent parameter is trainable, so keep a pointer to the parameter it came
-    from. ``bf16_weight_grad`` reads it back with
-    ``getattr(weights, "_parent", weights)`` to decide whether the expert is
-    frozen. Every per-expert slicing site must go through here, otherwise that
-    path silently loses the frozen-expert wgrad skip.
+    from. :func:`expert_weights_all_frozen` dereferences that ``_parent`` to decide
+    whether the expert is frozen. Every per-expert slicing site must go through
+    here, otherwise that path silently loses the frozen-expert wgrad skip.
     """
     view = parent_weight._slice(local_id, local_id + 1)
     view._parent = parent_weight
@@ -2245,6 +2247,10 @@ class ExpertsGroupGemmContiguousNode:
                     self.grouped_gemm_experts.weight1,
                     self.grouped_gemm_experts.weight2,
                 ):
+                    # `weight` may be a per-expert view; the predicate resolves it
+                    # to the parent parameter. Skipping matters most for the
+                    # offline-fp8 view: its main_grad setter allocates an fp32
+                    # buffer for the whole parent, not just this expert's slice.
                     if expert_weights_all_frozen(weight):
                         continue
                     if hasattr(weight, "main_grad"):
@@ -2600,10 +2606,9 @@ class ExpertsGroupGemmContiguousNode:
         """
         BF16 GEMM for weight grad
         """
-        # Under subbatch `weights` is a per-expert view of the stacked parameter,
-        # and a view's own stop_gradient is always True, so read the parameter it
-        # was sliced from. The GEMM below still uses the per-expert `weights`.
-        if expert_weights_all_frozen(getattr(weights, "_parent", weights)):
+        # `weights` may be a per-expert view; the predicate resolves it to the
+        # parent parameter. The GEMM below still uses the per-expert `weights`.
+        if expert_weights_all_frozen(weights):
             return
         if x is None:
             if self.dequant_input:
