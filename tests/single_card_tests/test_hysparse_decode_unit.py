@@ -30,6 +30,7 @@ GPU, no SM10.x needed) so they run everywhere, CI included.
 
 import types
 import unittest
+from unittest import mock
 
 import numpy as np
 import paddle
@@ -40,6 +41,7 @@ from paddlefleet.tilelang_ops.hysparse.pipeline import (
     select_topk_blocks,
 )
 from paddlefleet.transformer.multi_latent_attention import (
+    MQASelfAttention,
     MultiLatentAttention,
     _is_incremental_decode,
 )
@@ -357,6 +359,296 @@ class TestDynamicKVCacheDecodeState(unittest.TestCase):
         grown = cache.update_shared(step, 0)
         self.assertEqual(grown.shape, [2, 9, 1, 16])
         np.testing.assert_array_equal(grown[:, :8].numpy(), prefill.numpy())
+
+
+class TestMLAHySparseForwardRouting(unittest.TestCase):
+    def _stub(self, seq_len):
+        query = paddle.randn([1, seq_len, 1, 3])
+        key = paddle.randn([1, seq_len, 1, 3])
+        value = paddle.randn([1, seq_len, 1, 1])
+        kv_compressed = paddle.randn([1, seq_len, 2])
+        k_pos_emb = paddle.randn([1, seq_len, 1, 1])
+        core_attention = mock.Mock(
+            side_effect=lambda query, *_args, **_kwargs: paddle.zeros(
+                [query.shape[0], query.shape[1], 1]
+            )
+        )
+        core_attention.config = types.SimpleNamespace()
+        stub = types.SimpleNamespace(
+            config=types.SimpleNamespace(
+                sequence_parallel=False,
+                enable_hy_sparse_attention=True,
+            ),
+            attn_mask_type=None,
+            core_attention=core_attention,
+            recompute_core_attention=False,
+            recompute_qkv_up_porj_and_rope=False,
+            training=False,
+            use_rr_flash_attention=False,
+            gated_attention=False,
+            layer_number=0,
+            o_proj=lambda x: (x, None),
+            get_query_key_value_tensors=lambda *_: (
+                query,
+                key,
+                value,
+                None,
+                kv_compressed,
+                k_pos_emb,
+            ),
+        )
+        return stub
+
+    def _forward(self, stub, shared_kv, cache):
+        with (
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                return_value=1,
+            ),
+            mock.patch(
+                "paddlefleet.transformer.transformer_layer.TransformerLayer._log_md5"
+            ),
+        ):
+            return MultiLatentAttention.forward(
+                stub,
+                paddle.zeros(
+                    [1, stub.get_query_key_value_tensors()[0].shape[1], 1]
+                ),
+                None,
+                shared_kv=shared_kv,
+                past_key_values=cache,
+                layer_idx=0,
+                use_cache=True,
+            )
+
+    def test_prefill_seeds_cache_and_decode_refreshes_shared_indices(self):
+        cache = DynamicKVCache(num_layers=1)
+        prefill = self._stub(seq_len=2)
+        prefill_indices = paddle.full([1, 2, 1, 1], 7, dtype="int32")
+        prefill._hy_sparse_full_attention = mock.Mock(
+            return_value=(paddle.zeros([1, 2, 1]), prefill_indices)
+        )
+        prefill._hy_sparse_decode_block_indices = mock.Mock()
+        prefill_shared = []
+
+        self._forward(prefill, prefill_shared, cache)
+
+        self.assertEqual(cache.get_layer_kv(0)[0].shape[1], 2)
+        self.assertEqual(prefill_shared[0].shape, [1, 2, 1, 3])
+        self.assertIs(prefill_shared[1], prefill_indices)
+        prefill._hy_sparse_full_attention.assert_called_once()
+
+        decode = self._stub(seq_len=1)
+        decode_indices = paddle.full([1, 1, 1, 1], 9, dtype="int32")
+        decode._hy_sparse_full_attention = mock.Mock()
+        decode._hy_sparse_decode_block_indices = mock.Mock(
+            return_value=decode_indices
+        )
+        decode_shared = []
+
+        self._forward(decode, decode_shared, cache)
+
+        decode._hy_sparse_full_attention.assert_not_called()
+        decode._hy_sparse_decode_block_indices.assert_called_once_with(
+            mock.ANY, cache, 0
+        )
+        self.assertEqual(decode_shared[0].shape, [1, 3, 1, 3])
+        self.assertIs(decode_shared[1], decode_indices)
+
+
+class TestMQAHySparseForwardRouting(unittest.TestCase):
+    def _stub(self, seq_len):
+        config = types.SimpleNamespace(
+            sliding_window=(2,),
+            hy_sparse_block_size=2,
+            hy_sparse_block_sparse_use_tilelang=True,
+            kv_lora_rank=2,
+            cp_balance_mode="dualchunk_allgather",
+        )
+        query = paddle.randn([1, seq_len, 1, 3])
+        key = paddle.randn([1, seq_len, 1, 3])
+        value = paddle.randn([1, seq_len, 1, 2])
+        stub = types.SimpleNamespace(
+            is_mqa=True,
+            pg_collection=types.SimpleNamespace(tp=None),
+            config=config,
+            softmax_scale=0.5,
+            num_attention_heads_per_partition=1,
+            qk_nope_head_dim=1,
+            v_head_dim=1,
+            kv_b_proj=types.SimpleNamespace(weight=paddle.eye(2)),
+            gated_attention=False,
+            o_proj=lambda x: (x, None),
+            layer_number=0,
+            attn_mask_type=None,
+            get_query_key_value_tensors=lambda *_: (
+                query,
+                key,
+                value,
+                None,
+                None,
+                None,
+            ),
+        )
+        return stub
+
+    def _run_forward(self, stub, shared_kv, **kwargs):
+        calls = {}
+
+        def sliding(query, key, value, valid_range, **_):
+            calls["window_range"] = valid_range
+            shape = [query.shape[0], query.shape[1], query.shape[2], 2]
+            return paddle.zeros(shape), None
+
+        def sparse(query, key, block_indices, valid_range, **_):
+            calls["doc_range"] = valid_range
+            shape = [query.shape[0], query.shape[1], query.shape[2], 2]
+            return paddle.zeros(shape), None
+
+        patches = (
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.get_pg_size",
+                return_value=1,
+            ),
+            mock.patch(
+                "paddlefleet.transformer.transformer_layer.TransformerLayer._log_md5"
+            ),
+            mock.patch(
+                "paddlefleet.tilelang_ops.hysparse.sliding_window_mqa_attention",
+                side_effect=sliding,
+            ),
+            mock.patch(
+                "paddlefleet.tilelang_ops.hysparse.block_sparse_mqa_tl.block_sparse_mqa_attention_tl",
+                side_effect=sparse,
+            ),
+        )
+        with patches[0], patches[1], patches[2], patches[3]:
+            output, bias = MQASelfAttention.forward(
+                stub,
+                paddle.zeros(
+                    [1, stub.get_query_key_value_tensors()[0].shape[1], 1]
+                ),
+                None,
+                shared_kv=shared_kv,
+                **kwargs,
+            )
+        return output, bias, calls
+
+    def test_decode_uses_cached_window_and_full_shared_history(self):
+        stub = self._stub(seq_len=1)
+        cache = DynamicKVCache(num_layers=1, swa_layers=[True], window_size=2)
+        cache.update(
+            paddle.randn([1, 3, 3]), paddle.randn([1, 3, 2]), layer_idx=0
+        )
+        shared_key = paddle.randn([1, 4, 1, 3])
+        block_indices = paddle.zeros([1, 1, 1, 1], dtype="int32")
+
+        with mock.patch(
+            "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+            return_value=1,
+        ):
+            output, bias, calls = self._run_forward(
+                stub,
+                [shared_key, block_indices],
+                past_key_values=cache,
+                layer_idx=0,
+                use_cache=True,
+            )
+
+        self.assertEqual(output.shape, [1, 1, 1])
+        self.assertIsNone(bias)
+        np.testing.assert_array_equal(calls["window_range"].numpy(), [[[1, 3]]])
+        np.testing.assert_array_equal(calls["doc_range"].numpy(), [[[0, 4]]])
+
+    def test_decode_rejects_chunked_prefill(self):
+        stub = self._stub(seq_len=2)
+        cache = DynamicKVCache(num_layers=1)
+        cache.update(
+            paddle.randn([1, 1, 3]), paddle.randn([1, 1, 2]), layer_idx=0
+        )
+        shared_key = paddle.randn([1, 3, 1, 3])
+        block_indices = paddle.zeros([1, 2, 1, 1], dtype="int32")
+
+        with (
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                return_value=1,
+            ),
+            self.assertRaisesRegex(ValueError, "single query token"),
+        ):
+            self._run_forward(
+                stub,
+                [shared_key, block_indices],
+                past_key_values=cache,
+                layer_idx=0,
+                use_cache=True,
+            )
+
+    def test_decode_rejects_context_parallel(self):
+        stub = self._stub(seq_len=1)
+        cache = DynamicKVCache(num_layers=1)
+        cache.update(
+            paddle.randn([1, 1, 3]), paddle.randn([1, 1, 2]), layer_idx=0
+        )
+        shared_key = paddle.randn([1, 2, 1, 3])
+        block_indices = paddle.zeros([1, 1, 1, 1], dtype="int32")
+
+        with (
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                return_value=2,
+            ),
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.ContextParallelAllGatherOp.apply",
+                side_effect=lambda tensor, *_: tensor,
+            ),
+            self.assertRaisesRegex(ValueError, "doc_valid_range"),
+        ):
+            self._run_forward(
+                stub,
+                [shared_key, block_indices],
+                past_key_values=cache,
+                layer_idx=0,
+                use_cache=True,
+            )
+
+    def test_prefill_builds_and_scatters_both_valid_ranges(self):
+        stub = self._stub(seq_len=2)
+        shared_key = paddle.randn([1, 2, 1, 3])
+        block_indices = paddle.zeros([1, 2, 1, 1], dtype="int32")
+
+        with (
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                return_value=2,
+            ),
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.ContextParallelAllGatherOp.apply",
+                side_effect=lambda tensor, *_: tensor,
+            ),
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.ContextParallelScatterOp.apply",
+                side_effect=lambda tensor, *_: tensor,
+            ) as scatter,
+        ):
+            _, _, calls = self._run_forward(stub, [shared_key, block_indices])
+
+        self.assertEqual(scatter.call_count, 2)
+        self.assertEqual(calls["window_range"].shape, [1, 2, 2])
+        self.assertEqual(calls["doc_range"].shape, [1, 2, 2])
+
+    def test_sparse_layer_requires_shared_block_indices(self):
+        stub = self._stub(seq_len=2)
+        shared_key = paddle.randn([1, 2, 1, 3])
+
+        with (
+            mock.patch(
+                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                return_value=1,
+            ),
+            self.assertRaisesRegex(ValueError, "top-k block indices"),
+        ):
+            self._run_forward(stub, [shared_key, None])
 
 
 if __name__ == "__main__":

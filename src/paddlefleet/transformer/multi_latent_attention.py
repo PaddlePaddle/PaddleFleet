@@ -2175,9 +2175,8 @@ class MQASelfAttention(MLASelfAttention):
             # The shared latent is never window-truncated, so its length is the
             # whole KV history; the decode query's document range covers all of
             # it (generation runs one document per batch row).
-            assert get_context_parallel_world_size() == 1, (
-                "doc_valid_range is not built for CP > 1"
-            )
+            if get_context_parallel_world_size() != 1:
+                raise ValueError("doc_valid_range is not built for CP > 1")
             doc_valid_range = paddle.concat(
                 [
                     paddle.zeros([b, 1, 1], dtype="int32"),
