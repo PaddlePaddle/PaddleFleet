@@ -990,5 +990,141 @@ class TestUsePylayerGating(unittest.TestCase):
         self.assertTrue(paddle.isfinite(blocks[0].grad).all().item())
 
 
+# ---------------------------------------------------------------------------
+# Test: OutputBlockAttnResPipe layout uniqueness, forward/backward, state_dict
+# ---------------------------------------------------------------------------
+class TestOutputBlockAttnResPipe(unittest.TestCase):
+    """Verify OutputBlockAttnResPipe is inserted exactly once in all layouts."""
+
+    def setUp(self):
+        self.strategy = _init_fleet()
+
+    def _make_config(self, experimental=False, num_mtp=0):
+        return GPTConfig(
+            num_hidden_layers=4,
+            hidden_size=128,
+            rotary_base=10000,
+            vocab_size=100,
+            rotary_percent=1.0,
+            rope_scaling=1.0,
+            position_embedding_type="rope",
+            num_attention_heads=4,
+            intermediate_size=256,
+            max_sequence_length=32,
+            normalization="RMSNorm",
+            hidden_dropout_prob=0.0,
+            attention_dropout=0.0,
+            init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            output_layer_init_method=functools.partial(
+                paddle.nn.init.xavier_uniform_, gain=1.0
+            ),
+            tie_word_embeddings=True,
+            use_qk_norm=True,
+            block_attention_residuals=True,
+            attn_res_block_size=2,
+            gpt_model_use_experimental_version=experimental,
+            num_nextn_predict_layers=num_mtp,
+        )
+
+    def _count_output_attn_res_layers(self, model):
+        """Count OutputBlockAttnResPipe instances in model sublayers."""
+        from paddlefleet.transformer.block_attn_res import (
+            OutputBlockAttnResPipe,
+        )
+
+        return sum(
+            1
+            for m in model.sublayers()
+            if isinstance(m, OutputBlockAttnResPipe)
+        )
+
+    def test_standard_layout_has_exactly_one(self):
+        """Standard layout (no experimental, no MTP) has one OutputBlockAttnResPipe."""
+        config = self._make_config(experimental=False, num_mtp=0)
+        model = gpt_builder(config, num_stages=1)
+        self.assertEqual(self._count_output_attn_res_layers(model), 1)
+
+    def test_experimental_mtp_layout_has_exactly_one(self):
+        """Experimental MTP layout has one OutputBlockAttnResPipe (not duplicated)."""
+        config = self._make_config(experimental=True, num_mtp=1)
+        model = gpt_builder(config, num_stages=1)
+        self.assertEqual(self._count_output_attn_res_layers(model), 1)
+
+    def test_experimental_mtp_forward_backward(self):
+        """Experimental MTP: OutputBlockAttnResPipe handles concat/split correctly.
+
+        Directly exercise the pipe with MTP-shaped inputs (avoids the full
+        model's data pipeline dependencies).
+        """
+        from paddlefleet.transformer.block_attn_res import (
+            BlockAttnResSublayersSpec,
+            OutputBlockAttnResPipe,
+        )
+        from paddlefleet.transformer.paddle_norm import RMSNorm
+
+        config = self._make_config(experimental=True, num_mtp=1)
+        pipe = OutputBlockAttnResPipe(
+            config, BlockAttnResSublayersSpec(norm=RMSNorm)
+        )
+        pipe.train()
+
+        B, S, H = 2, 8, config.hidden_size
+        num_mtp = config.num_nextn_predict_layers  # 1
+        # hidden_states = concat of [main, mtp_0, ...] along axis=0
+        hidden = paddle.randn([(num_mtp + 1) * S, B, H])
+        hidden.stop_gradient = False
+        blocks = [paddle.randn([S, B, H]) for _ in range(2)]
+        for b in blocks:
+            b.stop_gradient = False
+
+        out = pipe({"hidden_states": hidden, "blocks": blocks})
+        self.assertIn("hidden_states", out)
+        # Output shape preserved
+        self.assertEqual(out["hidden_states"].shape, [(num_mtp + 1) * S, B, H])
+        # blocks consumed
+        self.assertNotIn("blocks", out)
+
+        # Backward path
+        loss = out["hidden_states"].sum()
+        loss.backward()
+        self.assertIsNotNone(pipe.block_attn_res.proj_weight.grad)
+        self.assertTrue(
+            paddle.isfinite(pipe.block_attn_res.proj_weight.grad).all().item()
+        )
+        self.assertIsNotNone(blocks[0].grad)
+        self.assertIsNotNone(hidden.grad)
+
+    def test_state_dict_round_trip(self):
+        """state_dict has exactly one set of output_attn_res keys; round-trip preserves values."""
+        config = self._make_config(experimental=True, num_mtp=1)
+        model = gpt_builder(config, num_stages=1)
+
+        sd = model.state_dict()
+        attn_res_keys = [k for k in sd.keys() if "output_attn_res" in k]
+        # Should have proj_weight and norm.weight (exactly 2 keys)
+        self.assertEqual(len(attn_res_keys), 2)
+
+        # No duplicate keys (dict guarantees uniqueness, but verify naming)
+        proj_keys = [k for k in attn_res_keys if "proj_weight" in k]
+        norm_keys = [k for k in attn_res_keys if "norm" in k]
+        self.assertEqual(len(proj_keys), 1)
+        self.assertEqual(len(norm_keys), 1)
+
+        # Mutate and reload. Save expected values first because
+        # set_state_dict may consume/clear the input dict.
+        expected = {}
+        for k in attn_res_keys:
+            v = paddle.ones_like(sd[k]) * 3.14
+            sd[k] = v
+            expected[k] = v.numpy().copy()
+        model.set_state_dict(sd)
+
+        sd2 = model.state_dict()
+        for k in attn_res_keys:
+            np.testing.assert_allclose(sd2[k].numpy(), expected[k], rtol=1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()
