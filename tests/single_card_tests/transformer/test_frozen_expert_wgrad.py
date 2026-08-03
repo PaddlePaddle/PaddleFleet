@@ -329,6 +329,262 @@ class TestZeroTokenBranchSkipsFrozenExperts(unittest.TestCase):
         self._run_zero_token_backward(node)
         self.assertNotEqual(self._grad_buffers(parent, node), [])
 
+    def test_offline_quant_keeps_existing_parent_buffer(self):
+        # main_grad already allocated: the branch must leave it alone. A sentinel
+        # value detects reallocation, since reading .grad/.main_grad hands back a
+        # fresh wrapper object each time and identity cannot be compared.
+        parent, node = self._node(trainable=True, offline_quant=True)
+        for attr in ("weight1", "weight2"):
+            weight = getattr(parent, attr)
+            weight.main_grad = paddle.ones(weight.shape, dtype="float32")
+        self._run_zero_token_backward(node)
+        for attr in ("weight1", "weight2"):
+            buffer = getattr(parent, attr).main_grad
+            self.assertEqual(int(paddle.count_nonzero(buffer)), buffer.size)
+
+    def test_raw_slice_keeps_existing_view_buffer(self):
+        parent, node = self._node(trainable=True, offline_quant=False)
+        view_owner = node.grouped_gemm_experts
+        for attr in ("weight1", "weight2"):
+            view = getattr(view_owner, attr)
+            view.grad = paddle.ones(view.shape, dtype="float32")
+        self._run_zero_token_backward(node)
+        for attr in ("weight1", "weight2"):
+            buffer = getattr(view_owner, attr).grad
+            self.assertEqual(int(paddle.count_nonzero(buffer)), buffer.size)
+
+
+class _GuardNotTaken(Exception):
+    """Raised by a stub placed right after a frozen-expert guard.
+
+    A test that only wants to prove "the early return did not fire" should not
+    depend on whichever incidental error the real code path happens to hit next
+    (today a ``TypeError`` from a None ``tokens_per_expert``). Stubbing the first
+    call after the guard states that intent directly.
+    """
+
+
+def _raise_guard_not_taken(*args, **kwargs):
+    raise _GuardNotTaken
+
+
+class _Expert:
+    """Stand-in for a split-path MLP expert: two projection weights."""
+
+    def __init__(self, trainable):
+        self.up_gate_proj = SimpleNamespace(
+            weight=_param(trainable, shape=(4, 8))
+        )
+        self.down_proj = SimpleNamespace(weight=_param(trainable, shape=(8, 4)))
+
+
+def _grad_of(weight):
+    return getattr(weight, "main_grad", None) or weight.grad
+
+
+class TestFp8WgradEarlyReturns(unittest.TestCase):
+    """``bwd_down_weight`` / ``bwd_gate_up_weight`` skip frozen experts.
+
+    These are the fp8 wgrad entries (``fp8_wgrad=True``, i.e.
+    ``use_bf16_gemm_weight_grad`` off). Returning early avoids both the transpose
+    quant and the GEMM; the inputs are left as ``None`` on purpose so the test
+    fails loudly if the guard ever stops firing.
+    """
+
+    def _node(self):
+        from paddlefleet.transformer.moe.fp8_utils import (
+            ExpertsGroupGemmContiguousNode,
+        )
+
+        custom_map = SimpleNamespace(
+            grouped_gemm_experts=_Parent(trainable=False),
+            moe_rank=0,
+            num_experts_per_device=2,
+            experts=None,
+        )
+        return ExpertsGroupGemmContiguousNode(
+            custom_map, expert_id=1, moe_deep_gemm=True, use_fp8_mlp=True
+        )
+
+    def test_bwd_down_weight_skips_frozen(self):
+        node = self._node()
+        self.assertIsNone(
+            node.bwd_down_weight(None, None, _param(trainable=False))
+        )
+
+    def test_bwd_gate_up_weight_skips_frozen(self):
+        node = self._node()
+        node.input, node.input_fp8, node.input_scale = 1, 2, 3
+        self.assertIsNone(
+            node.bwd_gate_up_weight(None, None, _param(trainable=False))
+        )
+        # clear_input defaults to False: the cached inputs must survive.
+        self.assertEqual(
+            (node.input, node.input_fp8, node.input_scale), (1, 2, 3)
+        )
+
+    def test_bwd_down_weight_does_not_skip_trainable(self):
+        # Guard must not fire: execution has to reach the quant call after it.
+        node = self._node()
+        node.fused_transpose_split_quant = _raise_guard_not_taken
+        with self.assertRaises(_GuardNotTaken):
+            node.bwd_down_weight(None, None, _param(trainable=True))
+
+    def test_bwd_gate_up_weight_does_not_skip_trainable(self):
+        node = self._node()
+        node.fused_transpose_split_quant = _raise_guard_not_taken
+        with self.assertRaises(_GuardNotTaken):
+            node.bwd_gate_up_weight(None, None, _param(trainable=True))
+
+    def test_bwd_gate_up_weight_clears_input_when_asked(self):
+        node = self._node()
+        node.input, node.input_fp8, node.input_scale = 1, 2, 3
+        self.assertIsNone(
+            node.bwd_gate_up_weight(
+                None, None, _param(trainable=False), clear_input=True
+            )
+        )
+        self.assertEqual(
+            (node.input, node.input_fp8, node.input_scale), (None, None, None)
+        )
+
+
+class TestZeroTokenSplitPathSkipsFrozenExperts(unittest.TestCase):
+    """Zero-token shortcut, split (non-fused) path: one weight pair per expert."""
+
+    def _node(self, trainable):
+        from paddlefleet.transformer.moe.fp8_utils import (
+            ExpertsGroupGemmContiguousNode,
+        )
+
+        experts = [_Expert(trainable), None, _Expert(trainable)]
+        custom_map = SimpleNamespace(experts=experts)
+        node = ExpertsGroupGemmContiguousNode(
+            custom_map,
+            expert_id=None,
+            moe_deep_gemm=False,
+            use_fp8_mlp=True,
+            moe_expert_fusion=False,
+        )
+        return experts, node
+
+    def _run(self, node):
+        dx, probs_grad = node.backward(
+            paddle.zeros([0, 8], dtype="bfloat16"),
+            paddle.zeros([0], dtype="float32"),
+        )
+        self.assertEqual(dx.shape[0], 0)
+        self.assertEqual(probs_grad.shape[0], 0)
+
+    def test_frozen_experts_allocate_nothing(self):
+        experts, node = self._node(trainable=False)
+        self._run(node)
+        for expert in experts:
+            if expert is None:
+                continue
+            self.assertIsNone(_grad_of(expert.up_gate_proj.weight))
+            self.assertIsNone(_grad_of(expert.down_proj.weight))
+
+    def test_trainable_experts_still_allocate(self):
+        experts, node = self._node(trainable=True)
+        self._run(node)
+        for expert in experts:
+            if expert is None:
+                continue
+            self.assertIsNotNone(_grad_of(expert.up_gate_proj.weight))
+            self.assertIsNotNone(_grad_of(expert.down_proj.weight))
+
+
+class TestMlpNodeWeightGradPreallocation(unittest.TestCase):
+    """``MlpNode._ensure_weight_grad`` / ``_slice_weight_grad`` with frozen experts.
+
+    ``_ensure_weight_grad`` pre-allocates fp32 grads so the VMM free-memory query
+    is honest; a frozen expert never needs one. Called unbound on a stub ``self``
+    so no real MoE layer is required.
+    """
+
+    @staticmethod
+    def _ensure(fake_self):
+        from paddlefleet.transformer.moe.fusion_layer_utils import MlpNode
+
+        MlpNode._ensure_weight_grad(fake_self)
+
+    def test_split_path_skips_frozen_experts(self):
+        experts = [_Expert(trainable=False), None]
+        self._ensure(SimpleNamespace(experts=experts))
+        self.assertIsNone(_grad_of(experts[0].up_gate_proj.weight))
+        self.assertIsNone(_grad_of(experts[0].down_proj.weight))
+
+    def test_split_path_allocates_for_trainable_experts(self):
+        experts = [_Expert(trainable=True)]
+        self._ensure(SimpleNamespace(experts=experts))
+        self.assertIsNotNone(_grad_of(experts[0].up_gate_proj.weight))
+        self.assertIsNotNone(_grad_of(experts[0].down_proj.weight))
+
+    def test_deep_gemm_path_skips_frozen_stacked_weight(self):
+        parent = _Parent(trainable=False)
+        self._ensure(
+            SimpleNamespace(
+                experts=None,
+                experts_group_gemm_node=SimpleNamespace(
+                    grouped_gemm_experts=parent
+                ),
+            )
+        )
+        self.assertIsNone(_grad_of(parent.weight1))
+        self.assertIsNone(_grad_of(parent.weight2))
+
+    def test_deep_gemm_path_allocates_for_trainable_stacked_weight(self):
+        parent = _Parent(trainable=True)
+        self._ensure(
+            SimpleNamespace(
+                experts=None,
+                experts_group_gemm_node=SimpleNamespace(
+                    grouped_gemm_experts=parent
+                ),
+            )
+        )
+        self.assertIsNotNone(_grad_of(parent.weight1))
+        self.assertIsNotNone(_grad_of(parent.weight2))
+
+    def _sliced_node(self, parent):
+        sliced = type("_SlicedGroupedExpert", (), {})()
+        sliced.weight1 = slice_expert_weight(parent.weight1, 0)
+        sliced.weight2 = slice_expert_weight(parent.weight2, 0)
+        sliced._parent = parent
+        sliced._local_id = 0
+        return SimpleNamespace(grouped_gemm_experts=sliced), sliced
+
+    def test_slice_weight_grad_skips_when_parent_has_no_grad(self):
+        from paddlefleet.transformer.moe.fusion_layer_utils import MlpNode
+
+        # Frozen expert: _ensure_weight_grad left no parent buffer, so there is
+        # nothing to build a per-expert view on.
+        parent = _Parent(trainable=False)
+        node, sliced = self._sliced_node(parent)
+        MlpNode._slice_weight_grad(
+            SimpleNamespace(experts_group_gemm_node=[node])
+        )
+        self.assertIsNone(_grad_of(sliced.weight1))
+        self.assertIsNone(_grad_of(sliced.weight2))
+
+    def test_slice_weight_grad_builds_view_when_parent_has_grad(self):
+        from paddlefleet.transformer.moe.fusion_layer_utils import MlpNode
+
+        parent = _Parent(trainable=True)
+        parent.weight1.grad = paddle.zeros(
+            parent.weight1.shape, dtype=paddle.float32
+        )
+        parent.weight2.grad = paddle.zeros(
+            parent.weight2.shape, dtype=paddle.float32
+        )
+        node, sliced = self._sliced_node(parent)
+        MlpNode._slice_weight_grad(
+            SimpleNamespace(experts_group_gemm_node=[node])
+        )
+        self.assertIsNotNone(_grad_of(sliced.weight1))
+        self.assertEqual(_grad_of(sliced.weight1).shape[0], 1)
+
 
 class _FakeCtx:
     """Stand-in for a PyLayer ctx. ``stop_gradient`` round-trips faithfully.

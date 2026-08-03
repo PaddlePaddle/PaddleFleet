@@ -333,9 +333,8 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
         M, G, R, D = ctx.M, ctx.G, ctx.R, ctx.D
         orig_shape = ctx.orig_shape
 
-        if not ctx.x_needs_grad and not ctx.w_needs_grad:
-            return None, None
-
+        # No "both frozen" shortcut needed: a PyLayer output is differentiable
+        # only if some input is, so backward is never entered in that case.
         # dy: [..., G, R] -> [M, G, R], NO transpose
         dy_3d = dy.reshape([M, G, R]).contiguous()
 

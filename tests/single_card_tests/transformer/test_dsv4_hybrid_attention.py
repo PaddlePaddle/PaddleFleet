@@ -3271,6 +3271,58 @@ class TestFusedGroupedMatmul(unittest.TestCase):
         with self.assertRaises(ValueError):
             fused_grouped_matmul(x, w)
 
+    def _run_with_frozen(self, x_trainable, w_trainable):
+        """Phase 2 shape: the o_groups weight is frozen while x stays live.
+
+        Paddle rejects a gradient for a stop_gradient input, so backward has to
+        return None at that position; skipping the matching Triton kernel is free
+        work saved.
+        """
+        model_parallel_cuda_manual_seed(_SEED)
+        x = paddle.randn(
+            [self._B, self._SQ, self._G, self._D], dtype="bfloat16"
+        )
+        x.stop_gradient = not x_trainable
+        # Mirror DSv4HybridAttention: the weight passed in is a reshape of
+        # linear_o_group_proj. reshape is a normal op and propagates
+        # stop_gradient from the parameter.
+        param = paddle.base.framework.EagerParamBase.from_tensor(
+            paddle.create_parameter(
+                [self._G * self._R, self._D], dtype="float32"
+            ).astype("bfloat16")
+        )
+        param.stop_gradient = not w_trainable
+        out = fused_grouped_matmul(
+            x, param.reshape([self._G, self._R, self._D])
+        )
+        if not out.stop_gradient:
+            out.astype("float32").sum().backward()
+        return x, param, out
+
+    def test_frozen_weight_gets_no_wgrad(self):
+        x, param, out = self._run_with_frozen(
+            x_trainable=True, w_trainable=False
+        )
+        self.assertFalse(out.stop_gradient)
+        self.assertIsNotNone(x.grad)
+        self.assertIsNone(param.grad)
+
+    def test_frozen_input_gets_no_dgrad(self):
+        x, param, out = self._run_with_frozen(
+            x_trainable=False, w_trainable=True
+        )
+        self.assertFalse(out.stop_gradient)
+        self.assertIsNone(x.grad)
+        self.assertIsNotNone(param.grad)
+
+    def test_both_frozen_output_is_detached(self):
+        x, param, out = self._run_with_frozen(
+            x_trainable=False, w_trainable=False
+        )
+        self.assertTrue(out.stop_gradient)
+        self.assertIsNone(x.grad)
+        self.assertIsNone(param.grad)
+
 
 if __name__ == "__main__":
     unittest.main()
