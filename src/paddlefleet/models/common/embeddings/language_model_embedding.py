@@ -183,6 +183,11 @@ class LanguageModelEmbedding(FleetLayer):
         # N-gram Embedding injection with normalization
         if self.ngram_embedding_enabled:
             if self.ngram_moe_enabled:
+                # Side-channel: aux_loss is read by GPTEmbedding.forward via
+                # getattr(self, "ngram_aux_loss") immediately after this call,
+                # within the same forward pass.  Under recompute the forward
+                # may run twice, but the second pass overwrites with the same
+                # value, so the side-channel stays consistent.
                 ngram_signal, self.ngram_aux_loss = self.ngram_embedding(
                     input_ids, embed_tokens
                 )

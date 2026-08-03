@@ -207,7 +207,9 @@ class NgramMoeEmbedding(nn.Layer):
         self.table_rows = int(self.table_rows_ratio * vocab_size)
         assert self.table_rows > 0, (
             "ngram_moe_table_rows_ratio * vocab_size must be a positive row "
-            f"count, got {self.table_rows_ratio} * {vocab_size}"
+            f"count, got ngram_moe_table_rows_ratio={self.table_rows_ratio} "
+            f"* vocab_size={vocab_size} = {self.table_rows}; set "
+            "ngram_moe_table_rows_ratio to a positive value in config"
         )
         self.emb_dim = int(config.ngram_moe_table_dim)
         assert self.emb_dim > 0, "ngram_moe_table_dim must be positive"

@@ -272,5 +272,89 @@ class TestNgramMoeBaselineConsistency(unittest.TestCase):
         np.testing.assert_array_equal(out1.numpy(), out2.numpy())
 
 
+class TestNgramUsageMonitorSmoke(unittest.TestCase):
+    """Smoke test: instantiate monitor, run observe/commit/analyze cycle."""
+
+    def test_monitor_observe_commit_analyze(self):
+        """Monitor should accept flat indices, commit them, and produce metrics."""
+        from paddlefleet.models.common.embeddings.ngram_monitor import (
+            NgramUsageMonitor,
+        )
+
+        config = SimpleNamespace(
+            ngram_monitor_enabled=True,
+            ngram_monitor_interval=1,
+            ngram_monitor_usage=True,
+            ngram_monitor_collision=False,
+            ngram_monitor_collision_max_rows=0,
+            ngram_monitor_signal=True,
+            ngram_monitor_signal_rows=1,
+            ngram_monitor_per_table_metrics=True,
+            ngram_monitor_distribution=True,
+            ngram_monitor_stale_windows=10,
+            ngram_monitor_reduce_group="auto",
+        )
+        table_sizes = [100, 101, 102, 103]
+        table_orders = [2, 2, 3, 3]
+        monitor = NgramUsageMonitor(
+            config=config,
+            table_sizes=table_sizes,
+            table_orders=table_orders,
+            vocab_size=200,
+        )
+
+        # Simulate one step of lookups: [B=2, S=8] flat indices
+        monitor.begin_step(1)
+        flat_index = paddle.randint(0, 406, [2, 8]).astype("int64")
+        valid_mask = paddle.ones([2, 8], dtype="bool")
+        monitor.observe_flat(flat_index, valid_mask)
+        monitor.commit()
+
+        # observe_signal needs word_emb and ngram_signal
+        word_emb = paddle.randn([2, 8, 32])
+        ngram_signal = paddle.randn([2, 8, 32])
+        monitor.observe_signal(word_emb, ngram_signal)
+
+        # analyze should return a non-empty dict of metrics
+        metrics = monitor.analyze()
+        self.assertIsNotNone(metrics, "analyze() returned None")
+        self.assertIsInstance(metrics, dict)
+        self.assertGreater(len(metrics), 0, "analyze() returned empty metrics")
+
+    def test_monitor_disabled_when_interval_not_reached(self):
+        """Monitor should skip analysis when step is not on interval."""
+        from paddlefleet.models.common.embeddings.ngram_monitor import (
+            NgramUsageMonitor,
+        )
+
+        config = SimpleNamespace(
+            ngram_monitor_enabled=True,
+            ngram_monitor_interval=100,
+            ngram_monitor_usage=True,
+            ngram_monitor_collision=False,
+            ngram_monitor_collision_max_rows=0,
+            ngram_monitor_signal=True,
+            ngram_monitor_signal_rows=1,
+            ngram_monitor_per_table_metrics=True,
+            ngram_monitor_distribution=True,
+            ngram_monitor_stale_windows=10,
+            ngram_monitor_reduce_group="auto",
+        )
+        monitor = NgramUsageMonitor(
+            config=config,
+            table_sizes=[100],
+            table_orders=[2],
+            vocab_size=200,
+        )
+
+        # Step 1 with interval=100 → should not analyze
+        monitor.begin_step(1)
+        flat_index = paddle.randint(0, 100, [2, 8]).astype("int64")
+        monitor.observe_flat(flat_index)
+        monitor.commit()
+        metrics = monitor.analyze()
+        self.assertIsNone(metrics, "analyze() should return None off-interval")
+
+
 if __name__ == "__main__":
     unittest.main()
