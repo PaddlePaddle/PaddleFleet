@@ -270,3 +270,58 @@ class BlockAttnRes(FleetLayer):
             h = h.to(partial_block.dtype)
 
         return h
+
+
+class OutputBlockAttnResPipe(paddle.nn.Layer):
+    """Pipeline-compatible wrapper: run output BlockAttnRes BEFORE the final norm."""
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        sublayers_spec: BlockAttnResSublayersSpec,
+    ):
+        super().__init__()
+        self.config = config
+        self.block_attn_res = BlockAttnRes(config, sublayers_spec)
+
+    def _mtp_active(self) -> bool:
+        # Guard mirrors WrappedPaddleNormPipe.forward (paddle_norm.py) so that
+        # this pipe splits under exactly the same conditions as the final norm.
+        return (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+            and not (
+                not self.config.gpt_model_use_experimental_version
+                and self.config.enable_mtp_magic_send
+            )
+        )
+
+    def forward(self, dict_args: dict):
+        if not self.config.block_attention_residuals:
+            return dict_args
+
+        hidden_states = dict_args["hidden_states"]
+        blocks = dict_args.get("blocks", []) or []
+
+        if self._mtp_active():
+            tensor_list = paddle.split(
+                hidden_states, self.config.num_nextn_predict_layers + 1
+            )
+            main_hidden = self.block_attn_res(tensor_list[0], blocks)
+            hidden_states = paddle.concat([main_hidden, *tensor_list[1:]])
+        else:
+            hidden_states = self.block_attn_res(hidden_states, blocks)
+
+        rst = {**dict_args, "hidden_states": hidden_states}
+        # Blocks have been consumed; downstream (final norm, LM head) no
+        # longer needs them.
+        rst.pop("blocks", None)
+        return rst
+
+    def build_schedule_node(self):
+        from paddle.distributed.fleet.meta_parallel.pipeline_parallel import (
+            ScheduleNode,
+        )
+
+        return ScheduleNode(self.forward, name="OutputBlockAttnResPipe")

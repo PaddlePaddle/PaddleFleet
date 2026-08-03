@@ -419,7 +419,7 @@ class TestTransformerLayerHelpers(unittest.TestCase):
                 break
 
     def test_is_block_boundary(self):
-        """_is_block_boundary correct for block_size=4 (span=2)."""
+        """_is_block_boundary correct for block_size=4 (span=4, K3 semantics)."""
         config = self._make_config(block_size=4, num_layers=6)
         model = gpt_builder(config, num_stages=1)
         from paddlefleet.transformer.transformer_layer import TransformerLayer
@@ -429,21 +429,28 @@ class TestTransformerLayerHelpers(unittest.TestCase):
             if isinstance(m, TransformerLayer):
                 if m._is_block_boundary():
                     boundaries.append(m.layer_number)
-        # block_span = 4//2 = 2, so layers 0,2,4 are boundaries
-        # (layer_number % 2 == 0)
+        # block_span == attn_res_block_size == 4 (matches K3's
+        # `layer_idx % attn_res_block_size == 0`), so layers 0 and 4 are
+        # boundaries.
+        self.assertTrue(len(boundaries) > 0)
         for b in boundaries:
-            self.assertEqual(b % 2, 0)
+            self.assertEqual(b % 4, 0)
 
     def test_is_block_boundary_block_size_2(self):
-        """block_size=2 => span=1, every layer is a boundary."""
+        """block_size=2 => span=2, every other layer is a boundary."""
         config = self._make_config(block_size=2, num_layers=4)
         model = gpt_builder(config, num_stages=1)
         from paddlefleet.transformer.transformer_layer import TransformerLayer
 
+        checked = 0
         for m in model.sublayers():
             if isinstance(m, TransformerLayer):
                 if hasattr(m, "attn_res_block_size") and m.attn_res_block_size:
-                    self.assertTrue(m._is_block_boundary())
+                    self.assertEqual(
+                        m._is_block_boundary(), m.layer_number % 2 == 0
+                    )
+                    checked += 1
+        self.assertTrue(checked > 0)
 
 
 # ---------------------------------------------------------------------------
