@@ -253,7 +253,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 ctx.attn_sink_dtype
             )
 
-        grads =  (
+        grads = (
             dq if ctx.query_needs_grad else None,
             dkv if ctx.kv_full_needs_grad else None,
             d_attn_sink if ctx.attn_sink_needs_grad else None,
