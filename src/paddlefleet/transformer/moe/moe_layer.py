@@ -189,6 +189,8 @@ class MoELayer(nn.Layer):
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
+        if self.use_accuracy_compatible:
+            self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
@@ -712,20 +714,51 @@ class MoELayer(nn.Layer):
                 self.token_dispatcher, "global_input_probs", None
             )
             if per_token_scale is None:
-                raise RuntimeError(
-                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
-                    "router probabilities from the token dispatcher."
+                if not self.use_accuracy_compatible:
+                    raise RuntimeError(
+                        "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                        "router probabilities from the token dispatcher."
+                    )
+            else:
+                scale_chunks = paddle.split(
+                    per_token_scale, num_or_sections=tokens_per_expert, axis=0
                 )
-            scale_chunks = paddle.split(
-                per_token_scale, num_or_sections=tokens_per_expert, axis=0
-            )
         for i, chunk in enumerate(chunks):
             if tokens_per_expert[i] == 0:
                 continue
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            if scale_chunks is None:
+            if self.use_accuracy_compatible and 0 < int(chunk.shape[0]) < 17:
+                num_rows = int(chunk.shape[0])
+                pad_rows = 32 - num_rows
+                chunk = paddle.concat(
+                    [
+                        chunk,
+                        paddle.zeros(
+                            [pad_rows, chunk.shape[1]], dtype=chunk.dtype
+                        ),
+                    ],
+                    axis=0,
+                )
+                scale = None
+                if scale_chunks is not None:
+                    scale = paddle.concat(
+                        [
+                            scale_chunks[i],
+                            paddle.zeros(
+                                [pad_rows], dtype=scale_chunks[i].dtype
+                            ),
+                        ],
+                        axis=0,
+                    )
+                expert_output = (
+                    expert(chunk)[0]
+                    if scale is None
+                    else expert(chunk, per_token_scale=scale)[0]
+                )
+                expert_output = expert_output[:num_rows]
+            elif scale_chunks is None:
                 expert_output = expert(chunk)[0]
             else:
                 expert_output = expert(chunk, per_token_scale=scale_chunks[i])[
@@ -950,6 +983,14 @@ class MoELayer(nn.Layer):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
+        if self.use_accuracy_compatible:
+            return self.custom_forward(
+                hidden_states,
+                probs,
+                routing_map,
+                topk_weights=topk_weights,
+                topk_indices=topk_indices,
+            )
         hidden_states = self._project_to_latent(hidden_states)
 
         should_log_balance = framework._dygraph_tracer()._has_grad
