@@ -173,13 +173,29 @@ class TestMoonEPDispatcher(unittest.TestCase):
             moe_use_fusion_node=False,
             moe_shared_expert_overlap=False,
         )
-        for target, value, error in (
-            ("bf16", False, "requires bf16=True"),
-            ("use_ue8m0", True, "UE8M0 or SonicMoE"),
-            ("using_sonic_moe", True, "UE8M0 or SonicMoE"),
+        for owner, target, value, error in (
+            (config, "bf16", False, "requires bf16=True"),
+            (layer, "moe_expert_fusion", False, "moe_expert_fusion=True"),
+            (config, "gated_linear_unit", False, "gated_linear_unit=True"),
+            (layer, "fp8", True, "BF16 expert compute only"),
+            (layer, "use_ue8m0", True, "UE8M0 or SonicMoE"),
+            (layer, "using_sonic_moe", True, "UE8M0 or SonicMoE"),
+            (layer, "moe_deep_gemm", True, "moe_deep_gemm"),
+            (
+                config,
+                "moe_expert_capacity_factor",
+                1.0,
+                "token dropping or capacity padding",
+            ),
+            (layer, "num_experts_per_tok", 33, "num_experts_per_tok <= 32"),
+            (
+                layer,
+                "moe_intermediate_size",
+                64,
+                "dimensions to be multiples of 128",
+            ),
         ):
             with self.subTest(target=target):
-                owner = config if target == "bf16" else layer
                 original = getattr(owner, target)
                 setattr(owner, target, value)
                 with self.assertRaisesRegex(ValueError, error):
