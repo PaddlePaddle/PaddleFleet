@@ -317,6 +317,11 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
         ctx.R = R
         ctx.D = D
         ctx.orig_shape = orig_shape
+        # Paddle PyLayer requires None for a stop_gradient input; record it here so
+        # a frozen backbone (DSv4 phase 2, ``csa_train_indexer_only``) also skips
+        # the matching kernel instead of violating the contract.
+        ctx.x_needs_grad = not x.stop_gradient
+        ctx.w_needs_grad = not w.stop_gradient
 
         # out is already [M, G, R] -> reshape to [..., G, R]
         out = out.reshape([*orig_shape[:-1], R])
@@ -328,61 +333,69 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
         M, G, R, D = ctx.M, ctx.G, ctx.R, ctx.D
         orig_shape = ctx.orig_shape
 
+        # No "both frozen" shortcut needed: a PyLayer output is differentiable
+        # only if some input is, so backward is never entered in that case.
         # dy: [..., G, R] -> [M, G, R], NO transpose
         dy_3d = dy.reshape([M, G, R]).contiguous()
 
-        # dx: [M, G, D] — kernel computes dy[G,M,R] @ w[G,R,D] via strides
-        dx = paddle.empty([M, G, D], dtype=dy.dtype)
-        grid_dx = lambda META: (
-            G,
-            triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(D, META["BLOCK_N"]),
-        )
-        grouped_matmul_dx_kernel[grid_dx](
-            dy_3d,
-            w,
-            dx,
-            M,
-            D,  # N = D (output cols)
-            R,  # K = R (reduction)
-            dy_3d.stride()[1],  # stride_dyg
-            dy_3d.stride()[0],  # stride_dym
-            dy_3d.stride()[2],  # stride_dyk
-            w.stride()[0],
-            w.stride()[1],
-            w.stride()[2],
-            dx.stride()[1],  # stride_dxg
-            dx.stride()[0],  # stride_dxm
-            dx.stride()[2],  # stride_dxn
-            tl.bfloat16 if dy.dtype == paddle.bfloat16 else tl.float16,
-        )
+        dx = None
+        if ctx.x_needs_grad:
+            # dx: [M, G, D] — kernel computes dy[G,M,R] @ w[G,R,D] via strides
+            dx = paddle.empty([M, G, D], dtype=dy.dtype)
+            grid_dx = lambda META: (
+                G,
+                triton.cdiv(M, META["BLOCK_M"])
+                * triton.cdiv(D, META["BLOCK_N"]),
+            )
+            grouped_matmul_dx_kernel[grid_dx](
+                dy_3d,
+                w,
+                dx,
+                M,
+                D,  # N = D (output cols)
+                R,  # K = R (reduction)
+                dy_3d.stride()[1],  # stride_dyg
+                dy_3d.stride()[0],  # stride_dym
+                dy_3d.stride()[2],  # stride_dyk
+                w.stride()[0],
+                w.stride()[1],
+                w.stride()[2],
+                dx.stride()[1],  # stride_dxg
+                dx.stride()[0],  # stride_dxm
+                dx.stride()[2],  # stride_dxn
+                tl.bfloat16 if dy.dtype == paddle.bfloat16 else tl.float16,
+            )
+            # dx is already [M, G, D] -> reshape to [..., G, D]
+            dx = dx.reshape(orig_shape)
 
-        # dw: [G, R, D] = dy^T[G, R, M] @ x[G, M, D] via strides
-        dw = paddle.empty([G, R, D], dtype=dy.dtype)
-        grid_dw = lambda META: (
-            G,
-            triton.cdiv(R, META["BLOCK_M"]) * triton.cdiv(D, META["BLOCK_N"]),
-        )
-        grouped_matmul_dw_kernel[grid_dw](
-            dy_3d,
-            x_3d,
-            dw,
-            M,
-            D,  # N = D (output cols)
-            R,  # K = R (rows of dw, which is the R dim)
-            dy_3d.stride()[1],  # stride_dyg
-            dy_3d.stride()[0],  # stride_dym
-            dy_3d.stride()[2],  # stride_dyr
-            x_3d.stride()[1],  # stride_xg
-            x_3d.stride()[0],  # stride_xm
-            x_3d.stride()[2],  # stride_xd
-            dw.stride()[0],
-            dw.stride()[1],
-            dw.stride()[2],
-            tl.bfloat16 if dy.dtype == paddle.bfloat16 else tl.float16,
-        )
+        dw = None
+        if ctx.w_needs_grad:
+            # dw: [G, R, D] = dy^T[G, R, M] @ x[G, M, D] via strides
+            dw = paddle.empty([G, R, D], dtype=dy.dtype)
+            grid_dw = lambda META: (
+                G,
+                triton.cdiv(R, META["BLOCK_M"])
+                * triton.cdiv(D, META["BLOCK_N"]),
+            )
+            grouped_matmul_dw_kernel[grid_dw](
+                dy_3d,
+                x_3d,
+                dw,
+                M,
+                D,  # N = D (output cols)
+                R,  # K = R (rows of dw, which is the R dim)
+                dy_3d.stride()[1],  # stride_dyg
+                dy_3d.stride()[0],  # stride_dym
+                dy_3d.stride()[2],  # stride_dyr
+                x_3d.stride()[1],  # stride_xg
+                x_3d.stride()[0],  # stride_xm
+                x_3d.stride()[2],  # stride_xd
+                dw.stride()[0],
+                dw.stride()[1],
+                dw.stride()[2],
+                tl.bfloat16 if dy.dtype == paddle.bfloat16 else tl.float16,
+            )
 
-        # dx is already [M, G, D] -> reshape to [..., G, D]
-        dx = dx.reshape(orig_shape)
         return dx, dw
 
 
