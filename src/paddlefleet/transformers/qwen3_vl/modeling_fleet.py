@@ -1352,7 +1352,7 @@ class Qwen3VLPretrainedModelFleet(PretrainedModel):
         "up_proj",
         "down_proj",
         "proj",
-        "linear_fc\d+",
+        r"linear_fc\d+",
         "up_gate_proj",
         "qkv_proj",
     ]

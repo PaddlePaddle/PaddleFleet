@@ -120,7 +120,7 @@ class DiffTransformerTest(unittest.TestCase):
             auto.DiffTransformerConfig
 
     def test_head_dim_must_match_hidden_size(self):
-        with self.assertRaisesRegex(ValueError, "head_dim \* num_attention_heads"):
+        with self.assertRaisesRegex(ValueError, r"head_dim \* num_attention_heads"):
             DiffTransformerConfig(hidden_size=32, num_attention_heads=2, head_dim=8)
 
     def test_causal_lm_does_not_attend_to_future_tokens(self):

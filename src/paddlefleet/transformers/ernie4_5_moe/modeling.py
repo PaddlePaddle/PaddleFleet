@@ -515,7 +515,7 @@ class Ernie4_5_MoePretrainedModel(PretrainedModel):
         "up_proj",
         "down_proj",
         "gate",
-        "mtp_linear_proj\.\d+",
+        r"mtp_linear_proj\.\d+",
     ]
 
     @classmethod

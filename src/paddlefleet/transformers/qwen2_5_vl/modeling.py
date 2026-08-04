@@ -254,7 +254,7 @@ class Qwen2_5_VLPretrainedModel(PretrainedModel):
         "up_proj",
         "down_proj",
         "proj",
-        "merger.mlp\.\d+",
+        r"merger.mlp\.\d+",
     ]
 
     @classmethod

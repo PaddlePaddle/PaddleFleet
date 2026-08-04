@@ -292,7 +292,7 @@ class Qwen3VLPretrainedModel(PretrainedModel):
         "up_proj",
         "down_proj",
         "proj",
-        "linear_fc\d+",
+        r"linear_fc\d+",
     ]
 
     @classmethod

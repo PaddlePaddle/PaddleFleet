@@ -276,7 +276,7 @@ class Qwen3VLMoePretrainedModelFleet(PretrainedModel):
         "o_proj",
         "qkv",
         "proj",
-        "linear_fc\d+",
+        r"linear_fc\d+",
         "gate",
     ]
 
@@ -511,7 +511,7 @@ class Qwen3VLMoePretrainedModel(PretrainedModel):
         "o_proj",
         "qkv",
         "proj",
-        "linear_fc\d+",
+        r"linear_fc\d+",
         "gate",
     ]
 

@@ -33,10 +33,18 @@ fi
 dir_name=$(dirname "${PYTEST_EXECUTE_FLAG_FILE}")
 mkdir -p "${dir_name}"
 set_env() {
-    export NVIDIA_TF32_OVERRIDE=0 
+    export NVIDIA_TF32_OVERRIDE=0
     export FLAGS_cudnn_deterministic=1
     export FLAGS_use_cuda_managed_memory=true
     export HF_ENDPOINT=https://hf-mirror.com
+
+    # Silence wandb console-capture noise during pytest teardown:
+    # httpx/httpcore emit debug logs on connection-pool close at exit, and because
+    # wandb monkeypatches sys.stdout/stderr, those writes hit a closed fd and raise
+    # "ValueError: I/O operation on closed file" --- pure CI log spam, no signal.
+    export WANDB_MODE=disabled      # unit tests never need to upload runs
+    export WANDB_CONSOLE=off        # do NOT patch stdout/stderr (root cause of the error)
+    export WANDB_SILENT=true        # belt-and-suspenders: keep wandb itself quiet
 
     # for CE
     # if [[ ${FLAGS_enable_CE} == "true" ]];then

@@ -731,9 +731,9 @@ class MergeModel:
                         if part_key_name.isdigit() or part_key_name in {"$LAYER_ID", "$EXPERT_ID"}:
                             prev_part_key_name = full_key_name.split(".")[-3]
                             if part_key_name.isdigit():
-                                transpose_weight_keys_set.add(f"{prev_part_key_name}\.{part_key_name}")
+                                transpose_weight_keys_set.add(rf"{prev_part_key_name}\.{part_key_name}")
                             else:
-                                transpose_weight_keys_set.add(f"{prev_part_key_name}\.\d+")
+                                transpose_weight_keys_set.add(rf"{prev_part_key_name}\.\d+")
                         else:
                             transpose_weight_keys_set.add(part_key_name)
             self.transpose_weight_keys = list(transpose_weight_keys_set)
