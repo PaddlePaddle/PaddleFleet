@@ -286,11 +286,14 @@ class DSAIndexer(paddle.nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
+        # Index dims are model-wide (``index_n_heads`` / ``index_head_dim`` /
+        # ``index_topk``); only the q-LoRA rank and rope split differ between
+        # the CSA layers and the hybrid MLA layers.
+        self.n_heads = config.dsa_index_n_heads
+        self.head_dim = config.dsa_index_head_dim
+        self.index_topk = config.dsa_index_topk
         if is_hybrid_mla_indexer:
             required_fields = (
-                "hybrid_index_n_heads",
-                "hybrid_index_head_dim",
-                "hybrid_index_topk",
                 "hybrid_mla_q_lora_rank",
                 "hybrid_mla_qk_rope_head_dim",
             )
@@ -304,15 +307,9 @@ class DSAIndexer(paddle.nn.Layer):
                     "hybrid MLA DSA indexer requires explicit hybrid config fields; "
                     f"missing fields: {', '.join(missing)}"
                 )
-            self.n_heads = config.hybrid_index_n_heads
-            self.head_dim = config.hybrid_index_head_dim
-            self.index_topk = config.hybrid_index_topk
             q_lora_rank = config.hybrid_mla_q_lora_rank
             self.rope_head_dim = config.hybrid_mla_qk_rope_head_dim
         else:
-            self.n_heads = config.dsa_index_n_heads
-            self.head_dim = config.dsa_index_head_dim
-            self.index_topk = config.dsa_index_topk
             q_lora_rank = config.q_lora_rank
             self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
@@ -1233,6 +1230,7 @@ class DSAIndexerLossLoggingHelper:
         total_loss_dict: dict | None = None,
         num_layers: int | None = None,
         csa_compress_ratios: list[int] | None = None,
+        non_absorbed_mqa: bool = False,
     ):
         """Track the sparse attention indexer metrics for logging.
 
@@ -1243,6 +1241,9 @@ class DSAIndexerLossLoggingHelper:
             total_loss_dict: Dictionary to accumulate total losses (optional).
             num_layers: Total number of layers with indexer metrics.
             csa_compress_ratios: Per-layer CSA compress ratios.
+            non_absorbed_mqa: ``non_absorbed_mqa`` of a DSV4 hybrid model; when
+                set, the ``-2`` (MLA) entries run an indexer too, so they must
+                be counted here.
         """
         num_layers = DSAIndexerLossLoggingHelper._infer_num_layers(num_layers)
         DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(
@@ -1259,6 +1260,11 @@ class DSAIndexerLossLoggingHelper:
             num_indexer_layers = sum(
                 1 for ratio in csa_compress_ratios if 1 < ratio < 128
             )
+            if non_absorbed_mqa:
+                # Hybrid MLA entries (-2) carry their own token-level indexer.
+                num_indexer_layers += sum(
+                    1 for ratio in csa_compress_ratios if ratio == -2
+                )
         else:
             num_indexer_layers = indexer_loss_values.shape[0]
         if num_indexer_layers == 0:

@@ -260,6 +260,9 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         layer.layer_number = 1
         layer.training = True
         layer.recompute_qkv_up_porj_and_rope = False
+        # Set in MLASelfAttention.__init__; the absorbed-MQA branch of
+        # get_query_key_value_tensors reads it.
+        layer.mqa_latent = False
         return layer
 
     def _hidden(self, batch=2, seq=32, hidden=16):

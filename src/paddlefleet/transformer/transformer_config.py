@@ -865,14 +865,39 @@ class TransformerConfig(ModelParallelConfig):
     hybrid_mla_num_key_value_heads: int | None = None
     """Layer-local KV-head count for hybrid MLA entries."""
 
-    hybrid_index_n_heads: int | None = None
-    """Layer-local DSA indexer head count for hybrid MLA entries."""
+    non_absorbed_mqa: bool = False
+    """Run the hybrid MLA (``csa_compress_ratios == -2``) layers as non-absorbed
+    MQA plus a DSA indexer, instead of plain multi-head latent attention.
 
-    hybrid_index_head_dim: int | None = None
-    """Layer-local DSA indexer head dimension for hybrid MLA entries."""
+    ``False``: ``kv_b_proj`` materialises per-head K/V and dense flash attention
+    runs on them (the MHA phase).
 
-    hybrid_index_topk: int | None = None
-    """Layer-local DSA indexer top-k for hybrid MLA entries."""
+    ``True``: the query is absorbed against ``kv_b_proj.weight`` at *runtime* so
+    attention runs on the single shared ``kv_lora_rank + qk_rope_head_dim``
+    latent head, and a Lightning indexer selects which tokens each query attends
+    to (forced local window + top-k). Absorption is activation-level, so the
+    parameter layout is byte-identical to the MHA phase and an MHA checkpoint
+    loads directly -- the only new weights are the indexer's.
+
+    The indexer reuses the model-wide ``index_n_heads`` / ``index_head_dim`` /
+    ``index_topk`` (``dsa_index_*`` internally), i.e. the same fields the CSA
+    layers already read; a learnable per-head sink comes from the model-wide
+    ``add_full_attention_sink_bias``. No hybrid-specific duplicates.
+    """
+
+    non_absorbed_mqa_dense: bool = False
+    """Drop the DSA indexer from ``non_absorbed_mqa`` and attend to the full
+    per-document causal set instead. Requires ``non_absorbed_mqa=True``.
+
+    This exists to isolate the absorption from the sparsity: because absorption
+    is activation-level and exact, non-absorbed MQA over the *full* causal set is
+    mathematically identical to the dense MHA phase, so a warm-started run must
+    track the MHA run to within kernel noise. Any drift is then attributable to
+    the absorption or the softmax scale rather than to the top-k selection.
+
+    Not for production: the index table is ``[b, s, s]`` int32, so cost grows with
+    the square of the sequence length (268 MB per layer at ``s=8192``).
+    """
 
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
@@ -1629,29 +1654,51 @@ class TransformerConfig(ModelParallelConfig):
                         "hybrid MLA dimensions must be explicit positive integers; "
                         f"invalid fields: {', '.join(invalid)}"
                     )
-                hybrid_index_fields = (
-                    "hybrid_index_n_heads",
-                    "hybrid_index_head_dim",
-                    "hybrid_index_topk",
-                )
-                configured_index_fields = [
-                    name
-                    for name in hybrid_index_fields
-                    if getattr(self, name, None) is not None
-                ]
-                if configured_index_fields:
+                if self.non_absorbed_mqa_dense and not self.non_absorbed_mqa:
+                    raise ValueError(
+                        "non_absorbed_mqa_dense=True only means anything with "
+                        "non_absorbed_mqa=True; it replaces that mode's DSA "
+                        "indexer with the full per-document causal set."
+                    )
+                if self.non_absorbed_mqa and not self.non_absorbed_mqa_dense:
+                    # The -2 layers' indexer reuses the CSA indexer fields. The
+                    # cuDNN indexer forward requires D_i=128, its backward
+                    # asserts topk % block_I == 0 with block_I=128, and
+                    # indexer_top_k/api.py:92 rejects topk > 2048 outright.
+                    # Fail here instead of minutes later at the first forward.
+                    index_fields = (
+                        "dsa_index_n_heads",
+                        "dsa_index_head_dim",
+                        "dsa_index_topk",
+                    )
                     invalid_index = [
                         name
-                        for name in hybrid_index_fields
+                        for name in index_fields
                         if not isinstance(getattr(self, name, None), int)
                         or isinstance(getattr(self, name, None), bool)
                         or getattr(self, name) <= 0
                     ]
                     if invalid_index:
                         raise ValueError(
-                            "hybrid MLA indexer dimensions must either all be unset "
-                            "or all be explicit positive integers; "
+                            "non_absorbed_mqa=True runs a DSA indexer on the "
+                            "hybrid MLA layers and needs index_n_heads / "
+                            "index_head_dim / index_topk as positive integers; "
                             f"invalid fields: {', '.join(invalid_index)}"
+                        )
+                    if self.dsa_index_head_dim != 128:
+                        raise ValueError(
+                            "non_absorbed_mqa=True uses the cuDNN indexer, which "
+                            "requires index_head_dim=128, got "
+                            f"{self.dsa_index_head_dim}."
+                        )
+                    if (
+                        self.dsa_index_topk % 128 != 0
+                        or self.dsa_index_topk > 2048
+                    ):
+                        raise ValueError(
+                            "index_topk must be a multiple of 128 and at most "
+                            "2048 (cuDNN indexer backward block size / top-k "
+                            f"limit), got {self.dsa_index_topk}."
                         )
 
             if (

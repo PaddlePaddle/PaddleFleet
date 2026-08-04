@@ -260,6 +260,8 @@ class TestRecomputeQKVUpProjAndRope(unittest.TestCase):
         layer.qk_rope_head_dim = qk_rope
         layer.v_head_dim = v_dim
         layer.q_head_dim = qk_nope + qk_rope
+        # Dense MLA: materialize the per-head K/V (absorbed MQA sets this True).
+        layer.mqa_latent = False
 
         # Simple projections that tile input to desired output dim
         class _TileProj:
@@ -566,6 +568,9 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             sequence_parallel=False,
             tensor_model_parallel_size=1,
             context_parallel_size=1,
+            # Dense MLA: no HySparse absorbed-MQA layers (read by the attention
+            # sink / kernel-version guard).
+            enable_hy_sparse_attention=False,
         )
         return config
 
@@ -598,7 +603,10 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
 
         def _fake_build_spec_layer(*args, **kwargs):
             build_calls.append(kwargs.copy())
-            return MagicMock()
+            # ``softmax_offset=None`` mirrors the real DotProductAttention with
+            # the attention sink off; a bare MagicMock would auto-create a
+            # truthy attribute and trip the MLA sink/kernel-version guard.
+            return MagicMock(softmax_offset=None)
 
         with (
             _patch(
@@ -780,14 +788,36 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
         inst = self._build_mla_instance(config)
         self.assertFalse(inst.recompute_qkv_up_porj_and_rope)
 
-    def test_mla_rejects_non_mha_kv_heads(self):
-        """MLA is MHA-only and should reject num_key_value_heads != num_attention_heads."""
+    def test_mla_ignores_non_mha_kv_heads(self):
+        """MLA is structurally MHA: ``num_key_value_heads`` is pinned, not rejected.
+
+        K/V are re-materialized from the latent by ``kv_b_proj`` (sized with
+        ``num_attention_heads``), so the config field never reaches a kernel.
+        In-tree MLA configs legitimately set it to 1 / 4 / 8, so building must
+        succeed and the layer-local count must follow ``num_attention_heads``.
+        """
         config = self._make_config()
         config.num_key_value_heads = config.num_attention_heads // 2
 
-        with self.assertRaisesRegex(
-            ValueError, "MLA currently supports MHA only"
-        ):
+        inst = self._build_mla_instance(config)
+        self.assertEqual(inst.num_key_value_heads, inst.num_attention_heads)
+        self.assertEqual(
+            inst.key_projection_size, inst.q_head_dim * inst.num_attention_heads
+        )
+
+    def test_hybrid_mla_rejects_non_mha_kv_heads(self):
+        """The dsv4_hybrid dims are explicit-only, so a mismatch is rejected."""
+        config = self._make_config()
+        config.experimental_attention_variant = "dsv4_hybrid"
+        config.hybrid_mla_q_lora_rank = 16
+        config.hybrid_mla_kv_lora_rank = config.kv_lora_rank
+        config.hybrid_mla_qk_nope_head_dim = config.qk_nope_head_dim
+        config.hybrid_mla_qk_rope_head_dim = config.qk_rope_head_dim
+        config.hybrid_mla_v_head_dim = config.v_head_dim
+        config.hybrid_mla_num_attention_heads = config.num_attention_heads
+        config.hybrid_mla_num_key_value_heads = config.num_attention_heads // 2
+
+        with self.assertRaisesRegex(ValueError, "MLA supports MHA only"):
             self._build_mla_instance(config)
 
 
@@ -811,6 +841,8 @@ class TestForwardDiscardOutputAndRegisterRecompute(unittest.TestCase):
         instance.recompute_core_attention = False
         instance.use_rr_flash_attention = False
         instance.layer_number = 0
+        # Dense MLA: forward materializes the per-head K/V.
+        instance.mqa_latent = False
         instance.config = MagicMock()
         instance.config.sequence_parallel = False
         instance.gated_attention = False

@@ -384,17 +384,17 @@ class MultiLatentAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
-        if (
+        is_dsv4_hybrid = (
             getattr(config, "experimental_attention_variant", None)
             == "dsv4_hybrid"
-        ):
+        )
+        if is_dsv4_hybrid:
             self.q_lora_rank = config.hybrid_mla_q_lora_rank
             self.kv_lora_rank = config.hybrid_mla_kv_lora_rank
             self.qk_nope_head_dim = config.hybrid_mla_qk_nope_head_dim
             self.qk_rope_head_dim = config.hybrid_mla_qk_rope_head_dim
             self.v_head_dim = config.hybrid_mla_v_head_dim
             self.num_attention_heads = config.hybrid_mla_num_attention_heads
-            self.num_key_value_heads = config.hybrid_mla_num_key_value_heads
         else:
             self.q_lora_rank = config.q_lora_rank
             self.kv_lora_rank = config.kv_lora_rank
@@ -402,14 +402,30 @@ class MultiLatentAttention(Attention):
             self.qk_rope_head_dim = config.qk_rope_head_dim
             self.v_head_dim = config.v_head_dim
             self.num_attention_heads = config.num_attention_heads
-            self.num_key_value_heads = config.num_key_value_heads
-        if self.num_key_value_heads != self.num_attention_heads:
-            raise ValueError(
-                "MLA currently supports MHA only; num_key_value_heads must equal "
-                "num_attention_heads. For DSV4 hybrid MLA, set "
-                "hybrid_mla_num_key_value_heads equal to "
-                "hybrid_mla_num_attention_heads."
-            )
+        # MLA has no GQA: K/V are always re-materialized from the shared latent
+        # with ``num_attention_heads`` heads -- ``kv_b_proj`` is sized
+        # ``num_attention_heads * (qk_nope_head_dim + v_head_dim)`` and the core
+        # attention is built with ``num_key_value_heads=1`` below -- so the
+        # config field never reaches a kernel here.
+        #
+        # For ``dsv4_hybrid`` the ``hybrid_mla_*`` dims are new and required to
+        # be explicit (transformer_config.py:1450), so a mismatch there is a real
+        # misconfiguration and is rejected. The plain ``num_key_value_heads``
+        # field is shared with the model's dense/GQA layers and 25 in-tree MLA
+        # configs legitimately disagree with ``num_attention_heads``
+        # (DeepSeek-V4 ``dsv4_flash*`` uses 1 for "one latent"; the
+        # eb5/ernielite ones inherit 4/8 from their dense siblings), so on that
+        # path pin the layer-local count to what is actually materialized rather
+        # than refusing to build.
+        if is_dsv4_hybrid:
+            kv_heads = config.hybrid_mla_num_key_value_heads
+            if kv_heads != self.num_attention_heads:
+                raise ValueError(
+                    "MLA supports MHA only: hybrid_mla_num_key_value_heads "
+                    f"({kv_heads}) must equal hybrid_mla_num_attention_heads "
+                    f"({self.num_attention_heads})."
+                )
+        self.num_key_value_heads = self.num_attention_heads
         tp_size = get_pg_size(self.pg_collection.tp)
         assert self.num_attention_heads % tp_size == 0
         assert self.num_key_value_heads % tp_size == 0
@@ -449,6 +465,31 @@ class MultiLatentAttention(Attention):
         self.softmax_scale = mscale * mscale / math.sqrt(self.q_head_dim)
         # mscale == 1.0 means softmax_scale equals default 1/sqrt(d), no need to pass explicitly
         self._softmax_scale_arg = None if mscale == 1.0 else self.softmax_scale
+
+        # Hybrid MLA layers may run attention on the shared KV latent instead of
+        # the per-head K/V produced by ``kv_b_proj`` ("runtime absorption").  This
+        # keeps every parameter byte-identical to the MHA layout -- only the
+        # activations change -- so an MHA checkpoint loads into an MQA run.
+        self.mqa_latent = getattr(
+            config, "experimental_attention_variant", None
+        ) == "dsv4_hybrid" and getattr(config, "non_absorbed_mqa", False)
+        if self.mqa_latent:
+            if self.config.apply_rope_fusion:
+                raise ValueError(
+                    "non_absorbed_mqa=True does not support apply_rope_fusion: "
+                    "the fused kernel writes the per-head K/V that absorption "
+                    "skips."
+                )
+            if self.config.sequence_parallel:
+                raise ValueError(
+                    "non_absorbed_mqa=True does not support sequence_parallel "
+                    "yet."
+                )
+            if get_pg_size(self.pg_collection.tp) != 1:
+                raise ValueError(
+                    "non_absorbed_mqa=True does not support tensor parallel "
+                    "(kv_b_proj is absorbed locally)."
+                )
 
         if self.config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
@@ -499,6 +540,63 @@ class MultiLatentAttention(Attention):
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
         )
+
+        # Attention sink. Both sink-aware core attentions create their own
+        # ``softmax_offset`` from ``add_full_attention_sink_bias`` /
+        # ``softmax_type`` via ``build_softmax_offset``, so the parameter name is
+        # ``self_attn.core_attention.softmax_offset`` in the dense and in the
+        # non-absorbed-MQA phase alike and an MHA checkpoint stays loadable.
+        #
+        # The dense path feeds it to ``flashmask_attention_func(...,
+        # learnable_sink=...)`` (dot_product_attention.py:653), which only exists
+        # on the FA4 (cute) kernel: gated on ``FLAGS_flash_attn_version in
+        # (3, 4)`` and asserting a bf16 sink (flash_mask/cute/interface.py).
+        # With the default flag value of 2 the run dies at the *first forward*
+        # with no hint about the cause, so fail at construction time. We
+        # deliberately do NOT set the flag ourselves: it is process-global and
+        # would switch every other (HCA / CSA) layer's kernel too.
+        # ``non_absorbed_mqa`` needs neither check -- its block-sparse kernel
+        # supports the sink natively and up-casts it internally. Neither do the
+        # HySparse absorbed-MQA layers: ``gpt_layer_specs.py:318`` builds every
+        # MLA layer as ``MQASelfAttention`` when ``enable_hy_sparse_attention``
+        # is on, and for an SWA layer (``is_mqa``, :1919) that subclass runs the
+        # TileLang / cuDNN MQA kernels directly with its own ``swa_attn_sink`` /
+        # ``sparse_attn_sink``, dropping this redundant ``softmax_offset``
+        # (:1942) as soon as the present ``__init__`` returns. Non-SWA HySparse
+        # layers do fall back to the dense MLA forward, but they only get a
+        # ``softmax_offset`` from ``add_full_attention_sink_bias``
+        # (dot_product_attention.py:98), which the check below still covers.
+        hysparse_absorbed_mqa = (
+            self.config.enable_hy_sparse_attention and self.is_swa
+        )
+        if (
+            not self.mqa_latent
+            and not hysparse_absorbed_mqa
+            and getattr(self.core_attention, "softmax_offset", None) is not None
+        ):
+            fa_version = int(
+                paddle.get_flags(["FLAGS_flash_attn_version"])[
+                    "FLAGS_flash_attn_version"
+                ]
+            )
+            if fa_version not in (3, 4):
+                raise RuntimeError(
+                    "an MLA attention sink (add_full_attention_sink_bias / "
+                    "softmax_type) needs the flashmask v4 (cute) kernel, but "
+                    f"FLAGS_flash_attn_version={fa_version} (only 3 or 4 reach "
+                    "that path). Either export FLAGS_flash_attn_version=4 "
+                    "(NOTE: process-global -- it changes the HCA/CSA layers' "
+                    "kernel as well), or run the hybrid MLA layers with "
+                    "non_absorbed_mqa=true, whose block-sparse kernel supports "
+                    "the sink natively."
+                )
+            if "bfloat16" not in str(self.config.params_dtype):
+                raise RuntimeError(
+                    "an MLA attention sink requires params_dtype='bfloat16', "
+                    f"got {self.config.params_dtype!r}: the sink is created with "
+                    "params_dtype and the flashmask v4 (cute) kernel asserts it "
+                    "is bf16."
+                )
 
         # Output.
         self.o_proj = build_spec_layer(
@@ -819,7 +917,23 @@ class MultiLatentAttention(Attention):
             past_key_values, layer_idx, use_cache
         )
 
-        if hasattr(self.core_attention.config, "forward_meta"):  # decode mode
+        # The indexer-loss row mask needs ``input_ids``: the packed sequence's
+        # trailing padding is invisible to ``attn_mask_startend_row_indices``.
+        # Only the non-absorbed-MQA core attention accepts it (and only that one
+        # owns an indexer), so keep the kwarg off every other core attention.
+        core_attn_extra = {}
+        if self.mqa_latent and kwargs.get("input_ids") is not None:
+            core_attn_extra["input_ids"] = kwargs["input_ids"]
+
+        if self.mqa_latent:
+            # Query is already absorbed; the core attention only needs the V-side
+            # de-absorption weight, laid out for
+            # ``einsum("bshl,lhv->bshv", out, w_v_b)``.
+            q_absorbed = None
+            wv_b = self.kv_b_proj.weight.reshape(
+                [self.kv_lora_rank, self.num_attention_heads_per_partition, -1]
+            )[:, :, self.qk_nope_head_dim :]
+        elif hasattr(self.core_attention.config, "forward_meta"):  # decode mode
             # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
             # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
             # wv_b: [heads, kv_lora_rank, v_head_dim]
@@ -893,6 +1007,7 @@ class MultiLatentAttention(Attention):
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
+                **core_attn_extra,
             )
         else:
             # Static batching attention kernel.
@@ -918,6 +1033,7 @@ class MultiLatentAttention(Attention):
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
+                **core_attn_extra,
             )
 
         if self.recompute_qkv_up_porj_and_rope and self.training:
@@ -1663,18 +1779,23 @@ class MLASelfAttention(MultiLatentAttention):
             )
 
             # kv: [num_tokens, n * (qk_nope_head_dim + v_head_dim)]
-            kv, _ = self.kv_b_proj(kv_compressed)
+            # Absorbed MQA never materialises the per-head K/V: ``kv_b_proj`` is
+            # folded into q (K side) and into the attention output (V side).
+            if self.mqa_latent:
+                kv = None
+            else:
+                kv, _ = self.kv_b_proj(kv_compressed)
 
-            # Debug: print kv shape
-            # if self.layer_number == 0:
-            #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after kv_b_proj: {kv.shape}", flush=True)
+                # Debug: print kv shape
+                # if self.layer_number == 0:
+                #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after kv_b_proj: {kv.shape}", flush=True)
 
-            # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
-            kv = kv.view(
-                *kv.size()[:-1],
-                self.num_attention_heads_per_partition,
-                self.qk_nope_head_dim + self.v_head_dim,
-            )
+                # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
+                kv = kv.view(
+                    *kv.size()[:-1],
+                    self.num_attention_heads_per_partition,
+                    self.qk_nope_head_dim + self.v_head_dim,
+                )
 
             # if self.layer_number == 0:
             #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after view: {kv.shape}", flush=True)
@@ -1843,11 +1964,14 @@ class MLASelfAttention(MultiLatentAttention):
 
                 # k_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # value: [num_tokens, n, v_head_dim]
-                k_no_pe, value = paddle.split(
-                    kv,
-                    [self.qk_nope_head_dim, self.v_head_dim],
-                    axis=-1,
-                )
+                if self.mqa_latent:
+                    k_no_pe, value = None, None
+                else:
+                    k_no_pe, value = paddle.split(
+                        kv,
+                        [self.qk_nope_head_dim, self.v_head_dim],
+                        axis=-1,
+                    )
 
                 # When sequence_parallel is enabled and not packed,
                 # q/k are seq-first [s, b, n, d] but rotary_pos_emb is
@@ -1905,26 +2029,57 @@ class MLASelfAttention(MultiLatentAttention):
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
                 k_pe = k_pos_emb
-                query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
-
-                # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
-                if k_pos_emb.ndim == 4:
-                    k_pos_emb = k_pos_emb.expand(
-                        -1, -1, self.num_attention_heads_per_partition, -1
+                if self.mqa_latent:
+                    # Runtime absorption.  ``kv_b_proj.weight`` is
+                    # [kv_lora_rank, n * (qk_nope_head_dim + v_head_dim)]; its
+                    # leading qk_nope_head_dim slice per head is W_k_b.  Because
+                    #     q_nope . k_nope == (q_nope W_k_b) . kv_compressed
+                    # the absorbed scores equal the MHA scores exactly, so the
+                    # softmax scale must stay the MHA one (mscale^2/sqrt(256)),
+                    # NOT 1/sqrt(576).
+                    w_k_b = self.kv_b_proj.weight.reshape(
+                        [
+                            self.kv_lora_rank,
+                            self.num_attention_heads_per_partition,
+                            -1,
+                        ]
+                    )[:, :, : self.qk_nope_head_dim]
+                    # query: [num_tokens, n, kv_lora_rank + qk_rope_head_dim]
+                    query = paddle.cat(
+                        [
+                            paddle.einsum("bshd,lhd->bshl", q_no_pe, w_k_b),
+                            q_pos_emb,
+                        ],
+                        axis=-1,
                     )
+                    # key: [num_tokens, 1, kv_lora_rank + qk_rope_head_dim].
+                    # Its leading kv_lora_rank channels are the (absorbed) value.
+                    key = paddle.cat(
+                        [kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1
+                    )
+                    value = None
                 else:
-                    assert k_pos_emb.ndim == 3
-                    k_pos_emb = k_pos_emb.expand(
-                        -1, self.num_attention_heads_per_partition, -1
-                    )
-                key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
+                    query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
+
+                    # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
+                    if k_pos_emb.ndim == 4:
+                        k_pos_emb = k_pos_emb.expand(
+                            -1, -1, self.num_attention_heads_per_partition, -1
+                        )
+                    else:
+                        assert k_pos_emb.ndim == 3
+                        k_pos_emb = k_pos_emb.expand(
+                            -1, self.num_attention_heads_per_partition, -1
+                        )
+                    key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
 
             # if self.layer_number == 0:
             #     print(f"[DEBUG MLA layer {self.layer_number}] key final shape: {key.shape}, head_dim={key.shape[-1]}", flush=True)
 
             query = query.contiguous()
             key = key.contiguous()
-            value = value.contiguous()
+            if value is not None:
+                value = value.contiguous()
 
             return query, key, value, k_pe
 
