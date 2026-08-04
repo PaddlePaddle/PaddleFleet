@@ -1369,7 +1369,20 @@ jobs:
             fi
           done
           git diff origin/${{ github.event.pull_request.base.ref }}...HEAD  --unified=0 > diff.txt
-          echo "=== DIFF FILE ==="
+          echo "=== DIFF FILE (before exclusion) ==="
+          cat diff.txt
+          echo "================="
+
+          # 豁免文件/目录列表：这些路径下的改动不计入覆盖率检查
+          EXCLUDE_PATHS=(
+            "src/paddlefleet/triton_ops/"
+          )
+
+          for EXCLUDE_PATH in "${EXCLUDE_PATHS[@]}"; do
+            python ci/exclude_diff_file.py diff.txt "$EXCLUDE_PATH"
+          done
+
+          echo "=== DIFF FILE (after exclusion) ==="
           cat diff.txt
           echo "================="
           python -m pip install diff-cover
