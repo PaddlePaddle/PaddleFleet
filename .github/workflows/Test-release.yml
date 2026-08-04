@@ -1368,8 +1368,21 @@ jobs:
                 wget "${base_url}/${filepath}" -O "$filename" --no-proxy
             fi
           done
-          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD  --unified=0 > diff.txt
-          echo "=== DIFF FILE ==="
+          # 豁免文件/目录列表：这些路径下的改动不计入覆盖率检查
+          EXCLUDE_PATHS=(
+            "src/paddlefleet/triton_ops/"
+          )
+
+          # 直接用 Git pathspec 排除豁免目录，避免自行解析 diff 头时
+          # 无法正确处理 Git 对非 ASCII 路径的 quoted-path 转义。
+          EXCLUDE_ARGS=()
+          for EXCLUDE_PATH in "${EXCLUDE_PATHS[@]}"; do
+            EXCLUDE_ARGS+=(":(exclude)${EXCLUDE_PATH}**")
+          done
+
+          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD --unified=0 \
+            -- . "${EXCLUDE_ARGS[@]}" > diff.txt
+          echo "=== DIFF FILE (after exclusion) ==="
           cat diff.txt
           echo "================="
           python -m pip install diff-cover
