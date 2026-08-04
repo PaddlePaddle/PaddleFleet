@@ -27,6 +27,7 @@ Covers:
 import functools
 import random
 import unittest
+from unittest.mock import MagicMock
 
 import numpy as np
 import paddle
@@ -1124,6 +1125,92 @@ class TestOutputBlockAttnResPipe(unittest.TestCase):
         sd2 = model.state_dict()
         for k in attn_res_keys:
             np.testing.assert_allclose(sd2[k].numpy(), expected[k], rtol=1e-6)
+
+    def test_forward_passthrough_when_disabled(self):
+        """block_attention_residuals=False: pipe returns dict_args untouched."""
+        from paddlefleet.transformer.block_attn_res import (
+            BlockAttnResSublayersSpec,
+            OutputBlockAttnResPipe,
+        )
+        from paddlefleet.transformer.paddle_norm import RMSNorm
+
+        config = self._make_config(experimental=False, num_mtp=0)
+        config.block_attention_residuals = False
+        pipe = OutputBlockAttnResPipe(
+            config, BlockAttnResSublayersSpec(norm=RMSNorm)
+        )
+        hidden = paddle.randn([8, 2, config.hidden_size])
+        dict_args = {"hidden_states": hidden, "blocks": ["b"]}
+        out = pipe(dict_args)
+        # Passthrough: same object, blocks retained, no aggregation.
+        self.assertIs(out, dict_args)
+        self.assertIs(out["hidden_states"], hidden)
+        self.assertIn("blocks", out)
+
+    def test_build_schedule_node(self):
+        """build_schedule_node wraps forward with the expected name."""
+        import sys
+        import types
+        from unittest.mock import patch
+
+        from paddlefleet.transformer.block_attn_res import (
+            BlockAttnResSublayersSpec,
+            OutputBlockAttnResPipe,
+        )
+        from paddlefleet.transformer.paddle_norm import RMSNorm
+
+        config = self._make_config(experimental=False, num_mtp=0)
+        pipe = OutputBlockAttnResPipe(
+            config, BlockAttnResSublayersSpec(norm=RMSNorm)
+        )
+
+        # ScheduleNode is imported lazily inside build_schedule_node from the
+        # paddle pipeline module; stub it so the test does not depend on the
+        # installed paddle version exposing that symbol.
+        pp_mod = types.ModuleType(
+            "paddle.distributed.fleet.meta_parallel.pipeline_parallel"
+        )
+
+        class _FakeSN:
+            def __init__(self, fn, name):
+                self.fn = fn
+                self.name = name
+
+        pp_mod.ScheduleNode = _FakeSN
+        with patch.dict(
+            sys.modules,
+            {
+                "paddle.distributed.fleet.meta_parallel.pipeline_parallel": (
+                    pp_mod
+                )
+            },
+        ):
+            node = pipe.build_schedule_node()
+        self.assertEqual(node.name, "OutputBlockAttnResPipe")
+        self.assertEqual(node.fn.__func__, OutputBlockAttnResPipe.forward)
+
+
+class TestGPTMainLMHeadInit(unittest.TestCase):
+    """GPTMainLMHead.__init__ must drop the block_attn_res kwarg.
+
+    Output BlockAttnRes moved to OutputBlockAttnResPipe, so the head must not
+    forward that kwarg to ColumnParallelLinear (covers lm_head.py pop line).
+    """
+
+    def test_init_pops_block_attn_res_kwarg(self):
+        from unittest.mock import patch
+
+        from paddlefleet.models.gpt.lm_head import GPTLMHead, GPTMainLMHead
+
+        sentinel = object()
+        captured = {}
+
+        def fake_gptlmhead_init(self, **kwargs):
+            captured.update(kwargs)
+
+        with patch.object(GPTLMHead, "__init__", fake_gptlmhead_init):
+            GPTMainLMHead(block_attn_res=sentinel, config=MagicMock())
+        self.assertNotIn("block_attn_res", captured)
 
 
 if __name__ == "__main__":
