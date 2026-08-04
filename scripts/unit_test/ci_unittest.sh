@@ -105,7 +105,11 @@ PYEOF
             echo -e "\033[33m [failed-timeout] Test execution exceeded time limit.\033[0m"
         fi
     else
-        tail -n 1 ${log_path}/unittest.log
+        echo "----- Top slowest cases (from --durations output, max 30) -----"
+        grep -E '^[0-9]+\.[0-9]+s[[:space:]]+(call|setup|teardown)' "${log_path}/unittest.log" | head -32 || true
+        echo ""
+        echo "----- Final stats -----"
+        tail -n 1 "${log_path}/unittest.log"
         echo -e "\033[32m All tests passed \033[0m"
     fi
 }
@@ -123,14 +127,16 @@ if [[ ${FLAGS_enable_CI} == "true" ]] || [[ ${FLAGS_enable_CE} == "true" ]];then
     PYTHONPATH=$(pwd)/src:$(pwd) \
     COVERAGE_SOURCE=paddlefleet \
     timeout 60m \
-    python -m pytest -v -n 1 test/formers \
+    python -u -m pytest -v -n 1 test/formers \
         --dist no \
         --maxfail=10 \
-        --timeout 200 --durations 20 \
+        --timeout 200 --durations 30 \
         --alluredir=result \
         --cov=paddlefleet \
-        --cov-report=xml:coverage.xml > ${log_path}/unittest.log 2>&1
-    exit_code=$?
+        --cov-report=xml:coverage.xml 2>&1 | tee ${log_path}/unittest.log
+    # NOTE: use PIPESTATUS[0] to capture the exit code of the FIRST pipeline stage
+    #       (`timeout` -> pytest). Plain $? would return tee's code (=0 even on failure).
+    exit_code=${PIPESTATUS[0]}
     print_info $exit_code unittest
     echo -e "\033[35m ---- Set PYTEST_EXECUTE_FLAG_FILE  \033[0m"
     touch ${PYTEST_EXECUTE_FLAG_FILE}
