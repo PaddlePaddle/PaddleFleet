@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 
 
 def pytest_configure(config):
     os.environ.setdefault("DOWNLOAD_SOURCE", "aistudio")
+    for name in ("httpx", "httpcore"): 
+        logging.getLogger(name).setLevel(logging.WARNING)
