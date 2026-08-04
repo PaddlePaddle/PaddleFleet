@@ -56,6 +56,7 @@ from paddlefleet.transformer.attention import (
 from paddlefleet.transformer.block_attn_res import (
     BlockAttnRes,
     BlockAttnResSublayersSpec,
+    OutputBlockAttnResPipe,
 )
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
@@ -953,20 +954,27 @@ def get_gpt_spec(
         rope_embedding=rope_embedding_spec,
     )
 
-    # Build block_attn_res spec for GPTLMHead
-    lm_head_block_attn_res = IdentityOp
+    # Build output_block_attn_res spec: a pipeline layer placed BEFORE the
+    # final RMSNorm (K3 alignment).
+    # LM heads no longer own the block_attn_res module.
+    output_block_attn_res_spec = None
     if config.block_attention_residuals:
         backend = LocalSpecProvider()
-        lm_head_norm = backend.layer_norm(
+        output_attn_res_norm = backend.layer_norm(
             rms_norm=(config.normalization == "RMSNorm"),
             for_qk=False,
         )
-        lm_head_block_attn_res = LayerSpec(
-            layer=BlockAttnRes,
-            sublayers_spec=BlockAttnResSublayersSpec(
-                norm=lm_head_norm,
-            ),
+        output_block_attn_res_spec = LayerSpec(
+            layer=OutputBlockAttnResPipe,
+            extra_kwargs={
+                "config": config,
+                "sublayers_spec": BlockAttnResSublayersSpec(
+                    norm=output_attn_res_norm,
+                ),
+            },
         )
+    # LM heads no longer own attn-res; pass IdentityOp for backward-compat kwargs.
+    lm_head_block_attn_res = IdentityOp
 
     # separate mtp head & loss
     mtp_lm_head_spec = None
@@ -1069,6 +1077,7 @@ def get_gpt_spec(
             mtp=mtp_layers_spec,
             mtp_lm_head=mtp_lm_head_spec,
             mtp_loss=mtp_loss_spec,
+            output_block_attn_res=output_block_attn_res_spec,
             layer_norm=LayerSpec(
                 layer=WrappedPaddleNormPipe,
                 extra_kwargs={

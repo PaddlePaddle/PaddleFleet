@@ -38,6 +38,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     has_recovered,
+    keep_indexer_grad_path,
     need_full_recompute,
     need_recompute_in_block,
     need_recompute_in_first_n,
@@ -546,14 +547,14 @@ class TransformerLayer(nn.Layer):
     def _is_block_boundary(self):
         """Determine if this layer is a block boundary for attention residuals.
 
-        Each block spans ``attn_res_block_size // 2`` transformer layers, and
-        the layer whose index is a multiple of that span closes the previous
-        block.
+        Each block spans ``attn_res_block_size`` transformer layers, and the
+        layer whose index is a multiple of that span closes the previous
+        block. This matches Kimi K3's ``layer_idx % attn_res_block_size == 0``.
         """
-        block_span = self.attn_res_block_size // 2
+        block_span = self.attn_res_block_size
         if block_span <= 0:
             raise ValueError(
-                "attn_res_block_size must be at least 2 when "
+                "attn_res_block_size must be at least 1 when "
                 "block_attention_residuals is enabled."
             )
         return self.layer_number % block_span == 0
@@ -874,6 +875,7 @@ class TransformerLayer(nn.Layer):
 
         if self.full_recompute or (not has_recovered()):
             hidden_states = dict_args["hidden_states"]
+            hidden_states = keep_indexer_grad_path(hidden_states, self.config)
             attention_mask = dict_args.get("attention_mask", None)
             attn_mask_startend_row_indices = dict_args.get(
                 "attn_mask_startend_row_indices", None

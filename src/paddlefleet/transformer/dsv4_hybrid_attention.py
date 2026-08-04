@@ -46,6 +46,7 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
 from paddlefleet.recompute_utils import (
+    keep_indexer_grad_path,
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
@@ -212,6 +213,11 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
         ctx.num_groups = num_groups
         ctx.o_lora_rank = o_lora_rank
         ctx.fp8_wgrad = fp8_wgrad
+        # Paddle PyLayer requires None for stop_gradient inputs; record here so
+        # a frozen backbone (phase 2 ``csa_train_indexer_only``) also skips the
+        # wgrad GEMM instead of violating the contract.
+        ctx.x_needs_grad = not x.stop_gradient
+        ctx.weight_needs_grad = not weight.stop_gradient
         return out.reshape([b, sq, num_groups * o_lora_rank])
 
     @staticmethod
@@ -252,6 +258,9 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
             recipe=(1, 128, 128),
         )
         grad_x = grad_x.reshape([b, sq, num_groups, d])
+
+        if not ctx.weight_needs_grad:
+            return (grad_x if ctx.x_needs_grad else None), None
 
         if fp8_wgrad:
             # grad_weight = x^T @ grad_output, "bhd,bhr->hdr". fp8_einsum
@@ -321,7 +330,10 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
                 )
             grad_weight = paddle.einsum("bsgd,bsgr->grd", x, grad_output)
 
-        return grad_x, grad_weight.reshape([num_groups * o_lora_rank, d])
+        return (
+            grad_x if ctx.x_needs_grad else None,
+            grad_weight.reshape([num_groups * o_lora_rank, d]),
+        )
 
 
 def _validate_dsv4_boundary_values(
@@ -901,7 +913,14 @@ class DSv4HybridAttention(Attention):
             self._full_attn_recompute = RecomputeWithoutOutput()
             core_attn_out = self._full_attn_recompute.recompute(
                 self._full_attn_forward,
-                hidden_states,
+                # This segment contains core_attention, i.e. the CSA Indexer and its
+                # side-attached loss. RecomputeWithoutOutput is a PyLayer whose
+                # output is differentiable only if some input is, and with a frozen
+                # backbone (csa_train_indexer_only) hidden_states is detached. It
+                # would then skip registering its recompute hook altogether
+                # (tensor_parallel/random.py:590 checks stop_gradient) and the
+                # Indexer would get no gradient, with no error and no warning.
+                keep_indexer_grad_path(hidden_states, self.config),
                 attention_mask,
                 position_offset,
                 docmask_meta,

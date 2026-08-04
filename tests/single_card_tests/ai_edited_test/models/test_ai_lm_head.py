@@ -69,7 +69,12 @@ class TestGPTLMHeadForward(unittest.TestCase):
         self.assertIsNotNone(result)
 
     def test_forward_with_block_attn_res(self):
-        """Test forward with block_attention_residuals enabled."""
+        """Output BlockAttnRes is no longer applied by the LM head.
+
+        The aggregation was moved into ``OutputBlockAttnResPipe``, which runs
+        BEFORE the final norm (K3-aligned ordering). The LM head must therefore
+        forward ``hidden_states`` untouched even when the feature is enabled.
+        """
         head = _make_head(
             GPTLMHead,
             config=MagicMock(
@@ -81,12 +86,12 @@ class TestGPTLMHeadForward(unittest.TestCase):
         head._forward = MagicMock(return_value=paddle.randn([2, 10, 100]))
         head.block_attn_res = MagicMock(return_value=paddle.randn([2, 10, 64]))
 
-        dict_args = {
-            "hidden_states": paddle.randn([2, 10, 64]),
-            "blocks": ["block1"],
-        }
+        hidden = paddle.randn([2, 10, 64])
+        dict_args = {"hidden_states": hidden, "blocks": ["block1"]}
         result = head.forward(dict_args)
-        head.block_attn_res.assert_called_once()
+        head.block_attn_res.assert_not_called()
+        # `_forward` receives the raw hidden states, not an aggregated tensor.
+        self.assertIs(head._forward.call_args[0][0], hidden)
         self.assertIsNotNone(result)
 
     def test_forward_with_mtp(self):
