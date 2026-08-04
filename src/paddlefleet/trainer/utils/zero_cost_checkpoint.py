@@ -2300,14 +2300,18 @@ class ZeroCostCheckpointCallbackFcBased(ZeroCostCheckpointCallback):
 
         # EMA metadata: master_weights portion (same .w_0 suffix as optimizer master_weights)
         # Distinguished from optimizer by being saved to ema_state/ directory
+        # NOTE: saved_ckptmeta() runs all_gather_object over the whole world, so it must be
+        # entered by every rank. Gating it on a rank-local "do I own any master weight?"
+        # deadlocks as soon as the ownership is skewed (e.g. Phase 2 freezes the backbone and
+        # only the couple of sharding ranks holding the Indexer master weights have a non-empty
+        # dict). Always call it, then fall back to None when the *global* result is empty.
         ema_master_weights_sharded = master_weights
-        if ema_master_weights_sharded:
-            self.ema_master_weight_ckpt_meta, self.ema_master_weights_filter = saved_ckptmeta(
-                ema_master_weights_sharded,
-                self.ckpt_data_name,
-                replicate_saved_into_local=True,
-            )
-        else:
+        self.ema_master_weight_ckpt_meta, self.ema_master_weights_filter = saved_ckptmeta(
+            ema_master_weights_sharded,
+            self.ckpt_data_name,
+            replicate_saved_into_local=True,
+        )
+        if not self.ema_master_weight_ckpt_meta.state_dict_metadata:
             self.ema_master_weight_ckpt_meta = None
             self.ema_master_weights_filter = {}
 
@@ -2315,13 +2319,12 @@ class ZeroCostCheckpointCallbackFcBased(ZeroCostCheckpointCallback):
         ema_model_params_sharded = {
             k: v for k, v in self.manipulated_state_dict.items() if v.local_tensor.dtype == paddle.float32
         }
-        if ema_model_params_sharded:
-            self.ema_model_params_ckpt_meta, self.ema_model_state_filter = saved_ckptmeta(
-                ema_model_params_sharded,
-                self.ckpt_data_name,
-                replicate_saved_into_local=True,
-            )
-        else:
+        self.ema_model_params_ckpt_meta, self.ema_model_state_filter = saved_ckptmeta(
+            ema_model_params_sharded,
+            self.ckpt_data_name,
+            replicate_saved_into_local=True,
+        )
+        if not self.ema_model_params_ckpt_meta.state_dict_metadata:
             self.ema_model_params_ckpt_meta = None
             self.ema_model_state_filter = {}
 
