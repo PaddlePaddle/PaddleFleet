@@ -24,7 +24,6 @@
 from __future__ import annotations
 
 import copy
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -73,8 +72,6 @@ try:
 except (ImportError, AttributeError):
     causal_conv1d = chunk_kda = rms_norm_gated = build_cp_context = None
     HAVE_FLA = False
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -397,17 +394,22 @@ class KimiDeltaAttention(FleetLayer):
             paddle.assign(paddle.log(A), self.A_log)
 
     def _build_cu_seqlens(
-        self, startend_row_indices, batch, seq_len, keep_single_segment=False
+        self,
+        startend_row_indices,
+        batch,
+        seq_len,
+        keep_single_segment=False,
     ):
         """Derive packed cu_seqlens for the ``[b, s] -> [1, b*s]`` flattening.
 
-        ``startend_row_indices`` is ``[b, h, s, 1]`` and each entry holds the
-        exclusive end of the document that position belongs to, *relative to its
-        own row*. A position starts a new document iff that end changes, so the
-        row-local boundaries plus the row seams (position 0 of every row) give
-        exactly the segment starts of the flattened sequence. Note the seams
-        matter: two adjacent rows routinely carry the same end value (e.g. both
-        end at ``s``), so diffing the already-flattened array would merge them.
+        ``startend_row_indices`` is ``[b, 1, s, 1]`` (or ``[b, 1, s, 2]``, where
+        only column 0 is used) and each entry holds the exclusive end of the
+        document that position belongs to, *relative to its own row*. A position
+        starts a new document iff that end changes, so the row-local boundaries
+        plus the row seams (position 0 of every row) give exactly the segment
+        starts of the flattened sequence. Note the seams matter: two adjacent
+        rows routinely carry the same end value (e.g. both end at ``s``), so
+        diffing the already-flattened array would merge them.
 
         Note ``paddlefleet.transformer.utils.get_doc_lens`` cannot be used here:
         it flattens across batch/head while comparing against a global arange,
@@ -425,23 +427,38 @@ class KimiDeltaAttention(FleetLayer):
                 return None, None
             cu_seqlens = paddle.to_tensor([0, total], dtype="int64")
             return cu_seqlens, cu_seqlens.cpu()
-        if startend_row_indices.ndim != 4:
+        # The head dim must be 1: a linear recurrence has a single segment
+        # layout, so a head-wise mask (what
+        # startend_row_indices_add_sliding_window produces) cannot be
+        # honoured and must not be silently reduced to head 0.
+        if (
+            startend_row_indices.ndim != 4
+            or startend_row_indices.shape[1] != 1
+            or startend_row_indices.shape[-1] != 1
+        ):
             raise ValueError(
-                "attn_mask_startend_row_indices must be [b, h, s, 1], got "
-                f"{list(startend_row_indices.shape)}"
+                "attn_mask_startend_row_indices must be [b, 1, s, 1] or "
+                f"[b, 1, s, 2], got {list(startend_row_indices.shape)}"
             )
         if startend_row_indices.shape[-2] != seq_len:
             raise ValueError(
                 f"attn_mask_startend_row_indices has sequence length "
                 f"{startend_row_indices.shape[-2]}, expected {seq_len}"
             )
-        # All heads share the same document layout, so keep only the first.
+        # Column 0 is the exclusive document end; column 1, when present, is
+        # just arange(seq_len) and carries no boundary information.
         ends = startend_row_indices[:, 0, :, 0].astype("int64")
-        is_start = paddle.ones([batch, seq_len], dtype="bool")
+        doc_edges = ends[:, 1:] != ends[:, :-1]
+
+        # Position 0 of every row is always a start, so the row seams become
+        # segment boundaries too.
+        head = paddle.ones([batch, 1], dtype="bool")
         if seq_len > 1:
-            is_start[:, 1:] = ends[:, 1:] != ends[:, :-1]
-        # Flattened positions are ascending, and position 0 of every row is
-        # always a start, so the row seams become segment boundaries too.
+            is_start = paddle.concat([head, doc_edges], axis=1)
+        else:
+            is_start = head
+        # Flattened positions are ascending, so the flat indices of the starts
+        # are already sorted and strictly increasing.
         starts = paddle.nonzero(is_start.reshape([-1])).flatten()
         cu_seqlens = paddle.concat(
             [starts, paddle.full([1], total, dtype=starts.dtype)]
@@ -458,6 +475,7 @@ class KimiDeltaAttention(FleetLayer):
         key_value_states: paddle.Tensor | None = None,
         attention_bias: paddle.Tensor | None = None,
         packed_seq_params=None,
+        input_ids: paddle.Tensor | None = None,
         **kwargs,
     ) -> tuple[paddle.Tensor, paddle.Tensor | None]:
         """
@@ -465,7 +483,7 @@ class KimiDeltaAttention(FleetLayer):
 
         Args:
             hidden_states: Hidden states [b, s, h] or [s, b, h] with sequence_parallel.
-            attn_mask_startend_row_indices: [b, h, s, 1] document boundaries. When
+            attn_mask_startend_row_indices: [b, 1, s, 1] document boundaries. When
                 given, the batch is flattened to a single packed sequence of length
                 b*s and the resulting cu_seqlens is handed to both the short conv
                 and the recurrence, so nothing leaks across document boundaries.
@@ -495,6 +513,17 @@ class KimiDeltaAttention(FleetLayer):
             # (part_len = total // world_size, rank_start = part_len * rank),
             # which is exactly scatter_contiguous. Other balance modes reorder
             # tokens, so the rank ranges would not match.
+            max_seq_len = getattr(self.config, "max_sequence_length", None)
+            if (
+                max_seq_len is not None
+                and seq_len * self.cp_size != max_seq_len
+            ):
+                raise ValueError(
+                    "KDA context parallel expects hidden_states to be a "
+                    "1/cp_size contiguous shard of the full sequence: "
+                    f"seq_len={seq_len} * cp_size={self.cp_size} != "
+                    f"max_sequence_length={max_seq_len}"
+                )
             if batch != 1:
                 raise NotImplementedError(
                     "KDA context parallel requires batch == 1 (the packed "
@@ -523,8 +552,9 @@ class KimiDeltaAttention(FleetLayer):
         )
         if cu_seqlens is not None and not self.use_fused_kernels:
             raise NotImplementedError(
-                "Variable-length input requires the fused kernels; the paddle "
-                "native fallback has no cu_seqlens support."
+                "Variable-length input with document boundaries requires the "
+                "fused kernels; the paddle native fallback has no cu_seqlens "
+                "support."
             )
         cp_context = None
         if self.cp_size > 1:
@@ -564,18 +594,20 @@ class KimiDeltaAttention(FleetLayer):
             if gate is not None:
                 gate = gate.transpose([1, 0, 2])
 
-        # Split into q, k, v, beta and (full-rank) output gate
+        # Split into q/k/v, beta and (full-rank) output gate. in_proj lays the
+        # channels out as [qk | v | beta | gate] (see self.in_proj_dim) and the
+        # conv wants q/k/v as one contiguous block, so keep them in a single
+        # split segment rather than cutting qk/v apart and concatenating them
+        # back together.
         split_sizes = [
-            self.qk_dim * 2 // self.tp_size,
-            self.v_dim // self.tp_size,
+            self.conv_dim_local_tp,
             self.num_value_heads // self.tp_size,
         ]
         if self.use_full_rank_gate:
             split_sizes.append(self.v_dim // self.tp_size)
-            qk, value, beta, gate = paddle.split(qkvbz, split_sizes, axis=-1)
+            qkv, beta, gate = paddle.split(qkvbz, split_sizes, axis=-1)
         else:
-            qk, value, beta = paddle.split(qkvbz, split_sizes, axis=-1)
-        qkv = paddle.concat([qk, value], axis=-1)
+            qkv, beta = paddle.split(qkvbz, split_sizes, axis=-1)
         qkv = qkv.reshape([eff_batch, eff_seq, -1])
         beta = beta.reshape([eff_batch, eff_seq, -1])
         gate = gate.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
