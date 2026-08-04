@@ -101,6 +101,11 @@ def _make_dsv4_instance(
     inst._full_attn_recompute = None
     inst._gate_recompute = None
 
+    # VHA postmix disabled for these recompute-path tests (forward() reads
+    # these flags; the real module sets them in __init__).
+    inst.use_vha_postmix = False
+    inst.recompute_vha_postmix = False
+
     # Gated attention
     inst.gated_attention = gated_attention
     inst.gated_attn_use_q_lora = gated_attn_use_q_lora

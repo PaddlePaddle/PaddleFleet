@@ -597,6 +597,86 @@ class MultiLatentAttention(Attention):
                     )
                 )
 
+        # VHA postmix: ungrouped low-rank cross-head mixing (I + U Vᵀ) on the head
+        # axis, applied to the attention output (head space) before the output
+        # projection. Reuses use_vha_attention / vha_postmix_rank. Ungrouped only:
+        # MLA/MQA have no grouped o_proj to fold a block-diagonal mixer into.
+        self.use_vha_postmix = getattr(config, "use_vha_attention", False)
+        if self.use_vha_postmix:
+            # Use an explicit ValueError (not assert): assertions are stripped
+            # under `python -O`, which would silently let TP>1 mix only the
+            # local heads of each rank and deviate from the declared full-head
+            # postmix semantics.
+            if get_pg_size(self.pg_collection.tp) != 1:
+                raise ValueError(
+                    "VHA postmix currently supports tensor parallel size 1 "
+                    f"only, got tp={get_pg_size(self.pg_collection.tp)}."
+                )
+            nh = (
+                self.num_attention_heads_per_partition
+            )  # == num_attention_heads (TP=1)
+            rank = getattr(config, "vha_postmix_rank", None)
+            if rank is None:
+                rank = nh // 4
+            rank = max(1, min(rank, nh))
+            self.vha_postmix_rank = rank
+            self.vha_postmix_U = self.create_parameter(
+                shape=[nh, rank],
+                default_initializer=paddle.nn.initializer.Normal(
+                    mean=0.0, std=0.01
+                ),
+            )
+            self.vha_postmix_V = self.create_parameter(
+                shape=[nh, rank],
+                default_initializer=paddle.nn.initializer.Constant(
+                    0.0
+                ),  # identity at init
+            )
+        # Selective recompute for the VHA postmix. Only list configuration is
+        # supported; honours recompute_num_layers + recompute_method
+        # (first_n / block) like the other selective modules.
+        modules = self.config.recompute_modules
+        self.recompute_vha_postmix = False
+        if (
+            self.config.recompute_granularity == "selective"
+            and modules is not None
+        ):
+            if isinstance(modules, dict) and "vha_postmix" in modules:
+                raise ValueError(
+                    "recompute_modules['vha_postmix'] only supports list "
+                    "configuration"
+                )
+            if isinstance(modules, list) and "vha_postmix" in modules:
+                n = self.config.recompute_num_layers
+                if n is None:
+                    self.recompute_vha_postmix = True
+                elif self.config.recompute_method == "block":
+                    self.recompute_vha_postmix = need_recompute_in_block(
+                        self.layer_number, self.config, n
+                    )
+                elif self.config.recompute_method == "first_n":
+                    self.recompute_vha_postmix = need_recompute_in_first_n(
+                        self.layer_number, self.config, n
+                    )
+                else:
+                    raise ValueError(
+                        "recompute_method must be 'first_n' or 'block'"
+                    )
+
+    def _apply_vha_postmix(self, attn_out, U=None, V=None):
+        # attn_out: [b, sq, nh_pp * v_head_dim] (head space, pre-gate / pre output proj).
+        if U is None:
+            U = self.vha_postmix_U
+        if V is None:
+            V = self.vha_postmix_V
+        b, sq = attn_out.shape[0], attn_out.shape[1]
+        nh = self.num_attention_heads_per_partition
+        mixed = attn_out.reshape([b, sq, nh, self.v_head_dim])
+        z = paddle.einsum("bthd,hr->btrd", mixed, U)
+        delta = paddle.einsum("btrd,hr->bthd", z, V)
+        mixed = mixed + delta
+        return mixed.reshape([b, sq, nh * self.v_head_dim])
+
     def _compute_absorbed_q(self, query):
         """
         Compute absorbed query for FD MLA decode kernel.
@@ -876,6 +956,21 @@ class MultiLatentAttention(Attention):
         # =================
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
+
+        # VHA postmix: low-rank cross-head mixing in head space, before the gate
+        # (mix-then-gate). Skip the nested selective recompute when already
+        # inside a layer-level recompute.
+        if self.use_vha_postmix:
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                core_attn_out = recompute(
+                    self._apply_vha_postmix, core_attn_out
+                )
+            else:
+                core_attn_out = self._apply_vha_postmix(core_attn_out)
 
         # Apply gated attention
         if self.gated_attention:
@@ -1282,6 +1377,14 @@ class MLASelfAttention(MultiLatentAttention):
         )
         if getattr(self, "gate_proj", None) is not None:
             specs["gate_proj.weight"] = (ortho_per_head, {"heads": num_heads})
+        # MQA (subclass) runs a second gated branch for block-sparse attention.
+        # sparse_gate_proj is built from gate_proj's in/out sizes, so it shares
+        # the head-major column layout and needs the same per-head slicing.
+        if getattr(self, "sparse_gate_proj", None) is not None:
+            specs["sparse_gate_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_heads},
+            )
         return specs
 
     def _is_cudagraph_active(self) -> bool:
@@ -1954,6 +2057,24 @@ class MQASelfAttention(MLASelfAttention):
                 self.swa_attn_sink = None
                 self.sparse_attn_sink = None
 
+            # VHA postmix for the block-sparse branch. The MQA path has two
+            # independent gated branches (sliding-window main + block-sparse),
+            # so each gets its own postmix params: the base vha_postmix_U/V
+            # serve the main branch, this set serves the sparse branch.
+            if self.use_vha_postmix:
+                nh = self.num_attention_heads_per_partition  # TP==1 for MQA
+                rank = self.vha_postmix_rank
+                self.sparse_vha_postmix_U = self.create_parameter(
+                    shape=[nh, rank],
+                    default_initializer=paddle.nn.initializer.Normal(
+                        mean=0.0, std=0.01
+                    ),
+                )
+                self.sparse_vha_postmix_V = self.create_parameter(
+                    shape=[nh, rank],
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+
     def forward(
         self,
         hidden_states,
@@ -2160,6 +2281,19 @@ class MQASelfAttention(MLASelfAttention):
 
         core_attn_out = compute_absorbed_v(core_attn_out)
 
+        # VHA postmix (main branch): mix in head space before the gate.
+        if self.use_vha_postmix:
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                core_attn_out = recompute(
+                    self._apply_vha_postmix, core_attn_out
+                )
+            else:
+                core_attn_out = self._apply_vha_postmix(core_attn_out)
+
         # =================
         # Sparse attention computation
         # =================
@@ -2249,6 +2383,22 @@ class MQASelfAttention(MLASelfAttention):
         )
 
         sparse_core_attn_out = compute_absorbed_v(sparse_core_attn_out)
+
+        # VHA postmix (sparse branch): own param set, mix before the sparse gate.
+        if self.use_vha_postmix:
+            U, V = self.sparse_vha_postmix_U, self.sparse_vha_postmix_V
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                sparse_core_attn_out = recompute(
+                    self._apply_vha_postmix, sparse_core_attn_out, U, V
+                )
+            else:
+                sparse_core_attn_out = self._apply_vha_postmix(
+                    sparse_core_attn_out, U, V
+                )
 
         # =================
         # Output. [b, sq, h]

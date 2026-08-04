@@ -18,6 +18,7 @@
 import numpy
 import paddle
 import paddle.nn.functional as F
+from paddle.base.framework import EagerParamBase
 
 from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
@@ -556,6 +557,34 @@ def has_config(config_map, key):
     )
 
 
+def expert_weights_all_frozen(weights):
+    """True when every expert weight in ``weights`` is a frozen parameter.
+
+    The MoE expert backward writes weight gradients straight into
+    ``main_grad`` / ``grad`` instead of returning them through autograd, so
+    ``stop_gradient`` is not honored automatically. Callers use this to skip the
+    wgrad GEMMs and their fp32 buffers when the experts are frozen (for example
+    DSv4 phase 2, ``csa_train_indexer_only``).
+
+    ``weights`` is a stacked parameter (grouped path), a list of per-expert
+    parameters (split path), or a **per-expert view** of a stacked parameter
+    (subbatch / sliced deep_gemm path). A view's own ``stop_gradient`` is always
+    True even when its parent parameter is trainable, so each entry is first
+    dereferenced through ``_parent`` -- stamped by :func:`slice_expert_weight` and
+    stored by :class:`_PerExpertWeightView`. Only an ``EagerParamBase`` then
+    counts as frozen; anything else keeps the original behavior so no gradient is
+    silently dropped. Mixed groups are treated as not frozen.
+    """
+    if weights is None:
+        return False
+    if not isinstance(weights, (list, tuple)):
+        weights = [weights]
+    entries = [getattr(w, "_parent", w) for w in weights if w is not None]
+    return bool(entries) and all(
+        isinstance(w, EagerParamBase) and w.stop_gradient for w in entries
+    )
+
+
 def kitchen_gemm(
     x_fp8,
     x_scale,
@@ -599,6 +628,20 @@ def kitchen_gemm(
             return out
 
     return y
+
+
+def slice_expert_weight(parent_weight, local_id):
+    """Per-expert view ``[1, K, N]`` of a stacked expert weight.
+
+    ``_slice`` returns a raw view whose ``stop_gradient`` is always True, even when
+    the parent parameter is trainable, so keep a pointer to the parameter it came
+    from. :func:`expert_weights_all_frozen` dereferences that ``_parent`` to decide
+    whether the expert is frozen. Every per-expert slicing site must go through
+    here, otherwise that path silently loses the frozen-expert wgrad skip.
+    """
+    view = parent_weight._slice(local_id, local_id + 1)
+    view._parent = parent_weight
+    return view
 
 
 class _PerExpertWeightView:
@@ -756,8 +799,8 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 # Normal: bf16 weight is valid, slice directly
                 sliced = type("_SlicedGroupedExpert", (), {})()
-                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
-                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
+                sliced.weight1 = slice_expert_weight(parent.weight1, local_id)
+                sliced.weight2 = slice_expert_weight(parent.weight2, local_id)
                 sliced._parent = parent
                 sliced._local_id = local_id
                 self.grouped_gemm_experts = sliced
@@ -1913,6 +1956,8 @@ class ExpertsGroupGemmContiguousNode:
         dw2 = do2_t * do3
         [n, k] = [n, m_sum] * [m_sum, k] (m_sum = sum(tokens_per_expert))
         """
+        if expert_weights_all_frozen(expert_w2):
+            return
         o2_t_fp8, o2_t_scale = self.fused_transpose_split_quant(
             o2, None, self.tokens_per_expert, True
         )
@@ -1978,6 +2023,12 @@ class ExpertsGroupGemmContiguousNode:
         dw1 = dx_t * do1
         [k, n] = [k, m_sum] * [m_sum, n] (m_sum = sum(tokens_per_expert))
         """
+        if expert_weights_all_frozen(expert_w1):
+            if clear_input:
+                self.input = None
+                self.input_fp8 = None
+                self.input_scale = None
+            return
 
         if input_x is None:
             if self.dequant_input:
@@ -2161,6 +2212,11 @@ class ExpertsGroupGemmContiguousNode:
                     if expert is None:
                         continue
 
+                    if expert_weights_all_frozen(
+                        [expert.down_proj.weight, expert.up_gate_proj.weight]
+                    ):
+                        continue
+
                     if hasattr(expert.down_proj.weight, "main_grad"):
                         if expert.down_proj.weight.main_grad is None:
                             expert.down_proj.weight.main_grad = paddle.zeros(
@@ -2187,34 +2243,24 @@ class ExpertsGroupGemmContiguousNode:
                                 dtype=paddle.float32,
                             )
             else:
-                if hasattr(self.grouped_gemm_experts.weight1, "main_grad"):
-                    if self.grouped_gemm_experts.weight1.main_grad is None:
-                        self.grouped_gemm_experts.weight1.main_grad = (
-                            paddle.zeros(
-                                shape=self.grouped_gemm_experts.weight1.shape,
-                                dtype=paddle.float32,
+                for weight in (
+                    self.grouped_gemm_experts.weight1,
+                    self.grouped_gemm_experts.weight2,
+                ):
+                    # `weight` may be a per-expert view; the predicate resolves it
+                    # to the parent parameter. Skipping matters most for the
+                    # offline-fp8 view: its main_grad setter allocates an fp32
+                    # buffer for the whole parent, not just this expert's slice.
+                    if expert_weights_all_frozen(weight):
+                        continue
+                    if hasattr(weight, "main_grad"):
+                        if weight.main_grad is None:
+                            weight.main_grad = paddle.zeros(
+                                shape=weight.shape, dtype=paddle.float32
                             )
-                        )
-                else:
-                    if self.grouped_gemm_experts.weight1.grad is None:
-                        self.grouped_gemm_experts.weight1.grad = paddle.zeros(
-                            shape=self.grouped_gemm_experts.weight1.shape,
-                            dtype=paddle.float32,
-                        )
-
-                if hasattr(self.grouped_gemm_experts.weight2, "main_grad"):
-                    if self.grouped_gemm_experts.weight2.main_grad is None:
-                        self.grouped_gemm_experts.weight2.main_grad = (
-                            paddle.zeros(
-                                shape=self.grouped_gemm_experts.weight2.shape,
-                                dtype=paddle.float32,
-                            )
-                        )
-                else:
-                    if self.grouped_gemm_experts.weight2.grad is None:
-                        self.grouped_gemm_experts.weight2.grad = paddle.zeros(
-                            shape=self.grouped_gemm_experts.weight2.shape,
-                            dtype=paddle.float32,
+                    elif weight.grad is None:
+                        weight.grad = paddle.zeros(
+                            shape=weight.shape, dtype=paddle.float32
                         )
 
             if a2a_async_fn:
@@ -2560,6 +2606,10 @@ class ExpertsGroupGemmContiguousNode:
         """
         BF16 GEMM for weight grad
         """
+        # `weights` may be a per-expert view; the predicate resolves it to the
+        # parent parameter. The GEMM below still uses the per-expert `weights`.
+        if expert_weights_all_frozen(weights):
+            return
         if x is None:
             if self.dequant_input:
                 if self.use_w4a8:
