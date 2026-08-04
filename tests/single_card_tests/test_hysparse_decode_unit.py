@@ -386,6 +386,7 @@ class TestMLAHySparseForwardRouting(unittest.TestCase):
             training=False,
             use_rr_flash_attention=False,
             gated_attention=False,
+            use_vha_postmix=False,
             layer_number=0,
             o_proj=lambda x: (x, None),
             get_query_key_value_tensors=lambda *_: (
@@ -478,6 +479,7 @@ class TestMQAHySparseForwardRouting(unittest.TestCase):
             v_head_dim=1,
             kv_b_proj=types.SimpleNamespace(weight=paddle.eye(2)),
             gated_attention=False,
+            use_vha_postmix=False,
             o_proj=lambda x: (x, None),
             layer_number=0,
             attn_mask_type=None,
