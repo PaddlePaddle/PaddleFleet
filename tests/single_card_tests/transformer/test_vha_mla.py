@@ -314,6 +314,48 @@ class TestMLAPostmixApply(unittest.TestCase):
         ref = (mixed + delta).reshape([b, sq, nh * vd])
         self.assertTrue(paddle.allclose(out, ref, atol=1e-6).item())
 
+    def test_backward_matches_manual_einsum(self):
+        """The matmul rewrite must be gradient-equivalent to the einsum form
+        (dx, dU, dV) — locks the optimization against silent regressions."""
+        attn = _build_mla(use_vha_attention=True, vha_postmix_rank=2)
+        attn.vha_postmix_V.set_value(
+            paddle.randn(attn.vha_postmix_V.shape, dtype="float32") * 0.1
+        )
+        b, sq, nh, vd = 2, 3, 4, 32
+        x0 = paddle.randn([b, sq, nh * vd], dtype="float32")
+
+        # Module (matmul) path — squared loss so grads depend on values.
+        x = x0.detach()
+        x.stop_gradient = False
+        out = attn._apply_vha_postmix(x)
+        (out * out).sum().backward()
+        gx = x.grad.clone()
+        gU = attn.vha_postmix_U.grad.clone()
+        gV = attn.vha_postmix_V.grad.clone()
+
+        # einsum reference on independent leaves.
+        xr = x0.detach()
+        xr.stop_gradient = False
+        Ur = attn.vha_postmix_U.detach()
+        Ur.stop_gradient = False
+        Vr = attn.vha_postmix_V.detach()
+        Vr.stop_gradient = False
+        mixed_r = xr.reshape([b, sq, nh, vd])
+        z_r = paddle.einsum("bthd,hr->btrd", mixed_r, Ur)
+        delta_r = paddle.einsum("btrd,hr->bthd", z_r, Vr)
+        ref = (mixed_r + delta_r).reshape([b, sq, nh * vd])
+        (ref * ref).sum().backward()
+
+        self.assertTrue(
+            paddle.allclose(gx, xr.grad, atol=1e-5).item(), "dx mismatch"
+        )
+        self.assertTrue(
+            paddle.allclose(gU, Ur.grad, atol=1e-5).item(), "dU mismatch"
+        )
+        self.assertTrue(
+            paddle.allclose(gV, Vr.grad, atol=1e-5).item(), "dV mismatch"
+        )
+
 
 # ===========================================================================
 # MLA forward with postmix
