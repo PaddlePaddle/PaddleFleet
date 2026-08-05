@@ -710,9 +710,11 @@ class GPTEmbedding(FleetLayer):
 
         # KDA turns the document boundaries into a packed cu_seqlens, and every
         # KDA layer of the step needs the same one. Build it once here and let it
-        # ride dict_args down to the layers (see build_cu_seqlens).
+        # ride dict_args down to the layers (see build_cu_seqlens). config.layer_types
+        # is what actually selects a KDA layer, so gate on it here too.
+        layer_types = getattr(self.config, "layer_types", None) or ()
         if (
-            self.config.experimental_attention_variant == "kimi_delta_attention"
+            "kimi_delta_attention" in layer_types
             and attn_mask_startend_row_indices is not None
         ):
             # With the old MTP dataflow every decoder layer trims the MTP tail

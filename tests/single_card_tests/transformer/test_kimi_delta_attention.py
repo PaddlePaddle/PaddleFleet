@@ -17,21 +17,24 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
 
+from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer import kimi_delta_attention as kda_mod
 from paddlefleet.transformer.kimi_delta_attention import (
     HAVE_FLA,
     KimiDeltaAttention,
     KimiDeltaAttentionSublayersSpec,
+    build_cu_seqlens,
     kda_gate,
     paddle_chunk_kda,
 )
+from paddlefleet.transformer.paddle_norm import RMSNorm
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 # ---- Local stand-in layers (no fleet / TP required) ----
@@ -267,6 +270,7 @@ def _build_kda(
     use_full_rank_gate=True,
     sequence_parallel=False,
     deterministic_mode=True,
+    out_norm=SimpleRMSNorm,
     **overrides,
 ):
     config = TransformerConfig(
@@ -285,7 +289,7 @@ def _build_kda(
         f_b_proj=NoBiasLinear,
         g_a_proj=NoBiasLinear,
         g_b_proj=NoBiasLinear,
-        out_norm=SimpleRMSNorm,
+        out_norm=out_norm,
         out_proj=NoBiasLinear,
     )
     kwargs = {
@@ -353,18 +357,31 @@ class TestKimiDeltaAttention(unittest.TestCase):
             qk_dim * 2 + v_dim + NUM_VALUE_HEADS,
         )
 
-    def test_conv_weight_stays_fp32_in_o2(self):
+    def test_fp32_params_stay_fp32_in_o2(self):
+        """conv1d / dt_bias / A_log / out_norm are pinned to fp32 under amp O2."""
         original_dtype = paddle.get_default_dtype()
         try:
             paddle.set_default_dtype("bfloat16")
-            kda = _build_kda()
+            # The real RMSNorm sizes its weight from config.params_dtype, which
+            # KDA pins to fp32; SimpleRMSNorm ignores it and would be born
+            # bfloat16, making the out_norm assertion a false pass.
+            kda = _build_kda(out_norm=RMSNorm)
         finally:
             paddle.set_default_dtype(original_dtype)
 
-        self.assertEqual(kda.conv1d.weight.dtype, paddle.float32)
+        fp32_names = ["conv1d.weight", "dt_bias", "A_log", "out_norm.weight"]
+
+        def assert_pinned():
+            params = dict(kda.named_parameters())
+            for name in fp32_names:
+                self.assertEqual(
+                    params[name].dtype, paddle.float32, f"{name} left fp32"
+                )
+
+        assert_pinned()
         self.assertEqual(kda.in_proj.linear.weight.dtype, paddle.bfloat16)
         paddle.amp.decorate(models=kda, level="O2", dtype="bfloat16")
-        self.assertEqual(kda.conv1d.weight.dtype, paddle.float32)
+        assert_pinned()
 
         x = paddle.randn(
             [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE], dtype="bfloat16"
@@ -378,7 +395,11 @@ class TestKimiDeltaAttention(unittest.TestCase):
             out, _ = kda(hidden_states=x, attention_mask=None)
             self.assertEqual(out.dtype, paddle.bfloat16)
             out.astype(paddle.float32).square().mean().backward()
-        self.assertEqual(kda.conv1d.weight.grad.dtype, paddle.float32)
+        grads = dict(kda.named_parameters())
+        for name in fp32_names:
+            self.assertEqual(
+                grads[name].grad.dtype, paddle.float32, f"grad[{name}]"
+            )
         self.assertEqual(x.grad.dtype, paddle.bfloat16)
 
     def test_forward_shape(self):
@@ -538,6 +559,61 @@ def _startend_row_indices(docs_per_row, seq_len):
     )
 
 
+class TestBuildCuSeqlens(unittest.TestCase):
+    """build_cu_seqlens flattens a [b, 1, s, 1] mask into packed segment starts."""
+
+    def test_no_mask(self):
+        self.assertIsNone(build_cu_seqlens(None, 2, SEQ_LENGTH))
+        self.assertEqual(
+            build_cu_seqlens(
+                None, 2, SEQ_LENGTH, keep_single_segment=True
+            ).tolist(),
+            [0, 2 * SEQ_LENGTH],
+        )
+
+    def test_single_segment(self):
+        """A lone document covering everything needs no mask at all."""
+        indices = _startend_row_indices([[SEQ_LENGTH]], SEQ_LENGTH)
+        self.assertIsNone(build_cu_seqlens(indices, 1, SEQ_LENGTH))
+        # context parallel always needs one to slice with
+        self.assertEqual(
+            build_cu_seqlens(
+                indices, 1, SEQ_LENGTH, keep_single_segment=True
+            ).tolist(),
+            [0, SEQ_LENGTH],
+        )
+
+    def test_document_boundaries(self):
+        indices = _startend_row_indices([[12, 20], [8, 24]], SEQ_LENGTH)
+        self.assertEqual(
+            build_cu_seqlens(indices, 2, SEQ_LENGTH).tolist(),
+            [0, 12, SEQ_LENGTH, SEQ_LENGTH + 8, 2 * SEQ_LENGTH],
+        )
+
+    def test_row_seam_is_a_boundary(self):
+        """Rows ending at the same value must not be merged when flattened."""
+        indices = _startend_row_indices([[SEQ_LENGTH]] * 2, SEQ_LENGTH)
+        self.assertEqual(
+            build_cu_seqlens(indices, 2, SEQ_LENGTH).tolist(),
+            [0, SEQ_LENGTH, 2 * SEQ_LENGTH],
+        )
+
+    def test_rejects_bad_shapes(self):
+        indices = _startend_row_indices([[12, 20]], SEQ_LENGTH)
+        # [b, 1, s, 2]: a start/end mask cannot be reduced to column 0
+        with self.assertRaises(ValueError):
+            build_cu_seqlens(
+                paddle.concat([indices, indices], axis=-1), 1, SEQ_LENGTH
+            )
+        # a head-wise mask cannot be honoured by a linear recurrence
+        with self.assertRaises(ValueError):
+            build_cu_seqlens(
+                paddle.concat([indices, indices], axis=1), 1, SEQ_LENGTH
+            )
+        with self.assertRaises(ValueError):
+            build_cu_seqlens(indices, 1, SEQ_LENGTH + 1)
+
+
 @unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels are not available")
 class TestVarlen(unittest.TestCase):
     """Packed variable-length input must equal running each document alone."""
@@ -608,6 +684,20 @@ class TestVarlen(unittest.TestCase):
         self.assertLess(self._rel(packed[0], batched[0]), 5e-4)
         self.assertLess(self._rel(packed[1], batched[1]), 5e-3)
 
+    def test_precomputed_cu_seqlens_matches_mask(self):
+        """The embedding hands cu_seqlens down; that must change nothing."""
+        indices = _startend_row_indices(self.DOCS, SEQ_LENGTH)
+        cu_seqlens = build_cu_seqlens(indices, len(self.DOCS), SEQ_LENGTH)
+        self.assertIsNotNone(cu_seqlens)
+        from_mask = self._forward_backward(self.x, indices)
+        self.kda.clear_gradients()
+        xi = self.x.clone()
+        xi.stop_gradient = False
+        out, _ = self.kda(hidden_states=xi, cu_seqlens=cu_seqlens)
+        out.pow(2).sum().backward()
+        np.testing.assert_array_equal(out.numpy(), from_mask[0])
+        np.testing.assert_array_equal(xi.grad.numpy(), from_mask[1])
+
     def test_native_path_rejects_varlen(self):
         native = _build_kda()
         self.assertFalse(native.use_fused_kernels)
@@ -617,6 +707,146 @@ class TestVarlen(unittest.TestCase):
                 hidden_states=self.x,
                 attn_mask_startend_row_indices=indices,
             )
+
+
+@unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels are not available")
+class TestContextParallelGuards(unittest.TestCase):
+    """The CP preconditions must reject unsupported layouts before any collective.
+
+    cp_size is set after construction so a single card can reach the checks.
+    """
+
+    def _kda(self, cp_size=4, deterministic_mode=False):
+        kda = _build_kda(deterministic_mode=deterministic_mode)
+        kda.cp_size = cp_size
+        kda.config.context_parallel_size = cp_size
+        kda.config.cp_balance_mode = "contiguous_allgather"
+        kda.config.max_sequence_length = SEQ_LENGTH * cp_size
+        return kda
+
+    def test_shard_must_be_one_over_cp_size(self):
+        kda = self._kda()
+        kda.config.max_sequence_length = SEQ_LENGTH  # not SEQ_LENGTH * cp_size
+        with self.assertRaises(ValueError):
+            kda(hidden_states=paddle.randn([1, SEQ_LENGTH, HIDDEN_SIZE]))
+
+    def test_requires_batch_one(self):
+        kda = self._kda()
+        with self.assertRaises(NotImplementedError):
+            kda(hidden_states=paddle.randn([2, SEQ_LENGTH, HIDDEN_SIZE]))
+
+    def test_requires_contiguous_balance_mode(self):
+        kda = self._kda()
+        kda.config.cp_balance_mode = "dualchunk_allgather"
+        with self.assertRaises(NotImplementedError):
+            kda(hidden_states=paddle.randn([1, SEQ_LENGTH, HIDDEN_SIZE]))
+
+    def test_requires_fused_kernels(self):
+        kda = self._kda(deterministic_mode=True)
+        self.assertFalse(kda.use_fused_kernels)
+        with self.assertRaises(NotImplementedError):
+            kda(hidden_states=paddle.randn([1, SEQ_LENGTH, HIDDEN_SIZE]))
+
+
+def _build_gpt_embedding(config):
+    """GPTEmbedding with a plain nn.Embedding and no rope (no fleet init needed)."""
+    from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
+
+    mock_spec = MagicMock(rope_embedding=None)
+
+    class _Emb(nn.Layer):
+        def __init__(self, v, h):
+            super().__init__()
+            self.embed_tokens = nn.Embedding(v, h)
+            self.reduce_scatter_embeddings = (
+                self.scatter_to_sequence_parallel
+            ) = self.sequence_parallel = False
+
+        @property
+        def embedding_weight(self):
+            return self.embed_tokens.weight
+
+        def forward(self, input_ids, position_ids=None):
+            return self.embed_tokens(input_ids)
+
+    emb_layer = _Emb(config.vocab_size, config.hidden_size)
+    with (
+        patch(
+            "paddlefleet.models.gpt.gpt_embedding.build_spec_layer",
+            side_effect=lambda s, *a, **kw: emb_layer
+            if s is mock_spec.language_embedding
+            else None,
+        ),
+        patch(
+            "paddlefleet.models.gpt.gpt_embedding.mark_context_parallel_parameter_disable_scale_grad"
+        ),
+    ):
+        return GPTEmbedding(
+            sublayers_spec=mock_spec,
+            config=config,
+            vocab_size=config.vocab_size,
+            max_sequence_length=SEQ_LENGTH,
+            position_embedding_type="rope",
+        )
+
+
+class TestCuSeqlensFromEmbedding(unittest.TestCase):
+    """The embedding builds cu_seqlens once per step, but only for KDA models."""
+
+    BATCH = 2
+    DOCS = [[12, 20], [8, 24]]
+
+    def _run(self, **cfg_kwargs):
+        config = GPTConfig(
+            vocab_size=128,
+            hidden_size=HIDDEN_SIZE,
+            num_attention_heads=NUM_KEY_HEADS,
+            num_hidden_layers=2,
+            **cfg_kwargs,
+        )
+        emb = _build_gpt_embedding(config)
+        indices = _startend_row_indices(self.DOCS, SEQ_LENGTH)
+        with (
+            patch(
+                "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
+                return_value=1,
+            ),
+            patch("paddlefleet.models.gpt.gpt_embedding.ScatterOp") as scatter,
+        ):
+            scatter.apply = lambda x: x
+            out = emb.forward(
+                {
+                    "input_ids": paddle.randint(
+                        0, 128, [self.BATCH, SEQ_LENGTH]
+                    ),
+                    "attn_mask_startend_row_indices": indices,
+                }
+            )
+        return out, indices
+
+    def test_built_for_kda_layers(self):
+        out, indices = self._run(
+            layer_types=["kimi_delta_attention", "self_attention"]
+        )
+        expected = build_cu_seqlens(indices, self.BATCH, SEQ_LENGTH)
+        np.testing.assert_array_equal(
+            out["cu_seqlens"].numpy(), expected.numpy()
+        )
+
+    def test_absent_without_kda_layers(self):
+        out, _ = self._run(layer_types=["self_attention"] * 2)
+        self.assertNotIn("cu_seqlens", out)
+        out, _ = self._run()  # layer_types unset
+        self.assertNotIn("cu_seqlens", out)
+
+    def test_absent_when_mtp_trims_the_mask(self):
+        """With the old MTP dataflow each layer trims the mask itself."""
+        out, _ = self._run(
+            layer_types=["kimi_delta_attention", "self_attention"],
+            num_nextn_predict_layers=1,
+            experimental_dataflow=False,
+        )
+        self.assertNotIn("cu_seqlens", out)
 
 
 if __name__ == "__main__":

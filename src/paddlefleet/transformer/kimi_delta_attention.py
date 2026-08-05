@@ -109,9 +109,9 @@ def build_cu_seqlens(
 ):
     """Derive packed cu_seqlens for a ``[b, s] -> [1, b*s]`` flattening.
 
-    ``startend_row_indices`` is ``[b, 1, s, 1]`` (or ``[b, 1, s, 2]``, where
-    only column 0 is used) and each entry holds the exclusive end of the
-    document that position belongs to, *relative to its own row*. A position
+    ``startend_row_indices`` is ``[b, 1, s, 1]`` and each entry holds the
+    exclusive end of the document that position belongs to, *relative to its
+    own row*. A position
     starts a new document iff that end changes, so the row-local boundaries
     plus the row seams (position 0 of every row) give exactly the segment
     starts of the flattened sequence. Note the seams matter: two adjacent
@@ -147,16 +147,15 @@ def build_cu_seqlens(
         or startend_row_indices.shape[-1] != 1
     ):
         raise ValueError(
-            "attn_mask_startend_row_indices must be [b, 1, s, 1] or "
-            f"[b, 1, s, 2], got {list(startend_row_indices.shape)}"
+            "attn_mask_startend_row_indices must be [b, 1, s, 1], got "
+            f"{list(startend_row_indices.shape)}"
         )
     if startend_row_indices.shape[-2] != seq_len:
         raise ValueError(
             f"attn_mask_startend_row_indices has sequence length "
             f"{startend_row_indices.shape[-2]}, expected {seq_len}"
         )
-    # Column 0 is the exclusive document end; column 1, when present, is
-    # just arange(seq_len) and carries no boundary information.
+    # Column 0 is the exclusive document end.
     ends = startend_row_indices[:, 0, :, 0].astype("int64")
     doc_edges = ends[:, 1:] != ends[:, :-1]
 
