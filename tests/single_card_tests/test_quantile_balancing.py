@@ -1485,7 +1485,9 @@ class TestAccumulateQBHistogramReal(unittest.TestCase):
     def test_degenerate_bin_range_falls_back(self):
         router = _build_qb_router()
         router.qb_bin_min.set_value(paddle.to_tensor(0.0))
-        router.qb_bin_max.set_value(paddle.to_tensor(0.0))  # zero range -> fallback to 2.0
+        router.qb_bin_max.set_value(
+            paddle.to_tensor(0.0)
+        )  # zero range -> fallback to 2.0
         scores = paddle.to_tensor(np.random.rand(6, 8).astype(np.float32))
         router._accumulate_qb_histogram(scores, scores, 2)
         self.assertEqual(int(router.qb_histogram.sum().item()), 6 * 8)
@@ -1493,7 +1495,9 @@ class TestAccumulateQBHistogramReal(unittest.TestCase):
     def test_out_of_range_values_are_clipped(self):
         router = _build_qb_router()
         router.qb_bin_min.set_value(paddle.to_tensor(0.0))
-        router.qb_bin_max.set_value(paddle.to_tensor(0.01))  # almost everything lands beyond the last bin
+        router.qb_bin_max.set_value(
+            paddle.to_tensor(0.01)
+        )  # almost everything lands beyond the last bin
         scores = paddle.to_tensor(np.full([4, 8], 0.5, dtype=np.float32))
         router._accumulate_qb_histogram(scores, scores, 2)
         hist = router.qb_histogram.numpy()
