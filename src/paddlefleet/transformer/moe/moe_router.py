@@ -447,9 +447,14 @@ class StandardMoERouter(nn.Layer):
             )
             self.expert_usage.stop_gradient = True
 
-            # Binning range -- initialized conservatively, updated by callback
-            self.qb_bin_min = -1.0
-            self.qb_bin_max = 1.0
+            # QB Binning range -- persisted because it affects the next step's
+            # histogram and therefore must survive checkpoint resumption.
+            self.register_buffer(
+                "qb_bin_min", paddle.to_tensor(-1.0, dtype=paddle.float32)
+            )
+            self.register_buffer(
+                "qb_bin_max", paddle.to_tensor(1.0, dtype=paddle.float32)
+            )
 
         # Hash-routing state. Activated lazily via set_layer_number() so that the
         # router knows its layer index.

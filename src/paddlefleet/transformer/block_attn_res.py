@@ -201,7 +201,11 @@ class BlockAttnRes(FleetLayer):
         # marked as sequence parallel param,
         # i.e., its gradient should be all-reduced.
         self.proj_weight = self.create_parameter(
-            shape=[self.hidden_size],
+            # Keep the Linear(hidden_size, 1) checkpoint layout.  The leading
+            # singleton dimension broadcasts identically in the dot product,
+            # while allowing AOA to load HF Attention Residual weights without
+            # an unsupported squeeze/reshape operation.
+            shape=[1, self.hidden_size],
             default_initializer=nn.initializer.Constant(0.0),
         )
 

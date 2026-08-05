@@ -346,6 +346,34 @@ class TestKimiDeltaAttention(unittest.TestCase):
             qk_dim * 2 + v_dim + NUM_VALUE_HEADS,
         )
 
+    def test_conv_weight_stays_fp32_in_o2(self):
+        original_dtype = paddle.get_default_dtype()
+        try:
+            paddle.set_default_dtype("bfloat16")
+            kda = _build_kda()
+        finally:
+            paddle.set_default_dtype(original_dtype)
+
+        self.assertEqual(kda.conv1d.weight.dtype, paddle.float32)
+        self.assertEqual(kda.in_proj.linear.weight.dtype, paddle.bfloat16)
+        paddle.amp.decorate(models=kda, level="O2", dtype="bfloat16")
+        self.assertEqual(kda.conv1d.weight.dtype, paddle.float32)
+
+        x = paddle.randn(
+            [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE], dtype="bfloat16"
+        )
+        x.stop_gradient = False
+        with patch.object(
+            kda_mod.fla.ops.kda,
+            "chunk_kda",
+            wraps=paddle_chunk_kda,
+        ):
+            out, _ = kda(hidden_states=x, attention_mask=None)
+            self.assertEqual(out.dtype, paddle.bfloat16)
+            out.astype(paddle.float32).square().mean().backward()
+        self.assertEqual(kda.conv1d.weight.grad.dtype, paddle.float32)
+        self.assertEqual(x.grad.dtype, paddle.bfloat16)
+
     def test_forward_shape(self):
         x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
         out, out_bias = self.kda(hidden_states=x, attention_mask=None)

@@ -141,6 +141,9 @@ class KimiDeltaAttention(FleetLayer):
                 -exp(A_log) * softplus(a + dt_bias) instead.
         """
         super().__init__(config=config)
+        # Keep the parent-owned FP32 gate parameters (A_log and dt_bias) in
+        # FP32 under AMP O2. Projection sublayers are decorated independently.
+        self._cast_to_low_precision = False
 
         # Attributes from arguments
         self.layer_number = layer_number
@@ -246,7 +249,12 @@ class KimiDeltaAttention(FleetLayer):
             padding=self.conv_kernel_dim - 1,
             bias_attr=conv_bias,
             data_format="NCL",
+            dtype="float32",
         )
+        # The released Kimi-K3 checkpoint keeps short-convolution weights in
+        # float32. Preserve that dtype under AMP O2 instead of casting the
+        # checkpoint to bf16 on load and casting it back only during export.
+        self.conv1d._cast_to_low_precision = False
         self.conv1d.weight.is_distributed = True if self.tp_size > 1 else False
         if conv_bias and self.conv1d.bias is not None:
             self.conv1d.bias.is_distributed = (
@@ -436,7 +444,10 @@ class KimiDeltaAttention(FleetLayer):
         # Convolution on qkv
         qkv = qkv.transpose([0, 2, 1]).contiguous()  # b, s, d -> b, d, s
         nvtx_range_push(suffix="conv1d")
-        qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
+        conv_output_dtype = qkv.dtype
+        qkv = self.act_fn(
+            self.conv1d(qkv.astype(paddle.float32))[..., :seq_len]
+        ).astype(conv_output_dtype)
         nvtx_range_pop(suffix="conv1d")
 
         qkv = qkv.transpose([0, 2, 1])  # b, d, s -> b, s, d
