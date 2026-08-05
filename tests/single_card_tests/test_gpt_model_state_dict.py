@@ -238,6 +238,50 @@ class TestVirtualPipelineNameMapping(unittest.TestCase):
             },
         )
 
+    def test_vpp_detected_when_shared_key_comes_first(self):
+        # If the first chunk registers the SharedLayerDesc with `forward_func`,
+        # the first non `shared_layers` key is `{chunk_start}.{name}.rest`,
+        # whose second segment is not a digit. VPP must still be detected,
+        # otherwise the `{chunk_start}.{local_idx}.rest` keys of the ordinary
+        # chunks would be resolved against `prefixes[chunk_start]`.
+        layers_desc = [
+            SharedLayerDesc(
+                "embed_weight_share",
+                nn.Linear,
+                forward_func=lambda layer, x: x,
+                shared_weight_attr="weight",
+            ),
+            LayerDesc(nn.Linear),
+            LayerDesc(nn.Linear),
+            SharedLayerDesc(
+                "embed_weight_share",
+                nn.Linear,
+                forward_func=lambda layer, x: x,
+                shared_weight_attr="weight",
+            ),
+        ]
+        pp_keys = [
+            "shared_layers.embed_weight_share.weight",
+            "0.embed_weight_share.weight",
+            "2.0.self_attn.o_proj.weight",
+        ]
+        # stage 0 of a pp=2, vpp=2 run owns virtual stages 0 and 2
+        mapping = self._build_mapping(
+            pp_keys,
+            layers_desc=layers_desc,
+            stage_id=0,
+            index_to_stage={0: 0, 1: 1, 2: 0, 3: 1},
+        )
+
+        self.assertEqual(
+            mapping,
+            {
+                "shared_layers.embed_weight_share.weight": "model.embedding.weight",
+                "0.embed_weight_share.weight": "model.embedding.weight",
+                "2.0.self_attn.o_proj.weight": "model.layers.1.self_attn.o_proj.weight",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
