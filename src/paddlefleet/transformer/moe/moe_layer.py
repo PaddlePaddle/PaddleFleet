@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 from paddlefleet import utils
 from paddlefleet.recompute_utils import need_recompute_in_first_n
 from paddlefleet.transformer.activations import situ
+from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
@@ -195,9 +196,9 @@ class MoELayer(nn.Layer):
         self.fp8 = config.fp8
         self.use_ue8m0 = config.use_ue8m0
         self.use_w4a8 = config.use_w4a8
+        self.use_w4a8_fused_quant = config.use_w4a8_fused_quant
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
-        self.fp8_dispatch = bool(config.fp8)
         self.fp8_dispatch = bool(config.fp8) and not self.use_w4a8
         self.fp8_wgrad = config.fp8_wgrad
         self.fp8_dispatch_bwd = (
@@ -259,6 +260,15 @@ class MoELayer(nn.Layer):
             # Override default XavierUniform with config init methods
             self.config.init_method(self.fc1_latent_proj.weight)
             self.config.output_layer_init_method(self.fc2_latent_proj.weight)
+            self.latent_norm = (
+                WrappedPaddleNorm(
+                    config=self.config,
+                    hidden_size=self.config.moe_latent_size,
+                    eps=self.config.rms_norm_eps,
+                )
+                if self.config.latent_moe_use_norm
+                else None
+            )
             # Update expert config to use latent size
             routed_expert_config.hidden_size = self.config.moe_latent_size
         # Cached latent-space projection from _maybe_pre_allgather_overlap;
@@ -1036,6 +1046,8 @@ class MoELayer(nn.Layer):
 
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
+            if self.latent_norm is not None:
+                hidden_states = self.latent_norm(hidden_states)
             hidden_states = self.fc2_latent_proj(hidden_states)
 
         return hidden_states
@@ -1119,6 +1131,7 @@ class MoELayer(nn.Layer):
                         self.config, "use_accuracy_compatible", False
                     ),
                     use_w4a8=self.use_w4a8,
+                    use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                 )
 
         with profile("combine"):
@@ -1130,6 +1143,8 @@ class MoELayer(nn.Layer):
 
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
+            if self.latent_norm is not None:
+                hidden_states = self.latent_norm(hidden_states)
             hidden_states = self.fc2_latent_proj(hidden_states)
 
         return hidden_states
@@ -1278,6 +1293,7 @@ class MoELayer(nn.Layer):
                         self.config, "use_accuracy_compatible", False
                     ),
                     use_w4a8=self.use_w4a8,
+                    use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                 )
 
             if is_first_fwd:
@@ -1304,6 +1320,8 @@ class MoELayer(nn.Layer):
     def aux_loss_compute(self, args):
         hidden_states, aux_loss, z_loss, residuals = args
         if self.use_latent_moe:
+            if self.latent_norm is not None:
+                hidden_states = self.latent_norm(hidden_states)
             hidden_states = self.fc2_latent_proj(hidden_states)
         if self.training and self.router_aux_loss_coef and aux_loss is not None:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
@@ -1480,6 +1498,8 @@ class MoELayer(nn.Layer):
                 )
             # Latent MoE: project back from latent space
             if self.use_latent_moe:
+                if self.latent_norm is not None:
+                    output = self.latent_norm(output)
                 output = self.fc2_latent_proj(output)
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)

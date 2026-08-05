@@ -226,6 +226,25 @@ class TransformerConfig(ModelParallelConfig):
     vha_postmix_rank: int | None = None
     """Rank of the VHA postmix low-rank head mixing matrices."""
 
+    vha_postmix_grouped: bool = False
+    """Postmix head-mixing topology (DSv4 hybrid only). False (default): ungrouped
+    full cross-head mixing over all num_attention_heads (the earlier VHA design).
+    True: within-group block-diagonal mixing that only recombines heads inside each
+    o_group (mixing stays within a group)."""
+
+    use_vha_premix: bool = False
+    """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
+    (linear_q_up_proj) with a structured VHA premix: the compressed Q is reshaped into
+    vha_premix_groups groups of dim d_q = q_lora_rank // vha_premix_groups, and each group is
+    expanded into k = num_attention_heads // vha_premix_groups heads via a per-group weight.
+    Requires q_lora_rank % vha_premix_groups == 0 and num_attention_heads % vha_premix_groups
+    == 0. DSv4 hybrid attention only; postmix is unaffected (still keyed on use_vha_attention)."""
+
+    vha_premix_groups: int | None = None
+    """Number of groups g_q the compressed Q is split into for the VHA premix. Per-group latent
+    dim is q_lora_rank // vha_premix_groups; per-group head expansion is num_attention_heads //
+    vha_premix_groups. Only used when use_vha_premix is True."""
+
     vha_q_lora_rank: int | None = None
     """Rank of the VHA Q low-rank projection. When set, Q projects to this rank per head before premix expansion."""
 
@@ -499,7 +518,7 @@ class TransformerConfig(ModelParallelConfig):
     """MoE Feed-Forward Network hidden size"""
 
     topk_method: str = "greedy"
-    """Options are greedy, group_limited_greedy, no_auxtc"""
+    """Options are greedy, group_limited_greedy, noaux_tc, quantile_balancing"""
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
@@ -516,7 +535,9 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use fusion node for MoE layer. Default is True"""
 
     moe_router_load_balancing_type: str = "aux_loss"
-    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
+    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn, none.
+    Use 'none' together with router_aux_loss_coef=0 when the router balances
+    load on its own (required by topk_method='quantile_balancing')."""
 
     moe_layer_freq: int | list[int] | None = None
     """Frequency between MoE layers and Dense layers. Accepts either:
@@ -607,6 +628,11 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
 
+    qb_n_bins: int = 1000
+    """Number of histogram bins for Quantile Balancing. Only used when
+    topk_method='quantile_balancing'. Higher values give more precise
+    quantile estimation at the cost of slightly more communication."""
+
     moe_split_feature_routing: bool = False
     """Enable multi-view (split-feature) MoE routing. When True, the router
     scores each expert with the sum of two independent views: the existing
@@ -644,6 +670,10 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_latent_size: int | None = None
     """The latent dimension size for latent MoE. Positive values enable latent MoE."""
+
+    latent_moe_use_norm: bool = False
+    """Apply RMSNorm to routed latent-MoE output before projecting it back to
+    the model hidden size."""
 
     ##################
     # Context Parallel
@@ -687,6 +717,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_w4a8: bool = False
     """Whether to use w4a8 for mlp gemm."""
+
+    use_w4a8_fused_quant: bool = False
+    """Whether to use fused CUDA operators for W4A8 online quantization."""
 
     full_fp8_computation: bool = False
     """Master switch for FP8 on Linear / ColumnParallelLinear / RowParallelLinear
@@ -805,6 +838,10 @@ class TransformerConfig(ModelParallelConfig):
 
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
+
+    mla_use_nope: bool = False
+    """Whether to bypass rotary position embeddings in MLA and use the
+    projected query and key channels directly."""
 
     hybrid_mla_q_lora_rank: int | None = None
     """Layer-local query low-rank width for MLA entries in a DSV4 hybrid model."""
@@ -1088,6 +1125,42 @@ class TransformerConfig(ModelParallelConfig):
     csa_dense_mode: bool = False
     """If True, skip CSAIndexer for CSA layers (1 < ratio < 128) and attend to all
     compressed positions.
+    """
+
+    csa_indexer_init_from_scratch: bool | None = None
+    """Whether the CSA Indexer weights are initialized instead of loaded.
+
+    This is about the *checkpoint*, not the training strategy, and is therefore
+    separate from ``csa_train_indexer_only``:
+
+    * ``True`` -- resuming a phase-1 checkpoint: it has no Indexer tensors at all
+      (phase 1 runs with ``csa_dense_mode=true``), so they must be initialized
+      from scratch. Leaving it ``False`` makes the AOA engine abort with
+      ``... indexer.linear_wq_b.weight should be assigned before!``.
+    * ``False`` -- resuming a phase-2/3 checkpoint (e.g. a fault-tolerant restart):
+      it does contain Indexer weights, and re-initializing them would
+      **silently** throw away all Indexer training done so far.
+
+    The flag is only read by the model's ``_gen_aoa_config``, which only runs on the
+    HF-loading path. There it is **mandatory**: leaving it ``None`` raises, because
+    which checkpoint a run starts from is a deliberate decision and must not be
+    guessed. Non-HF paths (flex/DCP resume, fresh start) never read it at all.
+    """
+
+    csa_train_indexer_only: bool = False
+    """Phase 2 training strategy: train only the CSA Indexer parameters.
+
+    Requires ``csa_dense_mode=False`` so the Indexer modules exist, and a
+    positive ``dsa_indexer_loss_coeff`` so they receive a training signal. The
+    backbone is frozen by the trainer before the optimizer is created; this flag
+    additionally keeps the recompute segments differentiable so the attached
+    indexer loss still gets a backward pass. It does not change any attention
+    value, the KL candidate range, or the main attention sparsity.
+
+    Only the base ``TransformerLayer`` keeps its recompute segment differentiable,
+    so ``enable_hy_sparse_attention=True`` (which swaps in
+    ``HySparseTransformerLayer``) is rejected rather than silently producing a
+    gradient-free Indexer.
     """
 
     csa_indexer_backend: str = "tilelang"
@@ -1605,6 +1678,49 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+            if self.csa_train_indexer_only:
+                if self.csa_dense_mode:
+                    raise ValueError(
+                        "csa_train_indexer_only=True requires csa_dense_mode=False; "
+                        "with csa_dense_mode=True no CSAIndexer is created and there "
+                        "would be no trainable parameter left."
+                    )
+                loss_coeff = getattr(self, "dsa_indexer_loss_coeff", None)
+                if not loss_coeff or float(loss_coeff) <= 0:
+                    raise ValueError(
+                        "csa_train_indexer_only=True requires a positive "
+                        f"dsa_indexer_loss_coeff, got {loss_coeff!r}; otherwise the "
+                        "Indexer receives no training signal."
+                    )
+                if not any(
+                    1 < int(ratio) < 128 for ratio in self.csa_compress_ratios
+                ):
+                    raise ValueError(
+                        "csa_train_indexer_only=True requires at least one CSA layer "
+                        "with 1 < csa_compress_ratios[i] < 128, got "
+                        f"{self.csa_compress_ratios}."
+                    )
+                if getattr(self, "enable_hy_sparse_attention", False):
+                    # enable_hy_sparse_attention swaps the layer class for
+                    # HySparseTransformerLayer, whose recompute call does not go
+                    # through keep_indexer_grad_path(). With a frozen backbone the
+                    # recompute segment output would stay stop_gradient=True and the
+                    # attached indexer loss would *silently* never get a backward
+                    # pass. HySparse also feeds a ``shared_kv`` kwarg that the CSA
+                    # attention forward swallows via **kwargs without using it, so
+                    # this combination is untested anyway. Fail loudly instead.
+                    raise ValueError(
+                        "csa_train_indexer_only=True is incompatible with "
+                        "enable_hy_sparse_attention=True: HySparseTransformerLayer "
+                        "does not keep its recompute segment differentiable, so the "
+                        "Indexer would silently receive no gradient."
+                    )
+        elif getattr(self, "csa_train_indexer_only", False):
+            raise ValueError(
+                "csa_train_indexer_only=True is only supported with "
+                "experimental_attention_variant='dsv4_hybrid', got "
+                f"{self.experimental_attention_variant!r}."
+            )
 
         # swa_high_precision_norm is only supported for DSv4 models.
         if (

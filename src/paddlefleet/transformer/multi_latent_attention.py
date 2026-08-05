@@ -62,6 +62,21 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
 
+def _is_incremental_decode(past_key_values, layer_idx, use_cache) -> bool:
+    """Whether this call is an incremental decode step for ``layer_idx``.
+
+    True once the layer has already written its prefill KV into the cache. Based
+    on the cache state rather than the query length so that a one-token prompt
+    is still treated as a prefill.
+    """
+    if not use_cache or past_key_values is None or layer_idx is None:
+        return False
+    has_layer_cache = getattr(past_key_values, "has_layer_cache", None)
+    if has_layer_cache is None:
+        return False
+    return bool(has_layer_cache(layer_idx))
+
+
 def build_hysparse_valid_range(
     attn_mask_startend_row_indices,
     seq_len,
@@ -582,6 +597,89 @@ class MultiLatentAttention(Attention):
                     )
                 )
 
+        # VHA postmix: ungrouped low-rank cross-head mixing (I + U Vᵀ) on the head
+        # axis, applied to the attention output (head space) before the output
+        # projection. Reuses use_vha_attention / vha_postmix_rank. Ungrouped only:
+        # MLA/MQA have no grouped o_proj to fold a block-diagonal mixer into.
+        self.use_vha_postmix = getattr(config, "use_vha_attention", False)
+        if self.use_vha_postmix:
+            # Use an explicit ValueError (not assert): assertions are stripped
+            # under `python -O`, which would silently let TP>1 mix only the
+            # local heads of each rank and deviate from the declared full-head
+            # postmix semantics.
+            if get_pg_size(self.pg_collection.tp) != 1:
+                raise ValueError(
+                    "VHA postmix currently supports tensor parallel size 1 "
+                    f"only, got tp={get_pg_size(self.pg_collection.tp)}."
+                )
+            nh = (
+                self.num_attention_heads_per_partition
+            )  # == num_attention_heads (TP=1)
+            rank = getattr(config, "vha_postmix_rank", None)
+            if rank is None:
+                rank = nh // 4
+            rank = max(1, min(rank, nh))
+            self.vha_postmix_rank = rank
+            self.vha_postmix_U = self.create_parameter(
+                shape=[nh, rank],
+                default_initializer=paddle.nn.initializer.Normal(
+                    mean=0.0, std=0.01
+                ),
+            )
+            self.vha_postmix_V = self.create_parameter(
+                shape=[nh, rank],
+                default_initializer=paddle.nn.initializer.Constant(
+                    0.0
+                ),  # identity at init
+            )
+        # Selective recompute for the VHA postmix. Only list configuration is
+        # supported; honours recompute_num_layers + recompute_method
+        # (first_n / block) like the other selective modules.
+        modules = self.config.recompute_modules
+        self.recompute_vha_postmix = False
+        if (
+            self.config.recompute_granularity == "selective"
+            and modules is not None
+        ):
+            if isinstance(modules, dict) and "vha_postmix" in modules:
+                raise ValueError(
+                    "recompute_modules['vha_postmix'] only supports list "
+                    "configuration"
+                )
+            if isinstance(modules, list) and "vha_postmix" in modules:
+                n = self.config.recompute_num_layers
+                if n is None:
+                    self.recompute_vha_postmix = True
+                elif self.config.recompute_method == "block":
+                    self.recompute_vha_postmix = need_recompute_in_block(
+                        self.layer_number, self.config, n
+                    )
+                elif self.config.recompute_method == "first_n":
+                    self.recompute_vha_postmix = need_recompute_in_first_n(
+                        self.layer_number, self.config, n
+                    )
+                else:
+                    raise ValueError(
+                        "recompute_method must be 'first_n' or 'block'"
+                    )
+
+    def _apply_vha_postmix(self, attn_out, U=None, V=None):
+        # attn_out: [b, sq, nh_pp * v_head_dim] (head space, pre-gate / pre output proj).
+        # Fused dense M = I + V @ U^T, then a single [nh,nh] GEMM on the head
+        # axis: rank-independent and faster than the split low-rank form; differs
+        # from the two-matmul path only by bf16 contraction order.
+        if U is None:
+            U = self.vha_postmix_U
+        if V is None:
+            V = self.vha_postmix_V
+        b, sq = attn_out.shape[0], attn_out.shape[1]
+        nh, d = self.num_attention_heads_per_partition, self.v_head_dim
+        mixed = attn_out.reshape([b * sq, nh, d])
+        M = paddle.matmul(V, U, transpose_y=True)  # [nh,r]@[r,nh]->[nh,nh]
+        M = M + paddle.eye(nh, dtype=M.dtype)
+        out = paddle.matmul(M, mixed)  # [nh,nh]@[B,nh,d]->[B,nh,d]
+        return out.reshape([b, sq, nh * d])
+
     def _compute_absorbed_q(self, query):
         """
         Compute absorbed query for FD MLA decode kernel.
@@ -717,6 +815,9 @@ class MultiLatentAttention(Attention):
         past_key_values = kwargs.get("past_key_values")
         layer_idx = kwargs.get("layer_idx")
         use_cache = kwargs.get("use_cache", False)
+        is_decode = _is_incremental_decode(
+            past_key_values, layer_idx, use_cache
+        )
 
         if hasattr(self.core_attention.config, "forward_meta"):  # decode mode
             # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
@@ -726,7 +827,12 @@ class MultiLatentAttention(Attention):
         else:
             q_absorbed, wv_b = None, None
 
-        if self.config.enable_hy_sparse_attention and shared_kv is not None:
+        hy_sparse_full = (
+            self.config.enable_hy_sparse_attention and shared_kv is not None
+        )
+        block_indices = None
+
+        if hy_sparse_full and not is_decode:
             if get_context_parallel_world_size() > 1:
                 cp_mode = getattr(
                     self.config, "cp_balance_mode", "dualchunk_allgather"
@@ -748,12 +854,23 @@ class MultiLatentAttention(Attention):
             # also failing to emit the top-k blocks. Activation recompute for
             # HySparse full layers is handled at the layer level
             # (HySparseTransformerLayer.full_recompute).
+            #
+            # Incremental decode (``is_decode``) skips this branch: the fused
+            # block-score kernels score a whole query row against the keys of
+            # the same forward, which a one-token step cannot provide. Decode
+            # instead runs the generic core_attention path (which maintains the
+            # KV cache) and re-derives the block scores from the cache in
+            # ``_hy_sparse_decode_block_indices`` below.
             core_attn_out, block_indices = self._hy_sparse_full_attention(
                 query,
                 key,
                 value,
                 attn_mask_startend_row_indices,
             )
+            if use_cache and past_key_values is not None:
+                # This branch bypasses core_attention, so the layer's own KV
+                # cache has to be seeded here for the later decode steps.
+                past_key_values.update(key, value, layer_idx)
         elif self.recompute_core_attention and self.training:
             core_attn_out = recompute(
                 self.core_attention,
@@ -812,14 +929,29 @@ class MultiLatentAttention(Attention):
 
         _log(core_attn_out, "core_attn_out", layer_num)
 
-        if self.config.enable_hy_sparse_attention and shared_kv is not None:
+        if hy_sparse_full:
             # Compressed KV latent shared with block-sparse attention in SWA
             # layers (single MQA head): [B, S, 1, kv_lora_rank + qk_rope_head_dim].
             shared_key = paddle.concat(
                 [kv_compressed.unsqueeze(2), k_pos_emb], axis=-1
             )
+            if use_cache and past_key_values is not None:
+                # Inference: accumulate across decode steps and hand the SWA
+                # layers the whole history instead of the current token only.
+                shared_key = past_key_values.update_shared(
+                    shared_key, layer_idx
+                )
+            if is_decode:
+                # The decode attention kernel carries no block-scoring epilogue,
+                # so score the single new query row against the cached keys
+                # here. This keeps the SWA layers' sparse branch -- and hence
+                # the model's output -- the same as a cache-less forward.
+                block_indices = self._hy_sparse_decode_block_indices(
+                    query, past_key_values, layer_idx
+                )
             shared_kv.append(shared_key)
-            # block_indices produced by the MHA block-score path above.
+            # block_indices from the prefill block-score kernel above, or from
+            # the decode-time scoring pass.
             shared_kv.append(block_indices)
 
         # =================
@@ -827,6 +959,21 @@ class MultiLatentAttention(Attention):
         # =================
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
+
+        # VHA postmix: low-rank cross-head mixing in head space, before the gate
+        # (mix-then-gate). Skip the nested selective recompute when already
+        # inside a layer-level recompute.
+        if self.use_vha_postmix:
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                core_attn_out = recompute(
+                    self._apply_vha_postmix, core_attn_out
+                )
+            else:
+                core_attn_out = self._apply_vha_postmix(core_attn_out)
 
         # Apply gated attention
         if self.gated_attention:
@@ -1027,6 +1174,59 @@ class MultiLatentAttention(Attention):
         core_attn_out = out.reshape([b, q_s, h * _dv])
         return core_attn_out, block_indices
 
+    def _hy_sparse_decode_block_indices(
+        self, query, past_key_values, layer_idx
+    ):
+        """Select top-k key blocks for one incremental-decode query token.
+
+        Prefill gets the block scores for free from the fused block-score kernel
+        (:meth:`_hy_sparse_full_attention`); the decode kernel has no such
+        epilogue, so the scoring row is recomputed from this layer's cached keys.
+        Without it the downstream SWA layers would have to drop their
+        block-sparse branch and quietly stop matching a cache-less forward.
+
+        Args:
+            query: [B, 1, H, Dk] this step's query (post-RoPE, decompressed).
+            past_key_values: cache exposing ``get_layer_kv``.
+            layer_idx: this layer's cache slot.
+
+        Returns:
+            [B, 1, topk] int32 document-relative block ids (-1 padding).
+        """
+        from paddlefleet.tilelang_ops.hysparse import (
+            decode_block_logit,
+            select_topk_blocks,
+        )
+
+        cached_key, _ = past_key_values.get_layer_kv(layer_idx)
+        kv_len = cached_key.shape[1]
+        block_B = self.config.hy_sparse_block_size
+        # Generation feeds one document per batch row, so the block grid is
+        # anchored at column 0 -- the same document layout the prefill
+        # valid_range describes (``attn_mask_startend_row_indices`` filled with
+        # the prompt length).
+        valid_range = paddle.concat(
+            [
+                paddle.zeros([query.shape[0], 1, 1], dtype="int32"),
+                paddle.full([query.shape[0], 1, 1], kv_len, dtype="int32"),
+            ],
+            axis=-1,
+        )
+        block_logit, lse = decode_block_logit(
+            query,
+            cached_key,
+            valid_range,
+            sm_scale=self.softmax_scale,
+            block_B=block_B,
+        )
+        return select_topk_blocks(
+            block_logit,
+            lse,
+            valid_range,
+            self.config.hy_sparse_topk,
+            block_B,
+        )
+
 
 class MLASelfAttention(MultiLatentAttention):
     """MLA Self-attention layer class
@@ -1180,6 +1380,14 @@ class MLASelfAttention(MultiLatentAttention):
         )
         if getattr(self, "gate_proj", None) is not None:
             specs["gate_proj.weight"] = (ortho_per_head, {"heads": num_heads})
+        # MQA (subclass) runs a second gated branch for block-sparse attention.
+        # sparse_gate_proj is built from gate_proj's in/out sizes, so it shares
+        # the head-major column layout and needs the same per-head slicing.
+        if getattr(self, "sparse_gate_proj", None) is not None:
+            specs["sparse_gate_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_heads},
+            )
         return specs
 
     def _is_cudagraph_active(self) -> bool:
@@ -1471,7 +1679,23 @@ class MLASelfAttention(MultiLatentAttention):
             # [num_tokens, qk_rope_head_dim] -> [num_tokens, 1, qk_rope_head_dim]
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
-            if self.config.apply_rope_fusion:
+            if getattr(self.config, "mla_use_nope", False):
+                q_no_pe = q[..., : self.qk_nope_head_dim]
+                q_pos_emb = q[..., self.qk_nope_head_dim :]
+                k_no_pe, value = paddle.split(
+                    kv,
+                    [self.qk_nope_head_dim, self.v_head_dim],
+                    axis=-1,
+                )
+                k_pe = k_pos_emb
+                query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
+                k_pos_emb = k_pos_emb.expand(
+                    *k_pos_emb.shape[:-2],
+                    self.num_attention_heads_per_partition,
+                    k_pos_emb.shape[-1],
+                )
+                key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
+            elif self.config.apply_rope_fusion:
                 from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,
@@ -1852,6 +2076,24 @@ class MQASelfAttention(MLASelfAttention):
                 self.swa_attn_sink = None
                 self.sparse_attn_sink = None
 
+            # VHA postmix for the block-sparse branch. The MQA path has two
+            # independent gated branches (sliding-window main + block-sparse),
+            # so each gets its own postmix params: the base vha_postmix_U/V
+            # serve the main branch, this set serves the sparse branch.
+            if self.use_vha_postmix:
+                nh = self.num_attention_heads_per_partition  # TP==1 for MQA
+                rank = self.vha_postmix_rank
+                self.sparse_vha_postmix_U = self.create_parameter(
+                    shape=[nh, rank],
+                    default_initializer=paddle.nn.initializer.Normal(
+                        mean=0.0, std=0.01
+                    ),
+                )
+                self.sparse_vha_postmix_V = self.create_parameter(
+                    shape=[nh, rank],
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+
     def forward(
         self,
         hidden_states,
@@ -1898,6 +2140,15 @@ class MQASelfAttention(MLASelfAttention):
                 **kwargs,
             )
 
+        # Inference (native KV cache path) state. ``is_decode`` is False during
+        # training and during the prefill pass.
+        past_key_values = kwargs.get("past_key_values")
+        layer_idx = kwargs.get("layer_idx")
+        use_cache = kwargs.get("use_cache", False)
+        is_decode = _is_incremental_decode(
+            past_key_values, layer_idx, use_cache
+        )
+
         # =====================
         # Query, Key, and Value
         # =====================
@@ -1940,7 +2191,6 @@ class MQASelfAttention(MLASelfAttention):
         )
 
         b, s = query.shape[0], query.shape[1]
-        kv_s = key.shape[1]
         block_B = self.config.hy_sparse_block_size
         sm_scale = self.softmax_scale
         window_size = self.config.sliding_window[0]
@@ -1951,25 +2201,58 @@ class MQASelfAttention(MLASelfAttention):
         shared_k = key.squeeze(2).contiguous()
         shared_v = value.squeeze(2).contiguous()
 
-        # Windowed valid_range for the sliding-window main path; document-anchored
-        # valid_range (no window clamp) for the block-sparse branch so its blocks
-        # match the full layer's block scoring / selected indices.
-        window_valid_range = build_hysparse_valid_range(
-            attn_mask_startend_row_indices, kv_s, b, window_size=window_size
-        )
-        doc_valid_range = build_hysparse_valid_range(
-            attn_mask_startend_row_indices, kv_s, b
-        )
-        if get_context_parallel_world_size() > 1:
-            cp_mode = getattr(
-                self.config, "cp_balance_mode", "dualchunk_allgather"
+        if use_cache and past_key_values is not None:
+            # Own (absorbed) KV cache. DynamicKVCache truncates SWA layers to
+            # window_size after every update, so the returned history holds at
+            # most window_size + 1 tokens during decode.
+            shared_k, shared_v = past_key_values.update(
+                shared_k, shared_v, layer_idx
             )
-            window_valid_range = ContextParallelScatterOp.apply(
-                window_valid_range, 1, cp_mode
+        kv_s = shared_k.shape[1]
+
+        if is_decode:
+            if s != 1:
+                raise ValueError(
+                    "HySparse MQA decode expects a single query token, got "
+                    f"seq_len={s}. Chunked prefill is not supported."
+                )
+            # The cache holds the most recent ``kv_s`` tokens and the query is
+            # the last of them, so the sliding window is the trailing
+            # ``window_size`` columns in cache-local coordinates.
+            bos = max(0, kv_s - window_size)
+            window_valid_range = paddle.concat(
+                [
+                    paddle.full([b, 1, 1], bos, dtype="int32"),
+                    paddle.full([b, 1, 1], kv_s, dtype="int32"),
+                ],
+                axis=-1,
             )
-            doc_valid_range = ContextParallelScatterOp.apply(
-                doc_valid_range, 1, cp_mode
+            # The block-sparse branch runs against the (untruncated) shared
+            # latent, so its range is built from that length further below.
+        else:
+            # Windowed valid_range for the sliding-window main path;
+            # document-anchored valid_range (no window clamp) for the
+            # block-sparse branch so its blocks match the full layer's block
+            # scoring / selected indices.
+            window_valid_range = build_hysparse_valid_range(
+                attn_mask_startend_row_indices,
+                kv_s,
+                b,
+                window_size=window_size,
             )
+            doc_valid_range = build_hysparse_valid_range(
+                attn_mask_startend_row_indices, kv_s, b
+            )
+            if get_context_parallel_world_size() > 1:
+                cp_mode = getattr(
+                    self.config, "cp_balance_mode", "dualchunk_allgather"
+                )
+                window_valid_range = ContextParallelScatterOp.apply(
+                    window_valid_range, 1, cp_mode
+                )
+                doc_valid_range = ContextParallelScatterOp.apply(
+                    doc_valid_range, 1, cp_mode
+                )
 
         # Sliding-window main path over the absorbed MQA dimensions.
         core_attn_out, _ = sliding_window_mqa_attention(
@@ -2017,11 +2300,43 @@ class MQASelfAttention(MLASelfAttention):
 
         core_attn_out = compute_absorbed_v(core_attn_out)
 
+        # VHA postmix (main branch): mix in head space before the gate.
+        if self.use_vha_postmix:
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                core_attn_out = recompute(
+                    self._apply_vha_postmix, core_attn_out
+                )
+            else:
+                core_attn_out = self._apply_vha_postmix(core_attn_out)
+
         # =================
         # Sparse attention computation
         # =================
-
         shared_key, shared_block_indices = shared_kv
+        if shared_block_indices is None:
+            raise ValueError(
+                "HySparse MQA layer "
+                f"(layer_number={getattr(self, 'layer_number', -1)}) needs "
+                "top-k block indices from its full-attention layer, but none "
+                "were provided."
+            )
+        if is_decode:
+            # The shared latent is never window-truncated, so its length is the
+            # whole KV history; the decode query's document range covers all of
+            # it (generation runs one document per batch row).
+            if get_context_parallel_world_size() != 1:
+                raise ValueError("doc_valid_range is not built for CP > 1")
+            doc_valid_range = paddle.concat(
+                [
+                    paddle.zeros([b, 1, 1], dtype="int32"),
+                    paddle.full([b, 1, 1], shared_key.shape[1], dtype="int32"),
+                ],
+                axis=-1,
+            )
         if get_context_parallel_world_size() > 1:
             cp_mode = getattr(
                 self.config, "cp_balance_mode", "dualchunk_allgather"
@@ -2064,8 +2379,8 @@ class MQASelfAttention(MLASelfAttention):
             if not is_dsa_available():
                 raise RuntimeError(
                     "HySparse block-sparse attention requires the DSA backend "
-                    "(FlashMLA sparse fwd + cuDNN DSA bwd), unavailable here: it "
-                    "needs SM100 + FlashMLA + the cuDNN frontend."
+                    "(FlashMLA sparse fwd + cuDNN DSA bwd), unavailable here: "
+                    "it needs SM100 + FlashMLA + the cuDNN frontend."
                 )
             sparse_core_attn_out, _ = block_sparse_mqa_attention_dsa(
                 query,
@@ -2087,6 +2402,22 @@ class MQASelfAttention(MLASelfAttention):
         )
 
         sparse_core_attn_out = compute_absorbed_v(sparse_core_attn_out)
+
+        # VHA postmix (sparse branch): own param set, mix before the sparse gate.
+        if self.use_vha_postmix:
+            U, V = self.sparse_vha_postmix_U, self.sparse_vha_postmix_V
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                sparse_core_attn_out = recompute(
+                    self._apply_vha_postmix, sparse_core_attn_out, U, V
+                )
+            else:
+                sparse_core_attn_out = self._apply_vha_postmix(
+                    sparse_core_attn_out, U, V
+                )
 
         # =================
         # Output. [b, sq, h]

@@ -132,24 +132,31 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
             paddle.arange(batch_sizes.shape[0]), batch_sizes
         ).cast("int32")
 
-        dx = paddle.zeros_like(x)
-        paddlefleet_deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
-            grad,
-            y,
-            dx,
-            tokens_per_expert_indices,
-        )
-        dx = paddle.cast(dx, paddle.float)
+        dx = None
+        if not x.stop_gradient:
+            dx = paddle.zeros_like(x)
+            paddlefleet_deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
+                grad,
+                y,
+                dx,
+                tokens_per_expert_indices,
+            )
+            dx = paddle.cast(dx, paddle.float)
 
-        dy = paddle.zeros_like(y, dtype=paddle.float)
-        k_grouped_bf16_gemm_tn_contiguous_aligned(
-            a=x,
-            b=grad,
-            d=dy,
-            ks=paddle.tolist(batch_sizes),
-            ks_tensor=batch_sizes.cast("int32"),
-            c=paddle.zeros_like(y, dtype=paddle.float),
-        )
+        # Frozen experts (DSv4 phase 2) must get None here: Paddle's PyLayer
+        # contract rejects a gradient for a stop_gradient input, and the wgrad
+        # GEMM would be wasted work.
+        dy = None
+        if not y.stop_gradient:
+            dy = paddle.zeros_like(y, dtype=paddle.float)
+            k_grouped_bf16_gemm_tn_contiguous_aligned(
+                a=x,
+                b=grad,
+                d=dy,
+                ks=paddle.tolist(batch_sizes),
+                ks_tensor=batch_sizes.cast("int32"),
+                c=paddle.zeros_like(y, dtype=paddle.float),
+            )
 
         del tokens_per_expert_indices
         return dx, dy
