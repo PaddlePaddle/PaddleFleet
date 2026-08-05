@@ -1149,34 +1149,6 @@ def _apply_rope(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_csa_indexer_loss_topk_effective(
-    config, index_topk: int, n_compressed: int
-) -> int:
-    """Return the TileLang CSA indexer top-k width used by indexer loss.
-
-    Phase semantics (driven by ``dsa_indexer_use_sparse_loss``, **not** by the
-    new TileLang switches):
-
-    * Phase 3 (``dsa_indexer_use_sparse_loss=True``): ``min(index_topk,
-      n_compressed)`` — selected-topk semantics, same as the existing
-      ``FusedDSAIndexerLoss`` / ``CSAIndexer.forward`` choice.
-    * Phase 2 (``dsa_indexer_use_sparse_loss=False``): ``n_compressed`` — the
-      selected set covers the full compressed candidate range and is later
-      consumed as full-range KL by the indexer loss path.
-    """
-    use_sparse_loss = bool(getattr(config, "dsa_indexer_use_sparse_loss", True))
-    if use_sparse_loss:
-        return min(int(index_topk), int(n_compressed))
-    return int(n_compressed)
-
-
-def _resolve_csa_indexer_attn_topk_effective(
-    index_topk: int, n_compressed: int
-) -> int:
-    """Return the compressed top-k width consumed by main CSA attention."""
-    return min(int(index_topk), int(n_compressed))
-
-
 def _map_compressed_topk_to_kv_full(
     topk_indices_compressed: Tensor,
     sq: int,
@@ -2233,6 +2205,23 @@ class CompressedSparseAttention(FleetLayer):
         )
         self.indexer_loss_coeff = getattr(config, "dsa_indexer_loss_coeff", 0.0)
 
+    def _resolve_topk_effective(self, n_compressed: int):
+        """Return the CSA indexer top-k width for current phase.
+
+        Phase semantics (driven by `dsa_indexer_use_sparse_loss`):
+        * Phase 3 (`dsa_indexer_use_sparse_loss=True`): select topk, same as the
+          existing `FusedDSAIndexerLoss` / `CSAIndexer.forward` choice.
+        * Phase 2 (`dsa_indexer_use_sparse_loss=False`): `n_compressed` - select
+          full compressed candidate range and is later consumed as full-range KL
+          by the indexer loss path.
+        """
+        use_sparse_loss = getattr(
+            self.config, "dsa_indexer_use_sparse_loss", True
+        )
+        if use_sparse_loss:
+            return min(self.indexer.index_topk, n_compressed)
+        return n_compressed
+
     def _compute_indexer_compressed_topk_idxs(
         self,
         query: Tensor,
@@ -2268,15 +2257,7 @@ class CompressedSparseAttention(FleetLayer):
         # only materialize main-attention indices. The backend branch remains
         # fixed across both forwards.
         need_indexer_loss = self.training and paddle.is_grad_enabled()
-        loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
-            self.config,
-            self.indexer.index_topk,
-            n_compressed,
-        )
-        attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
-            self.indexer.index_topk,
-            n_compressed,
-        )
+        topk_effective = self._resolve_topk_effective(n_compressed)
 
         causal_mask = _build_compressed_causal_mask(
             self.compress_ratio,
@@ -2321,7 +2302,7 @@ class CompressedSparseAttention(FleetLayer):
                     index_k_comp,
                     weights,
                     ratio=self.compress_ratio,
-                    topk_effective=attn_topk_effective,
+                    topk_effective=topk_effective,
                     valid_range=valid_range,
                     startend_row_indices=startend_row_indices,
                     doc_lens=doc_lens_list,
@@ -2350,7 +2331,7 @@ class CompressedSparseAttention(FleetLayer):
                     index_k_comp,
                     weights,
                     ratio=self.compress_ratio,
-                    topk_effective=attn_topk_effective,
+                    topk_effective=topk_effective,
                     valid_range=valid_range,
                 )
 
@@ -2385,7 +2366,7 @@ class CompressedSparseAttention(FleetLayer):
                     query.detach(),
                     key_for_loss.detach(),
                     self.softmax_scale,
-                    min(self.indexer.index_topk, n_compressed),
+                    topk_effective,
                     indexer_loss_coeff,
                     mask_for_loss,
                     getattr(self.config, "dsa_indexer_use_sparse_loss", True),
@@ -2426,10 +2407,10 @@ class CompressedSparseAttention(FleetLayer):
             )
 
         if (
-            topk_indices_compressed.shape[-1] > attn_topk_effective
+            topk_indices_compressed.shape[-1] > topk_effective
         ):  # Loss path may return wider top-k than attention consumes.
             topk_indices_compressed = topk_indices_compressed[
-                ..., :attn_topk_effective
+                ..., :topk_effective
             ].contiguous()
 
         compress_topk_idxs = _map_compressed_topk_to_kv_full(
@@ -2735,6 +2716,7 @@ class CompressedSparseAttention(FleetLayer):
             sq,
             docmask_meta=docmask_meta,
         )
+        window_idxs = window_idxs.astype("int32").contiguous()
 
         # Step 4: Compressed indices
         indexer_loss = None
@@ -2772,6 +2754,7 @@ class CompressedSparseAttention(FleetLayer):
                     offset,
                     docmask_meta=docmask_meta,
                 )
+            compress_topk_idxs = compress_topk_idxs.astype("int32")
 
             # For cudnn's second forward (both indexer and SA should be cudnn),
             # use [compress, window] order to generate lse_indexer. Otherwise,
@@ -3027,6 +3010,7 @@ class CompressedSparseAttention(FleetLayer):
             window_idxs = full_window_idxs[
                 :, position_offset : position_offset + sq, ...
             ]
+        window_idxs = window_idxs.astype("int32").contiguous()
 
         # Step 2: All-gather KV + compress
         kv_local = key.squeeze(2)  # [b, sq, hn]
@@ -3099,11 +3083,8 @@ class CompressedSparseAttention(FleetLayer):
                     and self.training
                     and paddle.is_grad_enabled()
                 )
-                loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
-                    self.config, self.indexer.index_topk, n_compressed_global
-                )
-                attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
-                    self.indexer.index_topk, n_compressed_global
+                topk_effective = self._resolve_topk_effective(
+                    n_compressed_global
                 )
 
                 # valid_range for varlen: [b, sq_local, 2] or None
@@ -3149,7 +3130,7 @@ class CompressedSparseAttention(FleetLayer):
                                     k_indexer_global,
                                     weights_indexer_bf,
                                     ratio=self.compress_ratio,
-                                    topk_effective=attn_topk_effective,
+                                    topk_effective=topk_effective,
                                     valid_range=valid_range,
                                     startend_row_indices=docmask_meta.startend_row_indices
                                     if docmask_meta is not None
@@ -3179,7 +3160,7 @@ class CompressedSparseAttention(FleetLayer):
                                     k_indexer_global,
                                     weights_indexer_bf,
                                     ratio=self.compress_ratio,
-                                    topk_effective=attn_topk_effective,
+                                    topk_effective=topk_effective,
                                     seq_offset=position_offset,
                                     valid_range=valid_range,
                                 )
@@ -3242,7 +3223,7 @@ class CompressedSparseAttention(FleetLayer):
                         query.detach(),
                         key_for_loss.detach(),
                         self.softmax_scale,
-                        min(self.indexer.index_topk, n_compressed_global),
+                        topk_effective,
                         indexer_loss_coeff,
                         mask_for_loss,
                         getattr(
@@ -3289,15 +3270,15 @@ class CompressedSparseAttention(FleetLayer):
                         q_indexer_bf,
                         k_indexer_global,
                         weights_indexer_bf,
-                        attn_topk_effective,
+                        topk_effective,
                         causal_mask,
                     )
 
                 if (
-                    topk_indices_compressed.shape[-1] > attn_topk_effective
+                    topk_indices_compressed.shape[-1] > topk_effective
                 ):  # CP loss path may return wider top-k than attention consumes.
                     topk_indices_compressed = topk_indices_compressed[
-                        ..., :attn_topk_effective
+                        ..., :topk_effective
                     ].contiguous()
 
                 compress_topk_idxs = map_compressed_topk_to_kv_full_cp(
@@ -3323,6 +3304,8 @@ class CompressedSparseAttention(FleetLayer):
                     compress_topk_idxs = compress_topk_idxs[
                         :, position_offset : position_offset + sq, ...
                     ]
+
+            compress_topk_idxs = compress_topk_idxs.astype("int32")
 
             if (
                 self.indexer is not None
