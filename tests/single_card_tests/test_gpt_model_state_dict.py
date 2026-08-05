@@ -19,8 +19,13 @@ from unittest import mock
 
 import numpy as np
 import paddle
+from paddle import nn
 from paddle.distributed import fleet
-from paddle.distributed.fleet.meta_parallel import PipelineLayer
+from paddle.distributed.fleet.meta_parallel import (
+    LayerDesc,
+    PipelineLayer,
+    SharedLayerDesc,
+)
 
 # from tests.unit_tests.test_utilities import Utils
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -139,8 +144,15 @@ class TestVirtualPipelineNameMapping(unittest.TestCase):
         "3": "model.lm_head",
     }
 
-    def _build_mapping(self, pp_keys):
+    def _build_mapping(
+        self, pp_keys, layers_desc=(), stage_id=0, index_to_stage=None
+    ):
         model = GPTModel.__new__(GPTModel)
+        model.layers = list(layers_desc)
+        model._stage_id = stage_id
+        model.get_stage_from_index = lambda idx: (index_to_stage or {}).get(
+            idx, stage_id
+        )
         with (
             mock.patch.object(
                 PipelineLayer,
@@ -185,6 +197,46 @@ class TestVirtualPipelineNameMapping(unittest.TestCase):
         )
         # every pipeline key keeps a unique single card name
         self.assertEqual(len(set(mapping.values())), len(pp_keys))
+
+    def test_chunk_shared_layer_keys_follow_shared_layer_rule(self):
+        # A SharedLayerDesc with `forward_func` is registered on the chunk
+        # itself under VPP, so the same parameter shows up both as
+        # `shared_layers.{name}.rest` and as `{chunk_start}.{name}.rest`. Both
+        # aliases must resolve to the same single card name.
+        layers_desc = [
+            SharedLayerDesc(
+                "embed_weight_share", nn.Linear, shared_weight_attr="weight"
+            ),
+            LayerDesc(nn.Linear),
+            LayerDesc(nn.Linear),
+            SharedLayerDesc(
+                "embed_weight_share",
+                nn.Linear,
+                forward_func=lambda layer, x: x,
+                shared_weight_attr="weight",
+            ),
+        ]
+        pp_keys = [
+            "shared_layers.embed_weight_share.weight",
+            "1.0.self_attn.o_proj.weight",
+            "3.embed_weight_share.weight",
+        ]
+        # stage 1 of a pp=2, vpp=2 run owns virtual stages 1 and 3
+        mapping = self._build_mapping(
+            pp_keys,
+            layers_desc=layers_desc,
+            stage_id=1,
+            index_to_stage={0: 0, 1: 1, 2: 0, 3: 1},
+        )
+
+        self.assertEqual(
+            mapping,
+            {
+                "shared_layers.embed_weight_share.weight": "model.lm_head.weight",
+                "1.0.self_attn.o_proj.weight": "model.layers.0.self_attn.o_proj.weight",
+                "3.embed_weight_share.weight": "model.lm_head.weight",
+            },
+        )
 
 
 if __name__ == "__main__":
