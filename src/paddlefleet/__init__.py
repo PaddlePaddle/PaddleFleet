@@ -97,6 +97,29 @@ with suppress(Exception):
     paddle.disable_signal_handler()
 
 PADDLEFLEET_TESTING = os.environ.get("PADDLEFLEET_TESTING", False)
+
+# transformers.audio_utils unconditionally calls
+# ``importlib.metadata.version("torchcodec")`` at import time in some releases.
+# When torchcodec is not installed this raises ``PackageNotFoundError`` and
+# breaks any downstream import that reaches ``transformers.processing_utils``.
+# Patch ``importlib.metadata.version`` so the missing torchcodec dist-info
+# resolves to a sentinel version instead of aborting the import chain.
+import importlib.metadata as _paddlefleet_im  # noqa: E402
+
+_paddlefleet_orig_version = _paddlefleet_im.version
+
+
+def _paddlefleet_patched_version(name, *args, **kwargs):
+    try:
+        return _paddlefleet_orig_version(name, *args, **kwargs)
+    except _paddlefleet_im.PackageNotFoundError:
+        if name == "torchcodec":
+            return "0.0.0"
+        raise
+
+
+_paddlefleet_im.version = _paddlefleet_patched_version
+
 _disabled_optional_modules = ["torchcodec"]
 if "torch" not in sys.modules and not PADDLEFLEET_TESTING:
     _disabled_optional_modules.extend(["torch", "torchvision"])
