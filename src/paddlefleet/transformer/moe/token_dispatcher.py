@@ -56,7 +56,7 @@ from .moonep import (
     is_moonep_available,
     moonep_combine,
     moonep_dispatch,
-    moonep_experts,
+    moonep_runtime_weights,
 )
 
 HAVE_HYBRID_EP = False
@@ -573,6 +573,7 @@ class _MoonEPManager(_DispatchManager):
         self._buffer = None
         self._buffer_signature = None
         self._bridge = None
+        self._num_dispatched_tokens = None
 
     def bind_experts(self, grouped_experts) -> None:
         self._bridge = MoonEPWeightBridge(
@@ -750,17 +751,14 @@ class _MoonEPManager(_DispatchManager):
         self.token_probs = None
         self.tokens_per_expert = None
         self.dispatched_probs = None
+        self._num_dispatched_tokens = None
         return hidden_states
 
-    def expert_compute(self, hidden_states, grouped_experts):
+    def runtime_expert_weights(self, grouped_experts):
         if self.handle is None:
-            raise RuntimeError("MoonEP expert compute requires an active plan.")
-        return moonep_experts(
-            hidden_states,
-            grouped_experts,
-            self.tokens_per_expert,
-            self._bridge,
-            self.handle,
+            raise RuntimeError("MoonEP runtime weights require an active plan.")
+        return moonep_runtime_weights(
+            grouped_experts, self._bridge, self.handle
         )
 
     def get_dispatched_metadata(self):
@@ -772,14 +770,31 @@ class _MoonEPManager(_DispatchManager):
         return self.tokens_per_expert
 
     def get_permuted_hidden_states_by_experts(self, hidden_states):
-        return hidden_states
+        self._num_dispatched_tokens = int(hidden_states.shape[0])
+        num_valid_tokens = int(self.tokens_per_expert.sum().item())
+        return hidden_states[:num_valid_tokens]
 
     def get_restored_hidden_states_by_experts(self, hidden_states):
-        if self.dispatched_probs is None:
-            return hidden_states
-        return hidden_states * self.dispatched_probs.astype(
-            hidden_states.dtype
-        ).unsqueeze(-1)
+        if self.dispatched_probs is not None:
+            hidden_states = hidden_states * self.dispatched_probs[
+                : hidden_states.shape[0]
+            ].astype(hidden_states.dtype).unsqueeze(-1)
+        if hidden_states.shape[0] != self._num_dispatched_tokens:
+            hidden_states = paddle.concat(
+                [
+                    hidden_states,
+                    paddle.zeros(
+                        [
+                            self._num_dispatched_tokens
+                            - hidden_states.shape[0],
+                            hidden_states.shape[1],
+                        ],
+                        dtype=hidden_states.dtype,
+                    ),
+                ],
+                axis=0,
+            )
+        return hidden_states
 
 
 class _DeepEPManager(_DispatchManager):
@@ -1126,12 +1141,12 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         if isinstance(self._comm_manager, _MoonEPManager):
             self._comm_manager.bind_experts(grouped_experts)
 
-    def expert_compute(self, hidden_states, grouped_experts):
+    def runtime_expert_weights(self, grouped_experts):
         if not isinstance(self._comm_manager, _MoonEPManager):
             raise RuntimeError(
-                "expert_compute is only provided by the MoonEP manager."
+                "runtime_expert_weights is only provided by the MoonEP manager."
             )
-        return self._comm_manager.expert_compute(hidden_states, grouped_experts)
+        return self._comm_manager.runtime_expert_weights(grouped_experts)
 
     def dispatch_preprocess(
         self,

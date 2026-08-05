@@ -100,7 +100,7 @@ class TestMoonEP(unittest.TestCase):
         finally:
             buffer.destroy()
 
-    def test_moe_layers_share_buffer_and_match_reference(self):
+    def test_moe_layers_share_buffer_and_reuse_expert_activation(self):
         import paddle.nn.functional as F
 
         from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -129,7 +129,7 @@ class TestMoonEP(unittest.TestCase):
             num_experts_per_tok=K,
             moe_intermediate_size=I,
             gated_linear_unit=True,
-            hidden_act=F.silu,
+            hidden_act=F.gelu,
             use_bias=False,
             bf16=True,
             params_dtype=paddle.bfloat16,
@@ -260,7 +260,7 @@ class TestMoonEP(unittest.TestCase):
             fc1 = paddle.matmul(reference_hidden, reference_w1[expert_id])
             gate, up = paddle.chunk(fc1, 2, axis=-1)
             expert_output = paddle.matmul(
-                F.silu(gate) * up, reference_w2[expert_id]
+                F.gelu(gate) * up, reference_w2[expert_id]
             )
             reference_output += expert_output * reference_route[
                 :, expert_id

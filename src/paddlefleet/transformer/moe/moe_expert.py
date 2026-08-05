@@ -295,8 +295,15 @@ class GroupedMLPExpert(FleetLayer):
         self,
         permuted_local_hidden_states: paddle.Tensor,
         tokens_per_expert: paddle.Tensor,
+        expert_weights: tuple[paddle.Tensor, paddle.Tensor] | None = None,
     ):
         """Forward step of the GroupedMLP without TP/DP."""
+
+        weight1, weight2 = (
+            expert_weights
+            if expert_weights is not None
+            else (self.weight1, self.weight2)
+        )
 
         if permuted_local_hidden_states.numel() != 0:
             tokens_per_expert = tokens_per_expert.cpu().tolist()
@@ -305,13 +312,13 @@ class GroupedMLPExpert(FleetLayer):
             if self.moe_deep_gemm:
                 fc1_output = DeepGEMMBMMFunction.apply(
                     permuted_local_hidden_states,
-                    self.weight1,
+                    weight1,
                     paddle.to_tensor(tokens_per_expert, dtype="int32"),
                 )
             else:
                 fc1_output = BMMFunction.apply(
                     permuted_local_hidden_states,
-                    self.weight1,
+                    weight1,
                     tokens_per_expert,
                 )
             if self.activation_recompute:
@@ -323,20 +330,20 @@ class GroupedMLPExpert(FleetLayer):
                 if self.moe_deep_gemm:
                     fc2_output = DeepGEMMBMMFunction.apply(
                         intermediate_parallel,
-                        self.weight2,
+                        weight2,
                         paddle.to_tensor(tokens_per_expert, dtype="int32"),
                     )
                 else:
                     fc2_output = BMMFunction.apply(
-                        intermediate_parallel, self.weight2, tokens_per_expert
+                        intermediate_parallel, weight2, tokens_per_expert
                     )
         else:
             # No token is allocated for local experts.
             assert paddle.count_nonzero(tokens_per_expert) == 0
 
             # Make sure params of experts still have gradients even given zero tokens.
-            w1 = self.weight1.reshape(self.config.hidden_size, -1)
-            w2 = self.weight2.reshape(-1, self.config.hidden_size)
+            w1 = weight1.reshape(weight1.shape[1], -1)
+            w2 = weight2.reshape(-1, weight2.shape[2])
             h = paddle.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
                 raise NotImplementedError(

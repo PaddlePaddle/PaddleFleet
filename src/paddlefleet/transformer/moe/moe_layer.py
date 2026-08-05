@@ -837,8 +837,13 @@ class MoELayer(nn.Layer):
     ):
         global_input_tokens, tokens_per_expert = self.permute(hidden_states)
         if self.moe_token_dispatcher_type == "moonep":
-            expert_outs = self.token_dispatcher.expert_compute(
-                global_input_tokens, self.grouped_gemm_experts
+            runtime_weights = self.token_dispatcher.runtime_expert_weights(
+                self.grouped_gemm_experts
+            )
+            expert_outs, _ = self.grouped_gemm_experts(
+                global_input_tokens,
+                tokens_per_expert,
+                expert_weights=runtime_weights,
             )
         else:
             expert_outs = self.expert_forward(
@@ -934,11 +939,6 @@ class MoELayer(nn.Layer):
             raise ValueError(
                 "moe_token_dispatcher_type='moonep' requires "
                 "moe_expert_fusion=True."
-            )
-        if not self.config.gated_linear_unit:
-            raise ValueError(
-                "moe_token_dispatcher_type='moonep' currently requires "
-                "gated_linear_unit=True."
             )
         if self.fp8 or self.fp8_dispatch or self.use_w4a8:
             raise ValueError(

@@ -19,7 +19,13 @@ from unittest import mock
 
 import paddle
 
-from paddlefleet.transformer.moe import moe_layer, moonep, token_dispatcher
+from paddlefleet.transformer.moe import (
+    moe_expert,
+    moe_layer,
+    moonep,
+    token_dispatcher,
+)
+from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.moe.token_dispatcher import (
     MoEFlexTokenDispatcher,
@@ -150,6 +156,38 @@ class TestMoonEPDispatcher(unittest.TestCase):
         ):
             manager._ensure_buffer(paddle.ones([2, 4], dtype="bfloat16"))
 
+    def test_runtime_layout_trims_and_restores_padding(self):
+        manager = object.__new__(_MoonEPManager)
+        manager.tokens_per_expert = paddle.to_tensor([1, 2], dtype="int64")
+        manager.dispatched_probs = paddle.to_tensor(
+            [1.0, 0.5, 0.25, 0.0, 0.0], dtype="float32"
+        )
+        manager._num_dispatched_tokens = None
+        dispatched = paddle.arange(10, dtype="float32").reshape([5, 2])
+
+        valid = manager.get_permuted_hidden_states_by_experts(dispatched)
+        restored = manager.get_restored_hidden_states_by_experts(
+            paddle.ones_like(valid)
+        )
+
+        self.assertEqual(valid.shape, [3, 2])
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    restored,
+                    paddle.to_tensor(
+                        [
+                            [1.0, 1.0],
+                            [0.5, 0.5],
+                            [0.25, 0.25],
+                            [0.0, 0.0],
+                            [0.0, 0.0],
+                        ]
+                    ),
+                )
+            )
+        )
+
     def test_moonep_config_rejects_unsupported_modes(self):
         config = types.SimpleNamespace(
             bf16=True,
@@ -176,7 +214,6 @@ class TestMoonEPDispatcher(unittest.TestCase):
         for owner, target, value, error in (
             (config, "bf16", False, "requires bf16=True"),
             (layer, "moe_expert_fusion", False, "moe_expert_fusion=True"),
-            (config, "gated_linear_unit", False, "gated_linear_unit=True"),
             (layer, "fp8", True, "BF16 expert compute only"),
             (layer, "use_ue8m0", True, "UE8M0 or SonicMoE"),
             (layer, "using_sonic_moe", True, "UE8M0 or SonicMoE"),
@@ -201,6 +238,95 @@ class TestMoonEPDispatcher(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, error):
                     MoELayer._validate_moonep_config(layer)
                 setattr(owner, target, original)
+
+        config.gated_linear_unit = False
+        MoELayer._validate_moonep_config(layer)
+
+    def test_grouped_expert_uses_runtime_weights_and_activation(self):
+        activation = mock.Mock(side_effect=lambda hidden: hidden + 1)
+        expert = types.SimpleNamespace(
+            moe_deep_gemm=False,
+            activation_recompute=False,
+            activation_func=activation,
+            weight1=paddle.zeros([1]),
+            weight2=paddle.zeros([1]),
+        )
+        hidden = paddle.ones([2, 2])
+        tokens_per_expert = paddle.to_tensor([2], dtype="int64")
+        runtime_weight1 = paddle.ones([1, 2, 4])
+        runtime_weight2 = paddle.ones([1, 4, 2])
+        fc1_output = paddle.full([2, 4], 2.0)
+        expected = paddle.full([2, 2], 3.0)
+
+        with mock.patch.object(
+            moe_expert.BMMFunction,
+            "apply",
+            side_effect=(fc1_output, expected),
+        ) as grouped_gemm:
+            output, _ = GroupedMLPExpert.forward(
+                expert,
+                hidden,
+                tokens_per_expert,
+                expert_weights=(runtime_weight1, runtime_weight2),
+            )
+
+        self.assertIs(grouped_gemm.call_args_list[0].args[1], runtime_weight1)
+        self.assertIs(grouped_gemm.call_args_list[1].args[1], runtime_weight2)
+        activation.assert_called_once()
+        self.assertIs(activation.call_args.args[0], fc1_output)
+        self.assertTrue(bool(paddle.equal_all(output, expected)))
+
+    def test_runtime_weights_delegate_gradient_reduction(self):
+        class _Bridge:
+            def __init__(self):
+                self.full_weights = (
+                    paddle.zeros([2, 2], dtype="float32"),
+                    paddle.zeros([2, 2], dtype="float32"),
+                )
+                self.plan = None
+
+            def prepare(self, weight1, weight2, plan):
+                self.plan = plan
+                for runtime, local in zip(
+                    self.full_weights, (weight1, weight2)
+                ):
+                    runtime.copy_(local)
+
+            def reduce_grads(self, plan, grad_weight1, grad_weight2):
+                self.plan = plan
+                return grad_weight1 * 5, grad_weight2 * 7
+
+        grouped_experts = types.SimpleNamespace(
+            weight1=paddle.ones([2, 2], dtype="float32"),
+            weight2=paddle.ones([2, 2], dtype="float32"),
+        )
+        grouped_experts.weight1.stop_gradient = False
+        grouped_experts.weight2.stop_gradient = False
+        bridge = _Bridge()
+        plan = object()
+
+        runtime_weight1, runtime_weight2 = moonep.moonep_runtime_weights(
+            grouped_experts, bridge, plan
+        )
+        (runtime_weight1 * 2).sum().add((runtime_weight2 * 3).sum()).backward()
+
+        self.assertIs(bridge.plan, plan)
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    grouped_experts.weight1.grad,
+                    paddle.full([2, 2], 10.0),
+                )
+            )
+        )
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    grouped_experts.weight2.grad,
+                    paddle.full([2, 2], 21.0),
+                )
+            )
+        )
 
 
 class TestMoonEPBufferCache(unittest.TestCase):

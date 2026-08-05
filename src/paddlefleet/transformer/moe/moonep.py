@@ -289,12 +289,6 @@ class MoonEPWeightBridge:
             )
         if len(weight1_shape) != 3 or len(weight2_shape) != 3:
             raise ValueError("MoonEP requires grouped 3-D expert weights.")
-        intermediate_size = int(weight2_shape[1])
-        if int(weight1_shape[2]) != 2 * intermediate_size:
-            raise ValueError(
-                "MoonEP requires packed SwiGLU weight1 with shape "
-                "[local_experts, hidden, 2 * intermediate]."
-            )
 
         projection_shapes = (
             [int(value) for value in weight1_shape],
@@ -466,116 +460,29 @@ class MoonEPCombine(paddle.autograd.PyLayer):
         return grad_expert_output
 
 
-class MoonEPExperts(paddle.autograd.PyLayer):
-    """SwiGLU grouped MLP over MoonEP's padded E+B expert groups."""
+class MoonEPRuntimeWeights(paddle.autograd.PyLayer):
+    """Expose prefetched E+B weights while reducing their grads to owners."""
 
     @staticmethod
-    def forward(
-        ctx,
-        hidden_states,
-        weight1,
-        weight2,
-        tokens_per_expert,
-        bridge,
-        plan,
-    ):
+    def forward(ctx, weight1, weight2, bridge, plan):
         bridge.prepare(weight1, weight2, plan)
-        weight1_runtime, weight2_runtime = bridge.full_weights
-        batch_sizes = [int(value) for value in tokens_per_expert.cpu().tolist()]
-        num_valid_tokens = sum(batch_sizes)
-        hidden = hidden_states[:num_valid_tokens]
-        fc1_output = paddle.incubate.nn.functional.batched_gemm(
-            hidden, weight1_runtime, batch_sizes
-        )
-        gate, up = paddle.chunk(fc1_output, 2, axis=-1)
-        activated = paddle.nn.functional.silu(gate) * up
-        output = paddle.incubate.nn.functional.batched_gemm(
-            activated, weight2_runtime, batch_sizes
-        )
-        if num_valid_tokens != hidden_states.shape[0]:
-            output = paddle.concat(
-                [
-                    output,
-                    paddle.zeros(
-                        [
-                            hidden_states.shape[0] - num_valid_tokens,
-                            hidden_states.shape[1],
-                        ],
-                        dtype=output.dtype,
-                    ),
-                ],
-                axis=0,
-            )
-
-        ctx.save_for_backward(hidden, gate, up, activated)
-        ctx.batch_sizes = batch_sizes
-        ctx.num_input_tokens = hidden_states.shape[0]
         ctx.bridge = bridge
         ctx.plan = plan
         ctx.weight1_dtype = weight1.dtype
         ctx.weight2_dtype = weight2.dtype
         ctx.set_grad_in_dtype_consistent(False)
-        return output
+        return bridge.full_weights
 
     @staticmethod
-    def backward(ctx, grad_output):
-        hidden, gate, up, activated = ctx.saved_tensor()
-        weight1_runtime, weight2_runtime = ctx.bridge.full_weights
-        grad_output = grad_output[: hidden.shape[0]].contiguous()
-
-        grad_weight2 = paddle.incubate.nn.functional.batched_gemm(
-            activated,
-            grad_output,
-            ctx.batch_sizes,
-            trans_lhs=True,
-        )
-        grad_activated = paddle.incubate.nn.functional.batched_gemm(
-            grad_output,
-            weight2_runtime,
-            ctx.batch_sizes,
-            trans_rhs=True,
-        )
-        sigmoid = paddle.nn.functional.sigmoid(gate)
-        silu_gate = gate * sigmoid
-        grad_gate = grad_activated * up * sigmoid * (1 + gate * (1 - sigmoid))
-        grad_up = grad_activated * silu_gate
-        grad_fc1 = paddle.concat([grad_gate, grad_up], axis=-1)
-        grad_hidden = paddle.incubate.nn.functional.batched_gemm(
-            grad_fc1,
-            weight1_runtime,
-            ctx.batch_sizes,
-            trans_rhs=True,
-        )
-        grad_weight1 = paddle.incubate.nn.functional.batched_gemm(
-            hidden,
-            grad_fc1,
-            ctx.batch_sizes,
-            trans_lhs=True,
-        )
+    def backward(ctx, grad_weight1, grad_weight2):
         grad_weight1, grad_weight2 = ctx.bridge.reduce_grads(
             ctx.plan,
             grad_weight1,
             grad_weight2,
         )
-        if hidden.shape[0] != ctx.num_input_tokens:
-            grad_hidden = paddle.concat(
-                [
-                    grad_hidden,
-                    paddle.zeros(
-                        [
-                            ctx.num_input_tokens - hidden.shape[0],
-                            hidden.shape[1],
-                        ],
-                        dtype=grad_hidden.dtype,
-                    ),
-                ],
-                axis=0,
-            )
         return (
-            grad_hidden,
             grad_weight1.astype(ctx.weight1_dtype),
             grad_weight2.astype(ctx.weight2_dtype),
-            None,
         )
 
 
@@ -601,18 +508,7 @@ def moonep_combine(expert_output, buffer, plan, bridge):
     return MoonEPCombine.apply(expert_output, buffer, plan, bridge)
 
 
-def moonep_experts(
-    hidden_states,
-    grouped_experts,
-    tokens_per_expert,
-    bridge,
-    plan,
-):
-    return MoonEPExperts.apply(
-        hidden_states,
-        grouped_experts.weight1,
-        grouped_experts.weight2,
-        tokens_per_expert,
-        bridge,
-        plan,
+def moonep_runtime_weights(grouped_experts, bridge, plan):
+    return MoonEPRuntimeWeights.apply(
+        grouped_experts.weight1, grouped_experts.weight2, bridge, plan
     )
