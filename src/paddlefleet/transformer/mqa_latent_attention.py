@@ -52,6 +52,20 @@ the YaRN ``mscale`` is a constant and the Hadamard ``rotate_activation`` is
 orthogonal, so no per-document position reset is needed. Equivalence to running
 every document on its own therefore reduces to index correctness, which is what
 ``_derive_csa_doc_boundaries`` plus the index builders below guarantee.
+
+Context parallel (``contiguous_allgather`` only, as the HCA layers of the same
+model require at ``dsv4_hybrid_attention.py:607-611``) follows the same
+"Miles pattern" as ``CSASelfAttention._forward_cp``: the query slice stays
+sharded, only the low-dimensional KV latent is all-gathered to the global
+length, and the output comes back sharded with no reduce-scatter. The index
+tables are built over the *global* sequence and then row-sliced to this rank,
+which is exactly right because ``_derive_csa_doc_boundaries`` and the builders
+are ``seqlen``-agnostic and their column values are global token ids -- the same
+space the all-gathered KV is indexed in. ``attn_mask_startend_row_indices``
+already arrives at the global length under CP
+(``dsv4_hybrid_attention.py:634``), while ``query`` / ``key`` / ``x`` / ``qr``
+arrive local but RoPE'd with global positions
+(``multi_latent_attention.py:1485-1545``).
 """
 
 from __future__ import annotations
@@ -64,8 +78,9 @@ import paddle.nn.functional as F
 from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
-from paddlefleet.parallel_state import get_context_parallel_world_size
+from paddlefleet.context_parallel_utils import ContextParallelGatherOp
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.csa_attention import (
     TileLangCSAIndexerLossAutoScaler,
     _build_mqa_causal_topk_idxs_from_doc_bounds,
@@ -144,6 +159,34 @@ class MQALatentAttention(FleetLayer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
+        # CP state, same derivation as csa_attention.py:2079-2090.
+        cp_pg = pg_collection.cp if pg_collection is not None else None
+        if cp_pg is not None and getattr(cp_pg, "nranks", 1) > 1:
+            self.cp_group = cp_pg
+            self.cp_size = cp_pg.nranks
+            self.cp_rank = cp_pg.rank
+            self.cp_enabled = True
+            # Deliberately the *same* constraint the HCA layers of this model
+            # assert (dsv4_hybrid_attention.py:607-611), not a weaker one: the
+            # contiguous layout is what makes "build the index table over the
+            # global sequence, then row-slice this rank's queries" correct, and
+            # it is what makes the all-gathered KV land in natural global order.
+            if (
+                getattr(config, "cp_balance_mode", None)
+                != "contiguous_allgather"
+            ):
+                raise NotImplementedError(
+                    "non_absorbed_mqa=True under context parallel requires "
+                    "cp_balance_mode='contiguous_allgather' (the same mode the "
+                    "hybrid model's HCA layers require), got "
+                    f"{getattr(config, 'cp_balance_mode', None)!r}."
+                )
+        else:
+            self.cp_group = None
+            self.cp_size = 1
+            self.cp_rank = 0
+            self.cp_enabled = False
+
         # ``k_channels`` is the MHA q_head_dim (qk_nope + qk_rope), NOT the 576
         # latent width: absorption is exactly score-preserving, so the MHA
         # softmax scale must be kept.
@@ -217,7 +260,8 @@ class MQALatentAttention(FleetLayer):
             key:   ``[b, s, 1, kv_lora_rank + qk_rope_head_dim]`` shared latent.
             value: unused (``None``); the V side lives inside ``key``.
             attn_mask_startend_row_indices: ``[b, 1, s, 1]`` exclusive per-token
-                document end rows. ``None`` means a single document.
+                document end rows, at the **global** sequence length under CP.
+                ``None`` means a single document.
             x / qr: hidden states / q latent, inputs of the DSA indexer.
             v_b_proj_weight: ``[kv_lora_rank, h, v_head_dim]`` de-absorption
                 weight (the V slice of ``kv_b_proj``).
@@ -226,21 +270,13 @@ class MQALatentAttention(FleetLayer):
                 row mean, as CSA does at ``csa_attention.py:1306``.
 
         Returns:
-            ``[b, s, h * v_head_dim]``
+            ``[b, s, h * v_head_dim]`` (this rank's query slice under CP)
         """
         if packed_seq_params is not None:
             raise NotImplementedError(
                 "non_absorbed_mqa=True does not support packed_seq_params; "
                 "document masking is driven by "
                 "attn_mask_startend_row_indices."
-            )
-        if get_context_parallel_world_size() > 1:
-            raise NotImplementedError(
-                "non_absorbed_mqa=True does not support context parallel yet: "
-                "the document metadata below is derived in local token space, "
-                "while a CP rank only holds a query slice of the globally "
-                "all-gathered KV. Keep non_absorbed_mqa=false for CP runs (the "
-                "dense MHA path supports contiguous_allgather)."
             )
         if v_b_proj_weight is None:
             raise ValueError(
@@ -254,16 +290,27 @@ class MQALatentAttention(FleetLayer):
                 "non_absorbed_mqa=True requires micro batch size 1 (documents "
                 f"are packed along the sequence), got b={b}."
             )
+        # Under CP this rank owns global query positions
+        # [position_offset, position_offset + s). Everything index-related is
+        # derived at s_global and row-sliced; the KV is all-gathered so that the
+        # global column ids in those tables address it directly.
+        s_global = s * self.cp_size
+        position_offset = self.cp_rank * s
         kv = key.squeeze(2).contiguous()  # [b, s, kv_lora + qk_rope]
+        kv = all_gather_cp(
+            kv, dim=1, group=self.cp_group
+        )  # -> [b, s_global, .]
         kv_lora_rank = int(v_b_proj_weight.shape[0])
 
         with paddle.no_grad():
             row_end = attn_mask_startend_row_indices
             if row_end is None:
-                row_end = paddle.full([b, 1, s, 1], s, dtype="int32")
-            _validate_csa_docmask_shape(row_end, b, s)
+                row_end = paddle.full(
+                    [b, 1, s_global, 1], s_global, dtype="int32"
+                )
+            _validate_csa_docmask_shape(row_end, b, s_global)
             doc_start, doc_len, is_valid, doc_lens, _ = (
-                _derive_csa_doc_boundaries(row_end, s)
+                _derive_csa_doc_boundaries(row_end, s_global)
             )
 
         if self.indexer is None:
@@ -271,7 +318,7 @@ class MQALatentAttention(FleetLayer):
             # tests): per-document full causal attention, mathematically
             # identical to dense MHA.
             token_indices = self._build_full_causal_indices(
-                b, s, doc_start, is_valid
+                b, s_global, doc_start, is_valid, position_offset, s
             )
             core_out = self._sparse_attn(
                 query, kv, token_indices, self.softmax_scale, kv_lora_rank
@@ -290,23 +337,43 @@ class MQALatentAttention(FleetLayer):
             doc_lens,
             kv_lora_rank,
             input_ids,
+            position_offset,
         )
 
     # ------------------------------------------------------------------
     # index construction / kernel plumbing
     # ------------------------------------------------------------------
     @staticmethod
-    def _build_full_causal_indices(b, s, doc_start, is_valid) -> Tensor:
-        """Per-document full-causal ``[b, s, s]`` int32 table (``-1`` padded)."""
+    def _build_full_causal_indices(
+        b, s_global, doc_start, is_valid, position_offset=0, s_local=None
+    ) -> Tensor:
+        """Per-document full-causal ``[b, s_local, s_global]`` int32 (``-1`` pad).
+
+        Built over the global sequence and row-sliced to this CP rank, so the
+        column values stay global token ids. ``O(s_global^2)`` while building,
+        which is why this mode is an equivalence experiment, not production.
+        """
         with paddle.no_grad():
             indices, _ = _build_mqa_causal_topk_idxs_from_doc_bounds(
-                b, s, doc_start, is_valid
+                b, s_global, doc_start, is_valid
             )
+            if s_local is not None and s_local != s_global:
+                indices = indices[
+                    :, position_offset : position_offset + s_local
+                ]
             indices = indices.contiguous()
         indices.stop_gradient = True
         return indices
 
-    def _indexer_valid_range(self, s, doc_start, doc_len, is_valid):
+    def _indexer_valid_range(
+        self,
+        s_global,
+        doc_start,
+        doc_len,
+        is_valid,
+        position_offset=0,
+        s_local=None,
+    ):
         """Non-local candidate range per query, in **global token** space.
 
         The forced local window already covers the last ``window_size`` causal
@@ -316,19 +383,27 @@ class MQALatentAttention(FleetLayer):
         Because the clamped end never exceeds the kernel's own causal limit, no
         masked ``-inf`` column can enter the top-k.
 
+        Built over the global sequence and row-sliced to this CP rank; the two
+        columns stay global token ids, which is what the kernel's
+        ``seq_offset``-aware causal bound expects.
+
         Returns:
-            ``(valid_range [1, s, 2] int32, row_empty [1, s, 1] bool)``.
+            ``(valid_range [1, s_local, 2] int32, row_empty [1, s_local, 1])``.
         """
-        positions = paddle.arange(s, dtype="int64")
+        positions = paddle.arange(s_global, dtype="int64")
         causal_avail = paddle.minimum(positions - doc_start + 1, doc_len)
         n_avail = paddle.clip(causal_avail - self.window_size, min=0)
         n_avail = paddle.where(is_valid, n_avail, paddle.zeros_like(n_avail))
-        valid_range = (
-            paddle.stack([doc_start, doc_start + n_avail], axis=-1)
-            .cast("int32")
-            .unsqueeze(0)
-        )
-        return valid_range, (n_avail == 0).reshape([1, s, 1])
+        valid_range = paddle.stack(
+            [doc_start, doc_start + n_avail], axis=-1
+        ).cast("int32")
+        if s_local is not None and s_local != s_global:
+            valid_range = valid_range[
+                position_offset : position_offset + s_local
+            ]
+            n_avail = n_avail[position_offset : position_offset + s_local]
+        rows = int(valid_range.shape[0])
+        return valid_range.unsqueeze(0), (n_avail == 0).reshape([1, rows, 1])
 
     def _sparse_attn(self, query, kv, token_indices, sm_scale, d_v):
         """Sparse MQA over the absorbed latent, via the shared cudnn backend.
@@ -376,12 +451,14 @@ class MQALatentAttention(FleetLayer):
         doc_lens,
         kv_lora_rank,
         input_ids=None,
+        position_offset=0,
     ) -> Tensor:
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk_fwd,
         )
 
         b, s = int(query.shape[0]), int(query.shape[1])
+        s_global = s * self.cp_size
         # The indexer loss is only attached on the grad-enabled forward. Under
         # full-layer recompute the first forward runs under no_grad and must
         # only materialise indices; both passes see identical inputs, so the
@@ -397,10 +474,14 @@ class MQALatentAttention(FleetLayer):
 
         with paddle.no_grad():
             window_idxs = _build_window_topk_idxs_from_doc_bounds(
-                b, s, self.window_size, doc_start, is_valid
+                b, s_global, self.window_size, doc_start, is_valid
             ).cast("int32")
+            if self.cp_enabled:
+                window_idxs = window_idxs[
+                    :, position_offset : position_offset + s
+                ]
             valid_range, row_empty = self._indexer_valid_range(
-                s, doc_start, doc_len, is_valid
+                s_global, doc_start, doc_len, is_valid, position_offset, s
             )
 
         x_det, qr_det = x.detach(), qr.detach()
@@ -408,12 +489,12 @@ class MQALatentAttention(FleetLayer):
             x_det.stop_gradient = False
             qr_det.stop_gradient = False
             q_idx, k_idx, w_idx = self.indexer.forward_before_topk(
-                x_det, qr_det
+                x_det, qr_det, position_offset, self.cp_group
             )
         else:
             with paddle.no_grad():
                 q_idx, k_idx, w_idx = self.indexer.forward_before_topk(
-                    x_det, qr_det
+                    x_det, qr_det, position_offset, self.cp_group
                 )
         # ``DSAIndexer`` pre-bakes ``head_dim**-0.5`` into the weights, but both
         # cuDNN indexer kernels apply ``dim**-0.5`` themselves (the backward one
@@ -444,13 +525,19 @@ class MQALatentAttention(FleetLayer):
         loss_topk = attn_topk
         if need_loss and not self.indexer_use_sparse_loss:
             loss_topk = max(
-                attn_topk, min(_LOSS_TOPK_CAP, s // _TOPK_BLOCK * _TOPK_BLOCK)
+                attn_topk,
+                min(_LOSS_TOPK_CAP, s_global // _TOPK_BLOCK * _TOPK_BLOCK),
             )
         # The THD/varlen fast path builds ``cu_seqlens_k`` from ``doc_lens``,
         # i.e. it assumes a document-compacted K buffer. At ratio 1 the K buffer
         # is the raw token sequence, so the two only coincide when the documents
         # exactly tile the sequence; otherwise fall back to the dense path.
-        doc_lens_arg = doc_lens.tolist() if int(doc_lens.sum()) == s else None
+        # ``doc_lens`` stays global: ``_make_cu_seqlens`` is CP-aware and uses
+        # ``seq_offset`` to pick out the documents this rank queries
+        # (csa_indexer_fwd_cudnn.py:407-466).
+        doc_lens_arg = (
+            doc_lens.tolist() if int(doc_lens.sum()) == s_global else None
+        )
 
         def select_topk(width, want_scores):
             out = cudnn_indexer_topk_fwd(
@@ -461,6 +548,7 @@ class MQALatentAttention(FleetLayer):
                 topk_effective=width,
                 valid_range=valid_range,
                 doc_lens=doc_lens_arg,
+                seq_offset=position_offset,
                 return_topk_scores=want_scores,
             )
             idx = paddle.where(row_empty, paddle.full_like(out[0], -1), out[0])
@@ -522,15 +610,21 @@ class MQALatentAttention(FleetLayer):
             # backstop that catches them, keeping the padding out of both the
             # logged loss and the gradient denominator.
             loss_mask, valid_rows = self._indexer_loss_mask(input_ids, b, s)
+            # Under CP each rank reduces over its own query rows only. With a
+            # mask the denominator is already the *global* valid-row count, so
+            # the per-rank losses sum to the global one; without a mask each rank
+            # produced a local mean and needs ``/cp_size``. Same split as
+            # csa_attention.py:2792-2810.
+            loss_coeff = (
+                self.indexer_loss_coeff
+                if loss_mask is not None
+                else self.indexer_loss_coeff / self.cp_size
+            )
             kl_per_pos = kl.sum(axis=-1)
             if loss_mask is None:
-                loss = kl_per_pos.mean() * self.indexer_loss_coeff
+                loss = kl_per_pos.mean() * loss_coeff
             else:
-                loss = (
-                    (kl_per_pos * loss_mask).sum()
-                    / valid_rows
-                    * self.indexer_loss_coeff
-                )
+                loss = (kl_per_pos * loss_mask).sum() / valid_rows * loss_coeff
 
         DSAIndexerLossLoggingHelper.save_loss_to_tracker(
             loss=loss,
@@ -547,7 +641,7 @@ class MQALatentAttention(FleetLayer):
             loss_indices,
             topk_probs,
             target,
-            self.indexer_loss_coeff,
+            loss_coeff,
             "cudnn",
             # ``num_rows_override`` + ``loss_mask``: the backward zeroes the pad
             # rows and rescales the cuDNN kernel's built-in ``1/(B*Sq)`` into
@@ -562,7 +656,11 @@ class MQALatentAttention(FleetLayer):
 
         ``(None, None)`` when no ``input_ids`` reached this layer (inference and
         the direct-construction unit tests), which keeps the plain row mean.
-        Context parallel needs no branch here: ``forward`` rejects it outright.
+
+        Under CP the mask is this rank's row slice but the denominator is the
+        **global** valid-row count, so summing the per-rank losses reproduces the
+        single-rank reduction. ``input_ids`` arrives sharded unless
+        ``experimental_dataflow``, exactly as at ``csa_attention.py:2419-2428``.
         """
         if input_ids is None:
             return None, None
@@ -570,6 +668,17 @@ class MQALatentAttention(FleetLayer):
         assert pad_token_id is not None, (
             "pad_token_id must be set in config when input_ids is provided"
         )
+        if self.cp_enabled:
+            if not getattr(self.config, "experimental_dataflow", False):
+                input_ids = ContextParallelGatherOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
+            loss_mask_global = (
+                input_ids.reshape([b, self.cp_size * s]) != pad_token_id
+            ).astype(paddle.float32)
+            valid_rows = max(float(loss_mask_global.sum()), 1.0)
+            offset = self.cp_rank * s
+            return loss_mask_global[:, offset : offset + s], valid_rows
         loss_mask = (input_ids.reshape([b, s]) != pad_token_id).astype(
             paddle.float32
         )
@@ -591,9 +700,10 @@ class MQALatentAttention(FleetLayer):
         whether the table is the attention one or the wider loss one.
 
         Args:
-            query: ``[1, s, h, dk]`` detached absorbed query.
-            kv: ``[1, s, dk]`` latent keys.
-            topk_indices: ``[1, s, topk]`` int32, ``-1`` for empty slots.
+            query: ``[1, s, h, dk]`` detached absorbed query (local rows).
+            kv: ``[1, s_global, dk]`` latent keys (all-gathered under CP).
+            topk_indices: ``[1, s, topk]`` int32 global column ids, ``-1`` for
+                empty slots.
 
         Returns:
             ``[1, s, topk]`` float32 rows summing to 1 (0 for empty rows).
