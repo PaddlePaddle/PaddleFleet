@@ -205,7 +205,22 @@ class RecordingMQA(MQALatentAttention):
         return super()._sparse_attn(query, kv, token_indices, sm_scale, d_v)
 
 
-def _build_module(config, layer_number=1, bf16=False, sink=None, is_mtp=False):
+def _build_module(
+    config,
+    layer_number=1,
+    bf16=False,
+    sink=None,
+    is_mtp=False,
+    pg_collection=None,
+):
+    """Build a ``RecordingMQA``.
+
+    ``pg_collection`` must be passed explicitly by the context-parallel tests
+    (``tests/multi_card_tests/transformer/test_mqa_dsa_cp.py``): left ``None``
+    the layer falls back to ``ProcessGroupCollection.use_mpu_process_groups()``,
+    which inside a ``fleet.init``-ed process would hand the CP=1 reference the
+    real CP group.
+    """
     indexer = None
     if getattr(config, "_build_dsa_indexer", False):
         indexer = LayerSpec(
@@ -226,6 +241,7 @@ def _build_module(config, layer_number=1, bf16=False, sink=None, is_mtp=False):
         attention_type="self",
         k_channels=K_CHANNELS,
         is_mtp_layer=is_mtp,
+        pg_collection=pg_collection,
     )
     if bf16:
         # ``rotate_activation`` asserts bf16 inputs, so the indexer projections

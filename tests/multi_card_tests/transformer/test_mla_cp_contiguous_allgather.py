@@ -40,6 +40,8 @@ Run (2 GPUs)::
 test_mla_cp_contiguous_allgather.py
 """
 
+import os
+import sys
 import types
 import unittest
 
@@ -48,16 +50,40 @@ import paddle
 import paddle.distributed as dist
 from paddle import nn
 from paddle.distributed import fleet
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 import paddlefleet.parallel_state as ps
 from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.dsa_attention import (
+    DSAIndexer,
+    DSAIndexerSublayersSpec,
+)
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.mqa_latent_attention import (
+    MQALatentAttention,
+    MQALatentAttentionSublayersSpec,
+)
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
+
+# ``hybrid_mla_utils`` owns the sublayer stubs and the SM100 kernel-availability
+# skip shared with the single-card hybrid-MLA suites.
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "..",
+        "single_card_tests",
+        "transformer",
+    ),
+)
+
+import hybrid_mla_utils as U
 
 DTYPE = "bfloat16"
 
@@ -157,12 +183,28 @@ def build_cfg(cp_size, sink=False, attn_mode="mha"):
     # "mqa"/"mqa_dsa" -> runtime-absorbed MQALatentAttention.
     c.non_absorbed_mqa = attn_mode != "mha"
     c.hybrid_mla_q_lora_rank = 64
-    c.hybrid_mla_kv_lora_rank = 128
-    c.hybrid_mla_qk_nope_head_dim = 64
+    if attn_mode == "mha":
+        c.hybrid_mla_kv_lora_rank = 128
+        c.hybrid_mla_qk_nope_head_dim = 64
+    else:
+        # The absorbed query is [kv_lora_rank + qk_rope_head_dim] wide and the
+        # absorbed value is [kv_lora_rank]. FlashMLA's sparse kernel only
+        # accepts d_qk in {512, 576} with d_v == 512 (mqa_sparse_attn.py:299),
+        # so the MQA fixture has to use the production latent width.
+        c.hybrid_mla_kv_lora_rank = 512
+        c.hybrid_mla_qk_nope_head_dim = 192
     c.hybrid_mla_qk_rope_head_dim = 64
     c.hybrid_mla_v_head_dim = 64
     c.hybrid_mla_num_attention_heads = H
     c.hybrid_mla_num_key_value_heads = H
+    # Indexer dims are model-wide; only ``mqa_dsa`` actually builds one.
+    c.dsa_index_n_heads = 64
+    c.dsa_index_head_dim = 128
+    c.dsa_index_topk = 128
+    c.dsa_indexer_rotary_interleaved = False
+    c.dsa_indexer_use_sparse_loss = True
+    c.csa_window_size = 128
+    c.non_absorbed_mqa_dense = attn_mode == "mqa"
     c.add_full_attention_sink_bias = sink
     c.rope_type = "rope"
     c.rope_theta = 10000.0
@@ -189,7 +231,27 @@ def build_cfg(cp_size, sink=False, attn_mode="mha"):
     return c
 
 
-def build_mla(cfg, cp_group):
+def _mqa_core_spec(attn_mode):
+    """``core_attention`` spec for ``non_absorbed_mqa``, per gpt_layer_specs.py:342."""
+    indexer = None
+    if attn_mode == "mqa_dsa":
+        indexer = LayerSpec(
+            layer=DSAIndexer,
+            sublayers_spec=DSAIndexerSublayersSpec(
+                linear_wq_b=U.BiasedLinear,
+                linear_wk=U.BiasedLinear,
+                k_norm=U.LayerNormStub,
+                linear_weights_proj=U.BiasedLinear,
+            ),
+            extra_kwargs={"is_hybrid_mla_indexer": True},
+        )
+    return LayerSpec(
+        layer=MQALatentAttention,
+        sublayers_spec=MQALatentAttentionSublayersSpec(indexer=indexer),
+    )
+
+
+def build_mla(cfg, cp_group, attn_mode="mha"):
     spec = MLASelfAttentionSublayersSpec(
         q_a_layernorm=_TestRMSNorm,
         kv_a_layernorm=_TestRMSNorm,
@@ -198,18 +260,27 @@ def build_mla(cfg, cp_group):
         q_b_proj=_TestLinear,
         kv_a_proj_with_mqa=_TestLinear,
         kv_b_proj=_TestLinear,
-        core_attention=DotProductAttention,
+        core_attention=(
+            DotProductAttention
+            if attn_mode == "mha"
+            else _mqa_core_spec(attn_mode)
+        ),
         o_proj=_TestLinear,
         gate_proj=None,
     )
     pg = types.SimpleNamespace(tp=None, cp=cp_group)
-    return MLASelfAttention(
+    layer = MLASelfAttention(
         config=cfg,
         sublayers_spec=spec,
         layer_number=1,
         attn_mask_type=AttnMaskType.causal,
         pg_collection=pg,
     )
+    if attn_mode != "mha":
+        # ``rotate_activation`` (indexer) and the sparse kernel both require
+        # bf16; ``U.BiasedLinear`` / ``U.LayerNormStub`` default to fp32.
+        layer.to(dtype=DTYPE)
+    return layer
 
 
 def _rel(a, x):
@@ -233,7 +304,7 @@ def _row_end(doc_lens, seqlen):
     return paddle.to_tensor(out).reshape([1, 1, seqlen, 1])
 
 
-def run_mla_cp(mask_full, seed=2026, sink=False):
+def run_mla_cp(mask_full, seed=2026, sink=False, attn_mode="mha"):
     """Build+run ref (CP off) then CP layer (CP on). Returns a metrics dict.
 
     Raises are propagated (used by the sink tests to observe NotImplementedError).
@@ -243,7 +314,9 @@ def run_mla_cp(mask_full, seed=2026, sink=False):
 
     _cp_disable()
     paddle.seed(seed)
-    ref = build_mla(build_cfg(1, sink=sink), None)
+    ref = build_mla(
+        build_cfg(1, sink=sink, attn_mode=attn_mode), None, attn_mode
+    )
 
     paddle.seed(1000)
     hf = paddle.randn([b, sg, 256], dtype=DTYPE)
@@ -255,7 +328,12 @@ def run_mla_cp(mask_full, seed=2026, sink=False):
 
     _cp_enable()
     paddle.seed(seed)
-    cpl = build_mla(build_cfg(CP_SIZE, sink=sink), CP_GROUP)
+    cpl = build_mla(
+        build_cfg(CP_SIZE, sink=sink, attn_mode=attn_mode), CP_GROUP, attn_mode
+    )
+    # ``paddle.seed`` alone does not guarantee identical weights once the two
+    # builds differ in kernel-side init order, so copy explicitly.
+    cpl.set_state_dict(ref.state_dict())
 
     s, e = CP_RANK * sl, (CP_RANK + 1) * sl
     hb = hf[:, s:e].clone()
@@ -377,50 +455,72 @@ class TestMLAContiguousAllgatherCP(unittest.TestCase):
             ratio, 1.0, delta=0.05, msg="grad-norm ratio deviates from 1"
         )
 
-    # ---- Item 6: MQA / MQA_DSA must reject CP with a clear NotImplementedError
-    def test_6_mqa_cp_not_implemented(self):
-        from paddlefleet.transformer.mqa_latent_attention import (
-            MQALatentAttention,
-            MQALatentAttentionSublayersSpec,
+    # ---- Item 6: non_absorbed_mqa (+DSA) CP equivalence at the MLA level ----
+    #
+    # This used to assert ``NotImplementedError``. MQA now implements
+    # ``contiguous_allgather`` CP, so the same slot must prove equivalence
+    # instead. The core-attention-only equivalence lives in
+    # ``test_mqa_dsa_cp.py``; what is new here is the *whole* MLA layer: the
+    # shared RoPE CP scatter (multi_latent_attention.py:1485-1545), the runtime
+    # absorption (:1913-1939), ``o_proj``, and every parameter gradient after
+    # the CP all-reduce.
+    def _check_mqa(self, attn_mode):
+        r = run_mla_cp(_row_end([200, 150, 162], 512), attn_mode=attn_mode)
+        self.assertLess(r["fwd"], FWD_RTOL, f"{attn_mode}: forward")
+        self.assertLess(r["dH"], GRAD_RTOL, f"{attn_mode}: dH")
+        for n, v in r["param_err"].items():
+            self.assertIsNotNone(v, f"{attn_mode}: ref grad missing for {n}")
+            self.assertLess(v, GRAD_RTOL, f"{attn_mode}: param grad {n}")
+        print(
+            f"[mla-cp{CP_SIZE} rank{CP_RANK}] {attn_mode}: fwd={r['fwd']:.2e} "
+            f"dH={r['dH']:.2e} "
+            f"param_max={max(r['param_err'].values(), default=0.0):.2e} "
+            f"per_pos_max={max(r['per_pos']):.3e}",
+            flush=True,
+        )
+        return r
+
+    @U._GPU
+    def test_6_mqa_dense_cp_equivalence(self):
+        """Absorbed MQA over the full per-document causal set, under CP.
+
+        The documents [0,200) [200,350) [350,512) all straddle the rank
+        boundaries for CP=2 (256) and CP=4 (128/256/384), so a per-rank index
+        table -- one clipped at ``q - position_offset`` instead of at the global
+        ``q`` -- drops the prefix owned by lower ranks and shows up as an O(1)
+        forward error on rank > 0.
+        """
+        r = self._check_mqa("mqa")
+        self.assertTrue(
+            any(n.endswith("kv_b_proj.weight") for n in r["param_err"]),
+            "kv_b_proj must still receive a gradient through the absorption",
         )
 
+    @U._GPU
+    def test_6b_mqa_dsa_cp_equivalence(self):
+        """Same, with the DSA indexer selecting the columns.
+
+        Additionally covers the indexer's own CP path end to end: its K is
+        all-gathered to the global length while its Q stays sharded and takes
+        the ``position_offset`` RoPE slice (dsa_attention.py:426-511).
+        """
+        r = self._check_mqa("mqa_dsa")
+        self.assertTrue(
+            any(".indexer." in n for n in r["param_err"]),
+            "the indexer parameters must receive gradients under CP",
+        )
+
+    def test_6c_mqa_rejects_other_cp_balance_modes(self):
+        """Only ``contiguous_allgather`` is implemented, same as HCA
+        (``dsv4_hybrid_attention.py:607-611``)."""
         _cp_enable()
         self.assertGreater(ps.get_context_parallel_world_size(), 1)
-
-        cfg = build_cfg(CP_SIZE, attn_mode="mqa")
-        kv_lora, qk_rope, v_head = 128, 64, 64
-        k_channels = kv_lora + qk_rope
-        try:
-            core = MQALatentAttention(
-                config=cfg,
-                sublayers_spec=MQALatentAttentionSublayersSpec(indexer=None),
-                layer_number=1,
-                attn_mask_type=AttnMaskType.causal,
-                attention_type="self",
-                k_channels=k_channels,
-            )
-        except Exception as ex:
-            # Construction-time rejection is also acceptable early failure.
-            self.assertIsInstance(
-                ex, (NotImplementedError, ValueError, AssertionError)
-            )
-            return
-
-        b, s, h = 1, 8, cfg.hybrid_mla_num_attention_heads
-        q = paddle.randn([b, s, h, kv_lora + qk_rope], dtype=DTYPE)
-        k = paddle.randn([b, s, 1, k_channels], dtype=DTYPE)
-        v = paddle.randn([b, s, 1, kv_lora], dtype=DTYPE)
-        row_end = _row_end([s], s)
-        with self.assertRaises(NotImplementedError) as cm:
-            core(
-                q,
-                k,
-                v,
-                None,
-                attn_mask_startend_row_indices=row_end,
-                v_b_proj_weight=paddle.randn([kv_lora, h, v_head], dtype=DTYPE),
-            )
-        self.assertIn("context", str(cm.exception).lower())
+        for mode in ("p2p", "zigzag", "dualchunk_allgather", None):
+            with self.subTest(cp_balance_mode=mode):
+                cfg = build_cfg(CP_SIZE, attn_mode="mqa")
+                cfg.cp_balance_mode = mode
+                with self.assertRaises(NotImplementedError):
+                    build_mla(cfg, CP_GROUP, "mqa")
 
 
 if __name__ == "__main__":
