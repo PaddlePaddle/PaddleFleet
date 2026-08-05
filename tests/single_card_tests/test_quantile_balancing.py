@@ -1471,7 +1471,12 @@ class TestAccumulateQBHistogramReal(unittest.TestCase):
         router._accumulate_qb_histogram(scores, biased, 2)
 
         expected = _numpy_accumulate_histogram(
-            scores_np, bias_np, 2, router.qb_bin_min, router.qb_bin_max, 100
+            scores_np,
+            bias_np,
+            2,
+            float(router.qb_bin_min.item()),
+            float(router.qb_bin_max.item()),
+            100,
         )
         np.testing.assert_array_equal(router.qb_histogram.numpy(), expected)
 
