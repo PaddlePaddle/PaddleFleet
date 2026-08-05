@@ -1462,18 +1462,17 @@ class SelfAttentionVHA(Attention):
         )
 
     def _apply_vha_postmix(self, attn_out: Tensor) -> Tensor:
-        # Head-axis low-rank mixing out = (I + V @ U^T) @ mixed, with v_head_dim
-        # as a batch axis. Expressed as two contraction-aligned matmuls (nh is
-        # the contracted dim in both, so no transpose is needed): bit-exact to
-        # the einsum form but faster and more memory-frugal.
+        # Fused dense M = I + V @ U^T, then a single [nh,nh] GEMM on the head
+        # axis: rank-independent and faster than the split low-rank form; differs
+        # from the two-matmul path only by bf16 contraction order.
         b, sq = attn_out.shape[0], attn_out.shape[1]
         nh, d = self.num_attention_heads, self.v_head_dim
         mixed = attn_out.reshape([b * sq, nh, d])
-        z = paddle.matmul(
-            self.vha_postmix_U, mixed, transpose_x=True
-        )  # [r,nh]@[B,nh,d]->[B,r,d]
-        delta = paddle.matmul(self.vha_postmix_V, z)  # [nh,r]@[B,r,d]->[B,nh,d]
-        out = mixed + delta
+        M = paddle.matmul(
+            self.vha_postmix_V, self.vha_postmix_U, transpose_y=True
+        )  # [nh,r]@[r,nh]->[nh,nh]
+        M = M + paddle.eye(nh, dtype=M.dtype)
+        out = paddle.matmul(M, mixed)  # [nh,nh]@[B,nh,d]->[B,nh,d]
         return out.reshape([b, sq, nh * d])
 
     def _apply_shared_kv_inverse_rope(

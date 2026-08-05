@@ -748,9 +748,9 @@ class MultiLatentAttention(Attention):
 
     def _apply_vha_postmix(self, attn_out, U=None, V=None):
         # attn_out: [b, sq, nh_pp * v_head_dim] (head space, pre-gate / pre output proj).
-        # Head-axis low-rank mixing (I + V @ U^T) via two contraction-aligned
-        # matmuls (nh contracted in both -> no transpose): bit-exact to the
-        # einsum form but faster and more memory-frugal.
+        # Fused dense M = I + V @ U^T, then a single [nh,nh] GEMM on the head
+        # axis: rank-independent and faster than the split low-rank form; differs
+        # from the two-matmul path only by bf16 contraction order.
         if U is None:
             U = self.vha_postmix_U
         if V is None:
@@ -758,11 +758,9 @@ class MultiLatentAttention(Attention):
         b, sq = attn_out.shape[0], attn_out.shape[1]
         nh, d = self.num_attention_heads_per_partition, self.v_head_dim
         mixed = attn_out.reshape([b * sq, nh, d])
-        z = paddle.matmul(
-            U, mixed, transpose_x=True
-        )  # [r,nh]@[B,nh,d]->[B,r,d]
-        delta = paddle.matmul(V, z)  # [nh,r]@[B,r,d]->[B,nh,d]
-        out = mixed + delta
+        M = paddle.matmul(V, U, transpose_y=True)  # [nh,r]@[r,nh]->[nh,nh]
+        M = M + paddle.eye(nh, dtype=M.dtype)
+        out = paddle.matmul(M, mixed)  # [nh,nh]@[B,nh,d]->[B,nh,d]
         return out.reshape([b, sq, nh * d])
 
     def _compute_absorbed_q(self, query):
