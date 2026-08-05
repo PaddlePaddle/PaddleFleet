@@ -905,7 +905,7 @@ class DotProductAttention(FleetLayer):
                     self.scale_mask_softmax.input_in_bf16 = False
                     self.scale_mask_softmax.input_in_float16 = False
 
-        # PaddleFormers collate emits float32 lower-triangle masks where 1.0 means attend and 0.0
+        # PaddleFleet collate emits float32 lower-triangle masks where 1.0 means attend and 0.0
         # means mask. PaddleFleet mask_func expects bool masks where True means
         # masked-out, so convert to strict upper-triangle semantics.
         if (

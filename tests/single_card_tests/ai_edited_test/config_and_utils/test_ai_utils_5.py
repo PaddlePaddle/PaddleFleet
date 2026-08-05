@@ -37,7 +37,7 @@ class TestGetBatchOnThisCpRank(unittest.TestCase):
         from paddlefleet.utils import get_batch_on_this_cp_rank
 
         # Mock ContextParallelScatterOp
-        with patch("paddlefleet.utils.ContextParallelScatterOp") as mock_cp:
+        with patch("paddlefleet.utils._fleet_utils.ContextParallelScatterOp") as mock_cp:
             mock_instance = MagicMock()
             mock_cp.apply = MagicMock(return_value=paddle.randn([2, 4]))
             inp = paddle.randn([2, 8])
@@ -47,7 +47,7 @@ class TestGetBatchOnThisCpRank(unittest.TestCase):
         """Test with dict input processes specified keys."""
         from paddlefleet.utils import get_batch_on_this_cp_rank
 
-        with patch("paddlefleet.utils.ContextParallelScatterOp") as mock_cp:
+        with patch("paddlefleet.utils._fleet_utils.ContextParallelScatterOp") as mock_cp:
             mock_cp.apply = MagicMock(return_value=paddle.randn([2, 4]))
             inputs = {
                 "input_ids": paddle.randn([2, 8]),
