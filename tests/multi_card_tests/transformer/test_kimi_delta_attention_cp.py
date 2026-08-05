@@ -181,11 +181,11 @@ class TestKimiDeltaAttentionCP(unittest.TestCase):
 
         want = ref[:, cp_rank * local : (cp_rank + 1) * local]
         err = float((out - want).norm() / want.norm())
-        assert err < 5e-3, f"rank {cp_rank}: output rel_err={err:.3e}"
+        assert err < 6e-4, f"rank {cp_rank}: output rel_err={err:.3e}"
 
         want_g = xf.grad[:, cp_rank * local : (cp_rank + 1) * local]
         gerr = float((shard.grad - want_g).norm() / want_g.norm())
-        assert gerr < 5e-2, f"rank {cp_rank}: grad_x rel_err={gerr:.3e}"
+        assert gerr < 6e-4, f"rank {cp_rank}: grad_x rel_err={gerr:.3e}"
         if cp_rank == 0:
             print(f"  [PASS] CP={CONTEXT_PARALLEL} out={err:.3e} gx={gerr:.3e}")
 

@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -72,6 +73,9 @@ try:
 except (ImportError, AttributeError):
     causal_conv1d = chunk_kda = rms_norm_gated = build_cp_context = None
     HAVE_FLA = False
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -275,6 +279,7 @@ class KimiDeltaAttention(FleetLayer):
         # native fallbacks stay in place for deterministic runs and for builds
         # without paddlefleet_ops.
         self.use_fused_kernels = HAVE_FLA and not config.deterministic_mode
+        logger.info("KDA will use fused kernel")
 
         # q/k/v/beta are all sharded by head, so both head counts must divide
         # evenly; otherwise the per-tensor split sizes in forward() silently stop
@@ -335,7 +340,9 @@ class KimiDeltaAttention(FleetLayer):
         self.conv_dim = self.qk_dim * 2 + self.v_dim
         self.conv_dim_local_tp = self.conv_dim // self.tp_size
 
-        # weight shape: [conv_dim, 1, d_conv], bias shape: [conv_dim]
+        # weight shape: [conv_dim, 1, d_conv], bias shape: [conv_dim].
+        # fp32 like A_log / dt_bias / out_norm: the fused kernels accept an fp32
+        # weight with low-precision activations.
         self.conv1d = nn.Conv1D(
             in_channels=self.conv_dim_local_tp,
             out_channels=self.conv_dim_local_tp,
@@ -346,9 +353,7 @@ class KimiDeltaAttention(FleetLayer):
             data_format="NCL",
             dtype="float32",
         )
-        # The released Kimi-K3 checkpoint keeps short-convolution weights in
-        # float32. Preserve that dtype under AMP O2 instead of casting the
-        # checkpoint to bf16 on load and casting it back only during export.
+        # force keep in float32 when using amp
         self.conv1d._cast_to_low_precision = False
         self.conv1d.weight.is_distributed = True if self.tp_size > 1 else False
         if conv_bias and self.conv1d.bias is not None:
@@ -375,11 +380,14 @@ class KimiDeltaAttention(FleetLayer):
         )
         self.A_log.is_distributed = True if self.tp_size > 1 else False
 
+        # force keep dt_bias / A_log (this layer's own params) in float32 under amp
+        self._cast_to_low_precision = False
+
         # Output layernorm before projection (per-head norm).
         # Replicated weight but each TP rank only sees its local value heads, so the
         # gradient is a partial sum and needs the sequence-parallel allreduce hook.
         # The norm spec sizes its weight from config.params_dtype, so hand it a
-        # config copy pinned to fp32 (see conv1d above).
+        # config copy pinned to fp32.
         input_is_parallel = True if self.tp_size > 1 else False
         norm_config = copy.copy(self.config)
         norm_config.params_dtype = paddle.float32
@@ -391,6 +399,8 @@ class KimiDeltaAttention(FleetLayer):
             input_is_parallel,
         )
         self.out_norm = build_spec_layer(sublayers_spec.out_norm, **extra_args)
+        # force keep in float32 when using amp
+        self.out_norm._cast_to_low_precision = False
 
         self.out_proj = build_spec_layer(
             sublayers_spec.out_proj,

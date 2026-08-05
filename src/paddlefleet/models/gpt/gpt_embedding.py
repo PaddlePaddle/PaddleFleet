@@ -712,7 +712,7 @@ class GPTEmbedding(FleetLayer):
         # KDA layer of the step needs the same one. Build it once here and let it
         # ride dict_args down to the layers (see build_cu_seqlens).
         if (
-            "kimi_delta_attention" in (self.config.attention_layer_types or [])
+            self.config.experimental_attention_variant == "kimi_delta_attention"
             and attn_mask_startend_row_indices is not None
         ):
             # With the old MTP dataflow every decoder layer trims the MTP tail

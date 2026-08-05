@@ -390,17 +390,35 @@ class TestKimiDeltaAttention(unittest.TestCase):
         self.assertIsNone(out_bias)
         assert paddle.isfinite(out).all().item()
 
-    def test_forward_always_calls_fla_chunk_kda(self):
-        """Deterministic mode must not select the removed eager fallback."""
+    def test_deterministic_mode_uses_paddle_fallback(self):
+        """Deterministic mode routes to the paddle-native chunked recurrence."""
         self.assertTrue(self.kda.config.deterministic_mode)
+        self.assertFalse(self.kda.use_fused_kernels)
         x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
 
         with patch.object(
-            kda_mod.fla.ops.kda,
-            "chunk_kda",
-            wraps=paddle_chunk_kda,
+            kda_mod, "chunk_kda", wraps=kda_mod.chunk_kda
         ) as mock_chunk_kda:
             out, _ = self.kda(hidden_states=x, attention_mask=None)
+
+        mock_chunk_kda.assert_not_called()
+        self.assertEqual(
+            list(out.shape), [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
+        )
+
+    @unittest.skipUnless(
+        HAVE_FLA, "paddlefleet_ops fla kernels are not available"
+    )
+    def test_fused_path_calls_fla_chunk_kda(self):
+        """Non-deterministic mode folds the gate/beta/l2norm into the kernel."""
+        kda = _build_kda(deterministic_mode=False)
+        self.assertTrue(kda.use_fused_kernels)
+        x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
+
+        with patch.object(
+            kda_mod, "chunk_kda", wraps=kda_mod.chunk_kda
+        ) as mock_chunk_kda:
+            out, _ = kda(hidden_states=x, attention_mask=None)
 
         mock_chunk_kda.assert_called_once()
         call_kwargs = mock_chunk_kda.call_args.kwargs
