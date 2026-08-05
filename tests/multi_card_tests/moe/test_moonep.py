@@ -100,7 +100,7 @@ class TestMoonEP(unittest.TestCase):
         finally:
             buffer.destroy()
 
-    def test_moe_layer_forward_backward_with_padding_matches_reference(self):
+    def test_moe_layers_share_buffer_and_match_reference(self):
         import paddle.nn.functional as F
 
         from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -144,6 +144,7 @@ class TestMoonEP(unittest.TestCase):
             router_aux_loss_coef=0.0,
         )
         layer = MoELayer(config, MoESublayers(), pg_collection)
+        second_layer = MoELayer(config, MoESublayers(), pg_collection)
         self.assertFalse(layer.moe_use_fusion_node)
 
         local_ids = paddle.arange(B, dtype="float32") + self.rank * B
@@ -158,8 +159,9 @@ class TestMoonEP(unittest.TestCase):
             + paddle.arange(I, dtype="float32").reshape([1, I, 1]) * 1e-4
             + paddle.arange(H, dtype="float32").reshape([1, 1, H]) * 1e-5
         ).astype("bfloat16")
-        layer.grouped_gemm_experts.weight1.copy_(local_w1)
-        layer.grouped_gemm_experts.weight2.copy_(local_w2)
+        for current_layer in (layer, second_layer):
+            current_layer.grouped_gemm_experts.weight1.copy_(local_w1)
+            current_layer.grouped_gemm_experts.weight2.copy_(local_w2)
 
         gathered_w1 = [
             paddle.empty_like(local_w1) for _ in range(self.world_size)
@@ -180,6 +182,8 @@ class TestMoonEP(unittest.TestCase):
         ).astype("bfloat16")
         hidden = hidden_base.detach()
         hidden.stop_gradient = False
+        second_hidden = hidden_base.detach()
+        second_hidden.stop_gradient = False
         reference_hidden = hidden_base.detach()
         reference_hidden.stop_gradient = False
 
@@ -211,6 +215,8 @@ class TestMoonEP(unittest.TestCase):
         )
         topk_weights = weights_base.detach()
         topk_weights.stop_gradient = False
+        second_topk_weights = weights_base.detach()
+        second_topk_weights.stop_gradient = False
         reference_topk_weights = weights_base.detach()
         reference_topk_weights.stop_gradient = False
         safe_topk_indices = paddle.where(
@@ -234,6 +240,17 @@ class TestMoonEP(unittest.TestCase):
             topk_weights=topk_weights,
             topk_indices=topk_indices,
         )
+        second_output = second_layer.custom_forward(
+            second_hidden,
+            probs,
+            routing_map,
+            topk_weights=second_topk_weights,
+            topk_indices=topk_indices,
+        )
+        self.assertIs(
+            layer.token_dispatcher._comm_manager._buffer,
+            second_layer.token_dispatcher._comm_manager._buffer,
+        )
 
         reference_route = (
             one_hot * (reference_topk_weights * route_mask).unsqueeze(-1)
@@ -252,7 +269,10 @@ class TestMoonEP(unittest.TestCase):
         grad = (
             paddle.arange(S * H, dtype="float32").reshape([S, H]) * 1e-5 + 0.5
         )
-        (output.astype("float32") * grad).sum().backward()
+        (
+            (output.astype("float32") * grad).sum()
+            + (second_output.astype("float32") * grad).sum()
+        ).backward()
         (reference_output.astype("float32") * grad).sum().backward()
         dist.all_reduce(reference_w1.grad, group=group)
         dist.all_reduce(reference_w2.grad, group=group)
@@ -260,11 +280,24 @@ class TestMoonEP(unittest.TestCase):
 
         for actual, expected, name, atol in (
             (output, reference_output, "output", 3e-2),
+            (second_output, reference_output, "second_output", 3e-2),
             (hidden.grad, reference_hidden.grad, "hidden_grad", 4e-2),
+            (
+                second_hidden.grad,
+                reference_hidden.grad,
+                "second_hidden_grad",
+                4e-2,
+            ),
             (
                 topk_weights.grad,
                 reference_topk_weights.grad,
                 "router_grad",
+                4e-2,
+            ),
+            (
+                second_topk_weights.grad,
+                reference_topk_weights.grad,
+                "second_router_grad",
                 4e-2,
             ),
             (
@@ -274,9 +307,21 @@ class TestMoonEP(unittest.TestCase):
                 5e-2,
             ),
             (
+                second_layer.grouped_gemm_experts.weight1.grad,
+                reference_w1.grad[local_slice],
+                "second_weight1_grad",
+                5e-2,
+            ),
+            (
                 layer.grouped_gemm_experts.weight2.grad,
                 reference_w2.grad[local_slice],
                 "weight2_grad",
+                5e-2,
+            ),
+            (
+                second_layer.grouped_gemm_experts.weight2.grad,
+                reference_w2.grad[local_slice],
+                "second_weight2_grad",
                 5e-2,
             ),
         ):
@@ -295,8 +340,17 @@ class TestMoonEP(unittest.TestCase):
         padding_slice = slice(S - 16, S)
         for actual, name in (
             (output[padding_slice], "padding_output"),
+            (second_output[padding_slice], "second_padding_output"),
             (hidden.grad[padding_slice], "padding_hidden_grad"),
+            (
+                second_hidden.grad[padding_slice],
+                "second_padding_hidden_grad",
+            ),
             (topk_weights.grad[padding_slice], "padding_router_grad"),
+            (
+                second_topk_weights.grad[padding_slice],
+                "second_padding_router_grad",
+            ),
         ):
             actual = actual.astype("float32")
             self.assertTrue(

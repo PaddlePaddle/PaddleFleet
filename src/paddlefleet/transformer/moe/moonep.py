@@ -14,78 +14,107 @@
 
 from __future__ import annotations
 
-import importlib
 import os
 import weakref
 from dataclasses import dataclass
-from types import SimpleNamespace
 
 import paddle
 
-_runtime = None
-_buffers = weakref.WeakSet()
+try:
+    from paddlefleet_ops import is_moonep_available as _is_moonep_available
+except ImportError:
+    _MOONEP_AVAILABLE = False
+else:
+    _MOONEP_AVAILABLE = _is_moonep_available()
+if _MOONEP_AVAILABLE:
+    from paddlefleet_ops.moonep import Buffer as MoonEPBuffer
+    from paddlefleet_ops.moonep._C import (
+        nvl_dist_map,
+        nvl_dist_map_fabric,
+        nvl_release_mem_handle,
+    )
+    from paddlefleet_ops.moonep.buffer import (
+        _alloc_nvl_chunk,
+        _exchange_fabric_handles,
+        _exchange_ipc_fds,
+        _mnnvl_enabled,
+        get_vmm_granularity,
+    )
+    from paddlefleet_ops.moonep.grad_reduce import launch_grad_reduce
+    from paddlefleet_ops.moonep.inter_rank_sync import launch_inter_rank_sync
+    from paddlefleet_ops.moonep.prefetch import launch_prefetch
+else:
+    MoonEPBuffer = None
+
+
+_buffer_cache = {}
 _bridges = weakref.WeakSet()
 
 
 def is_moonep_available() -> bool:
     """Return whether paddlefleet-ops loaded the optional MoonEP runtime."""
-    try:
-        from paddlefleet_ops import is_moonep_available as available
-
-        return available()
-    except ImportError:
-        return False
+    return _MOONEP_AVAILABLE
 
 
-def _load_runtime():
-    """Load MoonEP only after paddlefleet-ops enabled its compat scope."""
-    global _runtime
-    if _runtime is not None:
-        return _runtime
-    if not is_moonep_available():
+def _require_moonep() -> None:
+    if not _MOONEP_AVAILABLE:
         raise ImportError(
             "moe_token_dispatcher_type=moonep but MoonEP is unavailable. "
             "Install paddlefleet-ops with MoonEP support."
         )
 
-    from paddlefleet_ops.moonep import Buffer
 
-    package = "paddlefleet_ops.moonep"
-    buffer_module = importlib.import_module(f"{package}.buffer")
-    c_module = importlib.import_module(f"{package}._C")
-    grad_reduce_module = importlib.import_module(f"{package}.grad_reduce")
-    prefetch_module = importlib.import_module(f"{package}.prefetch")
-    sync_module = importlib.import_module(f"{package}.inter_rank_sync")
-    _runtime = SimpleNamespace(
-        Buffer=Buffer,
-        alloc_chunk=buffer_module._alloc_nvl_chunk,
-        exchange_fabric_handles=buffer_module._exchange_fabric_handles,
-        exchange_ipc_fds=buffer_module._exchange_ipc_fds,
-        get_vmm_granularity=buffer_module.get_vmm_granularity,
-        mnnvl_enabled=buffer_module._mnnvl_enabled,
-        map_fabric=c_module.nvl_dist_map_fabric,
-        map_posix=c_module.nvl_dist_map,
-        release_handle=c_module.nvl_release_mem_handle,
-        launch_grad_reduce=grad_reduce_module.launch_grad_reduce,
-        launch_prefetch=prefetch_module.launch_prefetch,
-        inter_rank_sync=sync_module.launch_inter_rank_sync,
+def get_moonep_buffer(
+    *,
+    S: int,
+    H: int,
+    K: int,
+    E: int,
+    B: int,
+    num_ep_ranks: int,
+    group,
+    num_sms: int | None = None,
+):
+    """Get a shared Buffer for one EP group, device, and fixed signature."""
+    _require_moonep()
+    S, H, K, E, B, num_ep_ranks = (
+        int(value) for value in (S, H, K, E, B, num_ep_ranks)
     )
-    return _runtime
-
-
-def new_moonep_buffer(**kwargs):
-    """Create a Buffer tracked for collective teardown."""
-    runtime = _load_runtime()
-    buffer = runtime.Buffer(explicitly_destroy=True, **kwargs)
-    _buffers.add(buffer)
+    if num_sms is not None:
+        num_sms = int(num_sms)
+    signature = (
+        id(group),
+        paddle.get_device(),
+        S,
+        H,
+        K,
+        E,
+        B,
+        num_ep_ranks,
+        num_sms,
+    )
+    buffer = _buffer_cache.get(signature)
+    if buffer is None:
+        buffer = MoonEPBuffer(
+            S=S,
+            H=H,
+            K=K,
+            E=E,
+            B=B,
+            num_ep_ranks=num_ep_ranks,
+            group=group,
+            num_sms=num_sms,
+            explicitly_destroy=True,
+        )
+        _buffer_cache[signature] = buffer
     return buffer
 
 
 def finalize_moonep() -> None:
     """Destroy live communication buffers before process-group teardown."""
-    for buffer in list(_buffers):
+    for buffer in list(_buffer_cache.values()):
         buffer.destroy()
-    _buffers.clear()
+    _buffer_cache.clear()
     for bridge in list(_bridges):
         bridge.destroy()
     _bridges.clear()
@@ -104,14 +133,14 @@ def _allocate_mapping(
     with_reduce_view: bool,
 ):
     """Map all owner chunks followed by this rank's redundant slot chunk."""
-    runtime = _load_runtime()
+    _require_moonep()
     rank = paddle.distributed.get_rank(group)
     world_size = paddle.distributed.get_world_size(group)
 
     chunk_nbytes = paddle.empty([], dtype=dtype).element_size()
     for dim in chunk_shape:
         chunk_nbytes *= int(dim)
-    granularity = int(runtime.get_vmm_granularity())
+    granularity = int(get_vmm_granularity())
     if chunk_nbytes % granularity:
         raise ValueError(
             "MoonEP expert storage must be VMM aligned: "
@@ -119,26 +148,26 @@ def _allocate_mapping(
             f"bytes={chunk_nbytes}, granularity={granularity}."
         )
 
-    use_mnnvl = runtime.mnnvl_enabled()
+    use_mnnvl = _mnnvl_enabled()
     expert_keepalive = slot_keepalive = None
     expert_owned = slot_owned = None
     open_fds = set()
     try:
-        expert_keepalive, expert_handle, expert_owned = runtime.alloc_chunk(
+        expert_keepalive, expert_handle, expert_owned = _alloc_nvl_chunk(
             chunk_shape, dtype
         )
         if not use_mnnvl:
             open_fds.add(expert_handle)
-        slot_keepalive, slot_handle, slot_owned = runtime.alloc_chunk(
+        slot_keepalive, slot_handle, slot_owned = _alloc_nvl_chunk(
             chunk_shape, dtype
         )
         if not use_mnnvl:
             open_fds.add(slot_handle)
         if use_mnnvl:
-            expert_handles = runtime.exchange_fabric_handles(
+            expert_handles = _exchange_fabric_handles(
                 expert_handle, world_size, group
             )
-            full = runtime.map_fabric(
+            full = nvl_dist_map_fabric(
                 chunk_shape=chunk_shape,
                 dtype=dtype,
                 fabric_handles=[*expert_handles, slot_handle],
@@ -147,10 +176,10 @@ def _allocate_mapping(
             )
             reduce_view = None
             if with_reduce_view:
-                slot_handles = runtime.exchange_fabric_handles(
+                slot_handles = _exchange_fabric_handles(
                     slot_handle, world_size, group
                 )
-                reduce_view = runtime.map_fabric(
+                reduce_view = nvl_dist_map_fabric(
                     chunk_shape=chunk_shape,
                     dtype=dtype,
                     fabric_handles=slot_handles,
@@ -158,7 +187,7 @@ def _allocate_mapping(
                     world_size=world_size,
                 )
         else:
-            expert_fds = runtime.exchange_ipc_fds(
+            expert_fds = _exchange_ipc_fds(
                 expert_handle,
                 list(range(world_size)),
                 rank,
@@ -170,7 +199,7 @@ def _allocate_mapping(
             open_fds.remove(expert_handle)
 
             if with_reduce_view:
-                slot_fds = runtime.exchange_ipc_fds(
+                slot_fds = _exchange_ipc_fds(
                     slot_handle,
                     list(range(world_size)),
                     rank,
@@ -184,14 +213,14 @@ def _allocate_mapping(
                     *(expert_fds[index] for index in range(world_size)),
                     slot_fds[rank],
                 ]
-                full = runtime.map_posix(
+                full = nvl_dist_map(
                     chunk_shape=chunk_shape,
                     dtype=dtype,
                     fds=full_fds,
                     local_rank=rank,
                     world_size=world_size + 1,
                 )
-                reduce_view = runtime.map_posix(
+                reduce_view = nvl_dist_map(
                     chunk_shape=chunk_shape,
                     dtype=dtype,
                     fds=[slot_fds[index] for index in range(world_size)],
@@ -203,7 +232,7 @@ def _allocate_mapping(
                     *(expert_fds[index] for index in range(world_size)),
                     slot_handle,
                 ]
-                full = runtime.map_posix(
+                full = nvl_dist_map(
                     chunk_shape=chunk_shape,
                     dtype=dtype,
                     fds=full_fds,
@@ -215,9 +244,9 @@ def _allocate_mapping(
         if not use_mnnvl:
             _close_fds(open_fds)
         if expert_owned is not None:
-            runtime.release_handle(expert_owned)
+            nvl_release_mem_handle(expert_owned)
         if slot_owned is not None:
-            runtime.release_handle(slot_owned)
+            nvl_release_mem_handle(slot_owned)
 
     return full, reduce_view, (expert_keepalive, slot_keepalive)
 
@@ -317,17 +346,15 @@ class MoonEPWeightBridge:
         for source, projection in zip((weight1, weight2), self.projections):
             projection.full_weight[local_slice].copy_(source.contiguous())
 
-        runtime = _load_runtime()
-        runtime.inter_rank_sync(self.buffer._require_ctx())
+        launch_inter_rank_sync(self.buffer._require_ctx())
         self.prefetch(plan)
 
     @paddle.no_grad()
     def prefetch(self, plan) -> None:
-        runtime = _load_runtime()
         ctx = self.buffer._require_ctx()
         experts_to_copy = plan.experts_to_copy[self.rank].contiguous()
         for projection in self.projections:
-            runtime.launch_prefetch(
+            launch_prefetch(
                 projection.full_weight[: self.num_experts],
                 projection.full_weight[self.num_experts :],
                 experts_to_copy,
@@ -345,11 +372,10 @@ class MoonEPWeightBridge:
             projection.full_grad[local_slice].copy_(grad[local_slice])
             projection.full_grad[slot_slice].copy_(grad[slot_slice])
 
-        runtime = _load_runtime()
         ctx = self.buffer._require_ctx()
-        runtime.inter_rank_sync(ctx)
+        launch_inter_rank_sync(ctx)
         for projection in self.projections:
-            runtime.launch_grad_reduce(
+            launch_grad_reduce(
                 projection.full_grad[: self.num_experts],
                 projection.reduce_buffer,
                 plan.experts_to_copy,

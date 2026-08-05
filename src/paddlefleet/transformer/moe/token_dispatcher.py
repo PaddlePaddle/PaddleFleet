@@ -52,11 +52,11 @@ from .moe_utils import (
 )
 from .moonep import (
     MoonEPWeightBridge,
+    get_moonep_buffer,
     is_moonep_available,
     moonep_combine,
     moonep_dispatch,
     moonep_experts,
-    new_moonep_buffer,
 )
 
 HAVE_HYBRID_EP = False
@@ -663,7 +663,7 @@ class _MoonEPManager(_DispatchManager):
                 f"got {hidden_states.dtype}."
             )
         self._buffer_signature = signature
-        self._buffer = new_moonep_buffer(
+        self._buffer = get_moonep_buffer(
             S=signature[0],
             H=hidden_states.shape[1],
             K=self.router_topk,

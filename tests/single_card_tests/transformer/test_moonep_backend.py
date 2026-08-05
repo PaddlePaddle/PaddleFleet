@@ -19,7 +19,7 @@ from unittest import mock
 
 import paddle
 
-from paddlefleet.transformer.moe import moe_layer, token_dispatcher
+from paddlefleet.transformer.moe import moe_layer, moonep, token_dispatcher
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.moe.token_dispatcher import (
     MoEFlexTokenDispatcher,
@@ -201,6 +201,63 @@ class TestMoonEPDispatcher(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, error):
                     MoELayer._validate_moonep_config(layer)
                 setattr(owner, target, original)
+
+
+class TestMoonEPBufferCache(unittest.TestCase):
+    def setUp(self):
+        moonep._buffer_cache.clear()
+        moonep._bridges.clear()
+        self.addCleanup(moonep._buffer_cache.clear)
+        self.addCleanup(moonep._bridges.clear)
+
+    def test_cache_reuses_only_matching_signatures(self):
+        group = object()
+        buffers = [mock.Mock(), mock.Mock()]
+        common = {
+            "H": 128,
+            "K": 2,
+            "E": 4,
+            "B": 2,
+            "num_ep_ranks": 2,
+            "group": group,
+        }
+
+        with (
+            mock.patch.object(moonep, "_MOONEP_AVAILABLE", True),
+            mock.patch.object(
+                moonep, "MoonEPBuffer", side_effect=buffers
+            ) as buffer_cls,
+        ):
+            first = moonep.get_moonep_buffer(S=2, **common)
+            first_again = moonep.get_moonep_buffer(S=2, **common)
+            second = moonep.get_moonep_buffer(S=3, **common)
+
+        self.assertIs(first, buffers[0])
+        self.assertIs(first_again, buffers[0])
+        self.assertIs(second, buffers[1])
+        self.assertEqual(buffer_cls.call_count, 2)
+
+    def test_finalize_destroys_each_cached_buffer_once(self):
+        class _Resource:
+            def __init__(self):
+                self.destroy_calls = 0
+
+            def destroy(self):
+                self.destroy_calls += 1
+
+        buffers = [_Resource(), _Resource()]
+        bridge = _Resource()
+        moonep._buffer_cache.update(
+            {("first",): buffers[0], ("second",): buffers[1]}
+        )
+        moonep._bridges.add(bridge)
+
+        moonep.finalize_moonep()
+        moonep.finalize_moonep()
+
+        self.assertEqual([buffer.destroy_calls for buffer in buffers], [1, 1])
+        self.assertEqual(bridge.destroy_calls, 1)
+        self.assertEqual(moonep._buffer_cache, {})
 
 
 class TestMoonEPBalanceLog(unittest.TestCase):
