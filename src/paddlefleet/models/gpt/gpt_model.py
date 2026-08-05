@@ -604,6 +604,11 @@ class GPTModel(PipelineLayer):
             )
 
             prefixes = self.get_sequential_name_prefixes()
+            shared_layer_names = {
+                layer.layer_name
+                for layer in self.layers
+                if isinstance(layer, SharedLayerDesc)
+            }
             for k in state_dict_keys:
                 name_splited = k.split(".")
                 if use_virtual_pp_degree:
@@ -613,6 +618,17 @@ class GPTModel(PipelineLayer):
                                 int(name_splited[0]) + int(name_splited[1])
                             )
                             single_name = [prefixes[idx]]
+                            single_name.extend(name_splited[2:])
+                        elif name_splited[1] in shared_layer_names:
+                            # A SharedLayerDesc with `forward_func` is
+                            # registered on the chunk itself under VPP, so its
+                            # key is `{chunk_start}.{shared_name}.rest`. It
+                            # aliases the same parameter as
+                            # `shared_layers.{shared_name}.rest` and must
+                            # resolve to the same single card name.
+                            single_name = [
+                                self.get_shardlayer_prefix(name_splited)
+                            ]
                             single_name.extend(name_splited[2:])
                         else:
                             # Layers directly added to the PipelineLayer under
