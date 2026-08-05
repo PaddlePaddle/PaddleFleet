@@ -201,6 +201,11 @@ class TestGPTMainLMHead(unittest.TestCase):
         self.assertEqual(head._forward.call_count, 1)
 
     def test_forward_applies_block_attn_res(self):
+        """Output BlockAttnRes no longer runs inside the LM head.
+
+        The aggregation was moved into ``OutputBlockAttnResPipe`` (K3-aligned:
+        pre-norm). ``GPTMainLMHead.forward`` must not invoke ``block_attn_res``.
+        """
         from paddlefleet.models.gpt.lm_head import GPTMainLMHead
 
         head = GPTMainLMHead.__new__(GPTMainLMHead)
@@ -213,7 +218,7 @@ class TestGPTMainLMHead(unittest.TestCase):
         head.block_attn_res = MagicMock(return_value=applied)
 
         out = head.forward({"hidden_states": hidden, "blocks": ["b"]})
-        head.block_attn_res.assert_called_once()
+        head.block_attn_res.assert_not_called()
         self.assertEqual(out["logits"], "L")
 
 

@@ -151,6 +151,12 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         # whether it was passed, so backward can return the matching number of
         # placeholder gradients.
         ctx.has_topk_length = topk_length is not None
+        # Paddle PyLayer requires None for stop_gradient inputs; record here.
+        # In phase 2 (``csa_train_indexer_only``) attn_sink is a frozen backbone
+        # parameter while query/kv_full still carry activation gradients.
+        ctx.query_needs_grad = not query.stop_gradient
+        ctx.kv_full_needs_grad = not kv_full.stop_gradient
+        ctx.attn_sink_needs_grad = not attn_sink.stop_gradient
 
         query, kv_full, attn_sink, topk_idxs = prepare_inputs(
             query,
@@ -247,7 +253,12 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 ctx.attn_sink_dtype
             )
 
-        grads = (dq, dkv, d_attn_sink, None)
+        grads = (
+            dq if ctx.query_needs_grad else None,
+            dkv if ctx.kv_full_needs_grad else None,
+            d_attn_sink if ctx.attn_sink_needs_grad else None,
+            None,
+        )
         if ctx.has_topk_length:
             # ``topk_length`` was passed as an extra (non-differentiable) tensor
             # input, so an extra placeholder gradient is required.

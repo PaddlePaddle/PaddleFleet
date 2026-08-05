@@ -65,6 +65,74 @@ def _bf16_grouped_output(x, weight, num_groups, o_lora_rank):
     return out.reshape([b, sq, num_groups * o_lora_rank])
 
 
+def _bf16_weight_param(shape, trainable):
+    tensor = paddle.create_parameter(shape, dtype="float32").astype("bfloat16")
+    param = paddle.base.framework.EagerParamBase.from_tensor(tensor)
+    param.stop_gradient = not trainable
+    return param
+
+
+class TestGroupedOutputFP8StopGradient(unittest.TestCase):
+    """Frozen inputs must get ``None`` back from backward.
+
+    DSv4 phase 2 (``csa_train_indexer_only``) freezes the whole backbone,
+    including ``linear_o_group_proj``, while the segment stays differentiable
+    through the Indexer. Paddle rejects a gradient for a ``stop_gradient`` input,
+    so backward has to return ``None`` at that position -- and skipping the wgrad
+    einsum is free work saved.
+    """
+
+    _B, _SQ, _G, _D, _R = 1, 128, 4, 256, 128
+
+    def _run(self, x_trainable, w_trainable, fp8_wgrad=True):
+        paddle.seed(11)
+        x = paddle.randn(
+            [self._B, self._SQ, self._G, self._D], dtype="bfloat16"
+        )
+        x.stop_gradient = not x_trainable
+        weight = _bf16_weight_param([self._G * self._R, self._D], w_trainable)
+        out = GroupedOutputFP8.apply(
+            x, weight, self._G, self._R, fp8_wgrad, False
+        )
+        if not out.stop_gradient:
+            out.astype("float32").sum().backward()
+        return x, weight, out
+
+    @_REQUIRE_GPU
+    @_REQUIRE_DEEP_GEMM
+    def test_frozen_weight_gets_no_wgrad(self):
+        x, weight, out = self._run(x_trainable=True, w_trainable=False)
+        self.assertFalse(out.stop_gradient)
+        self.assertIsNotNone(x.grad)
+        self.assertIsNone(weight.grad)
+
+    @_REQUIRE_GPU
+    @_REQUIRE_DEEP_GEMM
+    def test_frozen_weight_bf16_wgrad_path(self):
+        # fp8_wgrad=False takes the einsum wgrad branch; the guard sits before it.
+        x, weight, out = self._run(
+            x_trainable=True, w_trainable=False, fp8_wgrad=False
+        )
+        self.assertFalse(out.stop_gradient)
+        self.assertIsNone(weight.grad)
+
+    @_REQUIRE_GPU
+    @_REQUIRE_DEEP_GEMM
+    def test_frozen_input_gets_no_dgrad(self):
+        x, weight, out = self._run(x_trainable=False, w_trainable=True)
+        self.assertFalse(out.stop_gradient)
+        self.assertIsNone(x.grad)
+        self.assertIsNotNone(weight.grad)
+
+    @_REQUIRE_GPU
+    @_REQUIRE_DEEP_GEMM
+    def test_both_frozen_output_is_detached(self):
+        x, weight, out = self._run(x_trainable=False, w_trainable=False)
+        self.assertTrue(out.stop_gradient)
+        self.assertIsNone(x.grad)
+        self.assertIsNone(weight.grad)
+
+
 class TestGroupedOutputFP8Forward(unittest.TestCase):
     """Forward pass correctness."""
 

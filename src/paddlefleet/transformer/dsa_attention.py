@@ -1094,7 +1094,11 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, output: Tensor, indexer_loss: Tensor) -> Tensor:
         ctx.save_for_backward(indexer_loss)
-        return output
+        # Frozen backbone (phase 2): ``output`` is a leaf with
+        # ``stop_gradient=True``; returning it unchanged is treated as an inplace
+        # alias and rejected, so hand back a fresh tensor and skip its gradient.
+        ctx.output_needs_grad = not output.stop_gradient
+        return output if ctx.output_needs_grad else output.clone()
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
@@ -1103,6 +1107,8 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         if scale is None:
             scale = paddle.ones([1], dtype=indexer_loss.dtype)
         scaled_grad = paddle.ones_like(indexer_loss) * scale
+        if not ctx.output_needs_grad:
+            return None, scaled_grad
         return grad_output, scaled_grad
 
     @staticmethod

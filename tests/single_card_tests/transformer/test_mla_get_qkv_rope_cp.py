@@ -212,6 +212,7 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         context_parallel_size,
         sequence_parallel=False,
         tensor_model_parallel_size=1,
+        mla_use_nope=False,
     ):
         heads = 2
         qk_nope = 4
@@ -237,6 +238,7 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             cp_balance_mode="dualchunk_allgather",
             rope_type=rope_type,
             apply_rope_fusion=apply_rope_fusion,
+            mla_use_nope=mla_use_nope,
             gpt_model_use_experimental_version=False,
         )
         layer.num_attention_heads_per_partition = heads
@@ -475,6 +477,64 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
                     scatter_calls[0],
                     ([1, hidden_full.shape[1], 1, 8], 1, "dualchunk_allgather"),
                 )
+
+    def test_nope_bypasses_rotary_and_uses_raw_projected_channels(self):
+        """NoPE keeps Q intact and appends the raw positional K channels."""
+        hidden = self._hidden(batch=2, seq=8)
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=False,
+            context_parallel_size=1,
+            mla_use_nope=True,
+        )
+
+        with mock.patch.object(
+            mla_mod,
+            "apply_rotary_pos_emb",
+            side_effect=AssertionError("NoPE must bypass rotary application"),
+        ) as mock_apply_rope:
+            query, key, value, *_ = self._run_layer(
+                layer, hidden, cp_size=1, cp_rank=0
+            )
+
+        mock_apply_rope.assert_not_called()
+        expected_query, _ = layer.q_proj(hidden)
+        expected_query = expected_query.reshape(
+            [2, 8, layer.num_attention_heads_per_partition, layer.q_head_dim]
+        )
+        kv_combined, _ = layer.kv_a_proj_with_mqa(hidden)
+        kv_compressed, raw_k_pos = paddle.split(
+            kv_combined,
+            [layer.kv_lora_rank, layer.qk_rope_head_dim],
+            axis=-1,
+        )
+        expected_kv, _ = layer.kv_b_proj(kv_compressed)
+        expected_kv = expected_kv.reshape(
+            [
+                2,
+                8,
+                layer.num_attention_heads_per_partition,
+                layer.qk_nope_head_dim + layer.v_head_dim,
+            ]
+        )
+        expected_k_nope, expected_value = paddle.split(
+            expected_kv,
+            [layer.qk_nope_head_dim, layer.v_head_dim],
+            axis=-1,
+        )
+        expected_k_pos = raw_k_pos.unsqueeze(-2).expand(
+            [
+                2,
+                8,
+                layer.num_attention_heads_per_partition,
+                layer.qk_rope_head_dim,
+            ]
+        )
+        expected_key = paddle.concat([expected_k_nope, expected_k_pos], axis=-1)
+
+        self._assert_equal(query, expected_query, "NoPE query")
+        self._assert_equal(key, expected_key, "NoPE key")
+        self._assert_equal(value, expected_value, "NoPE value")
 
     def test_context_parallel_requires_prepared_rope_tensor(self):
         layer = self._make_layer(
