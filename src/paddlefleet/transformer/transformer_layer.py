@@ -544,8 +544,6 @@ class TransformerLayer(nn.Layer):
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
         dict_args.pop("dynamic_inference_decode_only", None)
-        keys = tuple(dict_args.keys())
-        values = tuple(dict_args.values())
 
         is_mtp = dict_args.pop("is_mtp", False)
         TransformerLayer._skip_mtp_probes = (
@@ -592,6 +590,40 @@ class TransformerLayer(nn.Layer):
                 )
             else:
                 main_seq_len = hidden_states.shape[1]
+
+            # The non-flexible MTP collator pads input_ids and its dense causal
+            # mask with one lookahead position per MTP layer. Embedding converts
+            # those lookahead positions into separate MTP hidden-state chunks,
+            # so every decoder and MTP transformer block operates on
+            # main_seq_len tokens. Keep the dense mask on that same model-facing
+            # sequence; passing the padded mask onward either leaks a stale key
+            # column into full attention or makes GatedDeltaNet reject it.
+            attention_mask = dict_args.get("attention_mask", None)
+            if attention_mask is not None:
+                if attention_mask.ndim == 2:
+                    if attention_mask.shape[-1] < main_seq_len:
+                        raise ValueError(
+                            "MTP attention mask is shorter than the main decoder sequence: "
+                            f"{attention_mask.shape[-1]} < {main_seq_len}"
+                        )
+                    dict_args["attention_mask"] = attention_mask[:, :main_seq_len]
+                elif attention_mask.ndim == 4:
+                    if (
+                        attention_mask.shape[-2] < main_seq_len
+                        or attention_mask.shape[-1] < main_seq_len
+                    ):
+                        raise ValueError(
+                            "MTP dense attention mask does not cover the main decoder sequence: "
+                            f"shape={list(attention_mask.shape)}, main_seq_len={main_seq_len}"
+                        )
+                    dict_args["attention_mask"] = attention_mask[
+                        :, :, :main_seq_len, :main_seq_len
+                    ]
+                else:
+                    raise ValueError(
+                        "MTP attention_mask must be a 2-D padding mask or 4-D dense mask, "
+                        f"got shape={list(attention_mask.shape)}"
+                    )
             rotary_pos_emb_full = None
             if (
                 "rotary_pos_emb" in dict_args.keys()
@@ -1820,8 +1852,6 @@ class HySparseTransformerLayer(TransformerLayer):
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
         dict_args.pop("dynamic_inference_decode_only", None)
-        keys = tuple(dict_args.keys())
-        values = tuple(dict_args.values())
 
         is_mtp = dict_args.pop("is_mtp", False)
         TransformerLayer._skip_mtp_probes = (

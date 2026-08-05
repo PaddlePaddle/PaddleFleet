@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from dataclasses import dataclass
 
 import paddle
@@ -26,6 +27,31 @@ from ...transformer.layer import FleetLayer
 @dataclass
 class VisionEmbeddingSpec:
     rope_embedding: LayerSpec = None
+
+
+class AccuracyCompatiblePatchProjection(nn.Conv3D):
+    """Conv3D-shaped patch projection with a Megatron-compatible reduction tree."""
+
+    def __init__(self, *args, accuracy_compatible: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.accuracy_compatible = accuracy_compatible
+
+    def forward(self, pixel_values):
+        if not self.accuracy_compatible:
+            return super().forward(pixel_values)
+
+        expected_shape = list(self.weight.shape[1:])
+        if list(pixel_values.shape[1:]) != expected_shape:
+            raise ValueError(
+                "accuracy-compatible patch projection requires one non-overlapping patch per row: "
+                f"expected trailing shape {expected_shape}, got {list(pixel_values.shape[1:])}"
+            )
+        patch_rows = pixel_values.reshape([pixel_values.shape[0], -1]).astype(
+            self.weight.dtype
+        )
+        patch_weight = self.weight.reshape([self.weight.shape[0], -1]).transpose([1, 0])
+        hidden_states = F.linear(patch_rows, patch_weight, self.bias)
+        return hidden_states.reshape([pixel_values.shape[0], self.weight.shape[0], 1, 1, 1])
 
 
 class VisionEmbedding(FleetLayer):
@@ -44,18 +70,28 @@ class VisionEmbedding(FleetLayer):
         self.in_channels = config.in_channels
         self.embed_dim = config.hidden_size
         self.merge_hidden_size = self.embed_dim * (config.spatial_merge_size**2)
+        accuracy_mode = bool(getattr(config, "use_accuracy_compatible", False))
+        self.accuracy_compatible_patch_projection = (
+            accuracy_mode
+            and os.environ.get("PADDLEFLEET_ACCURACY_PATCH_PROJECTION", "0") == "1"
+        )
+        self.accuracy_compatible_position_interpolation = (
+            accuracy_mode
+            and os.environ.get("PADDLEFLEET_ACCURACY_POSITION_INTERPOLATION", "0") == "1"
+        )
 
         kernel_size = [
             config.temporal_patch_size,
             config.patch_size,
             config.patch_size,
         ]
-        self.patch_embed = nn.Conv3D(
+        self.patch_embed = AccuracyCompatiblePatchProjection(
             config.in_channels,
             config.hidden_size,
             kernel_size=kernel_size,
             stride=kernel_size,
             bias=True,
+            accuracy_compatible=self.accuracy_compatible_patch_projection,
         )
         self.pos_embed = nn.Embedding(
             config.num_position_embeddings, config.hidden_size
@@ -121,8 +157,6 @@ class VisionEmbedding(FleetLayer):
             grid_thw[:, 1],
             grid_thw[:, 2],
         )
-        device = paddle.get_device()
-
         idx_list = [[] for _ in range(4)]
         weight_list = [[] for _ in range(4)]
 
@@ -165,13 +199,22 @@ class VisionEmbedding(FleetLayer):
                 weight_list[i].extend(weights[i].tolist())
 
         idx_tensor = paddle.to_tensor(idx_list, dtype="int64")
-        weight_tensor = paddle.to_tensor(
-            weight_list, dtype=self.pos_embed.weight.dtype
+        weight_dtype = (
+            "float32"
+            if self.accuracy_compatible_position_interpolation
+            else self.pos_embed.weight.dtype
         )
-        pos_embeds = self.pos_embed(idx_tensor) * weight_tensor[:, :, None]
-        patch_pos_embeds = (
-            pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
-        )
+        weight_tensor = paddle.to_tensor(weight_list, dtype=weight_dtype)
+        pos_embeds = self.pos_embed(idx_tensor)
+        if self.accuracy_compatible_position_interpolation:
+            patch_pos_embeds = paddle.sum(
+                pos_embeds.astype("float32") * weight_tensor[:, :, None], axis=0
+            )
+        else:
+            pos_embeds = pos_embeds * weight_tensor[:, :, None]
+            patch_pos_embeds = (
+                pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
+            )
 
         patch_pos_embeds = paddle.split(
             patch_pos_embeds,
@@ -246,7 +289,7 @@ class VisionEmbedding(FleetLayer):
             .reshape([-1, self.embed_dim])
         )
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
-        hidden_states = hidden_states + pos_embeds
+        hidden_states = hidden_states + pos_embeds.astype(hidden_states.dtype)
 
         seq_len, _ = hidden_states.shape
         hidden_states = hidden_states.reshape([seq_len, -1])

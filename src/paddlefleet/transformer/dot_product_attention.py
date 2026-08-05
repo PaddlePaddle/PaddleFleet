@@ -527,10 +527,47 @@ class DotProductAttention(FleetLayer):
         v_head_dim = value.shape[-1]
 
         if use_eager and packed_seq_params is not None:
-            raise ValueError(
-                'packed_seq_params does not support _attn_implementation="eager"; '
-                "please disable packed sequence inputs or use a fused attention implementation."
+            effective_mask_type = attn_mask_type or self.attn_mask_type
+            if effective_mask_type != AttnMaskType.no_mask:
+                raise ValueError(
+                    "eager packed-sequence attention currently supports only non-causal no-mask vision segments"
+                )
+            if packed_seq_params.qkv_format != "thd" or bsz != 1:
+                raise ValueError(
+                    "eager packed-sequence attention requires qkv_format='thd' represented as batch size one"
+                )
+            if packed_seq_params.cu_seqlens_q is None or packed_seq_params.cu_seqlens_kv is None:
+                raise ValueError("eager packed-sequence attention requires both q and kv cumulative lengths")
+
+            q_lengths = packed_seq_params.cu_seqlens_q[1:] - packed_seq_params.cu_seqlens_q[:-1]
+            kv_lengths = packed_seq_params.cu_seqlens_kv[1:] - packed_seq_params.cu_seqlens_kv[:-1]
+            q_segment_ids = paddle.repeat_interleave(
+                paddle.arange(q_lengths.shape[0], dtype="int64"), q_lengths
             )
+            kv_segment_ids = paddle.repeat_interleave(
+                paddle.arange(kv_lengths.shape[0], dtype="int64"), kv_lengths
+            )
+            if q_segment_ids.shape[0] != q_len or kv_segment_ids.shape[0] != key.shape[1]:
+                raise ValueError(
+                    "packed cumulative lengths do not cover the eager query/key sequence lengths: "
+                    f"q={q_segment_ids.shape[0]}/{q_len}, kv={kv_segment_ids.shape[0]}/{key.shape[1]}"
+                )
+            packed_mask = (q_segment_ids[:, None] != kv_segment_ids[None, :]).reshape(
+                [1, 1, q_len, key.shape[1]]
+            )
+            if attention_mask is None:
+                attention_mask = packed_mask
+            elif attention_mask.dtype == paddle.bool:
+                attention_mask = paddle.logical_or(attention_mask, packed_mask)
+            elif attention_mask.dtype == paddle.float32:
+                attention_mask = paddle.logical_or(attention_mask < 0.5, packed_mask)
+            else:
+                raise ValueError(
+                    "eager packed-sequence attention accepts only bool or PaddleFormers float32 masks"
+                )
+            # The explicit block-diagonal mask now carries the complete segment
+            # semantics. Continue through the unfused eager QK/softmax/value path.
+            packed_seq_params = None
         if packed_seq_params is not None:
             assert self.is_swa is False, "SWA doesn't support packed sequence"
             assert (

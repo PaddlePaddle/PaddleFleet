@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -32,6 +33,7 @@ from paddle.distributed.fleet.meta_parallel import (
 
 from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.tensor_parallel.layers import ColumnParallelLinear
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import (
@@ -74,6 +76,287 @@ class GatedDeltaNetSublayersSpec:
     in_proj: LayerSpec | type = IdentityOp
     out_norm: LayerSpec | type = IdentityOp
     out_proj: LayerSpec | type = IdentityOp
+
+
+def _accuracy_gdn_in_proj_order_enabled(config) -> bool:
+    """Return whether the opt-in Megatron GDN projection order is active."""
+    return bool(getattr(config, "use_accuracy_compatible", False)) and (
+        os.environ.get("PADDLEFLEET_ACCURACY_GDN_IN_PROJ_ORDER", "0") == "1"
+    )
+
+
+def _accuracy_gdn_causal_conv1d_enabled(config) -> bool:
+    """Return whether the opt-in Megatron causal Conv1D path is active."""
+    enabled = bool(getattr(config, "use_accuracy_compatible", False)) and (
+        os.environ.get("PADDLEFLEET_ACCURACY_GDN_CAUSAL_CONV1D", "0") == "1"
+    )
+    if enabled and not _accuracy_gdn_in_proj_order_enabled(config):
+        raise ValueError(
+            "PADDLEFLEET_ACCURACY_GDN_CAUSAL_CONV1D requires "
+            "PADDLEFLEET_ACCURACY_GDN_IN_PROJ_ORDER=1"
+        )
+    return enabled
+
+
+def _accuracy_gdn_conv_fp32_accum_enabled(config) -> bool:
+    """Return whether the opt-in FP32-accumulator GDN Conv1D path is active."""
+    enabled = bool(getattr(config, "use_accuracy_compatible", False)) and (
+        os.environ.get("PADDLEFLEET_ACCURACY_GDN_CONV_FP32_ACCUM", "0") == "1"
+    )
+    if enabled and not _accuracy_gdn_causal_conv1d_enabled(config):
+        raise ValueError(
+            "PADDLEFLEET_ACCURACY_GDN_CONV_FP32_ACCUM requires "
+            "PADDLEFLEET_ACCURACY_GDN_CAUSAL_CONV1D=1"
+        )
+    return enabled
+
+
+def _accuracy_gdn_qk_l2_enabled(config) -> bool:
+    """Return whether the opt-in Megatron-compatible Q/K L2 path is active."""
+    enabled = bool(getattr(config, "use_accuracy_compatible", False)) and (
+        os.environ.get("PADDLEFLEET_ACCURACY_GDN_QK_L2", "0") == "1"
+    )
+    if enabled and not _accuracy_gdn_causal_conv1d_enabled(config):
+        raise ValueError(
+            "PADDLEFLEET_ACCURACY_GDN_QK_L2 requires "
+            "PADDLEFLEET_ACCURACY_GDN_CAUSAL_CONV1D=1"
+        )
+    return enabled
+
+
+def _accuracy_gdn_recurrence_enabled(config) -> bool:
+    """Return whether the opt-in Megatron chunk recurrence scan is active."""
+    enabled = bool(getattr(config, "use_accuracy_compatible", False)) and (
+        os.environ.get("PADDLEFLEET_ACCURACY_GDN_RECURRENCE", "0") == "1"
+    )
+    if enabled and not _accuracy_gdn_qk_l2_enabled(config):
+        raise ValueError(
+            "PADDLEFLEET_ACCURACY_GDN_RECURRENCE requires "
+            "PADDLEFLEET_ACCURACY_GDN_QK_L2=1"
+        )
+    return enabled
+
+
+def _accuracy_compatible_sklansky_scan(x: paddle.Tensor):
+    """Inclusive last-axis Sklansky scan matching Torch CUDA cumsum."""
+    width = x.shape[-1]
+    if width <= 0 or width & (width - 1):
+        raise ValueError(
+            "accuracy-compatible GDN recurrence requires a positive power-of-two chunk"
+        )
+    output = x
+    step = 2
+    while step <= width:
+        half = step // 2
+        parts = []
+        for start in range(0, width, step):
+            lower = output[..., start : start + half]
+            upper = output[..., start + half : start + step]
+            parts.extend([lower, upper + lower[..., -1:]])
+        output = paddle.concat(parts, axis=-1)
+        step *= 2
+    return output
+
+
+def _accuracy_compatible_l2norm(x: paddle.Tensor, eps: float = 1e-6):
+    """Match FLA's BF16 L2 output with an explicit reduction tree.
+
+    FLA's Triton kernel reduces a 128-wide FP32 row and applies reciprocal
+    square root before storing BF16.  For the frozen H800 profile, reverse
+    serial accumulation plus ``1 / sqrt`` is the only tested Paddle-native
+    tree whose full BF16 Q/K output is raw exact.  This candidate intentionally
+    makes no backward exactness claim yet.
+    """
+    if x.shape[-1] <= 0:
+        raise ValueError("accuracy-compatible GDN L2 requires a non-empty row")
+    x_float = x.astype(paddle.float32)
+    squares = x_float * x_float
+    sum_squares = squares[..., -1]
+    for index in range(x.shape[-1] - 2, -1, -1):
+        sum_squares = squares[..., index] + sum_squares
+    inv_norm = 1.0 / paddle.sqrt(sum_squares.unsqueeze(-1) + eps)
+    return (x_float * inv_norm).astype(x.dtype)
+
+
+def _reorder_gdn_in_proj_by_key_head(
+    output: paddle.Tensor,
+    *,
+    num_key_heads: int,
+    key_head_dim: int,
+    num_value_heads: int,
+    value_head_dim: int,
+) -> paddle.Tensor:
+    """Reorder ``[q,k,v,z,b,a]`` sections into Megatron key-head groups.
+
+    The Qwen3.5 mcore bridge reshapes each of q/k/v/z/b/a to
+    ``[num_key_heads, -1]`` and concatenates within every key-head group before
+    flattening. Paddle's official checkpoint remains in section-major order;
+    this read-only activation permutation reproduces the bridge result without
+    changing parameter names, shapes, or checkpoint bytes.
+    """
+    if num_key_heads <= 0 or num_value_heads % num_key_heads != 0:
+        raise ValueError(
+            "GDN Megatron projection order requires positive key heads and "
+            "num_value_heads divisible by num_key_heads"
+        )
+    qk_dim = num_key_heads * key_head_dim
+    value_dim = num_value_heads * value_head_dim
+    section_sizes = [
+        qk_dim,
+        qk_dim,
+        value_dim,
+        value_dim,
+        num_value_heads,
+        num_value_heads,
+    ]
+    expected = sum(section_sizes)
+    if output.shape[-1] != expected:
+        raise ValueError(
+            "GDN Megatron projection order received an unexpected output size: "
+            f"expected {expected}, got {output.shape[-1]}"
+        )
+    grouped = [
+        section.reshape([*output.shape[:-1], num_key_heads, -1])
+        for section in paddle.split(output, section_sizes, axis=-1)
+    ]
+    return paddle.concat(grouped, axis=-1).reshape(output.shape)
+
+
+def _reorder_gdn_conv1d_by_key_head(
+    weight: paddle.Tensor,
+    *,
+    num_key_heads: int,
+    key_head_dim: int,
+    num_value_heads: int,
+    value_head_dim: int,
+) -> paddle.Tensor:
+    """Reorder official q/k/v Conv1D channels into mcore key-head groups."""
+    if num_key_heads <= 0 or num_value_heads % num_key_heads != 0:
+        raise ValueError(
+            "GDN Megatron Conv1D order requires positive key heads and "
+            "num_value_heads divisible by num_key_heads"
+        )
+    qk_dim = num_key_heads * key_head_dim
+    value_dim = num_value_heads * value_head_dim
+    expected = qk_dim * 2 + value_dim
+    if weight.shape[0] != expected or weight.ndim != 3 or weight.shape[1] != 1:
+        raise ValueError(
+            "GDN Megatron Conv1D order received an unexpected weight shape: "
+            f"expected [{expected}, 1, kernel], got {list(weight.shape)}"
+        )
+    grouped = [
+        section.reshape([num_key_heads, -1, 1, weight.shape[-1]])
+        for section in paddle.split(
+            weight, [qk_dim, qk_dim, value_dim], axis=0
+        )
+    ]
+    return paddle.concat(grouped, axis=1).reshape(weight.shape)
+
+
+class AccuracyCompatibleGDNConv1D(nn.Conv1D):
+    """Depthwise Conv1D matching mcore's grouped weight and BF16 GEMM tree."""
+
+    def __init__(
+        self,
+        *args,
+        config,
+        num_key_heads: int,
+        key_head_dim: int,
+        num_value_heads: int,
+        value_head_dim: int,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.accuracy_compatible_gdn_causal_conv1d = (
+            _accuracy_gdn_causal_conv1d_enabled(config)
+        )
+        self.accuracy_compatible_gdn_conv_fp32_accum = (
+            _accuracy_gdn_conv_fp32_accum_enabled(config)
+        )
+        self._gdn_order = {
+            "num_key_heads": num_key_heads,
+            "key_head_dim": key_head_dim,
+            "num_value_heads": num_value_heads,
+            "value_head_dim": value_head_dim,
+        }
+        if self.accuracy_compatible_gdn_causal_conv1d:
+            if self._groups != self._in_channels or self._groups != self._out_channels:
+                raise ValueError("accuracy-compatible GDN Conv1D requires depthwise groups")
+            if self._stride != [1] or self._dilation != [1] or self.bias is not None:
+                raise ValueError(
+                    "accuracy-compatible GDN Conv1D requires stride=1, dilation=1, and no bias"
+                )
+            if self._padding != self._kernel_size[0] - 1 or self._data_format != "NCL":
+                raise ValueError(
+                    "accuracy-compatible GDN Conv1D requires symmetric kernel-1 NCL padding"
+                )
+
+    def forward(self, x: paddle.Tensor) -> paddle.Tensor:
+        if not self.accuracy_compatible_gdn_causal_conv1d:
+            return super().forward(x)
+        weight = _reorder_gdn_conv1d_by_key_head(self.weight, **self._gdn_order)
+        padding = self._padding
+        kernel = self._kernel_size[0]
+        padded = F.pad(x, [padding, padding])
+        output_length = padded.shape[-1] - kernel + 1
+        windows = paddle.stack(
+            [padded[:, :, tap : tap + output_length] for tap in range(kernel)],
+            axis=-1,
+        )
+        batch, channels = x.shape[:2]
+        bmm_weight = (
+            weight[:, 0, :]
+            .unsqueeze(0)
+            .expand([batch, channels, kernel])
+            .reshape([batch * channels, kernel, 1])
+        )
+        windows = windows.reshape([batch * channels, output_length, kernel])
+        bmm_weight = bmm_weight.reshape([batch * channels, kernel, 1])
+        if self.accuracy_compatible_gdn_conv_fp32_accum:
+            return paddle.bmm(
+                windows.astype(paddle.float32),
+                bmm_weight.astype(paddle.float32),
+            ).astype(x.dtype).reshape([batch, channels, output_length])
+        return paddle.bmm(windows, bmm_weight).reshape(
+            [batch, channels, output_length]
+        )
+
+
+
+class AccuracyCompatibleGDNInputProjection(ColumnParallelLinear):
+    """Column-parallel projection with an explicit Qwen3.5 mcore row order.
+
+    The behavior is default-off and restricted to the independently validated
+    TP1 accuracy profile. The underlying parameter/state-dict layout remains
+    unchanged, so official checkpoint loading and inverse export stay lossless.
+    """
+
+    def __init__(self, *args, config, **kwargs):
+        super().__init__(*args, config=config, **kwargs)
+        self.accuracy_compatible_gdn_in_proj_order = (
+            _accuracy_gdn_in_proj_order_enabled(config)
+        )
+        if self.accuracy_compatible_gdn_in_proj_order and self.world_size != 1:
+            raise ValueError(
+                "PADDLEFLEET_ACCURACY_GDN_IN_PROJ_ORDER is validated only for TP1"
+            )
+
+    def forward(self, *args, **kwargs):
+        output, output_bias = super().forward(*args, **kwargs)
+        if not self.accuracy_compatible_gdn_in_proj_order:
+            return output, output_bias
+        reorder_kwargs = {
+            "num_key_heads": self.config.linear_num_key_heads,
+            "key_head_dim": self.config.linear_key_head_dim,
+            "num_value_heads": self.config.linear_num_value_heads,
+            "value_head_dim": self.config.linear_value_head_dim,
+        }
+        output = _reorder_gdn_in_proj_by_key_head(output, **reorder_kwargs)
+        if output_bias is not None:
+            output_bias = _reorder_gdn_in_proj_by_key_head(
+                output_bias, **reorder_kwargs
+            )
+        return output, output_bias
 
 
 class GatedDeltaNet(FleetLayer):
@@ -127,6 +410,15 @@ class GatedDeltaNet(FleetLayer):
         assert A_init_range[0] >= 0 and A_init_range[1] >= A_init_range[0]
         self.A_init_range = A_init_range
         self.use_qk_l2norm = use_qk_l2norm
+        self.accuracy_compatible_gdn_in_proj_order = _accuracy_gdn_in_proj_order_enabled(
+            config
+        )
+        self.accuracy_compatible_gdn_qk_l2 = _accuracy_gdn_qk_l2_enabled(
+            config
+        )
+        self.accuracy_compatible_gdn_recurrence = (
+            _accuracy_gdn_recurrence_enabled(config)
+        )
 
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups(
@@ -174,7 +466,7 @@ class GatedDeltaNet(FleetLayer):
         self.conv_dim_local_tp = self.conv_dim // self.tp_size
 
         # weight shape: [conv_dim, 1, d_conv], bias shape: [conv_dim]
-        self.conv1d = nn.Conv1D(
+        self.conv1d = AccuracyCompatibleGDNConv1D(
             in_channels=self.conv_dim_local_tp,
             out_channels=self.conv_dim_local_tp,
             kernel_size=self.conv_kernel_dim,
@@ -182,6 +474,11 @@ class GatedDeltaNet(FleetLayer):
             padding=self.conv_kernel_dim - 1,
             bias_attr=conv_bias,
             data_format="NCL",
+            config=self.config,
+            num_key_heads=self.num_key_heads,
+            key_head_dim=self.key_head_dim,
+            num_value_heads=self.num_value_heads,
+            value_head_dim=self.value_head_dim,
         )
         self.conv1d.weight.is_distributed = True if self.tp_size > 1 else False
         if conv_bias and self.conv1d.bias is not None:
@@ -270,32 +567,48 @@ class GatedDeltaNet(FleetLayer):
         """Derive a padding mask (1.0=valid, 0.0=padding) for GDN."""
         is_sp = self.config.sequence_parallel and self.sp_size > 1
 
-        if attention_mask is not None and attention_mask.ndim == 2:
-            full_seq = attention_mask.shape[-1]
-            if is_sp:
+        if attention_mask is not None and attention_mask.ndim in (2, 4):
+            if attention_mask.ndim == 2:
+                valid_tokens = attention_mask
+                full_seq = attention_mask.shape[-1]
+            elif (
+                attention_mask.shape[1] == 1
+                and attention_mask.shape[-2] == attention_mask.shape[-1]
+            ):
+                # PaddleFormers dense masks use 1.0 for an allowed QK edge and
+                # 0.0 for a masked edge. A valid causal query always retains its
+                # diagonal edge, while padding rows have a zero diagonal.
+                valid_tokens = paddle.diagonal(
+                    attention_mask[:, 0], axis1=-2, axis2=-1
+                )
+                full_seq = attention_mask.shape[-1]
+            else:
+                valid_tokens = None
+                full_seq = attention_mask.shape[-1]
+
+            if valid_tokens is not None and is_sp:
                 if full_seq != seq_len:
                     # Shape mismatch under SP – fall through to startend indices.
                     pass
                 else:
-                    # attention_mask is [b, full_s], slice to local chunk
+                    # valid_tokens is [b, full_s], slice to local chunk.
                     seq_len_local = seq_len // self.sp_size
                     tp_rank = get_pg_rank(self.pg_collection.tp)
                     offset = tp_rank * seq_len_local
-                    local_mask = attention_mask[
-                        :, offset : offset + seq_len_local
-                    ]
+                    local_mask = valid_tokens[:, offset : offset + seq_len_local]
                     if local_mask.astype("bool").all():
                         return None
                     return local_mask.astype(paddle.float32).T.unsqueeze(-1)
-            else:
-                if full_seq == seq_len:
-                    mask = attention_mask.unsqueeze(-1).astype(paddle.float32)
-                    if mask.all():
-                        return None
-                    return mask
-                # full_seq != seq_len: attention_mask shape does not match the
-                # current sequence length (e.g. stale mask from a previous stage).
-                # Fall through to try attn_mask_startend_row_indices instead.
+            elif valid_tokens is not None and full_seq == seq_len:
+                mask = valid_tokens.unsqueeze(-1).astype(paddle.float32)
+                # paddle.diagonal returns a strided view; materialize a bool
+                # reduction because GPU all() on that float view is unreliable.
+                if mask.astype("bool").all():
+                    return None
+                return mask
+            # The dense/padding mask shape does not match the current sequence
+            # (for example a stale MTP-lookahead mask). Fall through to try
+            # attn_mask_startend_row_indices, then fail closed below.
 
         if attn_mask_startend_row_indices is not None:
             indices = attn_mask_startend_row_indices[:, 0, :, 0]
@@ -402,20 +715,43 @@ class GatedDeltaNet(FleetLayer):
             # [s, b, x] -> [b, s, x]
             qkvzba = qkvzba.transpose([1, 0, 2])
 
-        # Split, reorder, and reshape the tensor into q, k, v, gate, beta, alpha
-        qkv, gate, beta, alpha = paddle.split(
-            qkvzba,
-            [
-                (self.qk_dim * 2 + self.v_dim) // self.tp_size,
-                self.v_dim // self.tp_size,
-                self.num_value_heads // self.tp_size,
-                self.num_value_heads // self.tp_size,
-            ],
-            axis=-1,
-        )
-        gate = gate.reshape([batch, seq_len, -1, self.value_head_dim])
-        beta = beta.reshape([batch, seq_len, -1])
-        alpha = alpha.reshape([batch, seq_len, -1])
+        # Split, reorder, and reshape the tensor into q, k, v, gate, beta, alpha.
+        # The accuracy-compatible projection has Megatron's per-key-head layout:
+        # [q(key_dim), k(key_dim), v(value_dim/key_head), z(value_dim/key_head),
+        #  b(value_heads/key_head), a(value_heads/key_head)] per key head.
+        if self.accuracy_compatible_gdn_in_proj_order:
+            local_key_heads = self.num_key_heads // self.tp_size
+            value_heads_per_key_head = self.num_value_heads // self.num_key_heads
+            value_dim_per_key_head = value_heads_per_key_head * self.value_head_dim
+            qkvzba = qkvzba.reshape([batch, seq_len, local_key_heads, -1])
+            qkv, gate, beta, alpha = paddle.split(
+                qkvzba,
+                [
+                    2 * self.key_head_dim + value_dim_per_key_head,
+                    value_dim_per_key_head,
+                    value_heads_per_key_head,
+                    value_heads_per_key_head,
+                ],
+                axis=-1,
+            )
+            gate = gate.reshape([batch, seq_len, self.num_value_heads // self.tp_size, self.value_head_dim])
+            beta = beta.reshape([batch, seq_len, -1])
+            alpha = alpha.reshape([batch, seq_len, -1])
+            qkv = qkv.reshape([batch, seq_len, -1])
+        else:
+            qkv, gate, beta, alpha = paddle.split(
+                qkvzba,
+                [
+                    (self.qk_dim * 2 + self.v_dim) // self.tp_size,
+                    self.v_dim // self.tp_size,
+                    self.num_value_heads // self.tp_size,
+                    self.num_value_heads // self.tp_size,
+                ],
+                axis=-1,
+            )
+            gate = gate.reshape([batch, seq_len, -1, self.value_head_dim])
+            beta = beta.reshape([batch, seq_len, -1])
+            alpha = alpha.reshape([batch, seq_len, -1])
 
         # Convolution on qkv
         qkv = qkv.transpose([0, 2, 1]).contiguous()  # b, s, d -> b, d, s
@@ -424,25 +760,65 @@ class GatedDeltaNet(FleetLayer):
         qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
         nvtx_range_pop(suffix="conv1d")
 
-        # Split qkv into query, key, and value
+        # Split qkv into query/key and value using the same per-key-head layout.
         qkv = qkv.transpose([0, 2, 1])  # b, d, s -> b, s, d
-        query, key, value = paddle.split(
-            qkv,
-            [
-                self.qk_dim // self.tp_size,
-                self.qk_dim // self.tp_size,
-                self.v_dim // self.tp_size,
-            ],
-            axis=-1,
-        )
-        query = query.reshape([batch, seq_len, -1, self.key_head_dim])
-        key = key.reshape([batch, seq_len, -1, self.key_head_dim])
-        value = value.reshape([batch, seq_len, -1, self.value_head_dim])
+        if self.accuracy_compatible_gdn_in_proj_order:
+            local_key_heads = self.num_key_heads // self.tp_size
+            value_heads_per_key_head = self.num_value_heads // self.num_key_heads
+            qkv = qkv.reshape([batch, seq_len, local_key_heads, -1])
+            query, key, value = paddle.split(
+                qkv,
+                [
+                    self.key_head_dim,
+                    self.key_head_dim,
+                    value_heads_per_key_head * self.value_head_dim,
+                ],
+                axis=-1,
+            )
+            query = query.reshape([batch, seq_len, -1, self.key_head_dim])
+            key = key.reshape([batch, seq_len, -1, self.key_head_dim])
+            value = value.reshape([batch, seq_len, -1, self.value_head_dim])
+        else:
+            query_key, value = paddle.split(
+                qkv,
+                [
+                    self.qk_dim * 2 // self.tp_size,
+                    self.v_dim // self.tp_size,
+                ],
+                axis=-1,
+            )
+            query_key = query_key.reshape(
+                [batch, seq_len, -1, self.key_head_dim]
+            )
+            value = value.reshape([batch, seq_len, -1, self.value_head_dim])
 
-        # Apply L2 norm to query and key
-        if self.use_qk_l2norm:
-            query = _l2norm(query.contiguous())
-            key = _l2norm(key.contiguous())
+        recurrence_observer = getattr(self, "_repro_recurrence_observer", None)
+        query_pre_norm = query if recurrence_observer is not None else None
+        key_pre_norm = key if recurrence_observer is not None else None
+
+        # FLA normalizes Q/K rows before the recurrent rule.
+        if self.accuracy_compatible_gdn_in_proj_order:
+            if self.use_qk_l2norm:
+                if self.accuracy_compatible_gdn_qk_l2:
+                    query = _accuracy_compatible_l2norm(query.contiguous())
+                    key = _accuracy_compatible_l2norm(key.contiguous())
+                else:
+                    query = _l2norm(query.contiguous())
+                    key = _l2norm(key.contiguous())
+        else:
+            # The legacy section-major path normalizes concatenated Q/K rows
+            # before splitting their head axis.
+            if self.use_qk_l2norm:
+                if self.accuracy_compatible_gdn_qk_l2:
+                    query_key = _accuracy_compatible_l2norm(
+                        query_key.contiguous()
+                    )
+                else:
+                    query_key = _l2norm(query_key.contiguous())
+            local_key_heads = self.num_key_heads // self.tp_size
+            query, key = paddle.split(
+                query_key, [local_key_heads, local_key_heads], axis=2
+            )
 
         # GQA repeat if num_value_heads > num_key_heads
         if self.num_value_heads // self.num_key_heads > 1:
@@ -480,6 +856,9 @@ class GatedDeltaNet(FleetLayer):
                 initial_state=None,
                 output_final_state=False,
                 use_qk_l2norm_in_kernel=False,
+                use_accuracy_compatible_cumsum=(
+                    self.accuracy_compatible_gdn_recurrence
+                ),
             )
         else:
             raise NotImplementedError("FLA not supported yet.")
@@ -493,6 +872,21 @@ class GatedDeltaNet(FleetLayer):
             #     output_final_state=False,
             #     use_qk_l2norm_in_kernel=False,
             # )
+        if recurrence_observer is not None:
+            recurrence_observer(
+                query_pre_norm=query_pre_norm,
+                key_pre_norm=key_pre_norm,
+                query=query,
+                key=key,
+                value=value,
+                alpha=alpha,
+                softplus_input=(
+                    alpha.astype(paddle.float32) + self.dt_bias.astype(paddle.float32)
+                ),
+                g=g,
+                beta=beta,
+                core_output=core_attn_out,
+            )
         nvtx_range_pop(suffix="gated_delta_rule")
 
         # Gated norm
@@ -625,6 +1019,7 @@ def paddle_chunk_gated_delta_rule(
     initial_state=None,
     output_final_state=False,
     use_qk_l2norm_in_kernel=False,
+    use_accuracy_compatible_cumsum=False,
 ):
     """
     Paddle-native implementation of chunked gated delta rule for deterministic mode.
@@ -676,8 +1071,12 @@ def paddle_chunk_gated_delta_rule(
         paddle.ones([chunk_size, chunk_size], dtype=paddle.bool), diagonal=0
     )
 
-    # Chunk decay
-    g = g.cumsum(axis=-1)
+    # Chunk decay. Torch CUDA uses a Sklansky scan for this 64-wide axis.
+    g = (
+        _accuracy_compatible_sklansky_scan(g)
+        if use_accuracy_compatible_cumsum
+        else g.cumsum(axis=-1)
+    )
     decay_mask = (
         (g.unsqueeze(-1) - g.unsqueeze(-2))
         .tril()

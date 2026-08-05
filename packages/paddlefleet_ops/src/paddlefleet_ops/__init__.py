@@ -238,8 +238,14 @@ _FLA_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
 _CUDNN_FRONTEND_AVAILABLE = False
 _FAST_HADAMARD_TRANSFORM_AVAILABLE = False
+_NO_EXT = os.environ.get("PADDLEFLEET_OPS_NO_EXT", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
-if paddle.is_compiled_with_cuda():
+if paddle.is_compiled_with_cuda() and not _NO_EXT:
     _FLA_AVAILABLE = True
     if paddle.cuda.get_device_capability()[0] >= 9:
         _DEEP_GEMM_AVAILABLE = True
@@ -342,11 +348,12 @@ def _safe_load_ecosystem_lib(
             ) from e
 
 
-import_custom_ops(
-    package="paddlefleet_ops._extensions",
-    module_name=".ops",
-    global_ns=globals(),
-)
+if not _NO_EXT:
+    import_custom_ops(
+        package="paddlefleet_ops._extensions",
+        module_name=".ops",
+        global_ns=globals(),
+    )
 
 # 别名：算子注册名改为 paddlefleet_fused_swiglu_probs_bwd 以避免与 FusedQuantOps 冲突，
 # 但对外仍保持 fused_swiglu_probs_bwd 的导入接口。
@@ -357,7 +364,7 @@ if "paddlefleet_fused_swiglu_probs_bwd" in globals():
 
 blocked_import_messages: dict[str, str] = {}
 
-if paddle.is_compiled_with_cuda():
+if paddle.is_compiled_with_cuda() and not _NO_EXT:
     if is_deep_gemm_available():
         paddle.enable_compat(scope={"deep_gemm", "triton"}, silent=True)
         _safe_load_ecosystem_lib("deep_gemm", ops_dir, globals())
@@ -466,13 +473,14 @@ if paddle.is_compiled_with_cuda():
             0, HardwareIncompatibleBlocker(blocked_import_messages)
         )
 
-    try:
-        paddle.enable_compat(scope={"triton"}, silent=True)
-        from ._extensions.flashmask import (
-            rr_attn_estimate_triton_func as rr_attn_estimate_triton_func,
-        )
-    finally:
-        paddle.disable_compat()
+    if not _NO_EXT:
+        try:
+            paddle.enable_compat(scope={"triton"}, silent=True)
+            from ._extensions.flashmask import (
+                rr_attn_estimate_triton_func as rr_attn_estimate_triton_func,
+            )
+        finally:
+            paddle.disable_compat()
 
 
 def __getattr__(name):

@@ -12,18 +12,102 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import paddle
 
+from paddlefleet.models.qwen3_vl.embedding import AccuracyCompatiblePatchProjection
+from paddlefleet.models.qwen3_vl.embedding import VisionEmbedding, VisionEmbeddingSpec
 from paddlefleet.transformer.paddle_norm import LayerNorm
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerSublayersSpec,
 )
+
+
+class TestAccuracyCompatiblePatchProjection(unittest.TestCase):
+    def _make_layer(self, accuracy_compatible):
+        layer = AccuracyCompatiblePatchProjection(
+            3,
+            8,
+            kernel_size=[2, 4, 4],
+            stride=[2, 4, 4],
+            bias=True,
+            accuracy_compatible=accuracy_compatible,
+        )
+        layer.eval()
+        return layer
+
+    def test_accuracy_path_matches_declared_linear_projection(self):
+        paddle.seed(1234)
+        layer = self._make_layer(accuracy_compatible=True)
+        pixel_values = paddle.randn([5, 3, 2, 4, 4])
+        actual = layer(pixel_values)
+        rows = pixel_values.reshape([5, -1]).astype(layer.weight.dtype)
+        weight = layer.weight.reshape([8, -1]).transpose([1, 0])
+        expected = paddle.nn.functional.linear(rows, weight, layer.bias).reshape(
+            [5, 8, 1, 1, 1]
+        )
+        np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_accuracy_path_preserves_conv_parameter_shapes(self):
+        layer = self._make_layer(accuracy_compatible=True)
+        self.assertEqual(list(layer.weight.shape), [8, 3, 2, 4, 4])
+        self.assertEqual(list(layer.bias.shape), [8])
+
+    def test_accuracy_path_rejects_non_patch_geometry(self):
+        layer = self._make_layer(accuracy_compatible=True)
+        with self.assertRaisesRegex(ValueError, "one non-overlapping patch per row"):
+            layer(paddle.randn([5, 3, 2, 8, 4]))
+
+
+class TestAccuracyCompatiblePositionInterpolation(unittest.TestCase):
+    def _make_embedding(self, *, accuracy_mode, enabled):
+        config = TransformerConfig(
+            num_hidden_layers=2, hidden_size=8, num_attention_heads=2
+        )
+        config.spatial_merge_size = 2
+        config.patch_size = 4
+        config.temporal_patch_size = 2
+        config.in_channels = 3
+        config.num_position_embeddings = 25
+        config.use_accuracy_compatible = accuracy_mode
+        with patch.dict(
+            os.environ,
+            {"PADDLEFLEET_ACCURACY_POSITION_INTERPOLATION": "1" if enabled else "0"},
+        ):
+            embedding = VisionEmbedding(config, VisionEmbeddingSpec())
+        embedding.pos_embed.to(dtype="bfloat16")
+        return embedding
+
+    def test_requires_accuracy_mode_and_explicit_opt_in(self):
+        self.assertFalse(
+            self._make_embedding(accuracy_mode=False, enabled=True).accuracy_compatible_position_interpolation
+        )
+        self.assertFalse(
+            self._make_embedding(accuracy_mode=True, enabled=False).accuracy_compatible_position_interpolation
+        )
+        self.assertTrue(
+            self._make_embedding(accuracy_mode=True, enabled=True).accuracy_compatible_position_interpolation
+        )
+
+    def test_accuracy_path_keeps_interpolation_output_in_float32(self):
+        embedding = self._make_embedding(accuracy_mode=True, enabled=True)
+        grid_thw = paddle.to_tensor([[1, 4, 4]], dtype="int64")
+        actual = embedding.fast_pos_embed_interpolate(grid_thw)
+        self.assertEqual(actual.dtype, paddle.float32)
+        self.assertEqual(list(actual.shape), [16, 8])
+
+    def test_default_path_preserves_embedding_dtype(self):
+        embedding = self._make_embedding(accuracy_mode=True, enabled=False)
+        grid_thw = paddle.to_tensor([[1, 4, 4]], dtype="int64")
+        actual = embedding.fast_pos_embed_interpolate(grid_thw)
+        self.assertEqual(actual.dtype, paddle.bfloat16)
+        self.assertEqual(list(actual.shape), [16, 8])
 
 
 class TestLayerNormDtypeCast(unittest.TestCase):
@@ -129,6 +213,22 @@ class TestTransformerLayerMTP(unittest.TestCase):
         np.testing.assert_array_equal(
             result["attn_mask_startend_row_indices"].numpy(), mask.numpy()
         )
+
+    def test_dense_attention_mask_drops_collator_mtp_lookahead(self):
+        layer = self._make_layer(experimental_dataflow=False)
+        B, S, H, n = 2, 8, 16, 2
+        mask = paddle.tril(paddle.ones([B, 1, S + n, S + n]))
+
+        result = layer(
+            {
+                "hidden_states": paddle.randn([B * (n + 1), S, H]),
+                "attention_mask": mask,
+            }
+        )
+
+        expected = mask[:, :, :S, :S]
+        self.assertEqual(list(result["attention_mask"].shape), [B, 1, S, S])
+        np.testing.assert_array_equal(result["attention_mask"].numpy(), expected.numpy())
 
 
 class TestMTPLayerForward(unittest.TestCase):

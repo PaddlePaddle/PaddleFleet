@@ -78,6 +78,7 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.gated_delta_net import (
+    AccuracyCompatibleGDNInputProjection,
     GatedDeltaNet,
     GatedDeltaNetSublayersSpec,
 )
@@ -300,7 +301,7 @@ def get_attention_spec(
         return LayerSpec(
             layer=GatedDeltaNet,
             sublayers_spec=GatedDeltaNetSublayersSpec(
-                in_proj=backend.column_parallel_linear(),
+                in_proj=AccuracyCompatibleGDNInputProjection,
                 out_norm=backend.layer_norm(
                     rms_norm=(config.normalization == "RMSNorm"),
                     for_qk=False,

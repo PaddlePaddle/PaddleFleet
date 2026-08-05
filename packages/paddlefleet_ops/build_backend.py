@@ -33,6 +33,16 @@ backends.init_backend_type()
 
 logger = logging.getLogger(__name__)
 
+
+def _no_ext_build() -> bool:
+    return os.environ.get("PADDLEFLEET_OPS_NO_EXT", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 # Root of this sub-package (packages/paddlefleet_ops/)
 _pkg_root = Path(__file__).parent.resolve()
 # Workspace root (two levels up: packages/paddlefleet_ops/ → packages/ → workspace root)
@@ -227,15 +237,15 @@ def _clean_egg_info():
 
 
 def get_requires_for_build_wheel(config_settings=None):
-    return get_special_build_deps()
+    return [] if _no_ext_build() else get_special_build_deps()
 
 
 def get_requires_for_build_sdist(config_settings=None):
-    return get_special_build_deps()
+    return [] if _no_ext_build() else get_special_build_deps()
 
 
 def get_requires_for_build_editable(config_settings=None):
-    return get_special_build_deps()
+    return [] if _no_ext_build() else get_special_build_deps()
 
 
 def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):
@@ -253,10 +263,11 @@ def prepare_metadata_for_build_editable(
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
-    check_cuda_arch_list()
-    check_patchelf_exists()
-    check_submodule_updated()
-    _prepare_ecosystem(use_symlinks=False)
+    if not _no_ext_build():
+        check_cuda_arch_list()
+        check_patchelf_exists()
+        check_submodule_updated()
+        _prepare_ecosystem(use_symlinks=False)
     return orig.build_wheel(
         wheel_directory, config_settings, metadata_directory
     )
@@ -265,10 +276,11 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 def build_editable(
     wheel_directory, config_settings=None, metadata_directory=None
 ):
-    check_cuda_arch_list()
-    check_patchelf_exists()
-    check_submodule_updated()
-    _prepare_ecosystem(use_symlinks=True)
+    if not _no_ext_build():
+        check_cuda_arch_list()
+        check_patchelf_exists()
+        check_submodule_updated()
+        _prepare_ecosystem(use_symlinks=True)
     return orig.build_editable(
         wheel_directory, config_settings, metadata_directory
     )

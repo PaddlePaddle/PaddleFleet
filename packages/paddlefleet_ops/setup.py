@@ -22,6 +22,13 @@ import backends
 from build_utils import get_special_build_deps
 from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
+_NO_EXT = os.environ.get("PADDLEFLEET_OPS_NO_EXT", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 
 def change_pwd():
     """change_pwd"""
@@ -270,6 +277,8 @@ def setup_install_no_extension():
 try:
     dependencies = (
         common_dependencies
+        if _NO_EXT
+        else common_dependencies
         + get_special_build_deps()
         + get_special_setup_deps()
     )
@@ -278,7 +287,10 @@ except Exception as e:
         f"Failed to resolve special dependencies: {e}, using common dependencies only"
     ) from e
 
-if backends.IS_NVIDIA:
+if _NO_EXT:
+    logging.info("Building paddlefleet-ops without optional native/fused extensions")
+    setup_install_no_extension()
+elif backends.IS_NVIDIA:
     setup_ops_extension()
 elif backends.IS_XPU:
     setup_install_no_extension()

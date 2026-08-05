@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
+from paddlefleet.packed_seq_params import PackedSeqParams
 from paddlefleet.transformer.dot_product_attention import (
     DotProductAttention,
 )
@@ -336,21 +337,86 @@ class TestDotProductAttentionEager(unittest.TestCase):
         self.assertEqual(out.shape, [2, 4, 128])
         paddle.device.set_device("cpu")
 
-    def test_eager_packed_seq_raises(self):
-        """eager + packed_seq_params should raise ValueError."""
+    def test_eager_packed_vision_matches_independent_segments_forward_backward(self):
         config = self._make_eager_config()
         attn = DotProductAttention(
             config=config,
             layer_number=1,
-            attn_mask_type=AttnMaskType.causal,
+            attn_mask_type=AttnMaskType.no_mask,
+            attention_type="self",
+        )
+        paddle.seed(2026)
+        q = paddle.randn([1, 8, 4, 32])
+        k = paddle.randn([1, 8, 4, 32])
+        v = paddle.randn([1, 8, 4, 32])
+        q.stop_gradient = k.stop_gradient = v.stop_gradient = False
+        packed = PackedSeqParams(
+            qkv_format="thd",
+            cu_seqlens_q=paddle.to_tensor([0, 3, 8], dtype="int32"),
+            cu_seqlens_kv=paddle.to_tensor([0, 3, 8], dtype="int32"),
+            max_seqlen_q=5,
+            max_seqlen_kv=5,
+            total_seqlen_q=8,
+            total_seqlen_kv=8,
+        )
+
+        packed_out = attn(
+            q,
+            k,
+            v,
+            None,
+            attn_mask_type=AttnMaskType.no_mask,
+            packed_seq_params=packed,
+        )
+        packed_out.sum().backward()
+        packed_grads = [tensor.grad.numpy().copy() for tensor in (q, k, v)]
+
+        q_ref = q.detach().clone()
+        k_ref = k.detach().clone()
+        v_ref = v.detach().clone()
+        q_ref.stop_gradient = k_ref.stop_gradient = v_ref.stop_gradient = False
+        reference_out = paddle.concat(
+            [
+                attn(
+                    q_ref[:, start:end],
+                    k_ref[:, start:end],
+                    v_ref[:, start:end],
+                    None,
+                    attn_mask_type=AttnMaskType.no_mask,
+                )
+                for start, end in ((0, 3), (3, 8))
+            ],
+            axis=1,
+        )
+        reference_out.sum().backward()
+
+        self.assertTrue(paddle.allclose(packed_out, reference_out, rtol=1e-6, atol=1e-6))
+        for packed_grad, reference in zip(packed_grads, (q_ref, k_ref, v_ref)):
+            self.assertTrue(
+                paddle.allclose(
+                    paddle.to_tensor(packed_grad), reference.grad, rtol=1e-6, atol=1e-6
+                )
+            )
+
+    def test_eager_packed_rejects_non_vision_batch_layout(self):
+        config = self._make_eager_config()
+        attn = DotProductAttention(
+            config=config,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.no_mask,
             attention_type="self",
         )
         q = paddle.randn([2, 4, 4, 32])
         k = paddle.randn([2, 4, 4, 32])
         v = paddle.randn([2, 4, 4, 32])
+        packed = PackedSeqParams(
+            qkv_format="thd",
+            cu_seqlens_q=paddle.to_tensor([0, 4], dtype="int32"),
+            cu_seqlens_kv=paddle.to_tensor([0, 4], dtype="int32"),
+        )
         with self.assertRaises(ValueError) as ctx:
-            attn(q, k, v, None, packed_seq_params=MagicMock())
-        self.assertIn("packed_seq_params", str(ctx.exception))
+            attn(q, k, v, None, packed_seq_params=packed)
+        self.assertIn("batch size one", str(ctx.exception))
 
 
 class TestDotProductAttentionContextParallel(unittest.TestCase):

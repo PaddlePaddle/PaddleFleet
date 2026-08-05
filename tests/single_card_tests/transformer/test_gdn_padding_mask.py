@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +26,13 @@ from paddle import nn
 from paddlefleet.transformer.gated_delta_net import (
     GatedDeltaNet,
     GatedDeltaNetSublayersSpec,
+    _accuracy_compatible_l2norm,
+    _accuracy_compatible_sklansky_scan,
+    _accuracy_gdn_causal_conv1d_enabled,
+    _accuracy_gdn_in_proj_order_enabled,
+    _accuracy_gdn_qk_l2_enabled,
+    _reorder_gdn_conv1d_by_key_head,
+    _reorder_gdn_in_proj_by_key_head,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -157,6 +165,128 @@ def _make_startend_indices(batch, seq_len, padding_start=None):
     return indices
 
 
+class TestAccuracyCompatibleGDNProjectionOrder(unittest.TestCase):
+    def test_requires_accuracy_mode_and_explicit_opt_in(self):
+        config = TransformerConfig(
+            hidden_size=16, num_attention_heads=2, num_hidden_layers=1
+        )
+        with patch.dict(
+            os.environ,
+            {"PADDLEFLEET_ACCURACY_GDN_IN_PROJ_ORDER": "1"},
+        ):
+            config.use_accuracy_compatible = False
+            self.assertFalse(_accuracy_gdn_in_proj_order_enabled(config))
+            config.use_accuracy_compatible = True
+            self.assertTrue(_accuracy_gdn_in_proj_order_enabled(config))
+        self.assertFalse(_accuracy_gdn_in_proj_order_enabled(config))
+
+    def test_conv_requires_projection_order_opt_in(self):
+        config = TransformerConfig(
+            hidden_size=16, num_attention_heads=2, num_hidden_layers=1
+        )
+        config.use_accuracy_compatible = True
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PADDLEFLEET_ACCURACY_GDN_IN_PROJ_ORDER": "0",
+                    "PADDLEFLEET_ACCURACY_GDN_CAUSAL_CONV1D": "1",
+                },
+            ),
+            self.assertRaisesRegex(ValueError, "requires"),
+        ):
+            _accuracy_gdn_causal_conv1d_enabled(config)
+
+    def test_qk_l2_requires_causal_conv_opt_in(self):
+        config = TransformerConfig(
+            hidden_size=16, num_attention_heads=2, num_hidden_layers=1
+        )
+        config.use_accuracy_compatible = True
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PADDLEFLEET_ACCURACY_GDN_IN_PROJ_ORDER": "1",
+                    "PADDLEFLEET_ACCURACY_GDN_CAUSAL_CONV1D": "0",
+                    "PADDLEFLEET_ACCURACY_GDN_QK_L2": "1",
+                },
+            ),
+            self.assertRaisesRegex(ValueError, "requires"),
+        ):
+            _accuracy_gdn_qk_l2_enabled(config)
+
+    def test_accuracy_l2_uses_declared_reverse_serial_tree(self):
+        x = paddle.to_tensor(
+            [[0.5, -1.0, 2.0, -4.0]], dtype="bfloat16"
+        )
+        actual = _accuracy_compatible_l2norm(x)
+        x_float = x.astype("float32")
+        squares = x_float * x_float
+        sum_squares = squares[..., -1]
+        for index in range(x.shape[-1] - 2, -1, -1):
+            sum_squares = squares[..., index] + sum_squares
+        expected = (
+            x_float
+            * (1.0 / paddle.sqrt(sum_squares.unsqueeze(-1) + 1e-6))
+        ).astype(x.dtype)
+        np.testing.assert_array_equal(actual.numpy(), expected.numpy())
+
+    def test_sklansky_scan_matches_declared_tree(self):
+        x = paddle.arange(8, dtype="float32").reshape([1, 8])
+        actual = _accuracy_compatible_sklansky_scan(x)
+        expected = np.array([[0, 1, 3, 6, 10, 15, 21, 28]], dtype=np.float32)
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+    def test_sklansky_scan_rejects_non_power_of_two_width(self):
+        with self.assertRaisesRegex(ValueError, "power-of-two"):
+            _accuracy_compatible_sklansky_scan(paddle.ones([1, 6]))
+
+    def test_official_conv_channels_are_grouped_by_key_head(self):
+        weight = paddle.arange(24, dtype="float32").reshape([6, 1, 4])
+        actual = _reorder_gdn_conv1d_by_key_head(
+            weight,
+            num_key_heads=2,
+            key_head_dim=1,
+            num_value_heads=2,
+            value_head_dim=1,
+        )
+        q, k, v = np.split(weight.numpy(), [2, 4], axis=0)
+        expected = np.concatenate(
+            [part.reshape([2, -1, 1, 4]) for part in (q, k, v)], axis=1
+        ).reshape([6, 1, 4])
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+    def test_section_major_output_is_grouped_by_key_head(self):
+        # q/k have one row per key head; v/z have two rows per key head;
+        # beta/alpha have one scalar per value head.
+        output = paddle.arange(24, dtype="float32").reshape([1, 1, 24])
+        actual = _reorder_gdn_in_proj_by_key_head(
+            output,
+            num_key_heads=2,
+            key_head_dim=2,
+            num_value_heads=4,
+            value_head_dim=1,
+        )
+        q, k, v, z, beta, alpha = np.split(
+            output.numpy(), [4, 8, 12, 16, 20], axis=-1
+        )
+        expected = np.concatenate(
+            [part.reshape([1, 1, 2, -1]) for part in (q, k, v, z, beta, alpha)],
+            axis=-1,
+        ).reshape([1, 1, 24])
+        np.testing.assert_array_equal(actual.numpy(), expected)
+
+    def test_invalid_output_size_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "unexpected output size"):
+            _reorder_gdn_in_proj_by_key_head(
+                paddle.zeros([1, 23]),
+                num_key_heads=2,
+                key_head_dim=2,
+                num_value_heads=4,
+                value_head_dim=1,
+            )
+
+
 class TestBuildPaddingMaskNoSP(unittest.TestCase):
     """_build_padding_mask without sequence parallel."""
 
@@ -182,6 +312,25 @@ class TestBuildPaddingMaskNoSP(unittest.TestCase):
         np.testing.assert_array_equal(result[0, :24, 0].numpy(), np.ones(24))
         np.testing.assert_array_equal(result[0, 24:, 0].numpy(), np.zeros(8))
         np.testing.assert_array_equal(result[1, :, 0].numpy(), np.ones(S))
+
+    def test_dense_causal_mask_all_valid_returns_none(self):
+        mask = paddle.tril(paddle.ones([B, 1, S, S], dtype="float32"))
+        self.assertIsNone(self.gdn._build_padding_mask(mask, None, B, S))
+
+    def test_dense_causal_mask_diagonal_identifies_padding(self):
+        mask = paddle.tril(paddle.ones([B, 1, S, S], dtype="float32"))
+        mask[0, :, 24:, :] = 0
+        mask[0, :, :, 24:] = 0
+        result = self.gdn._build_padding_mask(mask, None, B, S)
+        self.assertEqual(list(result.shape), [B, S, 1])
+        np.testing.assert_array_equal(result[0, :24, 0].numpy(), np.ones(24))
+        np.testing.assert_array_equal(result[0, 24:, 0].numpy(), np.zeros(8))
+        np.testing.assert_array_equal(result[1, :, 0].numpy(), np.ones(S))
+
+    def test_dense_causal_mask_wrong_sequence_length_raises(self):
+        mask = paddle.tril(paddle.ones([B, 1, S + 1, S + 1], dtype="float32"))
+        with self.assertRaises(ValueError):
+            self.gdn._build_padding_mask(mask, None, B, S)
 
     def test_startend_all_valid_returns_none(self):
         indices = _make_startend_indices(B, S, padding_start=None)
