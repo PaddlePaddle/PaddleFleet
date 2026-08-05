@@ -97,6 +97,83 @@ class KimiDeltaAttentionSublayersSpec:
     out_proj: LayerSpec | type = IdentityOp
 
 
+def build_cu_seqlens(
+    startend_row_indices,
+    batch,
+    seq_len,
+    keep_single_segment=False,
+):
+    """Derive packed cu_seqlens for a ``[b, s] -> [1, b*s]`` flattening.
+
+    ``startend_row_indices`` is ``[b, 1, s, 1]`` (or ``[b, 1, s, 2]``, where
+    only column 0 is used) and each entry holds the exclusive end of the
+    document that position belongs to, *relative to its own row*. A position
+    starts a new document iff that end changes, so the row-local boundaries
+    plus the row seams (position 0 of every row) give exactly the segment
+    starts of the flattened sequence. Note the seams matter: two adjacent
+    rows routinely carry the same end value (e.g. both end at ``s``), so
+    diffing the already-flattened array would merge them.
+
+    Note ``paddlefleet.transformer.utils.get_doc_lens`` cannot be used here:
+    it flattens across batch/head while comparing against a global arange,
+    so it only produces correct lengths for ``[1, 1, s, 1]``.
+
+    Every KDA layer of a step needs the same result, so the embedding builds it
+    once and hands it down through ``dict_args["cu_seqlens"]``; KDA only
+    calls this itself when nothing was passed in.
+
+    With ``keep_single_segment`` the trivial ``[0, b*s]`` is returned instead
+    of ``None``; context parallel always needs a cu_seqlens to slice.
+
+    Returns the cu_seqlens tensor, or ``None`` when the whole flattened
+    sequence is a single segment (nothing to mask out).
+    """
+    total = batch * seq_len
+    if startend_row_indices is None:
+        if not keep_single_segment:
+            return None
+        return paddle.to_tensor([0, total], dtype="int64")
+    # The head dim must be 1: a linear recurrence has a single segment
+    # layout, so a head-wise mask (what
+    # startend_row_indices_add_sliding_window produces) cannot be
+    # honoured and must not be silently reduced to head 0.
+    if (
+        startend_row_indices.ndim != 4
+        or startend_row_indices.shape[1] != 1
+        or startend_row_indices.shape[-1] != 1
+    ):
+        raise ValueError(
+            "attn_mask_startend_row_indices must be [b, 1, s, 1] or "
+            f"[b, 1, s, 2], got {list(startend_row_indices.shape)}"
+        )
+    if startend_row_indices.shape[-2] != seq_len:
+        raise ValueError(
+            f"attn_mask_startend_row_indices has sequence length "
+            f"{startend_row_indices.shape[-2]}, expected {seq_len}"
+        )
+    # Column 0 is the exclusive document end; column 1, when present, is
+    # just arange(seq_len) and carries no boundary information.
+    ends = startend_row_indices[:, 0, :, 0].astype("int64")
+    doc_edges = ends[:, 1:] != ends[:, :-1]
+
+    # Position 0 of every row is always a start, so the row seams become
+    # segment boundaries too.
+    head = paddle.ones([batch, 1], dtype="bool")
+    if seq_len > 1:
+        is_start = paddle.concat([head, doc_edges], axis=1)
+    else:
+        is_start = head
+    # Flattened positions are ascending, so the flat indices of the starts
+    # are already sorted and strictly increasing.
+    starts = paddle.nonzero(is_start.reshape([-1])).flatten()
+    cu_seqlens = paddle.concat(
+        [starts, paddle.full([1], total, dtype=starts.dtype)]
+    )
+    if cu_seqlens.shape[0] <= 2 and not keep_single_segment:
+        return None
+    return cu_seqlens
+
+
 class KimiDeltaAttention(FleetLayer):
     """Kimi Delta Attention (KDA) layer class.
 
@@ -393,80 +470,6 @@ class KimiDeltaAttention(FleetLayer):
             )(A)
             paddle.assign(paddle.log(A), self.A_log)
 
-    def _build_cu_seqlens(
-        self,
-        startend_row_indices,
-        batch,
-        seq_len,
-        keep_single_segment=False,
-    ):
-        """Derive packed cu_seqlens for the ``[b, s] -> [1, b*s]`` flattening.
-
-        ``startend_row_indices`` is ``[b, 1, s, 1]`` (or ``[b, 1, s, 2]``, where
-        only column 0 is used) and each entry holds the exclusive end of the
-        document that position belongs to, *relative to its own row*. A position
-        starts a new document iff that end changes, so the row-local boundaries
-        plus the row seams (position 0 of every row) give exactly the segment
-        starts of the flattened sequence. Note the seams matter: two adjacent
-        rows routinely carry the same end value (e.g. both end at ``s``), so
-        diffing the already-flattened array would merge them.
-
-        Note ``paddlefleet.transformer.utils.get_doc_lens`` cannot be used here:
-        it flattens across batch/head while comparing against a global arange,
-        so it only produces correct lengths for ``[1, 1, s, 1]``.
-
-        With ``keep_single_segment`` the trivial ``[0, b*s]`` is returned instead
-        of ``None``; context parallel always needs a cu_seqlens to slice.
-
-        Returns ``(cu_seqlens, cu_seqlens_cpu)``, or ``(None, None)`` when the
-        whole flattened sequence is a single segment (nothing to mask out).
-        """
-        total = batch * seq_len
-        if startend_row_indices is None:
-            if not keep_single_segment:
-                return None, None
-            cu_seqlens = paddle.to_tensor([0, total], dtype="int64")
-            return cu_seqlens, cu_seqlens.cpu()
-        # The head dim must be 1: a linear recurrence has a single segment
-        # layout, so a head-wise mask (what
-        # startend_row_indices_add_sliding_window produces) cannot be
-        # honoured and must not be silently reduced to head 0.
-        if (
-            startend_row_indices.ndim != 4
-            or startend_row_indices.shape[1] != 1
-            or startend_row_indices.shape[-1] != 1
-        ):
-            raise ValueError(
-                "attn_mask_startend_row_indices must be [b, 1, s, 1] or "
-                f"[b, 1, s, 2], got {list(startend_row_indices.shape)}"
-            )
-        if startend_row_indices.shape[-2] != seq_len:
-            raise ValueError(
-                f"attn_mask_startend_row_indices has sequence length "
-                f"{startend_row_indices.shape[-2]}, expected {seq_len}"
-            )
-        # Column 0 is the exclusive document end; column 1, when present, is
-        # just arange(seq_len) and carries no boundary information.
-        ends = startend_row_indices[:, 0, :, 0].astype("int64")
-        doc_edges = ends[:, 1:] != ends[:, :-1]
-
-        # Position 0 of every row is always a start, so the row seams become
-        # segment boundaries too.
-        head = paddle.ones([batch, 1], dtype="bool")
-        if seq_len > 1:
-            is_start = paddle.concat([head, doc_edges], axis=1)
-        else:
-            is_start = head
-        # Flattened positions are ascending, so the flat indices of the starts
-        # are already sorted and strictly increasing.
-        starts = paddle.nonzero(is_start.reshape([-1])).flatten()
-        cu_seqlens = paddle.concat(
-            [starts, paddle.full([1], total, dtype=starts.dtype)]
-        )
-        if cu_seqlens.shape[0] <= 2 and not keep_single_segment:
-            return None, None
-        return cu_seqlens, cu_seqlens.cpu()
-
     def forward(
         self,
         hidden_states: paddle.Tensor,
@@ -476,6 +479,7 @@ class KimiDeltaAttention(FleetLayer):
         attention_bias: paddle.Tensor | None = None,
         packed_seq_params=None,
         input_ids: paddle.Tensor | None = None,
+        cu_seqlens: paddle.Tensor | None = None,
         **kwargs,
     ) -> tuple[paddle.Tensor, paddle.Tensor | None]:
         """
@@ -491,6 +495,9 @@ class KimiDeltaAttention(FleetLayer):
             key_value_states: Key/value states (for cross attention, not supported).
             attention_bias: Attention bias (unused).
             packed_seq_params: Parameters used for THD format (not supported).
+            cu_seqlens: Packed cu_seqlens built once per step by the
+                embedding (see ``build_cu_seqlens``) and passed down through
+                ``dict_args``. Built here when None.
 
         Returns:
             Tuple of (output, output_bias).
@@ -544,12 +551,20 @@ class KimiDeltaAttention(FleetLayer):
         # rank's shard, so cu_seqlens has to be built in global coordinates.
         seq_len_full = seq_len * self.cp_size
 
-        cu_seqlens, cu_seqlens_cpu = self._build_cu_seqlens(
-            attn_mask_startend_row_indices,
-            batch,
-            seq_len_full,
-            keep_single_segment=self.cp_size > 1,
-        )
+        # Normally the embedding built this once for the whole step and it came
+        # down through dict_args; only build it here when nothing was handed in.
+        if cu_seqlens is None:
+            cu_seqlens = build_cu_seqlens(
+                attn_mask_startend_row_indices,
+                batch,
+                seq_len_full,
+                keep_single_segment=self.cp_size > 1,
+            )
+        # The host copy is only a hint that lets the kernels skip a device-to-host
+        # copy of their own. Leaving it None keeps every layer passing identical
+        # arguments, so fla's @tensor_cache helpers (prepare_chunk_indices,
+        # get_cp_cu_seqlens) hit on the shared cu_seqlens instead of recomputing.
+        cu_seqlens_cpu = None
         if cu_seqlens is not None and not self.use_fused_kernels:
             raise NotImplementedError(
                 "Variable-length input with document boundaries requires the "

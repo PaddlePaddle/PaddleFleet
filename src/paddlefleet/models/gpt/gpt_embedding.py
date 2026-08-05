@@ -38,6 +38,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -706,6 +707,32 @@ class GPTEmbedding(FleetLayer):
         for key in ("past_key_values", "use_cache"):
             if key in dict_args and key not in preproc_output:
                 preproc_output[key] = dict_args[key]
+
+        # KDA turns the document boundaries into a packed cu_seqlens, and every
+        # KDA layer of the step needs the same one. Build it once here and let it
+        # ride dict_args down to the layers (see build_cu_seqlens).
+        if (
+            "kimi_delta_attention" in (self.config.attention_layer_types or [])
+            and attn_mask_startend_row_indices is not None
+        ):
+            # With the old MTP dataflow every decoder layer trims the MTP tail
+            # off the mask itself, so a cu_seqlens built from the full mask here
+            # would cover the wrong length; leave it to the layers in that case.
+            mtp_trims_mask = (
+                self.config.num_nextn_predict_layers is not None
+                and self.config.num_nextn_predict_layers > 0
+                and not self.config.experimental_dataflow
+            )
+            if not mtp_trims_mask:
+                mask_batch, _, mask_seq_len, _ = (
+                    attn_mask_startend_row_indices.shape
+                )
+                preproc_output["cu_seqlens"] = build_cu_seqlens(
+                    attn_mask_startend_row_indices,
+                    mask_batch,
+                    mask_seq_len,
+                    keep_single_segment=self.config.context_parallel_size > 1,
+                )
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:
