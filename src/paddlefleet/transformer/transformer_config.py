@@ -669,6 +669,10 @@ class TransformerConfig(ModelParallelConfig):
     moe_latent_size: int | None = None
     """The latent dimension size for latent MoE. Positive values enable latent MoE."""
 
+    latent_moe_use_norm: bool = False
+    """Apply RMSNorm to routed latent-MoE output before projecting it back to
+    the model hidden size."""
+
     ##################
     # Context Parallel
     ##################
@@ -711,6 +715,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_w4a8: bool = False
     """Whether to use w4a8 for mlp gemm."""
+
+    use_w4a8_fused_quant: bool = False
+    """Whether to use fused CUDA operators for W4A8 online quantization."""
 
     full_fp8_computation: bool = False
     """Master switch for FP8 on Linear / ColumnParallelLinear / RowParallelLinear
@@ -829,6 +836,10 @@ class TransformerConfig(ModelParallelConfig):
 
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
+
+    mla_use_nope: bool = False
+    """Whether to bypass rotary position embeddings in MLA and use the
+    projected query and key channels directly."""
 
     hybrid_mla_q_lora_rank: int | None = None
     """Layer-local query low-rank width for MLA entries in a DSV4 hybrid model."""

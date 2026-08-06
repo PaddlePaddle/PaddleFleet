@@ -46,6 +46,7 @@ dependencies = [
     "tqdm",
     "transformers>=5.0.0,<5.4.0",
     "visualdl",
+    "tilelang-paddle==0.1.12",
 ]
 license = { text = "Apache 2.0" }
 authors = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.comm" }]

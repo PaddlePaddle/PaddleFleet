@@ -31,6 +31,7 @@ import unittest
 import numpy as np
 
 os.environ["FLAGS_use_virtual_memory_auto_growth"] = "False"
+os.environ["FLAGS_use_vmm_auto_growth_best_fit_allocator_v2"] = "False"
 os.environ["FLAGS_cudnn_deterministic"] = "True"
 
 from types import SimpleNamespace

@@ -1168,15 +1168,21 @@ class DSv4HybridAttention(Attention):
             z = paddle.einsum("btgjd,gjr->btgrd", mixed, self.vha_postmix_U)
             delta = paddle.einsum("btgrd,gjr->btgjd", z, self.vha_postmix_V)
             mixed = mixed + delta
-        else:
-            nh = self.num_attention_heads
-            mixed = attn_out.reshape([b, sq, nh, self.v_head_dim])
-            z = paddle.einsum("bthd,hr->btrd", mixed, self.vha_postmix_U)
-            delta = paddle.einsum("btrd,hr->bthd", z, self.vha_postmix_V)
-            mixed = mixed + delta
-        return mixed.reshape(
-            [b, sq, self.num_attention_heads * self.v_head_dim]
-        )
+            return mixed.reshape(
+                [b, sq, self.num_attention_heads * self.v_head_dim]
+            )
+        # ungrouped: fused dense M = I + V @ U^T, then a single [nh,nh] GEMM on
+        # the head axis. Rank-independent and faster than the split low-rank
+        # form (whose r-sized contraction underutilizes the GPU); differs from
+        # the two-matmul path only by bf16 contraction order.
+        nh, d = self.num_attention_heads, self.v_head_dim
+        mixed = attn_out.reshape([b * sq, nh, d])
+        M = paddle.matmul(
+            self.vha_postmix_V, self.vha_postmix_U, transpose_y=True
+        )  # [nh,r]@[r,nh]->[nh,nh]
+        M = M + paddle.eye(nh, dtype=M.dtype)
+        out = paddle.matmul(M, mixed)  # [nh,nh]@[B,nh,d]->[B,nh,d]
+        return out.reshape([b, sq, nh * d])
 
     def get_query_key_value_tensors(
         self,

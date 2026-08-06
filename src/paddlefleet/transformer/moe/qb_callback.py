@@ -1,4 +1,4 @@
-# Copyright (c) 2024 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -216,8 +216,12 @@ class MoEQuantileBalancingCallback:
         # --- Step 7: Update binning range for next step ---
         new_min = float(b_new.min().item()) - 1.0
         new_max = float(b_new.max().item()) + 1.0
-        layer.qb_bin_min = new_min
-        layer.qb_bin_max = new_max
+        layer.qb_bin_min.set_value(
+            paddle.to_tensor(new_min, dtype=paddle.float32)
+        )
+        layer.qb_bin_max.set_value(
+            paddle.to_tensor(new_max, dtype=paddle.float32)
+        )
 
         # --- Step 8: Reset histogram and expert_usage ---
         layer.qb_histogram.zero_()

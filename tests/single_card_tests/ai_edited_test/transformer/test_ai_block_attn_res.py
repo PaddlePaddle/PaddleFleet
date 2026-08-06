@@ -77,7 +77,7 @@ class TestBlockAttnResConstruction(unittest.TestCase):
         block = BlockAttnRes(config=config, sublayers_spec=spec)
         self.assertEqual(block.hidden_size, 64)
         self.assertIsNotNone(block.proj_weight)
-        self.assertEqual(block.proj_weight.shape, [64])
+        self.assertEqual(block.proj_weight.shape, [1, 64])
 
     @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_proj_weight_initialized_to_zero(self, mock_build):
@@ -88,7 +88,7 @@ class TestBlockAttnResConstruction(unittest.TestCase):
 
         block = BlockAttnRes(config=config, sublayers_spec=spec)
         self.assertTrue(
-            paddle.allclose(block.proj_weight, paddle.zeros([64])).item()
+            paddle.allclose(block.proj_weight, paddle.zeros([1, 64])).item()
         )
 
 

@@ -179,6 +179,12 @@ class DynamicKVCache:
 
     Implements the ``.update(k_new, v_new, layer_idx) -> (k, v)`` protocol
     expected by :class:`DotProductAttention`.
+
+    HySparse adds a second, cross-layer slot: a full-attention layer publishes
+    its compressed KV latent (``shared_key``) for the downstream SWA (MQA)
+    layers' block-sparse branch. During training that tensor is threaded through
+    ``dict_args``; during incremental decode only the new token's slice is
+    computed, so it is accumulated here via :meth:`update_shared`.
     """
 
     def __init__(
@@ -189,10 +195,52 @@ class DynamicKVCache:
     ):
         self.k: list[paddle.Tensor | None] = [None] * num_layers
         self.v: list[paddle.Tensor | None] = [None] * num_layers
+        # HySparse shared (compressed) KV latent produced by full layers.
+        self.shared_k: list[paddle.Tensor | None] = [None] * num_layers
         self.swa_layers = swa_layers or [False] * num_layers
         self.window_size = window_size
         # Track absolute sequence length independently of truncated cache
         self._seq_len: list[int] = [0] * num_layers
+
+    def has_layer_cache(self, layer_idx: int) -> bool:
+        """Whether ``layer_idx`` already cached something (i.e. we are decoding).
+
+        Attention layers use this to distinguish the first (prefill) pass from
+        the incremental decode steps that follow, instead of relying on the
+        query length -- a one-token prompt is still a prefill.
+        """
+        return self.k[layer_idx] is not None
+
+    def get_layer_kv(
+        self, layer_idx: int
+    ) -> tuple[paddle.Tensor | None, paddle.Tensor | None]:
+        """Cached ``(k, v)`` of ``layer_idx`` (window-truncated for SWA layers).
+
+        HySparse full layers read their own cached keys back to score blocks for
+        the current decode token.
+        """
+        return self.k[layer_idx], self.v[layer_idx]
+
+    def update_shared(
+        self, shared_key: paddle.Tensor, layer_idx: int
+    ) -> paddle.Tensor:
+        """Append a full layer's shared KV latent and return the whole history.
+
+        ``shared_key`` is ``[B, S, 1, kv_lora_rank + qk_rope_head_dim]``; it is
+        never window-truncated because the block-sparse branch gathers blocks
+        from the entire document.
+        """
+        if self.shared_k[layer_idx] is None:
+            self.shared_k[layer_idx] = shared_key
+        else:
+            self.shared_k[layer_idx] = paddle.concat(
+                [self.shared_k[layer_idx], shared_key], axis=1
+            )
+        return self.shared_k[layer_idx]
+
+    def get_shared(self, layer_idx: int) -> paddle.Tensor | None:
+        """Full shared KV latent published by full layer ``layer_idx``."""
+        return self.shared_k[layer_idx]
 
     def get_seq_len(self, layer_idx: int = 0) -> int:
         if self._seq_len[layer_idx] > 0:
@@ -230,6 +278,7 @@ class DynamicKVCache:
         for i in range(len(self.k)):
             self.k[i] = None
             self.v[i] = None
+            self.shared_k[i] = None
             self._seq_len[i] = 0
 
 

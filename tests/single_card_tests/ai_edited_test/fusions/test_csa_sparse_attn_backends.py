@@ -18,6 +18,7 @@ import importlib.util
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -512,3 +513,119 @@ class TestCsaSparseAttnBwdCudnnFunction(unittest.TestCase):
         self.assertEqual(dq, "mock_dq")
         self.assertEqual(dkv, "mock_dkv")
         self.assertEqual(d_sink, "mock_d_sink")
+
+
+class TestCsaBwdTopkLengthArchGate(unittest.TestCase):
+    """The backward topk_length hint must stay off on SM90 (see CUDA 700 bug)."""
+
+    @staticmethod
+    def _gate_for(capability):
+        from paddlefleet.fusions import csa_sparse_attn as mod
+
+        gate = mod._csa_bwd_honours_topk_length_holes
+        gate.cache_clear()
+        try:
+            with patch.object(
+                paddle.device.cuda,
+                "get_device_capability",
+                return_value=capability,
+            ):
+                return gate()
+        finally:
+            gate.cache_clear()
+
+    def test_sm90_falls_back_to_none(self):
+        # SM90's kernel drops the `>= 0` guard when topk_length is supplied.
+        self.assertFalse(self._gate_for((9, 0)))
+
+    def test_sm100_and_newer_keep_the_hint(self):
+        self.assertTrue(self._gate_for((10, 0)))
+        self.assertTrue(self._gate_for((12, 0)))
+
+
+class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
+    """What ``backward`` actually forwards to the cuDNN kernel per architecture.
+
+    The gate is only useful if the call site honours it, so drive
+    ``CSASparseAttention.backward`` end to end with a shape-faithful mock kernel
+    and record the ``topk_length`` it receives.
+    """
+
+    B, SQ, NP, HN, S_KV, TOPK = 1, 4, 2, 8, 16, 6
+
+    def _fake_ctx(self):
+        b, sq, np_heads, hn = self.B, self.SQ, self.NP, self.HN
+        query = paddle.randn([b, sq, np_heads, hn])
+        kv_full = paddle.randn([b, self.S_KV, hn])
+        attn_sink = paddle.randn([np_heads])
+        # Interior -1 holes: precisely the layout the SM90 kernel mishandles.
+        row = [0, -1, 2, -1, 5, -1]
+        topk_idxs = paddle.to_tensor([[row] * sq], dtype="int32")
+        output = paddle.randn([b, sq, np_heads, hn])
+        lse = paddle.randn([b, sq, np_heads])
+
+        ctx = SimpleNamespace(
+            saved_tensor=lambda: (
+                query,
+                kv_full,
+                attn_sink,
+                topk_idxs,
+                output,
+                lse,
+            ),
+            query_shape=(b, sq, np_heads, hn),
+            softmax_scale=0.125,
+            attn_sink_dtype=attn_sink.dtype,
+            backend="cudnn",
+            has_topk_length=False,
+        )
+        grad_output = paddle.randn([b, sq, np_heads, hn])
+        return ctx, grad_output
+
+    def _topk_length_passed_to_kernel(self, capability):
+        from paddlefleet.fusions import csa_sparse_attn as mod
+
+        ctx, grad_output = self._fake_ctx()
+        seen = {}
+
+        def fake_bwd(
+            q, kv, o, do, lse, sink, topk, *, softmax_scale, topk_length
+        ):
+            seen["topk_length"] = topk_length
+            return (
+                paddle.zeros_like(q),
+                paddle.zeros_like(kv),
+                paddle.zeros_like(sink),
+            )
+
+        gate = mod._csa_bwd_honours_topk_length_holes
+        gate.cache_clear()
+        try:
+            with (
+                patch.object(
+                    paddle.device.cuda,
+                    "get_device_capability",
+                    return_value=capability,
+                ),
+                patch(
+                    "paddlefleet.cudnn_ops.csa_sparse_attn_bwd_cudnn",
+                    fake_bwd,
+                ),
+            ):
+                mod.CSASparseAttention.backward(ctx, grad_output)
+        finally:
+            gate.cache_clear()
+
+        self.assertIn("topk_length", seen, "mock kernel was never called")
+        return seen["topk_length"]
+
+    def test_sm90_receives_none(self):
+        self.assertIsNone(self._topk_length_passed_to_kernel((9, 0)))
+
+    def test_sm100_receives_int32_bound(self):
+        topk_length = self._topk_length_passed_to_kernel((10, 0))
+        self.assertIsNotNone(topk_length)
+        self.assertEqual(topk_length.dtype, paddle.int32)
+        self.assertEqual(list(topk_length.shape), [self.B * self.SQ])
+        # Trailing bound of [0, -1, 2, -1, 5, -1] is 5 (last valid index 4 + 1).
+        self.assertEqual(topk_length.tolist(), [5] * (self.B * self.SQ))

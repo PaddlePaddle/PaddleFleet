@@ -143,6 +143,7 @@ class GPTSublayersSpec:
     mhc_contract: LayerSpec | None = None
     tail_empty_layers: list[LayerSpec] | None = None
     mtp: list[LayerSpec] | None = None
+    output_block_attn_res: LayerSpec | None = None
     layer_norm: LayerSpec | None = None
     lm_head: LayerSpec | None = None
     mtp_lm_head: LayerDesc | None = None
@@ -346,6 +347,12 @@ class GPTModel(PipelineLayer):
             self.config.gpt_model_use_experimental_version
             and self.config.num_nextn_predict_layers >= 1
         ):
+            if spec.output_block_attn_res is not None:
+                self.add_sequential_layer(
+                    layers,
+                    LayerDesc(spec.output_block_attn_res),
+                    f"{name_prefix}.output_attn_res",
+                )
             self.add_sequential_layer(
                 layers, LayerDesc(spec.layer_norm), name_prefix
             )
@@ -393,6 +400,12 @@ class GPTModel(PipelineLayer):
             self.config.gpt_model_use_experimental_version
             and self.config.num_nextn_predict_layers >= 1
         ):
+            if spec.output_block_attn_res is not None:
+                self.add_sequential_layer(
+                    layers,
+                    LayerDesc(spec.output_block_attn_res),
+                    f"{name_prefix}.output_attn_res",
+                )
             self.add_sequential_layer(
                 layers, LayerDesc(spec.layer_norm), name_prefix
             )

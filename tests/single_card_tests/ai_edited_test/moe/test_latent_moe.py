@@ -128,6 +128,24 @@ def _make_moe_layer(config, pg_collection=None):
     return MoELayer(config, sublayers=sublayers, pg_collection=pg_collection)
 
 
+def _attach_tracked_latent_output_path(stub, latent_size, hidden_size):
+    """Attach a real projection and record norm/projection call order."""
+    projection = nn.Linear(latent_size, hidden_size)
+    events = []
+
+    def apply_norm(hidden_states):
+        events.append("norm")
+        return hidden_states
+
+    def apply_projection(hidden_states):
+        events.append("fc2")
+        return projection(hidden_states)
+
+    stub.latent_norm = MagicMock(side_effect=apply_norm)
+    stub.fc2_latent_proj = MagicMock(side_effect=apply_projection)
+    stub._latent_output_events = events
+
+
 # ---------------------------------------------------------------------------
 # 1. TransformerConfig – new fields
 # ---------------------------------------------------------------------------
@@ -147,6 +165,12 @@ class TestLatentMoEConfig(unittest.TestCase):
     def test_set_non_positive_moe_latent_size(self):
         config = _make_moe_config(moe_latent_size=0)
         self.assertEqual(config.moe_latent_size, 0)
+
+    def test_latent_norm_defaults_disabled_and_can_be_enabled(self):
+        self.assertFalse(_make_moe_config().latent_moe_use_norm)
+        self.assertTrue(
+            _make_moe_config(latent_moe_use_norm=True).latent_moe_use_norm
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +249,21 @@ class TestLatentMoEInit(unittest.TestCase):
         self.assertIsInstance(layer.fc2_latent_proj, nn.Linear)
         self.assertEqual(layer.fc2_latent_proj.weight.shape[0], 32)
         self.assertEqual(layer.fc2_latent_proj.weight.shape[1], 64)
+        self.assertIsNone(layer.latent_norm)
+
+    def test_latent_moe_norm_is_created_when_enabled(self):
+        """Kimi Stable LatentMoE uses RMSNorm in the latent width."""
+        from paddlefleet.transformer.paddle_norm import RMSNorm
+
+        config = _make_moe_config(
+            moe_latent_size=32,
+            latent_moe_use_norm=True,
+            normalization="RMSNorm",
+        )
+        layer = self._run_init(config)
+
+        self.assertIsInstance(layer.latent_norm, RMSNorm)
+        self.assertEqual(list(layer.latent_norm.weight.shape), [32])
 
     def test_latent_moe_sets_expert_hidden_size(self):
         """Enabling latent MoE must reduce the expert input hidden_size."""
@@ -348,7 +387,7 @@ class TestAuxLossComputeLatent(unittest.TestCase):
         stub = MagicMock()
         stub.use_latent_moe = use_latent_moe
         if use_latent_moe:
-            stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
+            _attach_tracked_latent_output_path(stub, latent_size, hidden_size)
         stub.training = False
         stub.router_aux_loss_coef = 0.0
         stub.shared_experts = None
@@ -373,6 +412,7 @@ class TestAuxLossComputeLatent(unittest.TestCase):
 
         # Must be expanded back to hidden_size=64
         self.assertEqual(output.shape[-1], 64)
+        self.assertEqual(stub._latent_output_events, ["norm", "fc2"])
 
     def test_aux_loss_compute_skips_fc2_when_not_latent(self):
         """Without latent MoE, hidden_states must remain unchanged."""
@@ -535,7 +575,7 @@ class TestForwardLatent(unittest.TestCase):
         stub.use_latent_moe = use_latent_moe
         if use_latent_moe:
             stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)
-            stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
+            _attach_tracked_latent_output_path(stub, latent_size, hidden_size)
 
         # Parallel / sequence flags → single-card non-sequence path
         stub.expert_model_parallel_size = 1
@@ -609,6 +649,7 @@ class TestForwardLatent(unittest.TestCase):
             [bs, seq, 64],
             "Output must be restored to hidden_size=64",
         )
+        self.assertEqual(stub._latent_output_events, ["norm", "fc2"])
 
     def test_forward_without_latent_moe_skips_projections(self):
         """
@@ -773,7 +814,7 @@ class TestCustomForwardLatent(unittest.TestCase):
         stub.use_latent_moe = use_latent_moe
         if use_latent_moe:
             stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)
-            stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
+            _attach_tracked_latent_output_path(stub, latent_size, hidden_size)
         stub.dispatch.return_value = (
             paddle.randn([bs_seq, expert_out_size]),
             None,
@@ -798,6 +839,7 @@ class TestCustomForwardLatent(unittest.TestCase):
         self.assertEqual(
             output.shape[-1], 64, "output must be restored to hidden_size=64"
         )
+        self.assertEqual(stub._latent_output_events, ["norm", "fc2"])
 
     def test_custom_forward_skips_projections_when_not_latent(self):
         """Without latent MoE, hidden_states flow unchanged at full hidden_size."""
@@ -827,7 +869,7 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         stub._latent_hidden = None
         if use_latent_moe:
             stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)
-            stub.fc2_latent_proj = nn.Linear(latent_size, hidden_size)
+            _attach_tracked_latent_output_path(stub, latent_size, hidden_size)
         stub.using_sonic_moe = False
         stub.fp8 = False
         stub.moe_deep_gemm = False
@@ -878,6 +920,7 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         self.assertEqual(
             output.shape[-1], 64, "output must be restored to hidden_size=64"
         )
+        self.assertEqual(stub._latent_output_events, ["norm", "fc2"])
 
     def test_fusion_moe_forward_skips_projections_when_not_latent(self):
         """Without latent MoE, hidden_states flow unchanged at full hidden_size."""

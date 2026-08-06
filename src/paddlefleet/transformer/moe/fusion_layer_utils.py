@@ -392,6 +392,7 @@ class MlpNode:
         activation_type=None,
         use_accuracy_compatible=False,
         use_w4a8=False,
+        use_w4a8_fused_quant=False,
     ):
         """
         Constructor
@@ -495,6 +496,8 @@ class MlpNode:
                     clamp_value=clamp_value,
                     activation_type=activation_type,
                     use_accuracy_compatible=use_accuracy_compatible,
+                    use_w4a8=use_w4a8,
+                    use_w4a8_fused_quant=use_w4a8_fused_quant,
                 )
                 for local_expert_id in range(self.num_experts_per_device)
             ]
@@ -514,6 +517,7 @@ class MlpNode:
                 activation_type=activation_type,
                 use_accuracy_compatible=use_accuracy_compatible,
                 use_w4a8=use_w4a8,
+                use_w4a8_fused_quant=use_w4a8_fused_quant,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -3138,6 +3142,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         activation_type=None,
         use_accuracy_compatible=False,
         use_w4a8=False,
+        use_w4a8_fused_quant=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -3175,6 +3180,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             activation_type=activation_type,
             use_accuracy_compatible=use_accuracy_compatible,
             use_w4a8=use_w4a8,
+            use_w4a8_fused_quant=use_w4a8_fused_quant,
         )
 
         if fp8_dispatched_handle is not None:

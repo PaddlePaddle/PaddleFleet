@@ -252,8 +252,8 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer.qb_histogram = paddle.to_tensor(histogram_np, dtype=paddle.int32)
         layer.num_experts_per_tok = k
         layer.num_experts = n
-        layer.qb_bin_min = b_min
-        layer.qb_bin_max = b_max
+        layer.qb_bin_min = paddle.to_tensor(b_min, dtype=paddle.float32)
+        layer.qb_bin_max = paddle.to_tensor(b_max, dtype=paddle.float32)
         # Mock config
         layer.config = MagicMock()
         layer.config.sequence_parallel = False
@@ -350,10 +350,10 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
 
         b_new = layer._bias_value.numpy()
         self.assertAlmostEqual(
-            layer.qb_bin_min, float(b_new.min()) - 1.0, places=5
+            float(layer.qb_bin_min.item()), float(b_new.min()) - 1.0, places=5
         )
         self.assertAlmostEqual(
-            layer.qb_bin_max, float(b_new.max()) + 1.0, places=5
+            float(layer.qb_bin_max.item()), float(b_new.max()) + 1.0, places=5
         )
 
     def test_histogram_reset_after_update(self):
@@ -427,8 +427,8 @@ class TestAccumulateHistogramPaddle(unittest.TestCase):
         """Create a minimal mock for the router's histogram accumulation."""
         router = MagicMock()
         router.qb_n_bins = B
-        router.qb_bin_min = b_min
-        router.qb_bin_max = b_max
+        router.qb_bin_min = paddle.to_tensor(b_min, dtype=paddle.float32)
+        router.qb_bin_max = paddle.to_tensor(b_max, dtype=paddle.float32)
         router.qb_histogram = paddle.zeros([E, B], dtype=paddle.int32)
         return router
 
@@ -621,8 +621,8 @@ class TestOnOptimizerEnd(unittest.TestCase):
         layer.qb_histogram = paddle.to_tensor(histogram_np, dtype=paddle.int32)
         layer.num_experts_per_tok = k
         layer.num_experts = n
-        layer.qb_bin_min = -1.0
-        layer.qb_bin_max = 1.0
+        layer.qb_bin_min = paddle.to_tensor(-1.0, dtype=paddle.float32)
+        layer.qb_bin_max = paddle.to_tensor(1.0, dtype=paddle.float32)
         layer.config = MagicMock()
         layer.config.sequence_parallel = False
         layer.config.expert_model_parallel_size = 1
@@ -783,8 +783,8 @@ class TestEndToEnd(unittest.TestCase):
         layer.qb_histogram = histogram
         layer.num_experts_per_tok = k
         layer.num_experts = n
-        layer.qb_bin_min = b_min
-        layer.qb_bin_max = b_max
+        layer.qb_bin_min = paddle.to_tensor(b_min, dtype=paddle.float32)
+        layer.qb_bin_max = paddle.to_tensor(b_max, dtype=paddle.float32)
         layer.config = MagicMock()
         layer.config.sequence_parallel = False
         layer.config.expert_model_parallel_size = 1
@@ -920,8 +920,8 @@ class TestDegenerateRange(unittest.TestCase):
         layer.num_experts_per_tok = k
         layer.num_experts = n
         # Set bin_min == bin_max to trigger the fallback
-        layer.qb_bin_min = 0.0
-        layer.qb_bin_max = 0.0
+        layer.qb_bin_min = paddle.to_tensor(0.0, dtype=paddle.float32)
+        layer.qb_bin_max = paddle.to_tensor(0.0, dtype=paddle.float32)
         layer.config = MagicMock()
         layer.config.sequence_parallel = False
         layer.config.expert_model_parallel_size = 1
@@ -962,8 +962,8 @@ class TestOnOptimizerEndWithRealRouter(unittest.TestCase):
         layer.qb_histogram = paddle.to_tensor(histogram_np, dtype=paddle.int32)
         layer.num_experts_per_tok = k
         layer.num_experts = n
-        layer.qb_bin_min = -1.0
-        layer.qb_bin_max = 1.0
+        layer.qb_bin_min = paddle.to_tensor(-1.0, dtype=paddle.float32)
+        layer.qb_bin_max = paddle.to_tensor(1.0, dtype=paddle.float32)
         layer.config = MagicMock()
         layer.config.sequence_parallel = False
         layer.config.expert_model_parallel_size = 1
@@ -1070,8 +1070,8 @@ class TestTPAllReduceCondition(unittest.TestCase):
         layer.qb_histogram = paddle.to_tensor(histogram_np, dtype=paddle.int32)
         layer.num_experts_per_tok = k
         layer.num_experts = n
-        layer.qb_bin_min = -1.0
-        layer.qb_bin_max = 1.0
+        layer.qb_bin_min = paddle.to_tensor(-1.0, dtype=paddle.float32)
+        layer.qb_bin_max = paddle.to_tensor(1.0, dtype=paddle.float32)
         layer.config = MagicMock()
         layer.config.sequence_parallel = sp
         layer.config.expert_model_parallel_size = ep_size
@@ -1345,8 +1345,8 @@ class TestQBRouterInit(unittest.TestCase):
         self.assertTrue(router.qb_histogram.stop_gradient)
         self.assertEqual(router.expert_usage.shape, [8])
         self.assertTrue(router.expert_usage.stop_gradient)
-        self.assertEqual(router.qb_bin_min, -1.0)
-        self.assertEqual(router.qb_bin_max, 1.0)
+        self.assertEqual(float(router.qb_bin_min.item()), -1.0)
+        self.assertEqual(float(router.qb_bin_max.item()), 1.0)
         self.assertFalse(router._cast_to_low_precision)
 
     def test_experimental_version_bias_is_2d(self):
@@ -1365,6 +1365,17 @@ class TestQBRouterInit(unittest.TestCase):
             router = TopKRouter(config)
         self.assertEqual(router.qb_n_bins, 1000)
         self.assertEqual(router.qb_histogram.shape, [8, 1000])
+
+    def test_bin_range_is_restored_from_state_dict(self):
+        router = _build_qb_router()
+        router.qb_bin_min.set_value(paddle.to_tensor(-1.75))
+        router.qb_bin_max.set_value(paddle.to_tensor(2.25))
+
+        restored = _build_qb_router()
+        restored.set_state_dict(router.state_dict())
+
+        self.assertEqual(float(restored.qb_bin_min.item()), -1.75)
+        self.assertEqual(float(restored.qb_bin_max.item()), 2.25)
 
     def test_moe_topk_fusion_is_rejected(self):
         with self.assertRaises(ValueError) as ctx:
@@ -1460,7 +1471,12 @@ class TestAccumulateQBHistogramReal(unittest.TestCase):
         router._accumulate_qb_histogram(scores, biased, 2)
 
         expected = _numpy_accumulate_histogram(
-            scores_np, bias_np, 2, router.qb_bin_min, router.qb_bin_max, 100
+            scores_np,
+            bias_np,
+            2,
+            float(router.qb_bin_min.item()),
+            float(router.qb_bin_max.item()),
+            100,
         )
         np.testing.assert_array_equal(router.qb_histogram.numpy(), expected)
 
@@ -1473,16 +1489,20 @@ class TestAccumulateQBHistogramReal(unittest.TestCase):
 
     def test_degenerate_bin_range_falls_back(self):
         router = _build_qb_router()
-        router.qb_bin_min = 0.0
-        router.qb_bin_max = 0.0  # zero range -> fallback to 2.0
+        router.qb_bin_min.set_value(paddle.to_tensor(0.0))
+        router.qb_bin_max.set_value(
+            paddle.to_tensor(0.0)
+        )  # zero range -> fallback to 2.0
         scores = paddle.to_tensor(np.random.rand(6, 8).astype(np.float32))
         router._accumulate_qb_histogram(scores, scores, 2)
         self.assertEqual(int(router.qb_histogram.sum().item()), 6 * 8)
 
     def test_out_of_range_values_are_clipped(self):
         router = _build_qb_router()
-        router.qb_bin_min = 0.0
-        router.qb_bin_max = 0.01  # almost everything lands beyond the last bin
+        router.qb_bin_min.set_value(paddle.to_tensor(0.0))
+        router.qb_bin_max.set_value(
+            paddle.to_tensor(0.01)
+        )  # almost everything lands beyond the last bin
         scores = paddle.to_tensor(np.full([4, 8], 0.5, dtype=np.float32))
         router._accumulate_qb_histogram(scores, scores, 2)
         hist = router.qb_histogram.numpy()

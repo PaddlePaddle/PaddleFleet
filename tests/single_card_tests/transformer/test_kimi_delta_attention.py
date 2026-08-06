@@ -17,11 +17,13 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
 
+from paddlefleet.transformer import kimi_delta_attention as kda_mod
 from paddlefleet.transformer.kimi_delta_attention import (
     KimiDeltaAttention,
     KimiDeltaAttentionSublayersSpec,
@@ -344,6 +346,34 @@ class TestKimiDeltaAttention(unittest.TestCase):
             qk_dim * 2 + v_dim + NUM_VALUE_HEADS,
         )
 
+    def test_conv_weight_stays_fp32_in_o2(self):
+        original_dtype = paddle.get_default_dtype()
+        try:
+            paddle.set_default_dtype("bfloat16")
+            kda = _build_kda()
+        finally:
+            paddle.set_default_dtype(original_dtype)
+
+        self.assertEqual(kda.conv1d.weight.dtype, paddle.float32)
+        self.assertEqual(kda.in_proj.linear.weight.dtype, paddle.bfloat16)
+        paddle.amp.decorate(models=kda, level="O2", dtype="bfloat16")
+        self.assertEqual(kda.conv1d.weight.dtype, paddle.float32)
+
+        x = paddle.randn(
+            [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE], dtype="bfloat16"
+        )
+        x.stop_gradient = False
+        with patch.object(
+            kda_mod.fla.ops.kda,
+            "chunk_kda",
+            wraps=paddle_chunk_kda,
+        ):
+            out, _ = kda(hidden_states=x, attention_mask=None)
+            self.assertEqual(out.dtype, paddle.bfloat16)
+            out.astype(paddle.float32).square().mean().backward()
+        self.assertEqual(kda.conv1d.weight.grad.dtype, paddle.float32)
+        self.assertEqual(x.grad.dtype, paddle.bfloat16)
+
     def test_forward_shape(self):
         x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
         out, out_bias = self.kda(hidden_states=x, attention_mask=None)
@@ -352,6 +382,28 @@ class TestKimiDeltaAttention(unittest.TestCase):
         )
         self.assertIsNone(out_bias)
         assert paddle.isfinite(out).all().item()
+
+    def test_forward_always_calls_fla_chunk_kda(self):
+        """Deterministic mode must not select the removed eager fallback."""
+        self.assertTrue(self.kda.config.deterministic_mode)
+        x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
+
+        with patch.object(
+            kda_mod.fla.ops.kda,
+            "chunk_kda",
+            wraps=paddle_chunk_kda,
+        ) as mock_chunk_kda:
+            out, _ = self.kda(hidden_states=x, attention_mask=None)
+
+        mock_chunk_kda.assert_called_once()
+        call_kwargs = mock_chunk_kda.call_args.kwargs
+        self.assertTrue(call_kwargs["use_gate_in_kernel"])
+        self.assertTrue(call_kwargs["use_beta_sigmoid_in_kernel"])
+        self.assertTrue(call_kwargs["safe_gate"])
+        self.assertEqual(call_kwargs["lower_bound"], GATE_LOWER_BOUND)
+        self.assertEqual(
+            list(out.shape), [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
+        )
 
     def test_forward_low_rank_gate(self):
         kda = _build_kda(use_full_rank_gate=False)
