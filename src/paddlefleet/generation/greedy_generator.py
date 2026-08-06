@@ -469,7 +469,7 @@ class GreedyGenerator:
                         _last[0], min(5, _last.shape[-1])
                     )
                     logger.info(
-                        "[logits-debug][no_cache %s] top-5 ids=%s vals=%s",
+                        "[logits-debug][no_cache %s] top-k ids=%s vals=%s",
                         _tag,
                         _topk_idx.tolist(),
                         [round(v, 3) for v in _topk_val.tolist()],
@@ -647,7 +647,7 @@ class GreedyGenerator:
                     _last[0], min(5, _last.shape[-1])
                 )
                 logger.info(
-                    "[logits-debug][prefill] top-5 ids=%s vals=%s",
+                    "[logits-debug][prefill] top-k ids=%s vals=%s",
                     _topk_idx.tolist(),
                     [round(v, 3) for v in _topk_val.tolist()],
                 )
@@ -704,7 +704,7 @@ class GreedyGenerator:
                     _d = logits[:, -1].cast("float32")
                     _tv, _ti = paddle.topk(_d[0], min(5, _d.shape[-1]))
                     logger.info(
-                        "[logits-debug][decode step=%d] top-5 ids=%s vals=%s",
+                        "[logits-debug][decode step=%d] top-k ids=%s vals=%s",
                         step,
                         _ti.tolist(),
                         [round(v, 3) for v in _tv.tolist()],

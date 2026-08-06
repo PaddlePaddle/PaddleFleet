@@ -992,6 +992,7 @@ class TestCudnnIndexerDocmaskCP(unittest.TestCase):
             startend_row_indices=None,
             doc_lens=None,
             seq_offset=0,
+            **kwargs,
         ):
             captured["q_shape"] = list(q.shape)
             captured["k_shape"] = list(k.shape)
