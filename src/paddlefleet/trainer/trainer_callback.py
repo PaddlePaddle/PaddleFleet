@@ -85,6 +85,7 @@ __all__ = [
     "StepFlexToken",
     "FP8QuantWeightCallback",
     "MoECorrectionBiasAdjustCallback",
+    "MoEQuantileBalancingCallback",
     "MoeExpertsGradScaleCallback",
     "MoEGateSpGradSyncCallBack",
     "SPGradSyncCallback",

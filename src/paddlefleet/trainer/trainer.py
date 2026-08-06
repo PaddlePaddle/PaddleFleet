@@ -118,11 +118,10 @@ if TYPE_CHECKING:
     except ImportError:
         from transformers.tokenization_utils import PreTrainedTokenizer
 
-    from ..transformers.image_processing_utils import ImageProcessingMixin
-
 from paddle.framework.recall_error import LOSS_INF_ERROR, LOSS_NAN_ERROR
 
 from ..transformers.context_parallel_utils import auto_split_sequence_dim_load_balance
+from ..transformers.image_processing_utils import ImageProcessingMixin
 from ..transformers.model_utils import (
     PretrainedModel,
     _add_variant,
@@ -252,8 +251,8 @@ DEFAULT_CALLBACKS = [DefaultFlowCallback]
 DEFAULT_PROGRESS_CALLBACK = ProgressCallback
 
 if is_datasets_available():
-    PADDLEFLEET_TESTING = os.environ.get("PADDLEFLEET_TESTING", False)
-    if "torch" not in sys.modules and not PADDLEFLEET_TESTING:
+    PADDLEFORMERS_TESTING = os.environ.get("PADDLEFORMERS_TESTING", False)
+    if "torch" not in sys.modules and not PADDLEFORMERS_TESTING:
         sys.modules["torch"] = None
         import datasets
 
@@ -275,14 +274,14 @@ DIST_MODEL_PATH = "dist_model"
 
 class Trainer:
     """
-    Trainer is a simple but feature-complete training and eval loop for PaddlePaddle, optimized for PaddleFleet.
+    Trainer is a simple but feature-complete training and eval loop for PaddlePaddle, optimized for PaddleFormers.
 
     Args:
         model ([`PretrainedModel`] or `paddle.nn.Layer`, *optional*):
             The model to train, evaluate or use for predictions.
 
             [`Trainer`] is optimized to work with the [`PretrainedModel`] provided by the library. You can still use
-            your own models defined as `paddle.nn.Layer` as long as they work the same way as the PaddleFleet
+            your own models defined as `paddle.nn.Layer` as long as they work the same way as the PaddleFormers
             models.
         criterion(`paddle.nn.Layer`, *optional*):
             The model may only output the loggit, if you want do more computation for the output of model, you can
@@ -588,6 +587,11 @@ class Trainer:
 
         if self.args.use_async_save:
             self._async_optimizer_saver = AsyncSaver()
+
+        if self.args.use_flex_async_save:
+            from .utils.flex_async_save import FlexAsyncSaver
+
+            self._flex_async_saver = FlexAsyncSaver()
 
         if args.max_steps > 0:
             logger.info("max_steps is given, it will override any value given in num_train_epochs")
@@ -1133,6 +1137,15 @@ class Trainer:
         callback = EMAStateAssemblerCallback(self.ema_state_assembler)
         self.add_callback(callback)
 
+    def _wait_flex_async_save(self):
+        """Wait for any in-progress flex async checkpoint save to complete.
+
+        Should be called before optimizer.step() to ensure CPU pinned memory
+        is no longer being read by the background write thread.
+        """
+        if hasattr(self, "_flex_async_saver") and self._flex_async_saver.is_saving:
+            self._flex_async_saver.wait_for_completion()
+
     def _save_flex_model_state(self, output_dir):
         model_sharded_state_dict = self.model.sharded_state_dict()
         for key, sharded_weight in model_sharded_state_dict.items():
@@ -1304,8 +1317,58 @@ class Trainer:
                 else:
                     opt_states[k] = v
 
+            # When a checkpoint dumped under one MoE dispatcher layout is loaded
+            # under another (e.g. allgather N-D experts vs deepep flattened 2-D),
+            # grouped-gemm expert tensors have matching element counts but a
+            # different global_shape, which the flex-checkpoint resharder rejects
+            # with "Global shapes must be the same". Inject AOA reshape statements
+            # so the source is reshaped to the target layout during load.
+            # Restricted to grouped-gemm keys, and only when the two shapes form a
+            # valid canonical(N-D) <-> flattened([d0*d1, prod(rest)]) pair, so it
+            # is a no-op whenever the layouts already agree.
+            grouped_gemm_structs = {
+                k for k, v in model_sharded_state_dict.items() if getattr(v, "grouped_gemm_param", False)
+            }
+
+            def _grouped_gemm_reshape_statements(target_state_dict):
+                statements = []
+                seen = set()
+                for k, sw in target_state_dict.items():
+                    struct_name = re.sub(r"\.(w_0|moment1_0|moment2_0)$", "", k)
+                    if struct_name not in grouped_gemm_structs or struct_name in seen:
+                        continue
+                    meta = state_dict_metadata.get(k)
+                    if meta is None:
+                        continue
+                    meta = meta[0] if isinstance(meta, (list, tuple)) else meta
+                    src_shape = tuple(meta.global_shape)
+                    dst_shape = tuple(sw.global_shape)
+                    if src_shape == dst_shape:
+                        continue
+                    canonical = src_shape if len(src_shape) >= len(dst_shape) else dst_shape
+                    if len(canonical) < 3:
+                        continue
+                    flattened = (canonical[0] * canonical[1], math.prod(canonical[2:]))
+                    if {src_shape, dst_shape} != {canonical, flattened}:
+                        continue
+                    # AOA keys weights by the base model-state name (the optimizer
+                    # suffix is stripped internally), so the statement must use the
+                    # suffix-free struct name on both sides.
+                    seen.add(struct_name)
+                    statements.append(f"{struct_name} -> {struct_name}, reshape = '{list(canonical)}'")
+                return statements
+
+            def _merge_reshape_aoa(aoa_config, statements):
+                if not statements:
+                    return aoa_config
+                merged = dict(aoa_config or {})
+                existing = list(merged.get("aoa_statements", []))
+                merged["aoa_statements"] = existing + [s for s in statements if s not in existing]
+                return merged
+
             # use filtered AOA for master_weight (excludes FP32-only params)
             master_weight_aoa = getattr(self.args, "aoa_config_master_weight", None) or self.args.aoa_config
+            master_weight_aoa = _merge_reshape_aoa(master_weight_aoa, _grouped_gemm_reshape_statements(master_weights))
             dist.load_state_dict(
                 master_weights,
                 master_weights_path,
@@ -1319,7 +1382,7 @@ class Trainer:
                 dist.load_state_dict(
                     opt_states,
                     opt_states_path,
-                    aoa_config=self.args.aoa_config,
+                    aoa_config=_merge_reshape_aoa(self.args.aoa_config, _grouped_gemm_reshape_statements(opt_states)),
                     offload=self.args.load_via_cpu,
                     comm_method=flex_ckpt_comm_method,
                     worker_groups=worker_groups,
@@ -1378,7 +1441,7 @@ class Trainer:
             def bf16_filtered_sharded_state_dict(sharded_state_dict):
                 new_state_dict = {}
                 for k, v in sharded_state_dict.items():
-                    if v.local_tensor.dtype == paddle.bfloat16 and not v.local_tensor.stop_gradient:                        
+                    if v.local_tensor.dtype == paddle.bfloat16:
                         continue
                     new_state_dict[k] = v
                 return new_state_dict
@@ -1409,6 +1472,17 @@ class Trainer:
         if enable_bf16_opt:
             opt_state_dict = self.optimizer.state_dict()
 
+            # Structure names of grouped-gemm MoE experts, identified by the
+            # `grouped_gemm_param` attribute on the sharded tensor (same signal
+            # used by the ZCC worker in zero_cost_checkpoint.py). Their saved
+            # master weight can be flattened 2-D while the live param is N-D
+            # (or vice versa) depending on the dispatcher layout, so only these
+            # keys are allowed to reshape on an element-count match. Every other
+            # bf16 param keeps the exact shape check.
+            grouped_gemm_keys = {
+                k for k, v in self.model.sharded_state_dict().items() if getattr(v, "grouped_gemm_param", False)
+            }
+
             def _assign_master_weights_to_model(master_weights):
                 model_state_dict = self.model.state_dict()
                 for key, param in model_state_dict.items():
@@ -1418,9 +1492,13 @@ class Trainer:
                             f"shape {master_weights[param.name].shape} to param "
                             f"{param.name} shape{param.shape}"
                         )
-                        assert (
-                            param.shape == master_weights[param.name].shape
-                        ), f"got {param.shape} vs {master_weights[param.name].shape}"
+                        mw_shape = master_weights[param.name].shape
+                        if key in grouped_gemm_keys:
+                            assert math.prod(param.shape) == math.prod(
+                                mw_shape
+                            ), f"grouped-gemm element count mismatch: {param.shape} vs {mw_shape}"
+                        else:
+                            assert param.shape == mw_shape, f"shape mismatch: {param.shape} vs {mw_shape}"
                         master_weight = paddle.reshape(master_weights[param.name], param.shape)
                         paddle.assign(paddle.cast(to_device(master_weight), paddle.bfloat16), model_state_dict[key])
 
@@ -1502,9 +1580,13 @@ class Trainer:
                             logger.debug(
                                 f"key {key}, convert master weights {param.name} shape {master_weights[param.name].shape} to param {param.name} shape{param.shape}"
                             )
-                            assert (
-                                param.shape == master_weights[param.name].shape
-                            ), f"got {param.shape} vs {master_weights[param.name].shape}"
+                            mw_shape = master_weights[param.name].shape
+                            if key in grouped_gemm_keys:
+                                assert math.prod(param.shape) == math.prod(
+                                    mw_shape
+                                ), f"grouped-gemm element count mismatch: {param.shape} vs {mw_shape}"
+                            else:
+                                assert param.shape == mw_shape, f"shape mismatch: {param.shape} vs {mw_shape}"
                             master_weight = paddle.reshape(master_weights[param.name], param.shape)
                             paddle.assign(
                                 paddle.cast(to_device(master_weight), paddle.bfloat16), model_state_dict[key]
@@ -2064,6 +2146,10 @@ class Trainer:
             )
             self.optimizer.clear_grad()
             return
+
+        # Wait for any in-progress flex async save before optimizer.step(),
+        # because reload_optim will read from CPU pinned memory.
+        self._wait_flex_async_save()
 
         if parameters_list is None:
             parameters_list = []
@@ -2677,6 +2763,9 @@ class Trainer:
         metrics["train_loss"] = train_loss
 
         self.is_in_train = False
+
+        # Ensure the last flex async checkpoint save is fully written before exiting.
+        self._wait_flex_async_save()
 
         self._memory_tracker.stop_and_update_metrics(metrics)
 
@@ -4479,7 +4568,8 @@ class Trainer:
                                 self.args.optim_shard_num,
                             )
                         elif self.args.save_checkpoint_format == "flex_checkpoint":
-                            self._save_flex_optimizer_state(output_dir)
+                            if not self.args.use_flex_async_save:
+                                self._save_flex_optimizer_state(output_dir)
                         else:
                             if self.dp_group.rank > 0:  # this should only work for MoE saving
                                 self._save_ckpt_func(
@@ -4531,8 +4621,9 @@ class Trainer:
                                 signal_dir,
                             )
                         elif self.args.save_checkpoint_format == "flex_checkpoint":
-                            self._save_flex_model_state(output_dir)
-                            self._save_flex_optimizer_state(output_dir)
+                            if not self.args.use_flex_async_save:
+                                self._save_flex_model_state(output_dir)
+                                self._save_flex_optimizer_state(output_dir)
                         else:
                             if self.args.data_parallel_rank > 0 and self.args.use_expert_parallel:
                                 self._save_ckpt_func(
@@ -4770,6 +4861,10 @@ class Trainer:
 
                 return
             if self.args.save_checkpoint_format == "flex_checkpoint":
+                if self.args.use_flex_async_save and not last_fc_to_hf:
+                    # Async mode: model + optimizer saved together in background
+                    self._flex_async_saver.save_async(self, output_dir)
+                    return
                 if last_fc_to_hf:
                     is_main_process = paddle.distributed.get_rank() == 0
                     # Convert user-configured GB value to bytes for HFFormatFullParamSaver
@@ -5675,11 +5770,11 @@ class Trainer:
         if args is None:
             args = self.args
             key = "Training"
-        import paddlefleet
+        import paddleformers
 
         logger.debug("{:^40}".format("{} Configuration Arguments".format(key)))
         logger.debug("{:30}: {}".format("paddle commit id", paddle.version.commit))
-        logger.debug("{:30}: {}".format("paddlefleet commit id", paddlefleet.version.commit))
+        logger.debug("{:30}: {}".format("paddleformers commit id", paddlefleet.version.commit))
         if is_paddlefleet_available():
             import paddlefleet
 
