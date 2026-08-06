@@ -1722,6 +1722,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
         else:
@@ -1736,6 +1739,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
 
