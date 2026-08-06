@@ -94,6 +94,70 @@ def _log_moe_md5(tensor, name, layer_idx=None):
         )
 
 
+_ROUTER_SCALE_FAST = None
+
+
+def _router_scale_fast_enabled():
+    """Opt-in switch for the atomic-free routed-scaling-factor gather backward.
+
+    Default OFF keeps the original ``F.embedding`` path bit-for-bit.
+    """
+    global _ROUTER_SCALE_FAST
+    if _ROUTER_SCALE_FAST is None:
+        _ROUTER_SCALE_FAST = (
+            os.environ.get("FLEET_MOE_ROUTER_SCALE_FAST", "0") == "1"
+        )
+    return _ROUTER_SCALE_FAST
+
+
+class GatherExpertScale(paddle.autograd.PyLayer):
+    """Gather per-expert scales for the selected experts.
+
+    Forward is identical to ``F.embedding(idx, param.unsqueeze(1)).squeeze(-1)``
+    (both are a plain gather). The backward differs: instead of atomically
+    accumulating num_tokens*topk gradients into only num_experts addresses, it
+    scatters them into a dense [num_tokens, num_experts] fp32 buffer and does a
+    column sum. The atomic version is both slow (a few hundred addresses take
+    ~1e3 atomics each) and, in bf16, badly inaccurate (the accumulator saturates
+    once it grows past 2**8 times the increment).
+    """
+
+    @staticmethod
+    def forward(ctx, param, idx):
+        """forward"""
+        ctx.save_for_backward(idx)
+        ctx.num_experts = param.shape[0]
+        return paddle.gather(param, idx.reshape([-1])).reshape(idx.shape)
+
+    @staticmethod
+    def backward(ctx, grad):
+        """backward"""
+        (idx,) = ctx.saved_tensor()
+        dense = paddle.zeros(
+            [idx.shape[0], ctx.num_experts], dtype=paddle.float32
+        )
+        dense = paddle.put_along_axis(
+            dense, idx, grad.astype(paddle.float32), axis=1, reduce="add"
+        )
+        return dense.sum(axis=0).astype(grad.dtype), None
+
+
+def apply_learnable_routed_scaling(top_gate, top_idx, param):
+    """Scale top_gate by the learnable per-expert routed scaling factor.
+
+    top_idx may contain -1 for padded tokens; those are clipped to 0 exactly as
+    before (their top_gate is already 0).
+    """
+    safe_topk_indices = paddle.clip(top_idx, min=0)
+    if _router_scale_fast_enabled():
+        gathered_scales = GatherExpertScale.apply(param, safe_topk_indices)
+    else:
+        gathered_scales = F.embedding(
+            safe_topk_indices, param.unsqueeze(1)
+        ).squeeze(-1)
+    return top_gate * gathered_scales
+
+
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
     FusedGateDetachMatmul
@@ -945,12 +1009,9 @@ class StandardMoERouter(nn.Layer):
         # Mirrors the non-hash path (see forward(): routed_scaling_factor[_learnable]
         # is multiplied onto top_gate after normalization).
         if self.routed_scaling_factor_learnable:
-            safe_topk_indices = paddle.clip(top_idx, min=0)
-            gathered_scales = F.embedding(
-                safe_topk_indices,
-                self.routed_scaling_factor_param.unsqueeze(1),
-            ).squeeze(-1)
-            top_gate = top_gate * gathered_scales
+            top_gate = apply_learnable_routed_scaling(
+                top_gate, top_idx, self.routed_scaling_factor_param
+            )
         elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
             top_gate = top_gate * self.routed_scaling_factor
 
@@ -1411,12 +1472,9 @@ class TopKRouter(StandardMoERouter):
             # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
 
         if self.routed_scaling_factor_learnable:
-            safe_topk_indices = paddle.clip(top_idx, min=0)
-            gathered_scales = F.embedding(
-                safe_topk_indices,
-                self.routed_scaling_factor_param.unsqueeze(1),
-            ).squeeze(-1)
-            top_gate = top_gate * gathered_scales
+            top_gate = apply_learnable_routed_scaling(
+                top_gate, top_idx, self.routed_scaling_factor_param
+            )
         elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
             top_gate = top_gate * self.routed_scaling_factor
 
