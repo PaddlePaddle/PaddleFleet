@@ -387,14 +387,11 @@ class TestKimiDeltaAttention(unittest.TestCase):
             [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE], dtype="bfloat16"
         )
         x.stop_gradient = False
-        with patch.object(
-            kda_mod.fla.ops.kda,
-            "chunk_kda",
-            wraps=paddle_chunk_kda,
-        ):
-            out, _ = kda(hidden_states=x, attention_mask=None)
-            self.assertEqual(out.dtype, paddle.bfloat16)
-            out.astype(paddle.float32).square().mean().backward()
+        # Deterministic mode, so this runs the paddle-native conv + recurrence
+        # and needs no fla kernels.
+        out, _ = kda(hidden_states=x, attention_mask=None)
+        self.assertEqual(out.dtype, paddle.bfloat16)
+        out.astype(paddle.float32).square().mean().backward()
         grads = dict(kda.named_parameters())
         for name in fp32_names:
             self.assertEqual(
@@ -796,7 +793,8 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
     BATCH = 2
     DOCS = [[12, 20], [8, 24]]
 
-    def _run(self, **cfg_kwargs):
+    def _run(self, with_mask=True, cp_world_size=1, **cfg_kwargs):
+        cfg_kwargs.setdefault("max_sequence_length", SEQ_LENGTH * cp_world_size)
         config = GPTConfig(
             vocab_size=128,
             hidden_size=HIDDEN_SIZE,
@@ -805,11 +803,13 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
             **cfg_kwargs,
         )
         emb = _build_gpt_embedding(config)
-        indices = _startend_row_indices(self.DOCS, SEQ_LENGTH)
+        indices = (
+            _startend_row_indices(self.DOCS, SEQ_LENGTH) if with_mask else None
+        )
         with (
             patch(
                 "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
-                return_value=1,
+                return_value=cp_world_size,
             ),
             patch("paddlefleet.models.gpt.gpt_embedding.ScatterOp") as scatter,
         ):
@@ -847,6 +847,32 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
             experimental_dataflow=False,
         )
         self.assertNotIn("cu_seqlens", out)
+
+    def test_no_mask_only_builds_one_for_context_parallel(self):
+        """Without document boundaries only CP needs a (shared) cu_seqlens."""
+        out, _ = self._run(
+            with_mask=False,
+            layer_types=["kimi_delta_attention", "self_attention"],
+        )
+        self.assertNotIn("cu_seqlens", out)
+
+        # cp=2, so the [BATCH, SEQ_LENGTH] input stands in for a shard of a
+        # 2*SEQ_LENGTH global sequence.
+        out, _ = self._run(
+            with_mask=False,
+            cp_world_size=2,
+            layer_types=["kimi_delta_attention", "self_attention"],
+        )
+        self.assertEqual(out["cu_seqlens"].tolist(), [0, 2 * SEQ_LENGTH])
+
+    def test_context_parallel_requires_global_max_sequence_length(self):
+        """max_sequence_length must be the global (pre-scatter) length."""
+        with self.assertRaises(AssertionError):
+            self._run(
+                cp_world_size=2,
+                max_sequence_length=SEQ_LENGTH,  # local, not global
+                layer_types=["kimi_delta_attention", "self_attention"],
+            )
 
 
 if __name__ == "__main__":

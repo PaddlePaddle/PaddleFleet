@@ -278,7 +278,8 @@ class KimiDeltaAttention(FleetLayer):
         # native fallbacks stay in place for deterministic runs and for builds
         # without paddlefleet_ops.
         self.use_fused_kernels = HAVE_FLA and not config.deterministic_mode
-        logger.info("KDA will use fused kernel")
+        if self.use_fused_kernels:
+            logger.info("KDA will use fused kernel")
 
         # q/k/v/beta are all sharded by head, so both head counts must divide
         # evenly; otherwise the per-tensor split sizes in forward() silently stop
