@@ -17,8 +17,8 @@
 import importlib.util
 import os
 import sys
+import types
 import unittest
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -564,7 +564,7 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
         output = paddle.randn([b, sq, np_heads, hn])
         lse = paddle.randn([b, sq, np_heads])
 
-        ctx = SimpleNamespace(
+        ctx = types.SimpleNamespace(
             saved_tensor=lambda: (
                 query,
                 kv_full,
@@ -578,6 +578,9 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
             attn_sink_dtype=attn_sink.dtype,
             backend="cudnn",
             has_topk_length=False,
+            query_needs_grad=True,
+            kv_full_needs_grad=True,
+            attn_sink_needs_grad=True,
         )
         grad_output = paddle.randn([b, sq, np_heads, hn])
         return ctx, grad_output
