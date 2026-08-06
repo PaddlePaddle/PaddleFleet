@@ -46,7 +46,7 @@ class Config:
 
 
 class LightweightGPT(GPTModel):
-    def __init__(self, keys, model_type=""):
+    def __init__(self, keys, model_type="", num_virtual_pipeline_stages=1):
         self.config = Config(model_type)
         self._keys = keys
         self._sequential_layers = []
@@ -54,6 +54,8 @@ class LightweightGPT(GPTModel):
         self.layers = []
         self._stage_id = 0
         self._stage_for_index = 0
+        self._num_virtual_pipeline_stages = num_virtual_pipeline_stages
+        self._use_dualpipev = False
         self.loaded_state = None
 
     def get_stage_from_index(self, idx):
@@ -333,7 +335,8 @@ class TestGPTOverlapAndStateNoMock(unittest.TestCase):
                 "0.tail.weight",
                 "1.tail.weight",
                 "shared_layers.embed.weight",
-            ]
+            ],
+            num_virtual_pipeline_stages=2,
         )
         model.layers = [shared]
         model._sequential_layers = [
