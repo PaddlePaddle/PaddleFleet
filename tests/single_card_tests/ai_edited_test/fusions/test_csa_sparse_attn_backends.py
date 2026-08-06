@@ -17,6 +17,7 @@
 import importlib.util
 import os
 import sys
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -512,3 +513,84 @@ class TestCsaSparseAttnBwdCudnnFunction(unittest.TestCase):
         self.assertEqual(dq, "mock_dq")
         self.assertEqual(dkv, "mock_dkv")
         self.assertEqual(d_sink, "mock_d_sink")
+
+
+class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
+    """CSASparseAttention.backward cuDNN dispatch feeds an int32 topk bound.
+
+    Builds a complete fake ``ctx`` (the reported AttributeError was a fake ctx
+    missing ``query_needs_grad``) and mocks the two inner backend imports,
+    asserting the ``topk_length`` handed to ``csa_sparse_attn_bwd_cudnn`` is
+    int32 (the SM100/Blackwell ``mTopkLength`` bound).
+    """
+
+    def test_sm100_receives_int32_bound(self):
+        from paddlefleet.fusions.csa_sparse_attn import CSASparseAttention
+
+        b, sq, np_heads, hn = 1, 2, 1, 8
+        s_kv, dkv_dim = 4, 8
+        query = paddle.zeros([b, sq, np_heads, hn], dtype="float32")
+        kv_full = paddle.zeros([b, s_kv, dkv_dim], dtype="float32")
+        attn_sink = paddle.zeros([np_heads], dtype="float32")
+        topk_idxs = paddle.zeros([b, sq, 3], dtype="int32")
+        output = paddle.zeros([b, sq, np_heads, hn], dtype="float32")
+        lse = paddle.zeros([b, sq, np_heads], dtype="float32")
+
+        ctx = types.SimpleNamespace(
+            query_shape=(b, sq, np_heads, hn),
+            softmax_scale=0.125,
+            attn_sink_dtype=attn_sink.dtype,
+            backend="cudnn",
+            query_needs_grad=True,
+            kv_full_needs_grad=True,
+            attn_sink_needs_grad=True,
+            has_topk_length=False,
+            saved_tensor=lambda: (
+                query,
+                kv_full,
+                attn_sink,
+                topk_idxs,
+                output,
+                lse,
+            ),
+        )
+
+        captured = {}
+
+        def fake_bwd(
+            q, kv, o, do, lse_, sink, topk, *, softmax_scale, topk_length
+        ):
+            captured["topk_length"] = topk_length
+            return (
+                paddle.zeros(q.shape, dtype=q.dtype),
+                paddle.zeros(kv.shape, dtype=kv.dtype),
+                paddle.zeros(sink.shape, dtype="float32"),
+            )
+
+        # [N, W] int32 with an interleaved -1 hole so the trailing-bound logic
+        # in _csa_compute_topk_length is exercised (not sum(valid)).
+        fake_utils = types.SimpleNamespace(
+            _local_to_global_flat=lambda topk, s: paddle.to_tensor(
+                [[0, 2, -1], [1, -1, -1]], dtype="int32"
+            )
+        )
+        with patch.dict(
+            sys.modules,
+            {
+                "paddlefleet.cudnn_ops": types.SimpleNamespace(
+                    csa_sparse_attn_bwd_cudnn=fake_bwd
+                ),
+                "paddlefleet.fusions.csa_sparse_attn_utils": fake_utils,
+            },
+        ):
+            grads = CSASparseAttention.backward(
+                ctx, paddle.ones([b, sq, np_heads, hn], dtype="float32")
+            )
+
+        topk_length = captured["topk_length"]
+        self.assertEqual(topk_length.dtype, paddle.int32)
+        # Trailing bound: row0 last valid at col 1 -> 2; row1 at col 0 -> 1.
+        self.assertEqual(topk_length.tolist(), [2, 1])
+        # dq/dkv/d_sink present + one None for topk_idxs (has_topk_length False).
+        self.assertEqual(len(grads), 4)
+        self.assertIsNone(grads[3])
