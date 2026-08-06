@@ -594,7 +594,10 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             self_obj.attention_type = "self"
             self_obj.is_mtp_layer = False
 
+        build_calls = []
+
         def _fake_build_spec_layer(*args, **kwargs):
+            build_calls.append(kwargs.copy())
             return MagicMock()
 
         with (
@@ -624,7 +627,44 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
                 attn_mask_type=MagicMock(),
                 pg_collection=MagicMock(),
             )
+        instance._test_build_spec_calls = build_calls
         return instance
+
+    def test_qk_norm_eps_overrides_decoder_rms_norm_eps(self):
+        config = self._make_config()
+        config.q_lora_rank = 32
+        config.rms_norm_eps = 1e-5
+        config.qk_norm_eps = 1e-6
+
+        inst = self._build_mla_instance(config)
+        norm_calls = [
+            call
+            for call in inst._test_build_spec_calls
+            if call.get("hidden_size")
+            in (config.q_lora_rank, config.kv_lora_rank)
+            and "eps" in call
+        ]
+
+        self.assertEqual(len(norm_calls), 2)
+        self.assertTrue(all(call["eps"] == 1e-6 for call in norm_calls))
+
+    def test_qk_norm_eps_defaults_to_decoder_rms_norm_eps(self):
+        config = self._make_config()
+        config.q_lora_rank = 32
+        config.rms_norm_eps = 2e-5
+        config.qk_norm_eps = None
+
+        inst = self._build_mla_instance(config)
+        norm_calls = [
+            call
+            for call in inst._test_build_spec_calls
+            if call.get("hidden_size")
+            in (config.q_lora_rank, config.kv_lora_rank)
+            and "eps" in call
+        ]
+
+        self.assertEqual(len(norm_calls), 2)
+        self.assertTrue(all(call["eps"] == 2e-5 for call in norm_calls))
 
     def test_non_selective_granularity_returns_false(self):
         """Branch: recompute_granularity != 'selective' -> False."""

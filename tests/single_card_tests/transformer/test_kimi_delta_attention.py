@@ -261,12 +261,17 @@ class TestPaddleChunkKda(unittest.TestCase):
         self.assertGreater(float(diff[t]), 1e-4)
 
 
-def _build_kda(use_full_rank_gate=True, sequence_parallel=False, **overrides):
+def _build_kda(
+    use_full_rank_gate=True,
+    sequence_parallel=False,
+    hidden_act=F.silu,
+    **overrides,
+):
     config = TransformerConfig(
         hidden_size=HIDDEN_SIZE,
         num_attention_heads=NUM_KEY_HEADS,
         num_hidden_layers=2,
-        hidden_act=F.silu,
+        hidden_act=hidden_act,
         rms_norm_eps=1e-5,
         normalization="RMSNorm",
         sequence_parallel=sequence_parallel,
@@ -397,6 +402,8 @@ class TestKimiDeltaAttention(unittest.TestCase):
 
         mock_chunk_kda.assert_called_once()
         call_kwargs = mock_chunk_kda.call_args.kwargs
+        self.assertEqual(call_kwargs["beta"].dtype, paddle.float32)
+        self.assertTrue(call_kwargs["use_qk_l2norm_in_kernel"])
         self.assertTrue(call_kwargs["use_gate_in_kernel"])
         self.assertTrue(call_kwargs["use_beta_sigmoid_in_kernel"])
         self.assertTrue(call_kwargs["safe_gate"])
@@ -404,6 +411,49 @@ class TestKimiDeltaAttention(unittest.TestCase):
         self.assertEqual(
             list(out.shape), [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
         )
+
+    def test_short_conv_always_uses_silu(self):
+        """KDA short convolution uses the official SiLU, not hidden_act."""
+        kda = _build_kda(hidden_act=F.relu)
+        self.assertFalse(hasattr(kda, "act_fn"))
+        x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
+
+        with (
+            patch.object(kda_mod.F, "silu", wraps=kda_mod.F.silu) as mock_silu,
+            patch.object(
+                kda_mod.fla.ops.kda,
+                "chunk_kda",
+                wraps=paddle_chunk_kda,
+            ),
+        ):
+            kda(hidden_states=x, attention_mask=None)
+
+        mock_silu.assert_called_once()
+
+    def test_fused_sigmoid_gated_norm_contract(self):
+        """Output gating delegates to FLA RMSNorm with sigmoid and Fleet eps."""
+        x = paddle.randn(
+            [MICRO_BATCH_SIZE, SEQ_LENGTH, NUM_VALUE_HEADS, VALUE_HEAD_DIM]
+        )
+        gate = paddle.randn(x.shape)
+        expected = paddle.randn(x.shape)
+
+        with patch.object(
+            kda_mod.fla.modules.fused_norm_gate,
+            "rms_norm_gated",
+            return_value=expected,
+        ) as mock_rms_norm_gated:
+            actual = self.kda._apply_gated_norm(x, gate)
+
+        self.assertIs(actual, expected)
+        args = mock_rms_norm_gated.call_args.args
+        kwargs = mock_rms_norm_gated.call_args.kwargs
+        self.assertIs(args[0], x)
+        self.assertIs(args[1], gate)
+        self.assertIs(args[2], self.kda.out_norm.weight)
+        self.assertIsNone(args[3])
+        self.assertEqual(kwargs["activation"], "sigmoid")
+        self.assertEqual(kwargs["eps"], self.kda.config.rms_norm_eps)
 
     def test_forward_low_rank_gate(self):
         kda = _build_kda(use_full_rank_gate=False)

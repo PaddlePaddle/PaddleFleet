@@ -169,7 +169,6 @@ class KimiDeltaAttention(FleetLayer):
 
         # Attributes from config
         self.hidden_size = config.hidden_size
-        self.act_fn = config.hidden_act
         self.conv_kernel_dim = conv_kernel_dim
         self.key_head_dim = key_head_dim
         self.value_head_dim = value_head_dim
@@ -437,7 +436,9 @@ class KimiDeltaAttention(FleetLayer):
         else:
             qk, value, beta = paddle.split(qkvbz, split_sizes, axis=-1)
         qkv = paddle.concat([qk, value], axis=-1)
-        beta = beta.reshape([batch, seq_len, -1])
+        # The official router-strength projection is promoted before the
+        # in-kernel sigmoid; keeping BF16 here changes the KDA state update.
+        beta = beta.astype(paddle.float32).reshape([batch, seq_len, -1])
         gate = gate.reshape([batch, seq_len, -1, self.value_head_dim])
         alpha = alpha.reshape([batch, seq_len, -1, self.value_head_dim])
 
@@ -445,7 +446,7 @@ class KimiDeltaAttention(FleetLayer):
         qkv = qkv.transpose([0, 2, 1]).contiguous()  # b, s, d -> b, d, s
         nvtx_range_push(suffix="conv1d")
         conv_output_dtype = qkv.dtype
-        qkv = self.act_fn(
+        qkv = F.silu(
             self.conv1d(qkv.astype(paddle.float32))[..., :seq_len]
         ).astype(conv_output_dtype)
         nvtx_range_pop(suffix="conv1d")
@@ -464,10 +465,6 @@ class KimiDeltaAttention(FleetLayer):
         key = key.reshape([batch, seq_len, -1, self.key_head_dim])
         value = value.reshape([batch, seq_len, -1, self.value_head_dim])
 
-        if self.use_qk_l2norm:
-            query = _l2norm(query.contiguous())
-            key = _l2norm(key.contiguous())
-
         nvtx_range_push(suffix="kimi_delta_rule")
         core_attn_out, _ = fla.ops.kda.chunk_kda(
             query.contiguous(),
@@ -477,6 +474,7 @@ class KimiDeltaAttention(FleetLayer):
             beta=beta.contiguous(),
             A_log=self.A_log,
             dt_bias=self.dt_bias,
+            use_qk_l2norm_in_kernel=self.use_qk_l2norm,
             use_gate_in_kernel=True,
             use_beta_sigmoid_in_kernel=True,
             safe_gate=self.gate_lower_bound is not None,
@@ -503,13 +501,15 @@ class KimiDeltaAttention(FleetLayer):
 
     @jit_fuser
     def _apply_gated_norm(self, x, gate):
-        """Per-head RMSNorm with a sigmoid output gate (KDA uses sigmoid, GDN silu)."""
-        x_dtype = x.dtype
-        x = x.reshape([-1, x.shape[-1]])
-        y = self.out_norm(x)
-        gate = gate.reshape([-1, gate.shape[-1]])
-        y = y * F.sigmoid(gate.astype(paddle.float32))
-        return y.astype(x_dtype)
+        """Official FLA fused per-head RMSNorm with a sigmoid output gate."""
+        return fla.modules.fused_norm_gate.rms_norm_gated(
+            x,
+            gate,
+            self.out_norm.weight,
+            None,
+            activation="sigmoid",
+            eps=self.config.rms_norm_eps,
+        )
 
     def sharded_state_dict(self, structured_name_prefix: str = ""):
         """Sharding along axis 0 for dt_bias / A_log and the depthwise conv1d.

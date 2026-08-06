@@ -1334,19 +1334,22 @@ class MLASelfAttention(MultiLatentAttention):
             tp_group=pg_collection.tp,
         )
 
+        qk_norm_eps = getattr(self.config, "qk_norm_eps", None)
+        if qk_norm_eps is None:
+            qk_norm_eps = self.config.rms_norm_eps
         if q_lora_rank is not None:
             self.q_a_layernorm = build_spec_layer(
                 sublayers_spec.q_a_layernorm,
                 hidden_size=q_lora_rank,
                 config=self.config,
-                eps=self.config.rms_norm_eps,
+                eps=qk_norm_eps,
             )
 
         self.kv_a_layernorm = build_spec_layer(
             sublayers_spec.kv_a_layernorm,
             hidden_size=kv_lora_rank,
             config=self.config,
-            eps=self.config.rms_norm_eps,
+            eps=qk_norm_eps,
         )
 
     def muon_slice_specs(self, muon_configs):
