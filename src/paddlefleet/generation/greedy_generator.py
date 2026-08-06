@@ -467,7 +467,7 @@ class GreedyGenerator:
                     )
                     _topk_val, _topk_idx = paddle.topk(_last[0], k=5)
                     logger.info(
-                        "[logits-debug][no_cache %s] top-10 ids=%s vals=%s",
+                        "[logits-debug][no_cache %s] top-5 ids=%s vals=%s",
                         _tag,
                         _topk_idx.tolist(),
                         [round(v, 3) for v in _topk_val.tolist()],
