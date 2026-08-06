@@ -889,6 +889,9 @@ class _RecordingSelfAttn(paddle.nn.Layer):
                 "past_key_values": kwargs.get("past_key_values"),
                 "rope_freqs_cis": kwargs.get("rope_freqs_cis"),
                 "rotary_pos_emb": kwargs.get("rotary_pos_emb"),
+                "swa_rotary_pos_emb": kwargs.get("swa_rotary_pos_emb"),
+                "swa_rotary_pos_cos": kwargs.get("swa_rotary_pos_cos"),
+                "swa_rotary_pos_sin": kwargs.get("swa_rotary_pos_sin"),
                 "seq_len": seq_len,
             }
         )
@@ -1019,6 +1022,72 @@ class TestHyperConnectionTransformerLayerCacheDecode(unittest.TestCase):
         for call in stub.calls:
             self.assertIsNotNone(call["rope_freqs_cis"])
             self.assertIsNone(call["rotary_pos_emb"])
+
+
+class TestHyperConnectionTransformerLayerSWARoPE(unittest.TestCase):
+    """SWA + mHC regression for sliding-window RoPE propagation.
+
+    The plain-RoPE branch of HyperConnectionTransformerLayer._forward_attention
+    must forward swa_rotary_pos_emb / swa_rotary_pos_cos / swa_rotary_pos_sin to
+    self-attention, mirroring the base TransformerLayer. When self.is_swa is
+    set, Attention.forward overrides the plain rotary tensors with these SWA
+    ones; if they arrive as None, RoPE is skipped entirely and both prefill and
+    KV-cache decode produce wrong attention outputs. This guards the plumbing:
+    without the fix the stub would receive None for all three.
+    """
+
+    def _build_layer(self, layer_number):
+        # sliding_window set so this exercises the SWA-enabled configuration
+        # path alongside hyper-connections.
+        config = _make_hc_config(sliding_window=2)
+        layer = _make_hc_layer(config, layer_number=layer_number)
+        layer.eval()
+        stub = _RecordingSelfAttn(config.hidden_size)
+        layer.self_attn = stub
+        return config, layer, stub
+
+    def _step(self, layer, config, cache, seq_len, batch):
+        n, C, head_dim = (
+            config.num_residual_streams,
+            config.hidden_size,
+            config.head_dim,
+        )
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([seq_len, batch, n * C]),
+                "attention_mask": None,
+                "rotary_pos_emb": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_emb": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_cos": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_sin": paddle.randn([batch, seq_len, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+
+    def test_prefill_then_decode_forwards_swa_rope(self):
+        """Both prefill and decode must forward all three SWA RoPE tensors."""
+        layer_number = 2
+        config, layer, stub = self._build_layer(layer_number)
+        B, S_prefill, S_decode = 2, 4, 1
+        cache = _FakeKVCache()
+
+        self._step(layer, config, cache, S_prefill, B)
+        self._step(layer, config, cache, S_decode, B)
+
+        # One self-attention call per step, and every step forwarded the SWA
+        # RoPE trio (None here is the exact regression this guards).
+        self.assertEqual(len(stub.calls), 2)
+        for call in stub.calls:
+            self.assertIsNotNone(call["swa_rotary_pos_emb"])
+            self.assertIsNotNone(call["swa_rotary_pos_cos"])
+            self.assertIsNotNone(call["swa_rotary_pos_sin"])
+            # Plain rotary_pos_emb still forwarded alongside the SWA tensors.
+            self.assertIsNotNone(call["rotary_pos_emb"])
+        # Cache still driven once per step with the correct layer number.
+        self.assertEqual(
+            cache.updates, [(layer_number, S_prefill), (layer_number, S_decode)]
+        )
 
 
 class TestHyperConnectionTransformerLayerRecompute(unittest.TestCase):
