@@ -723,14 +723,14 @@ class GPTEmbedding(FleetLayer):
         # KDA layer of the step needs the same one. Build it once here and let it
         # ride dict_args down to the layers (see build_cu_seqlens).
         if self.has_kda_layer:
-            cp_size = get_context_parallel_world_size()
+            cp_size = max(get_context_parallel_world_size(), 1)
             hidden_states = preproc_output["hidden_states"]
-            # Every decoder layer splits the MTP concat along axis 0 and keeps
-            # tensor_list[0] as the backbone (transformer_layer.py:748-754), so
-            # undo the inflation that concat added before reading the shape.
-            axis0 = hidden_states.shape[0] // (
-                len(mtp_emb_res) if mtp_emb_res is not None else 1
-            )
+            axis0 = hidden_states.shape[0]
+            if (
+                not self.config.enable_mtp_magic_send
+                and self.config.num_nextn_predict_layers > 0
+            ):
+                axis0 = axis0 - self.config.num_nextn_predict_layers
             if self.sequence_parallel:
                 local_seq_len, batch = axis0, hidden_states.shape[1]
                 sp_size = self.config.tensor_model_parallel_size
