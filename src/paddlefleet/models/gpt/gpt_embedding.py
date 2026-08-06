@@ -724,18 +724,21 @@ class GPTEmbedding(FleetLayer):
         # ride dict_args down to the layers (see build_cu_seqlens).
         if self.has_kda_layer:
             cp_size = max(get_context_parallel_world_size(), 1)
-            hidden_states = preproc_output["hidden_states"]
-            axis0 = hidden_states.shape[0]
-            if (
-                not self.config.enable_mtp_magic_send
-                and self.config.num_nextn_predict_layers > 0
-            ):
-                axis0 = axis0 - self.config.num_nextn_predict_layers
+            # The MTP depths ride along concatenated on axis 0, and every decoder
+            # layer splits them off again and keeps tensor_list[0] as the backbone
+            # (transformer_layer.py:748-754), so read the backbone shape from the
+            # pre-concat tensor. Any other path (magic send, plain, external
+            # decoder_input) already hands over the backbone layout itself.
+            hidden_states = (
+                mtp_emb_res[0]
+                if mtp_emb_res is not None
+                else preproc_output["hidden_states"]
+            )
             if self.sequence_parallel:
-                local_seq_len, batch = axis0, hidden_states.shape[1]
+                local_seq_len, batch = hidden_states.shape[:2]  # [s/tp, b, h]
                 sp_size = self.config.tensor_model_parallel_size
             else:
-                batch, local_seq_len = axis0, hidden_states.shape[1]
+                batch, local_seq_len = hidden_states.shape[:2]  # [b, s, h]
                 sp_size = 1
             # hidden_states is this rank's shard while cu_seqlens is in global
             # sequence coordinates, so scale the length back up exactly the way

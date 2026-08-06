@@ -777,7 +777,12 @@ def _build_gpt_embedding(config):
             return self.embed_tokens.weight
 
         def forward(self, input_ids, position_ids=None):
-            return self.embed_tokens(input_ids)
+            out = self.embed_tokens(input_ids)
+            if config.sequence_parallel:
+                # real embeddings hand back [s/tp, b, h] under SP
+                tp = config.tensor_model_parallel_size
+                out = out.transpose([1, 0, 2])[: out.shape[1] // tp]
+            return out
 
     emb_layer = _Emb(config.vocab_size, config.hidden_size)
     with (
@@ -895,6 +900,22 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
         self.assertEqual(out["hidden_states"].shape[1], SEQ_LENGTH // 2)
         self.assertEqual(
             out["cu_seqlens"].tolist(), [0, self.BATCH * SEQ_LENGTH]
+        )
+
+    def test_sequence_parallel_layout(self):
+        """Under SP hidden_states is [s/tp, b, h]; the length scales back up."""
+        out, indices, _ = self._run(
+            layer_types=["kimi_delta_attention", "self_attention"],
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+        )
+        self.assertEqual(
+            out["hidden_states"].shape,
+            [SEQ_LENGTH // 2, self.BATCH, HIDDEN_SIZE],
+        )
+        expected = build_cu_seqlens(indices, self.BATCH, SEQ_LENGTH)
+        np.testing.assert_array_equal(
+            out["cu_seqlens"].numpy(), expected.numpy()
         )
 
     def test_mtp_tail_is_sliced_off_the_mask(self):
