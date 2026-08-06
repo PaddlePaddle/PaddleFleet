@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import random
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import paddle
@@ -26,8 +28,43 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
+from paddlefleet.transformer.moe import fused_a2a
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+_pg_collection = None
+
+
+def _ensure_fleet():
+    """Initialize fleet once per process and return the process groups."""
+    global _pg_collection
+    if _pg_collection is not None:
+        return _pg_collection
+
+    strategy = fleet.DistributedStrategy()
+    strategy.hybrid_configs = {
+        "dp_degree": 1,
+        "mp_degree": 4,
+        "pp_degree": 1,
+        "sharding_degree": 2,
+        "sep_degree": 1,
+        "cp_degree": 1,
+        "ep_degree": 4,
+        "moe_sharding_degree": 2,
+        "order": [
+            "sharding",
+            "moe_sharding",
+            "pp",
+            "sep",
+            "cp",
+            "dp",
+            "ep",
+            "mp",
+        ],
+    }
+    initialize_fleet(strategy=strategy)
+    _pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+    return _pg_collection
 
 
 class TestFusionBF16ExpertParallel(unittest.TestCase):
@@ -38,30 +75,8 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
         paddle.seed(seed)
         paddle.manual_seed(seed)
 
-        strategy = fleet.DistributedStrategy()
-        strategy.hybrid_configs = {
-            "dp_degree": 1,
-            "mp_degree": 4,
-            "pp_degree": 1,
-            "sharding_degree": 2,
-            "sep_degree": 1,
-            "cp_degree": 1,
-            "ep_degree": 4,
-            "moe_sharding_degree": 2,
-            "order": [
-                "sharding",
-                "moe_sharding",
-                "pp",
-                "sep",
-                "cp",
-                "dp",
-                "ep",
-                "mp",
-            ],
-        }
-        initialize_fleet(strategy=strategy)
+        self.pg_collection = _ensure_fleet()
         model_parallel_cuda_manual_seed(seed)
-        self.pg_collection = ProcessGroupCollection.use_mpu_process_groups()
 
     def test_moe_expert_fusion(self):
         n_routed_experts = 64
@@ -112,6 +127,93 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
 
     def tearDown(self):
         pass
+
+
+class TestStreamOrderedFenceEP(unittest.TestCase):
+    """Unit tests for fused_a2a._stream_ordered_fence_ep on a real EP group."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pg_collection = _ensure_fleet()
+
+    def setUp(self):
+        self.ep_group = self.pg_collection.ep
+        self._reset_fence_state()
+
+    def tearDown(self):
+        self._reset_fence_state()
+
+    def _reset_fence_state(self):
+        fused_a2a._EP_BARRIER_ASYNC = None
+        fused_a2a._ep_fence_tensors.clear()
+
+    def test_fence_tensor_is_cached_per_group(self):
+        first = fused_a2a._ep_fence_tensor(self.ep_group)
+        second = fused_a2a._ep_fence_tensor(self.ep_group)
+        self.assertIs(first, second)
+        self.assertEqual(first.shape, [1])
+        self.assertEqual(first.dtype, paddle.int32)
+        self.assertEqual(
+            list(fused_a2a._ep_fence_tensors.keys()), [self.ep_group.id]
+        )
+
+    def test_repeated_fences_keep_tensor_zero(self):
+        """The cached tensor must stay reusable across steps."""
+        for _ in range(4):
+            fused_a2a._stream_ordered_fence_ep(self.ep_group)
+        tensor = fused_a2a._ep_fence_tensor(self.ep_group)
+        self.assertEqual(int(tensor.numpy()[0]), 0)
+
+    def test_fence_rendezvous_orders_group_traffic(self):
+        """A fence between two collectives must not disturb their results."""
+        ep_rank = paddle.distributed.get_rank(self.ep_group)
+        expected = float(sum(range(self.ep_group.nranks)))
+
+        before = paddle.full([4], float(ep_rank), dtype="float32")
+        paddle.distributed.all_reduce(before, group=self.ep_group)
+
+        fused_a2a._stream_ordered_fence_ep(self.ep_group)
+
+        after = paddle.full([4], float(ep_rank), dtype="float32")
+        paddle.distributed.all_reduce(after, group=self.ep_group)
+
+        np.testing.assert_allclose(
+            before.numpy(), np.full([4], expected, dtype="float32")
+        )
+        np.testing.assert_allclose(
+            after.numpy(), np.full([4], expected, dtype="float32")
+        )
+
+    def test_barrier_ep_uses_device_barrier_by_default(self):
+        fused_a2a._EP_BARRIER_ASYNC = False
+        with (
+            patch.object(paddle.distributed, "barrier") as device_barrier,
+            patch.object(fused_a2a, "_stream_ordered_fence_ep") as fence,
+        ):
+            fused_a2a.barrier_ep(self.ep_group)
+        device_barrier.assert_called_once_with(self.ep_group)
+        fence.assert_not_called()
+
+    def test_barrier_ep_uses_fence_when_enabled(self):
+        fused_a2a._EP_BARRIER_ASYNC = True
+        with (
+            patch.object(paddle.distributed, "barrier") as device_barrier,
+            patch.object(fused_a2a, "_stream_ordered_fence_ep") as fence,
+        ):
+            fused_a2a.barrier_ep(self.ep_group)
+        fence.assert_called_once_with(self.ep_group)
+        device_barrier.assert_not_called()
+
+    def test_async_flag_reads_env_once(self):
+        with patch.dict(os.environ, {"FLEET_MOE_EP_BARRIER_ASYNC": "1"}):
+            self.assertTrue(fused_a2a._ep_barrier_async_enabled())
+        # Cached: clearing the env afterwards must not flip the switch.
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(fused_a2a._ep_barrier_async_enabled())
+
+        fused_a2a._EP_BARRIER_ASYNC = None
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(fused_a2a._ep_barrier_async_enabled())
 
 
 if __name__ == "__main__":
