@@ -578,6 +578,9 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
             attn_sink_dtype=attn_sink.dtype,
             backend="cudnn",
             has_topk_length=False,
+            query_needs_grad=True,
+            kv_full_needs_grad=True,
+            attn_sink_needs_grad=True,
         )
         grad_output = paddle.randn([b, sq, np_heads, hn])
         return ctx, grad_output
