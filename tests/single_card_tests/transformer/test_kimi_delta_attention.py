@@ -455,6 +455,65 @@ class TestKimiDeltaAttention(unittest.TestCase):
         self.assertEqual(kwargs["activation"], "sigmoid")
         self.assertEqual(kwargs["eps"], self.kda.config.rms_norm_eps)
 
+    def test_fused_sigmoid_gated_norm_forward_backward(self):
+        """Fused RMSNorm+sigmoid matches an independent FP32 oracle."""
+        shape = [2, 7, NUM_VALUE_HEADS, VALUE_HEAD_DIM]
+        for dtype, rtol, atol in (
+            ("float32", 1e-5, 1e-5),
+            ("bfloat16", 1e-2, 1e-2),
+        ):
+            with self.subTest(dtype=dtype):
+                paddle.seed(2026)
+                kda = _build_kda()
+                kda.out_norm.weight.set_value(
+                    paddle.linspace(0.5, 1.5, VALUE_HEAD_DIM, dtype="float32")
+                )
+
+                x = paddle.randn(shape, dtype=dtype)
+                gate = paddle.randn(shape, dtype=dtype)
+                x.stop_gradient = False
+                gate.stop_gradient = False
+                x_ref = x.detach().clone()
+                gate_ref = gate.detach().clone()
+                weight_ref = kda.out_norm.weight.detach().clone()
+                x_ref.stop_gradient = False
+                gate_ref.stop_gradient = False
+                weight_ref.stop_gradient = False
+
+                actual = kda._apply_gated_norm(x, gate)
+                x_ref_fp32 = x_ref.astype("float32")
+                expected = x_ref_fp32 * paddle.rsqrt(
+                    x_ref_fp32.square().mean(axis=-1, keepdim=True)
+                    + kda.config.rms_norm_eps
+                )
+                expected = (
+                    expected
+                    * weight_ref.astype("float32")
+                    * F.sigmoid(gate_ref.astype("float32"))
+                ).astype(dtype)
+
+                output_gradient = paddle.randn(shape, dtype=dtype)
+                (
+                    actual.astype("float32") * output_gradient.astype("float32")
+                ).sum().backward()
+                (
+                    expected.astype("float32")
+                    * output_gradient.astype("float32")
+                ).sum().backward()
+
+                for actual_value, expected_value in (
+                    (actual, expected),
+                    (x.grad, x_ref.grad),
+                    (gate.grad, gate_ref.grad),
+                    (kda.out_norm.weight.grad, weight_ref.grad),
+                ):
+                    paddle.testing.assert_close(
+                        actual_value.astype("float32"),
+                        expected_value.astype("float32"),
+                        rtol=rtol,
+                        atol=atol,
+                    )
+
     def test_forward_low_rank_gate(self):
         kda = _build_kda(use_full_rank_gate=False)
         x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
