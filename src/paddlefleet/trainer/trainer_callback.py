@@ -864,6 +864,21 @@ class MoECorrectionBiasAdjustCallback(TrainerCallback):
         model.apply(update_bias)
 
 
+class MoEQuantileBalancingCallback(TrainerCallback):
+    """PaddleFleet adapter for PaddleFleet's optimizer-step QB update."""
+
+    def __init__(self):
+        from paddlefleet.transformer.moe.qb_callback import (
+            MoEQuantileBalancingCallback as FleetQuantileBalancingCallback,
+        )
+
+        self._callback = FleetQuantileBalancingCallback()
+
+    def on_optimizer_end(self, args, state, control, **kwargs):
+        self._callback.on_optimizer_end(args, state, control, **kwargs)
+        return control
+
+
 class MoeExpertsGradScaleCallback(TrainerCallback):
     """
     This hook is used to correct the issue where the gradients of expert parameters are amplified by a factor of N.
