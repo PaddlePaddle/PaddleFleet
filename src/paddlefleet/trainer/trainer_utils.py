@@ -137,7 +137,7 @@ def mock_offload_optimizer():
     mock offload optimizer
     """
     try:
-        from paddlefleet.trainer.utils.offload_optimizer import hack_offload_optimizer
+        from paddleformers.trainer.utils.offload_optimizer import hack_offload_optimizer
 
         hack_offload_optimizer()
         logger.warning("hack_offload_optimizer called.")
@@ -1731,7 +1731,6 @@ class HFFormatFullParamSaver:
         shard_idx=None,
         saved_in_one_node=False,
         memory_growth_threshold=8 * (2**30),
-        post_save_hook=None,
     ):
         self.model = model
         self.aoa_config = aoa_config
@@ -1929,6 +1928,7 @@ class EMAStateAssembler:
         optimizer,
         start_step,
         memory_growth_threshold=8 * (2**30),
+        post_save_hook=None,
     ):
         self.output_dir = Path(output_dir)
         self.save_checkpoint_format = save_checkpoint_format
@@ -2333,6 +2333,7 @@ class EMAStateAssembler:
             memory_growth_threshold=self.memory_growth_threshold,
         )
         saver.save_checkpoint(str(save_path))
+
         if self.post_save_hook is not None:
             self.post_save_hook(str(save_path))
 
