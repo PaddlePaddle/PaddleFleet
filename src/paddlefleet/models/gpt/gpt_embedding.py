@@ -180,6 +180,12 @@ class GPTEmbedding(FleetLayer):
             if attn_mask_startend_row_indices is not None
             else None
         )
+        # config.layer_types is what selects a KDA layer (get_attention_spec
+        # dispatches on it), so it also decides whether KDA's global
+        # sequence-length contract and its cu_seqlens precompute apply below.
+        has_kda_layer = "kimi_delta_attention" in (
+            getattr(self.config, "layer_types", None) or ()
+        )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
@@ -497,6 +503,30 @@ class GPTEmbedding(FleetLayer):
                     "is applied in the plain (no-MTP, no-multimodal) path before RoPE "
                     "generation."
                 )
+                # scatter_contiguous slices at shape // cp_size
+                # (context_parallel_utils.py:411), so any remainder is dropped
+                # right here and cannot be recovered afterwards. KDA works in
+                # global sequence coordinates, so pin the contract down now,
+                # while the original length is still visible.
+                if has_kda_layer:
+                    cp_size = get_context_parallel_world_size()
+                    seq_len = decoder_input.shape[1]
+                    if seq_len % cp_size != 0:
+                        raise ValueError(
+                            "kimi_delta_attention with context parallel needs a "
+                            "sequence length divisible by "
+                            f"cp_size({cp_size}), got {seq_len}; truncate the "
+                            "tail before it reaches the model"
+                        )
+                    max_seq_len = getattr(
+                        self.config, "max_sequence_length", None
+                    )
+                    if max_seq_len != seq_len:
+                        raise ValueError(
+                            "kimi_delta_attention with context parallel requires "
+                            "config.max_sequence_length to be the global "
+                            f"sequence length {seq_len}, got {max_seq_len}"
+                        )
                 decoder_input = ContextParallelScatterOp.apply(
                     decoder_input, axis=1, mode=self.config.cp_balance_mode
                 )
@@ -710,67 +740,28 @@ class GPTEmbedding(FleetLayer):
 
         # KDA turns the document boundaries into a packed cu_seqlens, and every
         # KDA layer of the step needs the same one. Build it once here and let it
-        # ride dict_args down to the layers (see build_cu_seqlens). config.layer_types
-        # is what actually selects a KDA layer, so gate on it here too.
-        layer_types = getattr(self.config, "layer_types", None) or ()
-        if "kimi_delta_attention" in layer_types:
-            max_seq_len = getattr(self.config, "max_sequence_length", None)
+        # ride dict_args down to the layers (see build_cu_seqlens).
+        if has_kda_layer and self.config.experimental_dataflow:
             cp_size = get_context_parallel_world_size()
-            if cp_size > 1:
-                # KDA's CP path works in global sequence coordinates, and with no
-                # mask config.max_sequence_length is the only source for the
-                # global length, so make it a hard contract here instead of
-                # letting each layer trip over it. decoder_input is already
-                # scattered by CP and by sequence parallel, so scale the local
-                # length back up. scatter_contiguous slices at total // cp_size
-                # (context_parallel_utils.py:411), i.e. a sequence that does not
-                # divide evenly has its tail dropped, so a real non-divisible
-                # input must be truncated before it reaches KDA.
-                sp_size = (
-                    self.config.tensor_model_parallel_size
-                    if self.sequence_parallel
-                    else 1
+            if attn_mask_startend_row_indices is not None:
+                mask_batch, _, mask_seq_len, _ = (
+                    attn_mask_startend_row_indices.shape
                 )
-                local_seq_len = (
-                    decoder_input.shape[0]
-                    if self.sequence_parallel
-                    else decoder_input.shape[1]
-                )
-                global_seq_len = local_seq_len * sp_size * cp_size
-                assert max_seq_len == global_seq_len, (
-                    "kimi_delta_attention with context parallel requires "
-                    "config.max_sequence_length to be the global sequence "
-                    f"length, but got {max_seq_len} while hidden_states gives "
-                    f"{local_seq_len} * sp_size({sp_size}) * cp_size({cp_size})"
-                    f" = {global_seq_len}"
-                )
-            # With the old MTP dataflow every decoder layer trims the MTP tail
-            # off the mask itself, so a cu_seqlens built from the full mask here
-            # would cover the wrong length; leave it to the layers in that case.
-            mtp_trims_mask = (
-                self.config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not self.config.experimental_dataflow
-            )
-            if not mtp_trims_mask:
-                if attn_mask_startend_row_indices is not None:
-                    mask_batch, _, mask_seq_len, _ = (
-                        attn_mask_startend_row_indices.shape
+            else:
+                max_seq_len = getattr(self.config, "max_sequence_length", None)
+                if cp_size > 1 and max_seq_len is None:
+                    raise ValueError(
+                        "kimi_delta_attention with context parallel and no "
+                        "attn_mask_startend_row_indices requires "
+                        "config.max_sequence_length to build cu_seqlens"
                     )
-                else:
-                    # No document boundaries. Context parallel still needs a
-                    # cu_seqlens to slice with, and every layer has to get the
-                    # same one, so build the trivial [0, b*s] here too instead
-                    # of letting each layer make its own. KDA's CP path requires
-                    # batch == 1, and max_seq_len was validated above. Without
-                    # CP build_cu_seqlens returns None and the key is dropped.
-                    mask_batch, mask_seq_len = 1, max_seq_len or 0
-                preproc_output["cu_seqlens"] = build_cu_seqlens(
-                    attn_mask_startend_row_indices,
-                    mask_batch,
-                    mask_seq_len,
-                    keep_single_segment=cp_size > 1,
-                )
+                mask_batch, mask_seq_len = 1, max_seq_len or 0
+            preproc_output["cu_seqlens"] = build_cu_seqlens(
+                attn_mask_startend_row_indices,
+                mask_batch,
+                mask_seq_len,
+                keep_single_segment=cp_size > 1,
+            )
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:

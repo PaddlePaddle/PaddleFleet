@@ -399,6 +399,19 @@ class TestKimiDeltaAttention(unittest.TestCase):
             )
         self.assertEqual(x.grad.dtype, paddle.bfloat16)
 
+    @unittest.skipUnless(
+        HAVE_FLA, "paddlefleet_ops fla kernels are not available"
+    )
+    def test_fused_backend_logged_once_per_process(self):
+        """Every layer picks the same backend, so don't log it per layer."""
+        with (
+            patch.object(kda_mod, "_FUSED_KERNEL_LOGGED", False),
+            self.assertLogs(kda_mod.logger, level="INFO") as logs,
+        ):
+            _build_kda(deterministic_mode=False)
+            _build_kda(deterministic_mode=False)
+        self.assertEqual(len(logs.output), 1, logs.output)
+
     def test_forward_shape(self):
         x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
         out, out_bias = self.kda(hidden_states=x, attention_mask=None)
@@ -793,8 +806,16 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
     BATCH = 2
     DOCS = [[12, 20], [8, 24]]
 
-    def _run(self, with_mask=True, cp_world_size=1, **cfg_kwargs):
-        cfg_kwargs.setdefault("max_sequence_length", SEQ_LENGTH * cp_world_size)
+    def _run(
+        self,
+        with_mask=True,
+        cp_world_size=1,
+        seq_len=SEQ_LENGTH,
+        **cfg_kwargs,
+    ):
+        """Returns (preproc_output, mask, cp_scatter_mock)."""
+        cfg_kwargs.setdefault("max_sequence_length", seq_len)
+        cfg_kwargs.setdefault("experimental_dataflow", True)
         config = GPTConfig(
             vocab_size=128,
             hidden_size=HIDDEN_SIZE,
@@ -804,7 +825,7 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
         )
         emb = _build_gpt_embedding(config)
         indices = (
-            _startend_row_indices(self.DOCS, SEQ_LENGTH) if with_mask else None
+            _startend_row_indices(self.DOCS, seq_len) if with_mask else None
         )
         with (
             patch(
@@ -812,20 +833,27 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
                 return_value=cp_world_size,
             ),
             patch("paddlefleet.models.gpt.gpt_embedding.ScatterOp") as scatter,
+            patch(
+                "paddlefleet.models.gpt.gpt_embedding.ContextParallelScatterOp"
+            ) as cp_scatter,
         ):
             scatter.apply = lambda x: x
+            # Stand in for scatter_contiguous: rank 0's floor-divided slice.
+            cp_scatter.apply = MagicMock(
+                side_effect=lambda x, axis=1, **kw: x[
+                    :, : x.shape[axis] // cp_world_size
+                ]
+            )
             out = emb.forward(
                 {
-                    "input_ids": paddle.randint(
-                        0, 128, [self.BATCH, SEQ_LENGTH]
-                    ),
+                    "input_ids": paddle.randint(0, 128, [self.BATCH, seq_len]),
                     "attn_mask_startend_row_indices": indices,
                 }
             )
-        return out, indices
+        return out, indices, cp_scatter.apply
 
     def test_built_for_kda_layers(self):
-        out, indices = self._run(
+        out, indices, _ = self._run(
             layer_types=["kimi_delta_attention", "self_attention"]
         )
         expected = build_cu_seqlens(indices, self.BATCH, SEQ_LENGTH)
@@ -834,45 +862,63 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
         )
 
     def test_absent_without_kda_layers(self):
-        out, _ = self._run(layer_types=["self_attention"] * 2)
+        out, _, _ = self._run(layer_types=["self_attention"] * 2)
         self.assertNotIn("cu_seqlens", out)
-        out, _ = self._run()  # layer_types unset
+        out, _, _ = self._run()  # layer_types unset
         self.assertNotIn("cu_seqlens", out)
 
-    def test_absent_when_mtp_trims_the_mask(self):
-        """With the old MTP dataflow each layer trims the mask itself."""
-        out, _ = self._run(
+    def test_absent_without_experimental_dataflow(self):
+        """The precompute is only wired up for the new dataflow."""
+        out, _, _ = self._run(
             layer_types=["kimi_delta_attention", "self_attention"],
-            num_nextn_predict_layers=1,
             experimental_dataflow=False,
         )
         self.assertNotIn("cu_seqlens", out)
 
     def test_no_mask_only_builds_one_for_context_parallel(self):
         """Without document boundaries only CP needs a (shared) cu_seqlens."""
-        out, _ = self._run(
+        out, _, _ = self._run(
             with_mask=False,
             layer_types=["kimi_delta_attention", "self_attention"],
         )
         self.assertNotIn("cu_seqlens", out)
 
-        # cp=2, so the [BATCH, SEQ_LENGTH] input stands in for a shard of a
-        # 2*SEQ_LENGTH global sequence.
-        out, _ = self._run(
+        out, _, cp_scatter = self._run(
             with_mask=False,
             cp_world_size=2,
             layer_types=["kimi_delta_attention", "self_attention"],
         )
-        self.assertEqual(out["cu_seqlens"].tolist(), [0, 2 * SEQ_LENGTH])
+        # hidden_states is this rank's shard, but cu_seqlens stays global
+        cp_scatter.assert_called_once()
+        self.assertEqual(out["hidden_states"].shape[1], SEQ_LENGTH // 2)
+        self.assertEqual(out["cu_seqlens"].tolist(), [0, SEQ_LENGTH])
 
-    def test_context_parallel_requires_global_max_sequence_length(self):
-        """max_sequence_length must be the global (pre-scatter) length."""
-        with self.assertRaises(AssertionError):
+    def test_context_parallel_rejects_indivisible_sequence(self):
+        """The remainder is only visible before scatter_contiguous drops it."""
+        indivisible = SEQ_LENGTH - 2  # 30 % 4 != 0
+        with self.assertRaises(ValueError) as ctx:
             self._run(
-                cp_world_size=2,
-                max_sequence_length=SEQ_LENGTH,  # local, not global
+                with_mask=False,
+                cp_world_size=4,
+                seq_len=indivisible,
                 layer_types=["kimi_delta_attention", "self_attention"],
             )
+        # the reported length is the pre-scatter one; after the scatter it
+        # would read indivisible // 4
+        self.assertIn(f"got {indivisible}", str(ctx.exception))
+
+    def test_context_parallel_rejects_local_max_sequence_length(self):
+        """max_sequence_length must be the global (pre-scatter) length."""
+        with self.assertRaises(ValueError) as ctx:
+            self._run(
+                with_mask=False,
+                cp_world_size=4,
+                max_sequence_length=SEQ_LENGTH // 4,
+                layer_types=["kimi_delta_attention", "self_attention"],
+            )
+        self.assertIn(
+            f"global sequence length {SEQ_LENGTH}", str(ctx.exception)
+        )
 
 
 if __name__ == "__main__":

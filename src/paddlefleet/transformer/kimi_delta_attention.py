@@ -45,6 +45,7 @@ from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import (
     get_pg_size,
+    log_single_rank,
     nvtx_range_pop,
     nvtx_range_push,
 )
@@ -76,6 +77,10 @@ except (ImportError, AttributeError):
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Every KDA layer of a model reaches the same verdict, so the backend is logged
+# once per process instead of once per layer.
+_FUSED_KERNEL_LOGGED = False
 
 
 @dataclass
@@ -278,8 +283,10 @@ class KimiDeltaAttention(FleetLayer):
         # native fallbacks stay in place for deterministic runs and for builds
         # without paddlefleet_ops.
         self.use_fused_kernels = HAVE_FLA and not config.deterministic_mode
-        if self.use_fused_kernels:
-            logger.info("KDA will use fused kernel")
+        global _FUSED_KERNEL_LOGGED
+        if self.use_fused_kernels and not _FUSED_KERNEL_LOGGED:
+            _FUSED_KERNEL_LOGGED = True
+            log_single_rank(logger, logging.INFO, "KDA will use fused kernel")
 
         # q/k/v/beta are all sharded by head, so both head counts must divide
         # evenly; otherwise the per-tensor split sizes in forward() silently stop
