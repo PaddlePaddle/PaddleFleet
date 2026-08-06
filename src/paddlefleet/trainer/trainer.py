@@ -274,14 +274,14 @@ DIST_MODEL_PATH = "dist_model"
 
 class Trainer:
     """
-    Trainer is a simple but feature-complete training and eval loop for PaddlePaddle, optimized for PaddleFormers.
+    Trainer is a simple but feature-complete training and eval loop for PaddlePaddle, optimized for PaddleFleet.
 
     Args:
         model ([`PretrainedModel`] or `paddle.nn.Layer`, *optional*):
             The model to train, evaluate or use for predictions.
 
             [`Trainer`] is optimized to work with the [`PretrainedModel`] provided by the library. You can still use
-            your own models defined as `paddle.nn.Layer` as long as they work the same way as the PaddleFormers
+            your own models defined as `paddle.nn.Layer` as long as they work the same way as the PaddleFleet
             models.
         criterion(`paddle.nn.Layer`, *optional*):
             The model may only output the loggit, if you want do more computation for the output of model, you can
@@ -5770,11 +5770,11 @@ class Trainer:
         if args is None:
             args = self.args
             key = "Training"
-        import paddleformers
+        import paddlefleet
 
         logger.debug("{:^40}".format("{} Configuration Arguments".format(key)))
         logger.debug("{:30}: {}".format("paddle commit id", paddle.version.commit))
-        logger.debug("{:30}: {}".format("paddleformers commit id", paddlefleet.version.commit))
+        logger.debug("{:30}: {}".format("paddlefleet commit id", paddlefleet.version.commit))
         if is_paddlefleet_available():
             import paddlefleet
 
