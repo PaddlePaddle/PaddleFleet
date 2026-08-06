@@ -138,6 +138,17 @@ class GPTEmbedding(FleetLayer):
     def embedding_weight(self):
         return self.embedding.embedding_weight
 
+    @property
+    def has_kda_layer(self):
+        """Whether any decoder layer is a KimiDeltaAttention layer.
+
+        config.layer_types is what selects one (get_attention_spec dispatches on
+        it), and KDA is the only attention that needs a precomputed cu_seqlens.
+        """
+        return "kimi_delta_attention" in (
+            getattr(self.config, "layer_types", None) or ()
+        )
+
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTEmbedding")
 
@@ -179,12 +190,6 @@ class GPTEmbedding(FleetLayer):
             attn_mask_startend_row_indices.to(device)
             if attn_mask_startend_row_indices is not None
             else None
-        )
-        # config.layer_types is what selects a KDA layer (get_attention_spec
-        # dispatches on it), so it also decides whether KDA's global
-        # sequence-length contract and its cu_seqlens precompute apply below.
-        has_kda_layer = "kimi_delta_attention" in (
-            getattr(self.config, "layer_types", None) or ()
         )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
@@ -503,30 +508,6 @@ class GPTEmbedding(FleetLayer):
                     "is applied in the plain (no-MTP, no-multimodal) path before RoPE "
                     "generation."
                 )
-                # scatter_contiguous slices at shape // cp_size
-                # (context_parallel_utils.py:411), so any remainder is dropped
-                # right here and cannot be recovered afterwards. KDA works in
-                # global sequence coordinates, so pin the contract down now,
-                # while the original length is still visible.
-                if has_kda_layer:
-                    cp_size = get_context_parallel_world_size()
-                    seq_len = decoder_input.shape[1]
-                    if seq_len % cp_size != 0:
-                        raise ValueError(
-                            "kimi_delta_attention with context parallel needs a "
-                            "sequence length divisible by "
-                            f"cp_size({cp_size}), got {seq_len}; truncate the "
-                            "tail before it reaches the model"
-                        )
-                    max_seq_len = getattr(
-                        self.config, "max_sequence_length", None
-                    )
-                    if max_seq_len != seq_len:
-                        raise ValueError(
-                            "kimi_delta_attention with context parallel requires "
-                            "config.max_sequence_length to be the global "
-                            f"sequence length {seq_len}, got {max_seq_len}"
-                        )
                 decoder_input = ContextParallelScatterOp.apply(
                     decoder_input, axis=1, mode=self.config.cp_balance_mode
                 )
@@ -741,26 +722,32 @@ class GPTEmbedding(FleetLayer):
         # KDA turns the document boundaries into a packed cu_seqlens, and every
         # KDA layer of the step needs the same one. Build it once here and let it
         # ride dict_args down to the layers (see build_cu_seqlens).
-        if has_kda_layer and self.config.experimental_dataflow:
+        if self.has_kda_layer:
             cp_size = get_context_parallel_world_size()
-            if attn_mask_startend_row_indices is not None:
-                mask_batch, _, mask_seq_len, _ = (
-                    attn_mask_startend_row_indices.shape
-                )
+            hidden_states = preproc_output["hidden_states"]
+            # Every decoder layer splits the MTP concat along axis 0 and keeps
+            # tensor_list[0] as the backbone (transformer_layer.py:748-754), so
+            # undo the inflation that concat added before reading the shape.
+            axis0 = hidden_states.shape[0] // (
+                len(mtp_emb_res) if mtp_emb_res is not None else 1
+            )
+            if self.sequence_parallel:
+                local_seq_len, batch = axis0, hidden_states.shape[1]
+                sp_size = self.config.tensor_model_parallel_size
             else:
-                max_seq_len = getattr(self.config, "max_sequence_length", None)
-                if cp_size > 1 and max_seq_len is None:
-                    raise ValueError(
-                        "kimi_delta_attention with context parallel and no "
-                        "attn_mask_startend_row_indices requires "
-                        "config.max_sequence_length to build cu_seqlens"
-                    )
-                mask_batch, mask_seq_len = 1, max_seq_len or 0
+                batch, local_seq_len = axis0, hidden_states.shape[1]
+                sp_size = 1
+            # hidden_states is this rank's shard while cu_seqlens is in global
+            # sequence coordinates, so scale the length back up exactly the way
+            # KDA does for itself (kimi_delta_attention.py:521-526 and :562).
+            seq_len = local_seq_len * sp_size * cp_size
+            mask = attn_mask_startend_row_indices
+            if mask is not None and mask.shape[-2] > seq_len:
+                # The mask still covers the MTP tail that the backbone dropped,
+                # so take the part that belongs to the backbone.
+                mask = mask[:, :, :seq_len, :]
             preproc_output["cu_seqlens"] = build_cu_seqlens(
-                attn_mask_startend_row_indices,
-                mask_batch,
-                mask_seq_len,
-                keep_single_segment=cp_size > 1,
+                mask, batch, seq_len, keep_single_segment=cp_size > 1
             )
 
         for key in list(preproc_output.keys()):

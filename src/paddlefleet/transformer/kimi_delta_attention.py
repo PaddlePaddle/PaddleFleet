@@ -160,6 +160,11 @@ def build_cu_seqlens(
             f"attn_mask_startend_row_indices has sequence length "
             f"{startend_row_indices.shape[-2]}, expected {seq_len}"
         )
+    if startend_row_indices.shape[0] != batch:
+        raise ValueError(
+            f"attn_mask_startend_row_indices has batch "
+            f"{startend_row_indices.shape[0]}, expected {batch}"
+        )
     # Column 0 is the exclusive document end.
     ends = startend_row_indices[:, 0, :, 0].astype("int64")
     doc_edges = ends[:, 1:] != ends[:, :-1]

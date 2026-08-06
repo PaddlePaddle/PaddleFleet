@@ -814,7 +814,6 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
         **cfg_kwargs,
     ):
         """Returns (preproc_output, mask, cp_scatter_mock)."""
-        cfg_kwargs.setdefault("max_sequence_length", seq_len)
         cfg_kwargs.setdefault("experimental_dataflow", True)
         config = GPTConfig(
             vocab_size=128,
@@ -867,13 +866,16 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
         out, _, _ = self._run()  # layer_types unset
         self.assertNotIn("cu_seqlens", out)
 
-    def test_absent_without_experimental_dataflow(self):
-        """The precompute is only wired up for the new dataflow."""
-        out, _, _ = self._run(
+    def test_built_without_experimental_dataflow(self):
+        """The old dataflow needs it too; the mask still has the MTP tail."""
+        out, indices, _ = self._run(
             layer_types=["kimi_delta_attention", "self_attention"],
             experimental_dataflow=False,
         )
-        self.assertNotIn("cu_seqlens", out)
+        expected = build_cu_seqlens(indices, self.BATCH, SEQ_LENGTH)
+        np.testing.assert_array_equal(
+            out["cu_seqlens"].numpy(), expected.numpy()
+        )
 
     def test_no_mask_only_builds_one_for_context_parallel(self):
         """Without document boundaries only CP needs a (shared) cu_seqlens."""
@@ -891,33 +893,28 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
         # hidden_states is this rank's shard, but cu_seqlens stays global
         cp_scatter.assert_called_once()
         self.assertEqual(out["hidden_states"].shape[1], SEQ_LENGTH // 2)
-        self.assertEqual(out["cu_seqlens"].tolist(), [0, SEQ_LENGTH])
+        self.assertEqual(
+            out["cu_seqlens"].tolist(), [0, self.BATCH * SEQ_LENGTH]
+        )
 
-    def test_context_parallel_rejects_indivisible_sequence(self):
-        """The remainder is only visible before scatter_contiguous drops it."""
-        indivisible = SEQ_LENGTH - 2  # 30 % 4 != 0
-        with self.assertRaises(ValueError) as ctx:
-            self._run(
-                with_mask=False,
-                cp_world_size=4,
-                seq_len=indivisible,
-                layer_types=["kimi_delta_attention", "self_attention"],
-            )
-        # the reported length is the pre-scatter one; after the scatter it
-        # would read indivisible // 4
-        self.assertIn(f"got {indivisible}", str(ctx.exception))
-
-    def test_context_parallel_rejects_local_max_sequence_length(self):
-        """max_sequence_length must be the global (pre-scatter) length."""
-        with self.assertRaises(ValueError) as ctx:
-            self._run(
-                with_mask=False,
-                cp_world_size=4,
-                max_sequence_length=SEQ_LENGTH // 4,
-                layer_types=["kimi_delta_attention", "self_attention"],
-            )
-        self.assertIn(
-            f"global sequence length {SEQ_LENGTH}", str(ctx.exception)
+    def test_mtp_tail_is_sliced_off_the_mask(self):
+        """MTP shortens the backbone, so the mask tail must be dropped here."""
+        out, indices, _ = self._run(
+            layer_types=["kimi_delta_attention", "self_attention"],
+            experimental_dataflow=False,
+            num_nextn_predict_layers=1,
+        )
+        backbone = SEQ_LENGTH - 1
+        # the embedding concatenates the MTP depths along axis 0; every decoder
+        # layer splits them off again, so cu_seqlens covers the backbone only
+        self.assertEqual(
+            out["hidden_states"].shape, [2 * self.BATCH, backbone, HIDDEN_SIZE]
+        )
+        expected = build_cu_seqlens(
+            indices[:, :, :backbone, :], self.BATCH, backbone
+        )
+        np.testing.assert_array_equal(
+            out["cu_seqlens"].numpy(), expected.numpy()
         )
 
 
