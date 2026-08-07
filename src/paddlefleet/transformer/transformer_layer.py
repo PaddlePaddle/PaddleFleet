@@ -1655,6 +1655,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         rope_freqs_cis: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -1722,6 +1725,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
         else:
@@ -1732,10 +1738,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 rotary_pos_emb=rotary_pos_emb,
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
+                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                swa_rotary_pos_sin=swa_rotary_pos_sin,
                 position_ids=position_ids,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
 
