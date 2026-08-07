@@ -1094,7 +1094,20 @@ if not _CUTILE_AVAILABLE:
 else:
 
     class FusedSinkhornKnopp(paddle.autograd.PyLayer):
-        """Fused Sinkhorn-Knopp projection to doubly stochastic matrix (cuTile)."""
+        """Fused Sinkhorn-Knopp projection to doubly stochastic matrix (cuTile).
+
+        ``backward`` must return ``None`` at every position whose forward input
+        had ``stop_gradient=True``, or Paddle raises
+
+            InvalidArgumentError: GradNodePyLayer_FusedSinkhornKnopp's backward
+            function should return None at N position, ...
+
+        That happens with a frozen backbone (``train_indexer_only``): the mHC
+        block runs on detached inputs and frozen parameters, yet the segment
+        stays differentiable because the Indexer loss is attached downstream.
+        ``stop_gradient`` is only trustworthy on a PyLayer's *forward* inputs, so
+        it is recorded here and read in backward.
+        """
 
         @staticmethod
         def forward(
@@ -1107,11 +1120,14 @@ else:
             ctx.save_for_backward(M_init)
             ctx.num_iterations = num_iterations
             ctx.eps = eps
+            ctx.input_logits_stop_gradient = input_logits.stop_gradient
             return output
 
         @staticmethod
         def backward(ctx, grad_output):
             """cuTile fused Sinkhorn backward."""
+            if ctx.input_logits_stop_gradient:
+                return None
             (M_init,) = ctx.saved_tensor()
             grad_input = _cutile_sinkhorn_bwd(
                 grad_output, M_init, ctx.num_iterations, ctx.eps
@@ -1119,23 +1135,38 @@ else:
             return grad_input
 
     class FusedHAggregate(paddle.autograd.PyLayer):
-        """Fused n-stream weighted aggregation (cuTile)."""
+        """Fused n-stream weighted aggregation (cuTile).
+
+        See ``FusedSinkhornKnopp`` for why the ``stop_gradient`` flags are
+        recorded in forward and honored in backward.
+        """
 
         @staticmethod
         def forward(ctx, x: Tensor, h_pre: Tensor):
             """cuTile fused h_aggregate forward."""
             output = _cutile_h_aggregate_fwd(x, h_pre)
             ctx.save_for_backward(x, h_pre)
+            ctx.x_stop_gradient = x.stop_gradient
+            ctx.h_pre_stop_gradient = h_pre.stop_gradient
             return output
 
         @staticmethod
         def backward(ctx, grad_output):
             """cuTile fused h_aggregate backward."""
             x, h_pre = ctx.saved_tensor()
-            return _cutile_h_aggregate_bwd(grad_output, x, h_pre)
+            g_x, g_h_pre = _cutile_h_aggregate_bwd(grad_output, x, h_pre)
+            if ctx.x_stop_gradient:
+                g_x = None
+            if ctx.h_pre_stop_gradient:
+                g_h_pre = None
+            return g_x, g_h_pre
 
     class FusedHPostBDA(paddle.autograd.PyLayer):
-        """Fused: output = H_res @ orig_res + H_post * (x [+ bias]) (cuTile)."""
+        """Fused: output = H_res @ orig_res + H_post * (x [+ bias]) (cuTile).
+
+        See ``FusedSinkhornKnopp`` for why the ``stop_gradient`` flags are
+        recorded in forward and honored in backward.
+        """
 
         @staticmethod
         def forward(
@@ -1156,6 +1187,11 @@ else:
             else:
                 ctx.save_for_backward(h_res, original_residual, h_post, x)
                 ctx.has_bias = False
+            ctx.h_res_stop_gradient = h_res.stop_gradient
+            ctx.original_residual_stop_gradient = (
+                original_residual.stop_gradient
+            )
+            ctx.h_post_stop_gradient = h_post.stop_gradient
             ctx.x_stop_gradient = x.stop_gradient
             ctx.bias_stop_gradient = (
                 bias.stop_gradient if bias is not None else True
@@ -1170,22 +1206,35 @@ else:
                 g_hr, g_res, g_hp, g_x, g_bias = _cutile_h_post_bda_bwd(
                     grad_output, h_res, orig_res, h_post, x, bias
                 )
-                if ctx.x_stop_gradient:
-                    g_x = None
-                if ctx.bias_stop_gradient:
-                    g_bias = None
-                return g_hr, g_res, g_hp, g_x, g_bias
             else:
                 h_res, orig_res, h_post, x = ctx.saved_tensor()
                 g_hr, g_res, g_hp, g_x, _ = _cutile_h_post_bda_bwd(
                     grad_output, h_res, orig_res, h_post, x, None
                 )
-                if ctx.x_stop_gradient:
-                    g_x = None
-                return g_hr, g_res, g_hp, g_x
+                g_bias = None
+            if ctx.h_res_stop_gradient:
+                g_hr = None
+            if ctx.original_residual_stop_gradient:
+                g_res = None
+            if ctx.h_post_stop_gradient:
+                g_hp = None
+            if ctx.x_stop_gradient:
+                g_x = None
+            if ctx.bias_stop_gradient:
+                g_bias = None
+            if ctx.has_bias:
+                return g_hr, g_res, g_hp, g_x, g_bias
+            return g_hr, g_res, g_hp, g_x
 
     class FusedProjRms(paddle.autograd.PyLayer):
-        """Fused projection + RMS normalization (cuTile)."""
+        """Fused projection + RMS normalization (cuTile).
+
+        See ``FusedSinkhornKnopp`` for why the ``stop_gradient`` flags are
+        recorded in forward and honored in backward. ``weight`` is the one that
+        bites in practice: it is a frozen backbone parameter of the mHC block
+        under ``train_indexer_only``, which used to abort backward with
+        ``... should return None at 1 position``.
+        """
 
         @staticmethod
         def forward(ctx, x: Tensor, weight: Tensor, eps: float = 1e-6):
@@ -1197,6 +1246,8 @@ else:
             ctx.save_for_backward(x_2d, weight, norm)
             ctx.eps = eps
             ctx.original_shape = original_shape
+            ctx.x_stop_gradient = x.stop_gradient
+            ctx.weight_stop_gradient = weight.stop_gradient
             N = weight.shape[0]
             batch_shape = list(original_shape[:-1])
             return proj.reshape([*batch_shape, N]), r.reshape([*batch_shape, 1])
@@ -1211,7 +1262,10 @@ else:
             grad_x, grad_weight = _cutile_proj_rms_bwd(
                 grad_proj_2d, grad_r_2d, x_2d, weight, norm, ctx.eps
             )
-            return grad_x.reshape(original_shape), grad_weight
+            return (
+                None if ctx.x_stop_gradient else grad_x.reshape(original_shape),
+                None if ctx.weight_stop_gradient else grad_weight,
+            )
 
     # ========================================================================
     # Public API (only available when cuTile is installed)
