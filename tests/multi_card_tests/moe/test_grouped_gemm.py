@@ -14,6 +14,7 @@
 
 import os
 import random
+import time
 import unittest
 from unittest.mock import patch
 
@@ -182,6 +183,84 @@ class TestStreamOrderedFenceEP(unittest.TestCase):
         )
         np.testing.assert_allclose(
             after.numpy(), np.full([4], expected, dtype="float32")
+        )
+
+    def _run_deepep_rounds(self, async_barrier):
+        ep_rank = paddle.distributed.get_rank(self.ep_group)
+        num_experts = self.ep_group.nranks * 2
+        num_tokens, hidden_size, topk = 64, 128, 2
+        outputs = []
+
+        with patch.dict(
+            os.environ,
+            {"FLEET_MOE_EP_BARRIER_ASYNC": "1" if async_barrier else "0"},
+        ):
+            fused_a2a._EP_BARRIER_ASYNC = None
+            for round_id in range(2):
+                values = np.arange(num_tokens * hidden_size, dtype="float32")
+                values = values.reshape(num_tokens, hidden_size)
+                values = values / (num_tokens * hidden_size)
+                values += ep_rank * 10 + round_id
+                x = paddle.to_tensor(values, dtype=paddle.bfloat16)
+                token_indices = paddle.to_tensor(
+                    [
+                        [
+                            (token_id + ep_rank + round_id) % num_experts,
+                            (
+                                token_id
+                                + ep_rank
+                                + round_id
+                                + self.ep_group.nranks
+                            )
+                            % num_experts,
+                        ]
+                        for token_id in range(num_tokens)
+                    ],
+                    dtype="int64",
+                )
+                token_probs = paddle.full(
+                    [num_tokens, topk], 1.0 / topk, dtype="float32"
+                )
+
+                dispatched_x, _, states, _ = fused_a2a.fused_dispatch(
+                    x,
+                    token_indices,
+                    token_probs,
+                    num_experts,
+                    self.ep_group,
+                )
+                if round_id == 0 and ep_rank == self.ep_group.nranks - 1:
+                    time.sleep(0.5)
+                outputs.append(
+                    fused_a2a.fused_combine(
+                        dispatched_x,
+                        self.ep_group,
+                        states["handle"],
+                    )
+                )
+
+        return outputs
+
+    @unittest.skipUnless(
+        fused_a2a.HAVE_DEEP_EP, "DeepEP is required for stream-order testing"
+    )
+    def test_fence_orders_deepep_buffer_reuse_across_rounds(self):
+        """The async fence must preserve DeepEP buffer reuse ordering."""
+        baseline = self._run_deepep_rounds(async_barrier=False)
+        paddle.distributed.barrier(self.ep_group)
+        actual = self._run_deepep_rounds(async_barrier=True)
+
+        for round_id, (expected, result) in enumerate(zip(baseline, actual)):
+            np.testing.assert_array_equal(
+                expected.float().numpy(),
+                result.float().numpy(),
+                err_msg=f"DeepEP output differs in round {round_id}",
+            )
+
+        completed_rounds = paddle.full([1], len(actual), dtype="int32")
+        paddle.distributed.all_reduce(completed_rounds, group=self.ep_group)
+        self.assertEqual(
+            int(completed_rounds.numpy()[0]), 2 * self.ep_group.nranks
         )
 
     def test_barrier_ep_uses_device_barrier_by_default(self):
