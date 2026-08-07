@@ -147,6 +147,8 @@ def _csa_bwd_honours_topk_length_holes() -> bool:
 
 
 class CSASparseAttention(paddle.autograd.PyLayer):
+    _lse_indexer = None
+
     @staticmethod
     def forward(
         ctx,
@@ -157,6 +159,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         softmax_scale,
         backend,
         topk_length=None,
+        indexer_topk=0,
     ):
         from paddlefleet.fusions.csa_sparse_attn_utils import prepare_inputs
 
@@ -189,14 +192,16 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 flash_mla_sparse_attn,
             )
 
-            output, lse, _ = flash_mla_sparse_attn(
+            output, lse, lse_indexer = flash_mla_sparse_attn(
                 query,
                 kv_full,
                 attn_sink,
                 topk_idxs,
                 sm_scale=ctx.softmax_scale,
                 topk_length=topk_length,
+                indexer_topk=indexer_topk,
             )
+            CSASparseAttention._lse_indexer = lse_indexer
         else:
             if topk_length is not None:
                 raise NotImplementedError(
@@ -300,6 +305,7 @@ def csa_sparse_attn(
     softmax_scale,
     backend="tilelang",
     topk_length=None,
+    indexer_topk=0,
 ):
     """Unified CSA sparse attention entry point.
 
@@ -324,7 +330,7 @@ def csa_sparse_attn(
             f"csa_sparse_attn_backend={backend!r} is invalid. "
             "Must be one of {'unfused', 'tilelang', 'cudnn'}."
         )
-    return CSASparseAttention.apply(
+    output = CSASparseAttention.apply(
         query,
         kv_full,
         attn_sink,
@@ -332,4 +338,10 @@ def csa_sparse_attn(
         softmax_scale,
         backend,
         topk_length,
+        indexer_topk,
     )
+    if CSASparseAttention._lse_indexer is not None:
+        lse_indexer = CSASparseAttention._lse_indexer
+        CSASparseAttention._lse_indexer = None
+        return output, lse_indexer
+    return output
