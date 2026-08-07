@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import unittest
-
-os.environ["MOONEP_MEM_HANDLE_TYPE"] = "fd"
 
 import paddle
 import paddle.distributed as dist
