@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Context parallel for the ``non_absorbed_mqa`` hybrid-MLA core attention.
+"""Context parallel for the latent-MQA hybrid-MLA core attention.
 
 Gold standard: a CP=N :class:`MQALatentAttention` must reproduce the CP=1
 reference on its own query slice -- forward output, input gradients and every
@@ -28,9 +28,9 @@ config below sets ``cp_degree == world_size``.
 Covered here (see ``test_mla_cp_contiguous_allgather.py`` for the MHA layer and
 the full-MLA integration):
 
-1. ``non_absorbed_mqa_dense`` (``indexer is None``) equivalence.
-2. ``non_absorbed_mqa`` + DSA equivalence, single and multi document, including
-   a document that straddles a rank boundary.
+1. ``hybrid_mla_attention="mqa_full_causal"`` (``indexer is None``) equivalence.
+2. ``hybrid_mla_attention="mqa_dsa"`` equivalence, single and multi document,
+   including a document that straddles a rank boundary.
 3. The indexer's RoPE under CP -- ``DSAIndexer.forward_before_topk`` must be
    **bitwise** equal to the global call, sliced. This is the load-bearing rope
    check: Q takes ``freqs[position_offset : position_offset + s]`` while K is

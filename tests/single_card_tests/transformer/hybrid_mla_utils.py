@@ -132,15 +132,27 @@ _GPU = unittest.skipUnless(
 )
 
 
+# Fixture label -> production ``TransformerConfig.hybrid_mla_attention`` value.
+# The label ``"mqa"`` predates the enum and means "latent MQA, no indexer",
+# which the enum spells ``"mqa_full_causal"``.
+_HYBRID_MLA_ATTENTION = {
+    "mha": "mha",
+    "mqa": "mqa_full_causal",
+    "mqa_dsa": "mqa_dsa",
+}
+
+
 def _create_mqa_config(mode="mqa", loss_coeff=0.0, num_hidden_layers=2):
     """dsv4_hybrid config for a ``csa_compress_ratios == -2`` layer.
 
-    ``mode`` is a test-only fixture label: ``"mha"`` leaves
-    ``non_absorbed_mqa=False`` (dense path), while both ``"mqa"`` (dense,
-    indexer-less) and ``"mqa_dsa"`` (DSA) set ``non_absorbed_mqa=True``. The
-    dense/sparse distinction is expressed by whether ``_build_module`` attaches
-    an indexer to the sublayers spec, mirroring the production source which
-    reads the layer path from the spec, not from a config string.
+    ``mode`` is a test-only fixture label mapped onto the production
+    ``hybrid_mla_attention`` enum by ``_HYBRID_MLA_ATTENTION``: ``"mha"`` keeps
+    the dense per-head path, ``"mqa"`` selects ``"mqa_full_causal"`` (latent MQA
+    over the full per-document causal set, no indexer) and ``"mqa_dsa"`` selects
+    ``"mqa_dsa"`` (latent MQA + DSA indexer). Whether an indexer actually exists
+    is expressed by ``_build_module`` attaching one to the sublayers spec,
+    mirroring the production source which reads the layer path from the spec,
+    not from a config string.
 
     Attributes are assigned after construction so that ``__post_init__``
     validation (exercised by the production model config, not by this unit) is
@@ -154,10 +166,10 @@ def _create_mqa_config(mode="mqa", loss_coeff=0.0, num_hidden_layers=2):
     config.num_key_value_heads = H
     config.head_dim = K_CHANNELS
     config.experimental_attention_variant = "dsv4_hybrid"
-    config.non_absorbed_mqa = mode != "mha"
-    # Test-only markers read by ``_build_module``: production always builds the
-    # indexer when ``non_absorbed_mqa`` is set, so the indexer-less dense path
-    # is reachable only by constructing the layer directly with
+    config.hybrid_mla_attention = _HYBRID_MLA_ATTENTION[mode]
+    # Test-only markers read by ``_build_module``: production builds the indexer
+    # exactly for ``hybrid_mla_attention="mqa_dsa"``, so the indexer-less latent
+    # MQA path is reachable only by constructing the layer directly with
     # ``MQALatentAttentionSublayersSpec(indexer=None)``.
     config.test_attn_mode = mode
     config._build_dsa_indexer = mode == "mqa_dsa"
@@ -418,7 +430,10 @@ _PARENT_REPO_AVAILABLE = _CONFIG_DIR.is_dir()
 _MHA_CFG = "ernielite_layer43_mla_hca"
 _MQA_CFG = "ernielite_layer43_mla_mqa_hca"
 _DSA_CFG = "ernielite_layer43_mla_dsa_hca"
-_DENSE_CFG = "ernielite_layer43_non_absorbed_mqa_dense"
+# ``hybrid_mla_attention="mqa_full_causal"``: latent MQA with no indexer. The
+# on-disk directory still carries the pre-rename name; only the config *field*
+# was renamed, not the parent repo's config directories.
+_FULL_CAUSAL_CFG = "ernielite_layer43_non_absorbed_mqa_dense"
 
 # csa_compress_ratios == -2 marks a hybrid-MLA layer; 43 is the MTP layer.
 _MINUS2_LAYERS = (8, 17, 26, 34, 42, 43)

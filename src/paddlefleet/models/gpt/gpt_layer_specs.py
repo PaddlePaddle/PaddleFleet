@@ -324,14 +324,15 @@ def get_attention_spec(
         # ``dsv4_hybrid`` puts these MLA layers next to CSA/HCA layers that
         # already read the model-wide ``index_*`` fields, so field presence
         # cannot decide anything here: the hybrid MLA layers are dense MHA
-        # unless ``non_absorbed_mqa`` explicitly turns them into non-absorbed
-        # MQA + DSA indexer.
+        # unless ``hybrid_mla_attention`` explicitly turns them into latent MQA.
         is_hybrid_mla_indexer = (
             getattr(config, "experimental_attention_variant", None)
             == "dsv4_hybrid"
         )
-        non_absorbed_mqa = is_hybrid_mla_indexer and getattr(
-            config, "non_absorbed_mqa", False
+        hybrid_mla_attention = (
+            getattr(config, "hybrid_mla_attention", "mha")
+            if is_hybrid_mla_indexer
+            else "mha"
         )
         use_dsa = (
             not is_hybrid_mla_indexer
@@ -339,14 +340,14 @@ def get_attention_spec(
             and getattr(config, "dsa_index_n_heads", None) is not None
         )
 
-        if non_absorbed_mqa:
-            # Non-absorbed MQA core attention on the KV latent; parameters stay
+        if hybrid_mla_attention in ("mqa_dsa", "mqa_full_causal"):
+            # Latent MQA core attention on the KV latent; parameters stay
             # byte-identical to MHA so an MHA checkpoint loads unchanged. The
             # DSA indexer is what makes this mode worth running, so it is only
-            # switchable off by ``non_absorbed_mqa_dense``, which attends to the
-            # full per-document causal set instead -- mathematically identical
-            # to the dense MHA phase, for isolating absorption from sparsity.
-            dense_mqa = getattr(config, "non_absorbed_mqa_dense", False)
+            # dropped by ``mqa_full_causal``, which attends to the full
+            # per-document causal set instead -- mathematically identical to the
+            # dense MHA phase, for isolating absorption from sparsity.
+            dense_mqa = hybrid_mla_attention == "mqa_full_causal"
             core_attention = LayerSpec(
                 layer=MQALatentAttention,
                 sublayers_spec=MQALatentAttentionSublayersSpec(

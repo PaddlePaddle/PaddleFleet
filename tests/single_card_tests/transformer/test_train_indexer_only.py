@@ -76,7 +76,7 @@ def _make_dsv4_config(**overrides):
 
 
 def _make_mqa_config(**overrides):
-    """dsv4-hybrid config whose ``-2`` layers run non-absorbed MQA.
+    """dsv4-hybrid config whose ``-2`` layers run latent MQA + DSA indexer.
 
     A ``-2`` layer is a hybrid MLA layer, so ``__post_init__`` demands the whole
     ``hybrid_mla_*`` block before it ever gets to the ``train_indexer_only``
@@ -87,7 +87,7 @@ def _make_mqa_config(**overrides):
     kwargs = {
         "csa_dense_mode": True,
         "csa_compress_ratios": [128, -2],
-        "non_absorbed_mqa": True,
+        "hybrid_mla_attention": "mqa_dsa",
         # The DSA indexer of a -2 layer runs the cuDNN kernel, which pins
         # index_head_dim=128 and index_topk to a multiple of 128 (<= 2048).
         "dsa_index_head_dim": 128,
@@ -124,8 +124,8 @@ class TestPhase2ConfigValidation(unittest.TestCase):
 
     def test_dense_mode_without_mqa_indexer_rejected(self):
         # csa_dense_mode drops the CSAIndexer. On its own that leaves nothing to
-        # train -- but it is *not* illegal per se: the non-absorbed MQA layers
-        # carry a DSAIndexer of their own (see the tests below).
+        # train -- but it is *not* illegal per se: the latent MQA layers carry a
+        # DSAIndexer of their own (see the tests below).
         with self.assertRaisesRegex(ValueError, "build at least one Indexer"):
             _make_dsv4_config(train_indexer_only=True, csa_dense_mode=True)
 
@@ -146,23 +146,27 @@ class TestPhase2ConfigValidation(unittest.TestCase):
     def test_mqa_dsa_indexer_satisfies_the_check_without_any_csa_layer(self):
         # The new-attention phase 2: every CSA-ratio layer is HCA (128) and
         # csa_dense_mode is on, so there is no CSAIndexer anywhere. The only
-        # Indexer is the DSAIndexer of the ``-2`` non-absorbed MQA layers.
+        # Indexer is the DSAIndexer of the ``-2`` latent MQA layers.
         config = _make_mqa_config(train_indexer_only=True)
         self.assertTrue(config.train_indexer_only)
         self.assertTrue(config.csa_dense_mode)
 
-    def test_mqa_dense_rejected(self):
-        # non_absorbed_mqa_dense drops the DSAIndexer (gpt_layer_specs.py passes
+    def test_mqa_full_causal_rejected(self):
+        # "mqa_full_causal" drops the DSAIndexer (gpt_layer_specs.py passes
         # indexer=None), which is exactly the phase-1 shape: nothing to train.
         with self.assertRaisesRegex(ValueError, "build at least one Indexer"):
             _make_mqa_config(
-                train_indexer_only=True, non_absorbed_mqa_dense=True
+                train_indexer_only=True,
+                hybrid_mla_attention="mqa_full_causal",
             )
 
     def test_mqa_without_hybrid_layer_rejected(self):
-        # non_absorbed_mqa only does anything to ``-2`` layers; without one there
-        # is no MQALatentAttention and therefore no DSAIndexer.
-        with self.assertRaisesRegex(ValueError, "build at least one Indexer"):
+        # ``hybrid_mla_attention`` only does anything to ``-2`` layers; without
+        # one there is no MQALatentAttention and therefore no DSAIndexer. That
+        # is now caught earlier and more precisely, by the unconditional
+        # ``hybrid_mla_attention`` guard, rather than by the
+        # ``train_indexer_only`` "build at least one Indexer" check.
+        with self.assertRaisesRegex(ValueError, "only applies to MLA layers"):
             _make_mqa_config(
                 train_indexer_only=True, csa_compress_ratios=[0, 128]
             )

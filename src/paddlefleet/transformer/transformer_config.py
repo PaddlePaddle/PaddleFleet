@@ -828,38 +828,42 @@ class TransformerConfig(ModelParallelConfig):
     hybrid_mla_num_key_value_heads: int | None = None
     """Layer-local KV-head count for hybrid MLA entries."""
 
-    non_absorbed_mqa: bool = False
-    """Run the hybrid MLA (``csa_compress_ratios == -2``) layers as non-absorbed
-    MQA plus a DSA indexer, instead of plain multi-head latent attention.
+    hybrid_mla_attention: str = "mha"
+    """How the hybrid MLA layers (``csa_compress_ratios == -2``) run.
 
-    ``False``: ``kv_b_proj`` materialises per-head K/V and dense flash attention
-    runs on them (the MHA phase).
+    Only ``-2`` layers are affected; window / CSA / HCA / CSA-full-causal-MQA
+    layers ignore this field entirely.
 
-    ``True``: the query is absorbed against ``kv_b_proj.weight`` at *runtime* so
-    attention runs on the single shared ``kv_lora_rank + qk_rope_head_dim``
-    latent head, and a Lightning indexer selects which tokens each query attends
-    to (forced local window + top-k). Absorption is activation-level, so the
-    parameter layout is byte-identical to the MHA phase and an MHA checkpoint
-    loads directly -- the only new weights are the indexer's.
+    - ``"mha"`` (default): ``kv_b_proj`` materialises per-head K/V and dense flash
+      attention runs on them. Leaving the field unset keeps this behaviour.
+    - ``"mqa_dsa"``: latent MQA -- attention runs on the single shared
+      ``kv_lora_rank + qk_rope_head_dim`` latent head and a DSA (Lightning)
+      indexer selects the attended columns (forced local window + top-k).
+    - ``"mqa_full_causal"``: latent MQA with no indexer -- attend to the full
+      per-document causal set.
 
-    The indexer reuses the model-wide ``index_n_heads`` / ``index_head_dim`` /
+    Both ``mqa_*`` modes absorb the query against ``kv_b_proj.weight`` at
+    *runtime* (activation level, not weight level), so the parameter layout stays
+    byte-identical to ``"mha"`` and an MHA checkpoint loads unchanged. The only
+    new weights are the DSA indexer's; ``"mqa_full_causal"`` adds none at all.
+
+    ``"mqa_dsa"`` reuses the model-wide ``index_n_heads`` / ``index_head_dim`` /
     ``index_topk`` (``dsa_index_*`` internally), i.e. the same fields the CSA
     layers already read; a learnable per-head sink comes from the model-wide
     ``add_full_attention_sink_bias``. No hybrid-specific duplicates.
-    """
 
-    non_absorbed_mqa_dense: bool = False
-    """Drop the DSA indexer from ``non_absorbed_mqa`` and attend to the full
-    per-document causal set instead. Requires ``non_absorbed_mqa=True``.
+    ``"mqa_full_causal"`` isolates absorption from sparsity: absorption is
+    activation-level and exact, so latent MQA over the *full* causal set is
+    mathematically identical to ``"mha"`` and a warm-started run must track the
+    MHA run to within kernel noise. Any drift is then attributable to the
+    absorption or the softmax scale rather than to the top-k selection. Its index
+    table is ``[b, s, s]`` int32, so memory grows with the square of the sequence
+    length (268 MB per layer at ``s=8192``).
 
-    This exists to isolate the absorption from the sparsity: because absorption
-    is activation-level and exact, non-absorbed MQA over the *full* causal set is
-    mathematically identical to the dense MHA phase, so a warm-started run must
-    track the MHA run to within kernel noise. Any drift is then attributable to
-    the absorption or the softmax scale rather than to the top-k selection.
-
-    Not for production: the index table is ``[b, s, s]`` int32, so cost grows with
-    the square of the sequence length (268 MB per layer at ``s=8192``).
+    Terminology: the ``mqa_*`` modes above are *latent MQA* (class
+    ``MQALatentAttention``, ``-2`` layers). A ``csa_compress_ratios`` entry of
+    ``-1`` is *CSA full-causal MQA* (class ``CompressedSparseAttention``) -- a
+    different layer kind that this field does not touch.
     """
 
     v_head_dim: int | None = None
@@ -1050,6 +1054,11 @@ class TransformerConfig(ModelParallelConfig):
     """Per-layer attention-kind assignment for the DSv4 hybrid attention stack.
     Length must equal num_hidden_layers (+ mtp_num_layers if present).
     Each entry encodes the layer kind via its integer ratio value:
+      - -2: MLA layer — multi-head latent attention. How it actually runs is
+        chosen by ``hybrid_mla_attention`` (``"mha"`` / ``"mqa_dsa"`` /
+        ``"mqa_full_causal"``); this is the only ratio that field affects.
+      - -1: CSA full-causal MQA layer — no window, no compressor, no indexer.
+        A different layer kind from the latent MQA modes of ``-2``.
       - 0: window-only attention (no compression)
       - 2..127: CSA layer — overlapping compression (coff=2) with learned
         Lightning Indexer. The compression rate is a free parameter of CSA;
@@ -1076,13 +1085,14 @@ class TransformerConfig(ModelParallelConfig):
 
     Covers both indexer flavours of a dsv4-hybrid model: the ``CSAIndexer`` of
     the CSA layers (``1 < csa_compress_ratios[i] < 128``) and the ``DSAIndexer``
-    of the non-absorbed MQA layers (``== -2`` with ``non_absorbed_mqa``).
+    of the latent MQA layers (``== -2`` with ``hybrid_mla_attention="mqa_dsa"``).
 
     This is about the *checkpoint*, not the training strategy, and is therefore
     separate from ``train_indexer_only``:
 
     * ``True`` -- resuming a phase-1 checkpoint: it has no Indexer tensors at all
-      (phase 1 runs with ``csa_dense_mode=true`` / ``non_absorbed_mqa_dense=true``),
+      (phase 1 runs with ``csa_dense_mode=true`` /
+      ``hybrid_mla_attention="mha"`` or ``"mqa_full_causal"``),
       so they must be initialized from scratch. Leaving it ``False`` makes the AOA
       engine abort with ``... indexer.linear_wq_b.weight should be assigned before!``.
     * ``False`` -- resuming a phase-2/3 checkpoint (e.g. a fault-tolerant restart):
@@ -1100,8 +1110,8 @@ class TransformerConfig(ModelParallelConfig):
 
     Requires that the model actually builds an Indexer -- either a ``CSAIndexer``
     (``csa_dense_mode=False`` plus a layer with ``1 < ratio < 128``) or a
-    ``DSAIndexer`` (``non_absorbed_mqa`` without ``non_absorbed_mqa_dense``, plus
-    a ``-2`` layer) -- and a positive ``dsa_indexer_loss_coeff`` so it receives a
+    ``DSAIndexer`` (``hybrid_mla_attention="mqa_dsa"`` plus a ``-2`` layer) --
+    and a positive ``dsa_indexer_loss_coeff`` so it receives a
     training signal. The backbone is frozen by the trainer before the optimizer is
     created; this flag additionally keeps the recompute segments differentiable so
     the attached indexer loss still gets a backward pass. It does not change any
@@ -1493,6 +1503,80 @@ class TransformerConfig(ModelParallelConfig):
                 #  init_method is not None
                 self.embedding_init_method = self.init_method
 
+        # ``hybrid_mla_attention`` is validated unconditionally, i.e. outside the
+        # ``dsv4_hybrid`` / ``-2 in csa_compress_ratios`` guards below. A mode that
+        # no layer can honour is a configuration mistake and must fail at startup
+        # rather than be silently ignored.
+        hybrid_mla_modes = ("mha", "mqa_dsa", "mqa_full_causal")
+        if self.hybrid_mla_attention not in hybrid_mla_modes:
+            raise ValueError(
+                f"hybrid_mla_attention={self.hybrid_mla_attention!r} is invalid. "
+                "It must be one of: 'mha' (per-head K/V materialised, dense flash "
+                "attention -- the default), 'mqa_dsa' (latent MQA + DSA indexer "
+                "selecting window + top-k columns), or 'mqa_full_causal' (latent "
+                "MQA with no indexer, full per-document causal set)."
+            )
+        if self.hybrid_mla_attention != "mha":
+            ratios = self.csa_compress_ratios or []
+            ratio_counts: dict = {}
+            for r in ratios:
+                key = int(r) if hasattr(r, "__index__") else r
+                ratio_counts[key] = ratio_counts.get(key, 0) + 1
+            if (
+                self.experimental_attention_variant != "dsv4_hybrid"
+                or -2 not in ratio_counts
+            ):
+                raise ValueError(
+                    f"hybrid_mla_attention={self.hybrid_mla_attention!r} only "
+                    "applies to MLA layers, i.e. csa_compress_ratios entries "
+                    "equal to -2, but this config has none: "
+                    "experimental_attention_variant="
+                    f"{self.experimental_attention_variant!r}, ratio value "
+                    f"counts={ratio_counts or 'csa_compress_ratios unset'}. "
+                    "Either mark the target layers with -2, or set "
+                    "hybrid_mla_attention='mha' (the default). Note that ratio "
+                    "-1 is CSA full-causal MQA, a different layer kind that "
+                    "hybrid_mla_attention does not control."
+                )
+        if self.hybrid_mla_attention == "mqa_full_causal":
+            logger.warning(
+                "hybrid_mla_attention='mqa_full_causal' builds a [b, s, s] int32 "
+                "index table per MLA layer (268 MB per layer at s=8192). It "
+                "exists to isolate absorption from sparsity, not to save memory."
+            )
+        if self.hybrid_mla_attention == "mqa_dsa":
+            # On the ``-2`` layers ``dsa_indexer_use_sparse_loss`` decides both
+            # the indexer-loss candidate width and the attention candidate set,
+            # because they are one decision: while the indexer is still being
+            # learned (wide loss) attention must not consume its ranking. The
+            # two training phases are therefore fixed pairs, and the two mixed
+            # combinations are configuration mistakes rather than modes.
+            if self.train_indexer_only and self.dsa_indexer_use_sparse_loss:
+                raise ValueError(
+                    "train_indexer_only=True with "
+                    "dsa_indexer_use_sparse_loss=True is not a valid phase. "
+                    "Training only the Indexer is the warmup phase, which needs "
+                    "the wide indexer loss (dsa_indexer_use_sparse_loss=False) "
+                    "so the freshly initialised Indexer is supervised on columns "
+                    "it did not pick; the sparse loss only scores the columns it "
+                    "already selected and lets it reinforce its own initial "
+                    "ranking. Set dsa_indexer_use_sparse_loss=False in the "
+                    "model config, or drop train_indexer_only."
+                )
+            if (
+                not self.train_indexer_only
+                and not self.dsa_indexer_use_sparse_loss
+            ):
+                logger.warning(
+                    "hybrid_mla_attention='mqa_dsa' with "
+                    "dsa_indexer_use_sparse_loss=False runs the warmup shape "
+                    "(full per-document causal attention plus the wide indexer "
+                    "loss) while every backbone parameter still trains. The "
+                    "production warmup phase pairs it with "
+                    "train_indexer_only=True; the sparse training phase pairs "
+                    "dsa_indexer_use_sparse_loss=True with a trainable backbone."
+                )
+
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:
@@ -1558,13 +1642,7 @@ class TransformerConfig(ModelParallelConfig):
                         "hybrid MLA dimensions must be explicit positive integers; "
                         f"invalid fields: {', '.join(invalid)}"
                     )
-                if self.non_absorbed_mqa_dense and not self.non_absorbed_mqa:
-                    raise ValueError(
-                        "non_absorbed_mqa_dense=True only means anything with "
-                        "non_absorbed_mqa=True; it replaces that mode's DSA "
-                        "indexer with the full per-document causal set."
-                    )
-                if self.non_absorbed_mqa and not self.non_absorbed_mqa_dense:
+                if self.hybrid_mla_attention == "mqa_dsa":
                     # The -2 layers' indexer reuses the CSA indexer fields. The
                     # cuDNN indexer forward requires D_i=128, its backward
                     # asserts topk % block_I == 0 with block_I=128, and
@@ -1584,15 +1662,15 @@ class TransformerConfig(ModelParallelConfig):
                     ]
                     if invalid_index:
                         raise ValueError(
-                            "non_absorbed_mqa=True runs a DSA indexer on the "
-                            "hybrid MLA layers and needs index_n_heads / "
+                            "hybrid_mla_attention='mqa_dsa' runs a DSA indexer on "
+                            "the hybrid MLA layers and needs index_n_heads / "
                             "index_head_dim / index_topk as positive integers; "
                             f"invalid fields: {', '.join(invalid_index)}"
                         )
                     if self.dsa_index_head_dim != 128:
                         raise ValueError(
-                            "non_absorbed_mqa=True uses the cuDNN indexer, which "
-                            "requires index_head_dim=128, got "
+                            "hybrid_mla_attention='mqa_dsa' uses the cuDNN "
+                            "indexer, which requires index_head_dim=128, got "
                             f"{self.dsa_index_head_dim}."
                         )
                     if (
@@ -1666,13 +1744,13 @@ class TransformerConfig(ModelParallelConfig):
                 # either one is enough to have something to train. Both
                 # conditions mirror how the layer spec decides
                 # (``gpt_layer_specs.py``: ``csa_dense_mode`` drops the
-                # CSAIndexer, ``non_absorbed_mqa_dense`` drops the DSAIndexer).
+                # CSAIndexer, and only ``hybrid_mla_attention="mqa_dsa"`` builds
+                # the DSAIndexer).
                 has_csa_indexer = not self.csa_dense_mode and any(
                     1 < int(ratio) < 128 for ratio in self.csa_compress_ratios
                 )
                 has_mqa_indexer = (
-                    getattr(self, "non_absorbed_mqa", False)
-                    and not getattr(self, "non_absorbed_mqa_dense", False)
+                    self.hybrid_mla_attention == "mqa_dsa"
                     and any(
                         int(ratio) == -2 for ratio in self.csa_compress_ratios
                     )
@@ -1683,13 +1761,11 @@ class TransformerConfig(ModelParallelConfig):
                         "least one Indexer, and this config builds none, so there "
                         "would be no trainable parameter left. Either a CSA layer "
                         "(csa_dense_mode=False plus some 1 < csa_compress_ratios[i] "
-                        "< 128) or a non-absorbed MQA layer (non_absorbed_mqa=True, "
-                        "non_absorbed_mqa_dense=False plus some "
+                        "< 128) or a latent MQA layer with a DSA indexer "
+                        "(hybrid_mla_attention='mqa_dsa' plus some "
                         "csa_compress_ratios[i] == -2). Got "
                         f"csa_dense_mode={self.csa_dense_mode}, "
-                        f"non_absorbed_mqa={getattr(self, 'non_absorbed_mqa', False)}, "
-                        "non_absorbed_mqa_dense="
-                        f"{getattr(self, 'non_absorbed_mqa_dense', False)}, "
+                        f"hybrid_mla_attention={self.hybrid_mla_attention!r}, "
                         f"csa_compress_ratios={self.csa_compress_ratios}."
                     )
                 if getattr(self, "enable_hy_sparse_attention", False):

@@ -13,13 +13,13 @@
 # limitations under the License.
 
 """Adversarial validation (agent A7): recompute / MTP / checkpoint compat for
-the ``non_absorbed_mqa`` (dense MHA vs runtime-absorbed MQA, indexer always
-built) and ``add_full_attention_sink_bias`` (learnable per-head sink) features
-of the ERNIE5 V2 ``dsv4_hybrid`` MoE. The mode labels ``mha``/``mqa``/
-``mqa_dsa`` below are retained only as test fixtures: ``mha`` maps to
-``non_absorbed_mqa=False`` (dense) while ``mqa``/``mqa_dsa`` map to
-``non_absorbed_mqa=True`` and differ only by whether the DSA indexer spec is
-wired into this direct-construction fixture.
+the ``hybrid_mla_attention`` (dense MHA vs runtime-absorbed latent MQA, indexer
+always built for ``"mqa_dsa"``) and ``add_full_attention_sink_bias`` (learnable
+per-head sink) features of the ERNIE5 V2 ``dsv4_hybrid`` MoE. The mode labels
+``mha``/``mqa``/``mqa_dsa`` below are retained only as test fixtures: ``mha``
+maps to ``hybrid_mla_attention="mha"`` while ``mqa``/``mqa_dsa`` map to the
+latent MQA modes (``"mqa_full_causal"`` / ``"mqa_dsa"``) and differ only by
+whether the DSA indexer spec is wired into this direct-construction fixture.
 
 Coverage map (see validation_reports/A7_recompute_mtp_ckpt.md for the analysis):
   1. Recompute equivalence: full-layer recompute ON == OFF, elementwise on the
@@ -388,11 +388,11 @@ def _key_sig(module):
 @_REAL
 class TestCheckpointKeySets(unittest.TestCase):
     """A ``dsv4_hybrid`` dense-MHA checkpoint must load into an absorbed
-    (``non_absorbed_mqa=True``) run unchanged (every MLA parameter is byte
-    identical), the absorbed run adds the trained-from-scratch indexer keys
+    (``hybrid_mla_attention="mqa_dsa"``) run unchanged (every MLA parameter is
+    byte identical), the absorbed run adds the trained-from-scratch indexer keys
     (always built now) plus one learnable sink key per -2 layer, so a pre-sink
     checkpoint loaded into a sink run is short exactly that sink key per -2
-    layer. Since ``non_absorbed_mqa`` always wires the indexer, the old
+    layer. Since ``"mqa_dsa"`` always wires the indexer, the old
     DSA-less ``mqa`` surface no longer exists -- the ``_MQA_CFG`` and
     ``_DSA_CFG`` providers are the same absorbed+indexer layout, so the tests
     that purely contrasted them (mqa-vs-mqa_dsa) were dropped as redundant.
