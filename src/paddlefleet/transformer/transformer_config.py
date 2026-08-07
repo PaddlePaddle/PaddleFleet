@@ -1151,6 +1151,18 @@ class TransformerConfig(ModelParallelConfig):
     The positional embedding (RoPE) is applied only to the last qk_pos_emb_head_dim dims.
     """
 
+    hca_rope_type: str | None = None
+    """Per-attention-type RoPE variant for HCA layers (csa_compress_ratios == 128).
+    Options: "rope" (plain RoPE) or "yarn" (YaRN). When None, keeps the historical
+    default (compressed layers use YaRN). The RoPE width stays qk_pos_emb_head_dim.
+    """
+
+    csa_rope_type: str | None = None
+    """Per-attention-type RoPE variant for CSA layers (2 <= csa_compress_ratios < 128).
+    Options: "rope" (plain RoPE) or "yarn" (YaRN). When None, keeps the historical
+    default (compressed layers use YaRN). The RoPE width stays qk_pos_emb_head_dim.
+    """
+
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
 
@@ -1208,6 +1220,8 @@ class TransformerConfig(ModelParallelConfig):
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
+        "hca_rope_type": "hca_rope_type",
+        "csa_rope_type": "csa_rope_type",
     }
 
     @classmethod
@@ -1624,6 +1638,16 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+
+            # Per-attention-type RoPE variant validation (HCA / CSA).
+            valid_rope_types = {"rope", "yarn"}
+            for name in ("hca_rope_type", "csa_rope_type"):
+                val = getattr(self, name, None)
+                if val is not None and val not in valid_rope_types:
+                    raise ValueError(
+                        f"{name}={val!r} is invalid. Must be one of "
+                        "{'rope', 'yarn'} or None (keep default)."
+                    )
             if self.csa_train_indexer_only:
                 if self.csa_dense_mode:
                     raise ValueError(

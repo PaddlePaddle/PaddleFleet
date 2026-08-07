@@ -371,6 +371,17 @@ class DSv4HybridAttention(Attention):
                 f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
             )
 
+        # Resolve the per-attention-type RoPE variant override.
+        # HCA layers: compress_ratio == 128; CSA layers: 2 <= compress_ratio < 128.
+        # When the per-type field is unset (None), the historical default below
+        # is kept so existing configs behave exactly as before.
+        if compress_ratio == 128:
+            per_type_rope_type = config.hca_rope_type
+        elif 2 <= compress_ratio < 128:
+            per_type_rope_type = config.csa_rope_type
+        else:
+            per_type_rope_type = None
+
         # Per-layer RoPE (potentially different base for compressed layers)
         rope_base = getattr(config, "rotary_base", 10000)
         if compress_ratio > 1:
@@ -381,14 +392,15 @@ class DSv4HybridAttention(Attention):
             # YarnRotaryEmbedding's math.log() with a str and raise TypeError.
             rope_base = float(config.csa_compress_rotary_base)
 
-        use_compressed_yarn = compress_ratio > 1
-        if not use_compressed_yarn:
-            self.rotary_pos_emb = RotaryEmbedding(
-                self.qk_pos_emb_head_dim,
-                rotary_percent=getattr(config, "rotary_percent", 1.0),
-                rotary_base=rope_base,
-            )
-        else:
+        # Resolve the RoPE variant for this layer. Historically compressed
+        # layers (compress_ratio > 1, i.e. HCA/CSA) always used YaRN while
+        # window/MQA layers used plain RoPE. The per-attention-type override
+        # (hca_rope_type / csa_rope_type) lets HCA and CSA independently pick
+        # "rope" or "yarn"; when unset the historical default is preserved.
+        default_rope_type = "yarn" if compress_ratio > 1 else "rope"
+        resolved_rope_type = per_type_rope_type or default_rope_type
+
+        if resolved_rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.qk_pos_emb_head_dim,
                 rotary_base=rope_base,
@@ -403,6 +415,12 @@ class DSv4HybridAttention(Attention):
                 yarn_rope_fusion=getattr(
                     config, "dsv4_yarn_rope_fusion", False
                 ),
+            )
+        else:
+            self.rotary_pos_emb = RotaryEmbedding(
+                self.qk_pos_emb_head_dim,
+                rotary_percent=getattr(config, "rotary_percent", 1.0),
+                rotary_base=rope_base,
             )
 
         self.core_attention = build_spec_layer(
