@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Phase 2 (``csa_train_indexer_only``) regression guards.
+"""Phase 2 (``train_indexer_only``) regression guards.
 
 Freezing every non-Indexer parameter breaks two things that have nothing to do
 with the attention math, and both were found with the probes under
@@ -75,42 +75,96 @@ def _make_dsv4_config(**overrides):
     return TransformerConfig(**kwargs)
 
 
+def _make_mqa_config(**overrides):
+    """dsv4-hybrid config whose ``-2`` layers run non-absorbed MQA.
+
+    A ``-2`` layer is a hybrid MLA layer, so ``__post_init__`` demands the whole
+    ``hybrid_mla_*`` block before it ever gets to the ``train_indexer_only``
+    checks. ``csa_dense_mode=True`` matches the real new-attention configs: the
+    128/HCA layers have no CSAIndexer, so the DSAIndexer of the ``-2`` layers is
+    the only Indexer in the model.
+    """
+    kwargs = {
+        "csa_dense_mode": True,
+        "csa_compress_ratios": [128, -2],
+        "non_absorbed_mqa": True,
+        # The DSA indexer of a -2 layer runs the cuDNN kernel, which pins
+        # index_head_dim=128 and index_topk to a multiple of 128 (<= 2048).
+        "dsa_index_head_dim": 128,
+        "dsa_index_topk": 128,
+        "hybrid_mla_q_lora_rank": 64,
+        "hybrid_mla_kv_lora_rank": 64,
+        "hybrid_mla_qk_nope_head_dim": 64,
+        "hybrid_mla_qk_rope_head_dim": 64,
+        "hybrid_mla_v_head_dim": 128,
+        "hybrid_mla_num_attention_heads": 8,
+        "hybrid_mla_num_key_value_heads": 8,
+    }
+    kwargs.update(overrides)
+    return _make_dsv4_config(**kwargs)
+
+
 class TestPhase2ConfigValidation(unittest.TestCase):
-    """``csa_train_indexer_only`` must reject configs that cannot train."""
+    """``train_indexer_only`` must reject configs that cannot train."""
 
     def test_valid_phase2_config(self):
-        config = _make_dsv4_config(csa_train_indexer_only=True)
-        self.assertTrue(config.csa_train_indexer_only)
+        config = _make_dsv4_config(train_indexer_only=True)
+        self.assertTrue(config.train_indexer_only)
         self.assertFalse(config.csa_dense_mode)
 
     def test_default_is_off_for_phase1_and_phase3(self):
         self.assertFalse(
-            _make_dsv4_config(csa_dense_mode=True).csa_train_indexer_only
+            _make_dsv4_config(csa_dense_mode=True).train_indexer_only
         )
         self.assertFalse(
             _make_dsv4_config(
                 dsa_indexer_use_sparse_loss=True
-            ).csa_train_indexer_only
+            ).train_indexer_only
         )
 
-    def test_dense_mode_rejected(self):
-        with self.assertRaisesRegex(
-            ValueError, "requires csa_dense_mode=False"
-        ):
-            _make_dsv4_config(csa_train_indexer_only=True, csa_dense_mode=True)
+    def test_dense_mode_without_mqa_indexer_rejected(self):
+        # csa_dense_mode drops the CSAIndexer. On its own that leaves nothing to
+        # train -- but it is *not* illegal per se: the non-absorbed MQA layers
+        # carry a DSAIndexer of their own (see the tests below).
+        with self.assertRaisesRegex(ValueError, "build at least one Indexer"):
+            _make_dsv4_config(train_indexer_only=True, csa_dense_mode=True)
 
     def test_non_positive_loss_coeff_rejected(self):
         with self.assertRaisesRegex(
             ValueError, "positive\n?.*dsa_indexer_loss_coeff"
         ):
             _make_dsv4_config(
-                csa_train_indexer_only=True, dsa_indexer_loss_coeff=0.0
+                train_indexer_only=True, dsa_indexer_loss_coeff=0.0
             )
 
-    def test_no_csa_layer_rejected(self):
-        with self.assertRaisesRegex(ValueError, "at least one CSA layer"):
+    def test_no_indexer_layer_rejected(self):
+        with self.assertRaisesRegex(ValueError, "build at least one Indexer"):
             _make_dsv4_config(
-                csa_train_indexer_only=True, csa_compress_ratios=[0, 128]
+                train_indexer_only=True, csa_compress_ratios=[0, 128]
+            )
+
+    def test_mqa_dsa_indexer_satisfies_the_check_without_any_csa_layer(self):
+        # The new-attention phase 2: every CSA-ratio layer is HCA (128) and
+        # csa_dense_mode is on, so there is no CSAIndexer anywhere. The only
+        # Indexer is the DSAIndexer of the ``-2`` non-absorbed MQA layers.
+        config = _make_mqa_config(train_indexer_only=True)
+        self.assertTrue(config.train_indexer_only)
+        self.assertTrue(config.csa_dense_mode)
+
+    def test_mqa_dense_rejected(self):
+        # non_absorbed_mqa_dense drops the DSAIndexer (gpt_layer_specs.py passes
+        # indexer=None), which is exactly the phase-1 shape: nothing to train.
+        with self.assertRaisesRegex(ValueError, "build at least one Indexer"):
+            _make_mqa_config(
+                train_indexer_only=True, non_absorbed_mqa_dense=True
+            )
+
+    def test_mqa_without_hybrid_layer_rejected(self):
+        # non_absorbed_mqa only does anything to ``-2`` layers; without one there
+        # is no MQALatentAttention and therefore no DSAIndexer.
+        with self.assertRaisesRegex(ValueError, "build at least one Indexer"):
+            _make_mqa_config(
+                train_indexer_only=True, csa_compress_ratios=[0, 128]
             )
 
     def test_non_dsv4_variant_rejected(self):
@@ -120,7 +174,7 @@ class TestPhase2ConfigValidation(unittest.TestCase):
                 hidden_size=128,
                 num_attention_heads=4,
                 params_dtype=paddle.float32,
-                csa_train_indexer_only=True,
+                train_indexer_only=True,
             )
 
     def test_hy_sparse_attention_rejected(self):
@@ -128,7 +182,7 @@ class TestPhase2ConfigValidation(unittest.TestCase):
         # frozen backbone the Indexer would silently get no gradient at all.
         with self.assertRaisesRegex(ValueError, "enable_hy_sparse_attention"):
             _make_dsv4_config(
-                csa_train_indexer_only=True, enable_hy_sparse_attention=True
+                train_indexer_only=True, enable_hy_sparse_attention=True
             )
 
 
@@ -146,7 +200,7 @@ class TestKeepIndexerGradPath(unittest.TestCase):
         self.assertTrue(out.stop_gradient)
 
     def test_reenters_graph_when_flag_enabled(self):
-        config = _make_dsv4_config(csa_train_indexer_only=True)
+        config = _make_dsv4_config(train_indexer_only=True)
         out = keep_indexer_grad_path(self.hidden, config)
         self.assertIsNot(out, self.hidden)
         self.assertFalse(out.stop_gradient)
@@ -155,7 +209,7 @@ class TestKeepIndexerGradPath(unittest.TestCase):
         self.assertTrue(paddle.allclose(out, self.hidden).item())
 
     def test_short_circuits_when_already_differentiable(self):
-        config = _make_dsv4_config(csa_train_indexer_only=True)
+        config = _make_dsv4_config(train_indexer_only=True)
         hidden = paddle.randn([2, 4, 8])
         hidden.stop_gradient = False
         hidden = hidden * 1.0
@@ -163,13 +217,13 @@ class TestKeepIndexerGradPath(unittest.TestCase):
         self.assertIs(out, hidden)
 
     def test_noop_under_no_grad(self):
-        config = _make_dsv4_config(csa_train_indexer_only=True)
+        config = _make_dsv4_config(train_indexer_only=True)
         with paddle.no_grad():
             out = keep_indexer_grad_path(self.hidden, config)
         self.assertIs(out, self.hidden)
 
     def test_non_tensor_passthrough(self):
-        config = _make_dsv4_config(csa_train_indexer_only=True)
+        config = _make_dsv4_config(train_indexer_only=True)
         self.assertIsNone(keep_indexer_grad_path(None, config))
 
 
@@ -296,7 +350,7 @@ class TestRecomputeSegmentKeepsIndexerGrad(unittest.TestCase):
         self.assertIsNone(layer.indexer.weight.grad)
 
     def test_with_flag_indexer_gets_grad(self):
-        layer, out = self._run(_make_dsv4_config(csa_train_indexer_only=True))
+        layer, out = self._run(_make_dsv4_config(train_indexer_only=True))
         self.assertFalse(out.stop_gradient)
         self.assertIsNotNone(layer.indexer.weight.grad)
         self.assertGreater(
@@ -353,7 +407,7 @@ class TestFullAttnRecomputeKeepsIndexerGrad(unittest.TestCase):
 
     def test_with_flag_indexer_gets_grad(self):
         layer, core_attn_out = self._run(
-            _make_dsv4_config(csa_train_indexer_only=True)
+            _make_dsv4_config(train_indexer_only=True)
         )
         self.assertFalse(core_attn_out.stop_gradient)
         self.assertIsNotNone(layer.indexer.weight.grad)
@@ -371,7 +425,7 @@ class TestIndexerParameterOwnership(unittest.TestCase):
     main compressor's parameter names contain ``compressor`` just like the
     Indexer's nested one, so any name-substring rule would misclassify them.
     This test pins the module-tree rule used by
-    ``PretrainingTrainer._collect_csa_indexer_params``.
+    ``PretrainingTrainer._collect_indexer_params``.
     """
 
     def _build_core_attention(self, config=None):
@@ -411,7 +465,7 @@ class TestIndexerParameterOwnership(unittest.TestCase):
             ),
         )
         config = config or _make_dsv4_config(
-            csa_train_indexer_only=True, csa_compress_ratios=[0, 4]
+            train_indexer_only=True, csa_compress_ratios=[0, 4]
         )
         core_attention = CompressedSparseAttention(
             config=config,

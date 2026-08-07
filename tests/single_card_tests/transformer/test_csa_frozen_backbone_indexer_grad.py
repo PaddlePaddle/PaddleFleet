@@ -14,7 +14,7 @@
 
 """Guard: DSv4 CSA attention must survive a frozen backbone + trainable Indexer.
 
-This is the DSv4 phase 2 shape (``csa_train_indexer_only``): every parameter
+This is the DSv4 phase 2 shape (``train_indexer_only``): every parameter
 except the ``CSAIndexer`` is frozen, and the layer input is detached. The Indexer
 loss is attached through a PyLayer, so the attention output stays differentiable
 and backward walks the whole CSA path with ``stop_gradient=True`` on most of its
