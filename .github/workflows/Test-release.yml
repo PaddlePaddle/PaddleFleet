@@ -1309,7 +1309,7 @@ jobs:
 
   coverage_check:
     name: Coverage Upload And Check
-    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
+    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, unittest-gpu-ci, check-bypass]
     if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' && needs.single_card_test.result != 'skipped' }}
     runs-on:
       group: APPROVAL
@@ -1340,6 +1340,7 @@ jobs:
           h20_multi_coverage.xml:h20-multi/coverage.xml
           h20_single_coverage.xml:h20-single/coverage.xml
           a100_coverage.xml:a100/coverage.xml
+          unittest_coverage.xml:unittest-gpu/coverage.xml
           "
           base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
 
@@ -1347,7 +1348,8 @@ jobs:
             if [ -n "$config" ]; then
                 filename="${config%%:*}"
                 filepath="${config#*:}"
-                wget "${base_url}/${filepath}" -O "$filename" --no-proxy
+                wget -q "${base_url}/${filepath}" -O "$filename" --no-proxy \
+                  && echo "Downloaded: $filename" || echo "WARNING: failed to download $filename"
             fi
           done
           # 豁免文件/目录列表：这些路径下的改动不计入覆盖率检查
@@ -1364,13 +1366,9 @@ jobs:
 
           git diff origin/${{ github.event.pull_request.base.ref }}...HEAD --unified=0 \
             -- . "${EXCLUDE_ARGS[@]}" > diff.txt
-          echo "=== DIFF FILE (after exclusion) ==="
-          cat diff.txt
-          echo "================="
-          python -m pip install diff-cover
-          echo "=== 覆盖率文件 ==="
-          ls *.xml
-          echo "================="
+          echo "Diff size: $(wc -l < diff.txt) lines ($(wc -c < diff.txt) bytes)"
+          python -m pip install diff-cover -q
+          echo "Coverage XML files: $(ls *.xml 2>/dev/null | tr '\n' ' ')"
           COVERAGE_EXIT_CODE=0
           diff-cover *.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
@@ -1378,8 +1376,7 @@ jobs:
       - name: Check full coverage
         if: always()
         run: |
-          echo "=== 全量覆盖率检查 ==="
-          python -m pip install coverage==7.13.0
+          python -m pip install coverage==7.13.0 -q
 
           # 定义所有覆盖率文件
           COVERAGE_FILES=(
@@ -1388,6 +1385,7 @@ jobs:
             "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
             "a100_coverage.xml"
+            "unittest_coverage.xml"
           )
 
           # 检查哪些文件存在
@@ -1398,7 +1396,7 @@ jobs:
             fi
           done
 
-          echo "找到 ${#EXISTING_FILES[@]} 个覆盖率文件"
+          echo "找到 ${#EXISTING_FILES[@]} 个覆盖率文件: ${EXISTING_FILES[*]}"
 
           # 使用脚本合并 XML 覆盖率文件并输出全量覆盖率报告
           python ci/merge_and_check_coverage.py "${EXISTING_FILES[@]}" --report-only
@@ -1406,7 +1404,6 @@ jobs:
       - name: filter coverage files and remove backup files
         if: always()
         run: |
-          echo "=== CHECKING COVERAGE FILES ==="
 
           COVERAGE_FILES=(
             "multi_coverage.xml"
@@ -1414,6 +1411,7 @@ jobs:
             "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
             "a100_coverage.xml"
+            "unittest_coverage.xml"
           )
 
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
@@ -1435,12 +1433,13 @@ jobs:
             ./h20_multi_coverage.xml,
             ./h20_single_coverage.xml,
             ./h20_qwen_coverage.xml,
-            ./a100_coverage.xml
+            ./a100_coverage.xml,
+            ./unittest_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           use_oidc: true
-          verbose: true
+          verbose: false
 
   unittest-gpu-ci:
     needs: [check-bypass, build_whl, check_documents_type]
@@ -1644,8 +1643,8 @@ jobs:
           bos_prefix="${PR_ID}/${COMMIT_ID}"
           cd /workspace/PaddleFleet
           if [ -f "${PYTEST_EXECUTE_FLAG_FILE}" ] && [ -f coverage.xml ]; then
-            python ${{ env.bos_file }} coverage.xml paddle-github-action/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs
-            echo "coverage: https://paddle-github-action.bj.bcebos.com/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs/coverage.xml"
+            python ${{ env.bos_file }} coverage.xml paddle-github-action/${{ github.repository }}/pull/${PR_ID}/${COMMIT_ID}/unittest-gpu
+            echo "coverage: https://paddle-github-action.bj.bcebos.com/${{ github.repository }}/pull/${PR_ID}/${COMMIT_ID}/unittest-gpu/coverage.xml"
           fi
           cd /workspace/PaddleFleet/unittest_logs
           for FILE in *; do
