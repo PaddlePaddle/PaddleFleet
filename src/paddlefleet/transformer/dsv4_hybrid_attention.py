@@ -669,7 +669,7 @@ class DSv4HybridAttention(Attention):
                 # This segment contains core_attention, i.e. the CSA Indexer and its
                 # side-attached loss. RecomputeWithoutOutput is a PyLayer whose
                 # output is differentiable only if some input is, and with a frozen
-                # backbone (csa_train_indexer_only) hidden_states is detached. It
+                # backbone (train_indexer_only) hidden_states is detached. It
                 # would then skip registering its recompute hook altogether
                 # (tensor_parallel/random.py:590 checks stop_gradient) and the
                 # Indexer would get no gradient, with no error and no warning.

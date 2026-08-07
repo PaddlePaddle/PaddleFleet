@@ -17,7 +17,7 @@
 MoE expert weight gradients are written straight into ``main_grad`` / ``grad``
 instead of being returned through autograd, so ``stop_gradient`` is not honored
 automatically and every hand-written backward has to check it. DSv4 phase 2
-(``csa_train_indexer_only``) freezes the whole backbone, which makes those wgrad
+(``train_indexer_only``) freezes the whole backbone, which makes those wgrad
 GEMMs and their fp32 buffers pure waste.
 
 The subtlety these tests pin down is *where* ``stop_gradient`` may be trusted:
