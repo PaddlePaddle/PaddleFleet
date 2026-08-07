@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -44,6 +45,7 @@ from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.utils import (
     get_pg_size,
+    log_single_rank,
     nvtx_range_pop,
     nvtx_range_push,
 )
@@ -57,9 +59,28 @@ from .paddle_norm import (
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
-from paddlefleet_ops import fla
+try:
+    from paddlefleet_ops import fla
 
+    # Fused triton kernels from the paddle build of flash-linear-attention:
+    # the short causal conv, the chunked KDA recurrence (with q/k L2 norm, the
+    # gate and the beta sigmoid folded in) and the gated RMSNorm.
+    causal_conv1d = fla.modules.conv.causal_conv1d
+    chunk_kda = fla.ops.kda.chunk_kda
+    rms_norm_gated = fla.modules.fused_norm_gate.rms_norm_gated
+    build_cp_context = fla.ops.cp.context.build_cp_context
+
+    HAVE_FLA = True
+except (ImportError, AttributeError):
+    causal_conv1d = chunk_kda = rms_norm_gated = build_cp_context = None
+    HAVE_FLA = False
+
+# Configure logging
 logger = logging.getLogger(__name__)
+
+# Every KDA layer of a model reaches the same verdict, so the backend is logged
+# once per process instead of once per layer.
+_FUSED_KERNEL_LOGGED = False
 
 
 @dataclass
@@ -83,6 +104,87 @@ class KimiDeltaAttentionSublayersSpec:
     g_b_proj: LayerSpec | type = IdentityOp
     out_norm: LayerSpec | type = IdentityOp
     out_proj: LayerSpec | type = IdentityOp
+
+
+def build_cu_seqlens(
+    startend_row_indices,
+    batch,
+    seq_len,
+    keep_single_segment=False,
+):
+    """Derive packed cu_seqlens for a ``[b, s] -> [1, b*s]`` flattening.
+
+    ``startend_row_indices`` is ``[b, 1, s, 1]`` and each entry holds the
+    exclusive end of the document that position belongs to, *relative to its
+    own row*. A position
+    starts a new document iff that end changes, so the row-local boundaries
+    plus the row seams (position 0 of every row) give exactly the segment
+    starts of the flattened sequence. Note the seams matter: two adjacent
+    rows routinely carry the same end value (e.g. both end at ``s``), so
+    diffing the already-flattened array would merge them.
+
+    Note ``paddlefleet.transformer.utils.get_doc_lens`` cannot be used here:
+    it flattens across batch/head while comparing against a global arange,
+    so it only produces correct lengths for ``[1, 1, s, 1]``.
+
+    Every KDA layer of a step needs the same result, so the embedding builds it
+    once and hands it down through ``dict_args["cu_seqlens"]``; KDA only
+    calls this itself when nothing was passed in.
+
+    With ``keep_single_segment`` the trivial ``[0, b*s]`` is returned instead
+    of ``None``; context parallel always needs a cu_seqlens to slice.
+
+    Returns the cu_seqlens tensor, or ``None`` when the whole flattened
+    sequence is a single segment (nothing to mask out).
+    """
+    total = batch * seq_len
+    if startend_row_indices is None:
+        if not keep_single_segment:
+            return None
+        return paddle.to_tensor([0, total], dtype="int64")
+    # The head dim must be 1: a linear recurrence has a single segment
+    # layout, so a head-wise mask (what
+    # startend_row_indices_add_sliding_window produces) cannot be
+    # honoured and must not be silently reduced to head 0.
+    if (
+        startend_row_indices.ndim != 4
+        or startend_row_indices.shape[1] != 1
+        or startend_row_indices.shape[-1] != 1
+    ):
+        raise ValueError(
+            "attn_mask_startend_row_indices must be [b, 1, s, 1], got "
+            f"{list(startend_row_indices.shape)}"
+        )
+    if startend_row_indices.shape[-2] != seq_len:
+        raise ValueError(
+            f"attn_mask_startend_row_indices has sequence length "
+            f"{startend_row_indices.shape[-2]}, expected {seq_len}"
+        )
+    if startend_row_indices.shape[0] != batch:
+        raise ValueError(
+            f"attn_mask_startend_row_indices has batch "
+            f"{startend_row_indices.shape[0]}, expected {batch}"
+        )
+    # Column 0 is the exclusive document end.
+    ends = startend_row_indices[:, 0, :, 0].astype("int64")
+    doc_edges = ends[:, 1:] != ends[:, :-1]
+
+    # Position 0 of every row is always a start, so the row seams become
+    # segment boundaries too.
+    head = paddle.ones([batch, 1], dtype="bool")
+    if seq_len > 1:
+        is_start = paddle.concat([head, doc_edges], axis=1)
+    else:
+        is_start = head
+    # Flattened positions are ascending, so the flat indices of the starts
+    # are already sorted and strictly increasing.
+    starts = paddle.nonzero(is_start.reshape([-1])).flatten()
+    cu_seqlens = paddle.concat(
+        [starts, paddle.full([1], total, dtype=starts.dtype)]
+    )
+    if cu_seqlens.shape[0] <= 2 and not keep_single_segment:
+        return None
+    return cu_seqlens
 
 
 class KimiDeltaAttention(FleetLayer):
@@ -166,10 +268,12 @@ class KimiDeltaAttention(FleetLayer):
         self.pg_collection = pg_collection
         self.tp_size = get_pg_size(self.pg_collection.tp)
         self.sp_size = self.tp_size if config.sequence_parallel else 1
+        self.cp_size = get_pg_size(getattr(self.pg_collection, "cp", None))
 
         # Attributes from config
         self.hidden_size = config.hidden_size
         self.act_fn = config.hidden_act
+        self.activation = getattr(self.act_fn, "__name__", "silu")
         self.conv_kernel_dim = conv_kernel_dim
         self.key_head_dim = key_head_dim
         self.value_head_dim = value_head_dim
@@ -180,6 +284,14 @@ class KimiDeltaAttention(FleetLayer):
         self.gate_lora_rank = (
             gate_lora_rank if gate_lora_rank is not None else value_head_dim
         )
+        # Fused triton kernels for the conv / recurrence / gated norm. The paddle
+        # native fallbacks stay in place for deterministic runs and for builds
+        # without paddlefleet_ops.
+        self.use_fused_kernels = HAVE_FLA and not config.deterministic_mode
+        global _FUSED_KERNEL_LOGGED
+        if self.use_fused_kernels and not _FUSED_KERNEL_LOGGED:
+            _FUSED_KERNEL_LOGGED = True
+            log_single_rank(logger, logging.INFO, "KDA will use fused kernel")
 
         # q/k/v/beta are all sharded by head, so both head counts must divide
         # evenly; otherwise the per-tensor split sizes in forward() silently stop
@@ -240,7 +352,9 @@ class KimiDeltaAttention(FleetLayer):
         self.conv_dim = self.qk_dim * 2 + self.v_dim
         self.conv_dim_local_tp = self.conv_dim // self.tp_size
 
-        # weight shape: [conv_dim, 1, d_conv], bias shape: [conv_dim]
+        # weight shape: [conv_dim, 1, d_conv], bias shape: [conv_dim].
+        # fp32 like A_log / dt_bias / out_norm: the fused kernels accept an fp32
+        # weight with low-precision activations.
         self.conv1d = nn.Conv1D(
             in_channels=self.conv_dim_local_tp,
             out_channels=self.conv_dim_local_tp,
@@ -251,9 +365,7 @@ class KimiDeltaAttention(FleetLayer):
             data_format="NCL",
             dtype="float32",
         )
-        # The released Kimi-K3 checkpoint keeps short-convolution weights in
-        # float32. Preserve that dtype under AMP O2 instead of casting the
-        # checkpoint to bf16 on load and casting it back only during export.
+        # force keep in float32 when using amp
         self.conv1d._cast_to_low_precision = False
         self.conv1d.weight.is_distributed = True if self.tp_size > 1 else False
         if conv_bias and self.conv1d.bias is not None:
@@ -280,18 +392,27 @@ class KimiDeltaAttention(FleetLayer):
         )
         self.A_log.is_distributed = True if self.tp_size > 1 else False
 
+        # force keep dt_bias / A_log (this layer's own params) in float32 under amp
+        self._cast_to_low_precision = False
+
         # Output layernorm before projection (per-head norm).
         # Replicated weight but each TP rank only sees its local value heads, so the
         # gradient is a partial sum and needs the sequence-parallel allreduce hook.
+        # The norm spec sizes its weight from config.params_dtype, so hand it a
+        # config copy pinned to fp32.
         input_is_parallel = True if self.tp_size > 1 else False
+        norm_config = copy.copy(self.config)
+        norm_config.params_dtype = paddle.float32
         extra_args = get_norm_extra_args(
             sublayers_spec.out_norm,
-            self.config,
+            norm_config,
             self.value_head_dim,
             self.config.rms_norm_eps,
             input_is_parallel,
         )
         self.out_norm = build_spec_layer(sublayers_spec.out_norm, **extra_args)
+        # force keep in float32 when using amp
+        self.out_norm._cast_to_low_precision = False
 
         self.out_proj = build_spec_layer(
             sublayers_spec.out_proj,
@@ -374,10 +495,13 @@ class KimiDeltaAttention(FleetLayer):
     def forward(
         self,
         hidden_states: paddle.Tensor,
-        attention_mask: paddle.Tensor,
+        attn_mask_startend_row_indices: paddle.Tensor | None = None,
+        attention_mask: paddle.Tensor | None = None,
         key_value_states: paddle.Tensor | None = None,
         attention_bias: paddle.Tensor | None = None,
         packed_seq_params=None,
+        input_ids: paddle.Tensor | None = None,
+        cu_seqlens: paddle.Tensor | None = None,
         **kwargs,
     ) -> tuple[paddle.Tensor, paddle.Tensor | None]:
         """
@@ -385,11 +509,17 @@ class KimiDeltaAttention(FleetLayer):
 
         Args:
             hidden_states: Hidden states [b, s, h] or [s, b, h] with sequence_parallel.
-            attention_mask: Unused, KDA is causal by construction (only fixed-length
-                input is supported, so there is no padding to mask out).
+            attn_mask_startend_row_indices: [b, 1, s, 1] document boundaries. When
+                given, the batch is flattened to a single packed sequence of length
+                b*s and the resulting cu_seqlens is handed to both the short conv
+                and the recurrence, so nothing leaks across document boundaries.
+            attention_mask: Unused, KDA is causal by construction.
             key_value_states: Key/value states (for cross attention, not supported).
             attention_bias: Attention bias (unused).
             packed_seq_params: Parameters used for THD format (not supported).
+            cu_seqlens: Packed cu_seqlens built once per step by the
+                embedding (see ``build_cu_seqlens``) and passed down through
+                ``dict_args``. Built here when None.
 
         Returns:
             Tuple of (output, output_bias).
@@ -406,6 +536,82 @@ class KimiDeltaAttention(FleetLayer):
             seq_len = seq_len_local * self.sp_size
         else:
             batch, seq_len, _ = hidden_states.shape
+
+        if self.cp_size > 1:
+            # fla's CP assumes the sequence is split contiguously and evenly
+            # (part_len = total // world_size, rank_start = part_len * rank),
+            # which is exactly scatter_contiguous. Other balance modes reorder
+            # tokens, so the rank ranges would not match.
+            max_seq_len = getattr(self.config, "max_sequence_length", None)
+            if (
+                max_seq_len is not None
+                and seq_len * self.cp_size != max_seq_len
+            ):
+                raise ValueError(
+                    "KDA context parallel expects hidden_states to be a "
+                    "1/cp_size contiguous shard of the full sequence: "
+                    f"seq_len={seq_len} * cp_size={self.cp_size} != "
+                    f"max_sequence_length={max_seq_len}"
+                )
+            if batch != 1:
+                raise NotImplementedError(
+                    "KDA context parallel requires batch == 1 (the packed "
+                    f"sequence must be one contiguous split), got {batch}"
+                )
+            if "contiguous" not in getattr(
+                self.config, "cp_balance_mode", "dualchunk_allgather"
+            ):
+                raise NotImplementedError(
+                    "KDA context parallel requires a contiguous cp_balance_mode,"
+                    f" got {getattr(self.config, 'cp_balance_mode', None)!r}"
+                )
+            if not self.use_fused_kernels:
+                raise NotImplementedError(
+                    "KDA context parallel requires the fused kernels."
+                )
+        # The mask always covers the full sequence, while hidden_states is this
+        # rank's shard, so cu_seqlens has to be built in global coordinates.
+        seq_len_full = seq_len * self.cp_size
+
+        # Normally the embedding built this once for the whole step and it came
+        # down through dict_args; only build it here when nothing was handed in.
+        if cu_seqlens is None:
+            cu_seqlens = build_cu_seqlens(
+                attn_mask_startend_row_indices,
+                batch,
+                seq_len_full,
+                keep_single_segment=self.cp_size > 1,
+            )
+        # The host copy is only a hint that lets the kernels skip a device-to-host
+        # copy of their own. Leaving it None keeps every layer passing identical
+        # arguments, so fla's @tensor_cache helpers (prepare_chunk_indices,
+        # get_cp_cu_seqlens) hit on the shared cu_seqlens instead of recomputing.
+        cu_seqlens_cpu = None
+        if cu_seqlens is not None and not self.use_fused_kernels:
+            raise NotImplementedError(
+                "Variable-length input with document boundaries requires the "
+                "fused kernels; the paddle native fallback has no cu_seqlens "
+                "support."
+            )
+        cp_context = None
+        if self.cp_size > 1:
+            # build_cp_context slices the global cu_seqlens down to this rank and
+            # records how many conv tokens / recurrent states to pull from the
+            # neighbours. Both kernels read cu_seqlens out of the context and
+            # ignore the argument, so drop the global one here.
+            cp_context = build_cp_context(
+                cu_seqlens,
+                self.pg_collection.cp,
+                conv1d_kernel_size=self.conv_kernel_dim,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+            )
+            cu_seqlens = cu_seqlens_cpu = None
+        # Variable length is expressed as one packed sequence, which is what the
+        # kernels require (they reject cu_seqlens with batch > 1). Under CP the
+        # local shard is already [1, s_local], so nothing is flattened.
+        eff_batch, eff_seq = (
+            (1, batch * seq_len) if cu_seqlens is not None else (batch, seq_len)
+        )
 
         # Input projection
         nvtx_range_push(suffix="in_proj")
@@ -425,32 +631,51 @@ class KimiDeltaAttention(FleetLayer):
             if gate is not None:
                 gate = gate.transpose([1, 0, 2])
 
-        # Split into q, k, v, beta and (full-rank) output gate
+        # Split into q/k/v, beta and (full-rank) output gate. in_proj lays the
+        # channels out as [qk | v | beta | gate] (see self.in_proj_dim) and the
+        # conv wants q/k/v as one contiguous block, so keep them in a single
+        # split segment rather than cutting qk/v apart and concatenating them
+        # back together.
         split_sizes = [
-            self.qk_dim * 2 // self.tp_size,
-            self.v_dim // self.tp_size,
+            self.conv_dim_local_tp,
             self.num_value_heads // self.tp_size,
         ]
         if self.use_full_rank_gate:
             split_sizes.append(self.v_dim // self.tp_size)
-            qk, value, beta, gate = paddle.split(qkvbz, split_sizes, axis=-1)
+            qkv, beta, gate = paddle.split(qkvbz, split_sizes, axis=-1)
         else:
-            qk, value, beta = paddle.split(qkvbz, split_sizes, axis=-1)
-        qkv = paddle.concat([qk, value], axis=-1)
-        beta = beta.reshape([batch, seq_len, -1])
-        gate = gate.reshape([batch, seq_len, -1, self.value_head_dim])
-        alpha = alpha.reshape([batch, seq_len, -1, self.value_head_dim])
+            qkv, beta = paddle.split(qkvbz, split_sizes, axis=-1)
+        qkv = qkv.reshape([eff_batch, eff_seq, -1])
+        beta = beta.reshape([eff_batch, eff_seq, -1])
+        gate = gate.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
+        alpha = alpha.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
 
         # Convolution on qkv
-        qkv = qkv.transpose([0, 2, 1]).contiguous()  # b, s, d -> b, d, s
         nvtx_range_push(suffix="conv1d")
-        conv_output_dtype = qkv.dtype
-        qkv = self.act_fn(
-            self.conv1d(qkv.astype(paddle.float32))[..., :seq_len]
-        ).astype(conv_output_dtype)
+        if self.use_fused_kernels:
+            # Takes/returns [b, s, d] and fuses the causal padding, the depthwise
+            # conv and the activation. Weight is [d, w] instead of [d, 1, w].
+            # cu_seqlens is mandatory for packed input: without it the depthwise
+            # conv pulls kernel_size-1 tokens across every document boundary.
+            qkv, _ = causal_conv1d(
+                qkv.contiguous(),
+                weight=self.conv1d.weight.squeeze(1),
+                bias=self.conv1d.bias,
+                activation=self.activation,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                cp_context=cp_context,
+            )
+        else:
+            # nn.Conv1D needs matching dtypes, and the weight is pinned to fp32,
+            # so run the fallback conv in fp32 and cast back.
+            qkv_dtype = qkv.dtype
+            qkv = qkv.transpose([0, 2, 1]).contiguous()  # b, s, d -> b, d, s
+            qkv = self.conv1d(qkv.astype(self.conv1d.weight.dtype))
+            qkv = self.act_fn(qkv[..., :eff_seq]).astype(qkv_dtype)
+            qkv = qkv.transpose([0, 2, 1])  # b, d, s -> b, s, d
         nvtx_range_pop(suffix="conv1d")
 
-        qkv = qkv.transpose([0, 2, 1])  # b, d, s -> b, s, d
         query, key, value = paddle.split(
             qkv,
             [
@@ -460,33 +685,64 @@ class KimiDeltaAttention(FleetLayer):
             ],
             axis=-1,
         )
-        query = query.reshape([batch, seq_len, -1, self.key_head_dim])
-        key = key.reshape([batch, seq_len, -1, self.key_head_dim])
-        value = value.reshape([batch, seq_len, -1, self.value_head_dim])
-
-        if self.use_qk_l2norm:
-            query = _l2norm(query.contiguous())
-            key = _l2norm(key.contiguous())
+        query = query.reshape([eff_batch, eff_seq, -1, self.key_head_dim])
+        key = key.reshape([eff_batch, eff_seq, -1, self.key_head_dim])
+        value = value.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
 
         nvtx_range_push(suffix="kimi_delta_rule")
-        core_attn_out, _ = fla.ops.kda.chunk_kda(
-            query.contiguous(),
-            key.contiguous(),
-            value.contiguous(),
-            g=alpha.contiguous(),
-            beta=beta.contiguous(),
-            A_log=self.A_log,
-            dt_bias=self.dt_bias,
-            use_gate_in_kernel=True,
-            use_beta_sigmoid_in_kernel=True,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=self.gate_lower_bound,
-        )
+        if self.use_fused_kernels:
+            # L2 norm, the log-space gate and sigmoid(beta) are all folded into
+            # the kernel, matching the reference implementation.
+            core_attn_out, _ = chunk_kda(
+                q=query.contiguous(),
+                k=key.contiguous(),
+                v=value.contiguous(),
+                g=alpha.contiguous(),
+                beta=beta.contiguous(),
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                use_qk_l2norm_in_kernel=self.use_qk_l2norm,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                safe_gate=self.gate_lower_bound is not None,
+                lower_bound=self.gate_lower_bound,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                cp_context=cp_context,
+            )
+        else:
+            if self.use_qk_l2norm:
+                query = _l2norm(query.contiguous())
+                key = _l2norm(key.contiguous())
+            core_attn_out, _ = paddle_chunk_kda(
+                query.contiguous(),
+                key.contiguous(),
+                value.contiguous(),
+                g=alpha.contiguous(),
+                beta=beta.contiguous(),
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                use_qk_l2norm_in_kernel=False,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                safe_gate=self.gate_lower_bound is not None,
+                lower_bound=self.gate_lower_bound,
+            )
         nvtx_range_pop(suffix="kimi_delta_rule")
 
         # Gated norm
         nvtx_range_push(suffix="gated_norm")
-        norm_out = self._apply_gated_norm(core_attn_out, gate)
+        if self.use_fused_kernels:
+            norm_out = rms_norm_gated(
+                core_attn_out.reshape([-1, self.value_head_dim]),
+                gate.reshape([-1, self.value_head_dim]),
+                self.out_norm.weight,
+                None,
+                activation="sigmoid",
+                eps=self.config.rms_norm_eps,
+            )
+        else:
+            norm_out = self._apply_gated_norm(core_attn_out, gate)
         nvtx_range_pop(suffix="gated_norm")
 
         # [b, s, num_heads, head_dim] -> [b, s, v_dim]

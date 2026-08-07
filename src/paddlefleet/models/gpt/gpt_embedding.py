@@ -38,6 +38,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -136,6 +137,17 @@ class GPTEmbedding(FleetLayer):
     @property
     def embedding_weight(self):
         return self.embedding.embedding_weight
+
+    @property
+    def has_kda_layer(self):
+        """Whether any decoder layer is a KimiDeltaAttention layer.
+
+        config.layer_types is what selects one (get_attention_spec dispatches on
+        it), and KDA is the only attention that needs a precomputed cu_seqlens.
+        """
+        return "kimi_delta_attention" in (
+            getattr(self.config, "layer_types", None) or ()
+        )
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTEmbedding")
@@ -706,6 +718,40 @@ class GPTEmbedding(FleetLayer):
         for key in ("past_key_values", "use_cache"):
             if key in dict_args and key not in preproc_output:
                 preproc_output[key] = dict_args[key]
+
+        # KDA turns the document boundaries into a packed cu_seqlens, and every
+        # KDA layer of the step needs the same one. Build it once here and let it
+        # ride dict_args down to the layers (see build_cu_seqlens).
+        if self.has_kda_layer:
+            cp_size = max(get_context_parallel_world_size(), 1)
+            # The MTP depths ride along concatenated on axis 0, and every decoder
+            # layer splits them off again and keeps tensor_list[0] as the backbone
+            # (transformer_layer.py:748-754), so read the backbone shape from the
+            # pre-concat tensor. Any other path (magic send, plain, external
+            # decoder_input) already hands over the backbone layout itself.
+            hidden_states = (
+                mtp_emb_res[0]
+                if mtp_emb_res is not None
+                else preproc_output["hidden_states"]
+            )
+            if self.sequence_parallel:
+                local_seq_len, batch = hidden_states.shape[:2]  # [s/tp, b, h]
+                sp_size = self.config.tensor_model_parallel_size
+            else:
+                batch, local_seq_len = hidden_states.shape[:2]  # [b, s, h]
+                sp_size = 1
+            # hidden_states is this rank's shard while cu_seqlens is in global
+            # sequence coordinates, so scale the length back up exactly the way
+            # KDA does for itself (kimi_delta_attention.py:521-526 and :562).
+            seq_len = local_seq_len * sp_size * cp_size
+            mask = attn_mask_startend_row_indices
+            if mask is not None and mask.shape[-2] > seq_len:
+                # The mask still covers the MTP tail that the backbone dropped,
+                # so take the part that belongs to the backbone.
+                mask = mask[:, :, :seq_len, :]
+            preproc_output["cu_seqlens"] = build_cu_seqlens(
+                mask, batch, seq_len, keep_single_segment=cp_size > 1
+            )
 
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:

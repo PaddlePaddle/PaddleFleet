@@ -341,9 +341,6 @@ def window_topk_idxs_kernel(
     Trailing padding is supported: a position ``i`` is a valid query iff
     ``pos_in_doc[i] = i - doc_start[i] < doc_len[i]`` (equivalently ``i`` is
     inside a real document). Invalid (padding) query rows are filled with -1.
-
-    All arithmetic stays in int32: seqlen fits comfortably, so this avoids
-    mixed-width issues while the output buffer is int64.
     """
     pid = tl.program_id(0)  # position index i
     pos = pid
@@ -386,7 +383,7 @@ def window_topk_idxs_triton(
         window_size: positive window length.
 
     Returns:
-        int64 tensor [1, seqlen, window_size]; each valid row holds the
+        int32 tensor [1, seqlen, window_size]; each valid row holds the
         sliding-window source indices for a position, with out-of-window slots
         set to -1; padding-query rows are all -1.
     """
@@ -401,7 +398,7 @@ def window_topk_idxs_triton(
     dl = doc_len_per_pos.contiguous()
 
     (seqlen,) = ds.shape
-    out = paddle.empty([seqlen, window_size], dtype="int64")
+    out = paddle.empty([seqlen, window_size], dtype="int32")
 
     BLOCK_W = min(triton.next_power_of_2(window_size), 2048)
     grid = (seqlen,)

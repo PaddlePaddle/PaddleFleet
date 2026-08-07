@@ -408,7 +408,18 @@ def scatter_contiguous(input_tensor, group=None, axis=0):
     if nranks == 1:
         return input_tensor.clone()
     rank = group.rank
-    chunk_size = input_tensor.shape[axis] // nranks
+    # An uneven split would silently drop the tail here and nothing downstream
+    # could tell: the shards are equal-sized, so all_gather_contiguous returns a
+    # shorter sequence than went in. Consumers that work in global sequence
+    # coordinates (e.g. KimiDeltaAttention) would then be off by the remainder.
+    length = input_tensor.shape[axis]
+    if length % nranks != 0:
+        raise ValueError(
+            f"contiguous context parallel needs axis {axis} of the input to be "
+            f"divisible by cp_size({nranks}), got {length}; truncate the tail "
+            "before the model instead of letting the scatter drop it"
+        )
+    chunk_size = length // nranks
     result = paddle.slice(
         input_tensor,
         axes=[axis],

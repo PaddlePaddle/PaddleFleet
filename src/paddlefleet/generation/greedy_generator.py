@@ -409,6 +409,11 @@ class GreedyGenerator:
     ) -> paddle.Tensor | tuple[paddle.Tensor, list[list[float]]]:
         """No-KVCache generation: each step runs a full prefill."""
         bsz = generated.shape[0]
+        _r = (
+            paddle.distributed.get_rank()
+            if paddle.distributed.is_initialized()
+            else 0
+        )
         with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
             done = paddle.zeros([bsz, 1], dtype="bool")
             for step in range(max_new_tokens):
@@ -418,6 +423,19 @@ class GreedyGenerator:
                     .unsqueeze(0)
                     .expand([bsz, cur_len])
                 )
+                # Align log labels with the KV-cache path so the two runs can
+                # be diffed directly: no_cache step 0 == cached prefill,
+                # no_cache step s>0 == cached decode step s-1.
+                _tag = "prefill" if step == 0 else f"decode step={step - 1}"
+                _log_this_step = _DEBUG and _r == 0 and step < 4
+                if _log_this_step:
+                    logger.info(
+                        "[fwd-debug][no_cache %s] input_ids=%s position_ids=%s cur_len=%d",
+                        _tag,
+                        generated.tolist(),
+                        position_ids.tolist(),
+                        cur_len,
+                    )
                 if self.cache.window_size and any(self.cache.swa_layers):
                     prefill_startend = paddle.full(
                         [bsz, 1, cur_len, 1], cur_len, dtype="int32"
@@ -432,6 +450,30 @@ class GreedyGenerator:
                         "attn_mask_startend_row_indices": prefill_startend,
                     }
                 )
+                if _log_this_step:
+                    _last = logits[:, -1].cast("float32")
+                    logger.info(
+                        "[logits-debug][no_cache %s] shape=%s dtype=%s",
+                        _tag,
+                        list(logits.shape),
+                        logits.dtype,
+                    )
+                    logger.info(
+                        "[logits-debug][no_cache %s] min=%.4f max=%.4f mean=%.4f",
+                        _tag,
+                        float(_last.min()),
+                        float(_last.max()),
+                        float(_last.mean()),
+                    )
+                    _topk_val, _topk_idx = paddle.topk(
+                        _last[0], min(5, _last.shape[-1])
+                    )
+                    logger.info(
+                        "[logits-debug][no_cache %s] top-k ids=%s vals=%s",
+                        _tag,
+                        _topk_idx.tolist(),
+                        [round(v, 3) for v in _topk_val.tolist()],
+                    )
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty
                 )
@@ -566,7 +608,6 @@ class GreedyGenerator:
                 .unsqueeze(0)
                 .expand([bsz, prompt_len])
             )
-
             if _DEBUG and _r == 0:
                 logger.info(
                     "[fwd-debug][prefill] input_ids=%s position_ids=%s",
@@ -602,9 +643,11 @@ class GreedyGenerator:
                     float(_last.max()),
                     float(_last.mean()),
                 )
-                _topk_val, _topk_idx = paddle.topk(_last[0], k=10)
+                _topk_val, _topk_idx = paddle.topk(
+                    _last[0], min(5, _last.shape[-1])
+                )
                 logger.info(
-                    "[logits-debug][prefill] top-10 ids=%s vals=%s",
+                    "[logits-debug][prefill] top-k ids=%s vals=%s",
                     _topk_idx.tolist(),
                     [round(v, 3) for v in _topk_val.tolist()],
                 )
@@ -659,9 +702,9 @@ class GreedyGenerator:
                 )
                 if _DEBUG and _r == 0 and step < 3:
                     _d = logits[:, -1].cast("float32")
-                    _tv, _ti = paddle.topk(_d[0], k=5)
+                    _tv, _ti = paddle.topk(_d[0], min(5, _d.shape[-1]))
                     logger.info(
-                        "[logits-debug][decode step=%d] top-5 ids=%s vals=%s",
+                        "[logits-debug][decode step=%d] top-k ids=%s vals=%s",
                         step,
                         _ti.tolist(),
                         [round(v, 3) for v in _tv.tolist()],
