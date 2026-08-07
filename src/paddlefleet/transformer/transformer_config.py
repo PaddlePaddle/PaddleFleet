@@ -1125,16 +1125,20 @@ class TransformerConfig(ModelParallelConfig):
     compressed positions.
     """
 
-    csa_indexer_init_from_scratch: bool | None = None
-    """Whether the CSA Indexer weights are initialized instead of loaded.
+    indexer_init_from_scratch: bool | None = None
+    """Whether the Indexer weights are initialized instead of loaded.
+
+    Covers both indexer flavours of a dsv4-hybrid model: the ``CSAIndexer`` of
+    the CSA layers (``1 < csa_compress_ratios[i] < 128``) and the ``DSAIndexer``
+    of the non-absorbed MQA layers (``== -2`` with ``non_absorbed_mqa``).
 
     This is about the *checkpoint*, not the training strategy, and is therefore
-    separate from ``csa_train_indexer_only``:
+    separate from ``train_indexer_only``:
 
     * ``True`` -- resuming a phase-1 checkpoint: it has no Indexer tensors at all
-      (phase 1 runs with ``csa_dense_mode=true``), so they must be initialized
-      from scratch. Leaving it ``False`` makes the AOA engine abort with
-      ``... indexer.linear_wq_b.weight should be assigned before!``.
+      (phase 1 runs with ``csa_dense_mode=true`` / ``non_absorbed_mqa_dense=true``),
+      so they must be initialized from scratch. Leaving it ``False`` makes the AOA
+      engine abort with ``... indexer.linear_wq_b.weight should be assigned before!``.
     * ``False`` -- resuming a phase-2/3 checkpoint (e.g. a fault-tolerant restart):
       it does contain Indexer weights, and re-initializing them would
       **silently** throw away all Indexer training done so far.
@@ -1145,15 +1149,17 @@ class TransformerConfig(ModelParallelConfig):
     guessed. Non-HF paths (flex/DCP resume, fresh start) never read it at all.
     """
 
-    csa_train_indexer_only: bool = False
-    """Phase 2 training strategy: train only the CSA Indexer parameters.
+    train_indexer_only: bool = False
+    """Phase 2 training strategy: train only the Indexer parameters.
 
-    Requires ``csa_dense_mode=False`` so the Indexer modules exist, and a
-    positive ``dsa_indexer_loss_coeff`` so they receive a training signal. The
-    backbone is frozen by the trainer before the optimizer is created; this flag
-    additionally keeps the recompute segments differentiable so the attached
-    indexer loss still gets a backward pass. It does not change any attention
-    value, the KL candidate range, or the main attention sparsity.
+    Requires that the model actually builds an Indexer -- either a ``CSAIndexer``
+    (``csa_dense_mode=False`` plus a layer with ``1 < ratio < 128``) or a
+    ``DSAIndexer`` (``non_absorbed_mqa`` without ``non_absorbed_mqa_dense``, plus
+    a ``-2`` layer) -- and a positive ``dsa_indexer_loss_coeff`` so it receives a
+    training signal. The backbone is frozen by the trainer before the optimizer is
+    created; this flag additionally keeps the recompute segments differentiable so
+    the attached indexer loss still gets a backward pass. It does not change any
+    attention value, the KL candidate range, or the main attention sparsity.
 
     Only the base ``TransformerLayer`` keeps its recompute segment differentiable,
     so ``enable_hy_sparse_attention=True`` (which swaps in
@@ -1676,27 +1682,43 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
-            if self.csa_train_indexer_only:
-                if self.csa_dense_mode:
-                    raise ValueError(
-                        "csa_train_indexer_only=True requires csa_dense_mode=False; "
-                        "with csa_dense_mode=True no CSAIndexer is created and there "
-                        "would be no trainable parameter left."
-                    )
+            if self.train_indexer_only:
                 loss_coeff = getattr(self, "dsa_indexer_loss_coeff", None)
                 if not loss_coeff or float(loss_coeff) <= 0:
                     raise ValueError(
-                        "csa_train_indexer_only=True requires a positive "
+                        "train_indexer_only=True requires a positive "
                         f"dsa_indexer_loss_coeff, got {loss_coeff!r}; otherwise the "
                         "Indexer receives no training signal."
                     )
-                if not any(
+                # There are two kinds of Indexer, one per attention flavour, and
+                # either one is enough to have something to train. Both
+                # conditions mirror how the layer spec decides
+                # (``gpt_layer_specs.py``: ``csa_dense_mode`` drops the
+                # CSAIndexer, ``non_absorbed_mqa_dense`` drops the DSAIndexer).
+                has_csa_indexer = not self.csa_dense_mode and any(
                     1 < int(ratio) < 128 for ratio in self.csa_compress_ratios
-                ):
+                )
+                has_mqa_indexer = (
+                    getattr(self, "non_absorbed_mqa", False)
+                    and not getattr(self, "non_absorbed_mqa_dense", False)
+                    and any(
+                        int(ratio) == -2 for ratio in self.csa_compress_ratios
+                    )
+                )
+                if not (has_csa_indexer or has_mqa_indexer):
                     raise ValueError(
-                        "csa_train_indexer_only=True requires at least one CSA layer "
-                        "with 1 < csa_compress_ratios[i] < 128, got "
-                        f"{self.csa_compress_ratios}."
+                        "train_indexer_only=True requires the model to build at "
+                        "least one Indexer, and this config builds none, so there "
+                        "would be no trainable parameter left. Either a CSA layer "
+                        "(csa_dense_mode=False plus some 1 < csa_compress_ratios[i] "
+                        "< 128) or a non-absorbed MQA layer (non_absorbed_mqa=True, "
+                        "non_absorbed_mqa_dense=False plus some "
+                        "csa_compress_ratios[i] == -2). Got "
+                        f"csa_dense_mode={self.csa_dense_mode}, "
+                        f"non_absorbed_mqa={getattr(self, 'non_absorbed_mqa', False)}, "
+                        "non_absorbed_mqa_dense="
+                        f"{getattr(self, 'non_absorbed_mqa_dense', False)}, "
+                        f"csa_compress_ratios={self.csa_compress_ratios}."
                     )
                 if getattr(self, "enable_hy_sparse_attention", False):
                     # enable_hy_sparse_attention swaps the layer class for
@@ -1708,14 +1730,14 @@ class TransformerConfig(ModelParallelConfig):
                     # attention forward swallows via **kwargs without using it, so
                     # this combination is untested anyway. Fail loudly instead.
                     raise ValueError(
-                        "csa_train_indexer_only=True is incompatible with "
+                        "train_indexer_only=True is incompatible with "
                         "enable_hy_sparse_attention=True: HySparseTransformerLayer "
                         "does not keep its recompute segment differentiable, so the "
                         "Indexer would silently receive no gradient."
                     )
-        elif getattr(self, "csa_train_indexer_only", False):
+        elif getattr(self, "train_indexer_only", False):
             raise ValueError(
-                "csa_train_indexer_only=True is only supported with "
+                "train_indexer_only=True is only supported with "
                 "experimental_attention_variant='dsv4_hybrid', got "
                 f"{self.experimental_attention_variant!r}."
             )
