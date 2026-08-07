@@ -17,8 +17,8 @@
 import importlib.util
 import os
 import sys
+import types
 import unittest
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -564,7 +564,7 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
         output = paddle.randn([b, sq, np_heads, hn])
         lse = paddle.randn([b, sq, np_heads])
 
-        ctx = SimpleNamespace(
+        ctx = types.SimpleNamespace(
             saved_tensor=lambda: (
                 query,
                 kv_full,

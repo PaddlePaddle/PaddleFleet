@@ -865,6 +865,231 @@ class TestHyperConnectionTransformerLayerForward(unittest.TestCase):
         )
 
 
+class _RecordingSelfAttn(paddle.nn.Layer):
+    """Self-attention stub that records the cache-related kwargs it receives
+    and mutates the provided KV cache.
+
+    Lets tests assert that the mHC layer forwards past_key_values / layer_idx /
+    use_cache into self-attention and drives one cache update per step. Returns
+    an (output, bias) tuple matching the real attention contract consumed by
+    fused_h_res_h_post_bda.
+    """
+
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.calls = []
+
+    def forward(self, hidden_states, **kwargs):
+        seq_len = hidden_states.shape[0]  # seq-first: [S, B, C]
+        self.calls.append(
+            {
+                "layer_idx": kwargs.get("layer_idx"),
+                "use_cache": kwargs.get("use_cache"),
+                "past_key_values": kwargs.get("past_key_values"),
+                "rope_freqs_cis": kwargs.get("rope_freqs_cis"),
+                "rotary_pos_emb": kwargs.get("rotary_pos_emb"),
+                "swa_rotary_pos_emb": kwargs.get("swa_rotary_pos_emb"),
+                "swa_rotary_pos_cos": kwargs.get("swa_rotary_pos_cos"),
+                "swa_rotary_pos_sin": kwargs.get("swa_rotary_pos_sin"),
+                "seq_len": seq_len,
+            }
+        )
+        past_key_values = kwargs.get("past_key_values")
+        if kwargs.get("use_cache", False) and past_key_values is not None:
+            past_key_values.update(kwargs.get("layer_idx"), seq_len)
+        return paddle.zeros_like(hidden_states), None
+
+
+class _FakeKVCache:
+    """Minimal KV-cache double recording per-layer update calls."""
+
+    def __init__(self):
+        self.updates = []  # (layer_idx, seq_len) in call order
+        self.seen_lengths = {}  # layer_idx -> accumulated cached length
+
+    def update(self, layer_idx, seq_len):
+        self.updates.append((layer_idx, seq_len))
+        self.seen_lengths[layer_idx] = (
+            self.seen_lengths.get(layer_idx, 0) + seq_len
+        )
+
+
+class TestHyperConnectionTransformerLayerCacheDecode(unittest.TestCase):
+    """Two-step (prefill -> decode) regression for KV-cache propagation.
+
+    Covers both the plain-RoPE branch and the rope_freqs_cis branch of
+    HyperConnectionTransformerLayer._forward_attention, asserting that
+    past_key_values / layer_idx / use_cache reach self-attention and that the
+    cache is updated exactly once per step with the correct layer number.
+    """
+
+    def _build_layer(self, layer_number):
+        config = _make_hc_config()
+        layer = _make_hc_layer(config, layer_number=layer_number)
+        layer.eval()
+        stub = _RecordingSelfAttn(config.hidden_size)
+        layer.self_attn = stub
+        return config, layer, stub
+
+    def _assert_cache_flow(self, stub, cache, layer_number, seq_lens):
+        # One self-attention invocation per step (prefill, then decode).
+        self.assertEqual(len(stub.calls), len(seq_lens))
+        for call in stub.calls:
+            self.assertTrue(call["use_cache"])
+            self.assertEqual(call["layer_idx"], layer_number)
+            self.assertIs(call["past_key_values"], cache)
+        # Cache updated once per step with the right layer number and lengths.
+        self.assertEqual(cache.updates, [(layer_number, s) for s in seq_lens])
+        self.assertEqual(cache.seen_lengths[layer_number], sum(seq_lens))
+
+    def test_prefill_then_decode_plain_rope(self):
+        """Plain-RoPE branch: rotary_pos_emb forwarded, cache updated per step."""
+        layer_number = 2
+        config, layer, stub = self._build_layer(layer_number)
+        n, C, head_dim = (
+            config.num_residual_streams,
+            config.hidden_size,
+            config.head_dim,
+        )
+        B, S_prefill, S_decode = 2, 4, 1
+        cache = _FakeKVCache()
+
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([S_prefill, B, n * C]),
+                "attention_mask": None,
+                "rotary_pos_emb": paddle.randn([B, S_prefill, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([S_decode, B, n * C]),
+                "attention_mask": None,
+                "rotary_pos_emb": paddle.randn([B, S_decode, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+
+        self._assert_cache_flow(
+            stub, cache, layer_number, [S_prefill, S_decode]
+        )
+        # Plain-RoPE branch must take the else-branch: rotary_pos_emb is
+        # forwarded and rope_freqs_cis is not.
+        for call in stub.calls:
+            self.assertIsNotNone(call["rotary_pos_emb"])
+            self.assertIsNone(call["rope_freqs_cis"])
+
+    def test_prefill_then_decode_rope_freqs_cis(self):
+        """rope_freqs_cis branch: rope_freqs_cis forwarded, cache updated per step."""
+        layer_number = 3
+        config, layer, stub = self._build_layer(layer_number)
+        n, C, head_dim = (
+            config.num_residual_streams,
+            config.hidden_size,
+            config.head_dim,
+        )
+        B, S_prefill, S_decode = 2, 4, 1
+        cache = _FakeKVCache()
+
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([S_prefill, B, n * C]),
+                "attention_mask": None,
+                "rope_freqs_cis": paddle.randn([B, S_prefill, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([S_decode, B, n * C]),
+                "attention_mask": None,
+                "rope_freqs_cis": paddle.randn([B, S_decode, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+
+        self._assert_cache_flow(
+            stub, cache, layer_number, [S_prefill, S_decode]
+        )
+        # rope_freqs_cis branch must take the elif-branch: rope_freqs_cis is
+        # forwarded and rotary_pos_emb is not.
+        for call in stub.calls:
+            self.assertIsNotNone(call["rope_freqs_cis"])
+            self.assertIsNone(call["rotary_pos_emb"])
+
+
+class TestHyperConnectionTransformerLayerSWARoPE(unittest.TestCase):
+    """SWA + mHC regression for sliding-window RoPE propagation.
+
+    The plain-RoPE branch of HyperConnectionTransformerLayer._forward_attention
+    must forward swa_rotary_pos_emb / swa_rotary_pos_cos / swa_rotary_pos_sin to
+    self-attention, mirroring the base TransformerLayer. When self.is_swa is
+    set, Attention.forward overrides the plain rotary tensors with these SWA
+    ones; if they arrive as None, RoPE is skipped entirely and both prefill and
+    KV-cache decode produce wrong attention outputs. This guards the plumbing:
+    without the fix the stub would receive None for all three.
+    """
+
+    def _build_layer(self, layer_number):
+        # sliding_window set so this exercises the SWA-enabled configuration
+        # path alongside hyper-connections.
+        config = _make_hc_config(sliding_window=2)
+        layer = _make_hc_layer(config, layer_number=layer_number)
+        layer.eval()
+        stub = _RecordingSelfAttn(config.hidden_size)
+        layer.self_attn = stub
+        return config, layer, stub
+
+    def _step(self, layer, config, cache, seq_len, batch):
+        n, C, head_dim = (
+            config.num_residual_streams,
+            config.hidden_size,
+            config.head_dim,
+        )
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([seq_len, batch, n * C]),
+                "attention_mask": None,
+                "rotary_pos_emb": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_emb": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_cos": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_sin": paddle.randn([batch, seq_len, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+
+    def test_prefill_then_decode_forwards_swa_rope(self):
+        """Both prefill and decode must forward all three SWA RoPE tensors."""
+        layer_number = 2
+        config, layer, stub = self._build_layer(layer_number)
+        B, S_prefill, S_decode = 2, 4, 1
+        cache = _FakeKVCache()
+
+        self._step(layer, config, cache, S_prefill, B)
+        self._step(layer, config, cache, S_decode, B)
+
+        # One self-attention call per step, and every step forwarded the SWA
+        # RoPE trio (None here is the exact regression this guards).
+        self.assertEqual(len(stub.calls), 2)
+        for call in stub.calls:
+            self.assertIsNotNone(call["swa_rotary_pos_emb"])
+            self.assertIsNotNone(call["swa_rotary_pos_cos"])
+            self.assertIsNotNone(call["swa_rotary_pos_sin"])
+            # Plain rotary_pos_emb still forwarded alongside the SWA tensors.
+            self.assertIsNotNone(call["rotary_pos_emb"])
+        # Cache still driven once per step with the correct layer number.
+        self.assertEqual(
+            cache.updates, [(layer_number, S_prefill), (layer_number, S_decode)]
+        )
+
+
 class TestHyperConnectionTransformerLayerRecompute(unittest.TestCase):
     """Tests for HyperConnectionTransformerLayer with selective recompute."""
 
