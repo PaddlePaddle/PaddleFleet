@@ -15,7 +15,7 @@
 import sys
 import unittest
 from functools import wraps
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import paddle
@@ -85,8 +85,6 @@ from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
     _apply_rope,
     _build_compressed_causal_mask,
-    _resolve_csa_indexer_attn_topk_effective,
-    _resolve_csa_indexer_loss_topk_effective,
     get_compress_topk_idxs,
     get_mqa_causal_topk_idxs,
     get_valid_range,
@@ -517,29 +515,30 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 compress_ratio=4,
             )
 
-    def test_phase2_loss_topk_does_not_expand_attention_topk(self):
+    def test_topk_effective_in_phase2_and_phase3(self):
         config = _make_config(
             dsa_index_topk=2,
         )
         n_compressed = 8
 
+        ctx = MagicMock(
+            config=config,
+            indexer=MagicMock(index_topk=config.dsa_index_topk),
+        )
+
+        # phase2 uses full range
         self.assertEqual(
-            _resolve_csa_indexer_loss_topk_effective(
-                config, config.dsa_index_topk, n_compressed
+            CompressedSparseAttention._resolve_topk_effective(
+                ctx, n_compressed
             ),
             n_compressed,
         )
-        self.assertEqual(
-            _resolve_csa_indexer_attn_topk_effective(
-                config.dsa_index_topk, n_compressed
-            ),
-            config.dsa_index_topk,
-        )
 
+        # phase 3 uses the configured topk
         config.dsa_indexer_use_sparse_loss = True
         self.assertEqual(
-            _resolve_csa_indexer_loss_topk_effective(
-                config, config.dsa_index_topk, n_compressed
+            CompressedSparseAttention._resolve_topk_effective(
+                ctx, n_compressed
             ),
             config.dsa_index_topk,
         )
@@ -1490,6 +1489,89 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             ).item(),
             "cuDNN-indexer docmask: packed doc1 != doc1 alone",
         )
+
+    def test_cudnn_indexer_with_cudnn_sparse_attn(self):
+        """Test the path where both indexer and sparse_attn use cudnn."""
+        import paddlefleet_ops.cudnn.deepseek_sparse_attention as DSA
+
+        import paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn as SA
+        import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as IND
+
+        paddle.seed(_SEED)
+        ratio = 4
+        config = _make_config(
+            csa_compress_ratios=[ratio],
+            num_layers=1,
+            csa_indexer_backend="cudnn",
+            csa_sparse_attn_backend="cudnn",
+        )
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(config, layer_number=0)
+        attn.train()
+
+        seq_len = 128
+        seq_len_comp = seq_len // ratio
+        hidden_states = paddle.randn(
+            [1, seq_len, config.hidden_size], dtype="bfloat16"
+        )
+        startend_row_indices = paddle.full(
+            [1, 1, seq_len, 1], seq_len, dtype="int32"
+        )
+
+        # Mock cudnn kernel outputs
+        valid_mask = paddle.arange(1, seq_len + 1).unsqueeze(
+            1
+        ) >= paddle.arange(ratio, seq_len + ratio, ratio)
+        topk_indices = paddle.arange(seq_len_comp, dtype="int32").broadcast_to(
+            [1, seq_len, seq_len_comp]
+        )
+        topk_indices = paddle.where(
+            valid_mask, topk_indices, paddle.to_tensor(-1, dtype="int32")
+        )
+
+        topk_scores = paddle.randn([1, seq_len, seq_len_comp], dtype="float32")
+        topk_scores = paddle.where(
+            valid_mask,
+            topk_scores,
+            paddle.to_tensor(float("-inf"), dtype="float32"),
+        )
+
+        def _mock_indexer_topk(index_q, index_k_comp, weights, **kwargs):
+            self.assertEqual(kwargs.get("topk_effective"), seq_len_comp)
+            self.assertTrue(kwargs.get("return_topk_scores"))
+            return topk_indices, None, topk_scores
+
+        def _mock_flash_mla(q, kv, attn_sink, topk_idxs, **kwargs):
+            self.assertEqual(kwargs.get("indexer_topk"), seq_len_comp)
+            output = paddle.randn(
+                [*q.shape[:3], kv.shape[-1]], dtype="bfloat16"
+            )
+            lse = paddle.randn(q.shape[:3], dtype="float32")
+            return output, lse, lse
+
+        def _mock_target(
+            q_attn, k_attn, lse, topk_indices, softmax_scale, **kwargs
+        ):
+            self.assertEqual(type(q_attn.shape), tuple)
+            self.assertEqual(type(q_attn.stride()), tuple)
+            self.assertEqual(type(q_attn.stride(0)), int)
+            target = paddle.randn([1, seq_len, seq_len_comp], dtype="float32")
+            return {"target": target}
+
+        with (
+            patch.object(IND, "cudnn_indexer_topk_fwd", _mock_indexer_topk),
+            patch.object(SA, "flash_mla_sparse_attn", _mock_flash_mla),
+            patch.object(
+                DSA, "sparse_attn_score_recompute_wrapper", _mock_target
+            ),
+        ):
+            output, _ = attn(
+                hidden_states,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
+
+        self.assertTrue(output.isfinite().all().item())
 
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):

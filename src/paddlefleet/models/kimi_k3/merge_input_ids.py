@@ -25,7 +25,8 @@ def _where_2d(cond: paddle.Tensor):
     if nz.shape[0] == 0:
         empty = paddle.zeros([0], dtype="int64")
         return empty, empty
-    return nz[:, 0], nz[:, 1]
+    # ``nz[:, i]`` is strided view; make contiguous for ``paddle.index_put``.
+    return nz[:, 0].contiguous(), nz[:, 1].contiguous()
 
 
 def merge_input_ids_with_image_features(
