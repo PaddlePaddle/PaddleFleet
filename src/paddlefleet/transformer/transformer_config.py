@@ -1240,6 +1240,28 @@ class TransformerConfig(ModelParallelConfig):
         "csa_rope_type": "csa_rope_type",
     }
 
+    # Config keys that were renamed and deliberately left without a silent
+    # alias: value -> the migration hint shown when a stale key is supplied.
+    # ``_process_attribute``'s fallback is ``setattr``, so without this table a
+    # stale key would be absorbed as a dead attribute and the feature it used to
+    # switch on would silently stay off. Same intent as the
+    # ``sonicmoe_quant_format`` guard below.
+    renamed_config_keys = {
+        "non_absorbed_mqa": (
+            "Use hybrid_mla_attention instead: non_absorbed_mqa=True becomes "
+            "hybrid_mla_attention='mqa_dsa', non_absorbed_mqa=False becomes "
+            "hybrid_mla_attention='mha' (the default)."
+        ),
+        "non_absorbed_mqa_dense": (
+            "Use hybrid_mla_attention instead: non_absorbed_mqa_dense=True "
+            "becomes hybrid_mla_attention='mqa_full_causal', "
+            "non_absorbed_mqa_dense=False becomes hybrid_mla_attention='mha' "
+            "(the default)."
+        ),
+        "csa_train_indexer_only": "Use train_indexer_only instead.",
+        "csa_indexer_init_from_scratch": "Use indexer_init_from_scratch instead.",
+    }
+
     @classmethod
     def from_config(cls, config_dict):
         # note(zhangweilong): if cls(),will call __post_init__ directly,but __new__ will skip some attr init .please check provider attr
@@ -1282,6 +1304,12 @@ class TransformerConfig(ModelParallelConfig):
         elif key == "sonicmoe_quant_format":
             raise ValueError(
                 "sonicmoe_quant_format is deprecated. Use fp8_weight_quant_format instead."
+            )
+        elif key in self.renamed_config_keys:
+            raise ValueError(
+                f"{key} was renamed and is no longer supported. "
+                f"{self.renamed_config_keys[key]} Update the config that still "
+                f"sets {key}; it would otherwise be silently ignored."
             )
         else:
             setattr(self, key, value)

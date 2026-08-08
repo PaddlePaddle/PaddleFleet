@@ -48,9 +48,14 @@ Coverage:
      ``dsa_indexer_use_sparse_loss=False``: attention consumes the full
      per-document causal table (bit-identical to ``"mqa_full_causal"``) while
      the indexer's top-k serves the wide KL loss only.
+  8. Migration: the renamed config keys (``non_absorbed_mqa*``,
+     ``csa_train_indexer_only``, ``csa_indexer_init_from_scratch``) ship without
+     an alias, so a stale config must raise rather than be absorbed into a
+     silent default.
 """
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import paddle
@@ -426,6 +431,61 @@ class TestHybridMLAConfig(unittest.TestCase):
                 self.assertEqual(
                     config.dsa_indexer_use_sparse_loss, sparse_loss
                 )
+
+    def test_renamed_config_keys_are_rejected_not_absorbed(self):
+        """A stale config key must fail loudly instead of turning into a no-op.
+
+        The renames here ship without a compatibility alias (the repo's habit --
+        see ``sonicmoe_quant_format``), so the only question is whether a config
+        that still carries the old key is *told*. Two paths, two mechanisms:
+
+        * direct construction -- the dataclass ``__init__`` already raises
+          ``TypeError`` on an unknown kwarg, so nothing was needed;
+        * :meth:`TransformerConfig.from_config` -- ``_process_attribute``'s
+          fallback is a bare ``setattr``, so the stale key used to be absorbed
+          as a dead attribute. The switch it was meant to flip stayed at its
+          default and nothing complained: ``non_absorbed_mqa=True`` silently
+          became ``hybrid_mla_attention="mha"``. That is the hole this pins.
+        """
+        legacy_to_new = {
+            "non_absorbed_mqa": "hybrid_mla_attention",
+            "non_absorbed_mqa_dense": "hybrid_mla_attention",
+            "csa_train_indexer_only": "train_indexer_only",
+            "csa_indexer_init_from_scratch": "indexer_init_from_scratch",
+        }
+        for legacy, replacement in legacy_to_new.items():
+            # ``False`` must be rejected too: a stale key is a stale config even
+            # when its value happens to agree with the new field's default, and
+            # accepting it would leave the writer thinking the key still works.
+            for value in (True, False):
+                with self.subTest(legacy=legacy, value=value):
+                    stale = SimpleNamespace(**self._kwargs(**{legacy: value}))
+                    with self.assertRaises(ValueError) as raised:
+                        TransformerConfig.from_config(stale)
+                    message = str(raised.exception)
+                    self.assertIn(f"{legacy} was renamed", message)
+                    # The message has to name the replacement, otherwise the
+                    # reader has to go read the diff to migrate.
+                    self.assertIn(replacement, message)
+                    with self.assertRaises(TypeError):
+                        TransformerConfig(**self._kwargs(**{legacy: value}))
+
+    def test_from_config_accepts_the_current_key_names(self):
+        """Control for the test above: the rejection is keyed on the old names
+        only, so the new ones must survive the same ``from_config`` path.
+        """
+        fresh = SimpleNamespace(
+            **self._mqa_dsa_kwargs(
+                train_indexer_only=True,
+                dsa_indexer_use_sparse_loss=False,
+                dsa_indexer_loss_coeff=0.01,
+                indexer_init_from_scratch=True,
+            )
+        )
+        config = TransformerConfig.from_config(fresh)
+        self.assertEqual(config.hybrid_mla_attention, "mqa_dsa")
+        self.assertTrue(config.train_indexer_only)
+        self.assertTrue(config.indexer_init_from_scratch)
 
 
 @_GPU
