@@ -60,13 +60,14 @@ import unittest
 
 import paddle
 import paddle.distributed as dist
-from paddleformers.trainer.trainer_utils import init_optimizer
 
 from .hybrid_mla_utils import (
+    _CONFIG_DIR,
     _DSA_CFG,
     _GPU,
     _MHA_CFG,
     _MINUS2_LAYERS,
+    _PARENT_REPO_AVAILABLE,
     _add_repo_root_to_sys_path,
     _build_real_attn,
     _flash_attn_version,
@@ -75,6 +76,47 @@ from .hybrid_mla_utils import (
 )
 
 _add_repo_root_to_sys_path()
+
+
+def _paddleformers_available():
+    """``paddleformers`` is not part of the PaddleFleet CI image.
+
+    It must not be imported at module scope: a top-level import turns "not
+    installed" into a *collection* error that aborts the whole single-card run
+    instead of skipping this one file. Every other test in this directory that
+    reaches into PaddleFormers or the erniebot parent repo imports inside a
+    function for the same reason.
+    """
+    try:
+        from paddleformers.trainer.trainer_utils import (  # noqa: F401
+            init_optimizer,
+        )
+    except Exception:  # pragma: no cover - depends on the image
+        return False
+    return True
+
+
+def _init_optimizer():
+    """Late import, so collection never depends on paddleformers."""
+    from paddleformers.trainer.trainer_utils import init_optimizer
+
+    return init_optimizer
+
+
+def setUpModule():
+    """Skip from here rather than at import time.
+
+    Everything in this file is driven off the erniebot parent repo's production
+    ``model_config.json`` (loaded through PaddleFormers), so a standalone
+    PaddleFleet checkout still collects these tests and exits 0.
+    """
+    if not _PARENT_REPO_AVAILABLE:
+        raise unittest.SkipTest(
+            f"requires the erniebot parent repo configs at {_CONFIG_DIR}"
+        )
+    if not _paddleformers_available():
+        raise unittest.SkipTest("requires paddleformers")
+
 
 # The five parameters that only exist for ``hybrid_mla_attention="mqa_dsa"``.
 _INDEXER_KEYS = (
@@ -346,7 +388,7 @@ class TestMasterWeightCoverage(unittest.TestCase):
         optimizer = paddle.optimizer.AdamW(
             learning_rate=1e-4, parameters=params, multi_precision=True
         )
-        init_optimizer(optimizer, sharded, metadata)
+        _init_optimizer()(optimizer, sharded, metadata)
         return sharded, optimizer
 
     def test_full_metadata_and_full_optimizer_recovers_every_param(self):
