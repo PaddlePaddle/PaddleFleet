@@ -213,9 +213,13 @@ _CAPTURED = []
 class RecordingMQA(MQALatentAttention):
     """Captures the ``token_indices`` handed to the sparse kernel."""
 
-    def _sparse_attn(self, query, kv, token_indices, sm_scale, d_v):
+    def _sparse_attn(
+        self, query, kv, token_indices, sm_scale, d_v, indexer_topk=0
+    ):
         _CAPTURED.append(token_indices.numpy().copy())
-        return super()._sparse_attn(query, kv, token_indices, sm_scale, d_v)
+        return super()._sparse_attn(
+            query, kv, token_indices, sm_scale, d_v, indexer_topk
+        )
 
 
 def _build_module(
