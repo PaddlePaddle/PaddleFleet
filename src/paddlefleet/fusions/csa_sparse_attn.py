@@ -21,6 +21,8 @@ final sparse MQA attention:
   - "cudnn": FlashMLA sparse forward + cuDNN DSA backward
 """
 
+import functools
+
 import paddle
 from paddle import Tensor
 
@@ -126,7 +128,27 @@ def _csa_compute_topk_length(topk_idxs_flat: Tensor) -> Tensor:
     return trailing_len
 
 
+@functools.cache
+def _csa_bwd_honours_topk_length_holes() -> bool:
+    """Whether the cuDNN DSA backward kernel guards ``-1`` inside ``topk_length``.
+
+    ``_csa_compute_topk_length`` returns a *trailing* bound, so ``-1`` entries may
+    still appear inside ``[0, topk_length)`` (multi-doc leading/interior holes).
+    The SM100 kernel keeps its ``topk_idx >= 0`` guard on that path, but the SM90
+    kernel drops it once ``topk_length`` is given: it dereferences ``mKV[-1]``
+    while loading KV and atomically adds dKV at a negative row offset -> CUDA 700.
+
+    Until the SM90 kernel is fixed upstream, report False there so the caller
+    falls back to the ``topk_length=None`` path, which keeps both guards. That
+    path is functionally identical; it only loses the early-stop speedup.
+    """
+    major, _ = paddle.device.cuda.get_device_capability()
+    return major >= 10
+
+
 class CSASparseAttention(paddle.autograd.PyLayer):
+    _lse_indexer = None
+
     @staticmethod
     def forward(
         ctx,
@@ -137,6 +159,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         softmax_scale,
         backend,
         topk_length=None,
+        indexer_topk=0,
     ):
         from paddlefleet.fusions.csa_sparse_attn_utils import prepare_inputs
 
@@ -152,7 +175,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         # placeholder gradients.
         ctx.has_topk_length = topk_length is not None
         # Paddle PyLayer requires None for stop_gradient inputs; record here.
-        # In phase 2 (``csa_train_indexer_only``) attn_sink is a frozen backbone
+        # In phase 2 (``train_indexer_only``) attn_sink is a frozen backbone
         # parameter while query/kv_full still carry activation gradients.
         ctx.query_needs_grad = not query.stop_gradient
         ctx.kv_full_needs_grad = not kv_full.stop_gradient
@@ -169,14 +192,16 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 flash_mla_sparse_attn,
             )
 
-            output, lse, _ = flash_mla_sparse_attn(
+            output, lse, lse_indexer = flash_mla_sparse_attn(
                 query,
                 kv_full,
                 attn_sink,
                 topk_idxs,
                 sm_scale=ctx.softmax_scale,
                 topk_length=topk_length,
+                indexer_topk=indexer_topk,
             )
+            CSASparseAttention._lse_indexer = lse_indexer
         else:
             if topk_length is not None:
                 raise NotImplementedError(
@@ -215,7 +240,13 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             lse_flat = lse.reshape([b * sq, np_heads])
             topk_idxs_flat = _local_to_global_flat(topk_idxs, s_kv)
 
-            topk_length = _csa_compute_topk_length(topk_idxs_flat)
+            # SM90's backward kernel is unsafe with a trailing topk_length bound
+            # (see _csa_bwd_honours_topk_length_holes), so fall back to None there.
+            topk_length = (
+                _csa_compute_topk_length(topk_idxs_flat)
+                if _csa_bwd_honours_topk_length_holes()
+                else None
+            )
 
             dq_flat, dkv_flat, d_sink = csa_sparse_attn_bwd_cudnn(
                 q_flat,
@@ -274,6 +305,7 @@ def csa_sparse_attn(
     softmax_scale,
     backend="tilelang",
     topk_length=None,
+    indexer_topk=0,
 ):
     """Unified CSA sparse attention entry point.
 
@@ -298,7 +330,7 @@ def csa_sparse_attn(
             f"csa_sparse_attn_backend={backend!r} is invalid. "
             "Must be one of {'unfused', 'tilelang', 'cudnn'}."
         )
-    return CSASparseAttention.apply(
+    output = CSASparseAttention.apply(
         query,
         kv_full,
         attn_sink,
@@ -306,4 +338,10 @@ def csa_sparse_attn(
         softmax_scale,
         backend,
         topk_length,
+        indexer_topk,
     )
+    if CSASparseAttention._lse_indexer is not None:
+        lse_indexer = CSASparseAttention._lse_indexer
+        CSASparseAttention._lse_indexer = None
+        return output, lse_indexer
+    return output

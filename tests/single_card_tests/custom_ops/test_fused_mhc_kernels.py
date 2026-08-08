@@ -28,11 +28,13 @@ from paddle import Tensor
 
 from paddlefleet.fusions.fused_mhc_kernels import is_cutile_available
 from paddlefleet.transformer.hyper_connection import (
+    HyperConnectionModule,
     native_h_aggregate,
     native_h_post_bda,
     native_proj_rms,
     native_sinkhorn,
 )
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,6 +60,13 @@ LARGE_TF32_BWD_ATOL, LARGE_TF32_BWD_RTOL = 1e-2, 1e-2
 LARGE_COSINE_SIM_THRESH = 0.998
 
 _MHC_COMPUTE_H_EPS = 1e-6
+
+# Shapes for the frozen-input backward-contract tests below. Deliberately tiny:
+# the contract is a per-position boolean, not a numerical property, so the cells
+# only need to be large enough to be legal for each kernel.
+_FZ_S, _FZ_B, _FZ_N, _FZ_C = 2, 3, 4, 64
+_FZ_K, _FZ_PROJ_N = 64, 16
+_FZ_SINKHORN_ITERS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +905,297 @@ class TestEndToEndFused(unittest.TestCase):
         _assert_cosine_similar(
             grad_f, grad_r, COSINE_SIM_THRESH, "E2E fused hidden_states grad"
         )
+
+
+# ============================================================================
+# Frozen-input backward contract
+# ============================================================================
+
+
+class TestFrozenInputBackwardContract(unittest.TestCase):
+    """``backward`` must return ``None`` at exactly the frozen forward inputs.
+
+    Paddle enforces one half of this and aborts::
+
+        InvalidArgumentError: GradNodePyLayer_FusedProjRms's backward function
+        should return None at 1 position, ...
+
+    The opposite mistake -- returning ``None`` where the input *was* trainable
+    -- is not checked by anyone and silently drops that gradient, so both
+    directions are asserted here.
+
+    This shape is reachable in production, not hypothetical: the shipped configs
+    enable hyper connections with ``use_fused_mhc: true``, and the DSA warmup
+    phase runs ``train_indexer_only: true`` -- a frozen backbone whose mHC block
+    still receives a backward pass, because the indexer loss is attached
+    downstream. ``FusedProjRms``'s ``weight`` (the frozen ``mapping_proj``
+    parameter) is the position that bites first.
+
+    One cell per (PyLayer, frozen position), which is the granularity the
+    implementation is written at: one independent ``if`` per position. Exhausting
+    the power set would add 41 more cells and no signal.
+
+    Gating: the same ``_requires_cutile`` gate as the fused tests above. These
+    drive the same kernels at smaller shapes, so any machine that can run those
+    can run these.
+    """
+
+    def setUp(self):
+        paddle.set_device("gpu")
+
+    # -- forward inputs, ordered as the PyLayer takes them -------------------
+
+    @staticmethod
+    def _h_aggregate_inputs():
+        return [
+            ("x", _rand(_FZ_S, _FZ_B, _FZ_N, _FZ_C)),
+            ("h_pre", _rand(_FZ_S, _FZ_B, _FZ_N)),
+        ]
+
+    @staticmethod
+    def _h_post_bda_inputs(with_bias):
+        return [
+            ("h_res", _rand(_FZ_S, _FZ_B, _FZ_N, _FZ_N)),
+            ("original_residual", _rand(_FZ_S, _FZ_B, _FZ_N, _FZ_C)),
+            ("h_post", _rand(_FZ_S, _FZ_B, _FZ_N)),
+            ("x", _rand(_FZ_S, _FZ_B, _FZ_C)),
+            ("bias", _rand(_FZ_C) if with_bias else None),
+        ]
+
+    @staticmethod
+    def _proj_rms_inputs():
+        return [
+            ("x", _rand(_FZ_S * _FZ_B, _FZ_K)),
+            ("weight", _rand(_FZ_K, _FZ_PROJ_N)),
+        ]
+
+    @staticmethod
+    def _run(op, inputs, frozen):
+        """Clone ``inputs``, freeze ``frozen``, run ``op``, then backward.
+
+        Returns the cloned tensors by name so the caller can read ``.grad``.
+        ``None`` entries (an absent bias) are passed through untouched.
+        """
+        args, by_name = [], {}
+        for name, value in inputs:
+            if value is None:
+                args.append(None)
+                by_name[name] = None
+                continue
+            tensor = value.clone()
+            tensor.stop_gradient = name == frozen
+            args.append(tensor)
+            by_name[name] = tensor
+        out = op(*args)
+        outs = list(out) if isinstance(out, tuple) else [out]
+        paddle.autograd.backward(outs, [paddle.ones_like(o) for o in outs])
+        return by_name
+
+    def _assert_contract(self, label, fused_op, native_op, inputs, frozen):
+        fused = self._run(fused_op, inputs, frozen)
+        # The reference freezes nothing, which additionally pins that freezing
+        # one input leaves every other gradient unchanged.
+        reference = self._run(native_op, inputs, None)
+        self.assertIsNone(
+            fused[frozen].grad,
+            f"{label}: frozen {frozen!r} must receive no gradient",
+        )
+        for name, tensor in fused.items():
+            if tensor is None or name == frozen:
+                continue
+            self.assertIsNotNone(
+                tensor.grad,
+                f"{label}: {name!r} lost its gradient while {frozen!r} "
+                "was frozen",
+            )
+            _assert_not_all_zero(tensor.grad, f"{label}: {name} grad")
+            _assert_close(
+                tensor.grad,
+                reference[name].grad,
+                TF32_BWD_ATOL,
+                TF32_BWD_RTOL,
+                f"{label}: {name} grad with {frozen!r} frozen",
+            )
+
+    @_requires_cutile
+    def test_h_aggregate_frozen_positions(self):
+        from paddlefleet.fusions.fused_mhc_kernels import fused_h_aggregate
+
+        for frozen in ("x", "h_pre"):
+            with self.subTest(frozen=frozen):
+                self._assert_contract(
+                    "h_aggregate",
+                    fused_h_aggregate,
+                    native_h_aggregate,
+                    self._h_aggregate_inputs(),
+                    frozen,
+                )
+
+    @_requires_cutile
+    def test_h_post_bda_frozen_positions(self):
+        """Both arities: with a bias the PyLayer returns 5 gradients, without it
+        4, so the ``None`` positions differ between the two branches.
+        """
+        from paddlefleet.fusions.fused_mhc_kernels import fused_h_post_bda
+
+        for with_bias in (False, True):
+            inputs = self._h_post_bda_inputs(with_bias)
+            for name, value in inputs:
+                if value is None:
+                    continue
+                with self.subTest(bias=with_bias, frozen=name):
+                    self._assert_contract(
+                        f"h_post_bda(bias={with_bias})",
+                        fused_h_post_bda,
+                        native_h_post_bda,
+                        inputs,
+                        name,
+                    )
+
+    @_requires_cutile
+    def test_proj_rms_frozen_positions(self):
+        """``weight`` is the position production actually hits: it is the frozen
+        ``mapping_proj`` parameter under ``train_indexer_only``.
+        """
+        from paddlefleet.fusions.fused_mhc_kernels import fused_proj_rms
+
+        for frozen in ("x", "weight"):
+            with self.subTest(frozen=frozen):
+                self._assert_contract(
+                    "proj_rms",
+                    fused_proj_rms,
+                    native_proj_rms,
+                    self._proj_rms_inputs(),
+                    frozen,
+                )
+
+    @_requires_cutile
+    def test_sinkhorn_frozen_guard_is_unreachable(self):
+        """Pins why the two Sinkhorn guards are *not* in the matrix above.
+
+        Both Sinkhorn PyLayers take a single tensor argument, so freezing it
+        leaves the call with nothing differentiable: Paddle builds no grad node
+        and ``backward`` is never entered. Their ``return None`` guards are
+        therefore dead code, and the honest way to cover that is to assert the
+        unreachability rather than to manufacture an input that cannot exist.
+        """
+        from paddlefleet.fusions.fused_mhc_kernels import fused_sinkhorn
+
+        logits = _rand(_FZ_S, _FZ_B, _FZ_N, _FZ_N)
+        logits.stop_gradient = True
+        for label, op in (
+            ("fused", fused_sinkhorn),
+            ("native", native_sinkhorn),
+        ):
+            with self.subTest(impl=label):
+                out = op(logits, _FZ_SINKHORN_ITERS)
+                self.assertTrue(
+                    out.stop_gradient,
+                    f"{label} sinkhorn: a frozen sole input must yield a "
+                    "grad-free output, i.e. no backward call at all",
+                )
+
+
+class TestFrozenBackboneHyperConnectionModule(unittest.TestCase):
+    """The same contract at module level, in the shape production produces.
+
+    ``train_indexer_only`` freezes every mHC parameter while the segment stays
+    differentiable, because the indexer loss is attached downstream. Two
+    reachable variants:
+
+    * frozen parameters, differentiable hidden states -- reaches
+      ``FusedProjRms`` with ``weight`` frozen and ``x`` trainable;
+    * frozen parameters *and* detached hidden states -- reaches
+      ``FusedHPostBDA`` with ``h_res`` / ``original_residual`` / ``h_post``
+      frozen and only the layer output trainable.
+
+    The fused and native implementations are run on identical data and their
+    surviving gradients compared, so a guard that returns ``None`` in the wrong
+    place shows up as a mismatch rather than as silence.
+    """
+
+    def setUp(self):
+        paddle.set_device("gpu")
+
+    @staticmethod
+    def _module(use_fused):
+        config = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=_FZ_C,
+            num_attention_heads=4,
+            enable_hyper_connections=True,
+            num_residual_streams=_FZ_N,
+            use_fused_mhc=use_fused,
+        )
+        return HyperConnectionModule(config, layer_number=1)
+
+    def _run(self, use_fused, freeze_hidden, with_bias, seed):
+        paddle.seed(seed)
+        module = self._module(use_fused)
+        for param in module.parameters():
+            param.stop_gradient = True
+
+        hidden = _rand(_FZ_S, _FZ_B, _FZ_N * _FZ_C)
+        hidden.stop_gradient = freeze_hidden
+        # Stands in for the differentiable downstream (the indexer loss path):
+        # without it nothing would need a backward pass at all.
+        layer_out = _rand(_FZ_S, _FZ_B, _FZ_C)
+        layer_out.stop_gradient = False
+        bias = _rand(_FZ_C) if with_bias else None
+        if bias is not None:
+            bias.stop_gradient = True
+
+        aggregated, h_res, h_post = module(hidden)
+        output = module.fused_h_res_h_post_bda(
+            h_res,
+            hidden,
+            h_post,
+            (layer_out, bias),
+            dropout_prob=0.0,
+            training=True,
+            fused=True,
+        )
+        (output.sum() + aggregated.sum()).backward()
+
+        for name, param in module.named_parameters():
+            self.assertIsNone(
+                param.grad,
+                f"frozen mHC parameter {name} received a gradient",
+            )
+        self.assertIsNotNone(
+            layer_out.grad, "the differentiable downstream lost its gradient"
+        )
+        return layer_out.grad, None if freeze_hidden else hidden.grad
+
+    @_requires_cutile
+    def test_frozen_mhc_block_backward_matches_native(self):
+        for freeze_hidden in (False, True):
+            for with_bias in (False, True):
+                with self.subTest(
+                    freeze_hidden=freeze_hidden, with_bias=with_bias
+                ):
+                    fused_layer, fused_hidden = self._run(
+                        True, freeze_hidden, with_bias, seed=1234
+                    )
+                    native_layer, native_hidden = self._run(
+                        False, freeze_hidden, with_bias, seed=1234
+                    )
+                    _assert_close(
+                        fused_layer,
+                        native_layer,
+                        TF32_BWD_ATOL,
+                        TF32_BWD_RTOL,
+                        "frozen mHC block: layer-output grad",
+                    )
+                    if not freeze_hidden:
+                        self.assertIsNotNone(fused_hidden)
+                        _assert_close(
+                            fused_hidden,
+                            native_hidden,
+                            TF32_BWD_ATOL,
+                            TF32_BWD_RTOL,
+                            "frozen mHC block: hidden-states grad",
+                        )
 
 
 # ============================================================================

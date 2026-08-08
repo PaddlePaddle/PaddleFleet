@@ -47,6 +47,7 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
 )
+from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -314,6 +315,7 @@ class DSAIndexer(paddle.nn.Layer):
             self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.softmax_scale = self.head_dim**-0.5
+        self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
 
         # wq_b: q_lora_rank -> n_heads * head_dim (duplicated)
         self.wq_b = build_spec_layer(
@@ -396,6 +398,36 @@ class DSAIndexer(paddle.nn.Layer):
                 "supported types are 'rope' and 'yarn'"
             )
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the indexer q-up projection.
+
+        Same treatment as ``CSAIndexer.muon_slice_specs``
+        (``csa_attention.py:1823``): ``wq_b`` packs ``n_heads`` independent heads
+        along the output axis, so Muon must orthogonalise each head's block
+        rather than the concatenated matrix. ``wk`` (a single shared head) and
+        ``weights_proj`` (whose output dim *is* the head count) are whole
+        matrices and need no spec; ``k_norm`` is 1-D and never reaches Muon.
+
+        Consumed only by the per-module mechanism in
+        ``PaddleFormers/paddleformers/trainer/trainer.py:3427-3446``. ErnieBot
+        supplies its own ``build_muon_param_info_map``
+        (``fleet_model/ernie5_v2/modeling.py:2041``) and never walks that path,
+        so this exists to keep PaddleFleet correct standalone: without it,
+        latent MQA + DSA would silently lose per-head slicing there while the
+        CSA indexer kept it.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        return {
+            "wq_b.weight": (ortho_per_head, {"heads": self.n_heads}),
+        }
+
     def _apply_rope(
         self, x: Tensor, freqs: Tensor, mscale: float = 1.0
     ) -> Tensor:
@@ -427,6 +459,8 @@ class DSAIndexer(paddle.nn.Layer):
         self,
         hidden_states: Tensor,  # [b, s, hidden_size] or [s/TP, b, hidden_size] (SP mode)
         q_latent: Tensor,  # [b, s, q_lora_rank] or [s/TP, b, q_lora_rank] (SP mode)
+        position_offset: int = 0,
+        cp_group=None,
     ):
         """Compute q, k, weights before top-k selection.
 
@@ -435,6 +469,21 @@ class DSAIndexer(paddle.nn.Layer):
         When sequence_parallel is enabled, inputs are seq-first sharded
         [s/TP, b, h]. This method gathers them internally (like Megatron DSA)
         and transposes to batch-first [b, s, h] before processing.
+
+        Context parallel (``cp_group`` with ``nranks > 1``, contiguous layout):
+        ``hidden_states`` / ``q_latent`` hold this rank's query slice
+        ``[position_offset, position_offset + s)`` of the global sequence, so
+
+        * RoPE frequencies are built at the **global** length and Q takes the
+          rows of its own slice while K takes all of them;
+        * K is all-gathered to the global length right after ``wk``, i.e. at
+          ``head_dim`` (128) instead of ``hidden_size`` -- 32x less traffic --
+          and before ``k_norm`` / RoPE / ``rotate_activation``, all three of
+          which act per token and therefore commute with a seq-dim gather;
+        * ``weights`` is a per-query row quantity and stays sharded.
+
+        Returns ``q [b, s_local, n_heads, head_dim]``, ``k [b, s_global,
+        head_dim]``, ``weights [b, s_local, n_heads]``.
         """
         # Gather from sequence parallel region if needed
         if self.config.sequence_parallel and self.pg_collection.tp.nranks > 1:
@@ -449,9 +498,14 @@ class DSAIndexer(paddle.nn.Layer):
             q_latent = q_latent.transpose([1, 0, 2])
 
         bsz, seqlen, _ = hidden_states.shape
+        cp_size = (
+            cp_group.nranks
+            if cp_group is not None and cp_group.nranks > 1
+            else 1
+        )
 
-        # Compute RoPE internally
-        rotary_seq_len = seqlen
+        # Compute RoPE internally, at the global sequence length under CP.
+        rotary_seq_len = seqlen * cp_size
         if self.config.rope_type == "rope":
             freqs = self.rotary_pos_emb(rotary_seq_len, packed_seq=False)
             mscale = 1.0
@@ -459,18 +513,26 @@ class DSAIndexer(paddle.nn.Layer):
             freqs, mscale = self.rotary_pos_emb(
                 rotary_seq_len, packed_seq=False
             )
+        # freqs is [1, rotary_seq_len, 1, dim]; Q only needs its own slice.
+        freqs_q = (
+            freqs[:, position_offset : position_offset + seqlen]
+            if cp_size > 1
+            else freqs
+        )
 
         q, _ = self.wq_b(q_latent)  # [b, s, n_heads * head_dim]
         q = q.reshape([bsz, seqlen, self.n_heads, self.head_dim])
-        q = self._apply_rope(q, freqs, mscale)
+        q = self._apply_rope(q, freqs_q, mscale)
 
         k, _ = self.wk(hidden_states)  # [b, s, head_dim]
+        if cp_size > 1:
+            k = all_gather_cp(k, dim=1, group=cp_group)  # [b, s_global, hd]
         k = self.k_norm(k)
         k = self._apply_rope(k.unsqueeze(2), freqs, mscale).squeeze(2)
 
         # Rotate activation (Hadamard transform)
-        q = rotate_activation(q)
-        k = rotate_activation(k)
+        q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
+        k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
         weights, _ = self.weights_proj(hidden_states)
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale
@@ -1226,7 +1288,7 @@ class DSAIndexerLossLoggingHelper:
         total_loss_dict: dict | None = None,
         num_layers: int | None = None,
         csa_compress_ratios: list[int] | None = None,
-        non_absorbed_mqa: bool = False,
+        hybrid_mla_attention: str = "mha",
     ):
         """Track the sparse attention indexer metrics for logging.
 
@@ -1237,9 +1299,11 @@ class DSAIndexerLossLoggingHelper:
             total_loss_dict: Dictionary to accumulate total losses (optional).
             num_layers: Total number of layers with indexer metrics.
             csa_compress_ratios: Per-layer CSA compress ratios.
-            non_absorbed_mqa: ``non_absorbed_mqa`` of a DSV4 hybrid model; when
-                set, the ``-2`` (MLA) entries run an indexer too, so they must
-                be counted here.
+            hybrid_mla_attention: ``hybrid_mla_attention`` of a DSv4 hybrid
+                model. Only ``'mqa_dsa'`` gives the ``-2`` (MLA) entries a DSA
+                indexer, so only then are they counted here. The mapping from
+                mode to "has an indexer" lives here rather than in the caller so
+                there is one place that knows it.
         """
         num_layers = DSAIndexerLossLoggingHelper._infer_num_layers(num_layers)
         DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(
@@ -1256,7 +1320,7 @@ class DSAIndexerLossLoggingHelper:
             num_indexer_layers = sum(
                 1 for ratio in csa_compress_ratios if 1 < ratio < 128
             )
-            if non_absorbed_mqa:
+            if hybrid_mla_attention == "mqa_dsa":
                 # Hybrid MLA entries (-2) carry their own token-level indexer.
                 num_indexer_layers += sum(
                     1 for ratio in csa_compress_ratios if ratio == -2

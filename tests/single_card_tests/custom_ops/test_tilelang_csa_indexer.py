@@ -1364,12 +1364,12 @@ class TestTileLangCSAIndexerLossAutoScaler(unittest.TestCase):
         DSAIndexerLossAutoScaler._main_loss_backward_scale = None
         result = TileLangCSAIndexerLossAutoScaler.apply(
             output,
+            target.detach(),
             index_q_d,
             weights_d,
             index_k_d,
             topk_indices.detach(),
             topk_probs.detach(),
-            target.detach(),
             loss_coeff,
         )
         # Backward through the auto-scaler

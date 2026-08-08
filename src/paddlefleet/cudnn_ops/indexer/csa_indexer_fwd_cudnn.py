@@ -122,6 +122,59 @@ def _validate_indexer_inputs(index_q, index_k_comp, weights):
         raise ValueError(f"cuDNN IndexerForward requires D_i=128, got {dim}")
 
 
+def _indexer_top_k_unfused(
+    input_values: paddle.Tensor,
+    seq_lens: paddle.Tensor,
+    top_k: int,
+    return_val: bool = True,
+):
+    """
+    Deterministic topk in replacement of cudnn indexer_top_k_wrapper.
+
+    ``seq_lens`` is a hard per-row limit: only columns ``[0, seq_lens)`` may be
+    selected. ``indexer_forward_wrapper`` already writes ``-inf`` beyond each
+    row's *causal* limit, but a caller whose valid window is **narrower** than
+    that limit -- the hybrid MLA indexer excludes the forced local window, so its
+    ``valid_range`` end sits ``csa_window_size`` before the diagonal -- leaves
+    finite scores in ``[seq_lens, causal_len)``. ``paddle.topk`` scans the whole
+    row, so those columns would win top slots and be returned; blanking only the
+    output slots past ``seq_lens`` does not remove them. Mask the columns first.
+    For the pure-causal callers this is a no-op (already ``-inf`` there).
+    """
+    seq_lens_col = seq_lens.reshape([-1, 1]).cast("int32")
+    input_values = paddle.where(
+        paddle.arange(input_values.shape[-1], dtype="int32") < seq_lens_col,
+        input_values,
+        paddle.full_like(input_values, float("-inf")),
+    )
+    # Note: paddle.topk doesn't allow k greater than the axis size.
+    k = min(top_k, input_values.shape[-1])
+    topk_values, topk_indices = paddle.topk(input_values, k, axis=-1)
+    topk_indices = topk_indices.astype("int32")
+
+    if k < top_k:
+        topk_values = paddle.nn.functional.pad(
+            topk_values, (0, 0, 0, top_k - k), value=float("-inf")
+        )
+        topk_indices = paddle.nn.functional.pad(
+            topk_indices, (0, 0, 0, top_k - k), value=-1
+        )
+
+    # With the columns masked above, the invalid entries are exactly the ones
+    # ``topk`` had to fill from the ``-inf`` tail, i.e. output slots
+    # ``[seq_lens, top_k)``; their indices are meaningless, so blank them.
+    topk_indices = paddle.where(
+        paddle.arange(top_k, dtype="int32") < seq_lens_col,
+        topk_indices,
+        paddle.full_like(topk_indices, -1),
+    )
+
+    return {
+        "indices": topk_indices,
+        "values": topk_values if return_val else None,
+    }
+
+
 def cudnn_indexer_forward(
     index_q, index_k_comp, weights, ratio=4, sm_scale=None, seq_offset=0
 ):
@@ -194,11 +247,6 @@ def cudnn_indexer_topk(scores, sq, ratio, topk, valid_range=None, seq_offset=0):
     seq_offset = int(seq_offset)
     topk_k = min(topk, sk)
 
-    _require_cudnn_frontend()
-    from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_top_k.api import (
-        indexer_top_k_wrapper,
-    )
-
     if valid_range is None:
         # Causal-only (single-document): the radix kernel's per-row prefix
         # length is exactly the ratio-causal limit. No id remap needed —
@@ -229,11 +277,10 @@ def cudnn_indexer_topk(scores, sq, ratio, topk, valid_range=None, seq_offset=0):
         seq_lens = counts.reshape([batch * sq]).cast("int32")
         valid_range_for_remap = valid_range
 
-    result = indexer_top_k_wrapper(
+    result = _indexer_top_k_unfused(
         scores_for_topk.reshape([batch * sq, sk]).contiguous(),
         seq_lens,
         top_k=topk_k,
-        next_n=1,
         return_val=False,
     )
     topk_indices = result["indices"].reshape([batch, sq, topk_k]).cast("int32")
@@ -486,9 +533,6 @@ def _cudnn_indexer_topk_fwd_docmask_thd(
     from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_forward.api import (
         indexer_forward_wrapper,
     )
-    from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_top_k.api import (
-        indexer_top_k_wrapper,
-    )
 
     from .docmask_utils import topk_local_to_global, valid_range_to_counts
 
@@ -527,7 +571,7 @@ def _cudnn_indexer_topk_fwd_docmask_thd(
     counts = valid_range_to_counts(valid_range)
 
     # Compute topk indices [local_seqlen, topk]
-    results = indexer_top_k_wrapper(
+    results = _indexer_top_k_unfused(
         scores,
         counts.squeeze(0),
         top_k=topk_effective,

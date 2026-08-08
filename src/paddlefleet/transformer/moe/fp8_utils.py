@@ -289,7 +289,7 @@ def expert_weights_all_frozen(weights):
     ``main_grad`` / ``grad`` instead of returning them through autograd, so
     ``stop_gradient`` is not honored automatically. Callers use this to skip the
     wgrad GEMMs and their fp32 buffers when the experts are frozen (for example
-    DSv4 phase 2, ``csa_train_indexer_only``).
+    DSv4 phase 2, ``train_indexer_only``).
 
     ``weights`` is a stacked parameter (grouped path), a list of per-expert
     parameters (split path), or a **per-expert view** of a stacked parameter
