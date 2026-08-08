@@ -119,8 +119,33 @@ if TYPE_CHECKING:
 # 15.9ms at 128 rows, 13.3ms at 256, 12.4ms at 512, 12.4ms at 1024 -- past 256
 # the curve is flat, so larger chunks only buy peak memory.
 _TARGET_ROW_SLOTS = 256 * 512
+# ``lse_indexer`` widths ``flash_mla_sparse_fwd`` implements; anything else is
+# rejected outright (FlashMLA ``sparse_fwd.h:160``). Narrower budgets keep the
+# Python target path.
+_LSE_INDEXER_TOPKS = (512, 1024, 2048)
+# Narrowest query-head count the score-recompute kernel's MMA ``M`` tile
+# handles; see ``_attn_target_cudnn``.
+_TARGET_QHEAD_MIN = 16
 _NEG_INF = -1e30
 _EPS = 1e-10
+
+
+class _HashableTensor(paddle.Tensor):
+    """``paddle.Tensor`` with hashable ``shape`` / ``stride()``.
+
+    The cuDNN score-recompute wrapper keys its kernel cache on
+    ``(dtype, shape, stride(), ...)``, and Paddle returns those as lists, which
+    are unhashable.
+    """
+
+    @property
+    def shape(self):
+        return tuple(super().shape)
+
+    def stride(self, dim=None):
+        if dim is None:
+            return tuple(super().stride())
+        return super().stride(dim)
 
 
 @dataclass
@@ -725,7 +750,9 @@ class MQALatentAttention(FleetLayer):
         rows = int(valid_range.shape[0])
         return valid_range.unsqueeze(0), (n_avail == 0).reshape([1, rows, 1])
 
-    def _sparse_attn(self, query, kv, token_indices, sm_scale, d_v):
+    def _sparse_attn(
+        self, query, kv, token_indices, sm_scale, d_v, indexer_topk=0
+    ):
         """Sparse MQA over the absorbed latent, via the shared cudnn backend.
 
         Same FlashMLA sparse forward + cuDNN DSA backward pair that the CSA/HCA
@@ -734,6 +761,9 @@ class MQALatentAttention(FleetLayer):
         ``softmax_offset`` is ``None`` when ``add_full_attention_sink_bias`` is
         off, which the backend turns into a sinkless softmax. Query-head padding
         to the DSA-fixed ``h_q == 64`` is the backend's job.
+
+        ``indexer_topk > 0`` additionally returns the LSE over the first
+        ``indexer_topk`` columns, which is the indexer-loss target's normalizer.
         """
         from paddlefleet.fusions.mqa_sparse_attn import mqa_sparse_attn
 
@@ -744,6 +774,7 @@ class MQALatentAttention(FleetLayer):
             sm_scale,
             d_v,
             attn_sink=self.softmax_offset,
+            indexer_topk=indexer_topk,
         )
 
     @staticmethod
@@ -848,14 +879,42 @@ class MQALatentAttention(FleetLayer):
             topk_indices = paddle.where(
                 row_empty, paddle.full_like(selected, -1), selected
             )
+            # ``[indexer topk, window]``, not the other way round: the kernel's
+            # ``lse_indexer`` covers the *first* ``indexer_topk`` columns
+            # (``flash_mla_sparse_fwd``), and that restricted per-head LSE is
+            # exactly the normalizer the loss target needs -- with it every head
+            # contributes mass 1 over the selected set, matching the per-head
+            # softmax of ``_attn_target_python``. Feeding the *attention* LSE
+            # instead (window + sink included) would turn the target into a
+            # head-mass-weighted mixture: a different objective, invisible in the
+            # forward output.
+            #
+            # Attention itself is a softmax over a set, so the order changes only
+            # the accumulation order (hence the last bits), not the value. The
+            # order is unconditional on purpose: gating it on ``need_loss`` would
+            # make the two forwards of a full-recompute step disagree on the
+            # table layout and on ``topk_length``.
             token_indices = paddle.concat(
-                [window_idxs, topk_indices], axis=-1
+                [topk_indices, window_idxs], axis=-1
             ).contiguous()
         token_indices.stop_gradient = True
 
-        core_out = self._sparse_attn(
-            query, kv, token_indices, self.softmax_scale, kv_lora_rank
-        )
+        # The kernel only implements a handful of ``lse_indexer`` widths; other
+        # budgets fall back to the Python target path.
+        if topk in _LSE_INDEXER_TOPKS:
+            core_out, lse_indexer = self._sparse_attn(
+                query,
+                kv,
+                token_indices,
+                self.softmax_scale,
+                kv_lora_rank,
+                indexer_topk=topk,
+            )
+        else:
+            lse_indexer = None
+            core_out = self._sparse_attn(
+                query, kv, token_indices, self.softmax_scale, kv_lora_rank
+            )
         output = self._deabsorb(core_out, v_b_proj_weight)
         if not need_loss:
             return output
@@ -874,7 +933,9 @@ class MQALatentAttention(FleetLayer):
             )
             # The window is force-selected, so it is outside the indexer's
             # decision space and outside the KL: only the top-k columns.
-            target = self._attn_target(query.detach(), kv, topk_indices)
+            target = self._attn_target(
+                query.detach(), kv, topk_indices, lse_indexer
+            )
             kl = target * (
                 paddle.log(target + _EPS) - paddle.log(topk_probs + _EPS)
             )
@@ -987,7 +1048,7 @@ class MQALatentAttention(FleetLayer):
         )
         return loss_mask, max(float(loss_mask.sum()), 1.0)
 
-    def _attn_target(self, query, kv, kl_columns) -> Tensor:
+    def _attn_target(self, query, kv, kl_columns, lse_indexer=None) -> Tensor:
         """KL target: head-summed attention probs over the indexer's own columns.
 
         The denominator is **the KL's candidate set and nothing else** -- not the
@@ -1009,6 +1070,92 @@ class MQALatentAttention(FleetLayer):
         window term alone. Those are two objectives, not right and wrong; this one
         is the intended one.
 
+        Args:
+            query: ``[1, s, h, dk]`` detached absorbed query (local rows).
+            kv: ``[1, s_global, dk]`` latent keys (all-gathered under CP).
+            kl_columns: ``[1, s, w]`` int32 global column ids the KL scores,
+                ``-1`` for empty slots. Column *order* is irrelevant, so the
+                warmup phase passes the indexer's score-ordered table directly.
+            lse_indexer: ``[1, s, 64]`` float32 per-head LSE over exactly
+                ``kl_columns`` (``mqa_sparse_attn(indexer_topk=...)``). When
+                present the cuDNN score-recompute kernel does the whole thing in
+                one launch. ``None`` in the warmup phase -- its candidate set is
+                not the attention set, so no matching LSE exists -- and when the
+                budget is not one of ``_LSE_INDEXER_TOPKS``, so the Python path
+                stays as the reference and the fallback.
+
+        Returns:
+            ``[1, s, w]`` float32 rows summing to 1 (0 for empty rows).
+        """
+        if lse_indexer is not None:
+            return self._attn_target_cudnn(query, kv, kl_columns, lse_indexer)
+        return self._attn_target_python(query, kv, kl_columns)
+
+    def _attn_target_cudnn(self, query, kv, kl_columns, lse_indexer) -> Tensor:
+        """``_attn_target`` via the cuDNN DSA score-recompute kernel.
+
+        The kernel computes ``sum_h exp(Q_h·K_i*scale - LSE_h)`` L1-normalised
+        over the selected columns. With ``LSE_h`` restricted to those same
+        columns each head contributes mass 1, which is what the per-head softmax
+        of :meth:`_attn_target_python` produces.
+
+        Two different head paddings meet here, and they pull in opposite
+        directions:
+
+        * The *attention* kernel pads the query to its fixed ``h_q == 64``, and
+          those pad heads must stay out of the head sum. Hence the LSE is sliced
+          down to the layer's real ``h`` -- the query itself is already the
+          unpadded one.
+        * The *target* kernel uses the query-head count as its MMA ``M`` tile
+          (``_dispatch_sparse_attn_tile_params``: ``m = qhead_per_kv_head``), and
+          only powers of two from 16 up work: 24/40/48/80 raise, and ``h == 8``
+          -- the unit fixture's width -- silently returns an all-zero target,
+          which would make the KL target uniform-after-renormalisation with no
+          error anywhere. So pad back up to ``_TARGET_QHEAD_MIN`` when the layer
+          is narrower.
+
+        The pad heads carry an **infinite** LSE, so ``exp(score - inf) == 0``
+        keeps them out of the head sum exactly rather than approximately (the
+        query pad rows are zeros, whose score is a finite 0). Measured against
+        :meth:`_attn_target_python` at ``h=8 -> 16``: 7.5e-4 max abs error, i.e.
+        bf16 matmul noise.
+        """
+        from paddlefleet_ops.cudnn.deepseek_sparse_attention import (
+            sparse_attn_score_recompute_wrapper,
+        )
+
+        b, s, h, dk = (int(dim) for dim in query.shape)
+        idx = kl_columns.cast("int32").contiguous()
+        lse = lse_indexer[:, :, :h].cast("float32")
+        h_padded = max(_TARGET_QHEAD_MIN, 1 << (h - 1).bit_length())
+        if h_padded != h:
+            pad = h_padded - h
+            query = paddle.concat(
+                [query, paddle.zeros([b, s, pad, dk], dtype=query.dtype)],
+                axis=2,
+            )
+            lse = paddle.concat(
+                [lse, paddle.full([b, s, pad], float("inf"), dtype="float32")],
+                axis=2,
+            )
+        target = sparse_attn_score_recompute_wrapper(
+            _HashableTensor(query.contiguous()),
+            _HashableTensor(kv.contiguous()),
+            _HashableTensor(lse.contiguous()),
+            _HashableTensor(idx),
+            self.softmax_scale,
+        )["target"]
+
+        # Empty slots / all-empty rows: the kernel is not contracted to return
+        # zeros there, and a row of zeros must stay a row of zeros (the KL
+        # reduction divides by the valid-row count, not by the row sum).
+        valid = idx >= 0
+        target = paddle.where(valid, target, paddle.zeros_like(target))
+        return target / target.sum(axis=-1, keepdim=True).clip(min=_EPS)
+
+    def _attn_target_python(self, query, kv, kl_columns) -> Tensor:
+        """Reference ``_attn_target``: per-head softmax over gathered keys.
+
         The tilelang ``csa_attn_target_reducesum`` kernel is not usable here (it
         requires a power-of-two head dim; the latent is 576) and the dense
         ``_compute_attn_target_on_selected_set`` materialises ``[b, h, s, s]``, so
@@ -1016,16 +1163,6 @@ class MQALatentAttention(FleetLayer):
         no ``s*s`` tensor. The matmul runs in the input dtype (bf16) with fp32
         accumulation, as the tilelang kernel does internally for the CSA layers;
         the softmax and the L1 normalisation are fp32.
-
-        Args:
-            query: ``[1, s, h, dk]`` detached absorbed query (local rows).
-            kv: ``[1, s_global, dk]`` latent keys (all-gathered under CP).
-            kl_columns: ``[1, s, w]`` int32 global column ids the KL scores,
-                ``-1`` for empty slots. Column *order* is irrelevant, so the
-                warmup phase passes the indexer's score-ordered table directly.
-
-        Returns:
-            ``[1, s, w]`` float32 rows summing to 1 (0 for empty rows).
         """
         s, width = int(query.shape[1]), int(kl_columns.shape[-1])
         dk = int(query.shape[-1])

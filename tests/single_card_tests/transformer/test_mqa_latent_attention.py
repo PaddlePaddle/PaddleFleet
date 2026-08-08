@@ -52,12 +52,20 @@ Coverage:
      ``csa_train_indexer_only``, ``csa_indexer_init_from_scratch``) ship without
      an alias, so a stale config must raise rather than be absorbed into a
      silent default.
+  9. The fused indexer-loss target's plumbing with both kernels stubbed out:
+     the ``_attn_target`` dispatch, ``_attn_target_cudnn``'s call contract and
+     empty-slot handling, ``mqa_sparse_attn``'s ``lse_indexer`` side channel and
+     the ``_forward_sparse`` branch that asks for it. The kernels themselves need
+     SM100+ (see 5 and ``TestMQADSACudnnTarget``); everything around them is
+     plain Python and stays checked on machines that lack them.
 """
 
 import subprocess
 import sys
+import types
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import paddle
@@ -67,7 +75,11 @@ from paddlefleet.transformer.csa_attention import (
     _derive_csa_doc_boundaries,
 )
 from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
-from paddlefleet.transformer.mqa_latent_attention import MQALatentAttention
+from paddlefleet.transformer.mqa_latent_attention import (
+    _LSE_INDEXER_TOPKS,
+    MQALatentAttention,
+    _HashableTensor,
+)
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from .hybrid_mla_utils import (
@@ -991,12 +1003,12 @@ class TestMQADSA(unittest.TestCase):
         loss_widths = []
         inner_target = self.module._attn_target
 
-        def recording_target(query_, kv_, kl_columns):
+        def recording_target(query_, kv_, kl_columns, lse_indexer=None):
             # The KL's column set is the indexer's candidate set: the top-k in
             # the sparse phase, every causal column in warmup. The forced window
             # is never in it.
             loss_widths.append(int(kl_columns.shape[-1]))
-            return inner_target(query_, kv_, kl_columns)
+            return inner_target(query_, kv_, kl_columns, lse_indexer)
 
         self.module._attn_target = recording_target
 
@@ -1616,6 +1628,600 @@ class TestMQADSAWarmupPhase(unittest.TestCase):
         np.testing.assert_array_equal(first, second)
         np.testing.assert_array_equal(first, expected)
         self.assertIn("values", DSAIndexerLossLoggingHelper.tracker)
+
+
+class TestHashableTensor(unittest.TestCase):
+    """``_HashableTensor`` exists only to make the kernel cache key hashable.
+
+    The cuDNN score-recompute wrapper hashes ``(dtype, shape, stride(), ...)``;
+    Paddle returns both as lists, which ``dict`` rejects. No GPU needed -- the
+    contract is purely about the container types.
+    """
+
+    def test_shape_and_stride_are_hashable_tuples(self):
+        tensor = _HashableTensor(paddle.zeros([2, 3, 4], dtype="float32"))
+        self.assertIsInstance(tensor.shape, tuple)
+        self.assertEqual(tensor.shape, (2, 3, 4))
+        self.assertIsInstance(tensor.stride(), tuple)
+        self.assertEqual(tensor.stride(), (12, 4, 1))
+        # Per-dim form: the wrapper does not use it, but it is the half of the
+        # override that would silently return a plain int if dropped.
+        self.assertEqual(tensor.stride(0), 12)
+        hash((tensor.shape, tensor.stride()))
+
+
+@_GPU
+class TestMQADSACudnnTarget(unittest.TestCase):
+    """The fused indexer-loss target (``_attn_target_cudnn``).
+
+    The kernel needs an LSE taken over exactly the scored column set, which
+    exists only when attention and loss share one table (phase 3,
+    ``dsa_indexer_use_sparse_loss=True``) and the budget is a width
+    ``flash_mla_sparse_fwd`` implements (``_LSE_INDEXER_TOPKS``). The
+    module-wide fixture runs ``INDEX_TOPK = 128``, which is not one of them, so
+    every test here raises the budget to 512 -- the narrowest supported width.
+    """
+
+    TOPK = 512
+    SEQLEN = 768  # > WINDOW + TOPK, so the table stays genuinely sparse
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
+        except Exception:
+            pass
+
+    def _build(self, topk):
+        config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
+        config.dsa_index_topk = topk
+        module = _build_module(config, bf16=True)
+        self.assertEqual(int(module.indexer.index_topk), topk)
+        return module
+
+    def setUp(self):
+        _CAPTURED.clear()
+        DSAIndexerLossLoggingHelper.tracker.clear()
+        self.module = self._build(self.TOPK)
+
+    def _train_step(self, module, seed=0):
+        """One grad-enabled forward + backward, capturing the target's inputs.
+
+        Returns the ``_attn_target`` arguments so a test can re-run the Python
+        reference on the *same* columns; recomputing them from a second forward
+        would not work, the top-k table drifts between identical calls on a
+        single full-length document (``TestMQADSA``
+        ``test_use_sparse_loss_switches_both_attention_and_loss_width``).
+        """
+        query, key, w_v, x, qr = _make_inputs(
+            self.SEQLEN, seed=seed, with_hidden=True
+        )
+        captured = {}
+        inner = module._attn_target
+
+        def spy(query_, kv_, topk_indices, lse_indexer=None):
+            captured["args"] = (query_, kv_, topk_indices)
+            captured["lse_indexer"] = lse_indexer
+            target = inner(query_, kv_, topk_indices, lse_indexer)
+            captured["target"] = target
+            return target
+
+        module._attn_target = spy
+        try:
+            tensors = [t.clone() for t in (query, key, x, qr)]
+            for tensor in tensors:
+                tensor.stop_gradient = False
+            module.train()
+            out = module(
+                tensors[0],
+                tensors[1],
+                None,
+                None,
+                _row_end([self.SEQLEN], self.SEQLEN),
+                v_b_proj_weight=w_v,
+                x=tensors[2],
+                qr=tensors[3],
+            )
+            out.cast("float32").sum().backward()
+        finally:
+            module._attn_target = inner
+        return captured
+
+    def test_supported_budget_takes_the_fused_path(self):
+        """A 512 budget routes the target through the kernel, and the KL lands.
+
+        Asserts the plumbing end to end: ``mqa_sparse_attn`` returns the second
+        output at all (the ``indexer_topk > 0`` signature), the LSE has the
+        kernel's fixed ``h_q == 64`` head count rather than the layer's 8, and
+        the loss built on top of it is finite and non-zero.
+
+        The LSE is finite exactly on the rows that have a candidate: it is a
+        log-sum-exp over the ``indexer_topk`` prefix of the table, so the rows
+        whose prefix is all ``-1`` -- the first ``window_size`` tokens of a
+        document, which ``_indexer_valid_range`` leaves without candidates --
+        come back ``+inf``. Those rows have to end up as a zero target row, not
+        as a NaN one, which is what the KL's valid-row denominator assumes.
+        """
+        captured = self._train_step(self.module)
+        lse = captured["lse_indexer"]
+        self.assertIsNotNone(lse, "the fused path did not receive an LSE")
+        self.assertEqual(list(lse.shape), [1, self.SEQLEN, 64])
+        self.assertEqual(lse.dtype, paddle.float32)
+        has_candidate = (captured["args"][2] >= 0).any(axis=-1)
+        self.assertTrue(
+            bool(has_candidate.any()) and not bool(has_candidate.all())
+        )
+        self.assertTrue(bool(paddle.isfinite(lse[has_candidate]).all()))
+        self.assertTrue(bool(paddle.isinf(lse[~has_candidate]).all()))
+
+        target = captured["target"]
+        self.assertEqual(list(target.shape), [1, self.SEQLEN, self.TOPK])
+        self.assertTrue(bool(paddle.isfinite(target).all()))
+        self.assertEqual(float(target[~has_candidate].abs().max()), 0.0)
+        np.testing.assert_allclose(
+            target.sum(axis=-1)[has_candidate].numpy(), 1.0, atol=1e-5
+        )
+        loss = float(DSAIndexerLossLoggingHelper.tracker["values"][0])
+        self.assertTrue(np.isfinite(loss))
+        self.assertGreater(loss, 0.0)
+
+    def test_fused_target_matches_the_python_reference(self):
+        """The kernel and ``_attn_target_python`` must agree on the same table.
+
+        Both produce ``sum_h softmax_h`` over the selected columns, L1
+        normalised, so this is the correctness contract of the whole change: the
+        head-sum's normalizer is the LSE restricted to those columns, and
+        getting that wrong (e.g. feeding the attention LSE, which also covers
+        the window and the sink) changes the objective without changing the
+        forward output.
+        """
+        captured = self._train_step(self.module)
+        query, kv, topk_indices = captured["args"]
+        fused = captured["target"]
+        reference = self.module._attn_target_python(query, kv, topk_indices)
+
+        self.assertLess(_rel(fused, reference), 5e-3)
+        # Every non-empty row is a distribution; empty slots stay exactly zero
+        # (the KL divides by the valid-row count, not by the row sum).
+        valid_rows = (topk_indices >= 0).any(axis=-1)
+        row_sums = fused.sum(axis=-1)
+        np.testing.assert_allclose(row_sums[valid_rows].numpy(), 1.0, atol=1e-5)
+        empty_slots = topk_indices < 0
+        self.assertEqual(float(fused[empty_slots].abs().max()), 0.0)
+
+    def test_unsupported_budget_falls_back_to_python(self):
+        """384 is a legal ``index_topk`` the kernel does not implement.
+
+        ``dsa_index_topk`` only has to be a multiple of 128 and at most 2048
+        (``transformer_config.py``), while ``indexer_topk`` accepts
+        0/512/1024/2048 only. Without the ``_LSE_INDEXER_TOPKS`` guard the
+        illegal width would reach the kernel; with it the target silently uses
+        the Python reference instead.
+        """
+        self.assertNotIn(384, _LSE_INDEXER_TOPKS)
+        module = self._build(384)
+        captured = self._train_step(module)
+        self.assertIsNone(captured["lse_indexer"])
+        loss = float(DSAIndexerLossLoggingHelper.tracker["values"][0])
+        self.assertTrue(np.isfinite(loss))
+
+
+def _fake_score_recompute(fn):
+    """Put ``fn`` in place of the cuDNN score-recompute wrapper.
+
+    ``_attn_target_cudnn`` imports it lazily from
+    ``paddlefleet_ops.cudnn.deepseek_sparse_attention``, so swapping the module
+    in ``sys.modules`` intercepts the call without importing (or owning a GPU
+    able to run) the real op.
+    """
+    module = types.ModuleType("paddlefleet_ops.cudnn.deepseek_sparse_attention")
+    module.sparse_attn_score_recompute_wrapper = fn
+    return mock.patch.dict(
+        sys.modules,
+        {"paddlefleet_ops.cudnn.deepseek_sparse_attention": module},
+    )
+
+
+class TestAttnTargetDispatch(unittest.TestCase):
+    """``_attn_target`` picks its implementation from ``lse_indexer`` alone.
+
+    No GPU: the dispatch is what decides whether the loss target comes from the
+    kernel or from the reference, and it must not consult anything else (the
+    caller has already resolved the phase and the budget).
+    """
+
+    def setUp(self):
+        self.calls = []
+        self.stub = SimpleNamespace(
+            _attn_target_cudnn=lambda *a: self.calls.append("cudnn") or "cudnn",
+            _attn_target_python=lambda *a: self.calls.append("python")
+            or "python",
+        )
+
+    def test_lse_present_selects_the_kernel(self):
+        got = MQALatentAttention._attn_target(
+            self.stub, "q", "kv", "idx", "lse"
+        )
+        self.assertEqual((got, self.calls), ("cudnn", ["cudnn"]))
+
+    def test_lse_absent_selects_the_reference(self):
+        got = MQALatentAttention._attn_target(self.stub, "q", "kv", "idx", None)
+        self.assertEqual((got, self.calls), ("python", ["python"]))
+        # The default is the fallback too: phase 2 calls it with three args.
+        self.assertEqual(
+            MQALatentAttention._attn_target(self.stub, "q", "kv", "idx"),
+            "python",
+        )
+
+
+class TestAttnTargetCudnnMocked(unittest.TestCase):
+    """``_attn_target_cudnn``'s call contract, kernel mocked out.
+
+    The kernel itself needs SM100+ (covered by ``TestMQADSACudnnTarget``); what
+    is checked here is everything the wrapper is responsible for and the kernel
+    is not: hashable cache-key metadata, the LSE sliced down to the real head
+    count and then both it and the query padded back up to the kernel's
+    narrowest MMA tile, int32 indices, and the empty-slot handling on the way
+    out.
+    """
+
+    H_Q, S, TOPK, DK_ = 4, 3, 4, 8
+    SCALE = 0.25
+
+    def _inputs(self, h_q=None):
+        h_q = self.H_Q if h_q is None else h_q
+        query = paddle.zeros([1, self.S, h_q, self.DK_], dtype="bfloat16")
+        kv = paddle.zeros([1, self.S, self.DK_], dtype="bfloat16")
+        # Row 0 has two valid columns, row 1 one, row 2 none (a fully padded
+        # query row, which a short document's first token produces).
+        idx = paddle.to_tensor(
+            [[[0, 1, -1, -1], [0, -1, -1, -1], [-1, -1, -1, -1]]],
+            dtype="int64",
+        )
+        # The kernel's LSE always has the DSA-fixed 64 heads, not the layer's.
+        lse = paddle.full([1, self.S, 64], 1.5, dtype="bfloat16")
+        return query, kv, idx, lse
+
+    def _run(self, target_value=2.0, h_q=None):
+        seen = {}
+
+        def fake(q, kv, lse, idx, scale):
+            seen["types"] = [type(t) for t in (q, kv, lse, idx)]
+            # The real wrapper keys its kernel cache on this tuple; lists would
+            # raise TypeError here, which is the whole point of
+            # ``_HashableTensor``.
+            seen["key"] = hash(
+                tuple((t.dtype, t.shape, t.stride()) for t in (q, kv, lse, idx))
+            )
+            seen["q_shape"] = list(q.shape)
+            seen["q"] = q.cast("float32").numpy().copy()
+            seen["lse_shape"] = list(lse.shape)
+            seen["lse"] = lse.numpy().copy()
+            seen["lse_dtype"] = lse.dtype
+            seen["idx_dtype"] = idx.dtype
+            seen["scale"] = scale
+            return {
+                "target": paddle.full(idx.shape, target_value, dtype="float32")
+            }
+
+        query, kv, idx, lse = self._inputs(h_q)
+        with _fake_score_recompute(fake):
+            target = MQALatentAttention._attn_target_cudnn(
+                SimpleNamespace(softmax_scale=self.SCALE), query, kv, idx, lse
+            )
+        return seen, target
+
+    def test_kernel_arguments(self):
+        seen, _ = self._run()
+        self.assertEqual(seen["types"], [_HashableTensor] * 4)
+        self.assertEqual(seen["lse_dtype"], paddle.float32)
+        self.assertEqual(seen["idx_dtype"], paddle.int32)
+        self.assertEqual(seen["scale"], self.SCALE)
+
+    def test_narrow_head_count_is_padded_with_an_infinite_lse(self):
+        """``h < 16`` is padded up, and the pad heads contribute nothing.
+
+        The kernel's MMA ``M`` tile is the query-head count and it silently
+        returns an all-zero target below 16 heads, so the wrapper pads. The pad
+        heads must not join the head sum, which an infinite LSE guarantees
+        exactly: ``exp(finite - inf) == 0``.
+        """
+        seen, _ = self._run()
+        self.assertEqual(seen["q_shape"], [1, self.S, 16, self.DK_])
+        self.assertEqual(seen["lse_shape"], [1, self.S, 16])
+        # Real heads keep the layer's LSE, sliced out of the kernel's 64-wide
+        # one; the pad heads are +inf.
+        np.testing.assert_array_equal(seen["lse"][:, :, : self.H_Q], 1.5)
+        self.assertTrue(bool(np.isposinf(seen["lse"][:, :, self.H_Q :]).all()))
+        np.testing.assert_array_equal(seen["q"][:, :, self.H_Q :], 0.0)
+
+    def test_supported_head_count_is_passed_through(self):
+        """A power-of-two ``h >= 16`` (production is 64) is not padded."""
+        seen, _ = self._run(h_q=64)
+        self.assertEqual(seen["q_shape"], [1, self.S, 64, self.DK_])
+        self.assertEqual(seen["lse_shape"], [1, self.S, 64])
+        self.assertTrue(bool(np.isfinite(seen["lse"]).all()))
+
+    def test_empty_slots_are_zeroed_and_rows_renormalised(self):
+        """Whatever the kernel writes at ``-1`` slots is discarded.
+
+        A uniform kernel output makes the expectation exact: each row becomes
+        uniform over its valid columns, and the all-empty row stays all zeros
+        rather than turning into ``0/0`` -- the KL reduction divides by the
+        valid-row count, so a padded row must contribute nothing.
+        """
+        _, target = self._run()
+        np.testing.assert_allclose(
+            target.numpy(),
+            np.array([[[0.5, 0.5, 0.0, 0.0], [1.0, 0, 0, 0], [0, 0, 0, 0]]]),
+            atol=1e-6,
+        )
+        self.assertEqual(target.dtype, paddle.float32)
+
+
+class TestMQASparseAttnLseSideChannelMocked(unittest.TestCase):
+    """``mqa_sparse_attn``'s ``lse_indexer`` side channel, kernel mocked out.
+
+    The LSE cannot be a PyLayer output (every returned tensor would demand a
+    matching backward gradient), so it travels on a class attribute that the
+    wrapper pops. That popping is pure Python and is what this checks, together
+    with the ``indexer_topk`` pass-through and the two return signatures.
+    """
+
+    S, H_Q, DK_, DV_ = 4, 8, 576, 512
+    SCALE = 0.1
+
+    def _inputs(self):
+        query = paddle.zeros([1, self.S, self.H_Q, self.DK_], dtype="bfloat16")
+        kv = paddle.zeros([1, self.S, self.DK_], dtype="bfloat16")
+        idx = paddle.arange(self.S, dtype="int32").reshape([1, 1, self.S])
+        idx = paddle.where(
+            idx <= paddle.arange(self.S, dtype="int32").reshape([1, self.S, 1]),
+            idx.tile([1, self.S, 1]),
+            paddle.full([1, self.S, self.S], -1, dtype="int32"),
+        )
+        return query, kv, idx.contiguous()
+
+    def _patched_kernel(self, calls):
+        import paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn as fwd_mod
+
+        def fake(q_pad, kv, sink, token_indices, **kwargs):
+            calls.append(kwargs)
+            b, s = int(q_pad.shape[0]), int(q_pad.shape[1])
+            out = paddle.zeros([b, s, 64, kwargs["d_v"]], dtype=q_pad.dtype)
+            lse = paddle.zeros([b, s, 64], dtype="float32")
+            # The kernel returns ``None`` for a 0 budget; a non-None value for
+            # a real one, so a leak would be visible on the next call.
+            lse_indexer = (
+                None
+                if kwargs["indexer_topk"] == 0
+                else paddle.full([b, s, 64], 1.5, dtype="float32")
+            )
+            return out, lse, lse_indexer
+
+        return mock.patch.object(fwd_mod, "flash_mla_sparse_attn", fake)
+
+    def _call(self, indexer_topk, calls):
+        from paddlefleet.fusions.mqa_sparse_attn import mqa_sparse_attn
+
+        query, kv, idx = self._inputs()
+        with self._patched_kernel(calls):
+            return mqa_sparse_attn(
+                query,
+                kv,
+                idx,
+                self.SCALE,
+                self.DV_,
+                attn_sink=None,
+                indexer_topk=indexer_topk,
+            )
+
+    def tearDown(self):
+        from paddlefleet.fusions.mqa_sparse_attn import _MQASparseAttention
+
+        _MQASparseAttention._lse_indexer = None
+
+    def test_zero_budget_keeps_the_single_output_signature(self):
+        calls = []
+        out = self._call(0, calls)
+        self.assertIsInstance(out, paddle.Tensor)
+        self.assertEqual(list(out.shape), [1, self.S, self.H_Q * self.DV_])
+        self.assertEqual(calls[0]["indexer_topk"], 0)
+
+    def test_positive_budget_returns_and_forwards_the_lse(self):
+        calls = []
+        out, lse_indexer = self._call(512, calls)
+        self.assertEqual(calls[0]["indexer_topk"], 512)
+        self.assertEqual(list(out.shape), [1, self.S, self.H_Q * self.DV_])
+        self.assertEqual(list(lse_indexer.shape), [1, self.S, 64])
+        self.assertEqual(lse_indexer.dtype, paddle.float32)
+
+    def test_the_side_channel_never_outlives_one_call(self):
+        """Popped on every call, so a stale LSE cannot reach the next one.
+
+        Without the reset a 0-budget call following a 512 one would still find
+        the previous tensor on the class -- harmless today (the return value is
+        gated on ``indexer_topk``) but it would pin one LSE per layer alive for
+        the whole step.
+        """
+        from paddlefleet.fusions.mqa_sparse_attn import _MQASparseAttention
+
+        calls = []
+        self._call(512, calls)
+        self.assertIsNone(_MQASparseAttention._lse_indexer)
+        self._call(0, calls)
+        self.assertIsNone(_MQASparseAttention._lse_indexer)
+
+
+class TestSparseAttnPlumbingMocked(unittest.TestCase):
+    """``_sparse_attn`` forwards the sink and the budget, and nothing else.
+
+    Mocking ``mqa_sparse_attn`` keeps this off the SM100 kernels; the method's
+    only job is to hand over ``self.softmax_offset`` and ``indexer_topk``.
+    """
+
+    def setUp(self):
+        _CAPTURED.clear()
+        self.module = _build_module(_create_mqa_config("mqa_dsa"), bf16=True)
+
+    def _patched(self, calls):
+        import paddlefleet.fusions.mqa_sparse_attn as fusion
+
+        def fake(query, kv, token_indices, sm_scale, d_v, **kwargs):
+            calls.append((float(sm_scale), int(d_v), kwargs))
+            return "core_out"
+
+        return mock.patch.object(fusion, "mqa_sparse_attn", fake)
+
+    def test_budget_and_sink_are_forwarded(self):
+        calls = []
+        with self._patched(calls):
+            got = self.module._sparse_attn(
+                paddle.zeros([1, 2, H, DK], dtype="bfloat16"),
+                paddle.zeros([1, 2, DK], dtype="bfloat16"),
+                paddle.zeros([1, 2, 4], dtype="int32"),
+                self.module.softmax_scale,
+                DV,
+                indexer_topk=512,
+            )
+        self.assertEqual(got, "core_out")
+        scale, d_v, kwargs = calls[0]
+        self.assertEqual((scale, d_v), (self.module.softmax_scale, DV))
+        self.assertEqual(kwargs["indexer_topk"], 512)
+        # No sink configured in this fixture: the backend reads ``None`` as
+        # "sinkless softmax", it is not an omitted argument.
+        self.assertIsNone(kwargs["attn_sink"])
+        self.assertIn("attn_sink", kwargs)
+
+
+class TestForwardDsaFusedDispatchMocked(unittest.TestCase):
+    """Which target path ``_forward_sparse`` selects, with both kernels mocked.
+
+    ``TestMQADSACudnnTarget`` covers the same decision on real kernels; this
+    reaches it without any, so the branch stays checked on machines below
+    SM100. Mocked: the indexer top-k kernel, the sparse-attention call and the
+    target itself -- everything between them (window table, concat order, KL,
+    loss logging) is the real code.
+    """
+
+    S = 256
+    WIDE_TOPK = 384  # a legal index_topk the kernel does not implement
+
+    def _build(self, topk):
+        config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
+        config.dsa_index_topk = topk
+        module = _build_module(config, bf16=True)
+        module.train()
+        return module
+
+    def _topk_table(self, topk):
+        """``[1, S, topk]`` causal-ish table, right-padded with ``-1``."""
+        cols = paddle.arange(topk, dtype="int32").reshape([1, 1, topk])
+        rows = paddle.arange(self.S, dtype="int32").reshape([1, self.S, 1])
+        return paddle.where(
+            cols <= rows,
+            cols.tile([1, self.S, 1]),
+            paddle.full([1, self.S, topk], -1, dtype="int32"),
+        ).contiguous()
+
+    def _run(self, topk):
+        module = self._build(topk)
+        DSAIndexerLossLoggingHelper.tracker.clear()
+        seen = {}
+        table = self._topk_table(topk)
+
+        import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as fwd_mod
+
+        def fake_topk(q, k, w, **kwargs):
+            width = int(kwargs["topk_effective"])
+            scores = paddle.rand([1, self.S, width], dtype="float32")
+            return self._topk_table(width), None, scores
+
+        def fake_indexer(x, qr, position_offset, cp_group):
+            return (
+                paddle.zeros(
+                    [1, self.S, INDEX_HEADS, INDEX_HEAD_DIM], dtype="bfloat16"
+                ),
+                paddle.zeros([1, self.S, INDEX_HEAD_DIM], dtype="bfloat16"),
+                paddle.zeros([1, self.S, INDEX_HEADS], dtype="bfloat16"),
+            )
+
+        def fake_sparse_attn(
+            query, kv, token_indices, sm_scale, d_v, indexer_topk=0
+        ):
+            seen["indexer_topk"] = int(indexer_topk)
+            seen["token_indices"] = token_indices.numpy().copy()
+            core_out = query.reshape([1, self.S, H * DK])[:, :, : H * DV]
+            if indexer_topk == 0:
+                return core_out
+            return core_out, paddle.full([1, self.S, 64], 1.5, dtype="float32")
+
+        def fake_target(query, kv, topk_indices, lse_indexer=None):
+            seen["lse_indexer"] = lse_indexer
+            width = int(topk_indices.shape[-1])
+            return paddle.full([1, self.S, width], 1.0 / width, dtype="float32")
+
+        query, key, w_v, x, qr = _make_inputs(self.S, seed=0, with_hidden=True)
+        tensors = [t.clone() for t in (query, key, x, qr)]
+        for tensor in tensors:
+            tensor.stop_gradient = False
+        module.indexer.forward_before_topk = fake_indexer
+        module._sparse_attn = fake_sparse_attn
+        module._attn_target = fake_target
+        with mock.patch.object(fwd_mod, "cudnn_indexer_topk_fwd", fake_topk):
+            out = module(
+                tensors[0],
+                tensors[1],
+                None,
+                None,
+                _row_end([self.S], self.S),
+                v_b_proj_weight=w_v,
+                x=tensors[2],
+                qr=tensors[3],
+            )
+        seen["output"] = out
+        seen["table"] = table.numpy()
+        return seen
+
+    def test_supported_budget_requests_the_lse_and_reuses_it(self):
+        topk = _LSE_INDEXER_TOPKS[0]
+        seen = self._run(topk)
+        self.assertEqual(seen["indexer_topk"], topk)
+        # The indexer columns must come first: the kernel's LSE covers the
+        # leading ``indexer_topk`` columns of the table, so the window has to
+        # sit in the tail.
+        table = seen["token_indices"]
+        self.assertEqual(table.shape[-1], topk + WINDOW)
+        doc_start, _, is_valid, _, _ = _derive_csa_doc_boundaries(
+            _row_end([self.S], self.S), self.S
+        )
+        window = (
+            _build_window_topk_idxs_from_doc_bounds(
+                1, self.S, WINDOW, doc_start, is_valid
+            )
+            .cast("int32")
+            .numpy()
+        )
+        np.testing.assert_array_equal(table[:, :, topk:], window)
+        # ``_forward_sparse`` blanks the rows whose candidate range is empty (the
+        # first ``window_size`` tokens of a document), so compare where the
+        # prefix survived.
+        prefix, selected = table[:, :, :topk], seen["table"]
+        kept = prefix != -1
+        self.assertGreater(int(kept.sum()), 0)
+        np.testing.assert_array_equal(prefix[kept], selected[kept])
+        self.assertIsNotNone(seen["lse_indexer"])
+        self.assertEqual(list(seen["lse_indexer"].shape), [1, self.S, 64])
+        loss = float(DSAIndexerLossLoggingHelper.tracker["values"][0])
+        self.assertTrue(np.isfinite(loss))
+
+    def test_unsupported_budget_asks_for_no_lse(self):
+        self.assertNotIn(self.WIDE_TOPK, _LSE_INDEXER_TOPKS)
+        seen = self._run(self.WIDE_TOPK)
+        self.assertEqual(seen["indexer_topk"], 0)
+        self.assertIsNone(seen["lse_indexer"])
+        loss = float(DSAIndexerLossLoggingHelper.tracker["values"][0])
+        self.assertTrue(np.isfinite(loss))
 
 
 if __name__ == "__main__":
