@@ -187,6 +187,21 @@ class MQALatentAttention(FleetLayer):
             else config.num_attention_heads,
             is_swa,
         )
+        # Shares ``non_absorbed_mqa_split_kv_b_proj`` with the query-side
+        # absorption: when set, ``MLASelfAttention`` passes its standalone
+        # ``v_b_proj`` parameter instead of a view of ``kv_b_proj.weight``, laid
+        # out as ``[h, v_head_dim, kv_lora_rank]`` for ``fused_grouped_matmul``
+        # rather than the ``[kv_lora_rank, h, v_head_dim]`` the einsum wants.
+        self.split_kv_b = bool(
+            getattr(config, "non_absorbed_mqa_split_kv_b_proj", False)
+        )
+        # Latent width, i.e. the value width the sparse kernel sees and the
+        # contraction dim of the de-absorption weight. This layer only exists on
+        # the ``dsv4_hybrid`` path, so the hybrid field is the authoritative one.
+        kv_lora_rank = getattr(config, "hybrid_mla_kv_lora_rank", None)
+        if kv_lora_rank is None:
+            kv_lora_rank = config.kv_lora_rank
+        self.kv_lora_rank = int(kv_lora_rank)
 
     def forward(
         self,
@@ -219,8 +234,11 @@ class MQALatentAttention(FleetLayer):
             attn_mask_startend_row_indices: ``[b, 1, s, 1]`` exclusive per-token
                 document end rows. ``None`` means a single document.
             x / qr: hidden states / q latent, inputs of the DSA indexer.
-            v_b_proj_weight: ``[kv_lora_rank, h, v_head_dim]`` de-absorption
-                weight (the V slice of ``kv_b_proj``).
+            v_b_proj_weight: de-absorption weight. ``[kv_lora_rank, h,
+                v_head_dim]`` (the V slice of ``kv_b_proj``) by default, or the
+                standalone ``v_b_proj`` parameter as ``[h, v_head_dim,
+                kv_lora_rank]`` under
+                ``non_absorbed_mqa_split_kv_b_proj``.
             input_ids: ``[b, s]`` token ids, only used to build the indexer-loss
                 row mask (``!= pad_token_id``). ``None`` falls back to the plain
                 row mean, as CSA does at ``csa_attention.py:1306``.
@@ -255,7 +273,19 @@ class MQALatentAttention(FleetLayer):
                 f"are packed along the sequence), got b={b}."
             )
         kv = key.squeeze(2).contiguous()  # [b, s, kv_lora + qk_rope]
-        kv_lora_rank = int(v_b_proj_weight.shape[0])
+        kv_lora_rank = self.kv_lora_rank
+        # The de-absorption weight's contraction dim sits last in the
+        # grouped-matmul layout and first in the einsum one. Checking it here
+        # turns a silently-wrong ``[G, R, D]`` / ``[l, h, v]`` mix-up (both
+        # reshape fine) into an error at the first forward.
+        contraction = v_b_proj_weight.shape[-1 if self.split_kv_b else 0]
+        if int(contraction) != kv_lora_rank:
+            raise ValueError(
+                "v_b_proj_weight layout mismatch: expected contraction dim "
+                f"kv_lora_rank={kv_lora_rank}, got shape "
+                f"{v_b_proj_weight.shape} with "
+                f"non_absorbed_mqa_split_kv_b_proj={self.split_kv_b}."
+            )
 
         with paddle.no_grad():
             row_end = attn_mask_startend_row_indices
@@ -276,7 +306,7 @@ class MQALatentAttention(FleetLayer):
             core_out = self._sparse_attn(
                 query, kv, token_indices, self.softmax_scale, kv_lora_rank
             )
-            return self._deabsorb(core_out, v_b_proj_weight)
+            return self._deabsorb(core_out, v_b_proj_weight, self.split_kv_b)
 
         return self._forward_dsa(
             query,
@@ -352,13 +382,25 @@ class MQALatentAttention(FleetLayer):
         )
 
     @staticmethod
-    def _deabsorb(core_out, v_b_proj_weight) -> Tensor:
+    @staticmethod
+    def _deabsorb(core_out, v_b_proj_weight, split_kv_b=False) -> Tensor:
         """``[b, s, h * kv_lora_rank]`` -> ``[b, s, h * v_head_dim]``."""
         b, s, _ = core_out.shape
-        kv_lora_rank, h, v_head_dim = v_b_proj_weight.shape
-        out = core_out.reshape([b, s, h, kv_lora_rank])
-        out = paddle.einsum("bshl,lhv->bshv", out, v_b_proj_weight)
-        return out.reshape([b, s, h * v_head_dim])
+        if split_kv_b:
+            # ``v_b_proj``: [h, v_head_dim, kv_lora_rank], the grouped-matmul
+            # ``[G, R, D]`` contract -- one Triton GEMM, no transpose.
+            from paddlefleet.triton_ops import fused_grouped_matmul
+
+            h, v_head_dim, kv_lora_rank = v_b_proj_weight.shape
+            out = fused_grouped_matmul(
+                core_out.reshape([b, s, h, kv_lora_rank]), v_b_proj_weight
+            )
+        else:
+            kv_lora_rank, h, v_head_dim = v_b_proj_weight.shape
+            out = core_out.reshape([b, s, h, kv_lora_rank])
+            out = paddle.einsum("bshl,lhv->bshv", out, v_b_proj_weight)
+        out = out.reshape([b, s, h * v_head_dim])
+        return out
 
     # ------------------------------------------------------------------
     # mqa_dsa
@@ -490,7 +532,7 @@ class MQALatentAttention(FleetLayer):
         core_out = self._sparse_attn(
             query, kv, token_indices, self.softmax_scale, kv_lora_rank
         )
-        output = self._deabsorb(core_out, v_b_proj_weight)
+        output = self._deabsorb(core_out, v_b_proj_weight, self.split_kv_b)
         if not need_loss:
             return output
 

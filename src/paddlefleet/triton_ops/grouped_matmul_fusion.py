@@ -253,6 +253,45 @@ def grouped_matmul_dw_kernel(
     tl.store(dw_ptrs, acc.to(OUT_DTYPE), mask=dw_mask)
 
 
+def _grouped_3d_strides(t):
+    """Describe ``t`` of shape ``[..., G, X]`` as ``[M, G, X]`` without a copy.
+
+    Returns ``(stride_m, stride_g, stride_x)`` when the tensor is a plain
+    non-overlapping strided view whose ``[M, G, X]`` fold is exact, else
+    ``None`` -- in which case the caller materializes a dense copy exactly as
+    the original implementation did.
+
+    A strided view such as ``q[..., :qk_nope_head_dim]`` qualifies: its group
+    stride is the *full* head dim rather than ``X``. Since the kernels take every
+    stride explicitly they can read such a view in place, and the
+    ``.contiguous()`` copy it would otherwise trigger is pure waste -- an
+    expensive one, since phi's strided->dense kernel has no vectorized variant.
+
+    The checks are deliberately conservative: only layouts that a dense copy
+    would linearize element-for-element are accepted, so the kernels see the
+    same values in the same order and the result is bit-identical to the copy
+    path. Broadcast (stride 0), reversed (negative stride) and self-overlapping
+    views are all rejected rather than reasoned about.
+    """
+    shape = t.shape
+    strides = t.strides
+    if len(shape) < 3:
+        return None
+    stride_m, stride_g, stride_x = strides[-3], strides[-2], strides[-1]
+    # Innermost dim must be packed, and neither the group nor the row step may
+    # be degenerate (0 = broadcast, < 0 = reversed) or self-overlapping.
+    if stride_x != 1:
+        return None
+    if stride_g < shape[-1] or stride_m < shape[-2] * stride_g:
+        return None
+    # Leading dims collapse into M only if each is packed w.r.t. the next one.
+    # A size-1 dim contributes nothing to M, so its own stride is irrelevant.
+    for i in range(len(shape) - 3):
+        if shape[i] != 1 and strides[i] != shape[i + 1] * strides[i + 1]:
+            return None
+    return stride_m, stride_g, stride_x
+
+
 class GroupedMatmulTriton(paddle.autograd.PyLayer):
     """Fused grouped matmul: einsum("...gd,grd->...gr") via Triton.
 
@@ -275,8 +314,15 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
         for s in orig_shape[:-2]:
             M *= s
 
-        # x is [..., G, D] -> [M, G, D], NO transpose needed
-        x_3d = x.reshape([M, G, D]).contiguous()
+        # x is [..., G, D] -> [M, G, D]. A foldable unit-stride view is read in
+        # place; anything else is materialized as a dense copy as before.
+        x_strides = _grouped_3d_strides(x)
+        if x_strides is None:
+            x_3d = x.reshape([M, G, D]).contiguous()
+            x_strides = (x_3d.strides[0], x_3d.strides[1], x_3d.strides[2])
+        else:
+            x_3d = x
+        stride_xm, stride_xg, stride_xk = x_strides
 
         # Output in [M, G, R] layout directly (no transpose after kernel)
         out = paddle.empty([M, G, R], dtype=x.dtype)
@@ -299,9 +345,9 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
             M,
             R,
             D,
-            x_3d.stride()[1],  # stride_xg: step between groups
-            x_3d.stride()[0],  # stride_xm: step between rows (M dim)
-            x_3d.stride()[2],  # stride_xk: step between cols (D dim)
+            stride_xg,  # stride_xg: step between groups
+            stride_xm,  # stride_xm: step between rows (M dim)
+            stride_xk,  # stride_xk: step between cols (D dim)
             w.stride()[0],
             w.stride()[1],
             w.stride()[2],
@@ -312,6 +358,7 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
         )
 
         ctx.save_for_backward(x_3d, w)
+        ctx.x_strides = x_strides
         ctx.M = M
         ctx.G = G
         ctx.R = R
@@ -335,8 +382,15 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
 
         # No "both frozen" shortcut needed: a PyLayer output is differentiable
         # only if some input is, so backward is never entered in that case.
-        # dy: [..., G, R] -> [M, G, R], NO transpose
-        dy_3d = dy.reshape([M, G, R]).contiguous()
+        # dy: [..., G, R] -> [M, G, R]. Same in-place-view rule as the forward.
+        dy_strides = _grouped_3d_strides(dy)
+        if dy_strides is None:
+            dy_3d = dy.reshape([M, G, R]).contiguous()
+            dy_strides = (dy_3d.strides[0], dy_3d.strides[1], dy_3d.strides[2])
+        else:
+            dy_3d = dy
+        stride_dym, stride_dyg, stride_dyk = dy_strides
+        stride_xm, stride_xg, stride_xk = ctx.x_strides
 
         dx = None
         if ctx.x_needs_grad:
@@ -354,9 +408,9 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
                 M,
                 D,  # N = D (output cols)
                 R,  # K = R (reduction)
-                dy_3d.stride()[1],  # stride_dyg
-                dy_3d.stride()[0],  # stride_dym
-                dy_3d.stride()[2],  # stride_dyk
+                stride_dyg,  # stride_dyg
+                stride_dym,  # stride_dym
+                stride_dyk,  # stride_dyk
                 w.stride()[0],
                 w.stride()[1],
                 w.stride()[2],
@@ -384,12 +438,12 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
                 M,
                 D,  # N = D (output cols)
                 R,  # K = R (rows of dw, which is the R dim)
-                dy_3d.stride()[1],  # stride_dyg
-                dy_3d.stride()[0],  # stride_dym
-                dy_3d.stride()[2],  # stride_dyr
-                x_3d.stride()[1],  # stride_xg
-                x_3d.stride()[0],  # stride_xm
-                x_3d.stride()[2],  # stride_xd
+                stride_dyg,  # stride_dyg
+                stride_dym,  # stride_dym
+                stride_dyk,  # stride_dyr
+                stride_xg,  # stride_xg
+                stride_xm,  # stride_xm
+                stride_xk,  # stride_xd
                 dw.stride()[0],
                 dw.stride()[1],
                 dw.stride()[2],

@@ -862,6 +862,30 @@ class TransformerConfig(ModelParallelConfig):
     the square of the sequence length (268 MB per layer at ``s=8192``).
     """
 
+    non_absorbed_mqa_split_kv_b_proj: bool = False
+    """Split ``kv_b_proj`` into standalone ``k_b_proj`` / ``v_b_proj``
+    absorption parameters instead of slicing it on every forward. Requires
+    ``non_absorbed_mqa=True``.
+
+    ``False``: both absorption weights are sliced out of ``kv_b_proj.weight`` on
+    every forward and applied with an ``einsum``.
+
+    ``True``: they are separate parameters. Each is logically the ``[G, R, D]``
+    weight ``fused_grouped_matmul`` wants --
+    ``k_b_proj``: ``[heads, kv_lora_rank, qk_nope_head_dim]`` (query absorption),
+    ``v_b_proj``: ``[heads, v_head_dim, kv_lora_rank]`` (V de-absorption) -- but
+    *stored* with the leading two dims folded, i.e. as 2-D
+    ``[heads * kv_lora_rank, qk_nope_head_dim]`` and
+    ``[heads * v_head_dim, kv_lora_rank]``; the 3-D form is recovered per forward
+    with a zero-copy reshape. The fold exists because the AOA engine cannot
+    change a tensor's rank, so the checkpoint side has to be 2-D. Each side is
+    then one grouped Triton GEMM with no slice, no einsum and no transpose.
+    ``kv_b_proj`` receives no gradient at all in this mode and the parameter set
+    is no longer byte-compatible with a dense MHA phase: a checkpoint without
+    these two keys must have them split out of ``kv_b_proj.weight`` by the loader
+    (``_mla_split_kv_b_statements`` generates the AOA statements that do it).
+    """
+
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
@@ -1543,6 +1567,16 @@ class TransformerConfig(ModelParallelConfig):
                         "non_absorbed_mqa_dense=True only means anything with "
                         "non_absorbed_mqa=True; it replaces that mode's DSA "
                         "indexer with the full per-document causal set."
+                    )
+                if (
+                    self.non_absorbed_mqa_split_kv_b_proj
+                    and not self.non_absorbed_mqa
+                ):
+                    raise ValueError(
+                        "non_absorbed_mqa_split_kv_b_proj=True only means "
+                        "anything with non_absorbed_mqa=True; it splits that "
+                        "mode's kv_b_proj into standalone k_b_proj / v_b_proj "
+                        "absorption parameters."
                     )
                 if self.non_absorbed_mqa and not self.non_absorbed_mqa_dense:
                     # The -2 layers' indexer reuses the CSA indexer fields. The

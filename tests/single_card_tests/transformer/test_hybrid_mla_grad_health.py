@@ -134,7 +134,9 @@ class _FakePGCollection:
 # invariants the kernels require: >= 64 heads, head_dim 128 indexer, topk % 128
 # == 0, kv_lora_rank 512 + qk_rope 64 == 576 latent key width, v == 512.
 # --------------------------------------------------------------------------- #
-def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
+def _make_config(
+    mode, sink, indexer=False, dtype=paddle.bfloat16, split_kv_b=False
+):
     # ``indexer`` is vestigial: the hybrid-MLA layer's DSA indexer is now built
     # unconditionally whenever ``non_absorbed_mqa`` is True (see
     # gpt_layer_specs), so it is retained only for call-site compatibility.
@@ -164,6 +166,7 @@ def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
         hybrid_mla_num_attention_heads=64,
         hybrid_mla_num_key_value_heads=64,
         non_absorbed_mqa=non_absorbed_mqa,
+        non_absorbed_mqa_split_kv_b_proj=split_kv_b,
         add_full_attention_sink_bias=sink,
         o_groups=4,
         o_lora_rank=32,
@@ -198,10 +201,16 @@ def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
     return cfg
 
 
-def _build(mode, sink=False, indexer=False, dtype=paddle.bfloat16):
+def _build(
+    mode,
+    sink=False,
+    indexer=False,
+    dtype=paddle.bfloat16,
+    split_kv_b=False,
+):
     """Build the layer-0 (hybrid-MLA) self-attention for ``mode``."""
     model_parallel_cuda_manual_seed(_SEED)
-    cfg = _make_config(mode, sink, indexer, dtype=dtype)
+    cfg = _make_config(mode, sink, indexer, dtype=dtype, split_kv_b=split_kv_b)
     spec = get_gpt_layer_local_spec(
         config=cfg,
         normalization=cfg.normalization,
@@ -435,6 +444,104 @@ class TestItem1StateDictAndGradientMatch(unittest.TestCase):
             self.assertTrue(
                 0.95 < ratio < 1.05, f"{key} grad-norm ratio off ({ratio})"
             )
+
+
+@_skip_if_no_cuda
+class TestSplitKvBProj(unittest.TestCase):
+    """``non_absorbed_mqa_split_kv_b_proj``: the grouped-matmul ``k_b_proj`` /
+    ``v_b_proj`` must reproduce the ``kv_b_proj``-slice einsums, given the split
+    the loader performs."""
+
+    SEQ = 128
+
+    @staticmethod
+    def _loader_split(state, mod):
+        """What the loader must produce for the two split-out parameters.
+
+        Both are stored 2-D (leading dims folded), which is what the AOA
+        statements can express and what the parameters actually are.
+        """
+        heads = mod.num_attention_heads_per_partition
+        w = state["kv_b_proj.weight"].reshape([mod.kv_lora_rank, heads, -1])
+        state["k_b_proj"] = (
+            w[:, :, : mod.qk_nope_head_dim]
+            .transpose([1, 0, 2])
+            .reshape([heads * mod.kv_lora_rank, mod.qk_nope_head_dim])
+            .contiguous()
+        )
+        state["v_b_proj"] = (
+            w[:, :, mod.qk_nope_head_dim :]
+            .transpose([1, 2, 0])
+            .reshape([heads * mod.v_head_dim, mod.kv_lora_rank])
+            .contiguous()
+        )
+        return state
+
+    def test_absorbed_query_matches_kv_b_proj_slice(self):
+        base = _build("mqa")
+        ded = _build("mqa", split_kv_b=True)
+        self.assertFalse(base.mqa_latent_split_kv_b)
+        self.assertTrue(ded.mqa_latent_split_kv_b)
+
+        state = base.state_dict()
+        self.assertNotIn("k_b_proj", state)
+        self.assertNotIn("v_b_proj", state)
+        ded.set_state_dict(self._loader_split(state, ded))
+
+        x = _hidden(self.SEQ, seed=3)
+        q_base = base.get_query_key_value_tensors(x)[0]
+        q_ded = ded.get_query_key_value_tensors(x)[0]
+        self.assertEqual(q_ded.shape, q_base.shape)
+        err = _rel_err(
+            q_ded.astype("float32").numpy(), q_base.astype("float32").numpy()
+        )
+        self.assertLess(err, 1e-3, f"absorbed query diverged (rel L2 {err})")
+
+    def test_deabsorb_matches_einsum(self):
+        """The V-side de-absorption is layout-switched, so cover both paths on
+        the same numbers via the core attention's own helper."""
+        ded = _build("mqa", split_kv_b=True)
+        core = ded.core_attention
+        self.assertTrue(core.split_kv_b)
+
+        heads = ded.num_attention_heads_per_partition
+        w = ded.kv_b_proj.weight.reshape([ded.kv_lora_rank, heads, -1])
+        w_einsum = w[:, :, ded.qk_nope_head_dim :]  # [l, h, v]
+        w_grouped = w_einsum.transpose([1, 2, 0]).contiguous()  # [h, v, l]
+
+        rng = np.random.RandomState(11)
+        core_out = paddle.to_tensor(
+            rng.randn(1, self.SEQ, heads * ded.kv_lora_rank).astype("float32")
+            / np.sqrt(ded.kv_lora_rank),
+            dtype=ded.kv_b_proj.weight.dtype,
+        )
+        ref = core._deabsorb(core_out, w_einsum, False)
+        got = core._deabsorb(core_out, w_grouped, True)
+        self.assertEqual(got.shape, ref.shape)
+        err = _rel_err(
+            got.astype("float32").numpy(), ref.astype("float32").numpy()
+        )
+        self.assertLess(err, 1e-3, f"de-absorption diverged (rel L2 {err})")
+
+    def test_full_forward_matches_unsplit(self):
+        if not _HAS_DSA:
+            self.skipTest("absorbed MQA forward requires SM100+ DSA kernel")
+        base = _build("mqa")
+        ded = _build("mqa", split_kv_b=True)
+        ded.set_state_dict(self._loader_split(base.state_dict(), ded))
+        re = _row_end(self.SEQ)
+        x = _hidden(self.SEQ, seed=5)
+        out_base, _ = base(
+            x, attention_mask=None, attn_mask_startend_row_indices=re
+        )
+        out_ded, _ = ded(
+            x, attention_mask=None, attn_mask_startend_row_indices=re
+        )
+        err = _rel_err(
+            out_ded.astype("float32").numpy(),
+            out_base.astype("float32").numpy(),
+        )
+        self.assertLess(err, 1e-3, f"layer output diverged (rel L2 {err})")
 
 
 @_skip_if_no_cuda
