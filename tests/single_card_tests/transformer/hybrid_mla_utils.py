@@ -30,6 +30,7 @@ groups of fixtures:
   to the functions, so importing this module never requires the parent repo.
 """
 
+import contextlib
 import sys
 import unittest
 from pathlib import Path
@@ -427,17 +428,73 @@ _REPO_ROOT = _find_repo_root()
 _CONFIG_DIR = _REPO_ROOT / _CONFIG_SUBDIR
 _PARENT_REPO_AVAILABLE = _CONFIG_DIR.is_dir()
 
+# ---------------------------------------------------------------------------
+# The five production ``layer43`` configs. All are phase variants of the same
+# 44-layer skeleton and ``_MHA_CFG`` (phase 1, the live reference run) is the
+# baseline the others are diffed against.
+#
+# NOTE on naming: the enum rename (2026-08-07) fixed the vocabulary. An MLA
+# layer (``csa_compress_ratios == -2``) running ``MQALatentAttention`` is
+# **latent MQA**; a CSA-family layer with ``csa_compress_ratios == -1`` is
+# **CSA full-causal MQA** and is a different class entirely
+# (``DSv4HybridSelfAttention`` + ``CompressedSparseAttention``). ``_CSA_MQA_CFG``
+# is the latter and therefore carries NO ``hybrid_mla_*`` field at all -- it must
+# never be used as a stand-in for a latent-MQA config.
+# ---------------------------------------------------------------------------
+# Phase 1: dense per-head MHA on the -2 layers (``hybrid_mla_attention`` unset
+# -> defaults to ``"mha"``). Carries ``add_full_attention_sink_bias``.
 _MHA_CFG = "ernielite_layer43_mla_hca"
-_MQA_CFG = "ernielite_layer43_mla_mqa_hca"
-_DSA_CFG = "ernielite_layer43_mla_dsa_hca"
-# ``hybrid_mla_attention="mqa_full_causal"``: latent MQA with no indexer. The
-# on-disk directory still carries the pre-rename name; only the config *field*
-# was renamed, not the parent repo's config directories.
+# ``hybrid_mla_attention="mqa_full_causal"``: latent MQA with no indexer
+# (equivalence experiment, not a production phase). The on-disk directory still
+# carries the pre-rename ``non_absorbed`` name; only the config *field* was
+# renamed, not the parent repo's config directories.
 _FULL_CAUSAL_CFG = "ernielite_layer43_non_absorbed_mqa_dense"
+# Phase 2 (DSA warmup): ``hybrid_mla_attention="mqa_dsa"`` +
+# ``dsa_indexer_use_sparse_loss=false`` + YAML ``train_indexer_only=true``.
+_DSA_CFG = "ernielite_layer43_non_absorbed_mqa_hca_dsa"
+# Phase 3/4: ``hybrid_mla_attention="mqa_dsa"`` +
+# ``dsa_indexer_use_sparse_loss=true``, backbone unfrozen.
+_DSA_SPARSE_LOSS_CFG = "ernielite_layer43_non_absorbed_mqa_hca_dsa_sparse_loss"
+# CSA full-causal MQA (``csa_compress_ratios == -1``). NOT a hybrid-MLA config:
+# no ``-2`` layer, no ``hybrid_mla_*`` / ``rope_type`` / ``use_vha_attention`` /
+# ``add_full_attention_sink_bias`` key.
+_CSA_MQA_CFG = "ernielite_layer43_mqa_hca"
+
+# The two production configs that build a latent MQA + DSA indexer. Tests that
+# used to pair "mqa" with "dsa" must iterate this instead: since the enum
+# rename there is no separate indexer-less ``mqa`` config, the second
+# ``"mqa_dsa"`` config is the sparse-loss phase.
+_MQA_DSA_CFGS = (_DSA_CFG, _DSA_SPARSE_LOSS_CFG)
+# Every config that has ``-2`` layers, i.e. the hybrid-MLA phase chain whose
+# parameter sets must stay checkpoint compatible.
+_HYBRID_MLA_CFGS = (_MHA_CFG, _FULL_CAUSAL_CFG, *_MQA_DSA_CFGS)
+# All five, for the config-drift sentinels.
+_LAYER43_CFGS = (_CSA_MQA_CFG, *_HYBRID_MLA_CFGS)
 
 # csa_compress_ratios == -2 marks a hybrid-MLA layer; 43 is the MTP layer.
-_MINUS2_LAYERS = (8, 17, 26, 34, 42, 43)
+# This is the parent repo's online layout (7 MLA layers: 6 in the backbone plus
+# the MTP one). All five layer43 configs share the *indices*, so a phase-1
+# checkpoint loads into the later phases; they diverged for a while and were
+# realigned. ``_CSA_MQA_CFG`` puts ``-1`` at exactly these indices.
+_MINUS2_LAYERS = (7, 14, 21, 28, 35, 42, 43)
 _NUM_HIDDEN = 43
+
+# The production training YAMLs live next to each other and are named after the
+# model_config directory with a ``pretrain_`` infix.
+_YAML_DIR = _REPO_ROOT / "conf" / "online"
+
+
+def _yaml_path(name):
+    """Production training YAML for a ``model_config_separated`` directory."""
+    return _YAML_DIR / f"{name.replace('layer43_', 'layer43_pretrain_')}.yaml"
+
+
+def _load_yaml(name):
+    """Parsed production training YAML (key -> value, order insensitive)."""
+    import yaml
+
+    with open(_yaml_path(name)) as f:
+        return yaml.safe_load(f)
 
 
 def _add_repo_root_to_sys_path():
@@ -485,8 +542,57 @@ class _FakePGCollection:
         self.cp = _FakeGroup(1)
 
 
+def _load_json(name):
+    """Raw on-disk ``model_config.json`` (no provider normalisation)."""
+    import json
+
+    with open(_CONFIG_DIR / name / "model_config.json") as f:
+        return json.load(f)
+
+
+@contextlib.contextmanager
+def _flash_attn_version(value):
+    """Temporarily pin the process-global ``FLAGS_flash_attn_version``.
+
+    Production derives it from the compute capability in
+    ``TrainingArguments.__post_init__`` (PaddleFormers
+    ``trainer/training_args.py:1764-1780``): SM100 -> 4, SM90 -> 3, else 2. None
+    of the five layer43 YAMLs pins ``fa_version``, so on the SM100 boxes these
+    runs target the effective value is 4.
+
+    A bare pytest process never constructs ``TrainingArguments``, so the flag
+    keeps the image default 2, and the dense-MHA sink guard
+    (``multi_latent_attention.py:561-581``) then refuses to build the layer.
+    Reproducing the production flag value is the faithful fix; weakening the
+    guard would not be.
+    """
+    key = "FLAGS_flash_attn_version"
+    previous = paddle.get_flags([key])[key]
+    paddle.set_flags({key: value})
+    try:
+        yield
+    finally:
+        paddle.set_flags({key: previous})
+
+
+def _production_fa_version():
+    """The ``fa_version`` the production trainer would pick on this box."""
+    major, minor = paddle.device.cuda.get_device_capability()
+    if major == 10:
+        return 4
+    if (major, minor) == (9, 0):
+        return 3
+    return 2
+
+
 def _load_provider(name):
-    """``(cfg, provider)`` from the on-disk ``model_config.json``."""
+    """``(cfg, provider)`` from the on-disk ``model_config.json``.
+
+    NOTE: only the JSON is read. Provider fields that live in the training YAML
+    (``csa_sparse_attn_backend``, ``csa_indexer_backend``,
+    ``indexer_init_from_scratch``, ``train_indexer_only``, ...) are absent, so a
+    test that needs one has to set it explicitly -- see ``_load_yaml``.
+    """
     _add_repo_root_to_sys_path()
     from fleet_model.ernie5_v2.modeling import (
         Ernie5V2Provider,

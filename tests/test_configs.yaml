@@ -151,6 +151,10 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_mqa_dsa_cp.py]
     products:
       - num_gpus: 2
+  # transformer: DSA warmup phase + padded-layout context parallel (CP=2)
+  - test_case: [tests/multi_card_tests/transformer/test_mqa_dsa_warmup_cp.py]
+    products:
+      - num_gpus: 2
   # transformer: hybrid-MLA (MHA/MQA) contiguous_allgather context-parallel (CP=2)
   - test_case: [tests/multi_card_tests/transformer/test_mla_cp_contiguous_allgather.py]
     products:
