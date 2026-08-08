@@ -547,6 +547,80 @@ class TestSplitKvBProj(unittest.TestCase):
         )
         self.assertLess(err, 1e-3, f"layer output diverged (rel L2 {err})")
 
+    def test_warmup_eval_forward_matches_unsplit(self):
+        """``_forward_dsa``'s early-exit path must honour the split layout.
+
+        With ``dsa_indexer_use_sparse_loss=False`` and no indexer loss to attach
+        (eval / ``no_grad`` / the first forward of a fully recomputed layer),
+        attention skips the indexer and de-absorbs directly. That call site is
+        separate from the two grad-enabled ones, so it needs its own coverage:
+        reading the ``[h, v, l]`` weight through the ``[l, h, v]`` einsum branch
+        does not just lose accuracy, it fails the reshape outright.
+        """
+        if not _HAS_DSA:
+            self.skipTest("absorbed MQA forward requires SM100+ DSA kernel")
+        base = _build("mqa")
+        ded = _build("mqa", split_kv_b=True)
+        ded.set_state_dict(self._loader_split(base.state_dict(), ded))
+        re = _row_end(self.SEQ)
+        x = _hidden(self.SEQ, seed=7)
+        base.eval()
+        ded.eval()
+        with paddle.no_grad():
+            out_base, _ = base(
+                x, attention_mask=None, attn_mask_startend_row_indices=re
+            )
+            out_ded, _ = ded(
+                x, attention_mask=None, attn_mask_startend_row_indices=re
+            )
+        err = _rel_err(
+            out_ded.astype("float32").numpy(),
+            out_base.astype("float32").numpy(),
+        )
+        self.assertLess(err, 1e-3, f"warmup output diverged (rel L2 {err})")
+
+    def test_muon_slices_the_split_params_per_head(self):
+        """Muon must keep orthogonalising one head at a time.
+
+        Both split parameters are 2-D, so Muon picks them up, but the head dim
+        is folded into the leading axis -- without a spec each would be
+        orthogonalised as a single matrix with all heads mixed. ``axis=-2``
+        (not ``0``) also covers the 3-D input Muon produces when it batches
+        several same-shape parameters together.
+        """
+        ded = _build("mqa", split_kv_b=True)
+        specs = ded.muon_slice_specs({"muon_qkv_update_mode": "split_head"})
+        heads = ded.num_attention_heads_per_partition
+        # The unsplit weight gets no gradient in this mode, so it must not be
+        # orthogonalised either.
+        self.assertNotIn("kv_b_proj.weight", specs)
+
+        expected = {
+            "k_b_proj": [ded.kv_lora_rank, ded.qk_nope_head_dim],
+            "v_b_proj": [ded.v_head_dim, ded.kv_lora_rank],
+        }
+        for name, block in expected.items():
+            self.assertIn(name, specs)
+            slice_fn, kwargs = specs[name]
+            self.assertEqual(kwargs, {"heads": heads, "axis": -2})
+            weight = getattr(ded, name)
+            for extra in ([], [3]):
+                seen = []
+
+                def _record(block_tensor):
+                    seen.append(list(block_tensor.shape))
+                    return block_tensor
+
+                batched = (
+                    weight
+                    if not extra
+                    else paddle.stack([weight] * extra[0], axis=0)
+                )
+                out = slice_fn(batched, _record, **kwargs)
+                self.assertEqual(list(out.shape), list(batched.shape))
+                self.assertEqual(len(seen), heads)
+                self.assertEqual(seen, [extra + block] * heads)
+
 
 @_skip_if_no_cuda
 class TestItem2AbsoluteMagnitudeSanity(unittest.TestCase):

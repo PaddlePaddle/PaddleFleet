@@ -480,7 +480,6 @@ class MQALatentAttention(FleetLayer):
         )
 
     @staticmethod
-    @staticmethod
     def _deabsorb(core_out, v_b_proj_weight, split_kv_b=False) -> Tensor:
         """``[b, s, h * kv_lora_rank]`` -> ``[b, s, h * v_head_dim]``."""
         b, s, _ = core_out.shape
@@ -549,7 +548,7 @@ class MQALatentAttention(FleetLayer):
             core_out = self._sparse_attn(
                 query, kv, token_indices, self.softmax_scale, kv_lora_rank
             )
-            return self._deabsorb(core_out, v_b_proj_weight)
+            return self._deabsorb(core_out, v_b_proj_weight, self.split_kv_b)
 
         with paddle.no_grad():
             window_idxs = None

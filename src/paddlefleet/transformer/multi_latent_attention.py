@@ -1460,10 +1460,38 @@ class MLASelfAttention(MultiLatentAttention):
             ortho_per_head,
             {"head_sizes": [kv_lora, qk_rope]},
         )
-        specs["kv_b_proj.weight"] = (
-            ortho_per_head,
-            {"heads": num_heads, "head_sizes": [qk_nope, self.v_head_dim]},
-        )
+        if self.mqa_latent_split_kv_b:
+            # ``kv_b_proj`` is split into the standalone ``k_b_proj`` /
+            # ``v_b_proj`` absorption parameters, so the per-head blocks Muon
+            # must orthogonalise moved with them. Both are 2-D with the head dim
+            # folded into the leading axis, so a head is one equal block along
+            # ``axis=-2`` (``-2`` rather than ``0`` so a 3-D input -- Muon
+            # batching several same-shape parameters -- still splits the head
+            # axis and not the batch axis):
+            #   k_b_proj -> [kv_lora_rank, qk_nope_head_dim] per head, the same
+            #               block as the K half of the unsplit weight
+            #   v_b_proj -> [v_head_dim, kv_lora_rank] per head, i.e. the
+            #               transpose of the V half
+            # The transpose is bit-exact under muon_version 3: Newton-Schulz
+            # transposes any block with rows > cols before iterating and back
+            # after, and the version-3 scale ``max(dout, din) ** 0.5`` is
+            # symmetric in the two dims. Versions 1/2 scale with ``dout / din``
+            # and would break the V-side equivalence.
+            specs["k_b_proj"] = (
+                ortho_per_head,
+                {"heads": num_heads, "axis": -2},
+            )
+            specs["v_b_proj"] = (
+                ortho_per_head,
+                {"heads": num_heads, "axis": -2},
+            )
+            # ``kv_b_proj`` gets no gradient in this mode -- orthogonalising it
+            # would only burn a per-head Newton-Schulz every step.
+        else:
+            specs["kv_b_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_heads, "head_sizes": [qk_nope, self.v_head_dim]},
+            )
         if getattr(self, "gate_proj", None) is not None:
             specs["gate_proj.weight"] = (ortho_per_head, {"heads": num_heads})
         # MQA (subclass) runs a second gated branch for block-sparse attention.
