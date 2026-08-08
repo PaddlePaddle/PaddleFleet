@@ -913,6 +913,26 @@ class TestConfigDeltas(unittest.TestCase):
                 self._MISSING,
                 name == _DSA,
             )
+            # Both mqa_dsa phases resume through the HF safetensors branch of
+            # ``_load_flex_checkpoint`` rather than its DCP branch, because the
+            # DCP branch drops every bf16 parameter from the model-state request
+            # (``PaddleFormers trainer.py:1403``) and can only restore it from an
+            # fp32 master weight -- which does not exist for a parameter that is
+            # frozen (phase 2) or absent from the previous phase's optimizer
+            # state (phase 3/4), and the assignment loop at ``:1440`` has no else
+            # branch. ``load_from_hf`` requires ``ignore_load_lr_and_optim``
+            # (hard assert at ``:1252``), and ``parallel_broadcast`` cannot serve
+            # a resume whose parameter set changed (``resharder.py:459`` asserts
+            # ``nranks > 1``, which fails at PP=1 / moe_sharding=1).
+            # ``non_absorbed_mqa_dense`` deliberately keeps the DCP branch: it
+            # adds no parameter and freezes nothing, so its master weights are
+            # complete.
+            allowed["load_from_hf"] = (self._MISSING, True)
+            allowed["ignore_load_lr_and_optim"] = (False, True)
+            allowed["flex_ckpt_comm_method"] = (
+                "parallel_broadcast",
+                "broadcast",
+            )
         if name == _DSA:
             # Phase 2 = DSA warmup: only the indexer trains.
             allowed["train_indexer_only"] = (self._MISSING, True)
