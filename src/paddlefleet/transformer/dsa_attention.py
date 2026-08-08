@@ -398,6 +398,36 @@ class DSAIndexer(paddle.nn.Layer):
                 "supported types are 'rope' and 'yarn'"
             )
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the indexer q-up projection.
+
+        Same treatment as ``CSAIndexer.muon_slice_specs``
+        (``csa_attention.py:1823``): ``wq_b`` packs ``n_heads`` independent heads
+        along the output axis, so Muon must orthogonalise each head's block
+        rather than the concatenated matrix. ``wk`` (a single shared head) and
+        ``weights_proj`` (whose output dim *is* the head count) are whole
+        matrices and need no spec; ``k_norm`` is 1-D and never reaches Muon.
+
+        Consumed only by the per-module mechanism in
+        ``PaddleFormers/paddleformers/trainer/trainer.py:3427-3446``. ErnieBot
+        supplies its own ``build_muon_param_info_map``
+        (``fleet_model/ernie5_v2/modeling.py:2041``) and never walks that path,
+        so this exists to keep PaddleFleet correct standalone: without it,
+        latent MQA + DSA would silently lose per-head slicing there while the
+        CSA indexer kept it.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        return {
+            "wq_b.weight": (ortho_per_head, {"heads": self.n_heads}),
+        }
+
     def _apply_rope(
         self, x: Tensor, freqs: Tensor, mscale: float = 1.0
     ) -> Tensor:

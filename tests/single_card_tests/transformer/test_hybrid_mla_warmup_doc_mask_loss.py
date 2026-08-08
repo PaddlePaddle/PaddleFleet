@@ -848,5 +848,155 @@ class TestWarmupGradHealth(unittest.TestCase):
         self._check(sink=np.linspace(1.0, 3.0, H))
 
 
+# Layouts where the indexer has little or nothing left to choose from, because
+# the forced window already covers each document. ``cand_i = max(causal_len_i -
+# WINDOW, 0)``, so a document of length <= WINDOW gives *every* one of its rows
+# an empty candidate range.
+_STARVED_LAYOUTS = [
+    ([64, 64, 64, 64], 256, "every doc half the window: 256/256 rows starved"),
+    ([128, 128], 256, "every doc exactly the window: 256/256 rows starved"),
+    ([1] * 8 + [120, 128], 256, "single-token docs mixed with window-sized"),
+    ([2, 3, 5, 7, 11, 100], 128, "prime tiny docs, all far below the window"),
+    ([129, 127], 256, "one row past the window: 255/256 starved"),
+    ([1] * 8 + [248], 256, "single-token docs then one long document"),
+    ([255, 1], 256, "long document plus a single-token tail"),
+]
+
+
+@_GPU
+class TestStarvedIndexerCandidates(unittest.TestCase):
+    """Packed documents too short for the indexer to pick anything.
+
+    Real packing is dominated by short documents, so this is not a synthetic
+    edge: ``_indexer_valid_range`` clamps the candidate end a full
+    ``csa_window_size`` before the diagonal, so any document no longer than the
+    window leaves *every* one of its rows with zero candidates. The interesting
+    question is what that costs, and the answer must be "nothing":
+
+    * the forced window already spans the whole document, so the phase-3/4
+      attention table still contains the complete per-document causal set --
+      asserted as ``want - got == empty set``, not as a count;
+    * consequently all three ``hybrid_mla_attention`` shapes (phase 3/4, warmup,
+      ``mqa_full_causal``) must produce **bit-identical** output on these
+      layouts, which is a much stronger statement than "no crash";
+    * an all-``-1`` candidate row means a softmax over an empty set, the classic
+      NaN source, so output and every gradient are checked finite;
+    * and no starved row may borrow a column from a neighbouring document.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
+        except Exception:
+            pass
+
+    def _module(self, mode, sparse_loss):
+        config = _create_mqa_config(mode, loss_coeff=0.01)
+        if sparse_loss is not None:
+            config.dsa_indexer_use_sparse_loss = sparse_loss
+        config.pad_token_id = 0
+        return _build_module(config, bf16=True)
+
+    def _run(self, mode, sparse_loss, seqlen, layout, backward):
+        tensors, w_v = _leaves(seqlen)
+        row_end = _row_end(layout, seqlen)
+        module = self._module(mode, sparse_loss)
+        _CAPTURED.clear()
+        DSAIndexerLossLoggingHelper.tracker.clear()
+        out = _forward(
+            module,
+            tensors,
+            row_end,
+            w_v,
+            training=backward,
+            input_ids=paddle.ones([1, seqlen], dtype="int64"),
+        )
+        grads = {}
+        if backward:
+            out.cast("float32").sum().backward()
+            for name, tensor in zip(("query", "key", "x", "qr"), tensors):
+                grads[name] = tensor.grad
+            for name, param in module.named_parameters():
+                grads[name] = param.grad
+        return out, grads
+
+    @staticmethod
+    def _starved_rows(row_end, seqlen):
+        doc_start, _, _, _, _ = _derive_csa_doc_boundaries(row_end, seqlen)
+        starts = doc_start.numpy()
+        causal_len = np.arange(seqlen) + 1 - starts
+        return starts, int((np.maximum(causal_len - WINDOW, 0) == 0).sum())
+
+    def test_starved_rows_keep_the_whole_causal_set(self):
+        for layout, seqlen, note in _STARVED_LAYOUTS:
+            with self.subTest(layout=layout, note=note):
+                row_end = _row_end(layout, seqlen)
+                starts, starved = self._starved_rows(row_end, seqlen)
+                self.assertGreater(
+                    starved, 0, "layout starves no row: the case is not covered"
+                )
+                self._run("mqa_dsa", True, seqlen, layout, backward=False)
+                table = _CAPTURED[-1][0]
+                for row in range(seqlen):
+                    cols = table[row]
+                    got = set(cols[cols >= 0].tolist())
+                    want = set(range(int(starts[row]), row + 1))
+                    self.assertEqual(
+                        want - got,
+                        set(),
+                        f"row {row}: causal columns missing from the table",
+                    )
+                    self.assertEqual(
+                        got - want,
+                        set(),
+                        f"row {row}: table has columns outside its document",
+                    )
+
+    def test_all_three_modes_agree_bitwise_when_starved(self):
+        for layout, seqlen, note in _STARVED_LAYOUTS:
+            _, starved = self._starved_rows(_row_end(layout, seqlen), seqlen)
+            if starved < seqlen:
+                continue  # only fully starved layouts must collapse to equality
+            with self.subTest(layout=layout, note=note):
+                phase3, _ = self._run("mqa_dsa", True, seqlen, layout, False)
+                warmup, _ = self._run("mqa_dsa", False, seqlen, layout, False)
+                causal, _ = self._run("mqa", None, seqlen, layout, False)
+                self.assertEqual(
+                    float(np.abs(_fp32(phase3) - _fp32(warmup)).max()),
+                    0.0,
+                    "phase 3/4 != warmup although the window covers everything",
+                )
+                self.assertEqual(
+                    float(np.abs(_fp32(warmup) - _fp32(causal)).max()),
+                    0.0,
+                    "warmup != mqa_full_causal although the table is identical",
+                )
+
+    def test_starved_rows_stay_finite(self):
+        for mode, sparse_loss in (
+            ("mqa_dsa", False),
+            ("mqa_dsa", True),
+            ("mqa", None),
+        ):
+            for layout, seqlen, note in _STARVED_LAYOUTS:
+                with self.subTest(mode=mode, sparse=sparse_loss, note=note):
+                    out, grads = self._run(
+                        mode, sparse_loss, seqlen, layout, backward=True
+                    )
+                    array = _fp32(out)
+                    self.assertTrue(
+                        np.isfinite(array).all(),
+                        "an empty candidate row produced NaN/Inf output",
+                    )
+                    for name, grad in grads.items():
+                        if grad is None:
+                            continue
+                        self.assertTrue(
+                            np.isfinite(grad.cast("float32").numpy()).all(),
+                            f"gradient {name} is not finite",
+                        )
+
+
 if __name__ == "__main__":
     unittest.main()

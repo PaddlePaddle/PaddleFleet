@@ -479,14 +479,33 @@ _LAYER43_CFGS = (_CSA_MQA_CFG, *_HYBRID_MLA_CFGS)
 _MINUS2_LAYERS = (7, 14, 21, 28, 35, 42, 43)
 _NUM_HIDDEN = 43
 
-# The production training YAMLs live next to each other and are named after the
-# model_config directory with a ``pretrain_`` infix.
-_YAML_DIR = _REPO_ROOT / "conf" / "online"
+# The training YAMLs are named after the model_config directory with a
+# ``pretrain_`` infix. Only phase 1 is a live online run and stays in
+# ``conf/online``; the MQA phases are experiments and moved to
+# ``conf/experiment/ernielite_layer43_mqa`` (2026-08-08).
+_ONLINE_YAML_DIR = _REPO_ROOT / "conf" / "online"
+_EXPERIMENT_YAML_DIR = (
+    _REPO_ROOT / "conf" / "experiment" / "ernielite_layer43_mqa"
+)
 
 
 def _yaml_path(name):
-    """Production training YAML for a ``model_config_separated`` directory."""
-    return _YAML_DIR / f"{name.replace('layer43_', 'layer43_pretrain_')}.yaml"
+    """Training YAML for a ``model_config_separated`` directory.
+
+    Raises instead of returning a non-existent path: a silently missing YAML
+    turns every config-drift assertion into a skip, which is exactly how an
+    earlier rename went unnoticed.
+    """
+    filename = f"{name.replace('layer43_', 'layer43_pretrain_')}.yaml"
+    for directory in (_ONLINE_YAML_DIR, _EXPERIMENT_YAML_DIR):
+        candidate = directory / filename
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"no training YAML named {filename} under {_ONLINE_YAML_DIR} or "
+        f"{_EXPERIMENT_YAML_DIR}; if it moved again, add the new directory "
+        "here rather than letting the config tests skip"
+    )
 
 
 def _load_yaml(name):

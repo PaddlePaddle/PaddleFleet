@@ -486,10 +486,13 @@ class TestHybridIndexerReadsModelWideIndexFields(unittest.TestCase):
 
     def test_dsa_indexer_reflects_model_wide_index_fields(self):
         _, provider = _load_provider(_DSA)
-        # Production values (shared with the CSA layers).
+        # Production values (shared with the CSA layers). 2048 is what the
+        # online configs train at, and it is exactly
+        # ``mqa_latent_attention._LOSS_TOPK_CAP``, so at s=8192 the loss table
+        # and the attention table end up the same width.
         self.assertEqual(provider.dsa_index_n_heads, 64)
         self.assertEqual(provider.dsa_index_head_dim, 128)
-        self.assertEqual(provider.dsa_index_topk, 512)
+        self.assertEqual(provider.dsa_index_topk, 2048)
         # Discriminating probe: move the index dims off their production values
         # so a hard-coded/wrong-field read would be visible. Keep head_dim=128
         # (cuDNN kernel hard req) and topk a multiple of 128 (indexer backward
@@ -917,16 +920,33 @@ class TestConfigDeltas(unittest.TestCase):
 
     @classmethod
     def _json_allowlist(cls, name):
+        # ``index_topk`` is the value production actually trains at (2048, which
+        # is also ``mqa_latent_attention._LOSS_TOPK_CAP``). The baseline
+        # ``mla_hca`` config still carries the older 512, and it is deliberately
+        # not edited, so every non-baseline config differs here. Note the field
+        # is *not* MLA-only: the ratio-128 HCA indexer reads it too
+        # (``csa_attention.py:1776``), so this difference is a real behavioural
+        # gap between phase 1 and phases 2-4 on the HCA layers, not a cosmetic
+        # one -- it is allowlisted so the drift check stays green, not because it
+        # is harmless.
+        topk = {"index_topk": (512, 2048)}
         if name == _FULL_CAUSAL:
-            return {"hybrid_mla_attention": (cls._MISSING, "mqa_full_causal")}
+            return {
+                "hybrid_mla_attention": (cls._MISSING, "mqa_full_causal"),
+                **topk,
+            }
         if name == _DSA:
-            return {"hybrid_mla_attention": (cls._MISSING, "mqa_dsa")}
+            return {
+                "hybrid_mla_attention": (cls._MISSING, "mqa_dsa"),
+                **topk,
+            }
         if name == _SPARSE_LOSS:
             return {
                 "hybrid_mla_attention": (cls._MISSING, "mqa_dsa"),
                 # Phase 3/4: the indexer is trained enough for attention to
                 # consume its ranking, so the narrow (sparse) KL is used.
                 "dsa_indexer_use_sparse_loss": (False, True),
+                **topk,
             }
         if name == _CSA_MQA_CFG:
             # A different attention class, not a phase of the hybrid-MLA chain:
@@ -944,6 +964,7 @@ class TestConfigDeltas(unittest.TestCase):
                 "hybrid_mla_num_key_value_heads": (64, cls._MISSING),
                 "rope_type": ("rope", cls._MISSING),
                 "use_vha_attention": (True, cls._MISSING),
+                **topk,
             }
         raise AssertionError(f"no JSON allowlist for {name}")
 
