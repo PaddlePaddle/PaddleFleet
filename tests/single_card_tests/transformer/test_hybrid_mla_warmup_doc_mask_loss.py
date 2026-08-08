@@ -46,6 +46,12 @@ What is proven here, and nowhere else:
 * ``TestWarmupGradHealth`` -- the five indexer parameters, the detached indexer
   inputs, and the attention-side ``dq`` / ``dkv`` / ``d_sink``.
 
+Shape caveat: ``WINDOW + INDEX_TOPK == 256`` in ``hybrid_mla_utils``, so a
+``seqlen=256`` fixture has a *saturated* sparse budget -- the phase-3/4 top-k
+table would already equal the full causal set there, and no assertion at that
+shape can tell the two apart. ``_LAYOUTS`` therefore also carries ``seqlen=512``
+layouts, which is the discriminating shape.
+
 Shared fixtures come from ``hybrid_mla_utils``.
 
 Run::
@@ -57,6 +63,7 @@ Run::
 """
 
 import contextlib
+import inspect
 import unittest
 
 import numpy as np
@@ -88,11 +95,21 @@ _EPS = 1e-10  # mqa_latent_attention._EPS, the KL/renormalisation epsilon
 # trailing gap into one more *valid* document, so "with a trailing gap" is still
 # a well-formed multi-document layout here; genuine pad rows need
 # ``_pad_row_end`` and live in ``_PAD_LAYOUTS``.
+#
+# ``seqlen=256`` is a *saturated* budget: ``WINDOW + INDEX_TOPK == 128 + 128 ==
+# 256``, so at that shape the phase-3/4 sparse table already covers every row's
+# causal length and "attention takes the full causal set" is indistinguishable
+# from "attention takes the indexer's top-k". The last two layouts are therefore
+# at ``seqlen=512``, where the sparse budget covers at most 256 of a row's up to
+# 512 causal columns -- only there does an exact-column-set assertion actually
+# discriminate the warmup table from the top-k table.
 _LAYOUTS = [
     ([256], 256),  # one document spanning the whole buffer
     ([40, 216], 256),  # two documents, tiles the buffer
     ([100, 50, 106], 256),  # three documents, none a multiple of the window
     ([127, 65], 256),  # trailing gap -> a third (valid) document of 64
+    ([512], 512),  # discriminating: causal length 512 > window+topk = 256
+    ([200, 312], 512),  # discriminating, multi-document
 ]
 
 # Layouts whose trailing gap stays *outside* every document, i.e. real pad rows.
@@ -153,6 +170,28 @@ def _warmup_module(loss_coeff=0.01, sink=None, sparse_loss=False):
     return module
 
 
+# Positional signature of ``TileLangCSAIndexerLossAutoScaler.forward`` (minus
+# ``ctx``). The spy below binds by position, so a reordered upstream signature
+# would silently hand it the wrong tensors -- which is exactly what happened
+# when ``target`` moved from seventh to second: the spy then read
+# ``index_k_comp`` as the top-k table (bf16 bits as ``uint16``, so ``< 0`` never
+# fired) and the int32 column ids as the probabilities (``log`` of ``-1`` ->
+# ``nan``). Assert the order instead of trusting it.
+_LOSS_SCALER_ARGS = [
+    "output",
+    "target",
+    "index_q",
+    "weights",
+    "index_k_comp",
+    "topk_indices",
+    "topk_probs",
+    "loss_coeff",
+    "indexer_backend",
+    "num_rows_override",
+    "loss_mask",
+]
+
+
 @contextlib.contextmanager
 def _capture_loss_args():
     """Capture the arguments the layer hands ``TileLangCSAIndexerLossAutoScaler``.
@@ -163,20 +202,30 @@ def _capture_loss_args():
     gradient sees.
     """
     real = mqa_mod.TileLangCSAIndexerLossAutoScaler
+    actual = [
+        name
+        for name in inspect.signature(real.forward).parameters
+        if name != "ctx"
+    ]
+    assert actual == _LOSS_SCALER_ARGS, (
+        "TileLangCSAIndexerLossAutoScaler.forward was reordered: "
+        f"{actual} != {_LOSS_SCALER_ARGS}; the positional spy below would "
+        "capture the wrong tensors"
+    )
     cap = {}
 
     class _Spy:
         @staticmethod
         def apply(
             output,
+            target,
             index_q,
             weights,
             index_k_comp,
             topk_indices,
             topk_probs,
-            target,
             loss_coeff,
-            backend="tilelang",
+            indexer_backend="tilelang",
             num_rows_override=None,
             loss_mask=None,
         ):
@@ -194,14 +243,14 @@ def _capture_loss_args():
             cap["coeff"] = float(loss_coeff)
             return real.apply(
                 output,
+                target,
                 index_q,
                 weights,
                 index_k_comp,
                 topk_indices,
                 topk_probs,
-                target,
                 loss_coeff,
-                backend,
+                indexer_backend,
                 num_rows_override,
                 loss_mask,
             )

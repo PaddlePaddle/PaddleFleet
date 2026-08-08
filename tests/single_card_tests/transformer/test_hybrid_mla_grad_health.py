@@ -46,6 +46,7 @@ Run (SM100+ / Blackwell required for the absorbed cuDNN block-sparse kernel):
 """
 
 import contextlib
+import inspect
 import math
 import unittest
 
@@ -887,19 +888,46 @@ class TestItem10IndexerKLValueAndDenominator(unittest.TestCase):
 
         cap = {}
         real = mqamod.TileLangCSAIndexerLossAutoScaler
+        # Bound by position, so pin the order: upstream moved ``target`` from
+        # seventh to second, which silently turned ``probs`` into int32 column
+        # ids (``log(-1) -> nan``) instead of failing.
+        expected_args = [
+            "output",
+            "target",
+            "index_q",
+            "weights",
+            "index_k_comp",
+            "topk_indices",
+            "topk_probs",
+            "loss_coeff",
+            "indexer_backend",
+            "num_rows_override",
+            "loss_mask",
+        ]
+        actual_args = [
+            name
+            for name in inspect.signature(real.forward).parameters
+            if name != "ctx"
+        ]
+        self.assertEqual(
+            actual_args,
+            expected_args,
+            "TileLangCSAIndexerLossAutoScaler.forward was reordered; the "
+            "positional spy below would capture the wrong tensors",
+        )
 
         class Spy:
             @staticmethod
             def apply(
                 output,
+                target,
                 index_q,
                 weights,
                 index_k_comp,
                 topk_indices,
                 topk_probs,
-                target,
                 loss_coeff,
-                backend="tilelang",
+                indexer_backend="tilelang",
                 num_rows_override=None,
                 loss_mask=None,
             ):
@@ -918,14 +946,14 @@ class TestItem10IndexerKLValueAndDenominator(unittest.TestCase):
                 cap["coeff"] = float(loss_coeff)
                 return real.apply(
                     output,
+                    target,
                     index_q,
                     weights,
                     index_k_comp,
                     topk_indices,
                     topk_probs,
-                    target,
                     loss_coeff,
-                    backend,
+                    indexer_backend,
                     num_rows_override,
                     loss_mask,
                 )

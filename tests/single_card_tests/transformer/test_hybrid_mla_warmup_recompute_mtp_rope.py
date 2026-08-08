@@ -48,6 +48,13 @@ compose *around* it and were previously only exercised in phase 3
 
 Every RoPE assertion is against the independent fp64 reference of
 ``test_hybrid_mla_rope_audit``, never against the implementation itself.
+
+``TestRecomputeInnerForwardBitIdentical`` closes the one gap axis 1 leaves open:
+recompute-ON vs recompute-OFF says nothing about whether the *two* forwards of a
+recomputed step agree with each other, since paddle discards the first one's
+output. That class keeps both and requires ``maxabs == 0.0``, on all three
+``hybrid_mla_attention`` shapes and on a ``seqlen`` where the sparse budget does
+not already cover the whole causal range.
 """
 
 import unittest
@@ -732,6 +739,126 @@ class TestWarmupRope(unittest.TestCase):
                         layer_number=1,
                     )
                     self.assertFalse(module.mqa_latent)
+
+
+@_GPU
+class TestRecomputeInnerForwardBitIdentical(unittest.TestCase):
+    """The forward *inside* backward must equal the forward outside it, bitwise.
+
+    ``TestWarmupRecompute`` above compares recompute-on against recompute-off and
+    compares the two index tables, which pins the sparsity pattern. It does not
+    compare the two forwards' *outputs*, because paddle discards the first one --
+    so a divergence in R2's activations that happened to leave the column set
+    alone would go unnoticed and be differentiated silently.
+
+    Here both returns are kept and compared. ``maxabs == 0.0`` is the expected
+    result, not a tolerance: the recomputed forward re-executes the same kernels
+    on the same saved inputs, and the index table is an integer function of the
+    document bounds. The captured-call count is asserted first, otherwise a
+    single-forward implementation would make the comparison vacuous.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
+        except Exception:
+            pass
+
+    # ``mqa`` -> "mqa_full_causal"; the two ``mqa_dsa`` rows are warmup (wide
+    # loss, full-causal attention) and phase 3/4 (narrow loss, top-k attention).
+    _MODES = (("mqa_dsa", False), ("mqa_dsa", True), ("mqa", None))
+    # 256 saturates window+topk, 512 does not -- see the module docstring of
+    # ``test_hybrid_mla_warmup_doc_mask_loss``.
+    _SHAPES = ((SEQLEN, TWO_DOCS), (512, [200, 312]))
+
+    def _module(self, mode, sparse_loss):
+        config = _create_mqa_config(mode, loss_coeff=0.01)
+        if sparse_loss is not None:
+            config.dsa_indexer_use_sparse_loss = sparse_loss
+        config.pad_token_id = 0
+        return _build_module(config, bf16=True)
+
+    def _capture_two_forwards(self, module, seqlen, layout):
+        """Run one recomputed train step; return both forwards' outputs."""
+        import types
+
+        from paddle.distributed.fleet.utils import recompute
+
+        query, key, w_v, x, qr = _make_inputs(seqlen, seed=7, with_hidden=True)
+        row_end = _row_end(layout, seqlen)
+        module.train()
+        module.clear_gradients()
+        q = _leaf(query)
+
+        outs = []
+        real = type(module).forward
+
+        def spy(zelf, *args, **kwargs):
+            result = real(zelf, *args, **kwargs)
+            tensor = result[0] if isinstance(result, tuple) else result
+            outs.append(tensor.detach().cast("float32").numpy().copy())
+            return result
+
+        module.forward = types.MethodType(spy, module)
+        try:
+            out = recompute(
+                lambda qin: module(
+                    qin,
+                    key,
+                    None,
+                    None,
+                    row_end,
+                    v_b_proj_weight=w_v,
+                    x=x,
+                    qr=qr,
+                    input_ids=paddle.ones([1, seqlen], dtype="int64"),
+                ),
+                q,
+            )
+            out.cast("float32").sum().backward()
+        finally:
+            del module.forward
+        return outs
+
+    def test_inner_forward_output_is_bit_identical(self):
+        for mode, sparse_loss in self._MODES:
+            for seqlen, layout in self._SHAPES:
+                with self.subTest(mode=mode, sparse=sparse_loss, s=seqlen):
+                    _CAPTURED.clear()
+                    DSAIndexerLossLoggingHelper.tracker.clear()
+                    module = self._module(mode, sparse_loss)
+                    outs = self._capture_two_forwards(module, seqlen, layout)
+                    self.assertGreaterEqual(
+                        len(outs),
+                        2,
+                        "recompute did not run a second forward, so this "
+                        "comparison would be vacuous",
+                    )
+                    self.assertEqual(
+                        float(np.abs(outs[0] - outs[1]).max()),
+                        0.0,
+                        "the forward inside backward differs from the outer "
+                        "forward",
+                    )
+
+    def test_inner_forward_index_table_is_bit_identical(self):
+        for mode, sparse_loss in self._MODES:
+            for seqlen, layout in self._SHAPES:
+                with self.subTest(mode=mode, sparse=sparse_loss, s=seqlen):
+                    _CAPTURED.clear()
+                    DSAIndexerLossLoggingHelper.tracker.clear()
+                    module = self._module(mode, sparse_loss)
+                    self._capture_two_forwards(module, seqlen, layout)
+                    self.assertGreaterEqual(
+                        len(_CAPTURED), 2, "only one sparse-kernel call"
+                    )
+                    first, second = _CAPTURED[0], _CAPTURED[-1]
+                    self.assertEqual(
+                        int((first != second).sum()),
+                        0,
+                        "the recomputed forward selected different columns",
+                    )
 
 
 if __name__ == "__main__":

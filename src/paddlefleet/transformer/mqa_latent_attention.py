@@ -602,20 +602,30 @@ class MQALatentAttention(FleetLayer):
                 )
                 topk_indices, attn_scores, reuse_for_loss = None, None, False
             else:
-                # A wider table cannot be narrowed by slicing: the kernel emits
-                # the selected columns in ascending *position* order, not by
-                # score (measured: at s=512/topk=384 only 25% of the 128-wide
-                # table's entries match the wide table's first 128, and score
-                # steps go up 61290 times). So the two widths need two calls;
-                # the extra one runs only on the grad-enabled forward of a
-                # full-loss step.
+                # The attention width and the loss width are two separate
+                # kernel calls, and deliberately so: the attention set must not
+                # depend on how wide the loss happens to be.
+                #
+                # With today's ``_indexer_top_k_unfused`` (a deterministic
+                # ``paddle.topk``) slicing one wide call would in fact give the
+                # same columns -- measured over 6 shapes (pure causal s=512 and
+                # s=1024, window-clamped s=512/1024, packed docs [256,256,512],
+                # ratio=4): 0 ascending score steps in the emitted order and the
+                # narrow table is 100% the wide table's prefix. But that is a
+                # property of one helper, not of the interface: the pre-#1666
+                # radix kernel emitted in ascending *position* order (same
+                # shapes: ~61k ascending score steps, only 55.5% prefix match),
+                # so a slice would have silently moved the attention set. Two
+                # calls keep that decoupled by construction; the extra one runs
+                # only on the grad-enabled forward of a full-loss step.
                 #
                 # ``return_topk_scores`` stays tied to ``need_loss`` alone,
-                # never to the width decision: the flag selects a different
-                # kernel path and measurably changes which columns come back
-                # (~11% of slots at s=512/topk=128), so making it depend on the
-                # switch would move the attention set too. The scores of the
-                # narrow call are then unused when the loss widens the table.
+                # never to the width decision, for the same reason: under the
+                # old radix kernel the flag chose a different code path and
+                # flipped 10-15% of the returned slots (it is a no-op for the
+                # column set today, 0 slot mismatch on all 6 shapes above). The
+                # scores of the narrow call are unused when the loss widens the
+                # table.
                 topk_indices, attn_scores = select_topk(attn_topk, need_loss)
                 reuse_for_loss = loss_topk == attn_topk
                 token_indices = paddle.concat(
@@ -681,14 +691,20 @@ class MQALatentAttention(FleetLayer):
                 self.config
             ),
         )
+        # Argument order follows ``TileLangCSAIndexerLossAutoScaler.forward``
+        # (csa_attention.py): ``output, target, index_q, weights, index_k_comp,
+        # topk_indices, topk_probs, loss_coeff, indexer_backend,
+        # num_rows_override, loss_mask``. ``target`` sits second, right after
+        # ``output`` -- the CSA call sites spell that as
+        # ``apply(output, target, *state)``.
         return TileLangCSAIndexerLossAutoScaler.apply(
             output,
+            target,
             q_idx,
             w_idx,
             k_idx,
             loss_indices,
             topk_probs,
-            target,
             loss_coeff,
             "cudnn",
             # ``num_rows_override`` + ``loss_mask``: the backward zeroes the pad
