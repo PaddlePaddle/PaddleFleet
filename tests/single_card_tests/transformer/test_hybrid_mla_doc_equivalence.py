@@ -18,14 +18,16 @@ Validation agent A4. The gold standard proven here: N documents PACKED into a
 single 8192-style sequence must equal running every document ALONE (same
 weights, same content), elementwise on outputs AND gradients. The hybrid MLA
 (``csa_compress_ratios == -2``) layers run one of two attentions, selected by
-``non_absorbed_mqa`` and, within it, by whether the sublayers spec carries an
-indexer:
+``hybrid_mla_attention`` and, within it, by whether the sublayers spec carries
+an indexer:
 
-* dense MHA (``non_absorbed_mqa=False``) -- the fp32 ``_dense_reference`` below.
-* the indexer-less :class:`MQALatentAttention` dense path -- absorbed MQA,
-  mathematically equal to MHA (spec ``indexer=None``, a test-only construction
-  since production always builds the indexer).
-* the :class:`MQALatentAttention` DSA path -- forced window + top-k indexer.
+* dense MHA (``hybrid_mla_attention="mha"``) -- the fp32 ``_dense_reference``
+  below.
+* the indexer-less :class:`MQALatentAttention` full-causal path -- latent MQA,
+  mathematically equal to MHA (spec ``indexer=None``, which is what production
+  builds for ``"mqa_full_causal"``).
+* the :class:`MQALatentAttention` DSA path (``"mqa_dsa"``) -- forced window +
+  top-k indexer.
 
 Each is checked with the model-wide learnable per-head attention sink both ON
 and OFF.

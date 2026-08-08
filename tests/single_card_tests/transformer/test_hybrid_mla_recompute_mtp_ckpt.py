@@ -13,13 +13,13 @@
 # limitations under the License.
 
 """Adversarial validation (agent A7): recompute / MTP / checkpoint compat for
-the ``non_absorbed_mqa`` (dense MHA vs runtime-absorbed MQA, indexer always
-built) and ``add_full_attention_sink_bias`` (learnable per-head sink) features
-of the ERNIE5 V2 ``dsv4_hybrid`` MoE. The mode labels ``mha``/``mqa``/
-``mqa_dsa`` below are retained only as test fixtures: ``mha`` maps to
-``non_absorbed_mqa=False`` (dense) while ``mqa``/``mqa_dsa`` map to
-``non_absorbed_mqa=True`` and differ only by whether the DSA indexer spec is
-wired into this direct-construction fixture.
+the ``hybrid_mla_attention`` (dense MHA vs runtime-absorbed latent MQA, indexer
+always built for ``"mqa_dsa"``) and ``add_full_attention_sink_bias`` (learnable
+per-head sink) features of the ERNIE5 V2 ``dsv4_hybrid`` MoE. The mode labels
+``mha``/``mqa``/``mqa_dsa`` below are retained only as test fixtures: ``mha``
+maps to ``hybrid_mla_attention="mha"`` while ``mqa``/``mqa_dsa`` map to the
+latent MQA modes (``"mqa_full_causal"`` / ``"mqa_dsa"``) and differ only by
+whether the DSA indexer spec is wired into this direct-construction fixture.
 
 Coverage map (see validation_reports/A7_recompute_mtp_ckpt.md for the analysis):
   1. Recompute equivalence: full-layer recompute ON == OFF, elementwise on the
@@ -48,11 +48,13 @@ from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
 from .hybrid_mla_utils import (
     _CAPTURED,
     _CONFIG_DIR,
+    _CSA_MQA_CFG,
     _DSA_CFG,
     _GPU,
+    _HYBRID_MLA_CFGS,
     _MHA_CFG,
     _MINUS2_LAYERS,
-    _MQA_CFG,
+    _MQA_DSA_CFGS,
     _NUM_HIDDEN,
     K_CHANNELS,
     H,
@@ -60,8 +62,10 @@ from .hybrid_mla_utils import (
     _build_module,
     _build_real_attn,
     _create_mqa_config,
+    _flash_attn_version,
     _load_provider,
     _make_inputs,
+    _production_fa_version,
     _rel,
     _row_end,
     _try_use_cuda_device,
@@ -240,7 +244,11 @@ def _aoa_configs_available():
             ErnieFleetModelConfig,
         )
 
-        return (_CONFIG_DIR / _MQA_CFG / "model_config.json").is_file()
+        # Gate on the *baseline* config: it is the one every test here diffs
+        # against. (It used to gate on ``_MQA_CFG``, a name that had drifted to
+        # point at a directory which does not exist, so these tests silently
+        # skipped instead of running.)
+        return (_CONFIG_DIR / _MHA_CFG / "model_config.json").is_file()
     except Exception:
         return False
 
@@ -275,6 +283,14 @@ class TestSinkAOAMappingPerLayer(unittest.TestCase):
         cfg = ErnieFleetModelConfig.from_pretrained(
             str(_CONFIG_DIR / name), _configuration_file="model_config.json"
         )
+        # ``indexer_init_from_scratch`` is a YAML provider field, absent from the
+        # JSON-only config built here, and ``_resolve_init_from_scratch``
+        # (modeling.py:857) refuses to guess it for a ``"mqa_dsa"`` config. That
+        # refusal is the intended behaviour (it decides which checkpoint the run
+        # resumes from) and is asserted in
+        # ``test_hybrid_mla_config_pipeline.py``; supply it the way the trainer
+        # does. It never affects the sink statements this class inspects.
+        cfg.indexer_init_from_scratch = True
         fwd = _gen_aoa_config(cfg)["aoa_statements"]
         inv = _gen_inv_aoa_config(cfg)["aoa_statements"]
         return cfg, fwd, inv
@@ -292,7 +308,13 @@ class TestSinkAOAMappingPerLayer(unittest.TestCase):
         return int(idxs[0]) if idxs else None
 
     def test_sink_mapped_on_exactly_the_minus2_layers_both_directions(self):
-        for name in (_MQA_CFG, _DSA_CFG):
+        # Now covers all four hybrid-MLA phases. It used to iterate
+        # ``(_MQA_CFG, _DSA_CFG)``; ``_MQA_CFG`` had drifted onto
+        # ``ernielite_layer43_mqa_hca``, a CSA full-causal MQA config with no
+        # ``-2`` layer at all (it owns ``core_attention.attn_sink``, a different
+        # tensor), so it could never satisfy this. The baseline is in the loop
+        # now because it carries the sink too.
+        for name in _HYBRID_MLA_CFGS:
             with self.subTest(config=name):
                 _, fwd, inv = self._aoa(name)
                 for direction, stmts in (("fwd", fwd), ("inv", inv)):
@@ -327,11 +349,32 @@ class TestSinkAOAMappingPerLayer(unittest.TestCase):
                 self.assertNotIn(self._layer_index_of(s), hca_layers)
 
     def test_mha_config_maps_no_sink(self):
-        # The mha baseline deliberately omits ``add_full_attention_sink_bias``
-        # (so the live reference run is unperturbed) -> zero sink statements.
-        _, fwd, inv = self._aoa(_MHA_CFG)
+        """NAME IS HISTORICAL -- the negative control is now the CSA config.
+
+        WAS: the mha baseline deliberately omitted
+        ``add_full_attention_sink_bias`` (to leave the live reference run
+        unperturbed) and therefore emitted zero sink statements. NO LONGER TRUE:
+        the baseline sets the flag on purpose, so that
+        ``core_attention.softmax_offset`` exists on both sides of the migration
+        and the later phases add no parameter -- it emits one statement per
+        ``-2`` layer, which the test above pins.
+
+        NOW: the "no sink statement for a non-hybrid-MLA model" half of the
+        property is asserted where it still holds --
+        ``ernielite_layer43_mqa_hca``, a CSA full-causal MQA config with no ``-2``
+        layer, which owns ``core_attention.attn_sink`` instead. That keeps a
+        genuine negative control (the sink block must be gated on layer type, not
+        emitted for every layer) instead of an assertion that only passed because
+        the flag happened to be off.
+        """
+        _, fwd, inv = self._aoa(_CSA_MQA_CFG)
         self.assertEqual(self._sink_lines(fwd), [])
         self.assertEqual(self._sink_lines(inv), [])
+        # ... and it does map its own, differently-named sink on every layer.
+        self.assertTrue(
+            any("core_attention.attn_sink" in s for s in fwd),
+            "the CSA family sink (attn_sink) must still be mapped",
+        )
 
 
 # ===========================================================================
@@ -388,14 +431,23 @@ def _key_sig(module):
 @_REAL
 class TestCheckpointKeySets(unittest.TestCase):
     """A ``dsv4_hybrid`` dense-MHA checkpoint must load into an absorbed
-    (``non_absorbed_mqa=True``) run unchanged (every MLA parameter is byte
-    identical), the absorbed run adds the trained-from-scratch indexer keys
-    (always built now) plus one learnable sink key per -2 layer, so a pre-sink
-    checkpoint loaded into a sink run is short exactly that sink key per -2
-    layer. Since ``non_absorbed_mqa`` always wires the indexer, the old
-    DSA-less ``mqa`` surface no longer exists -- the ``_MQA_CFG`` and
-    ``_DSA_CFG`` providers are the same absorbed+indexer layout, so the tests
-    that purely contrasted them (mqa-vs-mqa_dsa) were dropped as redundant.
+    (``hybrid_mla_attention="mqa_dsa"``) run unchanged (every MLA parameter is
+    byte identical), the absorbed run adding only the trained-from-scratch
+    indexer keys. Since ``"mqa_dsa"`` always wires the indexer, the old DSA-less
+    ``mqa`` surface no longer exists, so the tests that purely contrasted
+    mqa-vs-mqa_dsa were dropped as redundant; the second ``"mqa_dsa"`` config is
+    the phase-3/4 sparse-loss one, which must have the identical key set.
+
+    SINK: the learnable sink used to be introduced *by* the absorbed phase, so it
+    showed up as "one extra key per -2 layer". The baseline
+    ``model_config.json`` now sets ``add_full_attention_sink_bias`` as well, on
+    purpose -- with the sink on both sides the parameter set is unchanged across
+    the migration, which is the entire point. The "pre-sink checkpoint resumed
+    into a sink run" hazard is therefore no longer reachable from the on-disk
+    configs and is reproduced by toggling the flag synthetically
+    (``_keys(..., sink=False)``) in
+    ``test_presink_ckpt_into_sink_run_is_short_the_sink_key``, so the loader
+    behaviour documented below stays covered.
 
     Loaders (task-4 file:line, from the loader source, not run here):
       * from_pretrained (HF import): warns and newly-initializes missing keys
@@ -407,7 +459,7 @@ class TestCheckpointKeySets(unittest.TestCase):
     ValueError under a unified-checkpoint resume.
     """
 
-    _LAYER = _MINUS2_LAYERS[0]  # 8, a -2 hybrid-MLA layer
+    _LAYER = _MINUS2_LAYERS[0]  # the first -2 hybrid-MLA layer
     _SINK = "core_attention.softmax_offset"
 
     def _keys(self, cfg_name, sink=None):
@@ -417,7 +469,11 @@ class TestCheckpointKeySets(unittest.TestCase):
             # faithfully from the real config (mode-toggling on one provider is
             # NOT reliable -- the indexer wiring does not reset).
             provider.add_full_attention_sink_bias = sink
-        return _key_sig(_build_real_attn(provider, self._LAYER))
+        # The dense-MHA sink needs the flashmask v4 kernel
+        # (multi_latent_attention.py:561-581); production derives that flag in
+        # ``TrainingArguments.__post_init__``, which a bare pytest never runs.
+        with _flash_attn_version(_production_fa_version()):
+            return _key_sig(_build_real_attn(provider, self._LAYER))
 
     @staticmethod
     def _indexer_keys(keyset):
@@ -426,36 +482,66 @@ class TestCheckpointKeySets(unittest.TestCase):
     def test_mha_core_loads_unchanged_into_mqa_and_dsa(self):
         # The activation-level absorption keeps every MLA parameter byte
         # identical, so all MHA keys exist -- same shape and dtype -- in the
-        # MQA and MQA_DSA runs. An MHA checkpoint therefore loads unchanged.
+        # MQA_DSA runs. An MHA checkpoint therefore loads unchanged.
+        #
+        # WAS: ``assertNotIn(self._SINK, mha)  # baseline is sinkless``. NO
+        # LONGER TRUE (see the class docstring); NOW the sink is asserted to be
+        # present in the baseline *and* to survive into both mqa_dsa configs with
+        # the same shape/dtype, which is the stronger form of the same
+        # checkpoint-compatibility claim.
         mha = self._keys(_MHA_CFG)
-        mqa = self._keys(_MQA_CFG)
-        dsa = self._keys(_DSA_CFG)
-        self.assertNotIn(self._SINK, mha)  # baseline is sinkless
+        self.assertIn(self._SINK, mha)
         self.assertEqual(self._indexer_keys(set(mha)), set())
-        for name, sig in mha.items():
-            self.assertIn(name, mqa, f"MHA key {name} missing from MQA")
-            self.assertEqual(mqa[name], sig, f"MQA shape/dtype drift on {name}")
-            self.assertIn(name, dsa, f"MHA key {name} missing from MQA_DSA")
-            self.assertEqual(dsa[name], sig, f"DSA shape/dtype drift on {name}")
+        for target in _MQA_DSA_CFGS:
+            with self.subTest(target=target):
+                other = self._keys(target)
+                for name, sig in mha.items():
+                    self.assertIn(
+                        name, other, f"MHA key {name} missing from {target}"
+                    )
+                    self.assertEqual(
+                        other[name],
+                        sig,
+                        f"{target} shape/dtype drift on {name}",
+                    )
 
     def test_mqa_dsa_adds_sink_plus_indexer_over_mha(self):
+        """NAME IS HISTORICAL -- ``mqa_dsa`` now adds ONLY the indexer.
+
+        WAS: ``assertIn(self._SINK, extra)`` -- the sink was one of the keys the
+        absorbed phase introduced. NO LONGER TRUE: the baseline carries it, so
+        the only new keys are the five DSA indexer parameters. That is a stronger
+        statement about the migration (the phase-2 run adds nothing but the module
+        it is there to train), so it is asserted as an exact equality, and the
+        sink is separately asserted to be on *both* sides.
+        """
         mha = set(self._keys(_MHA_CFG))
-        dsa = set(self._keys(_DSA_CFG))
-        self.assertEqual(mha - dsa, set(), "MQA_DSA dropped an MHA key")
-        extra = dsa - mha
-        self.assertIn(self._SINK, extra)
-        # Everything beyond the sink is an indexer parameter (new, trained from
-        # scratch) -- not a renamed/dropped MLA weight.
-        self.assertEqual(extra - {self._SINK}, self._indexer_keys(dsa))
-        self.assertEqual(len(self._indexer_keys(dsa)), 5)
+        for target in _MQA_DSA_CFGS:
+            with self.subTest(target=target):
+                dsa = set(self._keys(target))
+                self.assertEqual(
+                    mha - dsa, set(), f"{target} dropped an MHA key"
+                )
+                self.assertIn(self._SINK, mha)
+                self.assertIn(self._SINK, dsa)
+                extra = dsa - mha
+                # Everything new is an indexer parameter (trained from scratch)
+                # -- not a renamed/dropped MLA weight and not the sink.
+                self.assertEqual(extra, self._indexer_keys(dsa))
+                self.assertEqual(len(extra), 5)
 
     def test_presink_ckpt_into_sink_run_is_short_the_sink_key(self):
-        # NEGATIVE: a pre-sink (MHA baseline) checkpoint resumed into a sink run
-        # (MQA / MQA_DSA). The sink key is missing in both directions; for
-        # MQA_DSA the indexer keys are additionally missing but those are new
+        # NEGATIVE: a pre-sink checkpoint resumed into a sink run. Both on-disk
+        # phases now enable the sink, so the "saved" side is the baseline config
+        # with ``add_full_attention_sink_bias`` forced off -- exactly the state of
+        # a checkpoint taken before the flag was added to the baseline
+        # (`model_config.json`), which is what makes this hazard historical rather
+        # than hypothetical. The sink key is missing for every sink run; for
+        # mqa_dsa the indexer keys are additionally missing but those are new
         # trainable modules, whereas the sink gap is the compatibility hazard.
-        saved = set(self._keys(_MHA_CFG))
-        for target in (_MQA_CFG, _DSA_CFG):
+        saved = set(self._keys(_MHA_CFG, sink=False))
+        self.assertNotIn(self._SINK, saved)
+        for target in _HYBRID_MLA_CFGS:
             with self.subTest(target=target):
                 expected = set(self._keys(target))
                 missing = expected - saved

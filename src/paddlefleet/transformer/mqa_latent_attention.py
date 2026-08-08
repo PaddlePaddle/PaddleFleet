@@ -12,22 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Non-absorbed MQA core attention for hybrid MLA layers, with DSA.
+"""Latent MQA core attention for hybrid MLA layers, with DSA.
 
-``non_absorbed_mqa`` selects which core attention the
+``hybrid_mla_attention`` selects which core attention the
 ``csa_compress_ratios == -2`` (MLA) layers of a ``dsv4_hybrid`` model run:
 
-* ``false`` -- unchanged dense MLA (MHA); this module is not used.
-* ``true``  -- :class:`MQALatentAttention` with a forced local window plus
+* ``"mha"`` -- unchanged dense MLA (MHA); this module is not used.
+* ``"mqa_dsa"`` -- :class:`MQALatentAttention` with a forced local window plus
   Lightning-indexer top-k, i.e. DeepSeek Sparse Attention on the KV latent.
   The indexer reuses the model-wide ``index_n_heads`` / ``index_head_dim`` /
   ``index_topk``, and ``dsa_indexer_use_sparse_loss`` selects the indexer-loss
   width exactly as it does for the CSA layers (see ``_forward_dsa``).
+* ``"mqa_full_causal"`` -- :class:`MQALatentAttention` with the indexer dropped,
+  attending to the full per-document causal set. That is mathematically
+  identical to the dense MHA phase, so it isolates the absorption from the
+  sparsity for equivalence experiments; it is ``O(s^2)`` in index memory and
+  therefore not a production mode.
 
-``non_absorbed_mqa_dense`` additionally drops the indexer and attends to the full
-per-document causal set, which is mathematically identical to the dense MHA phase;
-it isolates the absorption from the sparsity for equivalence experiments and is
-``O(s^2)`` in index memory, so it is not a production mode.
+Note the ``mqa_*`` modes here are *latent* MQA (this module). A
+``csa_compress_ratios`` entry of ``-1`` is *CSA full-causal MQA*, a different
+layer kind handled by ``csa_attention.py``.
 
 ``MLASelfAttention`` performs the activation-level absorption (see its
 ``mqa_latent`` flag), so this module receives
@@ -116,10 +120,10 @@ class MQALatentAttentionSublayersSpec:
     """Sublayers spec for :class:`MQALatentAttention`.
 
     Args:
-        indexer: ``DSAIndexer`` spec. ``non_absorbed_mqa`` provides one unless
-            ``non_absorbed_mqa_dense`` is set, in which case it is ``None`` and
-            the layer attends to the full per-document causal set (dense MHA
-            equivalent). Also ``None`` in the absorption equivalence unit tests.
+        indexer: ``DSAIndexer`` spec. ``hybrid_mla_attention="mqa_dsa"`` provides
+            one; ``"mqa_full_causal"`` leaves it ``None`` and the layer attends
+            to the full per-document causal set (dense MHA equivalent). Also
+            ``None`` in the absorption equivalence unit tests.
     """
 
     indexer: LayerSpec | type = None
@@ -176,7 +180,7 @@ class MQALatentAttention(FleetLayer):
                 != "contiguous_allgather"
             ):
                 raise NotImplementedError(
-                    "non_absorbed_mqa=True under context parallel requires "
+                    "latent MQA under context parallel requires "
                     "cp_balance_mode='contiguous_allgather' (the same mode the "
                     "hybrid model's HCA layers require), got "
                     f"{getattr(config, 'cp_balance_mode', None)!r}."
@@ -211,11 +215,27 @@ class MQALatentAttention(FleetLayer):
             getattr(config, "dsa_indexer_loss_coeff", 0.0) or 0.0
         )
         # Same switch, same meaning as the CSA layers of the hybrid model: it
-        # selects the *width of the loss* top-k table, not the attention one.
-        # See ``_forward_dsa`` for how far it can be widened here.
+        # selects the *width of the indexer loss* candidate table. On these
+        # uncompressed layers it additionally selects the *attention* candidate
+        # set, because the two are one decision here -- see below.
         self.indexer_use_sparse_loss = bool(
             getattr(config, "dsa_indexer_use_sparse_loss", False)
         )
+        # ``dsa_indexer_use_sparse_loss=False`` is the phase-2 (warmup) mode:
+        # the indexer is still being learned, so attention must not consume its
+        # ranking yet -- it attends to the full per-document causal set, exactly
+        # like ``hybrid_mla_attention="mqa_full_causal"``, while the indexer is
+        # trained on the widest candidate table the kernel allows. Consuming a
+        # freshly initialised indexer's top-k here would feed the (frozen)
+        # backbone an essentially random sparse pattern for the whole phase.
+        # ``True`` is the phase-3/4 mode: attention consumes window + top-k and
+        # the KL is restricted to that same set.
+        # ``transformer_config.__post_init__`` pins this to ``train_indexer_only``
+        # so the two cannot disagree. Deliberately *not* cached as a second
+        # attribute: ``_forward_dsa`` reads ``self.indexer_use_sparse_loss``
+        # directly at both use sites, so a test (or anything else) flipping it on
+        # a live module cannot desynchronise the loss width from the attention
+        # set.
         # Learnable per-head attention-sink logit, from the model-wide
         # ``add_full_attention_sink_bias`` / ``softmax_type``. Built by the same
         # helper ``DotProductAttention`` uses, so the state_dict name
@@ -274,7 +294,7 @@ class MQALatentAttention(FleetLayer):
         """
         if packed_seq_params is not None:
             raise NotImplementedError(
-                "non_absorbed_mqa=True does not support packed_seq_params; "
+                "latent MQA does not support packed_seq_params; "
                 "document masking is driven by "
                 "attn_mask_startend_row_indices."
             )
@@ -287,7 +307,7 @@ class MQALatentAttention(FleetLayer):
         b, s = int(query.shape[0]), int(query.shape[1])
         if b != 1:
             raise NotImplementedError(
-                "non_absorbed_mqa=True requires micro batch size 1 (documents "
+                "latent MQA requires micro batch size 1 (documents "
                 f"are packed along the sequence), got b={b}."
             )
         # Under CP this rank owns global query positions
@@ -314,9 +334,9 @@ class MQALatentAttention(FleetLayer):
             )
 
         if self.indexer is None:
-            # ``non_absorbed_mqa_dense`` (and the absorption-equivalence unit
-            # tests): per-document full causal attention, mathematically
-            # identical to dense MHA.
+            # ``hybrid_mla_attention="mqa_full_causal"`` (and the
+            # absorption-equivalence unit tests): per-document full causal
+            # attention, mathematically identical to dense MHA.
             token_indices = self._build_full_causal_indices(
                 b, s_global, doc_start, is_valid, position_offset, s
             )
@@ -472,14 +492,30 @@ class MQALatentAttention(FleetLayer):
             and self.indexer_loss_coeff > 0
         )
 
+        if not self.indexer_use_sparse_loss and not need_loss:
+            # Phase-2 mode with nothing to learn this step (eval, or
+            # ``dsa_indexer_loss_coeff == 0``): attention does not consume the
+            # indexer, so skip its projections entirely instead of computing
+            # them under ``no_grad`` and throwing the result away.
+            with paddle.no_grad():
+                token_indices = self._build_full_causal_indices(
+                    b, s_global, doc_start, is_valid, position_offset, s
+                )
+            core_out = self._sparse_attn(
+                query, kv, token_indices, self.softmax_scale, kv_lora_rank
+            )
+            return self._deabsorb(core_out, v_b_proj_weight)
+
         with paddle.no_grad():
-            window_idxs = _build_window_topk_idxs_from_doc_bounds(
-                b, s_global, self.window_size, doc_start, is_valid
-            ).cast("int32")
-            if self.cp_enabled:
-                window_idxs = window_idxs[
-                    :, position_offset : position_offset + s
-                ]
+            window_idxs = None
+            if self.indexer_use_sparse_loss:
+                window_idxs = _build_window_topk_idxs_from_doc_bounds(
+                    b, s_global, self.window_size, doc_start, is_valid
+                ).cast("int32")
+                if self.cp_enabled:
+                    window_idxs = window_idxs[
+                        :, position_offset : position_offset + s
+                    ]
             valid_range, row_empty = self._indexer_valid_range(
                 s_global, doc_start, doc_len, is_valid, position_offset, s
             )
@@ -555,24 +591,46 @@ class MQALatentAttention(FleetLayer):
             return idx, (out[2] if want_scores else None)
 
         with paddle.no_grad():
-            # A wider table cannot be narrowed by slicing: the kernel emits the
-            # selected columns in ascending *position* order, not by score
-            # (measured: at s=512/topk=384 only 25% of the 128-wide table's
-            # entries match the wide table's first 128, and score steps go up
-            # 61290 times). So the two widths need two calls; the extra one runs
-            # only on the grad-enabled forward of a full-loss step.
-            #
-            # ``return_topk_scores`` stays tied to ``need_loss`` alone, never to
-            # the width decision: the flag selects a different kernel path and
-            # measurably changes which columns come back (~11% of slots at
-            # s=512/topk=128), so making it depend on the switch would move the
-            # attention set too. The scores of the narrow call are then unused
-            # when the loss widens the table.
-            topk_indices, attn_scores = select_topk(attn_topk, need_loss)
-            reuse_for_loss = loss_topk == attn_topk
-            token_indices = paddle.concat(
-                [window_idxs, topk_indices], axis=-1
-            ).contiguous()
+            if not self.indexer_use_sparse_loss:
+                # Phase 2: attention attends to the full per-document causal
+                # set, bit-identical to ``hybrid_mla_attention="mqa_full_causal"``
+                # -- the indexer's ranking is still being learned and must not
+                # steer attention yet. Only the loss consumes the top-k table,
+                # so there is exactly one ``select_topk`` call below.
+                token_indices = self._build_full_causal_indices(
+                    b, s_global, doc_start, is_valid, position_offset, s
+                )
+                topk_indices, attn_scores, reuse_for_loss = None, None, False
+            else:
+                # The attention width and the loss width are two separate
+                # kernel calls, and deliberately so: the attention set must not
+                # depend on how wide the loss happens to be.
+                #
+                # With today's ``_indexer_top_k_unfused`` (a deterministic
+                # ``paddle.topk``) slicing one wide call would in fact give the
+                # same columns -- measured over 6 shapes (pure causal s=512 and
+                # s=1024, window-clamped s=512/1024, packed docs [256,256,512],
+                # ratio=4): 0 ascending score steps in the emitted order and the
+                # narrow table is 100% the wide table's prefix. But that is a
+                # property of one helper, not of the interface: the pre-#1666
+                # radix kernel emitted in ascending *position* order (same
+                # shapes: ~61k ascending score steps, only 55.5% prefix match),
+                # so a slice would have silently moved the attention set. Two
+                # calls keep that decoupled by construction; the extra one runs
+                # only on the grad-enabled forward of a full-loss step.
+                #
+                # ``return_topk_scores`` stays tied to ``need_loss`` alone,
+                # never to the width decision, for the same reason: under the
+                # old radix kernel the flag chose a different code path and
+                # flipped 10-15% of the returned slots (it is a no-op for the
+                # column set today, 0 slot mismatch on all 6 shapes above). The
+                # scores of the narrow call are unused when the loss widens the
+                # table.
+                topk_indices, attn_scores = select_topk(attn_topk, need_loss)
+                reuse_for_loss = loss_topk == attn_topk
+                token_indices = paddle.concat(
+                    [window_idxs, topk_indices], axis=-1
+                ).contiguous()
         token_indices.stop_gradient = True
 
         core_out = self._sparse_attn(
@@ -633,14 +691,20 @@ class MQALatentAttention(FleetLayer):
                 self.config
             ),
         )
+        # Argument order follows ``TileLangCSAIndexerLossAutoScaler.forward``
+        # (csa_attention.py): ``output, target, index_q, weights, index_k_comp,
+        # topk_indices, topk_probs, loss_coeff, indexer_backend,
+        # num_rows_override, loss_mask``. ``target`` sits second, right after
+        # ``output`` -- the CSA call sites spell that as
+        # ``apply(output, target, *state)``.
         return TileLangCSAIndexerLossAutoScaler.apply(
             output,
+            target,
             q_idx,
             w_idx,
             k_idx,
             loss_indices,
             topk_probs,
-            target,
             loss_coeff,
             "cudnn",
             # ``num_rows_override`` + ``loss_mask``: the backward zeroes the pad

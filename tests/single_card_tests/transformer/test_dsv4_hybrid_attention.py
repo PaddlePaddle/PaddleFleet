@@ -172,7 +172,7 @@ def _make_config(
     hybrid_mla_v_head_dim=256,
     hybrid_mla_num_attention_heads=64,
     hybrid_mla_num_key_value_heads=64,
-    non_absorbed_mqa=False,
+    hybrid_mla_attention="mha",
     add_full_attention_sink_bias=False,
 ):
     if csa_compress_ratios is None:
@@ -201,7 +201,7 @@ def _make_config(
         hybrid_mla_v_head_dim=hybrid_mla_v_head_dim,
         hybrid_mla_num_attention_heads=hybrid_mla_num_attention_heads,
         hybrid_mla_num_key_value_heads=hybrid_mla_num_key_value_heads,
-        non_absorbed_mqa=non_absorbed_mqa,
+        hybrid_mla_attention=hybrid_mla_attention,
         add_full_attention_sink_bias=add_full_attention_sink_bias,
         o_groups=o_groups,
         o_lora_rank=o_lora_rank,
@@ -306,7 +306,7 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             hidden_size=256,
             q_lora_rank=1024,
             csa_compress_ratios=[-2],
-            non_absorbed_mqa=True,
+            hybrid_mla_attention="mqa_dsa",
             dsa_index_n_heads=4,
             dsa_index_head_dim=128,
             dsa_index_topk=128,
@@ -333,18 +333,18 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         self.assertEqual(list(indexer.wk.weight.shape), [256, 128])
         self.assertEqual(list(indexer.weights_proj.weight.shape), [256, 4])
 
-    def test_hybrid_mla_without_non_absorbed_mqa_uses_standard_attention(self):
+    def test_hybrid_mla_with_mha_mode_uses_standard_attention(self):
         # A ``dsv4_hybrid`` model's ``-2`` layer is dense MHA
-        # (``DotProductAttention``) unless ``non_absorbed_mqa`` turns it into
-        # non-absorbed MQA + DSA indexer. Field presence of the model-wide
+        # (``DotProductAttention``) unless ``hybrid_mla_attention`` turns it into
+        # latent MQA (+ DSA indexer). Field presence of the model-wide
         # ``dsa_index_*`` no longer selects ``DSAttention`` for these layers
         # (``gpt_layer_specs.py`` forces ``use_dsa=False`` for the hybrid
         # variant), so the core attention must never be ``DSAttention`` and,
-        # without the switch, never ``MQALatentAttention`` either.
+        # with ``hybrid_mla_attention="mha"``, never ``MQALatentAttention`` either.
         config = _make_config(
             num_layers=1,
             csa_compress_ratios=[-2],
-            non_absorbed_mqa=False,
+            hybrid_mla_attention="mha",
         )
         mla_spec = get_gpt_layer_local_spec(
             config=config,
@@ -415,16 +415,16 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 hybrid_mla_v_head_dim=None,
             )
 
-        # non_absorbed_mqa=True runs a DSA indexer on the -2 layers, so the
-        # model-wide dsa_index_* fields must be legal for the cuDNN indexer:
+        # hybrid_mla_attention="mqa_dsa" runs a DSA indexer on the -2 layers, so
+        # the model-wide dsa_index_* fields must be legal for the cuDNN indexer:
         # positive ints, head_dim == 128, topk a multiple of 128 and <= 2048.
-        # When non_absorbed_mqa is False (dense MHA) these constraints do not
+        # With "mha" (dense MHA) these constraints do not
         # apply, so the same otherwise-illegal values must round-trip.
         with self.assertRaisesRegex(ValueError, "index_n_heads"):
             _make_config(
                 num_layers=1,
                 csa_compress_ratios=[-2],
-                non_absorbed_mqa=True,
+                hybrid_mla_attention="mqa_dsa",
                 dsa_index_n_heads=None,
                 dsa_index_head_dim=128,
                 dsa_index_topk=128,
@@ -434,7 +434,7 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             _make_config(
                 num_layers=1,
                 csa_compress_ratios=[-2],
-                non_absorbed_mqa=True,
+                hybrid_mla_attention="mqa_dsa",
                 dsa_index_n_heads=4,
                 dsa_index_head_dim=32,
                 dsa_index_topk=128,
@@ -446,7 +446,7 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             _make_config(
                 num_layers=1,
                 csa_compress_ratios=[-2],
-                non_absorbed_mqa=True,
+                hybrid_mla_attention="mqa_dsa",
                 dsa_index_n_heads=4,
                 dsa_index_head_dim=128,
                 dsa_index_topk=8,
@@ -458,23 +458,23 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             _make_config(
                 num_layers=1,
                 csa_compress_ratios=[-2],
-                non_absorbed_mqa=True,
+                hybrid_mla_attention="mqa_dsa",
                 dsa_index_n_heads=4,
                 dsa_index_head_dim=128,
                 dsa_index_topk=2176,
             )
 
-        # Dense MHA (non_absorbed_mqa=False) skips the indexer constraints
+        # Dense MHA (hybrid_mla_attention="mha") skips the indexer constraints
         # entirely: head_dim 32 and topk 8 are fine because no indexer is built.
         cfg = _make_config(
             num_layers=1,
             csa_compress_ratios=[-2],
-            non_absorbed_mqa=False,
+            hybrid_mla_attention="mha",
             dsa_index_n_heads=4,
             dsa_index_head_dim=32,
             dsa_index_topk=8,
         )
-        self.assertFalse(cfg.non_absorbed_mqa)
+        self.assertEqual(cfg.hybrid_mla_attention, "mha")
 
     def test_csa_compress_ratios_accepts_general_set(self):
         # full-causal MQA (-1), window (0), CSA over the full [2, 127] range
@@ -3509,14 +3509,15 @@ class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
 
     The sink is created by ``build_softmax_offset`` *on the core attention*, so
     its state_dict name is ``core_attention.softmax_offset`` for the dense MHA
-    phase (``non_absorbed_mqa=False``, where ``DotProductAttention`` consumes it
-    as the FA4 ``learnable_sink``) as well as for the non-absorbed MQA + DSA
-    indexer phase (``non_absorbed_mqa=True``, where ``MQALatentAttention`` feeds
-    it to the block-sparse kernel). Keeping one name, one shape and one dtype is
-    what lets an MHA checkpoint load into an ``non_absorbed_mqa`` run unchanged.
+    phase (``hybrid_mla_attention="mha"``, where ``DotProductAttention`` consumes
+    it as the FA4 ``learnable_sink``) as well as for the latent MQA + DSA
+    indexer phase (``hybrid_mla_attention="mqa_dsa"``, where
+    ``MQALatentAttention`` feeds it to the block-sparse kernel). Keeping one
+    name, one shape and one dtype is what lets an MHA checkpoint load into a
+    latent-MQA run unchanged.
     """
 
-    def _build(self, non_absorbed_mqa, sink):
+    def _build(self, hybrid_mla_attention, sink):
         # ``MultiLatentAttention.__init__`` refuses to create the sink for the
         # dense MHA phase unless ``FLAGS_flash_attn_version in (3, 4)``: that
         # phase consumes it as ``flashmask_attention_func(learnable_sink=...)``,
@@ -3525,19 +3526,21 @@ class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
         # inspect the parameter, and the process-global default must stay
         # untouched for the other suites in this file. The absorbed phase owns
         # its sink inside the block-sparse kernel and needs no flag.
-        needs_fa4 = sink and not non_absorbed_mqa
+        needs_fa4 = sink and hybrid_mla_attention == "mha"
         previous = paddle.get_flags(["FLAGS_flash_attn_version"])[
             "FLAGS_flash_attn_version"
         ]
         if needs_fa4:
             paddle.set_flags({"FLAGS_flash_attn_version": 4})
         try:
-            return self._build_raw(non_absorbed_mqa, sink)
+            return self._build_raw(hybrid_mla_attention, sink)
         finally:
             if needs_fa4:
                 paddle.set_flags({"FLAGS_flash_attn_version": previous})
 
-    def _build_raw(self, non_absorbed_mqa, sink, params_dtype=paddle.bfloat16):
+    def _build_raw(
+        self, hybrid_mla_attention, sink, params_dtype=paddle.bfloat16
+    ):
         """Build without touching ``FLAGS_flash_attn_version``."""
         model_parallel_cuda_manual_seed(_SEED)
         config = _make_config(
@@ -3545,13 +3548,13 @@ class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
             hidden_size=256,
             params_dtype=params_dtype,
             csa_compress_ratios=[-2, 128],
-            non_absorbed_mqa=non_absorbed_mqa,
+            hybrid_mla_attention=hybrid_mla_attention,
             add_full_attention_sink_bias=sink,
-            # The -2 layer's DSA indexer (built only when non_absorbed_mqa=True)
-            # reads these model-wide fields; the cuDNN indexer needs head_dim
-            # 128 and a topk that is a multiple of 128. They are inert for the
-            # dense MHA phase (use_dsa is forced False for dsv4_hybrid), so the
-            # same config drives both phases.
+            # The -2 layer's DSA indexer (built only for
+            # hybrid_mla_attention="mqa_dsa") reads these model-wide fields; the
+            # cuDNN indexer needs head_dim 128 and a topk that is a multiple of
+            # 128. They are inert for the dense MHA phase (use_dsa is forced
+            # False for dsv4_hybrid), so the same config drives both phases.
             dsa_index_n_heads=4,
             dsa_index_head_dim=128,
             dsa_index_topk=128,
@@ -3576,23 +3579,23 @@ class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
             if name.endswith("softmax_offset")
         )
 
-    # The two hybrid MLA phases: dense MHA (non_absorbed_mqa=False) and
-    # non-absorbed MQA + DSA indexer (non_absorbed_mqa=True). The old
-    # DSA-less "mqa" mode is no longer reachable from config, so it collapses
-    # into the non_absorbed_mqa=True phase.
-    _PHASES = (False, True)
+    # The two hybrid MLA phases: dense MHA (``"mha"``) and latent MQA + DSA
+    # indexer (``"mqa_dsa"``). The indexer-less latent MQA mode
+    # (``"mqa_full_causal"``) exists only for equivalence experiments and shares
+    # the ``"mqa_dsa"`` sink layout, so it is not a separate phase here.
+    _PHASES = ("mha", "mqa_dsa")
 
     def test_disabled_creates_no_parameter(self):
-        for non_absorbed_mqa in self._PHASES:
-            with self.subTest(non_absorbed_mqa=non_absorbed_mqa):
-                mla = self._build(non_absorbed_mqa, sink=False)
+        for hybrid_mla_attention in self._PHASES:
+            with self.subTest(hybrid_mla_attention=hybrid_mla_attention):
+                mla = self._build(hybrid_mla_attention, sink=False)
                 self.assertIsNone(mla.core_attention.softmax_offset)
                 self.assertEqual(self._sink_keys(mla), [])
 
     def test_enabled_creates_one_zero_initialised_per_head_parameter(self):
-        for non_absorbed_mqa in self._PHASES:
-            with self.subTest(non_absorbed_mqa=non_absorbed_mqa):
-                mla = self._build(non_absorbed_mqa, sink=True)
+        for hybrid_mla_attention in self._PHASES:
+            with self.subTest(hybrid_mla_attention=hybrid_mla_attention):
+                mla = self._build(hybrid_mla_attention, sink=True)
                 sink = mla.core_attention.softmax_offset
                 self.assertIsNotNone(sink)
                 # One logit per local head of the hybrid MLA layer.
@@ -3613,10 +3616,10 @@ class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
                 )
 
     def test_state_dict_name_is_identical_across_phases(self):
-        # The valuable "an MHA checkpoint stays loadable into an non_absorbed_mqa
+        # The valuable "an MHA checkpoint stays loadable into a latent-MQA
         # run" guarantee: same name, shape and dtype in both phases.
-        mha = self._build(non_absorbed_mqa=False, sink=True)
-        mqa = self._build(non_absorbed_mqa=True, sink=True)
+        mha = self._build(hybrid_mla_attention="mha", sink=True)
+        mqa = self._build(hybrid_mla_attention="mqa_dsa", sink=True)
         self.assertEqual(self._sink_keys(mha), self._sink_keys(mqa))
         self.assertEqual(
             mha.core_attention.softmax_offset.shape,
@@ -3642,12 +3645,12 @@ class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
             with self.assertRaisesRegex(
                 RuntimeError, "FLAGS_flash_attn_version"
             ):
-                self._build_raw(non_absorbed_mqa=False, sink=True)
+                self._build_raw(hybrid_mla_attention="mha", sink=True)
             # The absorbed phase owns its sink inside the block-sparse kernel,
             # so the flag must NOT gate it.
             self.assertIsNotNone(
                 self._build_raw(
-                    non_absorbed_mqa=True, sink=True
+                    hybrid_mla_attention="mqa_dsa", sink=True
                 ).core_attention.softmax_offset
             )
         finally:
@@ -3666,14 +3669,16 @@ class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
         try:
             with self.assertRaisesRegex(RuntimeError, "params_dtype"):
                 self._build_raw(
-                    non_absorbed_mqa=False,
+                    hybrid_mla_attention="mha",
                     sink=True,
                     params_dtype=paddle.float32,
                 )
             # The block-sparse kernel up-casts the sink itself, so the absorbed
             # phase must stay dtype agnostic.
             mqa = self._build_raw(
-                non_absorbed_mqa=True, sink=True, params_dtype=paddle.float32
+                hybrid_mla_attention="mqa_dsa",
+                sink=True,
+                params_dtype=paddle.float32,
             )
             self.assertEqual(
                 mqa.core_attention.softmax_offset.dtype, paddle.float32

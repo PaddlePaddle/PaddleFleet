@@ -401,6 +401,36 @@ class DSAIndexer(paddle.nn.Layer):
                 "supported types are 'rope' and 'yarn'"
             )
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the indexer q-up projection.
+
+        Same treatment as ``CSAIndexer.muon_slice_specs``
+        (``csa_attention.py:1823``): ``wq_b`` packs ``n_heads`` independent heads
+        along the output axis, so Muon must orthogonalise each head's block
+        rather than the concatenated matrix. ``wk`` (a single shared head) and
+        ``weights_proj`` (whose output dim *is* the head count) are whole
+        matrices and need no spec; ``k_norm`` is 1-D and never reaches Muon.
+
+        Consumed only by the per-module mechanism in
+        ``PaddleFormers/paddleformers/trainer/trainer.py:3427-3446``. ErnieBot
+        supplies its own ``build_muon_param_info_map``
+        (``fleet_model/ernie5_v2/modeling.py:2041``) and never walks that path,
+        so this exists to keep PaddleFleet correct standalone: without it,
+        latent MQA + DSA would silently lose per-head slicing there while the
+        CSA indexer kept it.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        return {
+            "wq_b.weight": (ortho_per_head, {"heads": self.n_heads}),
+        }
+
     def _apply_rope(
         self, x: Tensor, freqs: Tensor, mscale: float = 1.0
     ) -> Tensor:
@@ -1261,7 +1291,7 @@ class DSAIndexerLossLoggingHelper:
         total_loss_dict: dict | None = None,
         num_layers: int | None = None,
         csa_compress_ratios: list[int] | None = None,
-        non_absorbed_mqa: bool = False,
+        hybrid_mla_attention: str = "mha",
     ):
         """Track the sparse attention indexer metrics for logging.
 
@@ -1272,9 +1302,11 @@ class DSAIndexerLossLoggingHelper:
             total_loss_dict: Dictionary to accumulate total losses (optional).
             num_layers: Total number of layers with indexer metrics.
             csa_compress_ratios: Per-layer CSA compress ratios.
-            non_absorbed_mqa: ``non_absorbed_mqa`` of a DSV4 hybrid model; when
-                set, the ``-2`` (MLA) entries run an indexer too, so they must
-                be counted here.
+            hybrid_mla_attention: ``hybrid_mla_attention`` of a DSv4 hybrid
+                model. Only ``'mqa_dsa'`` gives the ``-2`` (MLA) entries a DSA
+                indexer, so only then are they counted here. The mapping from
+                mode to "has an indexer" lives here rather than in the caller so
+                there is one place that knows it.
         """
         num_layers = DSAIndexerLossLoggingHelper._infer_num_layers(num_layers)
         DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(
@@ -1291,7 +1323,7 @@ class DSAIndexerLossLoggingHelper:
             num_indexer_layers = sum(
                 1 for ratio in csa_compress_ratios if 1 < ratio < 128
             )
-            if non_absorbed_mqa:
+            if hybrid_mla_attention == "mqa_dsa":
                 # Hybrid MLA entries (-2) carry their own token-level indexer.
                 num_indexer_layers += sum(
                     1 for ratio in csa_compress_ratios if ratio == -2

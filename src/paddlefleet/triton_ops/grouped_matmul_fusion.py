@@ -318,7 +318,7 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
         ctx.D = D
         ctx.orig_shape = orig_shape
         # Paddle PyLayer requires None for a stop_gradient input; record it here so
-        # a frozen backbone (DSv4 phase 2, ``csa_train_indexer_only``) also skips
+        # a frozen backbone (DSv4 phase 2, ``train_indexer_only``) also skips
         # the matching kernel instead of violating the contract.
         ctx.x_needs_grad = not x.stop_gradient
         ctx.w_needs_grad = not w.stop_gradient

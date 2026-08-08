@@ -171,6 +171,16 @@ class _TestRMSNorm(nn.Layer):
         return n * self.weight.cast(x.dtype)
 
 
+# Fixture label -> production ``TransformerConfig.hybrid_mla_attention`` value.
+# The label "mqa" predates the enum and means "latent MQA, no indexer", which
+# the enum spells ``"mqa_full_causal"``.
+_HYBRID_MLA_ATTENTION = {
+    "mha": "mha",
+    "mqa": "mqa_full_causal",
+    "mqa_dsa": "mqa_dsa",
+}
+
+
 def build_cfg(cp_size, sink=False, attn_mode="mha"):
     H = 4
     c = TransformerConfig(
@@ -179,9 +189,11 @@ def build_cfg(cp_size, sink=False, attn_mode="mha"):
     c.num_key_value_heads = H
     c.head_dim = 256
     c.experimental_attention_variant = "dsv4_hybrid"
-    # ``attn_mode`` is a fixture label: "mha" -> dense DotProductAttention,
-    # "mqa"/"mqa_dsa" -> runtime-absorbed MQALatentAttention.
-    c.non_absorbed_mqa = attn_mode != "mha"
+    # ``attn_mode`` is a fixture label, NOT the config value: "mha" -> dense
+    # DotProductAttention, "mqa" -> latent MQA over the full per-document causal
+    # set, "mqa_dsa" -> latent MQA + DSA indexer. It maps onto the production
+    # ``hybrid_mla_attention`` enum below ("mqa" -> "mqa_full_causal").
+    c.hybrid_mla_attention = _HYBRID_MLA_ATTENTION[attn_mode]
     c.hybrid_mla_q_lora_rank = 64
     if attn_mode == "mha":
         c.hybrid_mla_kv_lora_rank = 128
@@ -204,7 +216,6 @@ def build_cfg(cp_size, sink=False, attn_mode="mha"):
     c.dsa_indexer_rotary_interleaved = False
     c.dsa_indexer_use_sparse_loss = True
     c.csa_window_size = 128
-    c.non_absorbed_mqa_dense = attn_mode == "mqa"
     c.add_full_attention_sink_bias = sink
     c.rope_type = "rope"
     c.rope_theta = 10000.0
@@ -232,7 +243,7 @@ def build_cfg(cp_size, sink=False, attn_mode="mha"):
 
 
 def _mqa_core_spec(attn_mode):
-    """``core_attention`` spec for ``non_absorbed_mqa``, per gpt_layer_specs.py:342."""
+    """``core_attention`` spec for latent MQA, per gpt_layer_specs.py:342."""
     indexer = None
     if attn_mode == "mqa_dsa":
         indexer = LayerSpec(
@@ -455,7 +466,7 @@ class TestMLAContiguousAllgatherCP(unittest.TestCase):
             ratio, 1.0, delta=0.05, msg="grad-norm ratio deviates from 1"
         )
 
-    # ---- Item 6: non_absorbed_mqa (+DSA) CP equivalence at the MLA level ----
+    # ---- Item 6: latent MQA (+DSA) CP equivalence at the MLA level ----
     #
     # This used to assert ``NotImplementedError``. MQA now implements
     # ``contiguous_allgather`` CP, so the same slot must prove equivalence

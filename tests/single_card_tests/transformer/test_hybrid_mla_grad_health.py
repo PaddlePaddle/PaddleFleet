@@ -14,23 +14,24 @@
 
 """A5 GRADIENT HEALTH validation for hybrid-MLA attention.
 
-Adversarial gradient validation of ``non_absorbed_mqa`` for the hybrid-MLA
+Adversarial gradient validation of ``hybrid_mla_attention`` for the hybrid-MLA
 layer (csa ratio == -2, experimental_attention_variant == "dsv4_hybrid").
 
-  * non_absorbed_mqa=False -- dense MLA (MLASelfAttention + DotProductAttention).
-  * non_absorbed_mqa=True  -- runtime activation-level absorption on the shared
-      KV latent PLUS a cuDNN block-sparse DSA indexer (gpt_layer_specs always
-      builds the indexer for such a layer). With the forced local window
+  * ``"mha"``     -- dense MLA (MLASelfAttention + DotProductAttention).
+  * ``"mqa_dsa"`` -- latent MQA: runtime activation-level absorption on the
+      shared KV latent PLUS a cuDNN block-sparse DSA indexer (gpt_layer_specs
+      always builds the indexer for such a layer). With the forced local window
       (``csa_window_size``) >= sequence length the indexer selects no extra
       tokens, so the absorbed path degenerates to full per-document causal
       attention -- mathematically equal to the dense MHA phase, which is what
       the equivalence items below rely on.
 
-The old 3-state ``hybrid_mla_attn_mode`` {mha, mqa, mqa_dsa} collapsed onto
-this single boolean: "mha" -> non_absorbed_mqa=False and both "mqa"/"mqa_dsa"
--> non_absorbed_mqa=True (the DSA-less "mqa" is no longer reachable from
-config, so its redundant parametrisation was dropped). The mode strings below
-are kept only as readable labels for ``_build``.
+The old 3-state ``hybrid_mla_attn_mode`` {mha, mqa, mqa_dsa} became the
+``hybrid_mla_attention`` enum. Only two of its values are exercised here: "mha"
+-> ``"mha"`` and both "mqa"/"mqa_dsa" -> ``"mqa_dsa"`` (the indexer-less latent
+MQA mode, ``"mqa_full_causal"``, is a non-production equivalence experiment
+covered elsewhere, so its redundant parametrisation was dropped). The mode
+strings below are kept only as readable labels for ``_build``.
 
 The tests below deliberately look past cosine similarity and assert on
 gradient *magnitude* (absolute + relative norms, per parameter), on the
@@ -45,6 +46,7 @@ Run (SM100+ / Blackwell required for the absorbed cuDNN block-sparse kernel):
 """
 
 import contextlib
+import inspect
 import math
 import unittest
 
@@ -136,10 +138,10 @@ class _FakePGCollection:
 # --------------------------------------------------------------------------- #
 def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
     # ``indexer`` is vestigial: the hybrid-MLA layer's DSA indexer is now built
-    # unconditionally whenever ``non_absorbed_mqa`` is True (see
+    # unconditionally for ``hybrid_mla_attention="mqa_dsa"`` (see
     # gpt_layer_specs), so it is retained only for call-site compatibility.
     del indexer
-    non_absorbed_mqa = mode != "mha"
+    hybrid_mla_attention = "mha" if mode == "mha" else "mqa_dsa"
     cfg = TransformerConfig(
         num_hidden_layers=2,
         num_nextn_predict_layers=0,
@@ -163,7 +165,7 @@ def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
         hybrid_mla_v_head_dim=256,
         hybrid_mla_num_attention_heads=64,
         hybrid_mla_num_key_value_heads=64,
-        non_absorbed_mqa=non_absorbed_mqa,
+        hybrid_mla_attention=hybrid_mla_attention,
         add_full_attention_sink_bias=sink,
         o_groups=4,
         o_lora_rank=32,
@@ -177,7 +179,7 @@ def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
         # Indexer dims are model-wide now (HF json ``index_*``). The hybrid MLA
         # -2 layer's cuDNN indexer requires head_dim == 128 and topk % 128 == 0
         # (<= 2048); these carry the values the old ``hybrid_index_*`` fields
-        # held and satisfy the ``non_absorbed_mqa`` config validation.
+        # held and satisfy the ``hybrid_mla_attention="mqa_dsa"`` validation.
         dsa_index_n_heads=64,
         dsa_index_head_dim=128,
         dsa_index_topk=128,
@@ -239,10 +241,11 @@ def _fa4_for_mha_sink(mode, sink):
         paddle.set_flags({"FLAGS_flash_attn_version": previous})
 
 
-# Reachable modes (label, non_absorbed_mqa).  Via config there are only two:
-# dense MHA (non_absorbed_mqa=False) and the absorbed MQA+DSA-indexer path
-# (non_absorbed_mqa=True).  The old DSA-less "mqa" collapsed onto "mqa_dsa"
-# (indexer always built), so its redundant entry was dropped.
+# Modes exercised here, as (label, vestigial ``indexer`` argument). Only two of
+# the three ``hybrid_mla_attention`` values are relevant to gradient health:
+# ``"mha"`` and ``"mqa_dsa"`` (which always builds the indexer). The
+# indexer-less ``"mqa_full_causal"`` is a non-production equivalence experiment,
+# so its redundant entry was dropped.
 _MODES = (("mha", False), ("mqa_dsa", True))
 
 # Parameters we expect to carry gradient in the hybrid-MLA layer (weights only;
@@ -383,8 +386,9 @@ class TestItem1StateDictAndGradientMatch(unittest.TestCase):
     def test_mqa_consumes_mha_state_dict_when_sink_is_enabled_together(self):
         """The production migration flips TWO json fields at once.
 
-        ``ernielite_layer43_mla_hca`` -> ``..._non_absorbed_mqa_hca_dsa`` adds
-        ``non_absorbed_mqa: true`` *and* ``add_full_attention_sink_bias: true``,
+        ``ernielite_layer43_mla_hca`` -> the ``mqa_dsa`` production config adds
+        ``hybrid_mla_attention: "mqa_dsa"`` *and*
+        ``add_full_attention_sink_bias: true``,
         so the phase-1 checkpoint has no ``softmax_offset`` at all. The test
         above builds both phases with the sink already on; this one covers the
         real delta: the newly initialised set must be exactly the indexer's
@@ -884,19 +888,46 @@ class TestItem10IndexerKLValueAndDenominator(unittest.TestCase):
 
         cap = {}
         real = mqamod.TileLangCSAIndexerLossAutoScaler
+        # Bound by position, so pin the order: upstream moved ``target`` from
+        # seventh to second, which silently turned ``probs`` into int32 column
+        # ids (``log(-1) -> nan``) instead of failing.
+        expected_args = [
+            "output",
+            "target",
+            "index_q",
+            "weights",
+            "index_k_comp",
+            "topk_indices",
+            "topk_probs",
+            "loss_coeff",
+            "indexer_backend",
+            "num_rows_override",
+            "loss_mask",
+        ]
+        actual_args = [
+            name
+            for name in inspect.signature(real.forward).parameters
+            if name != "ctx"
+        ]
+        self.assertEqual(
+            actual_args,
+            expected_args,
+            "TileLangCSAIndexerLossAutoScaler.forward was reordered; the "
+            "positional spy below would capture the wrong tensors",
+        )
 
         class Spy:
             @staticmethod
             def apply(
                 output,
+                target,
                 index_q,
                 weights,
                 index_k_comp,
                 topk_indices,
                 topk_probs,
-                target,
                 loss_coeff,
-                backend="tilelang",
+                indexer_backend="tilelang",
                 num_rows_override=None,
                 loss_mask=None,
             ):
@@ -915,14 +946,14 @@ class TestItem10IndexerKLValueAndDenominator(unittest.TestCase):
                 cap["coeff"] = float(loss_coeff)
                 return real.apply(
                     output,
+                    target,
                     index_q,
                     weights,
                     index_k_comp,
                     topk_indices,
                     topk_probs,
-                    target,
                     loss_coeff,
-                    backend,
+                    indexer_backend,
                     num_rows_override,
                     loss_mask,
                 )

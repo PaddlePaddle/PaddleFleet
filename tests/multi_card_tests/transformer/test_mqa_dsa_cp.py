@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Context parallel for the ``non_absorbed_mqa`` hybrid-MLA core attention.
+"""Context parallel for the latent-MQA hybrid-MLA core attention.
 
 Gold standard: a CP=N :class:`MQALatentAttention` must reproduce the CP=1
 reference on its own query slice -- forward output, input gradients and every
@@ -28,9 +28,9 @@ config below sets ``cp_degree == world_size``.
 Covered here (see ``test_mla_cp_contiguous_allgather.py`` for the MHA layer and
 the full-MLA integration):
 
-1. ``non_absorbed_mqa_dense`` (``indexer is None``) equivalence.
-2. ``non_absorbed_mqa`` + DSA equivalence, single and multi document, including
-   a document that straddles a rank boundary.
+1. ``hybrid_mla_attention="mqa_full_causal"`` (``indexer is None``) equivalence.
+2. ``hybrid_mla_attention="mqa_dsa"`` equivalence, single and multi document,
+   including a document that straddles a rank boundary.
 3. The indexer's RoPE under CP -- ``DSAIndexer.forward_before_topk`` must be
    **bitwise** equal to the global call, sliced. This is the load-bearing rope
    check: Q takes ``freqs[position_offset : position_offset + s]`` while K is
@@ -58,6 +58,8 @@ import numpy as np
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
+
+from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(
@@ -184,6 +186,21 @@ def _rel(a, e):
     return float((a - e).norm() / e.norm().clip(min=1e-12))
 
 
+def _logged_indexer_loss(layer_number=1):
+    """The indexer loss this layer just pushed into the logging tracker.
+
+    ``_forward_dsa`` reduces the KL with the coefficient the CP branch picked
+    (global valid-row denominator when masked, ``/cp_size`` when not) and hands
+    exactly that scalar to ``DSAIndexerLossLoggingHelper``, so the tracker is a
+    direct read of the normalisation -- no gradient indirection. ``0.0`` when
+    the step attached no loss.
+    """
+    values = DSAIndexerLossLoggingHelper.tracker.get("values")
+    if values is None:
+        return 0.0
+    return float(values[layer_number - 1])
+
+
 def run_core_cp(
     mode,
     doc_lens,
@@ -192,6 +209,7 @@ def run_core_cp(
     sink=None,
     with_input_ids=False,
     sparse_loss=True,
+    row_end=None,
 ):
     """CP=1 reference then CP layer, on the same global batch.
 
@@ -199,10 +217,16 @@ def run_core_cp(
     which is what the layer sees in production (``dsv4_hybrid_attention.py:634``
     for the HCA layers, and the all-gathered ``kv_s`` for the MLA ones).
     ``input_ids`` is global too (``experimental_dataflow``).
+
+    ``row_end`` overrides the mask built from ``doc_lens``. ``U._row_end`` folds
+    the trailing gap into one final document, so it can never produce a
+    row-validity pad row; the padded-layout tests
+    (``test_mqa_dsa_warmup_cp.py``) pass their own table instead.
     """
     sl = s_global // CP_SIZE
     off = CP_RANK * sl
-    row_end = U._row_end(doc_lens, s_global)
+    if row_end is None:
+        row_end = U._row_end(doc_lens, s_global)
     inp = _inputs(s_global)
     ids = _input_ids(s_global) if with_input_ids else None
 
@@ -211,6 +235,7 @@ def run_core_cp(
     cpl.set_state_dict(ref.state_dict())
 
     U._CAPTURED.clear()
+    DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
     ra = {k: _leaf(v) for k, v in inp.items()}
     oa = ref(
         ra["query"],
@@ -225,8 +250,10 @@ def run_core_cp(
     )
     oa.sum().backward()
     idx_ref = U._CAPTURED[-1]
+    logged_ref = _logged_indexer_loss()
 
     U._CAPTURED.clear()
+    DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
     rb = {
         "query": _leaf(inp["query"][:, off : off + sl]),
         "key": _leaf(inp["key"][:, off : off + sl]),
@@ -247,6 +274,7 @@ def run_core_cp(
     )
     ob.sum().backward()
     idx_cp = U._CAPTURED[-1]
+    logged_cp = _logged_indexer_loss()
 
     # Parameter grads: this rank only saw its own query rows, so the CP group's
     # SUM is the reference. (``loss_coeff == 0`` leaves the indexer out of the
@@ -283,6 +311,17 @@ def run_core_cp(
         "per_pos": per_pos,
         "idx_ref_slice": idx_ref[:, off : off + sl],
         "idx_cp": idx_cp,
+        # Raw tensors + the logged indexer loss, for the assertions that are not
+        # a relative error: bitwise mode-vs-mode output equality, pad-row
+        # zeroing and the loss-denominator check
+        # (``test_mqa_dsa_warmup_cp.py``).
+        "out": ob.detach(),
+        "ref_out": oa.detach(),
+        "dq_local": rb["query"].grad.detach(),
+        "ref_dq": ra["query"].grad.detach(),
+        "row_end": row_end,
+        "logged_ref": logged_ref,
+        "logged_cp": logged_cp,
     }
 
 
