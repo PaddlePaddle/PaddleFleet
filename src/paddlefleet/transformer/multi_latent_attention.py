@@ -47,6 +47,7 @@ from paddlefleet.parallel_state import (
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
+    keep_indexer_grad_path,
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
@@ -969,8 +970,14 @@ class MultiLatentAttention(Attention):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention,
-                # DSA-specific parameters
-                x=hidden_states,
+                # DSA-specific parameters. ``recompute`` is a PyLayer, so with a
+                # frozen backbone (``train_indexer_only``) every input here would
+                # be detached, the segment output would inherit that, and the
+                # indexer loss attached *inside* the segment would silently never
+                # get a backward pass. This is the third segment that can hold an
+                # indexer, next to the layer-level one (transformer_layer.py) and
+                # ``DSv4HybridAttention``'s ``full_attn`` one.
+                x=keep_indexer_grad_path(hidden_states, self.config),
                 qr=q_compressed,
                 # fastdeploy support
                 kv_compressed=kv_compressed,

@@ -486,10 +486,9 @@ class TestHybridIndexerReadsModelWideIndexFields(unittest.TestCase):
 
     def test_dsa_indexer_reflects_model_wide_index_fields(self):
         _, provider = _load_provider(_DSA)
-        # Production values (shared with the CSA layers). 2048 is what the
-        # online configs train at, and it is exactly
-        # ``mqa_latent_attention._LOSS_TOPK_CAP``, so at s=8192 the loss table
-        # and the attention table end up the same width.
+        # Production values. Only phase 3/4 (``_forward_sparse``) reads
+        # ``index_topk`` -- the phase-2 warmup KL spans the full causal set and
+        # never selects a top-k at all.
         self.assertEqual(provider.dsa_index_n_heads, 64)
         self.assertEqual(provider.dsa_index_head_dim, 128)
         self.assertEqual(provider.dsa_index_topk, 2048)
@@ -940,25 +939,38 @@ class TestConfigDeltas(unittest.TestCase):
 
     @classmethod
     def _json_allowlist(cls, name):
-        # ``index_topk`` is the value production actually trains at (2048, which
-        # is also ``mqa_latent_attention._LOSS_TOPK_CAP``). The baseline
-        # ``mla_hca`` config still carries the older 512, and it is deliberately
-        # not edited, so every non-baseline config differs here. Note the field
-        # is *not* MLA-only: the ratio-128 HCA indexer reads it too
-        # (``csa_attention.py:1776``), so this difference is a real behavioural
-        # gap between phase 1 and phases 2-4 on the HCA layers, not a cosmetic
-        # one -- it is allowlisted so the drift check stays green, not because it
-        # is harmless.
+        # ``index_topk`` is the value production actually trains at (2048). The
+        # baseline ``mla_hca`` config still carries the older 512, and it is
+        # deliberately not edited, so every config that *keeps* the field differs
+        # here. Only phase 3/4 reads it: the phase-2 warmup KL spans the full
+        # causal set and selects no top-k.
+        # The field is MLA-only in this layout: the ratio-128 HCA layers set
+        # ``self.indexer = None`` (``csa_attention.py``: ``CSAIndexer`` is only
+        # built for ``1 < ratio < 128 and not csa_dense_mode``), and this model
+        # has no such ratio, so nothing but the ``-2`` layers can read it.
         topk = {"index_topk": (512, 2048)}
         if name == _FULL_CAUSAL:
+            # ``mqa_full_causal`` builds no indexer at all
+            # (``gpt_layer_specs.py`` passes ``indexer=None``), so every
+            # indexer-only key was deleted from this config rather than left as
+            # a dead value. See the header comment of
+            # ``ernielite_layer43_pretrain_non_absorbed_mqa_dense.yaml``.
             return {
                 "hybrid_mla_attention": (cls._MISSING, "mqa_full_causal"),
-                **topk,
+                "index_topk": (512, cls._MISSING),
+                "index_n_heads": (64, cls._MISSING),
+                "index_head_dim": (128, cls._MISSING),
+                "dsa_indexer_loss_coeff": (0.01, cls._MISSING),
+                "dsa_indexer_use_sparse_loss": (False, cls._MISSING),
             }
         if name == _DSA:
+            # Phase 2 (warmup): the KL spans the full per-document causal set,
+            # so this config carries no top-k budget at all -- and
+            # ``transformer_config`` only requires ``index_topk`` when
+            # ``dsa_indexer_use_sparse_loss`` is True.
             return {
                 "hybrid_mla_attention": (cls._MISSING, "mqa_dsa"),
-                **topk,
+                "index_topk": (512, cls._MISSING),
             }
         if name == _SPARSE_LOSS:
             return {
