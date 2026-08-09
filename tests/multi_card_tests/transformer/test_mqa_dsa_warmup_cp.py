@@ -18,18 +18,18 @@ Two gaps in ``test_mqa_dsa_cp.py`` / ``test_mla_cp_contiguous_allgather.py``:
 
 1. ``hybrid_mla_attention="mqa_dsa"`` with ``dsa_indexer_use_sparse_loss=False``
    -- the phase-2 (DSA warmup) pairing, where attention consumes the full
-   per-document causal set while the indexer is still being learned on the
-   widened KL table. The existing CP suites run ``True`` everywhere except the
-   one ``(masked=True, sparse=False)`` subtest of
+   per-document causal set while the indexer is trained by a KL over that same
+   full causal set (no top-k anywhere). The existing CP suites run ``True``
+   everywhere except the one ``(masked=True, sparse=False)`` subtest of
    ``test_mqa_dsa_cp.py::test_7``, which only observes parameter gradients. The
-   warmup mode takes a *different branch* of ``_forward_dsa``
-   (``mqa_latent_attention.py:495`` and ``:594``) whose index table is built at
-   ``s_global`` and row-sliced, so it needs its own CP evidence: that the
-   attention output is the CP=1 reference, that the table really is the global
-   one sliced, that the mode is bit-identical to ``"mqa_full_causal"`` under CP,
-   and that the widened loss still normalises across the CP group on both the
-   masked and the unmasked branch (``_indexer_loss_mask`` /
-   ``loss_coeff / cp_size``).
+   warmup mode takes its own branch (``mqa_latent_attention._forward_warmup``)
+   whose index table and causal mask are both built at ``s_global`` and
+   row-sliced, so it needs its own CP evidence: that the attention output is the
+   CP=1 reference, that the table really is the global one sliced, that the mode
+   is bit-identical to ``"mqa_full_causal"`` under CP, and that the full-causal
+   KL normalises across the CP group on both the masked and the unmasked branch
+   (``_indexer_loss_mask`` / the all-ones fallback, both of which divide by the
+   **global** row count so the per-rank losses simply add up).
 
 2. A layout with genuine **row-validity pad rows**. ``_STRADDLE`` sums to
    exactly ``S_GLOBAL`` and ``U._row_end`` folds any trailing gap into one final
@@ -134,7 +134,7 @@ class _CPChecks(unittest.TestCase):
     def _assert_full_causal(self, idx, row_end, tag):
         """Every local row's selected set == its whole per-document causal set.
 
-        This is what separates the warmup mode from phase 3/4: under
+        This is what separates the warmup mode from phase 3: under
         ``window + top-k`` a row longer than ``window + index_topk`` selects a
         strict subset, so this assertion would fail there.
         """
@@ -156,11 +156,12 @@ class TestWarmupCP(_CPChecks):
     def test_1_warmup_forward_equivalence(self):
         """CP=N == CP=1 on the warmup path, with and without a live loss.
 
-        ``dsa_indexer_loss_coeff == 0`` takes the early branch that skips the
-        indexer projections entirely (``mqa_latent_attention.py:495-507``);
-        ``> 0`` takes the branch that still builds the wide top-k table for the
-        KL but hands attention the full causal one (``:594-603``). Both must
-        land on the same reference output, so both are checked.
+        ``dsa_indexer_loss_coeff == 0`` returns straight after the full-causal
+        attention and never touches the indexer projections;
+        ``> 0`` additionally runs the full-candidate indexer KL
+        (``csa_indexer_topk_fwd`` with ``topk_effective=s_global``) over the
+        whole causal set. Neither may perturb the attention output, so both are
+        checked against the same reference.
         """
         for coeff in (0.0, 0.1):
             with self.subTest(loss_coeff=coeff):
@@ -231,11 +232,11 @@ class TestWarmupCP(_CPChecks):
         """Warmup output == ``hybrid_mla_attention="mqa_full_causal"`` output.
 
         Both modes call ``_build_full_causal_indices`` and then the same sparse
-        kernel with the same inputs, so on each rank this must be *bitwise*
-        equal, not merely close. The single-card claim (maxabs 0.0) is asserted
-        here with the CP row-slicing in the path -- the two modes slice the
-        table at different call sites (``forward`` vs ``_forward_dsa``), which
-        is exactly what could drift apart.
+        kernel with the same inputs -- ``_forward_warmup`` reaches it *through*
+        ``_forward_full_causal`` -- so on each rank this must be *bitwise* equal,
+        not merely close. The single-card claim (maxabs 0.0) is asserted here
+        with the CP row-slicing in the path, and it is also what pins the
+        phase-2 attention set to the frozen backbone's phase-1 one.
         """
         ref = H.run_core_cp("mqa", _STRADDLE)
         for coeff in (0.0, 0.1):
@@ -265,18 +266,22 @@ class TestWarmupCP(_CPChecks):
         """The logged indexer loss must sum to the CP=1 value across the group.
 
         Read straight out of ``DSAIndexerLossLoggingHelper``, so it observes the
-        denominator itself rather than its shadow in the gradients:
-        ``loss_mask is not None`` -> the global valid-row count (per-rank losses
-        are partial sums), ``None`` -> a local mean scaled by ``1/cp_size``
-        (``mqa_latent_attention.py:660-675``). ``sparse_loss`` is swept so that
-        a failure can be attributed: warmup-only means the widened table broke
-        it, both means the pre-existing normalisation is wrong.
+        denominator itself rather than its shadow in the gradients. Phase 2
+        (``sparse_loss=False``) has one formula on both branches: the row mask is
+        always a real tensor -- ``_indexer_loss_mask``'s global-count mask when
+        ``input_ids`` reached the layer, an all-ones mask over ``b * s_global``
+        when it did not -- so every rank contributes its own rows to one global
+        mean and the per-rank losses are partial sums. Phase 3
+        (``sparse_loss=True``) still keeps the two-branch form (global count when
+        masked, a local mean times ``1 / cp_size`` when not); both must land on
+        the CP=1 value. ``sparse_loss`` is swept so a failure can be attributed:
+        warmup-only means the full-causal KL broke it, both means the
+        pre-existing normalisation is wrong.
 
-        Note this layout does not exercise the *width* difference between the
-        two ``sparse_loss`` values: with documents of 200/150/162 and a 128-wide
-        forced window, no row has more than 72 non-local candidates, so the
-        128-slot and the 512-slot table hold the same set (the rest is ``-1``).
-        ``test_5`` covers the width itself.
+        Note this layout does not exercise the *width* difference between the two
+        ``sparse_loss`` values as sharply as it could: with documents of
+        200/150/162 and a 128-wide forced window, most rows have few non-local
+        candidates. ``test_5`` covers the width itself.
         """
         for sparse in (False, True):
             for masked in (True, False):
@@ -298,13 +303,11 @@ class TestWarmupCP(_CPChecks):
 
     @H.U._GPU
     def test_5_widened_warmup_loss_table_under_cp(self):
-        """One 512-long document, so the widened KL table is genuinely wider.
+        """One 512-long document, so the two phases' KL supports differ widely.
 
-        ``_indexer_valid_range`` leaves ``causal_len - window_size`` non-local
-        candidates, which only exceeds ``index_topk`` (128 in this fixture) once
-        a document is longer than 256. On this layout the warmup table really
-        holds ``min(2048, s_global)`` = 512 slots against phase 3/4's 128, so
-        the two logged losses must differ -- that is the non-vacuity control for
+        Phase 2's KL spans the whole per-document causal set (up to 512 columns
+        on this layout) while phase 3's spans window(128) + top-k(128), so the
+        two logged losses must differ -- that is the non-vacuity control for
         ``test_4`` -- while each still normalises across the CP group.
         """
         logged = {}
@@ -344,7 +347,8 @@ class TestWarmupCP(_CPChecks):
         rel = abs(got - want) / abs(want)
         print(
             f"[warmup-cp{H.CP_SIZE} rank{H.CP_RANK}] {tag}: "
-            f"sum(loss)={got:.6e} ref={want:.6e} rel={rel:.3e}",
+            f"this_rank={res['logged_cp']:.6e} sum(loss)={got:.6e} "
+            f"ref={want:.6e} rel={rel:.3e}",
             flush=True,
         )
         self.assertLess(
@@ -437,7 +441,7 @@ class TestPadRowsCP(_CPChecks):
 
     @H.U._GPU
     def test_3_pad_rows_sparse(self):
-        """Same layout on the phase-3/4 (``window + top-k``) path.
+        """Same layout on the phase-3 (``window + top-k``) path.
 
         Included so a pad-row failure can be attributed: if it reproduces here
         it is not specific to the warmup branch this change introduced.

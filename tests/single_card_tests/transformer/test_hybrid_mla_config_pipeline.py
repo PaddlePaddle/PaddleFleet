@@ -32,7 +32,7 @@ The five production ``layer43`` configs under test (43 decoder layers + 1 MTP,
                                               experiment).
 * ``..._non_absorbed_mqa_hca_dsa``         -- phase 2, ``"mqa_dsa"``
                                               (+ YAML ``train_indexer_only``).
-* ``..._non_absorbed_mqa_hca_dsa_sparse_loss`` -- phase 3/4, ``"mqa_dsa"`` with
+* ``..._non_absorbed_mqa_hca_dsa_sparse_loss`` -- phase 3, ``"mqa_dsa"`` with
                                               ``dsa_indexer_use_sparse_loss``.
 * ``ernielite_layer43_mqa_hca``            -- CSA full-causal MQA
                                               (``csa_compress_ratios == -1``).
@@ -216,7 +216,7 @@ class TestLayerDispatchTable(unittest.TestCase):
         The property kept here is unchanged in strength: *every* production
         config that sets ``hybrid_mla_attention="mqa_dsa"`` must dispatch to
         ``MQALatentAttention`` + ``DSAIndexer`` on all seven ``-2`` layers. Since
-        the enum rename the second such config is the phase-3/4 sparse-loss one,
+        the enum rename the second such config is the phase-3 sparse-loss one,
         so this pins that ``dsa_indexer_use_sparse_loss`` does NOT leak into the
         class dispatch.
         """
@@ -486,10 +486,9 @@ class TestHybridIndexerReadsModelWideIndexFields(unittest.TestCase):
 
     def test_dsa_indexer_reflects_model_wide_index_fields(self):
         _, provider = _load_provider(_DSA)
-        # Production values (shared with the CSA layers). 2048 is what the
-        # online configs train at, and it is exactly
-        # ``mqa_latent_attention._LOSS_TOPK_CAP``, so at s=8192 the loss table
-        # and the attention table end up the same width.
+        # Production values. Only phase 3 (``_forward_sparse``) reads
+        # ``index_topk`` -- the phase-2 warmup KL spans the full causal set and
+        # never selects a top-k at all.
         self.assertEqual(provider.dsa_index_n_heads, 64)
         self.assertEqual(provider.dsa_index_head_dim, 128)
         self.assertEqual(provider.dsa_index_topk, 2048)
@@ -680,34 +679,39 @@ class TestAOAStatements(unittest.TestCase):
                     li = int(s.split("model.layers.")[1].split(".")[0])
                     self.assertIn(li, _MINUS2_LAYERS, s)
 
-    def test_documented_bug_attention_gate_proj_dropped_from_aoa(self):
-        # HIGH (pre-existing, symmetric, NOT specific to this feature): the
-        # module builds ``self_attn.gate_proj`` because the provider sees
-        # ``gated_attention=True`` (modeling.py ~:455 ORs use_gated_attn |
-        # gated_attention), but the AOA statements at modeling.py:922 / :1383
-        # gate ONLY on ``config.use_gated_attn`` -- which is False on the ERNIE
-        # config (model_config.json sets ``gated_attention`` but not
-        # ``use_gated_attn``). Result: on HF import/export the attention gate
-        # weights are silently dropped, for ALL the layer43 configs including the
-        # mha baseline. This asserts the CURRENT (buggy) behavior so a fix flips
-        # it.
+    def test_attention_gate_proj_is_in_aoa(self):
+        """``self_attn.gate_proj`` survives HF import/export on every layer.
+
+        WAS a documented bug: the module builds ``self_attn.gate_proj`` because
+        the provider sees ``gated_attention=True`` (``modeling.py`` ORs
+        ``use_gated_attn | gated_attention``), while the AOA statements gated only
+        on ``config.use_gated_attn`` -- which is False on the ERNIE configs, since
+        ``model_config.json`` sets ``gated_attention`` and not ``use_gated_attn``.
+        The attention gate weights were therefore dropped silently, on every
+        layer43 config including the mha baseline. This test asserted the buggy
+        count (0) so that a fix would flip it, and erniebot's "fix gate_proj
+        transpose missing in HF ckpt export for hybrid-MLA layers" did.
+
+        The count is every layer that owns a gate, i.e. ``num_hidden_layers`` plus
+        the MTP layer -- not just the ``-2`` ones, because ``gated_attention`` is
+        a model-wide switch.
+        """
         for name in _LAYER43_CFGS:
             with self.subTest(config=name):
                 cfg, fwd, inv = self._aoa(name)
+                # The trigger is unchanged: still the model-wide field, not the
+                # one the AOA statements used to gate on.
                 self.assertFalse(getattr(cfg, "use_gated_attn", False))
                 self.assertTrue(getattr(cfg, "gated_attention", False))
-                self.assertEqual(self._count(fwd, "self_attn.gate_proj"), 0)
-                self.assertEqual(self._count(inv, "self_attn.gate_proj"), 0)
-
-    @unittest.expectedFailure
-    def test_attention_gate_proj_should_be_in_aoa(self):
-        # Expected behavior: since the module owns ``self_attn.gate_proj`` on
-        # every hybrid-MLA (-2) layer, HF conversion should carry it. Fails
-        # today, documenting the gate_proj drop as a genuine bug.
-        _, fwd, _ = self._aoa(_DSA)
-        self.assertEqual(
-            self._count(fwd, "self_attn.gate_proj"), len(_MINUS2_LAYERS)
-        )
+                expected = cfg.num_hidden_layers + (
+                    getattr(cfg, "num_nextn_predict_layers", 0) or 0
+                )
+                self.assertEqual(
+                    self._count(fwd, "self_attn.gate_proj"), expected
+                )
+                self.assertEqual(
+                    self._count(inv, "self_attn.gate_proj"), expected
+                )
 
 
 class TestConfigCheckCoverage(unittest.TestCase):
@@ -919,7 +923,7 @@ class TestConfigDeltas(unittest.TestCase):
             # (``PaddleFormers trainer.py:1403``) and can only restore it from an
             # fp32 master weight -- which does not exist for a parameter that is
             # frozen (phase 2) or absent from the previous phase's optimizer
-            # state (phase 3/4), and the assignment loop at ``:1440`` has no else
+            # state (phase 3), and the assignment loop at ``:1440`` has no else
             # branch. ``load_from_hf`` requires ``ignore_load_lr_and_optim``
             # (hard assert at ``:1252``), and ``parallel_broadcast`` cannot serve
             # a resume whose parameter set changed (``resharder.py:459`` asserts
@@ -940,30 +944,43 @@ class TestConfigDeltas(unittest.TestCase):
 
     @classmethod
     def _json_allowlist(cls, name):
-        # ``index_topk`` is the value production actually trains at (2048, which
-        # is also ``mqa_latent_attention._LOSS_TOPK_CAP``). The baseline
-        # ``mla_hca`` config still carries the older 512, and it is deliberately
-        # not edited, so every non-baseline config differs here. Note the field
-        # is *not* MLA-only: the ratio-128 HCA indexer reads it too
-        # (``csa_attention.py:1776``), so this difference is a real behavioural
-        # gap between phase 1 and phases 2-4 on the HCA layers, not a cosmetic
-        # one -- it is allowlisted so the drift check stays green, not because it
-        # is harmless.
+        # ``index_topk`` is the value production actually trains at (2048). The
+        # baseline ``mla_hca`` config still carries the older 512, and it is
+        # deliberately not edited, so every config that *keeps* the field differs
+        # here. Only phase 3 reads it: the phase-2 warmup KL spans the full
+        # causal set and selects no top-k.
+        # The field is MLA-only in this layout: the ratio-128 HCA layers set
+        # ``self.indexer = None`` (``csa_attention.py``: ``CSAIndexer`` is only
+        # built for ``1 < ratio < 128 and not csa_dense_mode``), and this model
+        # has no such ratio, so nothing but the ``-2`` layers can read it.
         topk = {"index_topk": (512, 2048)}
         if name == _FULL_CAUSAL:
+            # ``mqa_full_causal`` builds no indexer at all
+            # (``gpt_layer_specs.py`` passes ``indexer=None``), so every
+            # indexer-only key was deleted from this config rather than left as
+            # a dead value. See the header comment of
+            # ``ernielite_layer43_pretrain_non_absorbed_mqa_dense.yaml``.
             return {
                 "hybrid_mla_attention": (cls._MISSING, "mqa_full_causal"),
-                **topk,
+                "index_topk": (512, cls._MISSING),
+                "index_n_heads": (64, cls._MISSING),
+                "index_head_dim": (128, cls._MISSING),
+                "dsa_indexer_loss_coeff": (0.01, cls._MISSING),
+                "dsa_indexer_use_sparse_loss": (False, cls._MISSING),
             }
         if name == _DSA:
+            # Phase 2 (warmup): the KL spans the full per-document causal set,
+            # so this config carries no top-k budget at all -- and
+            # ``transformer_config`` only requires ``index_topk`` when
+            # ``dsa_indexer_use_sparse_loss`` is True.
             return {
                 "hybrid_mla_attention": (cls._MISSING, "mqa_dsa"),
-                **topk,
+                "index_topk": (512, cls._MISSING),
             }
         if name == _SPARSE_LOSS:
             return {
                 "hybrid_mla_attention": (cls._MISSING, "mqa_dsa"),
-                # Phase 3/4: the indexer is trained enough for attention to
+                # Phase 3: the indexer is trained enough for attention to
                 # consume its ranking, so the narrow (sparse) KL is used.
                 "dsa_indexer_use_sparse_loss": (False, True),
                 **topk,

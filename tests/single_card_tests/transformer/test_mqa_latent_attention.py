@@ -107,16 +107,6 @@ _LAYOUTS = [
 ]
 
 
-def _wide_loss_width(seqlen):
-    """The widened indexer-loss table width (mqa_latent_attention.py:562-566).
-
-    ``dsa_indexer_use_sparse_loss=False`` scores
-    ``max(index_topk, min(_LOSS_TOPK_CAP, s // _TOPK_BLOCK * _TOPK_BLOCK))``
-    columns; ``True`` scores exactly ``index_topk``.
-    """
-    return max(INDEX_TOPK, min(2048, seqlen // 128 * 128))
-
-
 def _full_causal_table(layout, seqlen):
     """The per-document full-causal ``[1, s, s]`` table, from the production
     builder itself -- it is a pure integer function of the document bounds.
@@ -301,17 +291,56 @@ class TestHybridMLAConfig(unittest.TestCase):
         # Keyed on (field, value), not on the message: topk=100 (not a multiple
         # of 128) and topk=2176 (>2048) both mention "index_topk" but hit
         # different branches.
+        #
+        # ``index_topk`` is validated in the sparse phase only, because that is
+        # the only phase that reads it -- the warmup KL spans the whole causal
+        # set and runs no top-k -- so the topk cases must ask for that phase.
         for field, value, msg in (
             ("dsa_index_head_dim", 64, "index_head_dim"),
             ("dsa_index_topk", 100, "index_topk"),
             ("dsa_index_topk", 2048 + 128, "index_topk"),
             ("dsa_index_n_heads", None, "index_n_heads"),
         ):
+            extra = (
+                {"dsa_indexer_use_sparse_loss": True}
+                if field == "dsa_index_topk"
+                else {}
+            )
             with (
                 self.subTest(field=field, value=value),
                 self.assertRaisesRegex(ValueError, msg),
             ):
-                TransformerConfig(**self._mqa_dsa_kwargs(**{field: value}))
+                TransformerConfig(
+                    **self._mqa_dsa_kwargs(**{field: value}, **extra)
+                )
+
+    def test_warmup_phase_needs_no_index_topk(self):
+        """Phase 2 must not be forced to carry a top-k budget.
+
+        ``_forward_warmup`` never selects a top-k, so a kernel-illegal (or
+        simply absent, hence default) ``index_topk`` must not block startup --
+        while the sparse phase still rejects it. The production phase-2
+        ``model_config.json`` relies on this: it ships no ``index_topk`` at all.
+        """
+        for topk in (100, 2048 + 128):
+            with self.subTest(dsa_index_topk=topk):
+                config = TransformerConfig(
+                    **self._mqa_dsa_kwargs(
+                        dsa_index_topk=topk,
+                        dsa_indexer_use_sparse_loss=False,
+                    )
+                )
+                self.assertEqual(config.hybrid_mla_attention, "mqa_dsa")
+                self.assertFalse(config.dsa_indexer_use_sparse_loss)
+                # ...and the same value is still rejected in the sparse phase,
+                # so this is a phase gate, not a dropped check.
+                with self.assertRaisesRegex(ValueError, "index_topk"):
+                    TransformerConfig(
+                        **self._mqa_dsa_kwargs(
+                            dsa_index_topk=topk,
+                            dsa_indexer_use_sparse_loss=True,
+                        )
+                    )
 
     def test_illegal_hybrid_mla_attention_configs_are_rejected(self):
         """The enum makes the old ``(dense=True, mqa=False)`` state
@@ -743,24 +772,26 @@ class TestMQADSA(unittest.TestCase):
         """``dsa_indexer_use_sparse_loss`` picks the whole training phase.
 
         On these uncompressed ``-2`` layers the switch is one decision with two
-        effects (mqa_latent_attention.py:495-507, :593-624), not just the KL
-        width it selects for the CSA layers of the same model
+        effects (``MQALatentAttention._phase``), not just the KL width it selects
+        for the CSA layers of the same model
         (``_resolve_csa_indexer_loss_topk_effective``):
 
-        * ``False`` -- phase 2 (warmup). Attention consumes the **full
-          per-document causal** table, because a freshly initialised indexer's
-          ranking must not steer attention yet; the KL is scored over the wide
-          candidate table (128 -> 512 at ``s=512``) so the indexer is also
-          supervised on columns it did not pick.
-        * ``True`` -- phase 3/4. Attention consumes ``window + index_topk`` and
-          the KL is restricted to that same set.
+        * ``False`` -- phase 2 (warmup, ``_forward_warmup``). Attention consumes
+          the **full per-document causal** table, because a freshly initialised
+          indexer's ranking must not steer attention yet, and the KL is scored
+          over that same full causal set -- so ``_attn_target``, the top-k KL
+          target builder, is never called at all. (It used to be called with a
+          *widened* top-k table; at the production ``index_topk=2048`` that
+          widening degenerated back into the phase-3 table, which is why the
+          phase now shares no loss code with phase 3.)
+        * ``True`` -- phase 3 (``_forward_sparse``). Attention consumes
+          ``window + index_topk`` and the KL is restricted to that same set, so
+          ``_attn_target`` is called once per step at exactly ``index_topk``.
 
-        Both widths are asserted exactly. The loss width is an integer the
-        switch controls directly, and -- unlike the ``True`` table -- the
-        ``False`` attention table is *exactly* assertable: it is
-        ``_build_full_causal_indices``, a pure integer function of the document
-        bounds with no floating-point scoring in it, so it is reproducible and
-        equal to the builder's own output element for element.
+        Both column sets are asserted. The ``False`` attention table is *exactly*
+        assertable: it is ``_build_full_causal_indices``, a pure integer function
+        of the document bounds with no floating-point scoring in it, so it is
+        reproducible and equal to the builder's own output element for element.
 
         The ``True`` path stays statistical, which is the pre-existing measured
         fact this test still records: on a single full-length document neither
@@ -776,9 +807,12 @@ class TestMQADSA(unittest.TestCase):
         loss_widths = []
         inner_target = self.module._attn_target
 
-        def recording_target(query_, kv_, topk_indices):
-            loss_widths.append(int(topk_indices.shape[-1]))
-            return inner_target(query_, kv_, topk_indices)
+        def recording_target(query_, kv_, kl_columns):
+            # The KL's column set is the indexer's candidate set: the top-k in
+            # the sparse phase, every causal column in warmup. The forced window
+            # is never in it.
+            loss_widths.append(int(kl_columns.shape[-1]))
+            return inner_target(query_, kv_, kl_columns)
 
         self.module._attn_target = recording_target
 
@@ -810,11 +844,13 @@ class TestMQADSA(unittest.TestCase):
         idx_b, _ = run(True)
         idx_full, loss_full = run(False)
 
-        # The KL width: exactly ``index_topk`` under ``True``, widened under
-        # ``False`` (mqa_latent_attention.py:562).
-        wide = _wide_loss_width(seqlen)
-        self.assertEqual(wide, 512)  # documents the 128 -> 512 widening here
-        self.assertEqual(loss_widths, [INDEX_TOPK, INDEX_TOPK, wide])
+        # The KL column set: exactly ``index_topk`` under ``True``; under
+        # ``False`` the same builder is reached but over the whole causal span,
+        # so the width is ``s``.
+        self.assertEqual(loss_widths, [INDEX_TOPK, INDEX_TOPK, seqlen])
+        # The KL never scores the forced window: its width is exactly the
+        # indexer's candidate budget, not ``WINDOW + INDEX_TOPK``.
+        self.assertNotIn(WINDOW + INDEX_TOPK, loss_widths)
 
         # The attention table: window + top-k under ``True``, the full causal
         # table (width ``s``) under ``False``.
@@ -957,7 +993,7 @@ class TestMQADSAWarmupPhase(unittest.TestCase):
     The indexer is still being learned, so attention must not consume its
     ranking: it attends to the full per-document causal set (bit-identical to
     ``hybrid_mla_attention="mqa_full_causal"``) while the indexer's top-k feeds
-    the wide KL loss only. ``TestMQADSA`` covers the phase-3/4 shape
+    the wide KL loss only. ``TestMQADSA`` covers the phase-3 shape
     (``True``), where attention consumes ``window + index_topk``.
 
     Kept as its own class rather than folded into ``TestMQADSA``: the module
@@ -1072,61 +1108,180 @@ class TestMQADSAWarmupPhase(unittest.TestCase):
                     self, table, self.row_end, self.SEQLEN, expect_full=True
                 )
 
-    def test_indexer_topk_serves_the_loss_only(self):
-        """Exactly one ``select_topk`` call, and attention does not consume it.
+    def test_warmup_undoes_the_indexer_weight_prebake_for_tilelang(self):
+        """The tilelang indexer re-applies ``head_dim**-0.5``, so the pre-bake
+        must be undone -- exactly as the cuDNN pair needs in phase 3.
 
-        Counting alone would not separate the phases -- phase 3 also calls the
-        kernel once when ``loss_topk == attn_topk``. What is specific here is
-        *what* the single call is for: it asks for the wide loss width rather
-        than ``index_topk``, and the table attention actually consumes contains
-        columns the indexer's table structurally cannot return. The indexer's
-        candidate range is clamped to end at ``doc_start + causal_len -
-        window_size`` (``_indexer_valid_range``), so the query's own diagonal is
-        never in it, while the full-causal table always has it.
+        This is a regression test for a bug the test suite was blind to: warmup
+        first shipped passing ``weights`` through unscaled, on the (wrong)
+        reasoning that the ``head_dim**0.5`` fixup was cuDNN-specific. Nothing
+        crashed and every existing assertion still passed -- the indexer was just
+        trained against a distribution flattened by ``1/sqrt(128)``. The precision
+        audit caught it by comparing against a plain-paddle reference:
+        un-baked weights match to ``max|d|=3.0e-8 / cosine 1-1.5e-13``, unscaled
+        ones are off by ``max|d|=7.5e-1 / cosine 0.62``.
+
+        So the discriminator has to be numeric. ``probs`` from the kernel is
+        compared against the reference expression evaluated with ``weights`` **as
+        ``forward_before_topk`` returns them**, which is the intended scale.
         """
-        import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as fwd_mod
+        import paddle.nn.functional as F
 
-        calls = []
-        inner = fwd_mod.cudnn_indexer_topk_fwd
+        import paddlefleet.tilelang_ops as tl_mod
 
-        def recording(*args, **kwargs):
-            out = inner(*args, **kwargs)
-            calls.append(
-                (
-                    int(kwargs["topk_effective"]),
-                    bool(kwargs["return_topk_scores"]),
-                    out[0].numpy().copy(),
-                )
-            )
-            return out
+        seen = {}
+        inner_tl = tl_mod.csa_indexer_topk_fwd
+        inner_proj = self.module._indexer_projections
+
+        def recording_proj(*args, **kwargs):
+            q, k, w = inner_proj(*args, **kwargs)
+            seen["w_as_returned"] = w.detach().cast("float32").numpy().copy()
+            seen["q"] = q.detach().cast("float32").numpy().copy()
+            seen["k"] = k.detach().cast("float32").numpy().copy()
+            return q, k, w
+
+        def recording_tl(*args, **kwargs):
+            seen["w_passed"] = args[2].detach().cast("float32").numpy().copy()
+            columns, probs = inner_tl(*args, **kwargs)
+            seen["columns"] = columns.numpy().copy()
+            seen["probs"] = probs.cast("float32").numpy().copy()
+            return columns, probs
 
         query, key, w_v, x, qr = self._inputs()
         tensors = [t.clone() for t in (query, key, x, qr)]
-        fwd_mod.cudnn_indexer_topk_fwd = recording
+        self.module._indexer_projections = recording_proj
+        tl_mod.csa_indexer_topk_fwd = recording_tl
+        try:
+            self._call(
+                self.module, tensors, w_v, training=True, differentiable=True
+            )
+        finally:
+            self.module._indexer_projections = inner_proj
+            tl_mod.csa_indexer_topk_fwd = inner_tl
+
+        # The pre-bake is undone exactly once. ``weights`` is bf16, so the
+        # product carries bf16 rounding (~2.6e-3 relative measured); the factor
+        # being separated here is sqrt(128) ~ 11.3 against 1.0, so a loose
+        # tolerance still discriminates it by three orders of magnitude.
+        root_d = float(self.module.indexer.head_dim) ** 0.5
+        np.testing.assert_allclose(
+            seen["w_passed"],
+            seen["w_as_returned"] * root_d,
+            rtol=5e-3,
+            atol=1e-6,
+        )
+
+        # ...and that is the scale which reproduces the reference distribution.
+        q = paddle.to_tensor(seen["q"])
+        k = paddle.to_tensor(seen["k"])
+        w = paddle.to_tensor(seen["w_as_returned"])
+        scores = paddle.einsum("bshd,btd->bsht", q, k)
+        logits = (F.relu(scores) * w.unsqueeze(-1)).sum(axis=2)
+        rows = paddle.arange(self.SEQLEN, dtype="int64").unsqueeze(-1)
+        cols = paddle.arange(self.SEQLEN, dtype="int64").unsqueeze(0)
+        doc_start = []
+        start = 0
+        for length in self.LAYOUT:
+            doc_start += [start] * length
+            start += length
+        doc_start = paddle.to_tensor(doc_start, dtype="int64")
+        keep = (cols <= rows) & (cols >= doc_start.unsqueeze(-1))
+        logits = logits + paddle.where(
+            keep.unsqueeze(0),
+            paddle.zeros([1, self.SEQLEN, self.SEQLEN], dtype="float32"),
+            paddle.full([1, self.SEQLEN, self.SEQLEN], -1e30, dtype="float32"),
+        )
+        ref = F.softmax(logits, axis=-1).numpy()
+
+        # The kernel emits columns in score order, so gather the reference onto
+        # the same permutation before comparing.
+        cols_seen = seen["columns"][0]
+        got = seen["probs"][0]
+        valid = cols_seen >= 0
+        safe = np.where(valid, cols_seen, 0)
+        ref_perm = np.take_along_axis(ref[0], safe, axis=-1)
+        ref_perm = np.where(valid, ref_perm, 0.0)
+        max_abs = float(np.abs(got - ref_perm).max())
+        # bf16 end to end (production dtype), so the reference rebuilt from the
+        # rounded weights lands ~2.3e-5 away; the audit's fp32 run gets 3.0e-8.
+        # The wrong scale is 7.5e-1, i.e. this threshold still discriminates by
+        # nearly three orders of magnitude.
+        self.assertLess(
+            max_abs,
+            1e-3,
+            f"warmup probs do not match the reference scale: max|d|={max_abs:.3e}",
+        )
+
+    def test_warmup_scores_every_causal_column_via_tilelang(self):
+        """Phase 2 scores the whole causal span, in one tilelang call.
+
+        Two things are pinned. First, the **cuDNN** top-k kernel -- phase 3's
+        selector -- is called zero times: this phase reads no ``index_topk``, no
+        window and no clamped candidate range. Second, the tilelang indexer is
+        called exactly once at ``topk_effective == s``, its documented
+        "full-candidate selection" mode, and the columns it comes back with are
+        exactly the attention table's, diagonal included -- the very column the
+        old clamped candidate range could never return.
+
+        Before the phase split this test demanded one *cuDNN* call for a widened
+        loss table. That widening was the bug: at the production
+        ``index_topk=2048`` it capped back to the phase-3 width, so the KL scored
+        the same columns attention would have picked.
+        """
+        import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as fwd_mod
+        import paddlefleet.tilelang_ops as tl_mod
+
+        cudnn_calls = []
+        tl_widths = []
+        tl_columns = []
+        inner_cudnn = fwd_mod.cudnn_indexer_topk_fwd
+        inner_tl = tl_mod.csa_indexer_topk_fwd
+
+        def recording_cudnn(*args, **kwargs):
+            cudnn_calls.append(int(kwargs["topk_effective"]))
+            return inner_cudnn(*args, **kwargs)
+
+        def recording_tl(*args, **kwargs):
+            tl_widths.append(int(kwargs["topk_effective"]))
+            columns, probs = inner_tl(*args, **kwargs)
+            tl_columns.append(columns.numpy().copy())
+            return columns, probs
+
+        query, key, w_v, x, qr = self._inputs()
+        tensors = [t.clone() for t in (query, key, x, qr)]
+        fwd_mod.cudnn_indexer_topk_fwd = recording_cudnn
+        tl_mod.csa_indexer_topk_fwd = recording_tl
         try:
             out = self._call(
                 self.module, tensors, w_v, training=True, differentiable=True
             )
             out.cast("float32").sum().backward()
         finally:
-            fwd_mod.cudnn_indexer_topk_fwd = inner
+            fwd_mod.cudnn_indexer_topk_fwd = inner_cudnn
+            tl_mod.csa_indexer_topk_fwd = inner_tl
 
-        self.assertEqual(len(calls), 1)
-        width, want_scores, indexer_table = calls[0]
-        # The wide loss width, not the attention budget.
-        self.assertEqual(width, _wide_loss_width(self.SEQLEN))
-        self.assertNotEqual(width, int(self.module.indexer.index_topk))
-        self.assertTrue(want_scores)
-        # The attention table is not this table: it holds the diagonal, which
-        # the indexer's clamped candidate range excludes by construction.
+        self.assertEqual(
+            cudnn_calls, [], "warmup called the cuDNN indexer top-k kernel"
+        )
+        self.assertEqual(tl_widths, [self.SEQLEN])
+        self.assertIn("values", DSAIndexerLossLoggingHelper.tracker)
+
         attn_table = _CAPTURED[-1]
         np.testing.assert_array_equal(
             attn_table, _full_causal_table(self.LAYOUT, self.SEQLEN)
         )
+        kl_columns = tl_columns[0]
+        for row in range(self.SEQLEN):
+            attn_cols = attn_table[0, row]
+            kl_cols = kl_columns[0, row]
+            self.assertEqual(
+                set(kl_cols[kl_cols >= 0].tolist()),
+                set(attn_cols[attn_cols >= 0].tolist()),
+                f"row {row}: KL and attention column sets differ",
+            )
         last = self.SEQLEN - 1
         self.assertIn(last, set(attn_table[0, last].tolist()))
-        self.assertNotIn(last, set(indexer_table[0, last].tolist()))
-        self.assertIn("values", DSAIndexerLossLoggingHelper.tracker)
+        self.assertIn(last, set(kl_columns[0, last].tolist()))
 
     def test_eval_early_exit_matches_the_training_forward(self):
         """``:495`` skips the indexer projections entirely under ``eval()``.

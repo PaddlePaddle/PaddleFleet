@@ -382,23 +382,29 @@ class TestHybridMLAColumnMaskLoadBearingCP(unittest.TestCase):
         )
 
     @H.U._GPU
-    def test_2_warmup_loss_table_stays_in_window(self):
-        """The widened phase-2 KL table goes through the same helper.
+    def test_2_warmup_never_reaches_the_topk_helper(self):
+        """Phase 2 never reaches this helper, so the column mask cannot apply.
 
-        Attention takes the full causal set here, but the loss still calls
-        ``select_topk`` (``mqa_latent_attention.py:578``), so an unmasked top-k
-        would train the indexer to rank columns the window already owns.
+        ``_forward_warmup`` (``mqa_latent_attention.py:453-585``) supervises the
+        indexer over the **whole** per-document causal span: one *tilelang*
+        ``csa_indexer_topk_fwd`` with ``topk_effective=s_global`` and
+        ``window=0`` (``mqa_latent_attention.py:524-541``), imported directly
+        rather than through ``csa_indexer_backend``. So the cuDNN helper this
+        file spies on -- the one that carries the column mask -- is not called
+        on either the attention or the loss side, and with no forced window
+        there is no window duplication for a mask to prevent. Asserted rather
+        than dropped because it is the sharpest statement of the phase-2
+        contract, and because it bounds ``test_1``'s claim: the mask is
+        load-bearing for phase 3 only.
         """
         spy = self._run(sparse_loss=False, loss_coeff=0.1)
         totals = self._report(spy, "mqa_dsa/warmup")
-        self.assertGreater(
-            totals["rows"], 0, "the warmup loss issued no top-k call"
-        )
         self.assertEqual(
-            totals["oor_prod"],
+            totals["rows"],
             0,
-            f"the warmup KL table holds {totals['oor_prod']} out-of-window "
-            "columns",
+            f"phase 2 issued {totals['rows']} cuDNN top-k row(s) across the CP "
+            "group; the warmup KL is supposed to go through the tilelang "
+            "full-candidate kernel, which carries no column mask",
         )
 
 
