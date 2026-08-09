@@ -453,12 +453,8 @@ class TestMLASpecs(unittest.TestCase):
             {k: specs[k] for k in ("k_b_proj", "v_b_proj")},
             {"k_b_proj": [3, 2 * 8, 4], "v_b_proj": [3, 2 * 4, 8]},
         )
-        self.assertEqual(
-            recorders["k_b_proj"].shapes, [(3, 8, 4), (3, 8, 4)]
-        )
-        self.assertEqual(
-            recorders["v_b_proj"].shapes, [(3, 8, 4), (3, 8, 4)]
-        )
+        self.assertEqual(recorders["k_b_proj"].shapes, [(3, 8, 4), (3, 8, 4)])
+        self.assertEqual(recorders["v_b_proj"].shapes, [(3, 8, 4), (3, 8, 4)])
 
     def test_without_optional_projections(self):
         fake = self._fake()

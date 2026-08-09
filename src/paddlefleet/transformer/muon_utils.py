@@ -28,9 +28,7 @@ def _transposing(ortho_fn):
     def wrapped(block):
         perm = list(range(block.ndim))
         perm[-2], perm[-1] = perm[-1], perm[-2]
-        return paddle.transpose(
-            ortho_fn(paddle.transpose(block, perm)), perm
-        )
+        return paddle.transpose(ortho_fn(paddle.transpose(block, perm)), perm)
 
     return wrapped
 

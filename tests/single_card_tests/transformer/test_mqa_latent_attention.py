@@ -419,9 +419,7 @@ class TestHybridMLAConfig(unittest.TestCase):
         # v_b_proj absorption parameters. On the dense MHA path there is nothing
         # to split, so silently accepting it would hide a mis-set config.
         with self.assertRaisesRegex(ValueError, "only means"):
-            TransformerConfig(
-                **self._kwargs(mqa_split_kv_b_proj=True)
-            )
+            TransformerConfig(**self._kwargs(mqa_split_kv_b_proj=True))
         for mode in ("mqa_dsa", "mqa_full_causal"):
             with self.subTest(mode=mode):
                 config = TransformerConfig(

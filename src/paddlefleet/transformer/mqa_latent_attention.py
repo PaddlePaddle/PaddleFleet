@@ -274,9 +274,7 @@ class MQALatentAttention(FleetLayer):
         # ``v_b_proj`` parameter instead of a view of ``kv_b_proj.weight``, laid
         # out as ``[h, v_head_dim, kv_lora_rank]`` for ``fused_grouped_matmul``
         # rather than the ``[kv_lora_rank, h, v_head_dim]`` the einsum wants.
-        self.split_kv_b = bool(
-            getattr(config, "mqa_split_kv_b_proj", False)
-        )
+        self.split_kv_b = bool(getattr(config, "mqa_split_kv_b_proj", False))
         # Latent width, i.e. the value width the sparse kernel sees and the
         # contraction dim of the de-absorption weight. This layer only exists on
         # the ``dsv4_hybrid`` path, so the hybrid field is the authoritative one.
