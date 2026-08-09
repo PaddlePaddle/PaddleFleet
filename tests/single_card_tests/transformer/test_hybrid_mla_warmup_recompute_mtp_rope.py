@@ -90,11 +90,7 @@ from .test_hybrid_mla_rope_audit import (
     ref_inv_freq,
     ref_rope_halfsplit,
 )
-from .test_mqa_latent_attention import (
-    _fp32,
-    _full_causal_table,
-    _wide_loss_width,
-)
+from .test_mqa_latent_attention import _fp32, _full_causal_table
 
 SEQLEN = 256
 # Two documents, the second longer than the forced window (so the indexer's
@@ -259,65 +255,86 @@ class TestWarmupRecompute(unittest.TestCase):
         self._equivalence(ONE_DOC)
 
     def _indexer_call_count(self, use_sparse_loss):
-        """How many times the indexer top-k kernel runs across both passes."""
+        """Indexer selector calls across both passes, per backend.
+
+        Two selectors have to be counted separately now: phase 3 selects with
+        the **cuDNN** top-k kernel, phase 2 with the **tilelang** one at
+        ``topk_effective = s_global`` (its full-candidate mode). Counting only
+        cuDNN would report "zero top-k calls" for warmup and hide the one call
+        it does make.
+        """
         import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as fwd_mod
+        import paddlefleet.tilelang_ops as tl_mod
 
         config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
         config.dsa_indexer_use_sparse_loss = use_sparse_loss
         module = _build_module(config, bf16=True)
         self.assertEqual(module.indexer_use_sparse_loss, use_sparse_loss)
 
-        topk_calls = []
+        cudnn_calls = []
+        tl_calls = []
         before_calls = []
         inner_topk = fwd_mod.cudnn_indexer_topk_fwd
+        inner_tl = tl_mod.csa_indexer_topk_fwd
         inner_before = module.indexer.forward_before_topk
 
         def rec_topk(*args, **kwargs):
-            topk_calls.append(int(kwargs["topk_effective"]))
+            cudnn_calls.append(int(kwargs["topk_effective"]))
             return inner_topk(*args, **kwargs)
+
+        def rec_tl(*args, **kwargs):
+            tl_calls.append(int(kwargs["topk_effective"]))
+            return inner_tl(*args, **kwargs)
 
         def rec_before(*args, **kwargs):
             before_calls.append(1)
             return inner_before(*args, **kwargs)
 
         fwd_mod.cudnn_indexer_topk_fwd = rec_topk
+        tl_mod.csa_indexer_topk_fwd = rec_tl
         module.indexer.forward_before_topk = rec_before
         _CAPTURED.clear()
         try:
             self._run(module, _row_end(TWO_DOCS, SEQLEN), use_recompute=True)
         finally:
             fwd_mod.cudnn_indexer_topk_fwd = inner_topk
+            tl_mod.csa_indexer_topk_fwd = inner_tl
             module.indexer.forward_before_topk = inner_before
-        return len(before_calls), topk_calls, len(_CAPTURED)
+        return len(before_calls), cudnn_calls, tl_calls, len(_CAPTURED)
 
     def test_no_grad_pass_skips_the_indexer_only_in_warmup(self):
-        """The ``:495`` early exit, observed through the recompute double pass.
+        """The warmup early exit, observed through the recompute double pass.
 
         Under recompute the layer is forwarded twice: once under ``no_grad``
-        (``need_loss`` False) and once grad-enabled. In warmup the first pass
-        takes the early exit, so the indexer projections and its top-k kernel
-        run exactly *once* even though attention was built twice. Phase 3 has no
-        such exit -- attention consumes the ranking, so the kernel must run on
-        both passes. The contrast is the discriminator: a single number that is
-        1 here and 2 there.
+        (no loss needed) and once grad-enabled. In warmup the first pass takes
+        the early exit, so the indexer projections run exactly *once* even though
+        attention was built twice, and the **cuDNN** top-k kernel -- phase 3's
+        selector -- runs **zero** times: warmup reads no ``index_topk``. What it
+        does run is one **tilelang** call at ``topk_effective == SEQLEN``, its
+        full-candidate mode, and exactly one, on the grad-enabled pass only.
+        Phase 3 has no such exit: attention consumes the ranking, so the
+        projections and the cuDNN kernel both run on both passes. The contrast is
+        the discriminator.
         """
-        n_before_w, topk_w, n_attn_w = self._indexer_call_count(False)
-        n_before_s, topk_s, n_attn_s = self._indexer_call_count(True)
+        n_before_w, cudnn_w, tl_w, n_attn_w = self._indexer_call_count(False)
+        n_before_s, cudnn_s, tl_s, n_attn_s = self._indexer_call_count(True)
         print(
             f"[warmup indexer calls] warmup before_topk={n_before_w} "
-            f"topk={topk_w} attn_forwards={n_attn_w} || "
-            f"phase3 before_topk={n_before_s} topk={topk_s} "
-            f"attn_forwards={n_attn_s}"
+            f"cudnn={cudnn_w} tilelang={tl_w} attn_forwards={n_attn_w} || "
+            f"phase3 before_topk={n_before_s} cudnn={cudnn_s} "
+            f"tilelang={tl_s} attn_forwards={n_attn_s}"
         )
         self.assertGreaterEqual(n_attn_w, 2, "recompute did not re-forward")
         self.assertGreaterEqual(n_attn_s, 2, "recompute did not re-forward")
         self.assertEqual(n_before_w, 1)
-        self.assertEqual(len(topk_w), 1)
-        self.assertEqual(topk_w, [_wide_loss_width(SEQLEN)])
+        self.assertEqual(cudnn_w, [], "warmup called the cuDNN top-k kernel")
+        # One tilelang call, on the grad-enabled pass only, over every column.
+        self.assertEqual(tl_w, [SEQLEN])
         # Same wrapping, sparse phase: no early exit, both passes pay for it.
         self.assertEqual(n_before_s, 2)
-        self.assertEqual(len(topk_s), 2)
-        self.assertEqual(topk_s, [INDEX_TOPK, INDEX_TOPK])
+        self.assertEqual(len(cudnn_s), 2)
+        self.assertEqual(cudnn_s, [INDEX_TOPK, INDEX_TOPK])
+        self.assertEqual(tl_s, [], "phase 3 selected with the tilelang kernel")
 
 
 def _mtp_config(use_sparse_loss, loss_coeff=0.01):
@@ -766,7 +783,7 @@ class TestRecomputeInnerForwardBitIdentical(unittest.TestCase):
             pass
 
     # ``mqa`` -> "mqa_full_causal"; the two ``mqa_dsa`` rows are warmup (wide
-    # loss, full-causal attention) and phase 3/4 (narrow loss, top-k attention).
+    # loss, full-causal attention) and phase 3 (narrow loss, top-k attention).
     _MODES = (("mqa_dsa", False), ("mqa_dsa", True), ("mqa", None))
     # 256 saturates window+topk, 512 does not -- see the module docstring of
     # ``test_hybrid_mla_warmup_doc_mask_loss``.

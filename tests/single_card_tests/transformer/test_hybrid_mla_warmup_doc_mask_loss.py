@@ -18,10 +18,13 @@ The warmup phase is ``hybrid_mla_attention="mqa_dsa"`` with
 ``dsa_indexer_use_sparse_loss=False``: the indexer is still being learned, so
 **attention** consumes the full per-document causal table
 (``MQALatentAttention._build_full_causal_indices`` ->
-``_build_mqa_causal_topk_idxs_from_doc_bounds``) while the indexer's top-k feeds
-a *wider* KL table. Two different tables, one switch --  which is exactly why
-the mask semantics and the loss reduction need pinning on this path and not only
-on the phase-3/4 path (``dsa_indexer_use_sparse_loss=True``), where
+``_build_mqa_causal_topk_idxs_from_doc_bounds``) and the KL is scored over that
+same full causal set (``MQALatentAttention._forward_warmup`` -> one
+``paddlefleet.tilelang_ops.csa_indexer_topk_fwd`` call at
+``topk_effective = s_global``). The phase-3 cuDNN top-k kernel runs zero times
+on this path, which is exactly why the mask semantics and the loss reduction
+need pinning here and not only on the phase-3 path
+(``dsa_indexer_use_sparse_loss=True``), where
 ``test_hybrid_mla_doc_equivalence.py`` and ``test_mqa_latent_attention.py``
 already cover them.
 
@@ -38,16 +41,15 @@ What is proven here, and nowhere else:
   produce them (it turns the trailing gap into one final valid document), so
   ``_pad_row_end`` below keeps the gap folded into the last document instead,
   which is what a real packed batch's padding tail looks like.
-* ``TestWarmupIndexerLossPrecision`` -- the KL candidate width formula, the row
-  mask coming from ``input_ids`` (not from the document metadata), the
-  reduction denominator, and the ``_attn_target`` claim that the KL target is
-  the *full-causal* attention distribution restricted to the loss candidates
-  and renormalised.
+* ``TestWarmupIndexerLossPrecision`` -- the KL column set (the whole causal set,
+  with no cuDNN top-k call anywhere), the row mask coming from ``input_ids`` (not
+  from the document metadata), the reduction denominator, and the claim that the
+  KL target is the head-summed *full-causal* attention distribution.
 * ``TestWarmupGradHealth`` -- the five indexer parameters, the detached indexer
   inputs, and the attention-side ``dq`` / ``dkv`` / ``d_sink``.
 
 Shape caveat: ``WINDOW + INDEX_TOPK == 256`` in ``hybrid_mla_utils``, so a
-``seqlen=256`` fixture has a *saturated* sparse budget -- the phase-3/4 top-k
+``seqlen=256`` fixture has a *saturated* sparse budget -- the phase-3 top-k
 table would already equal the full causal set there, and no assertion at that
 shape can tell the two apart. ``_LAYOUTS`` therefore also carries ``seqlen=512``
 layouts, which is the discriminating shape.
@@ -77,7 +79,6 @@ from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
 from .hybrid_mla_utils import (
     _CAPTURED,
     _GPU,
-    INDEX_TOPK,
     V_HEAD_DIM,
     WINDOW,
     H,
@@ -97,7 +98,7 @@ _EPS = 1e-10  # mqa_latent_attention._EPS, the KL/renormalisation epsilon
 # ``_pad_row_end`` and live in ``_PAD_LAYOUTS``.
 #
 # ``seqlen=256`` is a *saturated* budget: ``WINDOW + INDEX_TOPK == 128 + 128 ==
-# 256``, so at that shape the phase-3/4 sparse table already covers every row's
+# 256``, so at that shape the phase-3 sparse table already covers every row's
 # causal length and "attention takes the full causal set" is indistinguishable
 # from "attention takes the indexer's top-k". The last two layouts are therefore
 # at ``seqlen=512``, where the sparse budget covers at most 256 of a row's up to
@@ -150,15 +151,10 @@ def _segments(row_end, seqlen):
     return list(zip(doc_starts.numpy().tolist(), doc_lens.numpy().tolist()))
 
 
-def _wide_loss_width(seqlen):
-    """``mqa_latent_attention.py:562-566``: the warmup KL table width."""
-    return max(INDEX_TOPK, min(2048, seqlen // 128 * 128))
-
-
 def _warmup_module(loss_coeff=0.01, sink=None, sparse_loss=False):
     """A ``"mqa_dsa"`` module with the phase switch off *from construction*.
 
-    ``sparse_loss=True`` builds the phase-3/4 module instead, used only as the
+    ``sparse_loss=True`` builds the phase-3 module instead, used only as the
     control that decides whether a finding is specific to this change.
     """
     config = _create_mqa_config("mqa_dsa", loss_coeff=loss_coeff)
@@ -171,13 +167,11 @@ def _warmup_module(loss_coeff=0.01, sink=None, sparse_loss=False):
 
 
 # Positional signature of ``TileLangCSAIndexerLossAutoScaler.forward`` (minus
-# ``ctx``). The spy below binds by position, so a reordered upstream signature
-# would silently hand it the wrong tensors -- which is exactly what happened
-# when ``target`` moved from seventh to second: the spy then read
-# ``index_k_comp`` as the top-k table (bf16 bits as ``uint16``, so ``< 0`` never
-# fired) and the int32 column ids as the probabilities (``log`` of ``-1`` ->
-# ``nan``). Assert the order instead of trusting it.
-_LOSS_SCALER_ARGS = [
+# ``ctx``) -- the PyLayer phase 2 now attaches its loss through, imported into
+# ``mqa_latent_attention`` from ``csa_attention``. The spy below binds by
+# position, so a reordered signature would silently hand it the wrong tensors
+# instead of failing. Assert the order rather than trust it.
+_LOSS_ARGS = [
     "output",
     "target",
     "index_q",
@@ -192,14 +186,57 @@ _LOSS_SCALER_ARGS = [
 ]
 
 
+def _positional(columns, values=None):
+    """Scatter a column-layout table back into position space.
+
+    The tilelang indexer returns ``[b, s, width]`` tables in **column layout**:
+    slot ``j`` of row ``i`` refers to token ``columns[i, j]``, ordered by
+    descending score, with ``-1`` in the unused slots. That is not position
+    order, so anything compared against a positional reference has to be
+    scattered first. ``values is None`` returns the boolean "row ``i`` scored
+    column ``c``" table, which is what the old dense ``causal_mask > -1`` was.
+    """
+    b, s, width = columns.shape
+    dtype = bool if values is None else values.dtype
+    out = np.zeros([b, s, width], dtype=dtype)
+    for batch in range(b):
+        for row in range(s):
+            cols = columns[batch, row]
+            keep = cols >= 0
+            live = cols[keep]
+            assert live.size == 0 or int(live.max()) < width, (
+                f"row {row}: column id {int(live.max())} outside the "
+                f"{width}-wide position space"
+            )
+            out[batch, row, live] = (
+                True if values is None else values[batch, row, keep]
+            )
+    return out
+
+
 @contextlib.contextmanager
 def _capture_loss_args():
-    """Capture the arguments the layer hands ``TileLangCSAIndexerLossAutoScaler``.
+    """Capture what the warmup KL is actually reduced over.
 
-    That is the only place the KL target, the top-k probabilities, the row mask
-    and the reduction denominator are all visible at once, and it is the same
-    boundary the backward consumes, so anything asserted here is what the
-    gradient sees.
+    One spy, on the ``TileLangCSAIndexerLossAutoScaler`` boundary phase 2 now
+    attaches its loss at, because every observable is an argument of that single
+    call: ``P`` (``topk_probs``, already softmaxed by the kernel), ``Q``
+    (``target``, from ``_attn_target``), the column ids, the row mask, the
+    denominator and the coefficient. These are literally the tensors the
+    backward (upstream's tilelang ``csa_indexer_bwd``) differentiates, so
+    anything asserted here is what the gradient sees.
+
+    ``cap["probs"]`` / ``cap["target"]`` / ``cap["columns"]`` are in the
+    kernel's column layout; ``cap["live"]`` and ``cap["dense_target"]`` are the
+    position-space scatters for tests that compare against a positional
+    reference. A sum over the last axis -- which is all the KL does -- is
+    permutation invariant and may be taken on the column layout directly.
+
+    ``cap`` stays empty if the module was not in the warmup phase -- which is
+    itself the assertion that phase 3 does not reach this code. Phase 3
+    attaches through the *same* PyLayer now, so the discriminator is the
+    ``indexer_backend`` tag: ``"tilelang"`` is phase 2's full-candidate kernel,
+    ``"cudnn"`` is phase 3's top-k one, and only the former is recorded.
     """
     real = mqa_mod.TileLangCSAIndexerLossAutoScaler
     actual = [
@@ -207,9 +244,9 @@ def _capture_loss_args():
         for name in inspect.signature(real.forward).parameters
         if name != "ctx"
     ]
-    assert actual == _LOSS_SCALER_ARGS, (
+    assert actual == _LOSS_ARGS, (
         "TileLangCSAIndexerLossAutoScaler.forward was reordered: "
-        f"{actual} != {_LOSS_SCALER_ARGS}; the positional spy below would "
+        f"{actual} != {_LOSS_ARGS}; the positional spy below would "
         "capture the wrong tensors"
     )
     cap = {}
@@ -224,23 +261,31 @@ def _capture_loss_args():
             index_k_comp,
             topk_indices,
             topk_probs,
-            loss_coeff,
+            loss_coeff=1.0,
             indexer_backend="tilelang",
             num_rows_override=None,
             loss_mask=None,
         ):
-            cap["indices"] = topk_indices.numpy().copy()
-            cap["probs"] = topk_probs.astype("float32").numpy().copy()
-            cap["target"] = target.astype("float32").numpy().copy()
-            cap["mask"] = (
-                None
-                if loss_mask is None
-                else loss_mask.astype("float32").numpy().copy()
-            )
-            cap["num_rows"] = (
-                None if num_rows_override is None else float(num_rows_override)
-            )
-            cap["coeff"] = float(loss_coeff)
+            if indexer_backend == "tilelang":
+                cap["columns"] = topk_indices.numpy().copy()
+                cap["probs"] = topk_probs.astype("float32").numpy().copy()
+                cap["target"] = target.astype("float32").numpy().copy()
+                cap["width"] = int(topk_indices.shape[-1])
+                # ``loss_mask`` / ``num_rows_override`` are ``None`` when no
+                # ``input_ids`` reached the layer -- the same unmasked branch
+                # ``csa_attention`` takes -- so record that rather than assuming
+                # a synthesised all-ones mask.
+                cap["mask"] = (
+                    None
+                    if loss_mask is None
+                    else loss_mask.astype("float32").numpy().copy()
+                )
+                cap["num_rows"] = (
+                    None
+                    if num_rows_override is None
+                    else float(num_rows_override)
+                )
+                cap["coeff"] = float(loss_coeff)
             return real.apply(
                 output,
                 target,
@@ -260,6 +305,9 @@ def _capture_loss_args():
         yield cap
     finally:
         mqa_mod.TileLangCSAIndexerLossAutoScaler = real
+        if cap:
+            cap["live"] = _positional(cap["columns"])
+            cap["dense_target"] = _positional(cap["columns"], cap["target"])
 
 
 def _forward(module, tensors, row_end, w_v, training, input_ids=None):
@@ -497,7 +545,7 @@ class TestWarmupPadRows(unittest.TestCase):
 
 @_GPU
 class TestWarmupIndexerLossPrecision(unittest.TestCase):
-    """The warmup KL: candidate width, row mask, denominator, target.
+    """The warmup KL: column set, row mask, denominator, target.
 
     Every number below is read at the ``TileLangCSAIndexerLossAutoScaler``
     boundary, i.e. exactly what the backward differentiates, and cross-checked
@@ -546,38 +594,78 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
             axis=-1
         )
 
-    def test_loss_width_formula_and_two_distinct_tables(self):
-        """The KL table is ``max(index_topk, min(2048, s//128*128))`` wide while
-        the attention table is ``s`` wide -- the deliberate double table.
+    def test_kl_column_set_is_the_attention_column_set_and_no_topk_runs(self):
+        """One column set serves both consumers, and no cuDNN top-k is called.
 
-        ``s=300`` is the case that separates them numerically (256 vs 300); the
-        multiples of 128 make the two widths coincide as integers while still
-        being different tables (full-causal vs indexer top-k), which the
-        diagonal check below pins.
+        This replaces the old "two distinct tables" expectation: phase 2 used to
+        ask the indexer for a *wider* top-k table
+        (``max(index_topk, min(2048, s//128*128))``) to score the KL over, which
+        at the production ``index_topk=2048`` silently degenerated into the very
+        phase-3 table it was supposed to widen. Phase 2 now scores every causal
+        column instead, so the assertion is an equality between the KL's live
+        columns and the attention table -- checked element-wise per row,
+        including the diagonal the old indexer candidate range structurally
+        excluded (``_indexer_valid_range`` clamped at
+        ``causal_len - window_size``).
+
+        Two call counts pin *which* selector produced those columns: the cuDNN
+        top-k kernel (phase 3's) is called zero times, and the tilelang indexer
+        exactly once per step at ``topk_effective == s``, its documented
+        full-candidate mode.
         """
+        import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as fwd_mod
+        import paddlefleet.tilelang_ops as tl_mod
+
         module = _warmup_module()
-        for seqlen in (128, 256, 300, 384, 512):
-            with self.subTest(seqlen=seqlen):
-                _, cap, attn_table = self._step(module, seqlen, [seqlen])
-                self.assertEqual(
-                    cap["target"].shape[-1], _wide_loss_width(seqlen)
-                )
-                self.assertEqual(
-                    cap["indices"].shape[-1], _wide_loss_width(seqlen)
-                )
-                self.assertEqual(attn_table.shape[-1], seqlen)
-        # s=300: the widths genuinely differ, so a single table cannot be
-        # serving both consumers.
-        _, cap, attn_table = self._step(module, 300, [300])
-        self.assertEqual(cap["target"].shape[-1], 256)
-        self.assertEqual(attn_table.shape[-1], 300)
-        # ... and the loss table structurally cannot be the attention one: the
-        # indexer's candidate range is clamped to end ``window_size`` before the
-        # query, so the diagonal is never in it while it always is in the
-        # full-causal table.
-        last = 299
-        self.assertIn(last, set(attn_table[0, last].tolist()))
-        self.assertNotIn(last, set(cap["indices"][0, last].tolist()))
+        inner = fwd_mod.cudnn_indexer_topk_fwd
+        inner_tl = tl_mod.csa_indexer_topk_fwd
+        topk_calls = []
+        tl_widths = []
+
+        def recording(*args, **kwargs):
+            topk_calls.append(1)
+            return inner(*args, **kwargs)
+
+        def recording_tl(*args, **kwargs):
+            tl_widths.append(int(kwargs["topk_effective"]))
+            return inner_tl(*args, **kwargs)
+
+        fwd_mod.cudnn_indexer_topk_fwd = recording
+        tl_mod.csa_indexer_topk_fwd = recording_tl
+        try:
+            for seqlen in (16, 128, 256, 300, 384, 512):
+                with self.subTest(seqlen=seqlen):
+                    before = len(tl_widths)
+                    _, cap, attn_table = self._step(module, seqlen, [seqlen])
+                    # The KL table is exactly the causal span -- no rounding. The
+                    # tilelang wrapper pads ``topk_effective`` up to its block
+                    # internally and crops the result back
+                    # (``csa_indexer_fwd.py:430-462``), so short and non
+                    # -power-of-two lengths are served too; ``seqlen=16`` is below
+                    # the block size on purpose.
+                    self.assertEqual(cap["target"].shape[-1], seqlen)
+                    self.assertEqual(cap["probs"].shape[-1], seqlen)
+                    self.assertEqual(cap["width"], seqlen)
+                    self.assertEqual(attn_table.shape[-1], seqlen)
+                    # One tilelang call, over every candidate column.
+                    self.assertEqual(tl_widths[before:], [seqlen])
+                    # The KL's live columns are exactly attention's columns.
+                    live = cap["live"][0]
+                    for row in range(seqlen):
+                        cols = attn_table[0, row]
+                        self.assertEqual(
+                            set(cols[cols >= 0].tolist()),
+                            set(np.flatnonzero(live[row]).tolist()),
+                            f"s={seqlen} row {row}: KL and attention disagree",
+                        )
+                    # ... the diagonal included, on every row.
+                    self.assertTrue(
+                        bool(live[np.arange(seqlen), np.arange(seqlen)].all())
+                    )
+        finally:
+            fwd_mod.cudnn_indexer_topk_fwd = inner
+            tl_mod.csa_indexer_topk_fwd = inner_tl
+        self.assertEqual(topk_calls, [], "warmup called the cuDNN top-k kernel")
 
     def test_pad_tail_excluded_from_indexer_loss_warmup(self):
         """Warmup counterpart of
@@ -586,8 +674,8 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
         One document spans the whole buffer, so ``is_valid`` is all ``True`` and
         the document metadata cannot express the padding tail. Only
         ``input_ids != pad_token_id`` can, and it must drive both the KL sum and
-        its denominator -- the one the *backward* rescales the cuDNN kernel's
-        built-in ``1/(B*Sq)`` into.
+        its denominator -- the ``num_rows_override`` the backward divides by
+        (``TileLangCSAIndexerLossAutoScaler.forward``'s ``ctx.num_rows``).
         """
         seqlen, real_tokens = 256, 200
         module = _warmup_module()
@@ -599,7 +687,6 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
 
         _, is_valid = _doc_meta(_row_end([seqlen], seqlen), seqlen)
         self.assertEqual(int(is_valid.astype("int32").sum()), seqlen)
-        self.assertIsNotNone(cap["mask"])
         self.assertEqual(float(cap["mask"].sum()), float(real_tokens))
         self.assertEqual(cap["num_rows"], float(real_tokens))
         mask = cap["mask"].reshape(-1)
@@ -609,18 +696,39 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
         kl_per_row = self._kl_per_row(cap)
         ref = (kl_per_row * cap["mask"]).sum() / real_tokens * cap["coeff"]
         self.assertLess(abs(logged - float(ref)) / abs(float(ref)), 1e-5)
-        # Had ``is_valid`` driven the reduction, the loss would be measurably
-        # different -- so this is a real discriminator, not a tautology.
-        wrong = float(kl_per_row.mean() * cap["coeff"])
-        self.assertGreater(abs(wrong - logged) / abs(logged), 0.1)
+        # Two discriminators, so this is not a tautology.
+        # (1) the denominator: had ``B*Sq`` driven it, the scalar would be
+        # 256/200 = 1.28x smaller. (The old form of this check compared the
+        # masked mean against the *plain* mean of the same rows, which
+        # discriminated only because the top-k KL was near-zero on the padding
+        # tail. The full-causal KL is the same order of magnitude on every row --
+        # measured 0.7% apart here -- so that comparison no longer separates
+        # anything and the denominator has to be pinned directly.)
+        wrong_denominator = float(
+            (kl_per_row * cap["mask"]).sum() / seqlen * cap["coeff"]
+        )
+        self.assertAlmostEqual(
+            float(ref) / wrong_denominator, seqlen / real_tokens, delta=1e-6
+        )
+        self.assertGreater(abs(wrong_denominator - logged) / abs(logged), 0.2)
+        # (2) the mask is not a no-op: the rows it drops carry real KL mass.
+        dropped = float((kl_per_row * (1.0 - cap["mask"])).sum())
+        self.assertGreater(dropped, 0.0)
         # Single card: cp_size == 1, so the coefficient reaches the backward
         # unscaled. The ``/cp_size`` branch is a multi-card concern.
         self.assertEqual(cap["coeff"], module.indexer_loss_coeff)
 
     def test_no_input_ids_uses_the_plain_row_mean(self):
-        """Without ``input_ids`` the reduction is ``kl.mean() * coeff`` and the
-        backward keeps the kernel's own ``1/(B*Sq)`` (``num_rows_override`` is
-        ``None``)."""
+        """Without ``input_ids`` the reduction is ``kl.mean() * coeff``.
+
+        ``_indexer_loss_mask`` returns ``(None, None)`` and ``_forward_warmup``
+        passes that straight down, which is the same unmasked branch
+        ``csa_attention._compute_fused_indexer_target`` takes: the backward then
+        falls back to the kernel's own ``1/(B*Sq)``, and only the *logged* scalar
+        carries the ``/cp_size`` CP correction. So what to assert here is that
+        both reach the backward as ``None`` -- a synthesised all-ones mask would
+        silently change which denominator the gradient uses.
+        """
         seqlen = 256
         module = _warmup_module()
         logged, cap, _ = self._step(module, seqlen, [seqlen], input_ids=None)
@@ -633,48 +741,48 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
             module._indexer_loss_mask(None, 1, seqlen), (None, None)
         )
 
-    def test_attn_target_is_normalised_and_zero_on_empty_slots(self):
-        """``_attn_target`` rows are L1-normalised and exactly zero where the
-        candidate slot is ``-1`` (including whole rows with no candidate at
-        all)."""
+    def test_kl_target_is_normalised_and_zero_off_the_causal_set(self):
+        """The KL target is L1-normalised per row and exactly zero on columns the
+        per-document causal mask excludes.
+
+        The old form of this test asserted zero on ``-1`` top-k slots and
+        allowed whole rows with *no* candidate at all (the window clamp could
+        empty a row). Neither exists now: the column set is the causal set, so
+        every row has at least its own diagonal. A row shorter than the ``s``-wide
+        table still comes back ``-1``-padded, and those dead slots are where the
+        "excluded column" assertion now lands.
+        """
         seqlen, layout = 256, [40, 216]
         module = _warmup_module()
         _, cap, _ = self._step(module, seqlen, layout)
-        target, indices = cap["target"][0], cap["indices"][0]
-        empty_slot = indices < 0
-        empty_row = empty_slot.all(axis=-1)
-        self.assertTrue(empty_row.any(), "layout has no empty candidate row")
-        self.assertFalse(empty_row.all(), "layout has no live candidate row")
+        target = cap["target"][0]
+        masked = cap["columns"][0] < 0
+        self.assertTrue(masked.any(), "layout masks nothing")
+        self.assertFalse(masked.all(), "layout masks everything")
         self.assertEqual(
-            float(np.abs(target[empty_slot]).max()),
+            float(np.abs(target[masked]).max()),
             0.0,
-            "a masked candidate slot carries probability mass",
+            "a masked column carries probability mass",
         )
         self.assertGreaterEqual(float(target.min()), 0.0)
-        rowsum = target.sum(axis=-1)
-        self.assertEqual(float(np.abs(rowsum[empty_row]).max()), 0.0)
         self.assertLess(
-            float(np.abs(rowsum[~empty_row] - 1.0).max()),
+            float(np.abs(target.sum(axis=-1) - 1.0).max()),
             1e-5,
-            "live target rows are not L1-normalised",
+            "target rows are not L1-normalised",
         )
 
-    def test_attn_target_is_the_renormalised_full_causal_distribution(self):
+    def test_kl_target_is_the_full_causal_attention_distribution(self):
         """The intended semantics, measured.
 
-        In warmup, attention consumes the **full per-document causal** set while
-        the KL target is built over the *indexer's* candidate columns. So the
-        target is the attention distribution restricted to those columns and
-        renormalised -- deliberate, not a bug, and it is what makes the KL a
-        ranking objective on the columns the indexer can actually move.
+        In warmup both sides of the KL span the whole per-document causal set, so
+        the target is the head-summed attention distribution over *all* causal
+        columns, L1-normalised -- no restriction to an indexer candidate subset
+        and no renormalisation onto it, which is what the previous revision did.
 
-        The reference below is built the other way round from the
-        implementation (full fp32 per-document causal softmax over all ``s``
-        columns, head-summed, *then* restricted and renormalised) so agreement is
-        evidence about the semantics, not a restatement of the code. The residual
-        is the bf16 score rounding inside ``_attn_target``
-        (``paddle.matmul`` on bf16 inputs, ~2^-8 relative), measured at
-        norm-rel 9.68e-3 / maxabs 7.84e-3.
+        The reference below is an independent fp32 numpy recomputation (full
+        per-document causal softmax over all ``s`` columns, then head-summed and
+        L1-normalised), so agreement is evidence about the semantics, not a
+        restatement of the code. The residual is the bf16 rounding of the inputs.
         """
         seqlen, layout = 256, [40, 216]
         module = _warmup_module()
@@ -709,59 +817,55 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
             paddle.full_like(scores, -1e30),
         )
         head_sum = F.softmax(scores, axis=-1).sum(axis=1).numpy()
+        reference = head_sum / np.maximum(
+            head_sum.sum(axis=-1, keepdims=True), _EPS
+        )
+        # The mask the implementation used must be the same predicate. The
+        # kernel emits columns score-descending, so the comparison is on the
+        # position-space scatter, not on the raw column order.
+        np.testing.assert_array_equal(cap["live"][0], allowed)
 
-        indices = cap["indices"][0]
-        reference = np.zeros_like(cap["target"][0])
-        for row in range(seqlen):
-            cols = indices[row]
-            live = cols >= 0
-            if not live.any():
-                continue
-            # Every indexer candidate must be inside the attention set, else the
-            # renormalisation would not be well defined.
-            self.assertTrue(
-                bool(allowed[row][cols[live]].all()),
-                f"row {row}: an indexer candidate is outside the causal set",
-            )
-            mass = head_sum[row, cols[live]]
-            reference[row, live] = mass / max(mass.sum(), _EPS)
-
-        got = cap["target"][0]
+        got = cap["dense_target"][0]
         max_abs = float(np.abs(got - reference).max())
         norm_rel = float(
             np.linalg.norm(got - reference) / np.linalg.norm(reference)
         )
         print(
-            f"\n[warmup] _attn_target vs renormalised full-causal: "
+            f"\n[warmup] KL target vs full-causal head sum: "
             f"max_abs={max_abs:.3e} norm_rel={norm_rel:.3e}"
         )
         self.assertLess(norm_rel, 3e-2)
         self.assertLess(max_abs, 3e-2)
 
-    def test_window_length_sequence_leaves_no_indexer_candidate(self):
-        """PRE-EXISTING, not a warmup regression: at ``s == csa_window_size`` the
-        indexer's candidate range is empty for every row
-        (``_indexer_valid_range`` clamps at ``causal_len - window_size``), so the
-        KL is exactly 0 and the indexer learns nothing that step.
+    def test_window_length_sequence_still_trains_the_indexer_in_warmup(self):
+        """At ``s == csa_window_size`` phase 2 now learns, phase 3 still cannot.
 
-        Recorded here because the warmup phase is where the indexer does all of
-        its learning, so the floor matters. It is *not* introduced by the switch
-        change: the control with ``dsa_indexer_use_sparse_loss=True`` logs the
-        same 0.0, i.e. the cause is the window clamp shared by both phases.
+        Pre-existing and unchanged for phase 3: ``_indexer_valid_range`` clamps
+        the candidate range at ``causal_len - window_size``, so at ``s == window``
+        every row's range is empty, the KL is exactly 0 and the indexer learns
+        nothing that step. The old warmup shared that clamp and logged the same
+        0.0 -- a floor in the very phase where the indexer does all of its
+        learning. ``_forward_warmup`` passes ``window=0`` to
+        ``_indexer_valid_range`` now, so the candidate range is the whole causal
+        span and the KL is strictly positive at that shape (measured 9.10e-05);
+        the phase-3 control still logs 0.0, which is what makes this a property of
+        the change rather than of the fixture.
         """
         seqlen = WINDOW
-        for sparse_loss in (False, True):
-            with self.subTest(sparse_loss=sparse_loss):
-                module = _warmup_module(sparse_loss=sparse_loss)
-                logged, cap, _ = self._step(module, seqlen, [seqlen])
-                self.assertEqual(logged, 0.0)
-                self.assertEqual(float(np.abs(cap["target"]).max()), 0.0)
-                self.assertTrue(bool((cap["indices"] < 0).all()))
-        # One token past the window and the indexer has candidates again.
+        sparse = _warmup_module(sparse_loss=True)
+        logged_sparse, cap_sparse, _ = self._step(sparse, seqlen, [seqlen])
+        self.assertEqual(logged_sparse, 0.0)
+        self.assertEqual(cap_sparse, {}, "phase 3 reached the warmup KL")
+
         module = _warmup_module()
-        logged, cap, _ = self._step(module, 2 * WINDOW, [2 * WINDOW])
+        logged, cap, _ = self._step(module, seqlen, [seqlen])
         self.assertGreater(logged, 0.0)
+        self.assertEqual(cap["target"].shape[-1], seqlen)
         self.assertGreater(float(np.abs(cap["target"]).max()), 0.0)
+        # ... and it keeps scaling with the sequence, as before.
+        logged_2w, cap_2w, _ = self._step(module, 2 * WINDOW, [2 * WINDOW])
+        self.assertGreater(logged_2w, 0.0)
+        self.assertGreater(float(np.abs(cap_2w["target"]).max()), 0.0)
 
 
 @_GPU
@@ -873,10 +977,10 @@ class TestStarvedIndexerCandidates(unittest.TestCase):
     window leaves *every* one of its rows with zero candidates. The interesting
     question is what that costs, and the answer must be "nothing":
 
-    * the forced window already spans the whole document, so the phase-3/4
+    * the forced window already spans the whole document, so the phase-3
       attention table still contains the complete per-document causal set --
       asserted as ``want - got == empty set``, not as a count;
-    * consequently all three ``hybrid_mla_attention`` shapes (phase 3/4, warmup,
+    * consequently all three ``hybrid_mla_attention`` shapes (phase 3, warmup,
       ``mqa_full_causal``) must produce **bit-identical** output on these
       layouts, which is a much stronger statement than "no crash";
     * an all-``-1`` candidate row means a softmax over an empty set, the classic
@@ -965,7 +1069,7 @@ class TestStarvedIndexerCandidates(unittest.TestCase):
                 self.assertEqual(
                     float(np.abs(_fp32(phase3) - _fp32(warmup)).max()),
                     0.0,
-                    "phase 3/4 != warmup although the window covers everything",
+                    "phase 3 != warmup although the window covers everything",
                 )
                 self.assertEqual(
                     float(np.abs(_fp32(warmup) - _fp32(causal)).max()),

@@ -167,6 +167,7 @@ def _make_config(
     hybrid_mla_num_attention_heads=64,
     hybrid_mla_num_key_value_heads=64,
     hybrid_mla_attention="mha",
+    dsa_indexer_use_sparse_loss=False,
     add_full_attention_sink_bias=False,
 ):
     if csa_compress_ratios is None:
@@ -210,7 +211,7 @@ def _make_config(
         dsa_index_head_dim=dsa_index_head_dim,
         dsa_index_topk=dsa_index_topk,
         dsa_indexer_loss_coeff=dsa_indexer_loss_coeff,
-        dsa_indexer_use_sparse_loss=False,
+        dsa_indexer_use_sparse_loss=dsa_indexer_use_sparse_loss,
         dsa_indexer_rotary_interleaved=False,
         apply_rope_fusion=apply_rope_fusion,
         attention_dropout=0.0,
@@ -434,6 +435,8 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 dsa_index_topk=128,
             )
 
+        # ``index_topk`` is checked in the sparse phase only -- the warmup phase
+        # runs no top-k at all, so it must not be forced to carry a legal budget.
         with self.assertRaisesRegex(
             ValueError, "index_topk must be a multiple"
         ):
@@ -441,6 +444,7 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 num_layers=1,
                 csa_compress_ratios=[-2],
                 hybrid_mla_attention="mqa_dsa",
+                dsa_indexer_use_sparse_loss=True,
                 dsa_index_n_heads=4,
                 dsa_index_head_dim=128,
                 dsa_index_topk=8,
@@ -453,10 +457,23 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 num_layers=1,
                 csa_compress_ratios=[-2],
                 hybrid_mla_attention="mqa_dsa",
+                dsa_indexer_use_sparse_loss=True,
                 dsa_index_n_heads=4,
                 dsa_index_head_dim=128,
                 dsa_index_topk=2176,
             )
+
+        # Same values, warmup phase: accepted, because nothing reads them.
+        cfg_warmup = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-2],
+            hybrid_mla_attention="mqa_dsa",
+            dsa_indexer_use_sparse_loss=False,
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=128,
+            dsa_index_topk=2176,
+        )
+        self.assertEqual(cfg_warmup.hybrid_mla_attention, "mqa_dsa")
 
         # Dense MHA (hybrid_mla_attention="mha") skips the indexer constraints
         # entirely: head_dim 32 and topk 8 are fine because no indexer is built.

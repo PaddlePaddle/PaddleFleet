@@ -722,7 +722,8 @@ def get_mlp_layer_spec_for_backend(
     down_proj = backend.row_parallel_linear()
     hidden_act = None
 
-    if num_experts is None:
+    # num_experts may be 0 or None
+    if not num_experts:
         # Dense MLP w/ or w/o TE layers.
         layer = MLP
         if backend.fuse_layernorm_and_linear():

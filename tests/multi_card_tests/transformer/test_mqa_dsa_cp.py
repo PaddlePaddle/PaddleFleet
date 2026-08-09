@@ -38,7 +38,8 @@ the full-MLA integration):
 4. The selected column set: the sparse kernel's ``token_indices`` under CP must
    equal the reference's rows for this rank.
 5. Indexer-loss normalisation, masked (global denominator) and unmasked
-   (``/cp_size``), and the widened ``dsa_indexer_use_sparse_loss=False`` table.
+   (``/cp_size`` on the phase-3 path), and the phase-2
+   ``dsa_indexer_use_sparse_loss=False`` full-causal KL.
 6. The attention sink under CP.
 7. The ``cp_balance_mode`` guard.
 
@@ -189,11 +190,12 @@ def _rel(a, e):
 def _logged_indexer_loss(layer_number=1):
     """The indexer loss this layer just pushed into the logging tracker.
 
-    ``_forward_dsa`` reduces the KL with the coefficient the CP branch picked
-    (global valid-row denominator when masked, ``/cp_size`` when not) and hands
-    exactly that scalar to ``DSAIndexerLossLoggingHelper``, so the tracker is a
-    direct read of the normalisation -- no gradient indirection. ``0.0`` when
-    the step attached no loss.
+    ``_forward_warmup`` / ``_forward_sparse`` reduce the KL with the coefficient
+    and denominator their phase picked (phase 2 always the global row count;
+    phase 3 the global valid-row count when masked, ``/cp_size`` when not) and
+    hand exactly that scalar to ``DSAIndexerLossLoggingHelper``, so the tracker
+    is a direct read of the normalisation -- no gradient indirection. ``0.0``
+    when the step attached no loss.
     """
     values = DSAIndexerLossLoggingHelper.tracker.get("values")
     if values is None:

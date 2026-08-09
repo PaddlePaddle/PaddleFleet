@@ -1600,22 +1600,25 @@ class TransformerConfig(ModelParallelConfig):
             )
         if self.hybrid_mla_attention == "mqa_dsa":
             # On the ``-2`` layers ``dsa_indexer_use_sparse_loss`` decides both
-            # the indexer-loss candidate width and the attention candidate set,
+            # the indexer-loss candidate set and the attention candidate set,
             # because they are one decision: while the indexer is still being
-            # learned (wide loss) attention must not consume its ranking. The
-            # two training phases are therefore fixed pairs, and the two mixed
-            # combinations are configuration mistakes rather than modes.
+            # learned attention must not consume its ranking, so the warmup phase
+            # runs full-causal attention and a KL over the whole causal set --
+            # no top-k on either side. The two training phases are therefore
+            # fixed pairs, and the two mixed combinations are configuration
+            # mistakes rather than modes.
             if self.train_indexer_only and self.dsa_indexer_use_sparse_loss:
                 raise ValueError(
                     "train_indexer_only=True with "
                     "dsa_indexer_use_sparse_loss=True is not a valid phase. "
-                    "Training only the Indexer is the warmup phase, which needs "
-                    "the wide indexer loss (dsa_indexer_use_sparse_loss=False) "
-                    "so the freshly initialised Indexer is supervised on columns "
-                    "it did not pick; the sparse loss only scores the columns it "
-                    "already selected and lets it reinforce its own initial "
-                    "ranking. Set dsa_indexer_use_sparse_loss=False in the "
-                    "model config, or drop train_indexer_only."
+                    "Training only the Indexer is the warmup phase, whose KL "
+                    "spans the whole per-document causal set "
+                    "(dsa_indexer_use_sparse_loss=False) so the freshly "
+                    "initialised Indexer is supervised on columns it did not "
+                    "pick; the sparse loss only scores the columns it already "
+                    "selected and lets it reinforce its own initial ranking. "
+                    "Set dsa_indexer_use_sparse_loss=False in the model config, "
+                    "or drop train_indexer_only."
                 )
             if (
                 not self.train_indexer_only
@@ -1624,8 +1627,9 @@ class TransformerConfig(ModelParallelConfig):
                 logger.warning(
                     "hybrid_mla_attention='mqa_dsa' with "
                     "dsa_indexer_use_sparse_loss=False runs the warmup shape "
-                    "(full per-document causal attention plus the wide indexer "
-                    "loss) while every backbone parameter still trains. The "
+                    "(full per-document causal attention plus a KL over the "
+                    "whole causal set, no top-k anywhere) while every backbone "
+                    "parameter still trains. The "
                     "production warmup phase pairs it with "
                     "train_indexer_only=True; the sparse training phase pairs "
                     "dsa_indexer_use_sparse_loss=True with a trainable backbone."
@@ -1708,16 +1712,20 @@ class TransformerConfig(ModelParallelConfig):
                         "k_b_proj / v_b_proj absorption parameters."
                     )
                 if self.hybrid_mla_attention == "mqa_dsa":
-                    # The -2 layers' indexer reuses the CSA indexer fields. The
-                    # cuDNN indexer forward requires D_i=128, its backward
-                    # asserts topk % block_I == 0 with block_I=128, and
-                    # indexer_top_k/api.py:92 rejects topk > 2048 outright.
-                    # Fail here instead of minutes later at the first forward.
-                    index_fields = (
+                    # The -2 layers' indexer reuses the CSA indexer fields.
+                    # ``index_n_heads`` / ``index_head_dim`` set the indexer's
+                    # parameter shapes and are needed in both DSA phases; the
+                    # cuDNN indexer forward requires D_i=128.
+                    index_fields = [
                         "dsa_index_n_heads",
                         "dsa_index_head_dim",
-                        "dsa_index_topk",
-                    )
+                    ]
+                    # ``index_topk`` is phase 3 only: the warmup phase
+                    # (``dsa_indexer_use_sparse_loss=False``) runs no top-k at
+                    # all -- its KL spans the whole per-document causal set -- so
+                    # it must not be required to carry a top-k budget.
+                    if self.dsa_indexer_use_sparse_loss:
+                        index_fields.append("dsa_index_topk")
                     invalid_index = [
                         name
                         for name in index_fields
@@ -1728,8 +1736,8 @@ class TransformerConfig(ModelParallelConfig):
                     if invalid_index:
                         raise ValueError(
                             "hybrid_mla_attention='mqa_dsa' runs a DSA indexer on "
-                            "the hybrid MLA layers and needs index_n_heads / "
-                            "index_head_dim / index_topk as positive integers; "
+                            "the hybrid MLA layers and needs "
+                            f"{' / '.join(index_fields)} as positive integers; "
                             f"invalid fields: {', '.join(invalid_index)}"
                         )
                     if self.dsa_index_head_dim != 128:
@@ -1738,10 +1746,24 @@ class TransformerConfig(ModelParallelConfig):
                             "indexer, which requires index_head_dim=128, got "
                             f"{self.dsa_index_head_dim}."
                         )
-                    if (
+                    # ``index_n_heads`` is deliberately *not* pinned to 64 here.
+                    # The warmup phase's tilelang indexer does need exactly 64
+                    # (measured: 8 dies inside the kernel with a bare
+                    # "Check failed: (m_warp * n_warp == num_warps)"), but
+                    # enforcing it at config time would make every small-geometry
+                    # unit fixture unrepresentable. The check lives at the first
+                    # use instead --
+                    # ``MQALatentAttention._check_tilelang_full_candidate_support``
+                    # -- which still raises before any kernel launch.
+                    if self.dsa_indexer_use_sparse_loss and (
                         self.dsa_index_topk % 128 != 0
                         or self.dsa_index_topk > 2048
                     ):
+                        # The cuDNN indexer backward asserts
+                        # ``topk % block_I == 0`` with ``block_I=128`` and
+                        # ``indexer_top_k/api.py:92`` rejects ``topk > 2048``
+                        # outright. Fail here instead of minutes later at the
+                        # first forward.
                         raise ValueError(
                             "index_topk must be a multiple of 128 and at most "
                             "2048 (cuDNN indexer backward block size / top-k "

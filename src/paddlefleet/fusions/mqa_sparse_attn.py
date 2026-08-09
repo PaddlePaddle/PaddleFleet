@@ -64,8 +64,23 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
     ``attn_sink``.
     """
 
+    # Side channel for ``lse_indexer``: a PyLayer's returned tensors all become
+    # autograd outputs needing a matching backward grad, and this LSE is a
+    # by-product consumed under no_grad. ``mqa_sparse_attn`` pops it right after
+    # ``apply`` so it never outlives one call.
+    _lse_indexer = None
+
     @staticmethod
-    def forward(ctx, query, kv, token_indices, sm_scale, d_v, attn_sink=None):
+    def forward(
+        ctx,
+        query,
+        kv,
+        token_indices,
+        sm_scale,
+        d_v,
+        attn_sink=None,
+        indexer_topk=0,
+    ):
         from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
             flash_mla_sparse_attn,
         )
@@ -131,7 +146,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             token_indices.reshape([b * s, -1])
         )
 
-        out, lse, _ = flash_mla_sparse_attn(
+        out, lse, lse_indexer = flash_mla_sparse_attn(
             q_pad,
             kv,
             sink,
@@ -139,7 +154,9 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             sm_scale=ctx.sm_scale,
             d_v=d_v,
             topk_length=topk_len_flat.reshape([b, s]),
+            indexer_topk=int(indexer_topk),
         )  # out [b, s, 64, d_v], lse [b, s, 64]
+        _MQASparseAttention._lse_indexer = lse_indexer
 
         # ``token_indices`` is saved rather than recomputed so the backward always
         # differentiates the exact support the forward used. Under full recompute
@@ -296,7 +313,9 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         return tuple(grads)
 
 
-def mqa_sparse_attn(query, kv, token_indices, sm_scale, d_v, attn_sink=None):
+def mqa_sparse_attn(
+    query, kv, token_indices, sm_scale, d_v, attn_sink=None, indexer_topk=0
+):
     """Absorbed-MQA sparse attention (FlashMLA sparse fwd + cuDNN DSA bwd).
 
     Args:
@@ -311,15 +330,27 @@ def mqa_sparse_attn(query, kv, token_indices, sm_scale, d_v, attn_sink=None):
                        ``d_qk in {512, 576}``).
         attn_sink:     ``[h]`` learnable per-head sink logit, or ``None`` for a
                        sinkless softmax.
+        indexer_topk:  when > 0, also return the per-head LSE restricted to the
+                       **first** ``indexer_topk`` columns of ``token_indices``.
+                       That is the normalizer the indexer-loss target needs, so
+                       the caller must put the indexer-selected columns first.
+                       ``0`` keeps the single-output signature.
 
     Returns:
-        ``[b, s, h * d_v]``.
+        ``[b, s, h * d_v]``, or ``(output, lse_indexer [b, s, 64] fp32)`` when
+        ``indexer_topk > 0``.
     """
-    return _MQASparseAttention.apply(
+    output = _MQASparseAttention.apply(
         query,
         kv,
         token_indices,
         float(sm_scale),
         int(d_v),
         attn_sink,
+        int(indexer_topk),
     )
+    lse_indexer = _MQASparseAttention._lse_indexer
+    _MQASparseAttention._lse_indexer = None
+    if indexer_topk > 0:
+        return output, lse_indexer
+    return output
