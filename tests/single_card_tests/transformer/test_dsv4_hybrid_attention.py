@@ -2976,6 +2976,30 @@ class TestFusedGroupedMatmul(unittest.TestCase):
         with self.assertRaises(ValueError):
             fused_grouped_matmul(x, w)
 
+    def test_shape_mismatch_raises(self):
+        # G and D reach the kernel from w while x is read through its own
+        # strides, so a mismatching x would be read past its group (or out of
+        # bounds) rather than rejected. The dense path got this from
+        # ``x.reshape([M, G, D])``; the zero-copy view path never reshapes.
+        w = paddle.randn([self._G, self._R, self._D], dtype="bfloat16")
+        for shape in (
+            [1, 4, self._G, self._D - 1],  # wrong D
+            [1, 4, self._G + 1, self._D],  # wrong G
+            [self._G * self._D],  # not even 2-D
+        ):
+            with self.subTest(x_shape=shape):
+                x = paddle.randn(shape, dtype="bfloat16")
+                with self.assertRaises(ValueError):
+                    fused_grouped_matmul(x, w)
+        # A strided view of the right trailing shape still goes through.
+        wide = paddle.randn([1, 4, self._G, self._D + 5], dtype="bfloat16")
+        out = fused_grouped_matmul(wide[..., : self._D], w)
+        self.assertEqual(list(out.shape), [1, 4, self._G, self._R])
+        with self.assertRaises(ValueError):
+            fused_grouped_matmul(
+                wide[..., : self._D], w.reshape([self._G * self._R, self._D])
+            )
+
     def _run_with_frozen(self, x_trainable, w_trainable):
         """Phase 2 shape: the o_groups weight is frozen while x stays live.
 

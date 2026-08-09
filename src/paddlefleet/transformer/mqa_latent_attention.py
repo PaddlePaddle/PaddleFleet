@@ -269,13 +269,13 @@ class MQALatentAttention(FleetLayer):
             else config.num_attention_heads,
             is_swa,
         )
-        # Shares ``non_absorbed_mqa_split_kv_b_proj`` with the query-side
+        # Shares ``mqa_split_kv_b_proj`` with the query-side
         # absorption: when set, ``MLASelfAttention`` passes its standalone
         # ``v_b_proj`` parameter instead of a view of ``kv_b_proj.weight``, laid
         # out as ``[h, v_head_dim, kv_lora_rank]`` for ``fused_grouped_matmul``
         # rather than the ``[kv_lora_rank, h, v_head_dim]`` the einsum wants.
         self.split_kv_b = bool(
-            getattr(config, "non_absorbed_mqa_split_kv_b_proj", False)
+            getattr(config, "mqa_split_kv_b_proj", False)
         )
         # Latent width, i.e. the value width the sparse kernel sees and the
         # contraction dim of the de-absorption weight. This layer only exists on
@@ -360,7 +360,7 @@ class MQALatentAttention(FleetLayer):
                 v_head_dim]`` (the V slice of ``kv_b_proj``) by default, or the
                 standalone ``v_b_proj`` parameter as ``[h, v_head_dim,
                 kv_lora_rank]`` under
-                ``non_absorbed_mqa_split_kv_b_proj``.
+                ``mqa_split_kv_b_proj``.
             input_ids: ``[b, s]`` token ids, only used to build the indexer-loss
                 row mask (``!= pad_token_id``). ``None`` falls back to the plain
                 row mean, as CSA does at ``csa_attention.py:1306``.
@@ -410,7 +410,7 @@ class MQALatentAttention(FleetLayer):
                 "v_b_proj_weight layout mismatch: expected contraction dim "
                 f"kv_lora_rank={kv_lora_rank}, got shape "
                 f"{v_b_proj_weight.shape} with "
-                f"non_absorbed_mqa_split_kv_b_proj={self.split_kv_b}."
+                f"mqa_split_kv_b_proj={self.split_kv_b}."
             )
 
         with paddle.no_grad():

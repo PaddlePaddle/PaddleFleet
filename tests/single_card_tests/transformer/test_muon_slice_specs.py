@@ -408,7 +408,7 @@ class TestMLASpecs(unittest.TestCase):
         self.assertEqual(specs["kv_b_proj.weight"][1]["head_sizes"], [4, 4])
 
     def test_split_kv_b_slices_standalone_absorption_params(self):
-        # ``non_absorbed_mqa_split_kv_b_proj`` moves the per-head blocks Muon
+        # ``mqa_split_kv_b_proj`` moves the per-head blocks Muon
         # must orthogonalise from ``kv_b_proj`` onto the standalone
         # ``k_b_proj`` / ``v_b_proj`` parameters, which are split along the
         # head-major leading axis instead of by ``head_sizes``.
@@ -437,7 +437,28 @@ class TestMLASpecs(unittest.TestCase):
             },
         )
         self.assertEqual(recorders["k_b_proj"].shapes, [(8, 4), (8, 4)])
-        self.assertEqual(recorders["v_b_proj"].shapes, [(4, 8), (4, 8)])
+        # The V block is stored transposed relative to the unsplit weight, so
+        # it is orthogonalised in its transpose -- Muon's version 1/2 scaling is
+        # ``dout / din`` and would otherwise apply the reciprocal ratio.
+        self.assertEqual(recorders["v_b_proj"].shapes, [(8, 4), (8, 4)])
+
+    def test_split_kv_b_specs_handle_muon_batched_3d_input(self):
+        # Muon stacks same-shape parameters into one 3-D tensor before calling
+        # ortho_fn, so the head split must stay on axis -2 (not axis 0) and the
+        # V-side transpose must swap only the last two dims.
+        specs = MLASelfAttention.muon_slice_specs(
+            self._fake(split_kv_b=True), {}
+        )
+        recorders = _run_specs(
+            {k: specs[k] for k in ("k_b_proj", "v_b_proj")},
+            {"k_b_proj": [3, 2 * 8, 4], "v_b_proj": [3, 2 * 4, 8]},
+        )
+        self.assertEqual(
+            recorders["k_b_proj"].shapes, [(3, 8, 4), (3, 8, 4)]
+        )
+        self.assertEqual(
+            recorders["v_b_proj"].shapes, [(3, 8, 4), (3, 8, 4)]
+        )
 
     def test_without_optional_projections(self):
         fake = self._fake()

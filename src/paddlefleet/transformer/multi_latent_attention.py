@@ -461,7 +461,7 @@ class MultiLatentAttention(Attention):
         ) == "dsv4_hybrid" and getattr(
             config, "hybrid_mla_attention", "mha"
         ) in ("mqa_dsa", "mqa_full_causal")
-        # ``non_absorbed_mqa_split_kv_b_proj`` trades that property for speed:
+        # ``mqa_split_kv_b_proj`` trades that property for speed:
         # ``kv_b_proj`` is split into standalone ``k_b_proj`` / ``v_b_proj``
         # absorption parameters, pre-laid-out so each side is one grouped GEMM
         # instead of a slice + ``einsum``. A checkpoint that predates them must
@@ -469,7 +469,7 @@ class MultiLatentAttention(Attention):
         # both latent MQA modes -- the split only concerns absorption, not the
         # indexer.
         self.mqa_latent_split_kv_b = self.mqa_latent and getattr(
-            config, "non_absorbed_mqa_split_kv_b_proj", False
+            config, "mqa_split_kv_b_proj", False
         )
         if self.mqa_latent:
             if self.config.apply_rope_fusion:
@@ -1479,18 +1479,20 @@ class MLASelfAttention(MultiLatentAttention):
             #               block as the K half of the unsplit weight
             #   v_b_proj -> [v_head_dim, kv_lora_rank] per head, i.e. the
             #               transpose of the V half
-            # The transpose is bit-exact under muon_version 3: Newton-Schulz
-            # transposes any block with rows > cols before iterating and back
-            # after, and the version-3 scale ``max(dout, din) ** 0.5`` is
-            # symmetric in the two dims. Versions 1/2 scale with ``dout / din``
-            # and would break the V-side equivalence.
+            # The V side is therefore orthogonalised in its transpose, which
+            # puts the block back in the unsplit weight's orientation before
+            # Muon sees it. Newton-Schulz alone would not care (it transposes
+            # any block with rows > cols and back), but ``_scaling_fn`` does:
+            # only ``muon_version=3``'s ``max(dout, din) ** 0.5`` is symmetric
+            # in the two dims, while versions 1/2 scale with ``dout / din`` and
+            # would apply the reciprocal ratio to a transposed block.
             specs["k_b_proj"] = (
                 ortho_per_head,
                 {"heads": num_heads, "axis": -2},
             )
             specs["v_b_proj"] = (
                 ortho_per_head,
-                {"heads": num_heads, "axis": -2},
+                {"heads": num_heads, "axis": -2, "transposed": True},
             )
             # ``kv_b_proj`` gets no gradient in this mode -- orthogonalising it
             # would only burn a per-head Newton-Schulz every step.

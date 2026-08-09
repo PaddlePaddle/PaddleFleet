@@ -866,7 +866,7 @@ class TransformerConfig(ModelParallelConfig):
     different layer kind that this field does not touch.
     """
 
-    non_absorbed_mqa_split_kv_b_proj: bool = False
+    mqa_split_kv_b_proj: bool = False
     """Split ``kv_b_proj`` into standalone ``k_b_proj`` / ``v_b_proj``
     absorption parameters instead of slicing it on every forward. Requires a
     latent MQA mode, i.e. ``hybrid_mla_attention`` in ``{"mqa_dsa",
@@ -1700,12 +1700,12 @@ class TransformerConfig(ModelParallelConfig):
                         "hybrid MLA dimensions must be explicit positive integers; "
                         f"invalid fields: {', '.join(invalid)}"
                     )
-                if self.non_absorbed_mqa_split_kv_b_proj and (
+                if self.mqa_split_kv_b_proj and (
                     self.hybrid_mla_attention
                     not in ("mqa_dsa", "mqa_full_causal")
                 ):
                     raise ValueError(
-                        "non_absorbed_mqa_split_kv_b_proj=True only means "
+                        "mqa_split_kv_b_proj=True only means "
                         "anything for latent MQA, i.e. "
                         "hybrid_mla_attention='mqa_dsa' or 'mqa_full_causal'; "
                         "it splits those modes' kv_b_proj into standalone "

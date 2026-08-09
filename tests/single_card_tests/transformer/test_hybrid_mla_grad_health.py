@@ -168,7 +168,7 @@ def _make_config(
         hybrid_mla_num_attention_heads=64,
         hybrid_mla_num_key_value_heads=64,
         hybrid_mla_attention=hybrid_mla_attention,
-        non_absorbed_mqa_split_kv_b_proj=split_kv_b,
+        mqa_split_kv_b_proj=split_kv_b,
         add_full_attention_sink_bias=sink,
         o_groups=4,
         o_lora_rank=32,
@@ -452,7 +452,7 @@ class TestItem1StateDictAndGradientMatch(unittest.TestCase):
 
 @_skip_if_no_cuda
 class TestSplitKvBProj(unittest.TestCase):
-    """``non_absorbed_mqa_split_kv_b_proj``: the grouped-matmul ``k_b_proj`` /
+    """``mqa_split_kv_b_proj``: the grouped-matmul ``k_b_proj`` /
     ``v_b_proj`` must reproduce the ``kv_b_proj``-slice einsums, given the split
     the loader performs."""
 

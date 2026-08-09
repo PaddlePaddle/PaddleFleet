@@ -420,17 +420,17 @@ class TestHybridMLAConfig(unittest.TestCase):
         # to split, so silently accepting it would hide a mis-set config.
         with self.assertRaisesRegex(ValueError, "only means"):
             TransformerConfig(
-                **self._kwargs(non_absorbed_mqa_split_kv_b_proj=True)
+                **self._kwargs(mqa_split_kv_b_proj=True)
             )
         for mode in ("mqa_dsa", "mqa_full_causal"):
             with self.subTest(mode=mode):
                 config = TransformerConfig(
                     **self._mqa_dsa_kwargs(
                         hybrid_mla_attention=mode,
-                        non_absorbed_mqa_split_kv_b_proj=True,
+                        mqa_split_kv_b_proj=True,
                     )
                 )
-                self.assertTrue(config.non_absorbed_mqa_split_kv_b_proj)
+                self.assertTrue(config.mqa_split_kv_b_proj)
 
     def test_mqa_full_causal_does_not_require_index_dims(self):
         # No indexer is built, so the index_* validation must be skipped -- these

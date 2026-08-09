@@ -467,6 +467,19 @@ def fused_grouped_matmul(x, w):
         raise ValueError(
             f"x and w must have the same dtype, got x={x.dtype}, w={w.dtype}"
         )
+    # ``G`` and ``D`` reach the kernel from ``w`` while ``x`` is read through
+    # its own strides, so a mismatching ``x`` would be read past its group (or
+    # out of bounds) instead of failing. The dense path used to get this check
+    # for free from ``x.reshape([M, G, D])``; the zero-copy view path never
+    # reshapes, so state it here for both.
+    if w.ndim != 3:
+        raise ValueError(f"w must be 3-D [G, R, D], got shape {w.shape}")
+    if x.ndim < 2 or tuple(x.shape[-2:]) != (w.shape[0], w.shape[2]):
+        raise ValueError(
+            "x's trailing dims must match w's [G, D]: expected "
+            f"{(w.shape[0], w.shape[2])}, got x shape {x.shape} for w shape "
+            f"{w.shape}"
+        )
     if x.dtype not in _SUPPORTED_DTYPES:
         # fp32 (and any other unsupported dtype) stays on paddle.einsum to
         # preserve numerical equivalence instead of being downcast to fp16.
