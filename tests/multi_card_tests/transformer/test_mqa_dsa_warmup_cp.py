@@ -134,7 +134,7 @@ class _CPChecks(unittest.TestCase):
     def _assert_full_causal(self, idx, row_end, tag):
         """Every local row's selected set == its whole per-document causal set.
 
-        This is what separates the warmup mode from phase 3/4: under
+        This is what separates the warmup mode from phase 3: under
         ``window + top-k`` a row longer than ``window + index_topk`` selects a
         strict subset, so this assertion would fail there.
         """
@@ -271,7 +271,7 @@ class TestWarmupCP(_CPChecks):
         always a real tensor -- ``_indexer_loss_mask``'s global-count mask when
         ``input_ids`` reached the layer, an all-ones mask over ``b * s_global``
         when it did not -- so every rank contributes its own rows to one global
-        mean and the per-rank losses are partial sums. Phase 3/4
+        mean and the per-rank losses are partial sums. Phase 3
         (``sparse_loss=True``) still keeps the two-branch form (global count when
         masked, a local mean times ``1 / cp_size`` when not); both must land on
         the CP=1 value. ``sparse_loss`` is swept so a failure can be attributed:
@@ -306,7 +306,7 @@ class TestWarmupCP(_CPChecks):
         """One 512-long document, so the two phases' KL supports differ widely.
 
         Phase 2's KL spans the whole per-document causal set (up to 512 columns
-        on this layout) while phase 3/4's spans window(128) + top-k(128), so the
+        on this layout) while phase 3's spans window(128) + top-k(128), so the
         two logged losses must differ -- that is the non-vacuity control for
         ``test_4`` -- while each still normalises across the CP group.
         """
@@ -441,7 +441,7 @@ class TestPadRowsCP(_CPChecks):
 
     @H.U._GPU
     def test_3_pad_rows_sparse(self):
-        """Same layout on the phase-3/4 (``window + top-k``) path.
+        """Same layout on the phase-3 (``window + top-k``) path.
 
         Included so a pad-row failure can be attributed: if it reproduces here
         it is not specific to the warmup branch this change introduced.

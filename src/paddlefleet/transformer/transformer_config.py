@@ -1683,7 +1683,7 @@ class TransformerConfig(ModelParallelConfig):
                         "dsa_index_n_heads",
                         "dsa_index_head_dim",
                     ]
-                    # ``index_topk`` is phase 3/4 only: the warmup phase
+                    # ``index_topk`` is phase 3 only: the warmup phase
                     # (``dsa_indexer_use_sparse_loss=False``) runs no top-k at
                     # all -- its KL spans the whole per-document causal set -- so
                     # it must not be required to carry a top-k budget.

@@ -395,7 +395,7 @@ class TestHybridMLAColumnMaskLoadBearingCP(unittest.TestCase):
         there is no window duplication for a mask to prevent. Asserted rather
         than dropped because it is the sharpest statement of the phase-2
         contract, and because it bounds ``test_1``'s claim: the mask is
-        load-bearing for phase 3/4 only.
+        load-bearing for phase 3 only.
         """
         spy = self._run(sparse_loss=False, loss_coeff=0.1)
         totals = self._report(spy, "mqa_dsa/warmup")

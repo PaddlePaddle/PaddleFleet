@@ -784,7 +784,7 @@ class TestMQADSA(unittest.TestCase):
           *widened* top-k table; at the production ``index_topk=2048`` that
           widening degenerated back into the phase-3 table, which is why the
           phase now shares no loss code with phase 3.)
-        * ``True`` -- phase 3/4 (``_forward_sparse``). Attention consumes
+        * ``True`` -- phase 3 (``_forward_sparse``). Attention consumes
           ``window + index_topk`` and the KL is restricted to that same set, so
           ``_attn_target`` is called once per step at exactly ``index_topk``.
 
@@ -993,7 +993,7 @@ class TestMQADSAWarmupPhase(unittest.TestCase):
     The indexer is still being learned, so attention must not consume its
     ranking: it attends to the full per-document causal set (bit-identical to
     ``hybrid_mla_attention="mqa_full_causal"``) while the indexer's top-k feeds
-    the wide KL loss only. ``TestMQADSA`` covers the phase-3/4 shape
+    the wide KL loss only. ``TestMQADSA`` covers the phase-3 shape
     (``True``), where attention consumes ``window + index_topk``.
 
     Kept as its own class rather than folded into ``TestMQADSA``: the module

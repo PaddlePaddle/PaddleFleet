@@ -33,7 +33,7 @@ phase has its own ``_forward_*`` with no loss code shared between them:
   spans every causal column on both sides, via one ``csa_indexer_topk_fwd``
   call in its documented "full-candidate selection" mode.
 * ``"mqa_dsa"`` + ``dsa_indexer_use_sparse_loss=True`` -> ``_forward_sparse``
-  (phase 3/4). A forced local window plus Lightning-indexer top-k, i.e. DeepSeek
+  (phase 3). A forced local window plus Lightning-indexer top-k, i.e. DeepSeek
   Sparse Attention on the KV latent, with the KL restricted to that same
   selected set. This is the only phase that reads ``index_topk``.
 
@@ -113,7 +113,7 @@ from paddlefleet.transformer.layer import FleetLayer
 if TYPE_CHECKING:
     from paddlefleet.transformer.enums import AttnMaskType
 
-# Working set of the phase-3/4 KL-target gather, as a ``rows x slots`` budget:
+# Working set of the phase-3 KL-target gather, as a ``rows x slots`` budget:
 # 256 rows x 512 slots x 576 dims is ~150MB of gathered bf16 keys, transient and
 # freed every iteration. Measured at s=8192/h=64/topk=512/dk=576 on one B30Z:
 # 15.9ms at 128 rows, 13.3ms at 256, 12.4ms at 512, 12.4ms at 1024 -- past 256
@@ -273,7 +273,7 @@ class MQALatentAttention(FleetLayer):
           being learned, so attention must not consume its ranking: full causal
           attention, and the KL runs over the *full* causal set on both sides.
           No top-k anywhere.
-        * ``"sparse"`` -- phase 3/4. Attention consumes window + top-k and the
+        * ``"sparse"`` -- phase 3. Attention consumes window + top-k and the
           KL is restricted to that same selected set.
 
         Read live rather than cached in ``__init__``: a test flipping
@@ -756,7 +756,7 @@ class MQALatentAttention(FleetLayer):
         return out.reshape([b, s, h * v_head_dim])
 
     # ------------------------------------------------------------------
-    # sparse (phase 3/4)
+    # sparse (phase 3)
     # ------------------------------------------------------------------
     def _forward_sparse(
         self,
@@ -773,7 +773,7 @@ class MQALatentAttention(FleetLayer):
         input_ids=None,
         position_offset=0,
     ) -> Tensor:
-        """Phase 3/4: attention consumes window + top-k, KL on that same set.
+        """Phase 3: attention consumes window + top-k, KL on that same set.
 
         The indexer is trained enough to steer attention, so both sides narrow to
         the selected set. Reached only when ``_phase() == "sparse"``, i.e.

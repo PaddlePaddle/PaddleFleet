@@ -32,7 +32,7 @@ The five production ``layer43`` configs under test (43 decoder layers + 1 MTP,
                                               experiment).
 * ``..._non_absorbed_mqa_hca_dsa``         -- phase 2, ``"mqa_dsa"``
                                               (+ YAML ``train_indexer_only``).
-* ``..._non_absorbed_mqa_hca_dsa_sparse_loss`` -- phase 3/4, ``"mqa_dsa"`` with
+* ``..._non_absorbed_mqa_hca_dsa_sparse_loss`` -- phase 3, ``"mqa_dsa"`` with
                                               ``dsa_indexer_use_sparse_loss``.
 * ``ernielite_layer43_mqa_hca``            -- CSA full-causal MQA
                                               (``csa_compress_ratios == -1``).
@@ -216,7 +216,7 @@ class TestLayerDispatchTable(unittest.TestCase):
         The property kept here is unchanged in strength: *every* production
         config that sets ``hybrid_mla_attention="mqa_dsa"`` must dispatch to
         ``MQALatentAttention`` + ``DSAIndexer`` on all seven ``-2`` layers. Since
-        the enum rename the second such config is the phase-3/4 sparse-loss one,
+        the enum rename the second such config is the phase-3 sparse-loss one,
         so this pins that ``dsa_indexer_use_sparse_loss`` does NOT leak into the
         class dispatch.
         """
@@ -486,7 +486,7 @@ class TestHybridIndexerReadsModelWideIndexFields(unittest.TestCase):
 
     def test_dsa_indexer_reflects_model_wide_index_fields(self):
         _, provider = _load_provider(_DSA)
-        # Production values. Only phase 3/4 (``_forward_sparse``) reads
+        # Production values. Only phase 3 (``_forward_sparse``) reads
         # ``index_topk`` -- the phase-2 warmup KL spans the full causal set and
         # never selects a top-k at all.
         self.assertEqual(provider.dsa_index_n_heads, 64)
@@ -923,7 +923,7 @@ class TestConfigDeltas(unittest.TestCase):
             # (``PaddleFormers trainer.py:1403``) and can only restore it from an
             # fp32 master weight -- which does not exist for a parameter that is
             # frozen (phase 2) or absent from the previous phase's optimizer
-            # state (phase 3/4), and the assignment loop at ``:1440`` has no else
+            # state (phase 3), and the assignment loop at ``:1440`` has no else
             # branch. ``load_from_hf`` requires ``ignore_load_lr_and_optim``
             # (hard assert at ``:1252``), and ``parallel_broadcast`` cannot serve
             # a resume whose parameter set changed (``resharder.py:459`` asserts
@@ -947,7 +947,7 @@ class TestConfigDeltas(unittest.TestCase):
         # ``index_topk`` is the value production actually trains at (2048). The
         # baseline ``mla_hca`` config still carries the older 512, and it is
         # deliberately not edited, so every config that *keeps* the field differs
-        # here. Only phase 3/4 reads it: the phase-2 warmup KL spans the full
+        # here. Only phase 3 reads it: the phase-2 warmup KL spans the full
         # causal set and selects no top-k.
         # The field is MLA-only in this layout: the ratio-128 HCA layers set
         # ``self.indexer = None`` (``csa_attention.py``: ``CSAIndexer`` is only
@@ -980,7 +980,7 @@ class TestConfigDeltas(unittest.TestCase):
         if name == _SPARSE_LOSS:
             return {
                 "hybrid_mla_attention": (cls._MISSING, "mqa_dsa"),
-                # Phase 3/4: the indexer is trained enough for attention to
+                # Phase 3: the indexer is trained enough for attention to
                 # consume its ranking, so the narrow (sparse) KL is used.
                 "dsa_indexer_use_sparse_loss": (False, True),
                 **topk,

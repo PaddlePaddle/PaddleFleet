@@ -257,7 +257,7 @@ class TestWarmupRecompute(unittest.TestCase):
     def _indexer_call_count(self, use_sparse_loss):
         """Indexer selector calls across both passes, per backend.
 
-        Two selectors have to be counted separately now: phase 3/4 selects with
+        Two selectors have to be counted separately now: phase 3 selects with
         the **cuDNN** top-k kernel, phase 2 with the **tilelang** one at
         ``topk_effective = s_global`` (its full-candidate mode). Counting only
         cuDNN would report "zero top-k calls" for warmup and hide the one call
@@ -783,7 +783,7 @@ class TestRecomputeInnerForwardBitIdentical(unittest.TestCase):
             pass
 
     # ``mqa`` -> "mqa_full_causal"; the two ``mqa_dsa`` rows are warmup (wide
-    # loss, full-causal attention) and phase 3/4 (narrow loss, top-k attention).
+    # loss, full-causal attention) and phase 3 (narrow loss, top-k attention).
     _MODES = (("mqa_dsa", False), ("mqa_dsa", True), ("mqa", None))
     # 256 saturates window+topk, 512 does not -- see the module docstring of
     # ``test_hybrid_mla_warmup_doc_mask_loss``.

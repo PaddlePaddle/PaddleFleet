@@ -21,9 +21,9 @@ The warmup phase is ``hybrid_mla_attention="mqa_dsa"`` with
 ``_build_mqa_causal_topk_idxs_from_doc_bounds``) and the KL is scored over that
 same full causal set (``MQALatentAttention._forward_warmup`` -> one
 ``paddlefleet.tilelang_ops.csa_indexer_topk_fwd`` call at
-``topk_effective = s_global``). The phase-3/4 cuDNN top-k kernel runs zero times
+``topk_effective = s_global``). The phase-3 cuDNN top-k kernel runs zero times
 on this path, which is exactly why the mask semantics and the loss reduction
-need pinning here and not only on the phase-3/4 path
+need pinning here and not only on the phase-3 path
 (``dsa_indexer_use_sparse_loss=True``), where
 ``test_hybrid_mla_doc_equivalence.py`` and ``test_mqa_latent_attention.py``
 already cover them.
@@ -49,7 +49,7 @@ What is proven here, and nowhere else:
   inputs, and the attention-side ``dq`` / ``dkv`` / ``d_sink``.
 
 Shape caveat: ``WINDOW + INDEX_TOPK == 256`` in ``hybrid_mla_utils``, so a
-``seqlen=256`` fixture has a *saturated* sparse budget -- the phase-3/4 top-k
+``seqlen=256`` fixture has a *saturated* sparse budget -- the phase-3 top-k
 table would already equal the full causal set there, and no assertion at that
 shape can tell the two apart. ``_LAYOUTS`` therefore also carries ``seqlen=512``
 layouts, which is the discriminating shape.
@@ -98,7 +98,7 @@ _EPS = 1e-10  # mqa_latent_attention._EPS, the KL/renormalisation epsilon
 # ``_pad_row_end`` and live in ``_PAD_LAYOUTS``.
 #
 # ``seqlen=256`` is a *saturated* budget: ``WINDOW + INDEX_TOPK == 128 + 128 ==
-# 256``, so at that shape the phase-3/4 sparse table already covers every row's
+# 256``, so at that shape the phase-3 sparse table already covers every row's
 # causal length and "attention takes the full causal set" is indistinguishable
 # from "attention takes the indexer's top-k". The last two layouts are therefore
 # at ``seqlen=512``, where the sparse budget covers at most 256 of a row's up to
@@ -154,7 +154,7 @@ def _segments(row_end, seqlen):
 def _warmup_module(loss_coeff=0.01, sink=None, sparse_loss=False):
     """A ``"mqa_dsa"`` module with the phase switch off *from construction*.
 
-    ``sparse_loss=True`` builds the phase-3/4 module instead, used only as the
+    ``sparse_loss=True`` builds the phase-3 module instead, used only as the
     control that decides whether a finding is specific to this change.
     """
     config = _create_mqa_config("mqa_dsa", loss_coeff=loss_coeff)
@@ -233,10 +233,10 @@ def _capture_loss_args():
     permutation invariant and may be taken on the column layout directly.
 
     ``cap`` stays empty if the module was not in the warmup phase -- which is
-    itself the assertion that phase 3/4 does not reach this code. Phase 3/4
+    itself the assertion that phase 3 does not reach this code. Phase 3
     attaches through the *same* PyLayer now, so the discriminator is the
     ``indexer_backend`` tag: ``"tilelang"`` is phase 2's full-candidate kernel,
-    ``"cudnn"`` is phase 3/4's top-k one, and only the former is recorded.
+    ``"cudnn"`` is phase 3's top-k one, and only the former is recorded.
     """
     real = mqa_mod.TileLangCSAIndexerLossAutoScaler
     actual = [
@@ -838,9 +838,9 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
         self.assertLess(max_abs, 3e-2)
 
     def test_window_length_sequence_still_trains_the_indexer_in_warmup(self):
-        """At ``s == csa_window_size`` phase 2 now learns, phase 3/4 still cannot.
+        """At ``s == csa_window_size`` phase 2 now learns, phase 3 still cannot.
 
-        Pre-existing and unchanged for phase 3/4: ``_indexer_valid_range`` clamps
+        Pre-existing and unchanged for phase 3: ``_indexer_valid_range`` clamps
         the candidate range at ``causal_len - window_size``, so at ``s == window``
         every row's range is empty, the KL is exactly 0 and the indexer learns
         nothing that step. The old warmup shared that clamp and logged the same
@@ -855,7 +855,7 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
         sparse = _warmup_module(sparse_loss=True)
         logged_sparse, cap_sparse, _ = self._step(sparse, seqlen, [seqlen])
         self.assertEqual(logged_sparse, 0.0)
-        self.assertEqual(cap_sparse, {}, "phase 3/4 reached the warmup KL")
+        self.assertEqual(cap_sparse, {}, "phase 3 reached the warmup KL")
 
         module = _warmup_module()
         logged, cap, _ = self._step(module, seqlen, [seqlen])
@@ -977,10 +977,10 @@ class TestStarvedIndexerCandidates(unittest.TestCase):
     window leaves *every* one of its rows with zero candidates. The interesting
     question is what that costs, and the answer must be "nothing":
 
-    * the forced window already spans the whole document, so the phase-3/4
+    * the forced window already spans the whole document, so the phase-3
       attention table still contains the complete per-document causal set --
       asserted as ``want - got == empty set``, not as a count;
-    * consequently all three ``hybrid_mla_attention`` shapes (phase 3/4, warmup,
+    * consequently all three ``hybrid_mla_attention`` shapes (phase 3, warmup,
       ``mqa_full_causal``) must produce **bit-identical** output on these
       layouts, which is a much stronger statement than "no crash";
     * an all-``-1`` candidate row means a softmax over an empty set, the classic
@@ -1069,7 +1069,7 @@ class TestStarvedIndexerCandidates(unittest.TestCase):
                 self.assertEqual(
                     float(np.abs(_fp32(phase3) - _fp32(warmup)).max()),
                     0.0,
-                    "phase 3/4 != warmup although the window covers everything",
+                    "phase 3 != warmup although the window covers everything",
                 )
                 self.assertEqual(
                     float(np.abs(_fp32(warmup) - _fp32(causal)).max()),
