@@ -633,21 +633,22 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
         fwd_mod.cudnn_indexer_topk_fwd = recording
         tl_mod.csa_indexer_topk_fwd = recording_tl
         try:
-            for seqlen in (128, 256, 300, 384, 512):
+            for seqlen in (16, 128, 256, 300, 384, 512):
                 with self.subTest(seqlen=seqlen):
                     before = len(tl_widths)
                     _, cap, attn_table = self._step(module, seqlen, [seqlen])
-                    # The table is the causal span rounded up to a power of two
-                    # (the tilelang kernels' width constraint); the surplus slots
-                    # are ``-1`` and carry no probability, which is what the live
-                    # column-set equality below actually pins.
-                    width = 1 << (seqlen - 1).bit_length()
-                    self.assertEqual(cap["target"].shape[-1], width)
-                    self.assertEqual(cap["probs"].shape[-1], width)
-                    self.assertEqual(cap["width"], width)
+                    # The KL table is exactly the causal span -- no rounding. The
+                    # tilelang wrapper pads ``topk_effective`` up to its block
+                    # internally and crops the result back
+                    # (``csa_indexer_fwd.py:430-462``), so short and non
+                    # -power-of-two lengths are served too; ``seqlen=16`` is below
+                    # the block size on purpose.
+                    self.assertEqual(cap["target"].shape[-1], seqlen)
+                    self.assertEqual(cap["probs"].shape[-1], seqlen)
+                    self.assertEqual(cap["width"], seqlen)
                     self.assertEqual(attn_table.shape[-1], seqlen)
                     # One tilelang call, over every candidate column.
-                    self.assertEqual(tl_widths[before:], [width])
+                    self.assertEqual(tl_widths[before:], [seqlen])
                     # The KL's live columns are exactly attention's columns.
                     live = cap["live"][0]
                     for row in range(seqlen):

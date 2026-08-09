@@ -679,34 +679,39 @@ class TestAOAStatements(unittest.TestCase):
                     li = int(s.split("model.layers.")[1].split(".")[0])
                     self.assertIn(li, _MINUS2_LAYERS, s)
 
-    def test_documented_bug_attention_gate_proj_dropped_from_aoa(self):
-        # HIGH (pre-existing, symmetric, NOT specific to this feature): the
-        # module builds ``self_attn.gate_proj`` because the provider sees
-        # ``gated_attention=True`` (modeling.py ~:455 ORs use_gated_attn |
-        # gated_attention), but the AOA statements at modeling.py:922 / :1383
-        # gate ONLY on ``config.use_gated_attn`` -- which is False on the ERNIE
-        # config (model_config.json sets ``gated_attention`` but not
-        # ``use_gated_attn``). Result: on HF import/export the attention gate
-        # weights are silently dropped, for ALL the layer43 configs including the
-        # mha baseline. This asserts the CURRENT (buggy) behavior so a fix flips
-        # it.
+    def test_attention_gate_proj_is_in_aoa(self):
+        """``self_attn.gate_proj`` survives HF import/export on every layer.
+
+        WAS a documented bug: the module builds ``self_attn.gate_proj`` because
+        the provider sees ``gated_attention=True`` (``modeling.py`` ORs
+        ``use_gated_attn | gated_attention``), while the AOA statements gated only
+        on ``config.use_gated_attn`` -- which is False on the ERNIE configs, since
+        ``model_config.json`` sets ``gated_attention`` and not ``use_gated_attn``.
+        The attention gate weights were therefore dropped silently, on every
+        layer43 config including the mha baseline. This test asserted the buggy
+        count (0) so that a fix would flip it, and erniebot's "fix gate_proj
+        transpose missing in HF ckpt export for hybrid-MLA layers" did.
+
+        The count is every layer that owns a gate, i.e. ``num_hidden_layers`` plus
+        the MTP layer -- not just the ``-2`` ones, because ``gated_attention`` is
+        a model-wide switch.
+        """
         for name in _LAYER43_CFGS:
             with self.subTest(config=name):
                 cfg, fwd, inv = self._aoa(name)
+                # The trigger is unchanged: still the model-wide field, not the
+                # one the AOA statements used to gate on.
                 self.assertFalse(getattr(cfg, "use_gated_attn", False))
                 self.assertTrue(getattr(cfg, "gated_attention", False))
-                self.assertEqual(self._count(fwd, "self_attn.gate_proj"), 0)
-                self.assertEqual(self._count(inv, "self_attn.gate_proj"), 0)
-
-    @unittest.expectedFailure
-    def test_attention_gate_proj_should_be_in_aoa(self):
-        # Expected behavior: since the module owns ``self_attn.gate_proj`` on
-        # every hybrid-MLA (-2) layer, HF conversion should carry it. Fails
-        # today, documenting the gate_proj drop as a genuine bug.
-        _, fwd, _ = self._aoa(_DSA)
-        self.assertEqual(
-            self._count(fwd, "self_attn.gate_proj"), len(_MINUS2_LAYERS)
-        )
+                expected = cfg.num_hidden_layers + (
+                    getattr(cfg, "num_nextn_predict_layers", 0) or 0
+                )
+                self.assertEqual(
+                    self._count(fwd, "self_attn.gate_proj"), expected
+                )
+                self.assertEqual(
+                    self._count(inv, "self_attn.gate_proj"), expected
+                )
 
 
 class TestConfigCheckCoverage(unittest.TestCase):

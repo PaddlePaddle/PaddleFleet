@@ -122,8 +122,6 @@ _TARGET_ROW_SLOTS = 256 * 512
 _NEG_INF = -1e30
 _EPS = 1e-10
 
-_TILELANG_INDEXER_BLOCK = 32
-
 
 @dataclass
 class MQALatentAttentionSublayersSpec:
@@ -516,7 +514,7 @@ class MQALatentAttention(FleetLayer):
             return output
 
         b = int(query.shape[0])
-        self._check_tilelang_full_candidate_support(s_global)
+        self._check_tilelang_indexer_support()
         index_q, index_k, weights = self._indexer_projections(
             x, qr, position_offset, grad_enabled=True
         )
@@ -531,14 +529,14 @@ class MQALatentAttention(FleetLayer):
         # max_abs 3.0e-8 / cosine 1-1.5e-13, while passing them through unscaled
         # gives max_abs 7.5e-1 / cosine 0.62.
         weights = weights * (float(self.indexer.head_dim) ** 0.5)
-        # The tilelang kernels want a power-of-two top-k width, so ask for the
-        # whole causal span rounded up. ``valid_range`` already bounds each row's
-        # candidates, so the surplus slots come back ``-1`` and are dropped
-        # everywhere downstream -- measured: the per-row valid-slot count equals
-        # the causal length exactly at s = 40/127/200/300/384/500/8192, and the
-        # rows still sum to 1 within 4.2e-7. At a power-of-two sequence length
-        # (production) this is a no-op.
-        width = 1 << (s_global - 1).bit_length()
+        # ``topk_effective`` is the causal span itself. The wrapper rounds it up
+        # to a power-of-two multiple of its block internally and crops the result
+        # back to the requested width (``csa_indexer_fwd.py:430-462`` /
+        # ``csa_indexer_bwd.py:617-638``), so there is nothing to round here and
+        # no surplus ``-1`` slot to carry. Measured at
+        # s = 1/2/4/8/16/32/300/384/512/8192: the returned width equals
+        # ``s_global`` exactly, the per-row valid-slot count equals the causal
+        # length, rows sum to 1 within 9.6e-7 and the backward is finite.
         with paddle.no_grad():
             # No forced window in this phase, so the candidate range is the
             # whole per-document causal span.
@@ -556,7 +554,7 @@ class MQALatentAttention(FleetLayer):
                 index_k.detach(),
                 weights.detach(),
                 ratio=1,
-                topk_effective=width,
+                topk_effective=s_global,
                 seq_offset=position_offset,
                 valid_range=valid_range,
             )
@@ -606,28 +604,23 @@ class MQALatentAttention(FleetLayer):
             loss_mask,
         )
 
-    def _check_tilelang_full_candidate_support(self, s_global: int) -> None:
-        """Fail loudly on the tilelang indexer's shape constraints.
+    def _check_tilelang_indexer_support(self) -> None:
+        """Fail loudly on the one tilelang indexer constraint we cannot absorb.
 
-        The top-k width is the causal span rounded up to a power of two (see
-        ``_forward_warmup``), so the kernels' ``topk == next_power_of_2(topk)``
-        and ``topk % block == 0`` asserts are satisfied by construction for any
-        sequence length at or above the block size. What is left to check is the
-        head count: measured, ``index_n_heads`` below 64 trips the kernel's warp
-        tiling with a bare
-        ``Check failed: (m_warp * n_warp == num_warps)`` from inside tilelang, so
-        reject it here instead. The wrappers do not pad and the ``% block`` assert
-        only fires on the *backward*, i.e. minutes into a run.
+        The top-k *width* needs no check: the wrappers round ``topk_effective``
+        up to a power-of-two multiple of their block and crop the result back
+        (``csa_indexer_fwd.py:430-462``, ``csa_indexer_bwd.py:617-638``), so any
+        causal span from 1 upwards is served -- measured at
+        s = 1/2/4/8/16/32/300/384/512/8192.
+
+        The head count is different: ``index_n_heads`` other than 64 trips the
+        kernel's warp tiling with a bare
+        ``Check failed: (m_warp * n_warp == num_warps)`` from inside tilelang
+        (measured with 8). Reject that here rather than at the launch. It is not
+        checked at config time on purpose -- that would make every
+        small-geometry unit fixture unrepresentable.
         """
         heads = int(self.indexer.n_heads)
-        width = 1 << (s_global - 1).bit_length()
-        if width < _TILELANG_INDEXER_BLOCK:
-            raise ValueError(
-                "the DSA warmup phase scores the full per-document causal span "
-                "with the tilelang indexer, whose top-k width must be at least "
-                f"{_TILELANG_INDEXER_BLOCK}; here that width rounds up to "
-                f"{width} from the sequence length s_global={s_global}."
-            )
         if heads != 64:
             raise ValueError(
                 "the tilelang indexer's warp tiling requires index_n_heads == 64 "
