@@ -587,6 +587,12 @@ class TestSplitKvBProj(unittest.TestCase):
         orthogonalised as a single matrix with all heads mixed. ``axis=-2``
         (not ``0``) also covers the 3-D input Muon produces when it batches
         several same-shape parameters together.
+
+        The V side is additionally handed to ``ortho_fn`` transposed, i.e. in
+        the unsplit weight's ``[kv_lora_rank, v_head_dim]`` orientation: Muon's
+        ``muon_version`` 1/2 scaling is ``dout / din``, so the stored
+        ``[v_head_dim, kv_lora_rank]`` block would otherwise be scaled by the
+        reciprocal ratio.
         """
         ded = _build("mqa", split_kv_b=True)
         specs = ded.muon_slice_specs({"muon_qkv_update_mode": "split_head"})
@@ -596,13 +602,19 @@ class TestSplitKvBProj(unittest.TestCase):
         self.assertNotIn("kv_b_proj.weight", specs)
 
         expected = {
-            "k_b_proj": [ded.kv_lora_rank, ded.qk_nope_head_dim],
-            "v_b_proj": [ded.v_head_dim, ded.kv_lora_rank],
+            "k_b_proj": (
+                {"heads": heads, "axis": -2},
+                [ded.kv_lora_rank, ded.qk_nope_head_dim],
+            ),
+            "v_b_proj": (
+                {"heads": heads, "axis": -2, "transposed": True},
+                [ded.kv_lora_rank, ded.v_head_dim],
+            ),
         }
-        for name, block in expected.items():
+        for name, (expected_kwargs, block) in expected.items():
             self.assertIn(name, specs)
             slice_fn, kwargs = specs[name]
-            self.assertEqual(kwargs, {"heads": heads, "axis": -2})
+            self.assertEqual(kwargs, expected_kwargs)
             weight = getattr(ded, name)
             for extra in ([], [3]):
                 seen = []
