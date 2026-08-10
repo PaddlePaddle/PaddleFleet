@@ -194,6 +194,10 @@ def block_sparse_mqa_attention_dsa(
     else:
         query_p, key_p, eff_d_v = query, shared_key_sq, kv_lora_rank
 
+    # ``sink_grad_fusion`` is deliberately left at its default: the fused Triton
+    # sink-gradient epilogue (config ``dsa_sink_grad_fusion``) is scoped to
+    # MQALatentAttention, so HySparse keeps the eager epilogue even when a
+    # learnable ``attn_sink`` is supplied.
     out = mqa_sparse_attn(
         query_p,
         key_p,

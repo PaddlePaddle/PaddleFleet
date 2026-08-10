@@ -80,6 +80,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         d_v,
         attn_sink=None,
         indexer_topk=0,
+        sink_grad_fusion=False,
     ):
         from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
             flash_mla_sparse_attn,
@@ -118,6 +119,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         # real heads and the padded heads keep ``-1e30`` (they contribute no
         # output / gradient). The sink gradient is routed back to the parameter.
         ctx.learnable_sink = attn_sink is not None
+        ctx.sink_grad_fusion = sink_grad_fusion
         if attn_sink is None:
             sink = paddle.full([_DSA_HEADS], _NEG_SINK, dtype="float32")
         else:
@@ -269,13 +271,24 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         # ``dq_flat`` is bit-stable.
 
         gq, gk, gsink = ctx.needs_grad
+        # The cuDNN backward allocates ``dq``/``dkv`` with ``empty_like(q)`` /
+        # ``dtype=kv.dtype`` (``_interface_sm100.py:85,91``), so both already
+        # match the dtypes recorded in the forward and these casts are no-ops.
+        # Paddle's ``cast`` copies even when the dtype is unchanged (measured:
+        # different ``data_ptr``), which for dq is a pointless
+        # ``[b, s, h, d_qk]`` round trip -- 1.2 GB of traffic at
+        # b=1/s=8192/h=64/d_qk=576. Guard on the dtype instead of dropping the
+        # cast, so a backend that starts returning fp32 still converts.
         dq = None
         if gq:
             dq = dq_flat.reshape([b, s, hpad, dk])[:, :, :h, :].contiguous()
-            dq = dq.cast(ctx.query_dtype)
+            if dq.dtype != ctx.query_dtype:
+                dq = dq.cast(ctx.query_dtype)
         dkv = None
         if gk:
-            dkv = dkv_flat.reshape([b, skv, dk]).cast(ctx.kv_dtype)
+            dkv = dkv_flat.reshape([b, skv, dk])
+            if dkv.dtype != ctx.kv_dtype:
+                dkv = dkv.cast(ctx.kv_dtype)
         d_attn_sink = None
         if gsink:
             # The cuDNN DSA backward (SM100) allocates ``d_sink`` but its kernel
@@ -293,15 +306,28 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             # with ``Delta[b,s,h] = sum_dv(out * dO)``. The forward LSE is
             # KV-only (excludes the sink), so the full log-denominator is
             # ``logaddexp(lse_kv, s_h)`` and ``p_sink = exp(s_h - lse_full)``.
-            out_h = out[:, :, :h, :].astype("float32")
-            do_h = do[:, :, :h, :].astype("float32")
-            delta = (out_h * do_h).sum(axis=-1)  # [b, s, h]
-            sink_real = sink[:h].astype("float32").reshape([1, 1, h])
-            lse_h = lse[:, :, :h].astype("float32")
-            lse_full = paddle.logaddexp(lse_h, sink_real)
-            p_sink = paddle.exp(sink_real - lse_full)  # [b, s, h]
-            d_attn_sink = (-(delta * p_sink).sum(axis=[0, 1])).contiguous()
-            d_attn_sink = d_attn_sink.cast("float32")
+            #
+            # ``dsa_sink_grad_fusion`` runs that formula as a single Triton
+            # kernel, reading out/do once in their native dtype instead of
+            # materialising three ``[b, s, h, d_v]`` fp32 temporaries (~3.0 GiB
+            # at b=1/s=8192/h=64/d_v=512). Both paths are kept so the switch can
+            # be flipped mid-run to isolate a regression.
+            if ctx.sink_grad_fusion:
+                from paddlefleet.triton_ops.fused_sink_grad import (
+                    fused_sink_grad,
+                )
+
+                d_attn_sink = fused_sink_grad(out, do, lse, sink, h)
+            else:
+                out_h = out[:, :, :h, :].astype("float32")
+                do_h = do[:, :, :h, :].astype("float32")
+                delta = (out_h * do_h).sum(axis=-1)  # [b, s, h]
+                sink_real = sink[:h].astype("float32").reshape([1, 1, h])
+                lse_h = lse[:, :, :h].astype("float32")
+                lse_full = paddle.logaddexp(lse_h, sink_real)
+                p_sink = paddle.exp(sink_real - lse_full)  # [b, s, h]
+                d_attn_sink = (-(delta * p_sink).sum(axis=[0, 1])).contiguous()
+                d_attn_sink = d_attn_sink.cast("float32")
 
         # One returned grad per **tensor** input, in order. Non-tensor inputs
         # (sm_scale, d_v) occupy no slot. ``attn_sink`` occupies a slot only when
@@ -314,7 +340,14 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
 
 
 def mqa_sparse_attn(
-    query, kv, token_indices, sm_scale, d_v, attn_sink=None, indexer_topk=0
+    query,
+    kv,
+    token_indices,
+    sm_scale,
+    d_v,
+    attn_sink=None,
+    indexer_topk=0,
+    sink_grad_fusion=False,
 ):
     """Absorbed-MQA sparse attention (FlashMLA sparse fwd + cuDNN DSA bwd).
 
@@ -335,6 +368,13 @@ def mqa_sparse_attn(
                        That is the normalizer the indexer-loss target needs, so
                        the caller must put the indexer-selected columns first.
                        ``0`` keeps the single-output signature.
+        sink_grad_fusion: use the fused Triton sink-gradient epilogue instead of
+                       the eager one. No effect when ``attn_sink`` is ``None``
+                       (a sinkless layer has no sink gradient to compute).
+                       Only ``MQALatentAttention._sparse_attn`` wires this up,
+                       from the ``dsa_sink_grad_fusion`` config field; HySparse's
+                       ``block_sparse_mqa_attention_dsa`` leaves it at the default
+                       and keeps the eager epilogue by design.
 
     Returns:
         ``[b, s, h * d_v]``, or ``(output, lse_indexer [b, s, 64] fp32)`` when
@@ -348,6 +388,7 @@ def mqa_sparse_attn(
         int(d_v),
         attn_sink,
         int(indexer_topk),
+        sink_grad_fusion,
     )
     lse_indexer = _MQASparseAttention._lse_indexer
     _MQASparseAttention._lse_indexer = None

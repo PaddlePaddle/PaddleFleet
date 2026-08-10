@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -61,6 +62,8 @@ from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
+
+logger = logging.getLogger(__name__)
 
 
 def build_hysparse_valid_range(
@@ -471,13 +474,33 @@ class MultiLatentAttention(Attention):
         self.mqa_latent_split_kv_b = self.mqa_latent and getattr(
             config, "mqa_split_kv_b_proj", False
         )
+
+        # ``apply_rope_fusion`` is a model-wide flag, but the fused MLA RoPE is
+        # only applicable per (q, k) pair.  Latent MQA cannot use it because
+        # ``fused_apply_mla_rope_for_kv`` consumes the per-head K/V that
+        # absorption never materialises (``kv is None`` below).  The eager RoPE
+        # is used for that layer instead of failing the whole run, so the
+        # HCA/CSA layers -- which own an independent q/k pair and already route
+        # through ``fused_apply_mla_rope_inplace``
+        # (dsv4_hybrid_attention.py:1191, csa_attention.py:1063) -- still get
+        # the fusion.  Mixing layouts is only unsafe *within* one q/k pair.
+        #
+        # This ``config.apply_rope_fusion and not self.mqa_latent`` test is
+        # evaluated at each use site rather than cached here, so that toggling
+        # ``config.apply_rope_fusion`` on an already-constructed model (e.g. the
+        # KV-cache warning in generation/greedy_generator.py) still takes
+        # effect.
         if self.mqa_latent:
-            if self.config.apply_rope_fusion:
-                raise ValueError(
-                    "latent MQA (hybrid_mla_attention='mqa_dsa' / "
-                    "'mqa_full_causal') does not support apply_rope_fusion: "
-                    "the fused kernel writes the per-head K/V that absorption "
-                    "skips."
+            if self.config.apply_rope_fusion and not getattr(
+                self.config, "mqa_latent_rope_fusion", False
+            ):
+                logger.warning(
+                    "apply_rope_fusion has no effect on the RoPE of this "
+                    "latent-MQA layer (layer_number=%s): the fused kernel it "
+                    "selects needs the per-head K/V that absorption never "
+                    "materialises, so this layer keeps the eager RoPE. Set "
+                    "mqa_latent_rope_fusion=True to fuse it.",
+                    getattr(self, "layer_number", -1),
                 )
             if self.config.sequence_parallel:
                 raise ValueError(
@@ -1562,7 +1585,7 @@ class MLASelfAttention(MultiLatentAttention):
                 position_ids=None if self.training else position_ids,
             )
         else:
-            if self.config.apply_rope_fusion:
+            if bool(self.config.apply_rope_fusion) and not self.mqa_latent:
                 rotary_pos_cos, rotary_pos_sin = (
                     self.rotary_pos_emb.get_cached_cos_sin(
                         rotary_seq_len,
@@ -1807,7 +1830,7 @@ class MLASelfAttention(MultiLatentAttention):
             # [num_tokens, qk_rope_head_dim] -> [num_tokens, 1, qk_rope_head_dim]
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
-            if self.config.apply_rope_fusion:
+            if bool(self.config.apply_rope_fusion) and not self.mqa_latent:
                 from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,
@@ -1968,6 +1991,7 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
+                k_rope_fused_with_cat = False
                 if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
@@ -1988,6 +2012,98 @@ class MLASelfAttention(MultiLatentAttention):
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)
+                elif (
+                    getattr(self.config, "mqa_latent_rope_fusion", False)
+                    # Only the absorbed-MQA layers, and this one does gate rather
+                    # than assert: an unabsorbed MLA layer is a legitimate
+                    # configuration that has its own fused path via
+                    # ``apply_rope_fusion``, so it belongs on the eager branch
+                    # here, not in an error. Absorbed layers are the ones that
+                    # path cannot serve, because ``fused_apply_mla_rope_for_kv``
+                    # needs the per-head K/V that absorption never materialises
+                    # (:1895), which is why this kernel exists.
+                    and self.mqa_latent
+                ):
+                    # Fused rotate_half path, bit-exact with the eager branch
+                    # below (which it mirrors exactly: rotate_half, no
+                    # de-interleaving, no inverse, mscale folded into cos/sin).
+                    #
+                    # Anything that would make that branch compute a different
+                    # rotation must stop the run, not silently feed the kernel a
+                    # layout it does not implement. These are production
+                    # forward-time checks on user config / input, so they raise
+                    # ValueError explicitly rather than assert: ``python -O``
+                    # strips ``assert`` and would let the wrong layout reach
+                    # ``fused_apply_rope_half`` and silently corrupt results.
+                    # Matches the shape guards elsewhere in this file.
+                    if self.config.multi_latent_attention:
+                        raise ValueError(
+                            "mqa_latent_rope_fusion does not implement the "
+                            "multi_latent_attention de-interleave (0::2 / 1::2)"
+                        )
+                    if self.config.rotary_interleaved:
+                        raise ValueError(
+                            "mqa_latent_rope_fusion pairs the two halves of the "
+                            "rope block, not alternating channels"
+                        )
+                    if getattr(self.config, "high_precision_rope", False):
+                        raise ValueError(
+                            "high_precision_rope for mqa_latent_rope_fusion is "
+                            "not supported yet"
+                        )
+                    if self.config.sequence_parallel:
+                        raise ValueError(
+                            "sequence_parallel for mqa_latent_rope_fusion is not "
+                            "supported yet: k_pos_emb needs the per-rank freqs "
+                            "slice that apply_rotary_pos_emb does internally via "
+                            "sp_group (rope_utils.py:221)"
+                        )
+                    if rotary_pos_emb is None:  # pragma: no cover
+                        # Unreachable in practice: for a latent-MQA layer
+                        # rotary_pos_emb is always a real tensor (the ``= None``
+                        # at :1509 is gated on ``not mqa_latent``), and :1874
+                        # already dereferences ``rotary_pos_emb.shape`` above.
+                        # Kept as a defensive guard so a future caller that
+                        # wires the cached cos/sin path in here fails loudly
+                        # rather than feeding the kernel a missing angle tensor;
+                        # excluded from coverage because it cannot fire.
+                        raise ValueError(
+                            "mqa_latent_rope_fusion needs the angle tensor, but "
+                            "the caller prepared cached cos/sin instead"
+                        )
+                    if (  # pragma: no cover
+                        cu_seqlens_q is not None or cu_seqlens_kv is not None
+                    ):
+                        # Unreachable in practice: cu_seqlens_q/kv are only set
+                        # from packed_seq_params (:1576), but packed_seq_params
+                        # is refused earlier at :1850. Kept as a defensive guard
+                        # so a future caller wiring thd in here fails loudly
+                        # instead of feeding an unimplemented layout to the
+                        # kernel; excluded from coverage because it cannot fire.
+                        raise ValueError(
+                            "thd for mqa_latent_rope_fusion is not supported yet"
+                        )
+
+                    # Neither call works in place. This closure is replayed by
+                    # ``recompute_qkv_up_porj_and_rope`` and ``k_pos_emb`` is one
+                    # of its arguments, created outside, so an in-place rotation
+                    # would be applied a second time on replay. ``q`` is created
+                    # inside (:1710) and would survive that, but relying on where
+                    # a line happens to sit is not a property worth depending on.
+                    #
+                    # ``q_no_pe`` feeds the absorption GEMM unrotated, so only
+                    # the pe view is rotated: one pe-sized read and write.
+                    from paddlefleet.triton_ops import fused_apply_rope_half
+
+                    q_pos_emb = fused_apply_rope_half(
+                        q_pos_emb,
+                        rotary_pos_emb,
+                        self.qk_rope_head_dim,
+                        mscale,
+                    )
+                    # Defer k's rope to ``fused_rope_cat_key`` below, which
+                    # rotates and concatenates in one pass.
+                    k_rope_fused_with_cat = True
                 else:
                     # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
                     q_pos_emb = apply_rotary_pos_emb(
@@ -1999,6 +2115,8 @@ class MLASelfAttention(MultiLatentAttention):
                         cu_seqlens=cu_seqlens_q,
                         mscale=mscale,
                         cp_group=self.pg_collection.cp,
+                        apply_rope_fusion=bool(self.config.apply_rope_fusion)
+                        and not self.mqa_latent,
                     )
                     # k_pos_emb:[num_tokens, 1, qk_rope_head_dim]
                     k_pos_emb = apply_rotary_pos_emb(
@@ -2013,6 +2131,8 @@ class MLASelfAttention(MultiLatentAttention):
                         sp_group=self.pg_collection.tp
                         if self.config.sequence_parallel
                         else None,
+                        apply_rope_fusion=bool(self.config.apply_rope_fusion)
+                        and not self.mqa_latent,
                     )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
@@ -2064,9 +2184,28 @@ class MLASelfAttention(MultiLatentAttention):
                     )
                     # key: [num_tokens, 1, kv_lora_rank + qk_rope_head_dim].
                     # Its leading kv_lora_rank channels are the (absorbed) value.
-                    key = paddle.cat(
-                        [kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1
-                    )
+                    if k_rope_fused_with_cat:
+                        from paddlefleet.triton_ops import fused_rope_cat_key
+
+                        # The kernel hands back both of the things the eager
+                        # snippet produced: the concatenated key and the rotated
+                        # pe on its own. Taking the latter as a slice of the
+                        # former instead would be a non-contiguous read plus a
+                        # copy, and a non-contiguous return value is rejected by
+                        # ``RecomputeWithoutOutput(share_grad_holder=True)``
+                        # below, which calls ``share_buffer_to`` on each of them.
+                        key, k_pe = fused_rope_cat_key(
+                            kv_compressed,
+                            k_pos_emb,
+                            rotary_pos_emb,
+                            self.kv_lora_rank,
+                            self.qk_rope_head_dim,
+                            mscale,
+                        )
+                    else:
+                        key = paddle.cat(
+                            [kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1
+                        )
                     value = None
                 else:
                     query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)

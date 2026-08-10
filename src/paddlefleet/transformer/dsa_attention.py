@@ -444,6 +444,35 @@ class DSAIndexer(paddle.nn.Layer):
             freqs: RoPE frequencies
             mscale: YaRN concentration factor (1.0 for plain RoPE, ~1.37 for YaRN)
         """
+        # Fused path: one triton kernel replaces the slice + rotate_half +
+        # concat below.  It rotates ``x[..., :rope_head_dim]`` and copies the
+        # nope tail across in the same pass, writing the result once instead of
+        # rotating into a temporary and then rebuilding the whole tensor (128
+        # MiB for q at s=8192) to update 64 of 128 channels.  ``x`` itself is
+        # left alone -- out of place, so nothing here depends on whether the
+        # caller's tensor may be replayed.  Bit-exact with the eager branch, and
+        # CP-agnostic: freqs is matched to x on the
+        # sequence axis only, so the local q and the all-gathered k of the same
+        # layer can each pass their own freqs.
+        #
+        # Gated on its own ``dsa_indexer_rope_fusion``, not the model-wide
+        # ``apply_rope_fusion``: the indexer's layout ([pe | nope] +
+        # rotate_half) is a third convention that neither MLA fused kernel
+        # covers, so the two switches select unrelated kernels.
+        #
+        # Only config-level conditions gate here; the kernel's own input
+        # requirements (bf16 activations, and fp32 freqs when mscale != 1) are
+        # asserted inside ``fused_apply_rope_half``, matching how
+        # ``fused_apply_mla_rope_inplace`` handles them for the HCA layers.
+        if (
+            getattr(self.config, "dsa_indexer_rope_fusion", False)
+            and not self.config.dsa_indexer_rotary_interleaved
+            and not getattr(self.config, "high_precision_rope", False)
+        ):
+            from paddlefleet.triton_ops import fused_apply_rope_half
+
+            return fused_apply_rope_half(x, freqs, self.rope_head_dim, mscale)
+
         x_pe = x[..., : self.rope_head_dim]
         x_nope = x[..., self.rope_head_dim :]
         x_pe = _apply_rotary_pos_emb_bshd(

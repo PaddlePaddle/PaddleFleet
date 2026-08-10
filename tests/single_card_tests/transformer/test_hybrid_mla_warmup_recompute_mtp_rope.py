@@ -43,8 +43,10 @@ compose *around* it and were previously only exercised in phase 3
    attention's rotary application happens in ``MLASelfAttention`` before the
    ``mqa_latent`` branch, and the DSA indexer keeps its own plain-RoPE
    (``dsa_indexer_rotary_interleaved``) which is still evaluated in warmup even
-   though attention does not consume its ranking. Also a negative case for the
-   construction-time ``apply_rope_fusion`` x latent-MQA exclusion.
+   though attention does not consume its ranking. Also covers the
+   construction-time ``apply_rope_fusion`` x latent-MQA behaviour: the latent
+   layer downgrades to eager RoPE and warns (non-latent layers keep the global
+   fusion), plus the ``mqa_latent_rope_fusion=True`` opt-in that fuses it instead.
 
 Every RoPE assertion is against the independent fp64 reference of
 ``test_hybrid_mla_rope_audit``, never against the implementation itself.
@@ -58,6 +60,7 @@ not already cover the whole causal range.
 """
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import paddle
@@ -723,39 +726,90 @@ class TestWarmupRope(unittest.TestCase):
         print(f"[warmup rope indexer vs phase3] maxabs={measured}")
         self.assertTrue(measured)
 
-    def test_apply_rope_fusion_stays_excluded_from_latent_mqa(self):
-        """Construction-time exclusion (``multi_latent_attention.py``): the fused
-        kernel writes the per-head K/V that absorption skips.
+    def test_apply_rope_fusion_downgrades_on_latent_mqa(self):
+        """Latent MQA cannot use the fused MLA kernel: it needs the per-head K/V
+        that absorption skips. Instead of erroring at construction, the layer now
+        downgrades *itself* to eager RoPE and warns, so the non-latent HCA/CSA
+        layers of the same model keep the global fusion. This checks:
 
-        Negative case for both latent modes, including the warmup pairing, plus
-        the ``mha`` positive control that proves the exclusion is scoped to
-        latent MQA and not simply "fusion is broken here".
+          - both latent modes (``mqa_full_causal``, ``mqa_dsa``, incl. the warmup
+            pairing) construct, stay ``mqa_latent=True`` and resolve the per-layer
+            decision (``apply_rope_fusion and not mqa_latent``) to False (eager),
+            emitting the downgrade warning;
+          - the ``mha`` positive control stays non-latent and keeps fusion enabled
+            -- proving the downgrade is scoped to latent MQA, not "fusion is broken
+            here";
+          - ``mqa_latent_rope_fusion=True`` is the opt-in alternate path: the
+            latent layer constructs without the downgrade warning because it takes
+            the fused rotate_half branch instead.
         """
-        for mode, sparse, should_raise in (
-            ("mha", True, False),
-            ("mqa", True, True),
-            ("mqa_dsa", True, True),
-            ("mqa_dsa", False, True),
+        import paddlefleet.transformer.multi_latent_attention as _mla
+
+        def _effective(module, config):
+            # Mirrors the per-use-site decision in get_query_key_value_tensors.
+            return bool(config.apply_rope_fusion) and not module.mqa_latent
+
+        _DOWNGRADE = "has no effect on the RoPE"
+
+        # ---- latent modes downgrade to eager and warn ----
+        for mode, sparse in (
+            ("mqa", True),
+            ("mqa_dsa", True),
+            ("mqa_dsa", False),
         ):
-            with self.subTest(mode=mode, use_sparse_loss=sparse):
+            with self.subTest(
+                mode=mode, use_sparse_loss=sparse, path="downgrade"
+            ):
                 config = _create_mqa_config(mode)
                 config.dsa_indexer_use_sparse_loss = sparse
                 config.apply_rope_fusion = True
-                if should_raise:
-                    with self.assertRaises(ValueError) as ctx:
-                        MLASelfAttention(
-                            config=config,
-                            sublayers_spec=_MLA_SPEC,
-                            layer_number=1,
-                        )
-                    self.assertIn("apply_rope_fusion", str(ctx.exception))
-                else:
+                with mock.patch.object(_mla.logger, "warning") as warn:
                     module = MLASelfAttention(
                         config=config,
                         sublayers_spec=_MLA_SPEC,
                         layer_number=1,
                     )
-                    self.assertFalse(module.mqa_latent)
+                self.assertTrue(module.mqa_latent)
+                self.assertFalse(_effective(module, config))
+                self.assertTrue(
+                    any(
+                        _DOWNGRADE in str(c.args[0])
+                        for c in warn.call_args_list
+                    ),
+                    f"{mode}: expected the eager-downgrade warning",
+                )
+
+        # ---- mha control: non-latent keeps the global fusion ----
+        with self.subTest(mode="mha", path="enabled"):
+            config = _create_mqa_config("mha")
+            config.apply_rope_fusion = True
+            module = MLASelfAttention(
+                config=config, sublayers_spec=_MLA_SPEC, layer_number=1
+            )
+            self.assertFalse(module.mqa_latent)
+            self.assertTrue(_effective(module, config))
+
+        # ---- opt-in fused rotate_half path: no downgrade warning ----
+        for mode in ("mqa", "mqa_dsa"):
+            with self.subTest(mode=mode, path="mqa_latent_rope_fusion"):
+                config = _create_mqa_config(mode)
+                config.apply_rope_fusion = True
+                config.mqa_latent_rope_fusion = True
+                with mock.patch.object(_mla.logger, "warning") as warn:
+                    module = MLASelfAttention(
+                        config=config,
+                        sublayers_spec=_MLA_SPEC,
+                        layer_number=1,
+                    )
+                self.assertTrue(module.mqa_latent)
+                self.assertFalse(
+                    any(
+                        _DOWNGRADE in str(c.args[0])
+                        for c in warn.call_args_list
+                    ),
+                    f"{mode}: mqa_latent_rope_fusion must suppress the "
+                    "eager-downgrade warning",
+                )
 
 
 @_GPU
