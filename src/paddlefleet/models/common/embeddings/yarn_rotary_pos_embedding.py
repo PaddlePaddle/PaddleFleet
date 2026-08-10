@@ -122,10 +122,14 @@ class YarnRotaryEmbedding(RotaryEmbedding):
             + self.inv_freq_extra * inv_freq_mask
         )
 
+        # No fused kernel here: it would JIT-compile Triton, which fork/execs
+        # ptxas, during model construction -- the window where every rank runs
+        # in lockstep. At large scale a single failed exec kills the job.
         self._set_cos_sin_cache(
             self.original_max_position_embeddings,
             offset=0,
             dtype=paddle.get_default_dtype(),
+            rope_fusion=False,
         )
 
     def forward(
@@ -134,6 +138,8 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         offset: int = 0,
         packed_seq: bool = False,
         position_ids: Tensor | None = None,
+        *,
+        rope_fusion: bool | None = None,
     ) -> Tensor:
         """Forward pass of Yarn Rotary Embedding.
 
@@ -141,17 +147,18 @@ class YarnRotaryEmbedding(RotaryEmbedding):
             max_seq_len (int): Maximum size of sequence
             offset (int, optional): RoPE offset. Defaults to 0.
             packed_seq (bool, optional): Whether to use packed sequence. Defaults to False.
+            rope_fusion (bool, optional): Override the fused-kernel decision for this
+                call. Defaults to None, meaning use ``self.yarn_rope_fusion``.
 
         Returns:
             Tensor: Embeddings after applying Yarn RoPE.
         """
         inv_freq = self._cached_yarn_inv_freq
 
-        if (
-            self.yarn_rope_fusion
-            and position_ids is None
-            and not self.rotary_interleaved
-        ):
+        if rope_fusion is None:
+            rope_fusion = self.yarn_rope_fusion
+
+        if rope_fusion and position_ids is None and not self.rotary_interleaved:
             from paddlefleet.triton_ops import fused_yarn_rope_freqs
 
             emb = fused_yarn_rope_freqs(inv_freq, max_seq_len, offset)
@@ -201,13 +208,17 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         emb = emb[None, :, None, :]
         return emb, _mscale
 
-    def _set_cos_sin_cache(self, seq_len, offset, dtype, packed_seq=False):
+    def _set_cos_sin_cache(
+        self, seq_len, offset, dtype, packed_seq=False, *, rope_fusion=None
+    ):
         self.max_seq_len_cached = seq_len
         self.offset_cached = offset
         self.dtype_cached = dtype
         self.packed_seq_cached = packed_seq
 
-        emb, _mscale = self.forward(seq_len, offset, packed_seq)
+        emb, _mscale = self.forward(
+            seq_len, offset, packed_seq, rope_fusion=rope_fusion
+        )
         self.register_buffer(
             "cos_cached",
             (emb.cos() * _mscale).to(dtype).contiguous(),

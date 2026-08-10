@@ -2827,6 +2827,40 @@ class TestMQADecodeAlignment(unittest.TestCase):
         self._assert_close(full_out[:, prefix:, :], decode_out)
 
 
+@_REQUIRES_USABLE_CUDA
+class TestYarnRopeFusionConstructionTime(unittest.TestCase):
+    """Fusion must not run at construction, but must still run in forward."""
+
+    def test_fusion_not_invoked_during_construction(self):
+        from paddlefleet import triton_ops
+
+        real_fn = triton_ops.fused_yarn_rope_freqs
+        with patch.object(
+            triton_ops, "fused_yarn_rope_freqs", side_effect=real_fn
+        ) as mock_fused:
+            rope = YarnRotaryEmbedding(
+                head_dim=64,
+                scaling_factor=40.0,
+                original_max_position_embeddings=128,
+                yarn_rope_fusion=True,
+            )
+            # Contract 1: the __init__ cache build must take the unfused path,
+            # so no Triton JIT (and no ptxas fork/exec) happens while every
+            # rank is in lockstep during model construction.
+            mock_fused.assert_not_called()
+
+            # Contract 2: an explicit forward still honors yarn_rope_fusion.
+            rope.forward(64)
+            self.assertEqual(mock_fused.call_count, 1)
+
+            # Contract 3: seq_len <= original_max_position_embeddings hits the
+            # cache, so nothing is rebuilt and the kernel is not called again.
+            # This is the production case: 8192 <= 65536.
+            rope.get_cached_cos_sin(64)
+            self.assertEqual(mock_fused.call_count, 1)
+
+
+@_REQUIRES_USABLE_CUDA
 class TestDSv4PackedForwardBackwardEquivalence(unittest.TestCase):
     """Verify packed B=2 forward/backward matches two independent B=1 runs.
 

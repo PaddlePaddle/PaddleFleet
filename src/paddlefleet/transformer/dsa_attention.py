@@ -317,6 +317,7 @@ class DSAIndexer(paddle.nn.Layer):
             self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.softmax_scale = self.head_dim**-0.5
+        self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
 
         # wq_b: q_lora_rank -> n_heads * head_dim (duplicated)
         self.wq_b = build_spec_layer(
@@ -475,8 +476,8 @@ class DSAIndexer(paddle.nn.Layer):
         k = self._apply_rope(k.unsqueeze(2), freqs, mscale).squeeze(2)
 
         # Rotate activation (Hadamard transform)
-        q = rotate_activation(q)
-        k = rotate_activation(k)
+        q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
+        k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
         weights, _ = self.weights_proj(hidden_states)
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale

@@ -46,6 +46,7 @@ from paddlefleet.recompute_utils import (
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
+from paddlefleet.transformer.kimi_delta_attention import KimiDeltaAttention
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.multi_latent_attention import MultiLatentAttention
@@ -578,6 +579,7 @@ class TransformerLayer(nn.Layer):
         input_ids: Tensor | None = None,
         origin_input_ids: Tensor | None = None,
         blocks: list | None = None,
+        cu_seqlens: Tensor | None = None,
     ):
         """Forward with block_attention_residuals + full_recompute.
 
@@ -653,6 +655,7 @@ class TransformerLayer(nn.Layer):
                 block_attention_residuals=True,
                 in_recompute=True,
                 input_ids=input_ids,
+                cu_seqlens=cu_seqlens,
             )
             if ctx is None:
                 return hs
@@ -894,6 +897,15 @@ class TransformerLayer(nn.Layer):
             input_ids = dict_args.get("input_ids", None)
             offload_kwargs = self._compute_act_offload_kwargs()
             origin_input_ids = dict_args.get("origin_input_ids", None)
+            # Only forward this when the embedding actually produced one:
+            # recompute(use_reentrant=True) flattens kwargs into positional args,
+            # so an unexpected key would overflow a _forward_impl override that
+            # only takes it through **kwargs.
+            cu_seqlens_kwargs = (
+                {"cu_seqlens": dict_args["cu_seqlens"]}
+                if "cu_seqlens" in dict_args
+                else {}
+            )
 
             if (
                 self.config.block_attention_residuals
@@ -921,6 +933,7 @@ class TransformerLayer(nn.Layer):
                     input_ids=input_ids,
                     origin_input_ids=origin_input_ids,
                     blocks=dict_args.get("blocks", []),
+                    **cu_seqlens_kwargs,
                 )
             else:
                 outputs = recompute(
@@ -957,6 +970,7 @@ class TransformerLayer(nn.Layer):
                     packed_seq_params=packed_seq_params,
                     input_ids=input_ids,
                     origin_input_ids=origin_input_ids,
+                    **cu_seqlens_kwargs,
                     **offload_kwargs,
                 )
         else:
@@ -1046,6 +1060,7 @@ class TransformerLayer(nn.Layer):
         input_ids: Tensor | None = None,
         origin_input_ids: Tensor | None = None,
         blocks: list | tuple | None = None,
+        cu_seqlens: Tensor | None = None,
         **kwargs,
     ):
         def need_do_attention():
@@ -1116,6 +1131,7 @@ class TransformerLayer(nn.Layer):
                         block_attention_residuals=True,
                         in_recompute=self.full_recompute,
                         input_ids=input_ids,
+                        cu_seqlens=cu_seqlens,
                         **kwargs,
                     )
 
@@ -1168,6 +1184,7 @@ class TransformerLayer(nn.Layer):
                         packed_seq_params=packed_seq_params,
                         in_recompute=self.full_recompute,
                         input_ids=input_ids,
+                        cu_seqlens=cu_seqlens,
                         **kwargs,
                     )
             self._log_md5(
@@ -1205,6 +1222,7 @@ class TransformerLayer(nn.Layer):
         is_first_fwd: bool = False,
         block_attention_residuals: bool = False,
         input_ids: Tensor | None = None,
+        cu_seqlens: Tensor | None = None,
         **kwargs,
     ):
         """
@@ -1251,9 +1269,12 @@ class TransformerLayer(nn.Layer):
 
         extra_kwargs = {}
         if input_ids is not None and isinstance(
-            self.self_attn, DSv4HybridAttention
+            self.self_attn, (DSv4HybridAttention, KimiDeltaAttention)
         ):
             extra_kwargs["input_ids"] = input_ids
+        if isinstance(self.self_attn, KimiDeltaAttention):
+            # Built once per step by the embedding; None makes KDA build its own.
+            extra_kwargs["cu_seqlens"] = cu_seqlens
         if "shared_kv" in kwargs:
             extra_kwargs["shared_kv"] = kwargs["shared_kv"]
 
@@ -1655,6 +1676,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         rope_freqs_cis: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -1695,9 +1719,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # Self-attention
         extra_kwargs = {}
         if kwargs.get("input_ids") is not None and isinstance(
-            self.self_attn, DSv4HybridAttention
+            self.self_attn, (DSv4HybridAttention, KimiDeltaAttention)
         ):
             extra_kwargs["input_ids"] = kwargs["input_ids"]
+        if isinstance(self.self_attn, KimiDeltaAttention):
+            # Built once per step by the embedding; None makes KDA build its own.
+            extra_kwargs["cu_seqlens"] = kwargs.get("cu_seqlens")
 
         if isinstance(self.self_attn, MultiLatentAttention):
             attention_output_with_bias = self.self_attn(
@@ -1722,6 +1749,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
         else:
@@ -1732,10 +1762,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 rotary_pos_emb=rotary_pos_emb,
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
+                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                swa_rotary_pos_sin=swa_rotary_pos_sin,
                 position_ids=position_ids,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
 

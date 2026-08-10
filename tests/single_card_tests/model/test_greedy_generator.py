@@ -607,6 +607,93 @@ class TestGreedyGeneratorDebugMode(unittest.TestCase):
             _installed._DEBUG = orig
 
 
+class TestNoCacheDebugLogSteps(unittest.TestCase):
+    """Cover the _log_this_step debug-logging branches in _generate_no_cache
+    (reached via generate(..., no_cache=True)) by forcing _DEBUG=True.
+
+    The default _DEBUG is False, so the input/logits logging blocks guarded by
+    `_log_this_step` are otherwise never executed by the test suite.
+    """
+
+    def _make_debug_generator(
+        self, token_sequence, batch_size=1, vocab_size=100
+    ):
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        self._call_idx = 0
+        seq = token_sequence
+        bsz = batch_size
+
+        def fake_forward(inputs):
+            logits = paddle.zeros([bsz, 1, vocab_size], dtype="float32")
+            tok_id = seq[min(self._call_idx, len(seq) - 1)]
+            logits[:, 0, tok_id] = 10.0
+            self._call_idx += 1
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    def test_no_cache_debug_covers_prefill_and_decode_logging(self):
+        """_DEBUG=True + no_cache: prefill (step 0) and decode (step>0) logging
+        branches run without error. max_new_tokens=5 => steps 0..4, so both the
+        prefill and decode `_tag` values and both sides of the `step < 4` gate
+        (True for steps 0-3, False for step 4) are exercised.
+        """
+        import paddlefleet.generation.greedy_generator as _m
+
+        orig = _m._DEBUG
+        try:
+            _m._DEBUG = True
+            gen = self._make_debug_generator([5, 6, 7, 8, 9])
+            input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+            out = gen.generate(input_ids, max_new_tokens=5, no_cache=True)
+            self.assertEqual(out.shape[0], 1)
+            self.assertEqual(out.shape[1], 2 + 5)
+        finally:
+            _m._DEBUG = orig
+
+    def test_no_cache_debug_with_log_probs_and_eos(self):
+        """_DEBUG=True + no_cache still returns correct log-probs and honors eos
+        while running the logits-logging branch (shape/min-max-mean/top-5)."""
+        import paddlefleet.generation.greedy_generator as _m
+
+        orig = _m._DEBUG
+        try:
+            _m._DEBUG = True
+            gen = self._make_debug_generator([5, 6, 3, 7])
+            input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+            generated, log_probs = gen.generate(
+                input_ids,
+                max_new_tokens=10,
+                eos_token_id=3,
+                no_cache=True,
+                return_log_probs=True,
+            )
+            num_new = generated.shape[1] - input_ids.shape[1]
+            self.assertEqual(num_new, 3)
+            self.assertEqual(len(log_probs[0]), 3)
+        finally:
+            _m._DEBUG = orig
+
+
 class TestReturnLogProbs(unittest.TestCase):
     """Unit tests for the return_log_probs feature in GreedyGenerator.generate."""
 

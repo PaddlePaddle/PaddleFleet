@@ -46,7 +46,7 @@ class Config:
 
 
 class LightweightGPT(GPTModel):
-    def __init__(self, keys, model_type=""):
+    def __init__(self, keys, model_type="", num_virtual_pipeline_stages=1):
         self.config = Config(model_type)
         self._keys = keys
         self._sequential_layers = []
@@ -54,6 +54,8 @@ class LightweightGPT(GPTModel):
         self.layers = []
         self._stage_id = 0
         self._stage_for_index = 0
+        self._num_virtual_pipeline_stages = num_virtual_pipeline_stages
+        self._use_dualpipev = False
         self.loaded_state = None
 
     def get_stage_from_index(self, idx):
@@ -328,7 +330,13 @@ class TestGPTOverlapAndStateNoMock(unittest.TestCase):
             "embed", DummyEmbedding, shared_weight_attr="embedding_weight"
         )
         model = LightweightGPT(
-            ["0.0.weight", "0.tail.weight", "shared_layers.embed.weight"]
+            [
+                "0.0.weight",
+                "0.tail.weight",
+                "1.tail.weight",
+                "shared_layers.embed.weight",
+            ],
+            num_virtual_pipeline_stages=2,
         )
         model.layers = [shared]
         model._sequential_layers = [
@@ -342,7 +350,17 @@ class TestGPTOverlapAndStateNoMock(unittest.TestCase):
         self.assertEqual(
             mapping["model.embed.weight"], "shared_layers.embed.weight"
         )
-        self.assertEqual(mapping["model.layers.1.weight"], "0.tail.weight")
+        # Layers directly added to the PipelineLayer under VPP are named
+        # `{global_idx}.rest`, so each key resolves against the prefix of its
+        # own index and keeps its submodule name, instead of collapsing onto
+        # the last layer prefix and dropping `tail`.
+        self.assertEqual(mapping["model.embed.tail.weight"], "0.tail.weight")
+        self.assertEqual(mapping["model.layers.1.tail.weight"], "1.tail.weight")
+        self.assertNotIn("model.layers.1.weight", mapping)
+        self.assertEqual(
+            model._pp_to_single_mapping["0.tail.weight"],
+            "model.embed.tail.weight",
+        )
 
     def test_shared_layer_prefix_requires_current_stage(self):
         shared = SharedLayerDesc(
