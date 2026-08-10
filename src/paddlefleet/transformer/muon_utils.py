@@ -15,26 +15,54 @@ know nothing about muon configs or module structure.
 import paddle
 
 
-def ortho_blocks(weight, ortho_fn, sizes, axis=-1):
+def _transposing(ortho_fn):
+    """``ortho_fn`` applied to the transpose of each block, transposed back.
+
+    Muon's scaling is not symmetric in the two matrix dims for
+    ``muon_version`` 1 / 2 (``dout / din``), so a block stored transposed
+    relative to the layout the update was tuned on would be scaled by the
+    reciprocal ratio. Orthogonalising the transpose restores the original
+    semantics for every version. Batched (3-D) blocks swap their last two dims.
+    """
+
+    def wrapped(block):
+        perm = list(range(block.ndim))
+        perm[-2], perm[-1] = perm[-1], perm[-2]
+        return paddle.transpose(ortho_fn(paddle.transpose(block, perm)), perm)
+
+    return wrapped
+
+
+def ortho_blocks(weight, ortho_fn, sizes, axis=-1, transposed=False):
     """Split ``weight`` along ``axis``, orthogonalise each block, concat back.
 
     ``sizes`` is either an int (that many equal-width blocks) or a list of
-    per-block widths, matching ``paddle.split``.
+    per-block widths, matching ``paddle.split``. ``transposed=True`` hands each
+    block to ``ortho_fn`` transposed (see ``_transposing``).
     """
+    if transposed:
+        ortho_fn = _transposing(ortho_fn)
     blocks = paddle.split(weight, sizes, axis=axis)
     return paddle.concat([ortho_fn(b) for b in blocks], axis=axis)
 
 
-def ortho_per_head(weight, ortho_fn, heads=1, head_sizes=None, axis=-1):
+def ortho_per_head(
+    weight, ortho_fn, heads=1, head_sizes=None, axis=-1, transposed=False
+):
     """Orthogonalise a projection head by head.
 
     ``head_sizes`` describes the widths a single head is made of (e.g.
     ``[nope_dim, rope_dim]`` or ``[k_dim, v_dim]``); each of those pieces is
     orthogonalised separately. When it is None a head is one contiguous block
     and the weight is simply cut into ``heads`` equal parts.
+
+    ``transposed=True`` orthogonalises each block in its transpose, for weights
+    stored transposed relative to the layout Muon's scaling was tuned on.
     """
     sizes = heads if head_sizes is None else head_sizes * heads
-    return ortho_blocks(weight, ortho_fn, sizes, axis=axis)
+    return ortho_blocks(
+        weight, ortho_fn, sizes, axis=axis, transposed=transposed
+    )
 
 
 def ortho_gate_up(weight, ortho_fn):

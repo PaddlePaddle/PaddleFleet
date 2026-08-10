@@ -903,6 +903,32 @@ class TransformerConfig(ModelParallelConfig):
     different layer kind that this field does not touch.
     """
 
+    mqa_split_kv_b_proj: bool = False
+    """Split ``kv_b_proj`` into standalone ``k_b_proj`` / ``v_b_proj``
+    absorption parameters instead of slicing it on every forward. Requires a
+    latent MQA mode, i.e. ``hybrid_mla_attention`` in ``{"mqa_dsa",
+    "mqa_full_causal"}`` -- the split only concerns absorption, so it is
+    independent of whether an indexer runs.
+
+    ``False``: both absorption weights are sliced out of ``kv_b_proj.weight`` on
+    every forward and applied with an ``einsum``.
+
+    ``True``: they are separate parameters. Each is logically the ``[G, R, D]``
+    weight ``fused_grouped_matmul`` wants --
+    ``k_b_proj``: ``[heads, kv_lora_rank, qk_nope_head_dim]`` (query absorption),
+    ``v_b_proj``: ``[heads, v_head_dim, kv_lora_rank]`` (V de-absorption) -- but
+    *stored* with the leading two dims folded, i.e. as 2-D
+    ``[heads * kv_lora_rank, qk_nope_head_dim]`` and
+    ``[heads * v_head_dim, kv_lora_rank]``; the 3-D form is recovered per forward
+    with a zero-copy reshape. The fold exists because the AOA engine cannot
+    change a tensor's rank, so the checkpoint side has to be 2-D. Each side is
+    then one grouped Triton GEMM with no slice, no einsum and no transpose.
+    ``kv_b_proj`` receives no gradient at all in this mode and the parameter set
+    is no longer byte-compatible with a dense MHA phase: a checkpoint without
+    these two keys must have them split out of ``kv_b_proj.weight`` by the loader
+    (``_mla_split_kv_b_statements`` generates the AOA statements that do it).
+    """
+
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
@@ -1822,6 +1848,17 @@ class TransformerConfig(ModelParallelConfig):
                     raise ValueError(
                         "hybrid MLA dimensions must be explicit positive integers; "
                         f"invalid fields: {', '.join(invalid)}"
+                    )
+                if self.mqa_split_kv_b_proj and (
+                    self.hybrid_mla_attention
+                    not in ("mqa_dsa", "mqa_full_causal")
+                ):
+                    raise ValueError(
+                        "mqa_split_kv_b_proj=True only means "
+                        "anything for latent MQA, i.e. "
+                        "hybrid_mla_attention='mqa_dsa' or 'mqa_full_causal'; "
+                        "it splits those modes' kv_b_proj into standalone "
+                        "k_b_proj / v_b_proj absorption parameters."
                     )
                 if self.hybrid_mla_attention == "mqa_dsa":
                     # The -2 layers' indexer reuses the CSA indexer fields.

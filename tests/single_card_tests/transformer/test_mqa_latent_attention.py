@@ -161,6 +161,25 @@ class TestMQAGuards(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             self.module(query, key, None, None, v_b_proj_weight=w_v)
 
+    def test_v_b_proj_weight_layout_mismatch_rejected(self):
+        # Both layouts reshape fine, so a ``[h, v, l]`` weight handed to the
+        # einsum path (or the reverse) would silently mis-compute. The
+        # contraction dim is checked against the config rank instead.
+        query, key, _ = self._args()
+        w_v = paddle.zeros([H, V_HEAD_DIM, DV], dtype="bfloat16")
+        with self.assertRaises(ValueError):
+            self.module(query, key, None, None, v_b_proj_weight=w_v)
+
+    def test_kv_lora_rank_comes_from_the_hybrid_field(self):
+        # The rank is not derivable from ``v_b_proj_weight.shape[0]`` once the
+        # grouped-matmul layout is in play, so the layer reads it from the
+        # config: the hybrid field when set, the model-wide one otherwise.
+        self.assertEqual(self.module.kv_lora_rank, DV)
+        config = _create_mqa_config("mqa")
+        config.hybrid_mla_kv_lora_rank = None
+        config.kv_lora_rank = DV
+        self.assertEqual(_build_module(config).kv_lora_rank, DV)
+
     def test_softmax_scale_is_the_mha_scale(self):
         # Absorption is exactly score preserving, so the scale must stay the MHA
         # q_head_dim one (256**-0.5), never the 576-wide latent one.
@@ -486,6 +505,22 @@ class TestHybridMLAConfig(unittest.TestCase):
                             dsa_index_topk=INDEX_TOPK,
                         )
                     )
+
+    def test_split_kv_b_proj_only_means_anything_for_latent_mqa(self):
+        # The switch splits latent MQA's kv_b_proj into standalone k_b_proj /
+        # v_b_proj absorption parameters. On the dense MHA path there is nothing
+        # to split, so silently accepting it would hide a mis-set config.
+        with self.assertRaisesRegex(ValueError, "only means"):
+            TransformerConfig(**self._kwargs(mqa_split_kv_b_proj=True))
+        for mode in ("mqa_dsa", "mqa_full_causal"):
+            with self.subTest(mode=mode):
+                config = TransformerConfig(
+                    **self._mqa_dsa_kwargs(
+                        hybrid_mla_attention=mode,
+                        mqa_split_kv_b_proj=True,
+                    )
+                )
+                self.assertTrue(config.mqa_split_kv_b_proj)
 
     def test_mqa_full_causal_does_not_require_index_dims(self):
         # No indexer is built, so the index_* validation must be skipped -- these
