@@ -85,6 +85,7 @@ class _FakeGroup:
 class _FakePGCollection:
     def __init__(self):
         self.tp = _FakeGroup()
+        self.cp = _FakeGroup()
 
 
 # ---- Test dimensions ----
@@ -864,13 +865,25 @@ class TestContextParallelGuards(unittest.TestCase):
         kda.cp_size = cp_size
         kda.config.context_parallel_size = cp_size
         kda.config.cp_balance_mode = "contiguous_allgather"
-        kda.config.max_sequence_length = SEQ_LENGTH * cp_size
         return kda
 
-    def test_shard_must_be_one_over_cp_size(self):
+    def test_dynamic_seq_len_enters_cp_path(self):
+        """Without max_sequence_length, CP path passes all guards and reaches build_cp_context."""
         kda = self._kda()
-        kda.config.max_sequence_length = SEQ_LENGTH  # not SEQ_LENGTH * cp_size
-        with self.assertRaises(ValueError):
+        # Ensure max_sequence_length is not set (dynamic length scenario)
+        if hasattr(kda.config, "max_sequence_length"):
+            delattr(kda.config, "max_sequence_length")
+
+        # Sentinel to prove execution reached build_cp_context (past all guards)
+        class _ReachedBuildCpContext(Exception):
+            pass
+
+        with (
+            patch.object(
+                kda_mod, "build_cp_context", side_effect=_ReachedBuildCpContext
+            ),
+            self.assertRaises(_ReachedBuildCpContext),
+        ):
             kda(hidden_states=paddle.randn([1, SEQ_LENGTH, HIDDEN_SIZE]))
 
     def test_requires_batch_one(self):

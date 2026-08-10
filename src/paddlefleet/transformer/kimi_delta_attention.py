@@ -43,6 +43,7 @@ from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.triton_ops.utils import is_torch_compat_available
 from paddlefleet.utils import (
     get_pg_size,
     log_single_rank,
@@ -167,6 +168,19 @@ def build_cu_seqlens(
         )
     # Column 0 is the exclusive document end.
     ends = startend_row_indices[:, 0, :, 0].astype("int64")
+
+    # Fused Triton path: the same boundary detection + start compaction done in
+    # a single kernel. Only available under torch-compat (CUDA); fall back to
+    # the pure-paddle implementation below otherwise (e.g. CPU).
+    if is_torch_compat_available():
+        from paddlefleet.triton_ops.document_mask_fusion import (
+            cu_seqlens_triton,
+        )
+
+        return cu_seqlens_triton(
+            ends.flatten(), seq_len, keep_single_segment=keep_single_segment
+        )
+
     doc_edges = ends[:, 1:] != ends[:, :-1]
 
     # Position 0 of every row is always a start, so the row seams become
@@ -540,17 +554,6 @@ class KimiDeltaAttention(FleetLayer):
             # (part_len = total // world_size, rank_start = part_len * rank),
             # which is exactly scatter_contiguous. Other balance modes reorder
             # tokens, so the rank ranges would not match.
-            max_seq_len = getattr(self.config, "max_sequence_length", None)
-            if (
-                max_seq_len is not None
-                and seq_len * self.cp_size != max_seq_len
-            ):
-                raise ValueError(
-                    "KDA context parallel expects hidden_states to be a "
-                    "1/cp_size contiguous shard of the full sequence: "
-                    f"seq_len={seq_len} * cp_size={self.cp_size} != "
-                    f"max_sequence_length={max_seq_len}"
-                )
             if batch != 1:
                 raise NotImplementedError(
                     "KDA context parallel requires batch == 1 (the packed "

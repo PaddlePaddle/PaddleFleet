@@ -133,6 +133,122 @@ def document_mask_triton(start_end_row_indices: Tensor):
 
 
 @triton.jit
+def cu_seqlens_fwd_kernel(
+    End_ptr,  # flattened per-row-relative ends [total]
+    CuSeqlens_ptr,  # output [total + 1]; first (n_seg + 1) entries are valid
+    NSeg_ptr,  # output [1]; number of segments (cu_seqlens length = n_seg + 1)
+    total,  # batch * seq_len (length of the flattened sequence)
+    seq_len,  # row length s, used for row-seam detection (runtime scalar)
+    BLOCK_N: tl.constexpr,  # power of 2 block along the flattened axis
+):
+    """Packed cu_seqlens for a ``[b, s] -> [1, b*s]`` flattening.
+
+    ``End_ptr`` is the flattened ``startend_row_indices[:, 0, :, 0]`` where each
+    entry is the exclusive document end *relative to its own row*. A flat
+    position ``i`` starts a new segment iff it is column 0 of its row
+    (``i % seq_len == 0``) or its end value differs from the previous position.
+    The row-seam test is what a plain ``end != end_prev`` on the already
+    flattened array would miss: adjacent rows routinely share the same end
+    value (e.g. both end at ``s``) and would be wrongly merged.
+
+    Segment starts are compacted (prefix-sum) to the front of ``CuSeqlens_ptr``;
+    ``total`` is appended as the final entry and the segment count is written to
+    ``NSeg_ptr``. One program per row, streaming in BLOCK_N chunks with a running
+    start-count carried across blocks.
+    """
+    running_count = tl.zeros((), tl.int32)
+
+    for start in range(0, total, BLOCK_N):
+        cols = start + tl.arange(0, BLOCK_N)
+        mask = cols < total
+
+        end = tl.load(End_ptr + cols, mask=mask, other=0).to(tl.int32)
+
+        # previous position's end; read straight from global memory so lane 0 of
+        # each block correctly picks up the previous block's tail.
+        prev_cols = cols - 1
+        prev_mask = (prev_cols >= 0) & mask
+        end_prev = tl.load(End_ptr + prev_cols, mask=prev_mask, other=-1).to(
+            tl.int32
+        )
+
+        # row-local column: column 0 of every row is always a segment start, so
+        # row seams stay boundaries even when neighbouring rows share an end.
+        c = cols % seq_len
+        is_start = ((c == 0) | (end != end_prev)) & mask
+        m = is_start.to(tl.int32)
+
+        # exclusive prefix count within the row = destination slot in the output.
+        incl = tl.cumsum(m, axis=0)
+        dest = running_count + incl - m
+        tl.store(
+            CuSeqlens_ptr + dest,
+            cols.to(CuSeqlens_ptr.dtype.element_ty),
+            mask=is_start,
+        )
+
+        running_count += tl.sum(m, axis=0)
+
+    # append the flattened length as the closing edge, then record the count.
+    tl.store(
+        CuSeqlens_ptr + running_count + tl.arange(0, 1),
+        tl.full((1,), total, CuSeqlens_ptr.dtype.element_ty),
+    )
+    tl.store(
+        NSeg_ptr + tl.arange(0, 1),
+        running_count.to(NSeg_ptr.dtype.element_ty),
+    )
+
+
+def cu_seqlens_triton(
+    ends_flat: Tensor, seq_len: int, keep_single_segment=False
+):
+    """Fused version of ``kimi_delta_attention.build_cu_seqlens``' core.
+
+    Args:
+        ends_flat: 1-D int tensor [batch * seq_len]; the flattened
+            ``startend_row_indices[:, 0, :, 0]`` (per-row-relative exclusive
+            document ends).
+        seq_len: row length ``s``; ``batch`` is inferred from the input length.
+        keep_single_segment: when True, return ``[0, total]`` instead of ``None``
+            for a single-segment sequence (context parallel needs a cu_seqlens).
+
+    Returns:
+        int64 cu_seqlens tensor, or ``None`` when the whole flattened sequence is
+        a single segment and ``keep_single_segment`` is False.
+    """
+    assert ends_flat.ndim == 1, "expect 1-D flattened ends [batch * seq_len]"
+    (total,) = ends_flat.shape
+    assert total % seq_len == 0, "ends length must be a multiple of seq_len"
+
+    x = ends_flat.astype("int32")
+    if not x.is_contiguous():
+        x = x.contiguous()
+
+    cu_seqlens = paddle.empty([total + 1], dtype="int64")
+    n_seg = paddle.empty([1], dtype="int64")
+
+    BLOCK_N = 4096
+    grid = (1,)
+    cu_seqlens_fwd_kernel[grid](
+        x,
+        cu_seqlens,
+        n_seg,
+        total,
+        int(seq_len),
+        BLOCK_N=BLOCK_N,
+        num_warps=8,
+    )
+
+    # data-dependent length; syncs like the original paddle.nonzero path.
+    k = int(n_seg)
+    cu_seqlens = cu_seqlens[: k + 1]
+    if cu_seqlens.shape[0] <= 2 and not keep_single_segment:
+        return None
+    return cu_seqlens
+
+
+@triton.jit
 def cutoff_compact_kernel(
     PosInDoc_ptr,  # pos_in_doc [seq_len]
     DocLen_ptr,  # doc_len_per_pos [seq_len]
