@@ -566,6 +566,60 @@ class TestHybridMLAConfig(unittest.TestCase):
                     config.dsa_indexer_use_sparse_loss, sparse_loss
                 )
 
+    def test_indexer_init_from_scratch_is_rejected_for_the_sparse_phase(self):
+        """A from-scratch Indexer is only legal for the warmup phase.
+
+        ``indexer_init_from_scratch=True`` makes ``_gen_aoa_config`` emit the
+        ``_ -> key`` add primitive, and that primitive ignores a checkpoint
+        tensor of the same name rather than preferring it
+        (``aoa_engine.py:581-586`` routes it into ``need_add_output_vars``,
+        ``:685-686`` sets ``output_vars[key] = None``, ``:715-720`` returns no
+        source slices). The sparse phase always resumes a warmup checkpoint,
+        which does hold trained Indexer weights, so the pair would throw the
+        whole warmup phase away and report nothing louder than an "Unexpected
+        keys" warning. Rejecting it in ``__post_init__`` is the only place that
+        can fail *before* a weight is loaded.
+
+        The two legal combinations must still build, otherwise this would just
+        be forbidding the field.
+        """
+        with self.assertRaisesRegex(ValueError, "is not a valid phase"):
+            TransformerConfig(
+                **self._mqa_dsa_kwargs(
+                    dsa_indexer_use_sparse_loss=True,
+                    indexer_init_from_scratch=True,
+                )
+            )
+        legal = (
+            # warmup: the phase-1 checkpoint has no Indexer at all
+            (False, True),
+            # sparse phase resuming a warmup checkpoint that has one
+            (True, False),
+        )
+        for sparse_loss, scratch in legal:
+            with self.subTest(sparse_loss=sparse_loss, scratch=scratch):
+                config = TransformerConfig(
+                    **self._mqa_dsa_kwargs(
+                        dsa_indexer_use_sparse_loss=sparse_loss,
+                        indexer_init_from_scratch=scratch,
+                        dsa_indexer_loss_coeff=0.01,
+                    )
+                )
+                self.assertEqual(config.indexer_init_from_scratch, scratch)
+                self.assertEqual(
+                    config.dsa_indexer_use_sparse_loss, sparse_loss
+                )
+        # ``"mha"`` builds no Indexer, so neither field means anything there and
+        # the pair must not be policed.
+        config = TransformerConfig(
+            **self._kwargs(
+                hybrid_mla_attention="mha",
+                dsa_indexer_use_sparse_loss=True,
+                indexer_init_from_scratch=True,
+            )
+        )
+        self.assertEqual(config.indexer_init_from_scratch, True)
+
     def test_renamed_config_keys_are_rejected_not_absorbed(self):
         """A stale config key must fail loudly instead of turning into a no-op.
 

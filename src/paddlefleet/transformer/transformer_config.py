@@ -1181,6 +1181,12 @@ class TransformerConfig(ModelParallelConfig):
       it does contain Indexer weights, and re-initializing them would
       **silently** throw away all Indexer training done so far.
 
+    Because ``True`` is the destructive direction, it is rejected outright for
+    the sparse phase (``dsa_indexer_use_sparse_loss=True``, i.e. phase 3/4):
+    that phase always continues a warmup checkpoint, which does hold trained
+    Indexer weights, and the add primitive would drop them. ``__post_init__``
+    raises rather than letting the run start.
+
     The flag is only read by the model's ``_gen_aoa_config``, which only runs on the
     HF-loading path. There it is **mandatory**: leaving it ``None`` raises, because
     which checkpoint a run starts from is a deliberate decision and must not be
@@ -1709,6 +1715,32 @@ class TransformerConfig(ModelParallelConfig):
                     "production warmup phase pairs it with "
                     "train_indexer_only=True; the sparse training phase pairs "
                     "dsa_indexer_use_sparse_loss=True with a trainable backbone."
+                )
+            if (
+                self.dsa_indexer_use_sparse_loss
+                and self.indexer_init_from_scratch
+            ):
+                # The sparse phase always continues a warmup checkpoint, which
+                # does contain trained Indexer tensors. Asking for a
+                # from-scratch Indexer there makes ``_gen_aoa_config`` emit the
+                # ``_ -> key`` add primitive, and that primitive *ignores* a
+                # checkpoint tensor of the same name instead of preferring it,
+                # so the whole warmup phase is thrown away with nothing louder
+                # than an "Unexpected keys" warning. Starting the sparse phase
+                # from a checkpoint that has no Indexer at all is not a
+                # supported configuration either: attention consumes the
+                # Indexer's ranking there, so a random Indexer means attending
+                # to random columns -- that is precisely what the warmup phase
+                # exists to prevent. Fail here, before any weight is loaded.
+                raise ValueError(
+                    "indexer_init_from_scratch=True with "
+                    "dsa_indexer_use_sparse_loss=True is not a valid phase. "
+                    "The sparse phase resumes the warmup checkpoint, which "
+                    "already holds trained Indexer weights, and the HF-loading "
+                    "add primitive would silently discard them. Set "
+                    "indexer_init_from_scratch=False; only the warmup phase "
+                    "(dsa_indexer_use_sparse_loss=False), which starts from a "
+                    "checkpoint with no Indexer at all, may set it True."
                 )
 
         # DSv4 Hybrid Attention validation

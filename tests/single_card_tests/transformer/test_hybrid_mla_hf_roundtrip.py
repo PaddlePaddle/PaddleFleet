@@ -42,16 +42,21 @@ continuation story:
    ``"mqa_dsa"`` module succeeds with ``True`` (the ``_ -> key`` add primitive)
    and raises with ``False``. The failure mode of a mis-set switch must be an
    exception, not a zero-initialised indexer.
-4. **The ``_ -> key`` primitive discards a checkpoint tensor of the same name.**
-   ``aoa_engine.py:581-586`` routes ``_ -> key`` into ``need_add_output_vars``;
-   ``:685-686`` then sets ``output_vars[key] = None`` and ``:715-720`` returns no
-   source slices, so the destination keeps whatever the freshly built module
-   held. Leaving ``indexer_init_from_scratch: true`` in the YAML when restarting
-   phase 3 from a phase-2 checkpoint therefore throws away the trained indexer,
-   reported only as a generic "Unexpected keys" warning
-   (``load_state_dict.py:325-327``) whose text is wrong -- the keys *are* in the
-   model state dict. The current behaviour is pinned as a documented hazard, and
-   the behaviour we would want is a companion ``expectedFailure``.
+4. **A trained indexer on disk comes back, and the configuration that would
+   have dropped it no longer exists.** ``aoa_engine.py:581-586`` routes
+   ``_ -> key`` into ``need_add_output_vars``; ``:685-686`` then sets
+   ``output_vars[key] = None`` and ``:715-720`` returns no source slices, so for
+   such a key the destination keeps whatever the freshly built module held --
+   announced only as a generic "Unexpected keys" warning
+   (``load_state_dict.py:325-327``) whose text is wrong, because those keys *are*
+   in the model state dict. Leaving ``indexer_init_from_scratch: true`` in the
+   YAML when restarting phase 3 from a phase-2 checkpoint would therefore have
+   discarded the indexer that phase 2 just trained. That pair is now rejected in
+   ``TransformerConfig.__post_init__`` (``dsa_indexer_use_sparse_loss=True`` with
+   ``indexer_init_from_scratch=True``), before a single weight is read, so what
+   is pinned here is the positive contract: the sparse phase restores every
+   saved tensor bit-exactly, and the discarding combination is unreachable by
+   construction rather than merely documented.
 """
 
 import unittest
@@ -519,12 +524,19 @@ class TestCrossPhaseLoad(unittest.TestCase):
 
 
 @_requires_cuda
-class TestAddPrimitiveDiscardsTrainedIndexer(unittest.TestCase):
-    """Q4: ``_ -> key`` drops a checkpoint tensor of the same name.
+class TestSparsePhaseRestoresTheTrainedIndexer(unittest.TestCase):
+    """Q4: resuming the sparse phase brings the trained indexer back.
 
-    This is the phase-2 -> phase-3 restart footgun: the YAML that produced the
-    checkpoint has ``indexer_init_from_scratch: true``, and re-using it to
-    resume silently re-initialises the indexer it just trained.
+    The phase-2 -> phase-3 restart used to have a footgun: re-using the phase-2
+    YAML kept ``indexer_init_from_scratch: true``, whose ``_ -> key`` primitive
+    ignores the checkpoint tensor of the same name, so the indexer that phase 2
+    had just trained was silently re-initialised. That pair
+    (``dsa_indexer_use_sparse_loss=True`` with ``indexer_init_from_scratch=True``)
+    is rejected in ``TransformerConfig.__post_init__`` now -- see
+    ``test_mqa_latent_attention.py``
+    ``::test_indexer_init_from_scratch_is_rejected_for_the_sparse_phase``, which
+    needs no parent repo and therefore also runs in upstream CI -- so the only
+    configuration that can reach this load path is the one asserted below.
     """
 
     def _full_ckpt_then_load(self, tmp, init_from_scratch):
@@ -551,53 +563,19 @@ class TestAddPrimitiveDiscardsTrainedIndexer(unittest.TestCase):
         _load_hf(dst, _filter(forward, keys, fleet_on_left=False), path)
         return src, dst, own
 
-    def test_documented_hazard_scratch_true_discards_the_saved_indexer(self):
-        with TemporaryDirectory() as tmp:
-            src, dst, own = self._full_ckpt_then_load(tmp, True)
-        after = dst.state_dict()
-        # Not loaded: still bit-identical to what this module built itself ...
-        self.assertEqual(_diff_keys(after, own), [])
-        # ... and still different from the trained values on disk.
-        self.assertEqual(
-            sorted(
-                _diff_keys(
-                    after, {k: src.state_dict()[k] for k in _INDEXER_KEYS}
-                )
-            ),
-            sorted(_INDEXER_RANDOM_KEYS),
-        )
-        # Everything outside the indexer did load, so the discard is specific
-        # to the add primitive rather than a broken load.
-        backbone = {
-            k: v for k, v in src.state_dict().items() if "indexer" not in k
-        }
-        self.assertEqual(_diff_keys(after, backbone), [])
-
-    def test_scratch_false_loads_the_saved_indexer(self):
-        with TemporaryDirectory() as tmp:
-            src, dst, _ = self._full_ckpt_then_load(tmp, False)
-        self.assertEqual(_diff_keys(dst.state_dict(), src.state_dict()), [])
-
-    @unittest.expectedFailure
-    def test_add_primitive_should_not_discard_an_existing_checkpoint_tensor(
-        self,
-    ):
-        """The behaviour we would want: ``_ -> key`` means "initialise this if
-        the checkpoint has nothing", not "ignore what the checkpoint has".
-        Either the engine should prefer the checkpoint tensor, or
-        ``_gen_aoa_config`` should emit the add primitive only for keys absent
-        from the checkpoint. Pinned as an expected failure so that fixing it
-        turns this file red instead of leaving the hazard test as the only
-        record.
+    def test_the_sparse_phase_recovers_every_saved_tensor(self):
+        """``indexer_init_from_scratch=False`` -- the only setting the sparse
+        phase is allowed to run with -- restores the whole layer, indexer
+        included, bit for bit.
         """
         with TemporaryDirectory() as tmp:
-            src, dst, _ = self._full_ckpt_then_load(tmp, True)
+            src, dst, own = self._full_ckpt_then_load(tmp, False)
+        after = dst.state_dict()
+        self.assertEqual(_diff_keys(after, src.state_dict()), [])
+        # The indexer specifically moved off the values this module built for
+        # itself, so the equality above is a load and not a coincidence.
         self.assertEqual(
-            _diff_keys(
-                dst.state_dict(),
-                {k: src.state_dict()[k] for k in _INDEXER_KEYS},
-            ),
-            [],
+            sorted(_diff_keys(after, own)), sorted(_INDEXER_RANDOM_KEYS)
         )
 
 
