@@ -54,6 +54,8 @@ Coverage:
      silent default.
 """
 
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 
@@ -166,6 +168,109 @@ class TestMQAGuards(unittest.TestCase):
             self.module.softmax_scale, K_CHANNELS**-0.5, places=12
         )
         self.assertAlmostEqual(self.module.softmax_scale, 0.0625, places=12)
+
+    def test_pad_token_id_none_rejected(self):
+        # A ``None`` ``pad_token_id`` would compare every token against None,
+        # marking the whole batch valid and silently changing the indexer loss
+        # denominator. Must raise, and must not be an ``assert`` (see
+        # ``TestValidationSurvivesOptimizedMode``).
+        fake = SimpleNamespace(
+            config=SimpleNamespace(pad_token_id=None), cp_enabled=False
+        )
+        with self.assertRaisesRegex(ValueError, "pad_token_id must be set"):
+            MQALatentAttention._indexer_loss_mask(
+                fake, paddle.zeros([1, 4], dtype="int64"), 1, 4
+            )
+
+    def test_attn_sink_wrong_head_count_rejected(self):
+        # The sparse kernel fixes ``h_q`` at 64 and zero-pads shorter head
+        # dims, so a wrong-length sink is not caught downstream -- it would be
+        # padded and consumed as if valid. The check fires before any kernel
+        # launch, so no SM10.x device is required.
+        from paddlefleet.fusions.mqa_sparse_attn import mqa_sparse_attn
+
+        with self.assertRaisesRegex(ValueError, "attn_sink must be"):
+            mqa_sparse_attn(
+                paddle.zeros([1, 2, 4, DK]),
+                paddle.zeros([1, 2, DK]),
+                paddle.zeros([1, 2, 4], dtype="int32"),
+                0.0625,
+                DV,
+                attn_sink=paddle.zeros([5]),
+            )
+
+
+class TestValidationSurvivesOptimizedMode(unittest.TestCase):
+    """The two public-entry validations must be real ``raise`` statements.
+
+    ``python -O`` strips ``assert``, so an ``assert``-based check is no check at
+    all in an optimized deployment: a wrong-length ``attn_sink`` would be
+    zero-padded into the fixed 64-head CUDA kernel and a ``None``
+    ``pad_token_id`` would mark every row valid. Both checks fire before any
+    kernel launch, so no SM10.x device is required.
+    """
+
+    _SCRIPT = """
+import sys
+from types import SimpleNamespace
+
+import paddle
+
+if sys.flags.optimize < 1:
+    print("NOT_OPTIMIZED")
+    sys.exit(3)
+
+from paddlefleet.fusions.mqa_sparse_attn import mqa_sparse_attn
+from paddlefleet.transformer.mqa_latent_attention import MQALatentAttention
+
+try:
+    mqa_sparse_attn(
+        paddle.zeros([1, 2, 4, 576]),
+        paddle.zeros([1, 2, 576]),
+        paddle.zeros([1, 2, 4], dtype="int32"),
+        0.0625,
+        512,
+        attn_sink=paddle.zeros([5]),
+    )
+except ValueError as exc:
+    if "attn_sink must be" not in str(exc):
+        print("BAD_SINK_MESSAGE", exc)
+        sys.exit(4)
+else:
+    print("SINK_CHECK_STRIPPED")
+    sys.exit(5)
+
+fake = SimpleNamespace(
+    config=SimpleNamespace(pad_token_id=None), cp_enabled=False
+)
+try:
+    MQALatentAttention._indexer_loss_mask(
+        fake, paddle.zeros([1, 4], dtype="int64"), 1, 4
+    )
+except ValueError as exc:
+    if "pad_token_id must be set" not in str(exc):
+        print("BAD_PAD_MESSAGE", exc)
+        sys.exit(6)
+else:
+    print("PAD_CHECK_STRIPPED")
+    sys.exit(7)
+
+print("OK")
+"""
+
+    def test_both_validations_still_raise(self):
+        proc = subprocess.run(
+            [sys.executable, "-O", "-c", self._SCRIPT],
+            capture_output=True,
+            text=True,
+            timeout=1200,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}",
+        )
+        self.assertIn("OK", proc.stdout)
 
 
 class TestMQAIndexRanges(unittest.TestCase):
@@ -984,6 +1089,47 @@ class TestMQADSA(unittest.TestCase):
         # The backbone must keep flowing with the sink enabled.
         self.assertIsNotNone(query.grad)
         self.assertTrue(bool(paddle.isfinite(query.grad.cast("float32")).all()))
+
+    def test_sink_grad_dtype_follows_the_forward_input(self):
+        """``d_sink`` comes back in the dtype the caller passed in.
+
+        The analytic sink gradient is derived in fp32 (the kernels' compute
+        dtype), but a PyLayer must hand each input's gradient back in that
+        input's dtype -- an fp32 grad on a bf16 parameter breaks accumulation
+        and the optimizer's master-weight path. This drives the shared PyLayer
+        directly so the assertion is on the layer contract, not on whatever
+        paddle's parameter-grad plumbing happens to coerce.
+        """
+        from paddlefleet.fusions.mqa_sparse_attn import mqa_sparse_attn
+
+        b, s, h = 1, WINDOW, H
+        rng = np.random.RandomState(0)
+        cols = np.full([b, s, WINDOW], -1, dtype=np.int32)
+        for i in range(s):
+            cols[0, i, : i + 1] = np.arange(i + 1, dtype=np.int32)
+        token_indices = paddle.to_tensor(cols)
+        for dtype in ("bfloat16", "float32"):
+            with self.subTest(sink_dtype=dtype):
+                query = paddle.to_tensor(
+                    rng.randn(b, s, h, DK).astype("float32") * 0.1
+                ).cast("bfloat16")
+                kv = paddle.to_tensor(
+                    rng.randn(b, s, DK).astype("float32") * 0.1
+                ).cast("bfloat16")
+                sink = paddle.to_tensor(
+                    np.linspace(1.0, 3.0, h).astype("float32")
+                ).cast(dtype)
+                sink.stop_gradient = False
+                out = mqa_sparse_attn(
+                    query, kv, token_indices, K_CHANNELS**-0.5, DV, sink
+                )
+                out.cast("float32").sum().backward()
+                self.assertIsNotNone(sink.grad)
+                self.assertEqual(sink.grad.dtype, sink.dtype)
+                self.assertEqual(list(sink.grad.shape), [h])
+                self.assertGreater(
+                    float(sink.grad.astype("float32").abs().max()), 0.0
+                )
 
 
 @_GPU

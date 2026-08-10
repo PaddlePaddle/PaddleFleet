@@ -963,9 +963,14 @@ class MQALatentAttention(FleetLayer):
         if input_ids is None:
             return None, None
         pad_token_id = getattr(self.config, "pad_token_id", 0)
-        assert pad_token_id is not None, (
-            "pad_token_id must be set in config when input_ids is provided"
-        )
+        # Explicit raise, not ``assert``: this validates a user-supplied config
+        # field and must survive ``python -O`` (which strips asserts). A None
+        # ``pad_token_id`` would silently compare every token against None and
+        # mark the whole batch valid.
+        if pad_token_id is None:
+            raise ValueError(
+                "pad_token_id must be set in config when input_ids is provided"
+            )
         if self.cp_enabled:
             if not getattr(self.config, "experimental_dataflow", False):
                 input_ids = ContextParallelGatherOp.apply(

@@ -106,9 +106,13 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         if attn_sink is None:
             sink = paddle.full([_DSA_HEADS], _NEG_SINK, dtype="float32")
         else:
-            assert list(attn_sink.shape) == [h], (
-                f"attn_sink must be [num_heads={h}]; got {attn_sink.shape}"
-            )
+            if list(attn_sink.shape) != [h]:
+                raise ValueError(
+                    f"attn_sink must be [num_heads={h}]; got {attn_sink.shape}"
+                )
+            # The gradient handed back must carry the dtype the caller passed in
+            # (bf16 under AMP), not the float32 the kernels compute in.
+            ctx.attn_sink_dtype = attn_sink.dtype
             sink_real = attn_sink.cast("float32")
             if h < _DSA_HEADS:
                 sink_pad = paddle.full(
@@ -284,7 +288,10 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             lse_full = paddle.logaddexp(lse_h, sink_real)
             p_sink = paddle.exp(sink_real - lse_full)  # [b, s, h]
             d_attn_sink = (-(delta * p_sink).sum(axis=[0, 1])).contiguous()
-            d_attn_sink = d_attn_sink.cast("float32")
+            # Match the dtype of the ``attn_sink`` the forward received, the way
+            # ``csa_sparse_attn.py`` does; a float32 grad on a bf16 parameter
+            # breaks the PyLayer contract and the optimizer's master-weight path.
+            d_attn_sink = d_attn_sink.cast(ctx.attn_sink_dtype)
 
         # One returned grad per **tensor** input, in order. Non-tensor inputs
         # (sm_scale, d_v) occupy no slot. ``attn_sink`` occupies a slot only when
