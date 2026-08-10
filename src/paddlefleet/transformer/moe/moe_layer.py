@@ -44,12 +44,17 @@ from paddlefleet.recompute_utils import need_recompute_in_first_n
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
-from .fused_a2a import configure_buffer
+from .fused_a2a import configure_buffer, get_teramoe_buffer
 from .fusion_layer_utils import (
     FusionMoePyLayer,
     HybridEPMoePyLayer,
 )
-from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
+from .moe_expert import (
+    GroupedMLPExpert,
+    SonicMoEExpert,
+    StandardMLPExpert,
+    TeraMoEExpert,
+)
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
@@ -178,6 +183,7 @@ class MoELayer(nn.Layer):
         self.use_ue8m0 = config.use_ue8m0
         self.dw_p2p_overlap = getattr(config, "dw_p2p_overlap", False)
         self.using_sonic_moe = self.config.using_sonic_moe
+        self.using_teramoe = getattr(self.config, "using_teramoe", False)
         self.fp8_dispatch = bool(config.fp8)
         self.fp8_wgrad = config.fp8_wgrad
         self.fp8_dispatch_bwd = (
@@ -192,6 +198,24 @@ class MoELayer(nn.Layer):
                 paddlefleet_ops.blocked_import_messages[
                     "paddlefleet_ops.sonicmoe"
                 ]
+            )
+        if self.using_teramoe:
+            assert paddlefleet_ops.is_teramoe_available(), (
+                paddlefleet_ops.blocked_import_messages[
+                    "paddlefleet_ops.teramoe"
+                ]
+            )
+            self.teramoe_dispatch_sms = getattr(
+                config, "teramoe_dispatch_sms", 48
+            )
+            self.teramoe_combine_sms = getattr(
+                config, "teramoe_combine_sms", 48
+            )
+            self.teramoe_compute_batch_size = getattr(
+                config, "teramoe_compute_batch_size", 4096
+            )
+            self.teramoe_combine_start_percent = getattr(
+                config, "teramoe_combine_start_percent", 70
             )
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_deep_gemm = config.moe_deep_gemm
@@ -349,11 +373,16 @@ class MoELayer(nn.Layer):
             and self.moe_expert_fusion
             and self.moe_deep_gemm is False
             and self.using_sonic_moe is False
+            and self.using_teramoe is False
         ):
             use_fused_weight = False
         if self.using_sonic_moe:
             assert use_fused_weight is True, (
                 "for sonic moe, expert weight must be fused."
+            )
+        if self.using_teramoe:
+            assert use_fused_weight is True, (
+                "for teramoe, expert weight must be fused."
             )
 
         if use_fused_weight:
@@ -372,6 +401,13 @@ class MoELayer(nn.Layer):
                         self.moe_intermediate_size
                         // self.expert_model_parallel_size
                     ),
+                )
+            elif self.using_teramoe:
+                self.grouped_gemm_experts = TeraMoEExpert(
+                    self.num_local_experts,
+                    self.num_experts_per_tok,
+                    routed_expert_config,
+                    pg_collection,
                 )
             elif self.using_sonic_moe:
                 # TODO: replace grouped_gemm_experts with fusion_experts
@@ -910,6 +946,25 @@ class MoELayer(nn.Layer):
 
         return hidden_states
 
+    def teramoe_forward(
+        self,
+        hidden_states: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
+    ):
+        hidden_states = self._project_to_latent(hidden_states)
+
+        # TeraMoE: fused dispatch+compute+combine in one persistent kernel.
+        hidden_states = self._run_teramoe_forward(
+            hidden_states,
+            topk_weights,
+            topk_indices,
+        )
+        # Latent MoE: project back from latent space to hidden_size
+        if self.use_latent_moe:
+            hidden_states = self.fc2_latent_proj(hidden_states)
+        return hidden_states
+
     def fusion_moe_forward(
         self,
         hidden_states: paddle.Tensor,
@@ -1000,6 +1055,31 @@ class MoELayer(nn.Layer):
             hidden_states = self.fc2_latent_proj(hidden_states)
 
         return hidden_states
+
+    def _run_teramoe_forward(self, hidden_states, topk_weights, topk_indices):
+        """Run TeraMoE fused forward: dispatch + compute + combine in one kernel.
+
+        Args:
+            hidden_states: [num_tokens, hidden_size] input tokens
+            topk_weights: [num_tokens, topk] routing weights
+            topk_indices: [num_tokens, topk] expert indices
+
+        Returns:
+            output: [num_tokens, hidden_size]
+        """
+        buffer = get_teramoe_buffer(self.moe_group, self.teramoe_dispatch_sms)
+        output = self.grouped_gemm_experts(
+            hidden_states,
+            topk_indices,
+            topk_weights,
+            self.num_experts,
+            buffer,
+            num_dispatch_sms=self.teramoe_dispatch_sms,
+            num_combine_sms=self.teramoe_combine_sms,
+            compute_batch_size=self.teramoe_compute_batch_size,
+            combine_start_head_percent=self.teramoe_combine_start_percent,
+        )
+        return output
 
     def compute_gate(
         self, hidden_states, input_ids=None, origin_input_ids=None
@@ -1272,6 +1352,7 @@ class MoELayer(nn.Layer):
             and self.moe_shared_expert_overlap
             and self.moe_use_fusion_node
             and self.expert_model_parallel_size > 1
+            and not self.using_teramoe
         ):
             combine_overlap_handle = {
                 "fn": self.shared_experts,
@@ -1282,7 +1363,13 @@ class MoELayer(nn.Layer):
 
         expert_input = self._prepare_expert_input(hidden_states, residual)
         if self.expert_model_parallel_size > 1:
-            if self.moe_use_fusion_node:
+            if self.using_teramoe:
+                output = self.teramoe_forward(
+                    expert_input,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
+                )
+            elif self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
                     expert_input,
                     probs,
@@ -1430,7 +1517,23 @@ class MoELayer(nn.Layer):
             weights, indices = paddle.topk(masked_probs, k=topk, axis=-1)
             return indices, weights
 
-        if self.using_sonic_moe:
+        if self.using_teramoe:
+            buffer = get_teramoe_buffer(
+                self.moe_group, self.teramoe_dispatch_sms
+            )
+            final_hidden_states = self.grouped_gemm_experts(
+                hidden_states,
+                topk_indices,
+                topk_weights,
+                self.num_experts,
+                buffer,
+                num_dispatch_sms=self.teramoe_dispatch_sms,
+                num_combine_sms=self.teramoe_combine_sms,
+                compute_batch_size=self.teramoe_compute_batch_size,
+                combine_start_head_percent=self.teramoe_combine_start_percent,
+            )
+            return final_hidden_states.cast(hidden_states.dtype)
+        elif self.using_sonic_moe:
             use_fp8 = self.fp8 is not None
             final_hidden_states = self.grouped_gemm_experts(
                 hidden_states,

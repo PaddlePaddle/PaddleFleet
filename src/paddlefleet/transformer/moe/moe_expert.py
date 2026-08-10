@@ -665,6 +665,48 @@ class SonicMoEExpert(GroupedMLPExpert):
         return super().sharded_state_dict(structured_name_prefix)
 
 
+class TeraMoEExpert(SonicMoEExpert):
+    """TeraMoE expert — reuses SonicMoE's weight layout transformations.
+
+    Weight layout is identical to SonicMoE (sonic layout):
+    - weight1 (W_gateup): [E, 2*I, H], gate/up interleaved
+    - weight2 (W_down):   [E, H, I]
+
+    forward() converts to sonic layout then calls buffer.teramoe_autograd()
+    which fuses dispatch + compute + combine into a single persistent kernel.
+    optimizer step() flushes back to grouped layout (same as SonicMoE).
+    """
+
+    def forward(
+        self,
+        hidden_states,
+        topk_indices,
+        topk_scores,
+        num_experts,
+        buffer,
+        **kwargs,
+    ):
+        self.convert_weights_to_sonic_layout()
+        # weight1: [E, 2*I, H] = TeraMoE W_gateup
+        # weight2: [E, H, I]   = TeraMoE W_down
+        # TeraMoE C++ kernel expects 2D input [num_tokens, hidden_size]
+        orig_shape = hidden_states.shape
+        if hidden_states.ndim == 3:
+            hidden_states = hidden_states.reshape([-1, orig_shape[-1]])
+        output = buffer.teramoe_autograd(
+            hidden_states,
+            topk_indices,
+            topk_scores,
+            self.weight1,
+            self.weight2,
+            num_experts,
+            **kwargs,
+        )
+        if len(orig_shape) == 3:
+            output = output.reshape([*orig_shape[:2], output.shape[-1]])
+        return output
+
+
 class StandardMLPExpert(MLP):
     def __init__(
         self,

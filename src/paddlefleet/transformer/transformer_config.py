@@ -754,6 +754,24 @@ class TransformerConfig(ModelParallelConfig):
     """When using_sonic_moe is enabled, the computation part of the moelayer will use the implementation provided by SonicMoE."""
 
     ####################
+    # TeraMoE
+    ####################
+    using_teramoe: bool = False
+    """When enabled, MoE layer uses TeraMoE fused persistent kernel (dispatch+compute+combine in one kernel)."""
+
+    teramoe_dispatch_sms: int = 48
+    """Number of SMs allocated for TeraMoE dispatch phase."""
+
+    teramoe_combine_sms: int = 48
+    """Number of SMs allocated for TeraMoE combine phase."""
+
+    teramoe_compute_batch_size: int = 4096
+    """Batch size for TeraMoE compute phase. Must be one of (1024, 2048, 4096)."""
+
+    teramoe_combine_start_percent: int = 70
+    """Percentage threshold at which TeraMoE starts the combine phase. Range [0, 100]."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.

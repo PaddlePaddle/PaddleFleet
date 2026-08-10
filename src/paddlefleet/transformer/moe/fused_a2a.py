@@ -24,6 +24,7 @@ from paddlefleet_ops import (
     is_deep_ep_available,
     is_hybrid_ep_available,
     is_sonic_moe_available,
+    is_teramoe_available,
 )
 
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
@@ -59,8 +60,16 @@ else:
     quantize_activation_blockscaled_fast = None
     HAVE_SONIC_MOE = False
 
+if is_teramoe_available():
+    from paddlefleet_ops import teramoe
+
+    HAVE_TERAMOE = True
+else:
+    HAVE_TERAMOE = False
+
 _buffer = None
 _hybrid_ep_buffer = None
+_teramoe_buffer = None
 
 # HybridEP dispatch/combine kernels use 128-token chunks to align with default
 # NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API and NUM_OF_TOKENS_PER_CHUNK_COMBINE_API
@@ -185,6 +194,28 @@ def reset_hybrid_ep_buffer():
     global _hybrid_ep_buffer
 
     _hybrid_ep_buffer = None
+
+
+def get_teramoe_buffer(group, num_sms):
+    """Get or create a TeraMoE buffer for fused dispatch+compute+combine.
+
+    Args:
+        group: Process group for communication
+        num_sms: Number of QPs per rank (typically matches total SMs)
+
+    Returns:
+        teramoe.Buffer: TeraMoE communication buffer
+    """
+    global _teramoe_buffer
+    if _teramoe_buffer is None or _teramoe_buffer.group != group:
+        _teramoe_buffer = teramoe.Buffer(
+            group,
+            num_nvl_bytes=int(2e9),
+            num_rdma_bytes=int(1e9),
+            num_qps_per_rank=num_sms,
+            explicitly_destroy=True,
+        )
+    return _teramoe_buffer
 
 
 def _need_new_hybrid_ep_buffer(

@@ -230,6 +230,7 @@ _DEEP_GEMM_AVAILABLE = False
 _DEEP_EP_AVAILABLE = False
 _HYBRID_EP_AVAILABLE = False
 _SONIC_MOE_AVAILABLE = False
+_TERAMOE_AVAILABLE = False
 _FLASH_MLA_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
 _CUDNN_FRONTEND_AVAILABLE = False
@@ -250,6 +251,7 @@ if paddle.is_compiled_with_cuda():
         and _cuda_version >= (12, 9)
     ):
         _SONIC_MOE_AVAILABLE = True
+        _TERAMOE_AVAILABLE = True
     if sys.version_info >= (3, 12):
         _CUDNN_FRONTEND_AVAILABLE = True
     _FAST_HADAMARD_TRANSFORM_AVAILABLE = True
@@ -272,6 +274,10 @@ def is_hybrid_ep_available():
 
 def is_sonic_moe_available():
     return _SONIC_MOE_AVAILABLE
+
+
+def is_teramoe_available():
+    return _TERAMOE_AVAILABLE
 
 
 def is_flash_mla_available():
@@ -393,6 +399,19 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.sonicmoe"] = error
+
+    if is_teramoe_available():
+        with paddle.use_compat_guard(
+            enable=True, scope={"teramoe"}, silent=True
+        ):
+            _safe_load_ecosystem_lib("teramoe", ops_dir, globals())
+    else:
+        warning, error = _sonic_moe_requirement(
+            "paddlefleet_ops.teramoe",
+            hint="TeraMoE requires Blackwell (SM100+) GPU, CUDA >= 12.9, and Python >= 3.12.",
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet_ops.teramoe"] = error
 
     if is_flash_mla_available():
         paddle.enable_compat(scope={"flash_mla"}, silent=True)
