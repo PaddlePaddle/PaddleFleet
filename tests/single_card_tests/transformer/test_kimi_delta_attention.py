@@ -468,7 +468,7 @@ class TestKimiDeltaAttention(unittest.TestCase):
         """KDA short convolution uses the official SiLU, not hidden_act."""
         kda = _build_kda(hidden_act=F.relu)
         self.assertFalse(hasattr(kda, "act_fn"))
-        self.assertEqual(kda.activation, "silu")
+        self.assertFalse(hasattr(kda, "activation"))
         x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
 
         with patch.object(kda_mod.F, "silu", wraps=kda_mod.F.silu) as mock_silu:
@@ -482,24 +482,40 @@ class TestKimiDeltaAttention(unittest.TestCase):
     def test_fused_sigmoid_gated_norm_contract(self):
         """Output gating delegates to FLA RMSNorm with sigmoid and Fleet eps."""
         kda = _build_kda(deterministic_mode=False)
-        x = paddle.randn(
+        hidden_states = paddle.randn(
+            [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
+        )
+        core_attn_out = paddle.randn(
             [MICRO_BATCH_SIZE, SEQ_LENGTH, NUM_VALUE_HEADS, VALUE_HEAD_DIM]
         )
-        gate = paddle.randn(x.shape)
         fused_shape = [
             MICRO_BATCH_SIZE * SEQ_LENGTH * NUM_VALUE_HEADS,
             VALUE_HEAD_DIM,
         ]
         expected = paddle.randn(fused_shape)
 
-        with patch.object(
-            kda_mod,
-            "rms_norm_gated",
-            return_value=expected,
-        ) as mock_rms_norm_gated:
-            actual = kda._apply_fused_gated_norm(x, gate)
+        with (
+            patch.object(
+                kda_mod,
+                "causal_conv1d",
+                side_effect=lambda x, **kwargs: (x, None),
+            ),
+            patch.object(
+                kda_mod,
+                "chunk_kda",
+                return_value=(core_attn_out, None),
+            ),
+            patch.object(
+                kda_mod,
+                "rms_norm_gated",
+                return_value=expected,
+            ) as mock_rms_norm_gated,
+        ):
+            actual, _ = kda(hidden_states=hidden_states, attention_mask=None)
 
-        self.assertIs(actual, expected)
+        self.assertEqual(
+            list(actual.shape), [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
+        )
         args = mock_rms_norm_gated.call_args.args
         kwargs = mock_rms_norm_gated.call_args.kwargs
         self.assertEqual(list(args[0].shape), fused_shape)
@@ -537,7 +553,14 @@ class TestKimiDeltaAttention(unittest.TestCase):
                 gate_ref.stop_gradient = False
                 weight_ref.stop_gradient = False
 
-                actual = kda._apply_fused_gated_norm(x, gate).reshape(shape)
+                actual = kda_mod.rms_norm_gated(
+                    x.reshape([-1, VALUE_HEAD_DIM]),
+                    gate.reshape([-1, VALUE_HEAD_DIM]),
+                    kda.out_norm.weight,
+                    None,
+                    activation="sigmoid",
+                    eps=kda.config.rms_norm_eps,
+                ).reshape(shape)
                 x_ref_fp32 = x_ref.astype("float32")
                 expected = x_ref_fp32 * paddle.rsqrt(
                     x_ref_fp32.square().mean(axis=-1, keepdim=True)

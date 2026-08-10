@@ -272,9 +272,6 @@ class KimiDeltaAttention(FleetLayer):
 
         # Attributes from config
         self.hidden_size = config.hidden_size
-        # KDA short convolution is SiLU by architecture, independently of the
-        # decoder MLP activation configured through hidden_act.
-        self.activation = "silu"
         self.conv_kernel_dim = conv_kernel_dim
         self.key_head_dim = key_head_dim
         self.value_head_dim = value_head_dim
@@ -664,7 +661,7 @@ class KimiDeltaAttention(FleetLayer):
                 qkv.contiguous(),
                 weight=self.conv1d.weight.squeeze(1),
                 bias=self.conv1d.bias,
-                activation=self.activation,
+                activation="silu",
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
                 cp_context=cp_context,
@@ -736,7 +733,14 @@ class KimiDeltaAttention(FleetLayer):
         # Gated norm
         nvtx_range_push(suffix="gated_norm")
         if self.use_fused_kernels:
-            norm_out = self._apply_fused_gated_norm(core_attn_out, gate)
+            norm_out = rms_norm_gated(
+                core_attn_out.reshape([-1, self.value_head_dim]),
+                gate.reshape([-1, self.value_head_dim]),
+                self.out_norm.weight,
+                None,
+                activation="sigmoid",
+                eps=self.config.rms_norm_eps,
+            )
         else:
             norm_out = self._apply_gated_norm(core_attn_out, gate)
         nvtx_range_pop(suffix="gated_norm")
@@ -754,20 +758,8 @@ class KimiDeltaAttention(FleetLayer):
         return out, out_bias
 
     @jit_fuser
-    def _apply_fused_gated_norm(self, x, gate):
-        """Official FLA fused per-head RMSNorm with a sigmoid output gate."""
-        return rms_norm_gated(
-            x.reshape([-1, self.value_head_dim]),
-            gate.reshape([-1, self.value_head_dim]),
-            self.out_norm.weight,
-            None,
-            activation="sigmoid",
-            eps=self.config.rms_norm_eps,
-        )
-
-    @jit_fuser
     def _apply_gated_norm(self, x, gate):
-        """Paddle-native per-head norm with a sigmoid output gate."""
+        """Per-head RMSNorm with a sigmoid output gate (KDA uses sigmoid, GDN silu)."""
         x_dtype = x.dtype
         x = x.reshape([-1, x.shape[-1]])
         y = self.out_norm(x)
