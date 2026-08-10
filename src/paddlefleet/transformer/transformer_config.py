@@ -1340,8 +1340,27 @@ class TransformerConfig(ModelParallelConfig):
     # Ernie Trainer Configs
     ####################
 
-    moe_logging: bool = False
+    enable_moe_logging: bool = False
     """Whether to enable MoE logging."""
+
+    enable_csa_indexer_prefetch: bool = False
+
+    disable_csa_indexer_prefetch: bool = False
+    """Disable the CSA indexer prefetch pipeline."""
+
+    csa_tilelang_indexer: bool = False
+    """Use the TileLang implementation for the CSA indexer."""
+
+    csa_indexer_prefetch_depth: int = 2
+    """Prefetch depth."""
+
+    csa_prefetch_configs: str | dict | None = None
+    """CSA prefetch configuration, either a JSON string or a dict, e.g.
+    ``{"indexer": {"stage0": {"depth": 2, "async_copy": True}}}``.
+    """
+
+    csa_dense_mode: bool = True
+    """Run CSA in dense mode."""
 
     deepep_buffer_configs: dict | None = None
     """DeepEP buffer configuration."""
@@ -1455,6 +1474,9 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.enable_csa_indexer_prefetch:
+            assert not self.disable_csa_indexer_prefetch
+            assert self.csa_indexer_prefetch_depth > 0
         if self.mtp_shared_last_layer:
             # When MTP reuses the last backbone TransformerLayer's parameters,
             # the MTP transformer block must have an identical structure to the

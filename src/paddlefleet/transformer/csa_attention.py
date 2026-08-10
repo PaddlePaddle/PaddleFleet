@@ -26,6 +26,7 @@ Components:
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import warnings
 from dataclasses import dataclass
@@ -2254,6 +2255,23 @@ class CompressedSparseAttention(FleetLayer):
         # ``min(index_topk, n_compressed)``.
         indexer_backend = getattr(
             self.config, "csa_indexer_backend", "tilelang"
+        )
+        prefetch_cfg = getattr(self.config, "csa_prefetch_configs", None)
+        if isinstance(prefetch_cfg, str):
+            prefetch_cfg = json.loads(prefetch_cfg)
+        elif prefetch_cfg is None:
+            prefetch_cfg = {}
+        prefetch_depth = (
+            prefetch_cfg.get("indexer", {})
+            .get("stage0", {})
+            .get("depth", self.config.csa_indexer_prefetch_depth)
+        )
+        if isinstance(prefetch_depth, str):
+            prefetch_depth = int(prefetch_depth.split(":")[0])
+        self._indexer_prefetch = (
+            self.config.enable_csa_indexer_prefetch
+            and not self.config.disable_csa_indexer_prefetch
+            and prefetch_depth > 0
         )
         # The indexer loss path is only active during the grad-enabled forward.
         # Full recompute runs the first forward under no_grad; that pass should
