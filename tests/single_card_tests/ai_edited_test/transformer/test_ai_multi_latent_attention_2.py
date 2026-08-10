@@ -354,6 +354,7 @@ class TestRecomputeQKVUpProjAndRope(unittest.TestCase):
             position_ids=None,
             inverse=False,
             mla_output_remove_interleaving=False,
+            apply_rope_fusion=None,
         ):
             return t
 

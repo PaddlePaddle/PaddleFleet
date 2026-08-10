@@ -436,6 +436,31 @@ class TransformerConfig(ModelParallelConfig):
     apply_rope_fusion: bool = False
     """If True, use fused RoPE kernel."""
 
+    mqa_latent_rope_fusion: bool = False
+    """If True, use the Triton rotate_half kernel for absorbed MQA's RoPE.
+
+    Independent of ``apply_rope_fusion``, which selects
+    ``fused_apply_mla_rope_for_q`` / ``_for_kv``. Those two de-interleave
+    (``mla_output_remove_interleaving=False``) and ``_for_kv`` needs the
+    per-head K/V that absorbed MQA never materialises, so they cannot serve the
+    ``non_absorbed_mqa`` layers. This flag covers exactly those layers: it routes
+    the *eager* branch's q RoPE through ``fused_apply_rope_half`` and its k RoPE
+    plus the key concat through ``fused_rope_cat_key``, both bit-exact with that
+    branch. Neither writes in place, so they stay correct when
+    ``recompute_qkv_up_porj_and_rope`` replays the closure that owns
+    ``k_pos_emb``.
+
+    Silently falls back to eager on any layer that is not absorbed MQA
+    (``mqa_latent``) -- an unabsorbed MLA layer has its own fused path via
+    ``apply_rope_fusion``. Every other incompatibility is asserted rather than
+    downgraded, matching how ``apply_rope_fusion`` handles its own
+    (multi_latent_attention.py:1723): ``multi_latent_attention``,
+    ``rotary_interleaved``, ``high_precision_rope``, ``sequence_parallel`` and
+    THD ``cu_seqlens`` each select a rotation the kernel does not implement, and
+    so are bf16 activations and fp32 freqs when mscale != 1, which the kernel
+    asserts itself.
+    """
+
     sigmoid_gate_fusion: bool = False
     """If True, use Triton fused sigmoid gate kernel."""
 
@@ -1130,6 +1155,23 @@ class TransformerConfig(ModelParallelConfig):
     Note: This field corresponds to the HuggingFace config.json field "indexer_use_sparse_loss".
     The mapping from HuggingFace field name to PaddleFleet internal field name is handled
     by TransformerConfig.transform_rules.
+    """
+
+    dsa_indexer_rope_fusion: bool = False
+    """Whether to use the fused Triton RoPE for the DSA indexer's q/k.
+
+    Independent of the model-wide ``apply_rope_fusion``, which selects the MLA
+    and HCA/CSA fused kernels. The indexer uses a third convention -- rope
+    channels first, ``rotate_half`` instead of MLA's de-interleave -- so it has
+    its own kernel (``fused_apply_rope_half``) and its own switch.
+
+    Silently falls back to the eager path when
+    ``dsa_indexer_rotary_interleaved`` or ``high_precision_rope`` is set (both
+    select a different rotation the kernel does not implement). The remaining
+    requirements are asserted by the kernel rather than silently skipped:
+    bf16 activations, and fp32 freqs when mscale != 1 (i.e. YaRN).
+
+    Bit-exact with the eager path, so it is safe to toggle mid-run.
     """
 
     dsa_indexer_rotary_interleaved: bool = False

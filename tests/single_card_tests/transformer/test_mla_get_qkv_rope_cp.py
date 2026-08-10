@@ -23,6 +23,33 @@ from paddlefleet.transformer import multi_latent_attention as mla_mod
 from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
 
 
+def _triton_rope_available():
+    """The latent-MQA fused branch calls real triton kernels, so its
+    regression test only runs where CUDA + triton are present. This is a
+    weaker gate than hybrid_mla_utils._GPU (which needs the SM100 FlashMLA /
+    cuDNN DSA kernels): fused_apply_rope_half / fused_rope_cat_key run on any
+    CUDA GPU with triton, and the branch under test never touches DSA.
+    """
+    if not paddle.is_compiled_with_cuda():
+        return False
+    try:
+        from paddlefleet.triton_ops import (  # noqa: F401
+            fused_apply_rope_half,
+            fused_rope_cat_key,
+        )
+
+        return True
+    except Exception:
+        return False
+
+
+_TRITON_GPU = unittest.skipUnless(
+    _triton_rope_available(),
+    "requires CUDA + triton fused RoPE kernels "
+    "(fused_apply_rope_half / fused_rope_cat_key)",
+)
+
+
 class _IdentityNorm:
     def __call__(self, x):
         return x
@@ -193,6 +220,7 @@ def _apply_rotary_pos_emb_identity(
     position_ids=None,
     inverse=False,
     mla_output_remove_interleaving=False,
+    apply_rope_fusion=None,
 ):
     return t
 
@@ -213,6 +241,7 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         sequence_parallel=False,
         tensor_model_parallel_size=1,
         mla_use_nope=False,
+        mqa_latent_rope_fusion=False,
     ):
         heads = 2
         qk_nope = 4
@@ -240,6 +269,15 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             apply_rope_fusion=apply_rope_fusion,
             mla_use_nope=mla_use_nope,
             gpt_model_use_experimental_version=False,
+            # Read by the fused rotate_half branch of
+            # ``get_query_key_value_tensors``.
+            mqa_latent_rope_fusion=mqa_latent_rope_fusion,
+            # Guards checked at the top of that fused branch before the triton
+            # import (multi_latent_attention.py:1934-1964); default to the
+            # layout the kernel implements so a test can flip one at a time.
+            multi_latent_attention=False,
+            rotary_interleaved=False,
+            high_precision_rope=False,
         )
         layer.num_attention_heads_per_partition = heads
         layer.q_lora_rank = layer.config.q_lora_rank
@@ -741,6 +779,274 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
                 cp_rank=0,
                 packed_seq_params=packed_seq_params,
             )
+
+    # ------------------------------------------------------------------
+    # Latent-MQA fused-branch config guards (multi_latent_attention.py
+    # :1952-1972). These raise before the ``fused_apply_rope_half`` import, so
+    # they run on CPU without triton. Each test flips exactly one bad flag on an
+    # otherwise-valid latent-MQA layer and asserts the branch refuses it.
+    # ------------------------------------------------------------------
+    def _latent_fused_layer(self):
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=False,
+            context_parallel_size=1,
+            mqa_latent_rope_fusion=True,
+        )
+        # The fused rotate_half branch is gated on ``self.mqa_latent`` (set in
+        # __init__ for absorbed layers); the CPU fixture bypasses __init__, so
+        # set it here.
+        layer.mqa_latent = True
+        return layer
+
+    def test_latent_fused_rejects_multi_latent_attention(self):
+        layer = self._latent_fused_layer()
+        layer.config.multi_latent_attention = True
+        with self.assertRaisesRegex(ValueError, "de-interleave"):
+            self._run_layer(layer, self._hidden(seq=8), cp_size=1, cp_rank=0)
+
+    def test_latent_fused_rejects_rotary_interleaved(self):
+        layer = self._latent_fused_layer()
+        layer.config.rotary_interleaved = True
+        with self.assertRaisesRegex(ValueError, "not alternating channels"):
+            self._run_layer(layer, self._hidden(seq=8), cp_size=1, cp_rank=0)
+
+    def test_latent_fused_rejects_high_precision_rope(self):
+        layer = self._latent_fused_layer()
+        layer.config.high_precision_rope = True
+        with self.assertRaisesRegex(
+            ValueError, "high_precision_rope for mqa_latent_rope_fusion"
+        ):
+            self._run_layer(layer, self._hidden(seq=8), cp_size=1, cp_rank=0)
+
+    def test_latent_fused_rejects_sequence_parallel(self):
+        layer = self._make_layer(
+            rope_type="rope",
+            apply_rope_fusion=False,
+            context_parallel_size=1,
+            sequence_parallel=True,
+            tensor_model_parallel_size=1,
+            mqa_latent_rope_fusion=True,
+        )
+        layer.mqa_latent = True
+        with self.assertRaisesRegex(
+            ValueError, "sequence_parallel for mqa_latent_rope_fusion"
+        ):
+            self._run_layer(
+                layer, self._hidden(batch=2, seq=8), cp_size=1, cp_rank=0
+            )
+
+
+@_TRITON_GPU
+class TestLatentMQARopeFusion(unittest.TestCase):
+    """Real ``mqa_latent=True`` fusion on/off forward+backward alignment.
+
+    The CP suite above builds only ``mqa_latent=False`` layers and fakes the
+    fused module, so the absorbed-MQA branch of
+    ``get_query_key_value_tensors`` (multi_latent_attention.py:1910-1985,
+    2044-2061) -- the one that calls the real ``fused_apply_rope_half`` (q) and
+    ``fused_rope_cat_key`` (k) triton kernels -- was never exercised. This
+    class drives that branch on GPU and asserts it matches the eager path it
+    replaces, covering ``recompute_qkv_up_porj_and_rope`` off and on (the
+    latter replays the closure through
+    ``RecomputeWithoutOutput(share_grad_holder=True)``, which is exactly why
+    the kernels must be out-of-place).
+
+    A single layer is built once and only ``config.mqa_latent_rope_fusion`` is
+    toggled between the two runs, so the weights are identical and any
+    difference is purely the fused-vs-eager RoPE. ``multi_latent_attention`` is
+    False because the fused branch requires it (it raises otherwise) and the
+    eager branch then uses the same rotate_half (no 0::2/1::2 de-interleave),
+    which is what makes the two bit-exact.
+    """
+
+    _HEADS = 2
+    _QK_NOPE = 4
+    _QK_ROPE = 8
+    _V_DIM = 4
+    _KV_LORA = 8
+    _HIDDEN = 16
+
+    def setUp(self):
+        paddle.seed(2026)
+        paddle.device.set_device("gpu")
+
+    def _build_latent_layer(self):
+        heads = self._HEADS
+        qk_nope = self._QK_NOPE
+        qk_rope = self._QK_ROPE
+        v_dim = self._V_DIM
+        kv_lora = self._KV_LORA
+        hidden = self._HIDDEN
+
+        layer = types.SimpleNamespace()
+        layer.get_query_key_value_tensors = types.MethodType(
+            MLASelfAttention.get_query_key_value_tensors, layer
+        )
+        layer._is_cudagraph_active = types.MethodType(
+            MLASelfAttention._is_cudagraph_active, layer
+        )
+        layer.config = types.SimpleNamespace(
+            q_lora_rank=None,
+            hidden_size=hidden,
+            kv_lora_rank=kv_lora,
+            sequence_parallel=False,
+            tensor_model_parallel_size=1,
+            context_parallel_size=1,
+            cp_balance_mode="dualchunk_allgather",
+            rope_type="rope",
+            apply_rope_fusion=False,
+            gpt_model_use_experimental_version=False,
+            mqa_latent_rope_fusion=True,
+            # The fused branch raises unless these hold; the eager branch then
+            # uses the matching rotate_half, so the two stay bit-exact.
+            multi_latent_attention=False,
+            rotary_interleaved=False,
+            high_precision_rope=False,
+            # Read by the eager apply_rotary_pos_emb (rope_utils.py:562).
+            rope_theta=10000.0,
+        )
+        layer.num_attention_heads_per_partition = heads
+        layer.q_lora_rank = None
+        layer.kv_lora_rank = kv_lora
+        layer.qk_nope_head_dim = qk_nope
+        layer.qk_rope_head_dim = qk_rope
+        layer.v_head_dim = v_dim
+        layer.q_head_dim = qk_nope + qk_rope
+        layer.q_proj = _TileProjection(heads * layer.q_head_dim)
+        layer.kv_a_proj_with_mqa = _TileProjection(kv_lora + qk_rope)
+        # Absorbed MQA never calls kv_b_proj; it only reads ``.weight`` to fold
+        # W_k_b into the query (multi_latent_attention.py:2027). bf16 because
+        # the einsum runs against the bf16 q_no_pe.
+        w_kv_b = (
+            paddle.randn([kv_lora, heads * (qk_nope + v_dim)]) * 0.1
+        ).cast("bfloat16")
+        w_kv_b.stop_gradient = False
+        layer.kv_b_proj = types.SimpleNamespace(weight=w_kv_b)
+        layer.kv_a_layernorm = _IdentityNorm()
+        layer.rotary_pos_emb = _FakeRotaryEmbedding(qk_rope)
+        layer.pg_collection = types.SimpleNamespace(tp=None, cp=object())
+        layer.layer_number = 1
+        layer.training = True
+        layer.recompute_qkv_up_porj_and_rope = False
+        layer.mqa_latent = True
+        return layer
+
+    def _hidden(self, batch=2, seq=16):
+        hidden = self._HIDDEN
+        values = paddle.arange(batch * seq * hidden, dtype="float32")
+        h = (values.reshape([batch, seq, hidden]) / 100.0).cast("bfloat16")
+        h.stop_gradient = False
+        return h
+
+    def _forward_backward(self, layer, hidden):
+        """Run one forward+backward under the CP=1 patches, return fp32 clones.
+
+        Backward runs inside the patch context so the recompute replay (which
+        re-enters the closure and re-reads ``get_context_parallel_world_size``)
+        sees the same CP=1 stubs the forward did.
+        """
+        # ``kv_b_proj.weight`` is shared across the on/off runs; clear its grad
+        # so the second run does not read an accumulated value.
+        if layer.kv_b_proj.weight.grad is not None:
+            layer.kv_b_proj.weight.clear_grad()
+
+        with (
+            mock.patch.object(
+                mla_mod, "get_context_parallel_world_size", return_value=1
+            ),
+            mock.patch.object(mla_mod, "get_pg_size", return_value=1),
+            mock.patch.object(mla_mod, "get_pg_rank", return_value=0),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "paddlefleet.transformer.transformer_layer": self._fake_transformer_layer_module(),
+                },
+            ),
+        ):
+            query, key, value, _, _, k_pe = layer.get_query_key_value_tensors(
+                hidden
+            )
+            self.assertIsNone(value, "absorbed MQA must not materialise value")
+            # Snapshot the forward values before the recompute discard below
+            # frees the output buffers.
+            out = {
+                "query": query.astype("float32").detach().clone(),
+                "key": key.astype("float32").detach().clone(),
+                "k_pe": k_pe.astype("float32").detach().clone(),
+            }
+            # Stand in for the attention consumer: a downstream tensor built
+            # from the qkv outputs. This is the ``core_attn_out`` that
+            # MLASelfAttention.forward (multi_latent_attention.py:1034) hands to
+            # ``discard_output_and_register_recompute`` -- the hook that frees
+            # the qkv outputs and replays the closure on backward. Reproducing
+            # that call here is what actually exercises the recompute path;
+            # without it the replay never fires and ctx.inputs is never set.
+            core_attn_out = (
+                query.astype("float32").flatten(2).sum(-1, keepdim=True)
+                + key.astype("float32").flatten(2).sum(-1, keepdim=True)
+                + k_pe.astype("float32").flatten(2).sum(-1, keepdim=True)
+            )
+            if (
+                layer.recompute_qkv_up_porj_and_rope
+                and getattr(layer, "_qkv_recompute", None) is not None
+            ):
+                layer._qkv_recompute.discard_output_and_register_recompute(
+                    core_attn_out
+                )
+                layer._qkv_recompute = None
+            core_attn_out.sum().backward()
+
+        out["hidden_grad"] = hidden.grad.astype("float32").detach().clone()
+        return out
+
+    def _fake_transformer_layer_module(self):
+        module = types.ModuleType("paddlefleet.transformer.transformer_layer")
+
+        class TransformerLayer:
+            @staticmethod
+            def _log_md5(tensor, name, layer_idx):
+                pass
+
+        module.TransformerLayer = TransformerLayer
+        return module
+
+    def _run_alignment(self, recompute):
+        layer = self._build_latent_layer()
+        layer.recompute_qkv_up_porj_and_rope = recompute
+
+        layer.config.mqa_latent_rope_fusion = True
+        fused = self._forward_backward(layer, self._hidden())
+
+        layer.config.mqa_latent_rope_fusion = False
+        eager = self._forward_backward(layer, self._hidden())
+
+        # The kernels claim bit-identical forward with the eager rotate_half.
+        for name in ("query", "key", "k_pe"):
+            self.assertTrue(
+                bool(paddle.equal_all(fused[name], eager[name]).item()),
+                f"{name}: fused vs eager not bitwise equal "
+                f"(recompute={recompute})",
+            )
+        # Backward through the custom op need not be bit-exact (different
+        # reduction order); require a tight bf16-scale tolerance instead.
+        self.assertTrue(
+            bool(
+                paddle.allclose(
+                    fused["hidden_grad"],
+                    eager["hidden_grad"],
+                    rtol=1e-3,
+                    atol=1e-3,
+                ).item()
+            ),
+            f"input grad: fused vs eager not close (recompute={recompute})",
+        )
+
+    def test_latent_mqa_fusion_matches_eager(self):
+        self._run_alignment(recompute=False)
+
+    def test_latent_mqa_fusion_matches_eager_with_recompute(self):
+        self._run_alignment(recompute=True)
 
 
 if __name__ == "__main__":
