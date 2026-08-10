@@ -16,6 +16,7 @@ PaddleFleet 混合专家层、路由器、专家、Token 调度器及相关工�
 | `test_ai_moe_layer_extra.py` | Extra tests for MoELayer expert parallel initialization / MoE 层专家并行初始化额外测试 |
 | `test_ai_moe_router.py` | Unit tests for moe_router module / 测试 MoE 路由器模块 |
 | `test_ai_moe_utils.py` | Unit tests for moe_utils module / 测试 MoE 工具模块 |
+| `test_ai_router_scale_fast.py` | Unit tests for apply_learnable_routed_scaling / 测试可学习路由缩放因子的 gather 前反向 |
 | `test_ai_multi_token_prediction.py` | Unit tests for multi_token_prediction module / 测试多 Token 预测模块 |
 | `test_ai_token_dispatcher.py` | Unit tests for token_dispatcher module / 测试 Token 调度器模块 |
 | `test_kgroupgemm.py` | Tests for k-grouped gemm code paths including fp8+deep_gemm / 测试 k-grouped GEMM 代码路径 |

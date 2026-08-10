@@ -54,6 +54,8 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         mscale_all_dim (float, optional): Mscale all dim value for Yarn RoPE. Defaults to 0.
         correction_range_round_to_int (bool): Whether to round dim range bounds to integer.
             Defaults to True
+        yarn_rope_fusion (bool, optional): If True, use the Triton fused kernel to build the
+            Yarn RoPE frequency table. Defaults to False.
     """
 
     def __init__(
@@ -71,6 +73,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         mscale_all_dim: float = 0.0,
         correction_range_round_to_int: bool = True,
         use_accuracy_compatible: bool = False,
+        yarn_rope_fusion: bool = False,
     ):
         self.dim = head_dim
         self.rotary_base = rotary_base
@@ -81,6 +84,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         self.mscale = mscale
         self.mscale_all_dim = mscale_all_dim
         self.correction_range_round_to_int = correction_range_round_to_int
+        self.yarn_rope_fusion = yarn_rope_fusion
 
         super().__init__(
             head_dim=head_dim,
@@ -100,29 +104,8 @@ class YarnRotaryEmbedding(RotaryEmbedding):
             * self.rotary_base
             ** (paddle.arange(0, self.dim, 2).astype(paddle.float32) / self.dim)
         )
-        self._set_cos_sin_cache(
-            self.original_max_position_embeddings,
-            offset=0,
-            dtype=paddle.get_default_dtype(),
-        )
 
-    def forward(
-        self,
-        max_seq_len: int,
-        offset: int = 0,
-        packed_seq: bool = False,
-        position_ids: Tensor | None = None,
-    ) -> Tensor:
-        """Forward pass of Yarn Rotary Embedding.
-
-        Args:
-            max_seq_len (int): Maximum size of sequence
-            offset (int, optional): RoPE offset. Defaults to 0.
-            packed_seq (bool, optional): Whether to use packed sequence. Defaults to False.
-
-        Returns:
-            Tensor: Embeddings after applying Yarn RoPE.
-        """
+        # Pre-compute inv_freq (only depends on config constants)
         low, high = _yarn_find_correction_range(
             self.beta_fast,
             self.beta_slow,
@@ -134,10 +117,55 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         inv_freq_mask = 1.0 - _yarn_linear_ramp_mask(
             low, high, self.dim // 2
         ).to(dtype=paddle.float32)
-        inv_freq = (
+        self._cached_yarn_inv_freq = (
             self.inv_freq_inter * (1 - inv_freq_mask)
             + self.inv_freq_extra * inv_freq_mask
         )
+
+        # No fused kernel here: it would JIT-compile Triton, which fork/execs
+        # ptxas, during model construction -- the window where every rank runs
+        # in lockstep. At large scale a single failed exec kills the job.
+        self._set_cos_sin_cache(
+            self.original_max_position_embeddings,
+            offset=0,
+            dtype=paddle.get_default_dtype(),
+            rope_fusion=False,
+        )
+
+    def forward(
+        self,
+        max_seq_len: int,
+        offset: int = 0,
+        packed_seq: bool = False,
+        position_ids: Tensor | None = None,
+        *,
+        rope_fusion: bool | None = None,
+    ) -> Tensor:
+        """Forward pass of Yarn Rotary Embedding.
+
+        Args:
+            max_seq_len (int): Maximum size of sequence
+            offset (int, optional): RoPE offset. Defaults to 0.
+            packed_seq (bool, optional): Whether to use packed sequence. Defaults to False.
+            rope_fusion (bool, optional): Override the fused-kernel decision for this
+                call. Defaults to None, meaning use ``self.yarn_rope_fusion``.
+
+        Returns:
+            Tensor: Embeddings after applying Yarn RoPE.
+        """
+        inv_freq = self._cached_yarn_inv_freq
+
+        if rope_fusion is None:
+            rope_fusion = self.yarn_rope_fusion
+
+        if rope_fusion and position_ids is None and not self.rotary_interleaved:
+            from paddlefleet.triton_ops import fused_yarn_rope_freqs
+
+            emb = fused_yarn_rope_freqs(inv_freq, max_seq_len, offset)
+            _mscale = _yarn_get_concentration_factor(
+                self.scaling_factor, self.mscale, self.mscale_all_dim
+            )
+            return emb, _mscale
 
         if position_ids is not None:
             # Handle different position_ids shapes:
@@ -180,13 +208,17 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         emb = emb[None, :, None, :]
         return emb, _mscale
 
-    def _set_cos_sin_cache(self, seq_len, offset, dtype, packed_seq=False):
+    def _set_cos_sin_cache(
+        self, seq_len, offset, dtype, packed_seq=False, *, rope_fusion=None
+    ):
         self.max_seq_len_cached = seq_len
         self.offset_cached = offset
         self.dtype_cached = dtype
         self.packed_seq_cached = packed_seq
 
-        emb, _mscale = self.forward(seq_len, offset, packed_seq)
+        emb, _mscale = self.forward(
+            seq_len, offset, packed_seq, rope_fusion=rope_fusion
+        )
         self.register_buffer(
             "cos_cached",
             (emb.cos() * _mscale).to(dtype).contiguous(),

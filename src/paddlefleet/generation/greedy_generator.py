@@ -179,6 +179,12 @@ class DynamicKVCache:
 
     Implements the ``.update(k_new, v_new, layer_idx) -> (k, v)`` protocol
     expected by :class:`DotProductAttention`.
+
+    HySparse adds a second, cross-layer slot: a full-attention layer publishes
+    its compressed KV latent (``shared_key``) for the downstream SWA (MQA)
+    layers' block-sparse branch. During training that tensor is threaded through
+    ``dict_args``; during incremental decode only the new token's slice is
+    computed, so it is accumulated here via :meth:`update_shared`.
     """
 
     def __init__(
@@ -189,10 +195,52 @@ class DynamicKVCache:
     ):
         self.k: list[paddle.Tensor | None] = [None] * num_layers
         self.v: list[paddle.Tensor | None] = [None] * num_layers
+        # HySparse shared (compressed) KV latent produced by full layers.
+        self.shared_k: list[paddle.Tensor | None] = [None] * num_layers
         self.swa_layers = swa_layers or [False] * num_layers
         self.window_size = window_size
         # Track absolute sequence length independently of truncated cache
         self._seq_len: list[int] = [0] * num_layers
+
+    def has_layer_cache(self, layer_idx: int) -> bool:
+        """Whether ``layer_idx`` already cached something (i.e. we are decoding).
+
+        Attention layers use this to distinguish the first (prefill) pass from
+        the incremental decode steps that follow, instead of relying on the
+        query length -- a one-token prompt is still a prefill.
+        """
+        return self.k[layer_idx] is not None
+
+    def get_layer_kv(
+        self, layer_idx: int
+    ) -> tuple[paddle.Tensor | None, paddle.Tensor | None]:
+        """Cached ``(k, v)`` of ``layer_idx`` (window-truncated for SWA layers).
+
+        HySparse full layers read their own cached keys back to score blocks for
+        the current decode token.
+        """
+        return self.k[layer_idx], self.v[layer_idx]
+
+    def update_shared(
+        self, shared_key: paddle.Tensor, layer_idx: int
+    ) -> paddle.Tensor:
+        """Append a full layer's shared KV latent and return the whole history.
+
+        ``shared_key`` is ``[B, S, 1, kv_lora_rank + qk_rope_head_dim]``; it is
+        never window-truncated because the block-sparse branch gathers blocks
+        from the entire document.
+        """
+        if self.shared_k[layer_idx] is None:
+            self.shared_k[layer_idx] = shared_key
+        else:
+            self.shared_k[layer_idx] = paddle.concat(
+                [self.shared_k[layer_idx], shared_key], axis=1
+            )
+        return self.shared_k[layer_idx]
+
+    def get_shared(self, layer_idx: int) -> paddle.Tensor | None:
+        """Full shared KV latent published by full layer ``layer_idx``."""
+        return self.shared_k[layer_idx]
 
     def get_seq_len(self, layer_idx: int = 0) -> int:
         if self._seq_len[layer_idx] > 0:
@@ -230,12 +278,25 @@ class DynamicKVCache:
         for i in range(len(self.k)):
             self.k[i] = None
             self.v[i] = None
+            self.shared_k[i] = None
             self._seq_len[i] = 0
 
 
 # ---------------------------------------------------------------------------
 # Greedy generator
 # ---------------------------------------------------------------------------
+
+
+def _uses_dsv4_hybrid_attention(cfg) -> bool:
+    """Return True when the model uses DSv4 Hybrid (CSA/HCA) attention.
+
+    Detected from the config: either the attention-variant selector or the
+    presence of per-layer compression ratios drives the CSA/HCA code path.
+    """
+    if getattr(cfg, "experimental_attention_variant", None) == "dsv4_hybrid":
+        return True
+    ratios = getattr(cfg, "csa_compress_ratios", None)
+    return bool(ratios)
 
 
 class GreedyGenerator:
@@ -318,11 +379,20 @@ class GreedyGenerator:
                 "is unsupported because it would break full-attention heads in "
                 "SWA layers."
             )
-        self.cache = DynamicKVCache(
-            num_layers=total_layers,
-            swa_layers=swa_layers,
-            window_size=self.window_size,
-        )
+        # DSv4 Hybrid (CSA/HCA) attention needs the richer per-layer decode
+        # state (raw + compressed KV, group buffers, indexer keys). Its cache
+        # also satisfies the standard ``update(k, v, layer_idx)`` protocol, so
+        # it can serve models that interleave CSA/HCA and standard layers.
+        if _uses_dsv4_hybrid_attention(cfg):
+            from paddlefleet.generation.csa_cache import CSADynamicCache
+
+            self.cache = CSADynamicCache(num_layers=total_layers)
+        else:
+            self.cache = DynamicKVCache(
+                num_layers=total_layers,
+                swa_layers=swa_layers,
+                window_size=self.window_size,
+            )
 
     @paddle.no_grad()
     def _generate_no_cache(
@@ -339,6 +409,11 @@ class GreedyGenerator:
     ) -> paddle.Tensor | tuple[paddle.Tensor, list[list[float]]]:
         """No-KVCache generation: each step runs a full prefill."""
         bsz = generated.shape[0]
+        _r = (
+            paddle.distributed.get_rank()
+            if paddle.distributed.is_initialized()
+            else 0
+        )
         with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
             done = paddle.zeros([bsz, 1], dtype="bool")
             for step in range(max_new_tokens):
@@ -348,6 +423,19 @@ class GreedyGenerator:
                     .unsqueeze(0)
                     .expand([bsz, cur_len])
                 )
+                # Align log labels with the KV-cache path so the two runs can
+                # be diffed directly: no_cache step 0 == cached prefill,
+                # no_cache step s>0 == cached decode step s-1.
+                _tag = "prefill" if step == 0 else f"decode step={step - 1}"
+                _log_this_step = _DEBUG and _r == 0 and step < 4
+                if _log_this_step:
+                    logger.info(
+                        "[fwd-debug][no_cache %s] input_ids=%s position_ids=%s cur_len=%d",
+                        _tag,
+                        generated.tolist(),
+                        position_ids.tolist(),
+                        cur_len,
+                    )
                 if self.cache.window_size and any(self.cache.swa_layers):
                     prefill_startend = paddle.full(
                         [bsz, 1, cur_len, 1], cur_len, dtype="int32"
@@ -362,6 +450,30 @@ class GreedyGenerator:
                         "attn_mask_startend_row_indices": prefill_startend,
                     }
                 )
+                if _log_this_step:
+                    _last = logits[:, -1].cast("float32")
+                    logger.info(
+                        "[logits-debug][no_cache %s] shape=%s dtype=%s",
+                        _tag,
+                        list(logits.shape),
+                        logits.dtype,
+                    )
+                    logger.info(
+                        "[logits-debug][no_cache %s] min=%.4f max=%.4f mean=%.4f",
+                        _tag,
+                        float(_last.min()),
+                        float(_last.max()),
+                        float(_last.mean()),
+                    )
+                    _topk_val, _topk_idx = paddle.topk(
+                        _last[0], min(5, _last.shape[-1])
+                    )
+                    logger.info(
+                        "[logits-debug][no_cache %s] top-k ids=%s vals=%s",
+                        _tag,
+                        _topk_idx.tolist(),
+                        [round(v, 3) for v in _topk_val.tolist()],
+                    )
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty
                 )
@@ -457,7 +569,8 @@ class GreedyGenerator:
         """
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be [B, L]")
-
+        if max_new_tokens <= 0:
+            raise ValueError("max_new_tokens should be >= 0")
         self.model.eval()
 
         bsz, prompt_len = input_ids.shape
@@ -487,6 +600,7 @@ class GreedyGenerator:
             )
 
         self.cache.reset()
+
         with paddle.amp.auto_cast(True, level="O2", dtype="bfloat16"):
             # ---- Prefill ----
             position_ids = (
@@ -529,19 +643,20 @@ class GreedyGenerator:
                     float(_last.max()),
                     float(_last.mean()),
                 )
-                _topk_val, _topk_idx = paddle.topk(_last[0], k=10)
+                _topk_val, _topk_idx = paddle.topk(
+                    _last[0], min(5, _last.shape[-1])
+                )
                 logger.info(
-                    "[logits-debug][prefill] top-10 ids=%s vals=%s",
+                    "[logits-debug][prefill] top-k ids=%s vals=%s",
                     _topk_idx.tolist(),
                     [round(v, 3) for v in _topk_val.tolist()],
                 )
                 _kv_lens = [
-                    self.cache._seq_len[i]
-                    for i in range(min(3, len(self.cache._seq_len)))
-                    if self.cache._seq_len[i] > 0
+                    self.cache.get_seq_len(i)
+                    for i in range(min(3, len(self.cache.swa_layers)))
                 ]
                 logger.info(
-                    "[kv-debug][prefill] cache seq_lens (first 3 non-zero layers): %s",
+                    "[kv-debug][prefill] cache seq_lens (first 3 layers): %s",
                     _kv_lens,
                 )
 
@@ -587,9 +702,9 @@ class GreedyGenerator:
                 )
                 if _DEBUG and _r == 0 and step < 3:
                     _d = logits[:, -1].cast("float32")
-                    _tv, _ti = paddle.topk(_d[0], k=5)
+                    _tv, _ti = paddle.topk(_d[0], min(5, _d.shape[-1]))
                     logger.info(
-                        "[logits-debug][decode step=%d] top-5 ids=%s vals=%s",
+                        "[logits-debug][decode step=%d] top-k ids=%s vals=%s",
                         step,
                         _ti.tolist(),
                         [round(v, 3) for v in _tv.tolist()],

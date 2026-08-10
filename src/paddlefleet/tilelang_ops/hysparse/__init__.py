@@ -20,13 +20,14 @@ the selected blocks.
 
 Public entry points (enable_hy_sparse_attention=True):
 * full layers -> block_score_fa4_attn_fwd (FA4-fused block scoring) +
-                 select_topk_blocks
+                 select_topk_blocks; during incremental decode the scoring pass
+                 is replaced by decode_block_logit over the KV cache.
 * SWA layers  -> sliding_window_mqa_attention (windowed MQA main path);
                  the sparse gather branch runs on the cuDNN DSA op
                  (paddlefleet.cudnn_ops.block_sparse_mqa_attention_dsa).
 """
 
-from .pipeline import select_topk_blocks
+from .pipeline import decode_block_logit, select_topk_blocks
 from .swa_attn import sliding_window_mqa_attention
 
 
@@ -47,6 +48,7 @@ def block_score_fa4_attn_fwd(*args, **kwargs):
 
 __all__ = [
     "block_score_fa4_attn_fwd",
+    "decode_block_logit",
     "select_topk_blocks",
     "sliding_window_mqa_attention",
 ]

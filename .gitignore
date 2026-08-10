@@ -38,6 +38,7 @@ packages/paddlefleet_ops/src/paddlefleet_ops/hybrid_ep
 packages/paddlefleet_ops/src/paddlefleet_ops/hybrid_ep_cpp.so
 packages/paddlefleet_ops/src/paddlefleet_ops/flash_mask
 packages/paddlefleet_ops/src/paddlefleet_ops/flash_mla
+packages/paddlefleet_ops/src/paddlefleet_ops/fla
 packages/paddlefleet_ops/src/paddlefleet_ops/sonicmoe
 packages/paddlefleet_ops/src/paddlefleet_ops/quack
 packages/paddlefleet_ops/src/paddlefleet_ops/cudnn

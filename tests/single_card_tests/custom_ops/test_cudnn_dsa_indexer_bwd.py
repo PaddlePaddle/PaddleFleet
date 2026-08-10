@@ -761,6 +761,10 @@ class TestTileLangCSAIndexerLossAutoScalerCudnn(unittest.TestCase):
             )
             ctx.loss_coeff = 0.01
             ctx.indexer_backend = "cudnn"
+            # Set by the real forward: False means the attached main output was
+            # frozen (DSv4 phase 2), in which case backward must report None for
+            # that position instead of a gradient.
+            ctx.output_needs_grad = True
             ctx.loss_mask = (
                 paddle.ones([b, sq], dtype="float32")
                 if with_loss_mask

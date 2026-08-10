@@ -652,15 +652,27 @@ class TestSwiGLUAccuracyCompatibleClamp(unittest.TestCase):
             return d1, dp
 
         do1_clamp, pg_clamp = grads(True)
-        do1_unclamp, _ = grads(False)
+        do1_unclamp, pg_unclamp = grads(False)
 
+        # do1 follows the clamped autograd path, so it matches the clamped ref.
         np.testing.assert_array_equal(
             do1.astype("float32").numpy(),
             do1_clamp.astype("float32").numpy(),
         )
+        # probs_grad is recomputed in fp64 from the *clamped* gate/value, so it
+        # must stay consistent with the clamped forward (dL/dprobs uses the same
+        # effective o2 = silu(clip(gate)) * clip(val) that the forward used).
         np.testing.assert_array_equal(
             probs_grad.astype("float32").numpy(),
             pg_clamp.astype("float32").numpy(),
+        )
+        # the clamp must actually change probs_grad for these saturated inputs,
+        # otherwise the clamped/unclamped distinction would be untested.
+        self.assertFalse(
+            np.array_equal(
+                pg_clamp.astype("float32").numpy(),
+                pg_unclamp.astype("float32").numpy(),
+            )
         )
         # saturated gate/value gradients are masked by the clamp, so the
         # unclamped gradient must differ.

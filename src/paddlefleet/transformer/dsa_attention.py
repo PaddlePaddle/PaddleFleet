@@ -276,6 +276,7 @@ class DSAIndexer(paddle.nn.Layer):
         sublayers_spec: DSAIndexerSublayersSpec,
         layer_number: int,
         pg_collection: ProcessGroupCollection | None = None,
+        is_hybrid_mla_indexer: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -285,17 +286,43 @@ class DSAIndexer(paddle.nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
-        self.n_heads = config.dsa_index_n_heads
-        self.head_dim = config.dsa_index_head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
+        if is_hybrid_mla_indexer:
+            required_fields = (
+                "hybrid_index_n_heads",
+                "hybrid_index_head_dim",
+                "hybrid_index_topk",
+                "hybrid_mla_q_lora_rank",
+                "hybrid_mla_qk_rope_head_dim",
+            )
+            missing = [
+                name
+                for name in required_fields
+                if getattr(config, name, None) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "hybrid MLA DSA indexer requires explicit hybrid config fields; "
+                    f"missing fields: {', '.join(missing)}"
+                )
+            self.n_heads = config.hybrid_index_n_heads
+            self.head_dim = config.hybrid_index_head_dim
+            self.index_topk = config.hybrid_index_topk
+            q_lora_rank = config.hybrid_mla_q_lora_rank
+            self.rope_head_dim = config.hybrid_mla_qk_rope_head_dim
+        else:
+            self.n_heads = config.dsa_index_n_heads
+            self.head_dim = config.dsa_index_head_dim
+            self.index_topk = config.dsa_index_topk
+            q_lora_rank = config.q_lora_rank
+            self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = self.head_dim - self.rope_head_dim
-        self.index_topk = config.dsa_index_topk
         self.softmax_scale = self.head_dim**-0.5
+        self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
 
         # wq_b: q_lora_rank -> n_heads * head_dim (duplicated)
         self.wq_b = build_spec_layer(
             sublayers_spec.linear_wq_b,
-            config.q_lora_rank,
+            q_lora_rank,
             self.n_heads * self.head_dim,
             config=self.config,
             init_method=self.config.init_method,
@@ -304,6 +331,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wq_b",
+            disable_fp8=True,
         )
 
         # wk: hidden_size -> head_dim (single shared K, duplicated)
@@ -318,6 +346,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wk",
+            disable_fp8=True,
         )
 
         # k_norm: LayerNorm (NOT RMSNorm) per reference
@@ -339,6 +368,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_weights_proj",
+            disable_fp8=True,
         )
 
         # Initialize Position Embedding.
@@ -446,8 +476,8 @@ class DSAIndexer(paddle.nn.Layer):
         k = self._apply_rope(k.unsqueeze(2), freqs, mscale).squeeze(2)
 
         # Rotate activation (Hadamard transform)
-        q = rotate_activation(q)
-        k = rotate_activation(k)
+        q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
+        k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
         weights, _ = self.weights_proj(hidden_states)
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale
@@ -1065,7 +1095,11 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, output: Tensor, indexer_loss: Tensor) -> Tensor:
         ctx.save_for_backward(indexer_loss)
-        return output
+        # Frozen backbone (phase 2): ``output`` is a leaf with
+        # ``stop_gradient=True``; returning it unchanged is treated as an inplace
+        # alias and rejected, so hand back a fresh tensor and skip its gradient.
+        ctx.output_needs_grad = not output.stop_gradient
+        return output if ctx.output_needs_grad else output.clone()
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
@@ -1074,6 +1108,8 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         if scale is None:
             scale = paddle.ones([1], dtype=indexer_loss.dtype)
         scaled_grad = paddle.ones_like(indexer_loss) * scale
+        if not ctx.output_needs_grad:
+            return None, scaled_grad
         return grad_output, scaled_grad
 
     @staticmethod

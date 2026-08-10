@@ -111,6 +111,25 @@ class TestScatterContiguous(unittest.TestCase):
             expected = x[:, rank * 2 : (rank + 1) * 2]
             self.assertTrue(paddle.equal_all(out, expected))
 
+    def test_indivisible_length_raises(self):
+        """An uneven split would silently drop the tail, so it must raise.
+
+        The shards are equal-sized, so nothing downstream could notice: an
+        all_gather would hand back a shorter sequence than went in.
+        """
+        from paddlefleet.context_parallel_utils import scatter_contiguous
+
+        x = paddle.arange(30).reshape([10, 3]).cast("float32")
+        group = _make_mock_group(nranks=4, rank=0)
+        with self.assertRaises(ValueError) as ctx:
+            scatter_contiguous(x, group=group, axis=0)
+        self.assertIn("divisible", str(ctx.exception))
+        # nranks == 1 is a no-op, so any length stays legal there
+        group = _make_mock_group(nranks=1, rank=0)
+        self.assertEqual(
+            scatter_contiguous(x, group=group, axis=0).shape, [10, 3]
+        )
+
     def test_negative_axis(self):
         """axis=-1 works correctly."""
         from paddlefleet.context_parallel_utils import scatter_contiguous

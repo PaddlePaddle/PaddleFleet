@@ -77,7 +77,7 @@ class TestBlockAttnResConstruction(unittest.TestCase):
         block = BlockAttnRes(config=config, sublayers_spec=spec)
         self.assertEqual(block.hidden_size, 64)
         self.assertIsNotNone(block.proj_weight)
-        self.assertEqual(block.proj_weight.shape, [64])
+        self.assertEqual(block.proj_weight.shape, [1, 64])
 
     @patch("paddlefleet.transformer.block_attn_res.build_spec_layer")
     def test_proj_weight_initialized_to_zero(self, mock_build):
@@ -88,7 +88,7 @@ class TestBlockAttnResConstruction(unittest.TestCase):
 
         block = BlockAttnRes(config=config, sublayers_spec=spec)
         self.assertTrue(
-            paddle.allclose(block.proj_weight, paddle.zeros([64])).item()
+            paddle.allclose(block.proj_weight, paddle.zeros([1, 64])).item()
         )
 
 
@@ -99,7 +99,9 @@ class TestBlockAttnResForward(unittest.TestCase):
     def test_forward_with_single_block(self, mock_build):
         """Test forward with a single completed block."""
         mock_norm = MagicMock()
-        mock_norm.return_value = paddle.randn([1, 2, 4, 64])
+        mock_norm.side_effect = lambda x: x
+        mock_norm.weight = paddle.ones([64])
+        mock_norm.variance_epsilon = 1e-5
         mock_build.return_value = mock_norm
 
         config = _make_config()
@@ -116,7 +118,9 @@ class TestBlockAttnResForward(unittest.TestCase):
     def test_forward_with_multiple_blocks(self, mock_build):
         """Test forward with multiple completed blocks."""
         mock_norm = MagicMock()
-        mock_norm.return_value = paddle.randn([3, 2, 4, 64])
+        mock_norm.side_effect = lambda x: x
+        mock_norm.weight = paddle.ones([64])
+        mock_norm.variance_epsilon = 1e-5
         mock_build.return_value = mock_norm
 
         config = _make_config()
@@ -133,7 +137,9 @@ class TestBlockAttnResForward(unittest.TestCase):
     def test_forward_with_no_completed_blocks(self, mock_build):
         """Test forward with no completed blocks (only partial)."""
         mock_norm = MagicMock()
-        mock_norm.return_value = paddle.randn([1, 2, 4, 64])
+        mock_norm.side_effect = lambda x: x
+        mock_norm.weight = paddle.ones([64])
+        mock_norm.variance_epsilon = 1e-5
         mock_build.return_value = mock_norm
 
         config = _make_config()

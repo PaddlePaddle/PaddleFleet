@@ -37,6 +37,7 @@ def get_special_setup_deps():
     if backends.IS_NVIDIA:
         deps = [
             "triton",  # for deep_gemm, flashmask
+            "einops",  # for flash-linear-attention
             "nvidia-cutlass-dsl[cu13]==4.4.1",  # for sonic_moe and flash_attention
             "filelock",  # for sonic_moe
             "apache-tvm-ffi>=0.1.3,<0.1.12",  # for supersonic_moe
@@ -210,6 +211,7 @@ def setup_ops_extension():
             f"{_ext_rel}/fuse_stack_transpose_fp8_quant.cu",
             f"{_ext_rel}/fuse_apply_rotary_pos_emb_vision.cu",
             f"{_ext_rel}/fused_swiglu_probs_bwd.cu",
+            f"{_ext_rel}/w4a8_quant.cu",
         ],
         include_dirs=[str(Path(__file__).parent / _ext_rel)],
         extra_compile_args={

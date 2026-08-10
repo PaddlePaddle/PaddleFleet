@@ -62,6 +62,79 @@ try:
 except ImportError:
     _grad_accum_fusion_available = False
 
+_deep_gemm_available = True
+try:
+    from paddlefleet_ops import deep_gemm
+except (ImportError, RuntimeError):
+    _deep_gemm_available = False
+    deep_gemm = None
+
+# Color tag for fp8-enabled non-MoE Linear weights so that
+# ``optimizer.clear_param_storage("linear_fp8")`` can free their bf16 master
+# storage after pre-quantization. Mirrors the MoE ``"moe_expert"`` pattern.
+_LINEAR_FP8_COLOR = "linear_fp8"
+
+
+def _fp8_prequant_weight(layer):
+    """Pre-quantize ``layer.weight`` and stash fp8 cache attrs on it.
+
+    Stashes forward-orientation fp8 tensor + both fwd/bwd scales. The
+    backward-orientation fp8 tensor is derived on demand via
+    ``fp8_weight_fwd.T.contiguous()`` in ``weight_quant_func``.
+    """
+    if not getattr(layer, "fp8", False):
+        return
+    if getattr(layer, "weight_quant_func", None) is None:
+        return
+    weight = getattr(layer, "weight", None)
+    if weight is None:
+        return
+    prev_fp8 = getattr(weight, "fp8_weight_fwd", None)
+    if prev_fp8 is not None:
+        try:
+            delattr(weight, "fp8_weight_fwd")
+        except AttributeError:
+            weight.fp8_weight_fwd = None
+    _, scale_bwd, fp8_fwd, scale_fwd = layer.weight_quant_func(weight)
+    weight.fp8_weight_fwd = fp8_fwd
+    weight.fp8_scale_fwd = scale_fwd
+    weight.fp8_scale_bwd = scale_bwd
+
+
+def _fp8_clear_prequant_weight(layer):
+    """Drop the fp8 cache stashed by ``_fp8_prequant_weight``.
+
+    Symmetric to ``_fp8_prequant_weight``: strips ``fp8_weight_fwd`` and
+    both scale attrs from ``layer.weight`` so the next ``weight_quant_func``
+    call re-quantizes the (post-optimizer-step) bf16 weight. Safe to call
+    when no cache exists or the layer is bf16.
+    """
+    weight = getattr(layer, "weight", None)
+    if weight is None:
+        return
+    for attr in ("fp8_weight_fwd", "fp8_scale_fwd", "fp8_scale_bwd"):
+        if hasattr(weight, attr):
+            try:
+                delattr(weight, attr)
+            except AttributeError:
+                setattr(weight, attr, None)
+
+
+def _maybe_color_linear_fp8_weight(layer):
+    """Tag ``layer.weight`` with the linear-fp8 color, once, if unset."""
+    if not getattr(layer, "fp8", False):
+        return
+    # Expert linears are colored by MoELayer with "moe_expert"; skip here to
+    # avoid Paddle's guard against reassigning a non-None color.
+    if getattr(layer, "is_expert", False):
+        return
+    weight = getattr(layer, "weight", None)
+    if weight is None:
+        return
+    color = getattr(weight, "color", None)
+    if color in (None, -1):
+        weight.color = {"color": _LINEAR_FP8_COLOR}
+
 
 HAVE_TE = False
 
@@ -247,6 +320,9 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             self.vocab_end_index - self.vocab_start_index
         )
         self.deterministic_mode = config.deterministic_mode
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
         self.config = config
         self.world_size = get_pg_size(self.tp_group)
 
@@ -309,7 +385,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         else:
             masked_input = input_
         # Get the embeddings.
-        if self.deterministic_mode:
+        if self.deterministic_mode or self.use_accuracy_compatible:
             output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
@@ -390,6 +466,7 @@ def linear_with_frozen_weight(
     wgrad_deferral_limit: None = None,
     async_grad_allreduce: bool | None = None,
     use_accuracy_compatible: bool = False,
+    **kwargs,
 ) -> paddle.Tensor:
     """Linear layer execution with weight.requires_grad == False.
 
@@ -463,6 +540,184 @@ def linear_with_frozen_weight(
     return LinearWithFrozenWeight.apply(*args)
 
 
+def _bwd_quant_blockwise_1x128(x, use_pow2_scale, use_ue8m0):
+    """Backward-path 1x128 blockwise quant.
+
+    When ``use_ue8m0=True`` we produce int32-packed pow2 scales in MN-major
+    layout (``output_scale_transpose=True`` + ``.T`` stride-only view) so
+    DeepGEMM's SM100 INT/(1,1,128) branch can consume them without extra
+    H2D transfers. When ``use_ue8m0=False`` we keep the original behavior
+    (fp32 scales, ``output_scale_transpose=False``) which matches the
+    pre-existing pow2-only golden.
+    """
+    if use_ue8m0:
+        fp8, scale = paddle.incubate.nn.functional.fp8_quant_blockwise(
+            x,
+            output_scale_transpose=True,
+            quant_method="1x128",
+            input_transpose=False,
+            using_pow2_scale=True,
+            using_ue8m0_scale=True,
+        )[:2]
+        return fp8, scale.T
+    return paddle.incubate.nn.functional.fp8_quant_blockwise(
+        x,
+        output_scale_transpose=False,
+        quant_method="1x128",
+        input_transpose=False,
+        using_pow2_scale=use_pow2_scale,
+    )[:2]
+
+
+def _dequant_inp_t_to_bf16(inp_t_fp8, inp_t_scale):
+    """Dequantize the pre-quantized ``[K, M]`` fp8 activation back to bf16.
+
+    Used by the backward wgrad fallback when ``save_original_input=False``
+    (so the bf16 activation was not saved) and ``fp8_wgrad=False`` (so the
+    wgrad gemm still runs in bf16). ``inp_t_fp8`` is the transposed-
+    orientation fp8 quantization emitted by the forward quant kernel,
+    with shape ``[K, M]`` — exactly what ``total_input.t()`` would be.
+
+    ``inp_t_scale`` was passed through ``_mn_major`` at forward time
+    (stride-only ``.T`` view for DeepGEMM's ``stride(-2)==1`` requirement).
+    ``fused_act_dequant`` requires K-major scale (``stride(-1)==1``), so
+    we materialize a contiguous copy here. Handles both float32 scales
+    and UE8M0 int32-packed scales transparently.
+    """
+    scale_k_major = inp_t_scale.contiguous()
+    return paddle.incubate.nn.functional.fused_act_dequant(
+        inp_t_fp8, scale_k_major
+    )
+
+
+def _make_bwd_inp_quant_func(use_pow2_scale, use_ue8m0):
+    """Return an ``inp_quant_func`` callable for the backward dgrad path.
+
+    Mirrors ``_bwd_quant_blockwise_1x128`` but returns a callable in the
+    shape expected by ``general_gemm``'s ``inp_quant_func`` argument.
+    """
+
+    def _f(x):
+        return _bwd_quant_blockwise_1x128(x, use_pow2_scale, use_ue8m0)
+
+    return _f
+
+
+def general_gemm(
+    a,
+    b,
+    bias=None,
+    fp8=False,
+    inp_quant_func=None,
+    weight_quant_func=None,
+    out=None,
+    recipe=None,
+    use_accuracy_compatible=False,
+):
+    """Unified GEMM interface supporting both bf16 and fp8 paths.
+
+    Args:
+        a: Left operand. Raw tensor or pre-quantized (fp8_tensor, scale) tuple.
+        b: Right operand. Same convention as *a*.
+        bias: Optional bias (only used in bf16 path).
+        fp8: If True, use fp8 gemm via deep_gemm.fp8_gemm_nt.
+        inp_quant_func: Quantization callable for input (when fp8=True).
+        weight_quant_func: Quantization callable for weight (when fp8=True).
+        out: Pre-allocated output buffer. If not None, accumulates into it;
+             if None, creates a new buffer.
+
+    Returns:
+        output tensor, and optionally quant cache tuple when fp8=True.
+    """
+    if fp8:
+        assert _deep_gemm_available, (
+            "FP8 GEMM requires paddlefleet_ops.deep_gemm"
+        )
+
+        from paddlefleet.fp8.utils import is_fp8_tensor
+
+        # fp8_quant_blockwise requires 2D input, reshape if needed
+        a_orig_shape = None
+        if not is_fp8_tensor(a) and a.ndim > 2:
+            a_orig_shape = a.shape
+            a = a.reshape([-1, a.shape[-1]])
+
+        if is_fp8_tensor(a):
+            inp_fp8, inp_scale = a
+            inp_t_fp8, inp_t_scale = None, None
+        else:
+            quant_result = inp_quant_func(a)
+            if len(quant_result) == 2:
+                inp_fp8, inp_scale = quant_result
+                inp_t_fp8, inp_t_scale = None, None
+            else:
+                inp_fp8, inp_scale, inp_t_fp8, inp_t_scale = quant_result
+
+        # weight_quant_func returns either a 2-tuple ``(fp8, scale)`` or a
+        # 4-tuple ``(fp8_bwd, scale_bwd, fp8_fwd, scale_fwd)``. The forward
+        # orientation feeds fp8_gemm_nt here; the backward orientation (if
+        # present) is returned for dgrad reuse.
+        weight_fp8_bwd, weight_scale_bwd = None, None
+        if is_fp8_tensor(b):
+            weight_fp8, weight_scale = b
+        else:
+            wq_result = weight_quant_func(b)
+            if len(wq_result) == 2:
+                weight_fp8, weight_scale = wq_result
+            else:
+                (
+                    weight_fp8_bwd,
+                    weight_scale_bwd,
+                    weight_fp8,
+                    weight_scale,
+                ) = wq_result
+
+        if out is not None:
+            # Accumulate into existing buffer
+            deep_gemm.fp8_gemm_nt(
+                (inp_fp8, inp_scale),
+                (weight_fp8, weight_scale),
+                out,
+                c=out,
+                recipe=recipe,
+            )
+        else:
+            out = paddle.empty(
+                [inp_fp8.shape[0], weight_fp8.shape[0]], dtype=paddle.bfloat16
+            )
+            deep_gemm.fp8_gemm_nt(
+                (inp_fp8, inp_scale),
+                (weight_fp8, weight_scale),
+                out,
+                recipe=recipe,
+            )
+
+        if a_orig_shape is not None:
+            out = out.reshape([*list(a_orig_shape[:-1]), out.shape[-1]])
+
+        return out, (
+            inp_fp8,
+            inp_scale,
+            inp_t_fp8,
+            inp_t_scale,
+            weight_fp8,
+            weight_scale,
+            weight_fp8_bwd,
+            weight_scale_bwd,
+        )
+
+    else:
+        # Standard bf16/fp16 path
+        if bias is not None:
+            output = paddle.nn.functional.linear(a, b, bias)
+        else:
+            if use_accuracy_compatible:
+                output = paddle.nn.functional.linear(a, b)
+            else:
+                output = paddle.matmul(a, b)
+        return output, None
+
+
 class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
     """See linear_with_grad_accumulation_and_async_allreduce"""
 
@@ -479,16 +734,28 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         wgrad_deferral_limit,
         tp_group,
         use_accuracy_compatible=False,
+        fp8=False,
+        fp8_wgrad=False,
+        inp_quant_func=None,
+        weight_quant_func=None,
+        use_pow2_scale=False,
+        use_ue8m0=False,
+        save_original_input=False,
     ):
         """Forward."""
         if gradient_accumulation_fusion and hasattr(weight, "main_grad"):
             main_grad = weight.main_grad
         else:
             main_grad = None
-        ctx.save_for_backward(input._new_shared_tensor(), weight)
-        # We can't save main_grad in save_for_backward as this module would be
-        # reused across layers like MTP logits. So, to prevent in-place modification
-        # checks we save the tensor in ctx.
+        # When fp8 is on we can skip the bf16 activation and use the fp8
+        # cache on ctx; ``save_original_input`` forces the bf16 tensor to
+        # be kept (needed for bf16 wgrad).
+        skip_bf16_input_save = fp8 and not save_original_input
+        ctx.bf16_input_saved = not skip_bf16_input_save
+        # ``input.shape`` is still needed in backward for sequence-parallel
+        # collectives; save as a plain tuple to avoid retaining the tensor.
+        ctx.input_shape = tuple(input.shape)
+        ctx.input_dtype = input.dtype
         ctx.main_grad = main_grad
         ctx.use_bias = bias is not None
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
@@ -497,11 +764,19 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
+        ctx.use_accuracy_compatible = use_accuracy_compatible
         # Cache input.stop_gradient: ``_new_shared_tensor()`` does not
         # necessarily preserve this flag, and Paddle's PyLayer contract
         # requires backward to return None at position 0 iff the original
         # forward input had stop_gradient=True.
         ctx.input_stop_gradient = bool(input.stop_gradient)
+        ctx.fp8 = fp8
+        ctx.fp8_wgrad = fp8_wgrad
+        ctx.inp_quant_func = inp_quant_func
+        ctx.weight_quant_func = weight_quant_func
+        ctx.use_pow2_scale = use_pow2_scale
+        ctx.use_ue8m0 = use_ue8m0
+        ctx.save_original_input = save_original_input
 
         if sequence_parallel:
             dim_size = list(input.shape)
@@ -515,34 +790,100 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         else:
             total_input = input
 
-        if bias is not None:
-            output = paddle.nn.functional.linear(total_input, weight, bias)
-        else:
-            if use_accuracy_compatible:
-                output = paddle.nn.functional.linear(total_input, weight)
+        output, fp8_meta = general_gemm(
+            total_input,
+            weight,
+            bias=bias,
+            fp8=fp8,
+            inp_quant_func=inp_quant_func,
+            weight_quant_func=weight_quant_func,
+            use_accuracy_compatible=use_accuracy_compatible,
+        )
+
+        save_list = []
+        if not skip_bf16_input_save:
+            save_list.append(input._new_shared_tensor())
+        save_list.append(weight)
+        if fp8 and fp8_meta is not None:
+            (
+                _,
+                _,
+                inp_t_fp8,
+                inp_t_scale,
+                weight_fp8,
+                weight_scale,
+                weight_fp8_bwd,
+                weight_scale_bwd,
+            ) = fp8_meta
+            # When ``save_original_input`` is True the bf16 activation is kept
+            # and backward re-quantizes it, so ``inp_t_fp8``/``inp_t_scale``
+            # can be dropped.
+            if save_original_input:
+                save_list.extend([weight_fp8, weight_scale, weight_scale_bwd])
+                ctx.fp8_input_stashed = False
             else:
-                output = paddle.matmul(total_input, weight)
+                save_list.extend(
+                    [
+                        inp_t_fp8,
+                        inp_t_scale,
+                        weight_fp8,
+                        weight_scale,
+                        weight_scale_bwd,
+                    ]
+                )
+                ctx.fp8_input_stashed = True
+            ctx.fp8_saved = True
+        else:
+            ctx.fp8_saved = False
+            ctx.fp8_input_stashed = False
+        ctx.save_for_backward(*save_list)
+
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward."""
-        input, weight = ctx.saved_tensor()
+        saved = ctx.saved_tensor()
+        idx = 0
+        if ctx.bf16_input_saved:
+            input = saved[idx]
+            idx += 1
+        else:
+            input = None
+        weight = saved[idx]
+        idx += 1
+        if ctx.fp8_saved:
+            if ctx.fp8_input_stashed:
+                inp_t_fp8 = saved[idx]
+                idx += 1
+                inp_t_scale = saved[idx]
+                idx += 1
+            else:
+                inp_t_fp8 = None
+                inp_t_scale = None
+            weight_fp8 = saved[idx]
+            idx += 1
+            weight_scale = saved[idx]
+            idx += 1
+            weight_scale_bwd = saved[idx]
+            idx += 1
+        else:
+            inp_t_fp8 = None
+            inp_t_scale = None
+            weight_fp8 = None
+            weight_scale = None
+            weight_scale_bwd = None
+        # weight_fp8_bwd is reconstructed below via weight_fp8.T.contiguous().
+        weight_fp8_bwd = None
         main_grad = ctx.main_grad
         use_bias = ctx.use_bias
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
         handle = None
         tp_group = ctx.tp_group
+        fp8 = ctx.fp8
+        fp8_wgrad = ctx.fp8_wgrad
 
-        # Paddle PyLayer contract: when a forward Tensor input has
-        # stop_gradient=True, the corresponding backward return slot MUST be
-        # None. The "input" position (0) is the only one that can carry
-        # stop_gradient=True in normal usage (weight/bias are trainable);
-        # callers that intentionally feed a detached tensor (e.g. for
-        # gradient isolation) rely on this. We must skip grad_input compute
-        # and any input-side collective (all_reduce / reduce_scatter) in
-        # that case, while still computing grad_weight / grad_bias.
         input_needs_grad = not ctx.input_stop_gradient
 
         if ctx.gradient_accumulation_fusion:
@@ -574,8 +915,30 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 total_input = all_gather_buffer
             else:
                 total_input = input
+
+        # Compute grad_input
         if input_needs_grad:
-            grad_input = grad_output.matmul(weight.t())
+            if fp8 and weight_fp8 is not None:
+                # FP8 dgrad: grad_input = grad_output @ weight
+                # Reuse the backward orientation quantized in forward when
+                # available; otherwise fall back to `.T.contiguous()`.
+                if weight_fp8_bwd is not None:
+                    weight_bwd = (weight_fp8_bwd, weight_scale_bwd)
+                else:
+                    weight_bwd = (
+                        weight_fp8.T.contiguous(),
+                        weight_scale_bwd,
+                    )
+                grad_input, _ = general_gemm(
+                    grad_output,
+                    weight_bwd,
+                    fp8=True,
+                    inp_quant_func=_make_bwd_inp_quant_func(
+                        ctx.use_pow2_scale, ctx.use_ue8m0
+                    ),
+                )
+            else:
+                grad_input, _ = general_gemm(grad_output, weight.t())
         else:
             grad_input = None
 
@@ -584,9 +947,23 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             handle.wait()
 
         if wgrad_compute:
-            grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
-                grad_output, total_input
-            )
+            if total_input is not None:
+                grad_output, total_input = (
+                    prepare_input_tensors_for_wgrad_compute(
+                        grad_output, total_input
+                    )
+                )
+            else:
+                # fp8 + save_original_input=False: no bf16 input available.
+                # Only reshape grad_output to 2D for the fp8 wgrad path.
+                grad_output = grad_output.contiguous()
+                if grad_output.dim() == 3:
+                    grad_output = grad_output.reshape(
+                        [
+                            grad_output.shape[0] * grad_output.shape[1],
+                            grad_output.shape[2],
+                        ]
+                    )
 
         if ctx.allreduce_dgrad and input_needs_grad:
             # Asynchronous all-reduce
@@ -610,7 +987,35 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 sub_grad_input = None
 
-        if ctx.gradient_accumulation_fusion:
+        # Compute grad_weight
+        if fp8_wgrad and wgrad_compute:
+            # FP8 wgrad: grad_output^T @ total_input (both already 2D)
+            grad_out_t_fp8, grad_out_t_scale = _bwd_quant_blockwise_1x128(
+                grad_output.T.contiguous(),
+                ctx.use_pow2_scale,
+                ctx.use_ue8m0,
+            )
+            inp_t_fp8_bwd, inp_t_scale_bwd = inp_t_fp8, inp_t_scale
+            if inp_t_fp8_bwd is None:
+                assert total_input is not None, (
+                    "fp8 wgrad requires either pre-quantized inp_t_fp8 (from"
+                    " fp8 forward with input_trans=True) or the bf16 total_input"
+                    " (set save_original_input=True to keep bf16 activation)"
+                )
+                inp_t_fp8_bwd, inp_t_scale_bwd = _bwd_quant_blockwise_1x128(
+                    total_input.T.contiguous(),
+                    ctx.use_pow2_scale,
+                    ctx.use_ue8m0,
+                )
+
+            grad_weight, _ = general_gemm(
+                (inp_t_fp8_bwd, inp_t_scale_bwd),
+                (grad_out_t_fp8, grad_out_t_scale),
+                fp8=True,
+                recipe=(1, 1, 128),
+            )
+
+        elif ctx.gradient_accumulation_fusion:
             if wgrad_compute:
                 if weight.main_grad.dtype == paddle.float32:
                     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
@@ -636,20 +1041,58 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 if getattr(weight, "zero_out_wgrad", False):
                     grad_weight = paddle.zeros(
                         weight.main_grad.shape,
-                        dtype=input.dtype,
+                        dtype=ctx.input_dtype,
                         requires_grad=False,
                     )
                 else:
                     grad_weight = paddle.empty(
                         weight.main_grad.shape,
-                        dtype=input.dtype,
+                        dtype=ctx.input_dtype,
                         requires_grad=False,
                     )
                 weight.grad_added_to_main_grad = True
             else:
                 grad_weight = None
         else:
-            grad_weight = total_input.t().matmul(grad_output)
+            if (
+                wgrad_compute
+                and ctx.use_accuracy_compatible
+                and getattr(weight, "is_expert_param", False)
+                and hasattr(weight, "main_grad")
+                and weight.main_grad is not None
+                and weight.main_grad.dtype == paddle.float32
+            ):
+                weight.main_grad.add_(
+                    paddle.matmul(
+                        grad_output.astype("float32"),
+                        total_input.astype("float32"),
+                        transpose_x=True,
+                    ).t()
+                )
+                if hasattr(weight, "grad_added_to_main_grad"):
+                    weight.grad_added_to_main_grad = True
+                grad_weight = paddle.zeros(weight.shape, dtype=input.dtype)
+            elif wgrad_compute:
+                if total_input is not None:
+                    grad_weight, _ = general_gemm(total_input.t(), grad_output)
+                elif inp_t_fp8 is not None:
+                    # No bf16 input saved; dequantize the fp8 transposed
+                    # activation (shape [K, M] = total_input.t()) for bf16 wgrad.
+                    total_input_t_bf16 = _dequant_inp_t_to_bf16(
+                        inp_t_fp8, inp_t_scale
+                    )
+                    grad_weight, _ = general_gemm(
+                        total_input_t_bf16, grad_output
+                    )
+                else:
+                    raise AssertionError(
+                        "bf16 wgrad requires either the saved bf16 "
+                        "activation (save_original_input=True) or a "
+                        "pre-quantized fp8 activation saved for backward "
+                        "(fp8 forward with input_trans=True)"
+                    )
+            else:
+                grad_weight = None
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
@@ -686,6 +1129,13 @@ def linear_with_grad_accumulation_and_async_allreduce(
     async_grad_allreduce: bool | None = None,
     tp_group: paddle.core.ProcessGroup | None = None,
     use_accuracy_compatible: bool = False,
+    fp8: bool = False,
+    fp8_wgrad: bool = False,
+    inp_quant_func=None,
+    weight_quant_func=None,
+    use_pow2_scale: bool = False,
+    use_ue8m0: bool = False,
+    save_original_input: bool = False,
 ) -> paddle.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -772,6 +1222,13 @@ def linear_with_grad_accumulation_and_async_allreduce(
         wgrad_deferral_limit,
         tp_group,
         use_accuracy_compatible,
+        fp8,
+        fp8_wgrad,
+        inp_quant_func,
+        weight_quant_func,
+        use_pow2_scale,
+        use_ue8m0,
+        save_original_input,
     ]
 
     if not linear_with_grad_accumulation_and_async_allreduce.warned:
@@ -870,6 +1327,7 @@ class Linear(paddle.nn.Layer):
         tp_comm_buffer_name: str | None = None,
         disable_grad_reduce: bool = False,
         tp_group: paddle.core.ProcessGroup | None = None,
+        disable_fp8: bool = False,
     ):
         super().__init__()
 
@@ -882,6 +1340,8 @@ class Linear(paddle.nn.Layer):
         self.grad_output_buffer = grad_output_buffer
         self.config = config
         self._dtype = config.params_dtype
+        self.tp_comm_buffer_name = tp_comm_buffer_name
+        self._fp8_linear_logged = False
 
         # No TP: output_size_per_partition equals the full output_size.
         self.output_size_per_partition = output_size
@@ -926,6 +1386,7 @@ class Linear(paddle.nn.Layer):
             # Weight is duplicated across TP ranks; reduce gradient on DP group.
             self.weight.allreduce = True
             self.weight.is_distributed = False
+            self.weight.is_expert_param = self.is_expert
         else:
             self.weight = None
 
@@ -945,6 +1406,67 @@ class Linear(paddle.nn.Layer):
             self.bias = None
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+
+        # FP8 is inherited from ``config`` unless the caller opts out via
+        # ``disable_fp8``. ``save_original_input`` defaults to ``not self.fp8``
+        # and is a settable attribute — callers can override it post-init when
+        # the wgrad path needs the bf16 activation kept (e.g. the shared
+        # expert's up_gate_proj).
+        self.fp8 = (
+            bool(getattr(config, "full_fp8_computation", False))
+            and bool(getattr(config, "fp8", None))
+            and not disable_fp8
+        )
+        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
+        self.save_original_input = not self.fp8
+        self.use_pow2_scale = False
+        self.use_ue8m0 = False
+        self.inp_quant_func = None
+        self.weight_quant_func = None
+        if self.fp8:
+            # Linear has no TP; the assertion is trivially satisfied but kept
+            # for symmetry with ColumnParallelLinear / RowParallelLinear.
+            from paddlefleet.fp8.quantization import get_quant_func
+
+            self.use_pow2_scale = (
+                paddle.device.cuda.get_device_capability()[0] == 10
+            )
+            self.use_ue8m0 = bool(getattr(config, "use_ue8m0", False))
+            self.inp_quant_func, self.weight_quant_func = get_quant_func(
+                getattr(config, "fp8_recipe", "blockwise"),
+                input_trans=True,
+                out_scale_trans=False,
+                pow2_scale=self.use_pow2_scale,
+                use_ue8m0=self.use_ue8m0,
+            )
+            # Color the bf16 weight so ``clear_param_storage("linear_fp8")``
+            # can free it after pre-quant.
+            _maybe_color_linear_fp8_weight(self)
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        """Pre-quantize this Linear's weight and cache on ``self.weight``.
+
+        Called from the per-step FP8 quant callback via
+        ``TransformerLayer.fp8_quant_weight`` -> non-MoE Linear walk. Stores
+        one fp8 tensor (forward orientation) plus both scales; backward fp8
+        is derived on demand in ``weight_quant_func`` via ``.T.contiguous()``.
+
+        ``batch_mode`` / ``quant_transpose`` are accepted for signature
+        compatibility with the MoE dispatch chain but are unused here — a
+        non-MoE Linear has a single weight tensor and always needs both
+        scale orientations (no reason to skip the transposed scale).
+        """
+        _fp8_prequant_weight(self)
+
+    def clear_fp8_quant_weight(self):
+        """Drop the fp8 cache stashed by :meth:`fp8_quant_weight`.
+
+        Must be called after every optimizer step (paired with
+        ``fp8_quant_weight`` on the next iter) so a stale post-step weight
+        cache does not shadow the freshly-updated bf16 weight in
+        ``weight_quant_func``.
+        """
+        _fp8_clear_prequant_weight(self)
 
     def forward(
         self,
@@ -1018,6 +1540,13 @@ class Linear(paddle.nn.Layer):
             use_accuracy_compatible=getattr(
                 self.config, "use_accuracy_compatible", False
             ),
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            inp_quant_func=self.inp_quant_func,
+            weight_quant_func=self.weight_quant_func,
+            use_pow2_scale=self.use_pow2_scale,
+            use_ue8m0=self.use_ue8m0,
+            save_original_input=self.save_original_input,
         )
 
         output_bias = (
@@ -1243,6 +1772,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
         tp_comm_buffer_name: str | None = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: paddle.core.ProcessGroup | None = None,
+        disable_fp8: bool = False,
     ):
         super().__init__()
 
@@ -1260,6 +1790,8 @@ class ColumnParallelLinear(paddle.nn.Layer):
         self.disable_grad_reduce = disable_grad_reduce
         self.tp_group = tp_group
         self._dtype = config.params_dtype
+        self.tp_comm_buffer_name = tp_comm_buffer_name
+        self._fp8_linear_logged = False
 
         self.tp_group = get_tensor_model_parallel_group_if_none(
             self.tp_group, is_expert=self.is_expert, check_initialized=False
@@ -1318,6 +1850,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
                 self.is_expert and self.expert_parallel
             )
             self.weight.is_distributed = True if self.world_size > 1 else False
+            self.weight.is_expert_param = self.is_expert
         else:
             self.weight = None
 
@@ -1362,6 +1895,50 @@ class ColumnParallelLinear(paddle.nn.Layer):
             )
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+
+        # FP8 is inherited from ``config`` unless the caller opts out via
+        # ``disable_fp8``. ``save_original_input`` defaults to ``not self.fp8``
+        # and is a settable attribute — callers can override it post-init.
+        self.fp8 = (
+            bool(getattr(config, "full_fp8_computation", False))
+            and bool(getattr(config, "fp8", None))
+            and not disable_fp8
+        )
+        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
+        self.save_original_input = not self.fp8
+        self.use_pow2_scale = False
+        self.use_ue8m0 = False
+        self.inp_quant_func = None
+        self.weight_quant_func = None
+        if self.fp8:
+            assert self.world_size == 1, (
+                "ColumnParallelLinear FP8 currently requires TP=1, "
+                f"got world_size={self.world_size}"
+            )
+            from paddlefleet.fp8.quantization import get_quant_func
+
+            self.use_pow2_scale = (
+                paddle.device.cuda.get_device_capability()[0] == 10
+            )
+            self.use_ue8m0 = bool(getattr(config, "use_ue8m0", False))
+            self.inp_quant_func, self.weight_quant_func = get_quant_func(
+                getattr(config, "fp8_recipe", "blockwise"),
+                input_trans=True,
+                out_scale_trans=False,
+                pow2_scale=self.use_pow2_scale,
+                use_ue8m0=self.use_ue8m0,
+            )
+            # Color the bf16 weight so ``clear_param_storage("linear_fp8")``
+            # can free it after pre-quant.
+            _maybe_color_linear_fp8_weight(self)
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        """Pre-quantize this ColumnParallelLinear's weight (see ``Linear.fp8_quant_weight``)."""
+        _fp8_prequant_weight(self)
+
+    def clear_fp8_quant_weight(self):
+        """Drop the fp8 cache (see ``Linear.clear_fp8_quant_weight``)."""
+        _fp8_clear_prequant_weight(self)
 
     def forward(
         self,
@@ -1478,6 +2055,13 @@ class ColumnParallelLinear(paddle.nn.Layer):
             use_accuracy_compatible=getattr(
                 self.config, "use_accuracy_compatible", False
             ),
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            inp_quant_func=self.inp_quant_func,
+            weight_quant_func=self.weight_quant_func,
+            use_pow2_scale=self.use_pow2_scale,
+            use_ue8m0=self.use_ue8m0,
+            save_original_input=self.save_original_input,
         )
 
         gather_output = self.gather_output
@@ -1578,6 +2162,7 @@ class RowParallelLinear(paddle.nn.Layer):
         is_expert: bool = False,
         tp_comm_buffer_name: str | None = None,  # Not used
         tp_group: paddle.core.ProcessGroup | None = None,
+        disable_fp8: bool = False,
     ):
         super().__init__()
 
@@ -1594,6 +2179,8 @@ class RowParallelLinear(paddle.nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tp_group = tp_group
         self._dtype = config.params_dtype
+        self.tp_comm_buffer_name = tp_comm_buffer_name
+        self._fp8_linear_logged = False
 
         if self.sequence_parallel and not self.input_is_parallel:
             raise RuntimeError(
@@ -1655,6 +2242,7 @@ class RowParallelLinear(paddle.nn.Layer):
                 )
         self.weight.allreduce = not (self.is_expert and self.expert_parallel)
         self.weight.is_distributed = True if self.world_size > 1 else False
+        self.weight.is_expert_param = self.is_expert
 
         if bias:
             self.bias = self.create_parameter(
@@ -1675,6 +2263,50 @@ class RowParallelLinear(paddle.nn.Layer):
             # self.register_parameter("bias", None)
 
         self._forward_impl = linear_with_grad_accumulation_and_async_allreduce
+
+        # FP8 is inherited from ``config`` unless the caller opts out via
+        # ``disable_fp8``. ``save_original_input`` defaults to ``not self.fp8``
+        # and is a settable attribute — callers can override it post-init.
+        self.fp8 = (
+            bool(getattr(config, "full_fp8_computation", False))
+            and bool(getattr(config, "fp8", None))
+            and not disable_fp8
+        )
+        self.fp8_wgrad = bool(getattr(config, "fp8_wgrad", False)) and self.fp8
+        self.save_original_input = not self.fp8
+        self.use_pow2_scale = False
+        self.use_ue8m0 = False
+        self.inp_quant_func = None
+        self.weight_quant_func = None
+        if self.fp8:
+            assert self.world_size == 1, (
+                "RowParallelLinear FP8 currently requires TP=1, "
+                f"got world_size={self.world_size}"
+            )
+            from paddlefleet.fp8.quantization import get_quant_func
+
+            self.use_pow2_scale = (
+                paddle.device.cuda.get_device_capability()[0] == 10
+            )
+            self.use_ue8m0 = bool(getattr(config, "use_ue8m0", False))
+            self.inp_quant_func, self.weight_quant_func = get_quant_func(
+                getattr(config, "fp8_recipe", "blockwise"),
+                input_trans=True,
+                out_scale_trans=False,
+                pow2_scale=self.use_pow2_scale,
+                use_ue8m0=self.use_ue8m0,
+            )
+            # Color the bf16 weight so ``clear_param_storage("linear_fp8")``
+            # can free it after pre-quant.
+            _maybe_color_linear_fp8_weight(self)
+
+    def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
+        """Pre-quantize this RowParallelLinear's weight (see ``Linear.fp8_quant_weight``)."""
+        _fp8_prequant_weight(self)
+
+    def clear_fp8_quant_weight(self):
+        """Drop the fp8 cache (see ``Linear.clear_fp8_quant_weight``)."""
+        _fp8_clear_prequant_weight(self)
 
     def forward(self, input_):
         """Forward of RowParallelLinear
@@ -1741,6 +2373,13 @@ class RowParallelLinear(paddle.nn.Layer):
             use_accuracy_compatible=getattr(
                 self.config, "use_accuracy_compatible", False
             ),
+            fp8=self.fp8,
+            fp8_wgrad=self.fp8_wgrad,
+            inp_quant_func=self.inp_quant_func,
+            weight_quant_func=self.weight_quant_func,
+            use_pow2_scale=self.use_pow2_scale,
+            use_ue8m0=self.use_ue8m0,
+            save_original_input=self.save_original_input,
         )
 
         # All-reduce across all the partitions.

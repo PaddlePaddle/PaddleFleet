@@ -18,6 +18,7 @@
 import numpy
 import paddle
 import paddle.nn.functional as F
+from paddle.base.framework import EagerParamBase
 
 from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
@@ -35,6 +36,18 @@ try:
     )
 except (ImportError, RuntimeError):
     pass
+
+try:
+    from paddlefleet_ops import (
+        w4a8_dequantize_1x32,
+        w4a8_quantize_1x32,
+        w4a8_stack_quantize_1x32,
+        w4a8_weighted_swiglu_quantize_1x32,
+    )
+
+    HAS_W4A8_FUSED_QUANT = True
+except (ImportError, AttributeError, RuntimeError):
+    HAS_W4A8_FUSED_QUANT = False
 
 # 优先从 paddlefleet_ops 导入（算子已重命名为 paddlefleet_fused_swiglu_probs_bwd 避免冲突），
 # 仅在 paddlefleet_ops 中不存在时回退到旧的 FusedQuantOps。
@@ -236,6 +249,316 @@ def tilewise_quant(x):
         return x_fp8, x_scale
 
 
+# ---------------------------------------------------------------------------
+# w4a8 (fp4 权重 1x32 + fp8 激活 1x32) 在线量化散算子
+#
+# 实现参考 DeepGEMM 官方 python 参考实现（deep_gemm/utils/math.py）：
+#   ceil_to_ue8m0 / per_token_cast_to_fp8 / per_token_cast_to_fp4 /
+#   _quantize_to_fp4_e2m1 / cast_back_from_fp8
+# 命名约定：
+#   - 普通 blockwise 量化算子：quant_blockwize()，通过 attr 区分 fp4/fp8、ue8m0 等
+#   - 与 CUDA 融合算子对应的 python 散算子：原名 + "_python"
+# ---------------------------------------------------------------------------
+
+W4A8_QUANT_BLOCK = 32
+
+
+def _use_w4a8_fused_quant(enabled):
+    if enabled and not HAS_W4A8_FUSED_QUANT:
+        raise RuntimeError(
+            "use_w4a8_fused_quant=True requires paddlefleet_ops "
+            "built with the W4A8 1x32 CUDA custom ops"
+        )
+    return enabled
+
+
+def ceil_to_ue8m0(x):
+    """将 scale 向上取整到 2 的幂（ue8m0）。
+
+    等价 DeepGEMM math.py 的 ceil_to_ue8m0：
+        bits = x.abs().float().view(torch.int32)
+        exp = ((bits >> 23) & 0xFF) + (bits & 0x7FFFFF).bool().int()
+        return (exp.clamp(1, 254) << 23).view(torch.float)
+    """
+    bits = x.abs().astype("float32").view("int32")
+    mask_ff = paddle.full_like(bits, 0xFF)
+    mask_7fffff = paddle.full_like(bits, 0x7FFFFF)
+    shift_23 = paddle.full_like(bits, 23)
+    exp = ((bits >> shift_23) & mask_ff) + ((bits & mask_7fffff) != 0).astype(
+        "int32"
+    )
+    return (exp.clip(1, 254) << shift_23).view("float32")
+
+
+def _quantize_to_fp4_e2m1(x):
+    """fp32 -> e2m1 4bit code（int32, 0~15），同 DeepGEMM _quantize_to_fp4_e2m1。
+
+    e2m1 可表示值 {0, 0.5, 1, 1.5, 2, 3, 4, 6}，
+    rounding 边界（相邻值中点）：0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0，
+    bit3 为符号位。
+    """
+    ax = x.abs()
+    code = paddle.zeros(ax.shape, dtype="int32")
+    for boundary in (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0):
+        code = code + (ax > boundary).astype("int32")
+    sign = ((x < 0) & (code != 0)).astype("int32")
+    shift_3 = paddle.full_like(code, 3)
+    return code | (sign << shift_3)
+
+
+def quant_blockwize(
+    x, quant_method="1x32", quant_dtype="fp8", using_ue8m0_scale=True
+):
+    """普通 blockwise 量化散算子（对齐 fp8_quant_blockwise 的 attr 风格）。
+
+    参考 DeepGEMM math.py 的 per_token_cast_to_fp8 / per_token_cast_to_fp4。
+
+    Args:
+        x: [M, K] bf16/fp32，K 必须能被块大小整除（fp4 时还需被 2 整除）
+        quant_method: "1xN"，块大小（如 "1x32" / "1x128"）
+        quant_dtype: "fp8"（e4m3fn）或 "fp4"（e2m1，两值打包成一个 int8）
+        using_ue8m0_scale: scale 是否向上取整到 2 的幂（SM100 1D1D kernel
+            内部会把 fp32 scale cast 成 packed ue8m0，故 w4a8 必须为 True）
+
+    Returns:
+        (q, sf):
+          fp8: q [M, K] float8_e4m3fn, sf [M, K/gran_k] fp32
+          fp4: q [M, K/2] int8（低 nibble 存前一个元素）, sf [M, K/gran_k] fp32
+    """
+    gran_m, gran_k = (int(v) for v in quant_method.split("x"))
+    assert x.ndim == 2, x.shape
+    m, n = x.shape
+    assert n % gran_k == 0, f"K={n} 必须是 {gran_k} 的倍数"
+
+    if gran_m > 1:
+        # 2D tile 量化（如 128x128，权重量化，同 CUDA fuse_stack_*_fp8_quant）
+        assert quant_dtype == "fp8", "2D tile 量化仅支持 fp8"
+        assert m % gran_m == 0, f"M={m} 必须是 {gran_m} 的倍数"
+        tiles = (
+            x.reshape([m // gran_m, gran_m, n // gran_k, gran_k])
+            .transpose([0, 2, 1, 3])
+            .astype("float32")
+        )
+        amax = tiles.abs().max(axis=[2, 3]).clip(min=1e-4)
+        sf = amax / 448.0
+        sf = ceil_to_ue8m0(sf) if using_ue8m0_scale else sf
+        q = (
+            (tiles * (1.0 / sf.unsqueeze(-1).unsqueeze(-1)))
+            .transpose([0, 2, 1, 3])
+            .reshape([m, n])
+            .astype(paddle.float8_e4m3fn)
+        )
+        return q, sf
+
+    if m == 0:
+        if quant_dtype == "fp8":
+            q = paddle.empty([0, n], dtype=paddle.float8_e4m3fn)
+        else:
+            q = paddle.empty([0, n // 2], dtype=paddle.int8)
+        return q, paddle.empty([0, n // gran_k], dtype=paddle.float32)
+
+    x_view = x.reshape([m, n // gran_k, gran_k]).astype("float32")
+    x_amax = x_view.abs().max(axis=2).clip(min=1e-4)
+
+    if quant_dtype == "fp8":
+        sf = x_amax / 448.0
+        sf = ceil_to_ue8m0(sf) if using_ue8m0_scale else sf
+        q = (
+            (x_view * (1.0 / sf.unsqueeze(2)))
+            .reshape([m, n])
+            .astype(paddle.float8_e4m3fn)
+        )
+        return q, sf
+
+    if quant_dtype == "fp4":
+        assert n % 2 == 0, n
+        sf = x_amax / 6.0
+        sf = ceil_to_ue8m0(sf) if using_ue8m0_scale else sf
+        x_scaled = x_view * (1.0 / sf.unsqueeze(2))
+        codes = _quantize_to_fp4_e2m1(x_scaled).reshape([m, n])
+        # 打包：两个 4bit code -> 一个字节，低 nibble 存前一个元素
+        # （同 DeepGEMM per_token_cast_to_fp4）
+        codes2 = codes.reshape([m, n // 2, 2])
+        mask_0f = paddle.full_like(codes2[:, :, 0], 0x0F)
+        shift_4 = paddle.full_like(codes2[:, :, 0], 4)
+        packed = (codes2[:, :, 0] & mask_0f) | (
+            (codes2[:, :, 1] & mask_0f) << shift_4
+        )
+        # 按 bit pattern 转 int8（>127 的按补码回绕）
+        packed = paddle.where(packed > 127, packed - 256, packed).astype("int8")
+        return packed, sf
+
+    raise ValueError(f"unsupported quant_dtype: {quant_dtype}")
+
+
+def _stack_expert_weights(w):
+    """把专家权重 list/stacked tensor 统一成 [E, H0, H1]。"""
+    if isinstance(w, (list, tuple)):
+        w = w[0] if len(w) == 1 else paddle.stack(w, axis=0)
+    assert w.ndim == 3, w.shape
+    return w
+
+
+def fuse_stack_fp8_quant_python(
+    w, quant_method="1x32", quant_dtype="fp4", using_ue8m0_scale=True
+):
+    """fuse_stack_fp8_quant 的 python 散算子版本（不转置）。
+
+    输入 w: [E, R, C] bf16 stacked 权重（或 tensor list，自动 stack），
+    沿最后一维（GEMM 收缩维）做 blockwise 量化。
+    返回: fp4 时 (w_q [E, R, C/2] int8, sf [E, R, C/gran_k] fp32)
+    """
+    w = _stack_expert_weights(w)
+    e, r, c = w.shape
+    q, sf = quant_blockwize(
+        w.reshape([e * r, c]),
+        quant_method=quant_method,
+        quant_dtype=quant_dtype,
+        using_ue8m0_scale=using_ue8m0_scale,
+    )
+    if not quant_method.startswith("1x"):
+        # 2D tile（如 128x128）时保持 CUDA 融合算子的 2D 布局：
+        # q [E*R, C], sf [E*R/gm, C/gk]
+        return q, sf
+    return (
+        q.reshape([e, r, q.shape[-1]]),
+        sf.reshape([e, r, sf.shape[-1]]),
+    )
+
+
+def fuse_stack_transpose_fp8_quant_python(
+    w, quant_method="1x32", quant_dtype="fp4", using_ue8m0_scale=True
+):
+    """fuse_stack_transpose_fp8_quant 的 python 散算子版本。
+
+    输入 w: [E, H0, H1]，先转置成 [E, H1, H0] 再沿最后一维量化。
+    """
+    w = _stack_expert_weights(w)
+    return fuse_stack_fp8_quant_python(
+        w.transpose([0, 2, 1]).contiguous(),
+        quant_method=quant_method,
+        quant_dtype=quant_dtype,
+        using_ue8m0_scale=using_ue8m0_scale,
+    )
+
+
+def _weighted_swiglu_fp32(o1, probs, clamp_value=None):
+    """fp32 全程计算 swiglu(o1) * probs（与 CUDA 融合算子内部精度一致）。
+
+    CUDA 版 fuse_weighted_swiglu_fp8_quant(_clamp) 在 kernel 内用 fp32
+    计算 silu(gate)*up*probs 后直接量化，不落 bf16 中间结果；python 版
+    同样保持 fp32，才能与融合算子位级对齐。
+    """
+    x32 = o1.astype("float32")
+    h = x32.shape[-1] // 2
+    gate, up = x32[:, :h], x32[:, h:]
+    if clamp_value is not None:
+        gate = gate.clip(max=clamp_value)
+        up = up.clip(min=-clamp_value, max=clamp_value)
+    p = probs.astype("float32")
+    if p.ndim == 1:
+        # 端到端 forward 传入的 unzipped_probs 是 1-D [M]（CUDA 融合算子内部兼容），
+        # python 版需显式广播为 [M, 1]
+        p = p.reshape([-1, 1])
+    return F.silu(gate) * up * p
+
+
+def fuse_weighted_swiglu_fp8_quant_python(
+    o1, probs, quant_method="1x32", using_ue8m0_scale=True
+):
+    """fuse_weighted_swiglu_fp8_quant 的 python 散算子版本。
+
+    o2 = swiglu(o1) * probs（fp32 中间计算），再做 blockwise fp8 量化。
+    quant_method="1x128" 且 using_ue8m0_scale=True 时与 CUDA 融合算子
+    （using_pow2_scaling=True）逐位一致。
+    返回: (o2_fp8 [M, H] float8_e4m3fn, sf [M, H/gran_k] fp32)
+    """
+    o2 = _weighted_swiglu_fp32(o1, probs)
+    return quant_blockwize(
+        o2,
+        quant_method=quant_method,
+        quant_dtype="fp8",
+        using_ue8m0_scale=using_ue8m0_scale,
+    )
+
+
+def fuse_weighted_swiglu_fp8_quant_clamp_python(
+    o1, probs, clamp_value, quant_method="1x32", using_ue8m0_scale=True
+):
+    """fuse_weighted_swiglu_fp8_quant_clamp 的 python 散算子版本。
+
+    clamp 语义与 CUDA 版一致：gate 上界夹 min(x, c)，up 对称夹 clip(y, -c, c)。
+    quant_method="1x128" 且 using_ue8m0_scale=True 时与 CUDA 融合算子逐位一致。
+    """
+    o2 = _weighted_swiglu_fp32(o1, probs, clamp_value)
+    return quant_blockwize(
+        o2,
+        quant_method=quant_method,
+        quant_dtype="fp8",
+        using_ue8m0_scale=using_ue8m0_scale,
+    )
+
+
+def fused_act_dequant_python(x_fp8, sf):
+    """fused_act_dequant 的 python 散算子版本（blockwise 反量化）。
+
+    参考 DeepGEMM math.py 的 cast_back_from_fp8：
+        group_idx = arange(n) // gran_k
+        return x_fp8.float() * sf[:, group_idx]
+
+    输入: x_fp8 [M, K] float8_e4m3fn, sf [M, K/gran_k] fp32
+    返回: bf16 [M, K]
+    """
+    m, n = x_fp8.shape
+    assert sf.shape[0] == m and n % sf.shape[1] == 0, (
+        f"{x_fp8.shape} vs {sf.shape}"
+    )
+    gran_k = n // sf.shape[1]
+    group_idx = paddle.arange(n, dtype="int64") // gran_k
+    sf_expanded = paddle.index_select(sf.astype("float32"), group_idx, axis=1)
+    return (x_fp8.astype("float32") * sf_expanded).astype("bfloat16")
+
+
+def _w4a8_quant(x, quant_dtype, use_w4a8_fused_quant=False):
+    if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        return w4a8_quantize_1x32(x, 0 if quant_dtype == "fp8" else 1)
+    return quant_blockwize(x, quant_dtype=quant_dtype)
+
+
+def _w4a8_stack_quant(weights, transpose, use_w4a8_fused_quant=False):
+    if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        weights = _stack_expert_weights(weights)
+        return w4a8_stack_quantize_1x32(weights, transpose)
+    fn = (
+        fuse_stack_transpose_fp8_quant_python
+        if transpose
+        else fuse_stack_fp8_quant_python
+    )
+    return fn(weights, quant_dtype="fp4")
+
+
+def _w4a8_weighted_swiglu_quant(
+    o1, probs, clamp_value=None, use_w4a8_fused_quant=False
+):
+    if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        return w4a8_weighted_swiglu_quantize_1x32(
+            o1,
+            probs,
+            0.0 if clamp_value is None else float(clamp_value),
+        )
+    if clamp_value is not None and clamp_value > 0:
+        return fuse_weighted_swiglu_fp8_quant_clamp_python(
+            o1, probs, clamp_value
+        )
+    return fuse_weighted_swiglu_fp8_quant_python(o1, probs)
+
+
+def _w4a8_dequant(x_fp8, sf, use_w4a8_fused_quant=False):
+    if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        return w4a8_dequantize_1x32(x_fp8, sf)
+    return fused_act_dequant_python(x_fp8, sf)
+
+
 def split_group_gemm(
     x_fp8, x_scale, w_fp8, w_scale, tokens_per_expert, gemm_out, use_ue8m0=False
 ):
@@ -295,6 +618,34 @@ def has_config(config_map, key):
     )
 
 
+def expert_weights_all_frozen(weights):
+    """True when every expert weight in ``weights`` is a frozen parameter.
+
+    The MoE expert backward writes weight gradients straight into
+    ``main_grad`` / ``grad`` instead of returning them through autograd, so
+    ``stop_gradient`` is not honored automatically. Callers use this to skip the
+    wgrad GEMMs and their fp32 buffers when the experts are frozen (for example
+    DSv4 phase 2, ``csa_train_indexer_only``).
+
+    ``weights`` is a stacked parameter (grouped path), a list of per-expert
+    parameters (split path), or a **per-expert view** of a stacked parameter
+    (subbatch / sliced deep_gemm path). A view's own ``stop_gradient`` is always
+    True even when its parent parameter is trainable, so each entry is first
+    dereferenced through ``_parent`` -- stamped by :func:`slice_expert_weight` and
+    stored by :class:`_PerExpertWeightView`. Only an ``EagerParamBase`` then
+    counts as frozen; anything else keeps the original behavior so no gradient is
+    silently dropped. Mixed groups are treated as not frozen.
+    """
+    if weights is None:
+        return False
+    if not isinstance(weights, (list, tuple)):
+        weights = [weights]
+    entries = [getattr(w, "_parent", w) for w in weights if w is not None]
+    return bool(entries) and all(
+        isinstance(w, EagerParamBase) and w.stop_gradient for w in entries
+    )
+
+
 def kitchen_gemm(
     x_fp8,
     x_scale,
@@ -338,6 +689,20 @@ def kitchen_gemm(
             return out
 
     return y
+
+
+def slice_expert_weight(parent_weight, local_id):
+    """Per-expert view ``[1, K, N]`` of a stacked expert weight.
+
+    ``_slice`` returns a raw view whose ``stop_gradient`` is always True, even when
+    the parent parameter is trainable, so keep a pointer to the parameter it came
+    from. :func:`expert_weights_all_frozen` dereferences that ``_parent`` to decide
+    whether the expert is frozen. Every per-expert slicing site must go through
+    here, otherwise that path silently loses the frozen-expert wgrad skip.
+    """
+    view = parent_weight._slice(local_id, local_id + 1)
+    view._parent = parent_weight
+    return view
 
 
 class _PerExpertWeightView:
@@ -467,6 +832,8 @@ class ExpertsGroupGemmContiguousNode:
         clamp_value=None,
         activation_type="swiglu",
         use_accuracy_compatible=False,
+        use_w4a8=False,
+        use_w4a8_fused_quant=False,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -494,8 +861,8 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 # Normal: bf16 weight is valid, slice directly
                 sliced = type("_SlicedGroupedExpert", (), {})()
-                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
-                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
+                sliced.weight1 = slice_expert_weight(parent.weight1, local_id)
+                sliced.weight2 = slice_expert_weight(parent.weight2, local_id)
                 sliced._parent = parent
                 sliced._local_id = local_id
                 self.grouped_gemm_experts = sliced
@@ -542,6 +909,23 @@ class ExpertsGroupGemmContiguousNode:
             moe_grouped_gemm=not self.is_split_group_gemm,
             use_accuracy_compatible=use_accuracy_compatible,
         )
+        self.use_w4a8 = use_w4a8
+        self.use_w4a8_fused_quant = use_w4a8_fused_quant
+        if use_w4a8:
+            assert moe_expert_fusion and moe_deep_gemm and use_fp8_mlp, (
+                "use_w4a8 需要 moe_expert_fusion + moe_deep_gemm + use_fp8_mlp"
+            )
+            # assert not dequant_input, (
+            #     "use_w4a8 要求关闭 fp8_dispatch（专家输入 bf16），"
+            #     "不支持 dequant_input"
+            # )
+            assert hasattr(
+                paddlefleet_deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous"
+            ), (
+                "use_w4a8 需要 paddlefleet_ops.deep_gemm 提供 fp8*fp4 grouped GEMM"
+            )
+            # 用户指定：w4a8 下 dw 全部走 bf16 grouped gemm
+            self.use_bf16_gemm_weight_grad = True
 
     def cached_tensors(self):
         """
@@ -682,6 +1066,10 @@ class ExpertsGroupGemmContiguousNode:
         o1 = x * w1
         [m_sum, n] = [m_sum, k] * [num_groups, k, n] (m_sum = sum(tokens_per_expert))
         """
+        if self.use_w4a8:
+            # 反向存储（dequant_input: fp8 1x32 / 否则 bf16）在 _fwd_gate_up_w4a8
+            # 内完成，直接复用前向的量化结果
+            return self._fwd_gate_up_w4a8(x, expert_w1, scale=scale)
         # concat w1, shape is [num_groups, n, k]
 
         if hasattr(self, "grouped_gemm_experts"):
@@ -759,7 +1147,7 @@ class ExpertsGroupGemmContiguousNode:
                     (x_fp8, x_scale),
                     (w1_t_quant, w1_t_scale),
                     o1,
-                    m_indices=self.m_indices,
+                    self.m_indices,
                 )
 
         if self.dequant_input:
@@ -768,6 +1156,175 @@ class ExpertsGroupGemmContiguousNode:
         else:
             self.input = x
         return o1
+
+    # ------------------------------------------------------------------
+    # w4a8 路径：权重 fp4 1x32 在线量化 + 激活 fp8 1x32 量化 + DeepGEMM fp8*fp4
+    # ------------------------------------------------------------------
+
+    def _w4a8_grouped_gemm(self, x_fp8, x_sf, w_fp4, w_sf, out):
+        """调用 DeepGEMM 的 m_grouped fp8*fp4 contiguous GEMM (SM100 1D1D)。
+
+        x_fp8/x_sf: 激活 fp8 1x32 量化结果 [M, K] / [M, K/32]
+        w_fp4/w_sf: 权重 fp4 1x32 量化结果 [E, N, K/2] / [E, N, K/32]
+        out: [M, N] bf16；grouped_layout 即 self.m_indices（每行 group id）。
+        """
+        paddlefleet_deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+            (x_fp8, x_sf),
+            (w_fp4, w_sf),
+            out,
+            self.m_indices,
+            recipe_a=(1, W4A8_QUANT_BLOCK),
+            recipe_b=(1, W4A8_QUANT_BLOCK),
+        )
+        return out
+
+    def _fwd_gate_up_w4a8(self, x, expert_w1, scale=None):
+        """w4a8 前向 up_gate: o1 = x(fp8 1x32) @ w1(fp4 1x32)^T
+
+        [m_sum, n] = [m_sum, k] * [num_groups, k, n]
+        """
+        assert scale is None, "TODO w4a8支持fp8_dispatch"
+        x_fp8 = x_sf = None
+        if x is None:
+            # backward recompute：dequant_input 下直接复用存储的 1x32 fp8，
+            # 免去一次反量化+再量化
+            if self.dequant_input:
+                assert self.input_fp8 is not None
+                x_fp8, x_sf = self.input_fp8, self.input_scale
+            else:
+                assert self.input is not None
+                x = self.input
+        # [E, K, N] -> [E, N, K/2]
+        w1_fp4, w1_sf = _w4a8_stack_quant(
+            expert_w1,
+            transpose=True,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
+        if x_fp8 is None:
+            x_fp8, x_sf = _w4a8_quant(
+                x,
+                quant_dtype="fp8",
+                use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+            )
+        # 给反向存储：dequant_input 存 fp8 1x32 量化结果（省显存，
+        # 反向 bf16 wgrad 用 fused_act_dequant_python 反量化），否则存 bf16
+        if self.dequant_input:
+            self.input_fp8, self.input_scale = x_fp8, x_sf
+        else:
+            self.input = x
+
+        o1 = paddle.empty(
+            [x_fp8.shape[0], w1_fp4.shape[1]], dtype=paddle.bfloat16
+        )
+        if numpy.prod(x_fp8.shape) != 0:
+            self._w4a8_grouped_gemm(x_fp8, x_sf, w1_fp4, w1_sf, o1)
+        return o1
+
+    def _fwd_down_w4a8(
+        self, o1, unzipped_probs, expert_w2, o3=None, clear_o1=False
+    ):
+        """w4a8 前向 down: o3 = swiglu(o1)*probs (fp8 1x32) @ w2(fp4 1x32)^T
+
+        [m_sum, k] = [m_sum, n] * [num_groups, n, k]
+        """
+        # 在线量化权重：[E, H, K] -> [E, K, H/2]
+        w2_fp4, w2_sf = _w4a8_stack_quant(
+            expert_w2,
+            transpose=True,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
+        o2_fp8, o2_sf = _w4a8_weighted_swiglu_quant(
+            o1,
+            unzipped_probs,
+            self.clamp_value,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
+        if clear_o1:
+            o1._clear_to_zero_allocation()
+
+        o3_shape = [o2_fp8.shape[0], w2_fp4.shape[1]]
+        if o3 is not None:
+            assert o3.shape == o3_shape, f"{o3.shape} vs {o3_shape}"
+            o3.zero_()
+        else:
+            o3 = paddle.empty(o3_shape, dtype=paddle.bfloat16)
+        if numpy.prod(o2_fp8.shape) != 0:
+            self._w4a8_grouped_gemm(o2_fp8, o2_sf, w2_fp4, w2_sf, o3)
+        return o3
+
+    def _bwd_down_input_w4a8(
+        self, expert_w2, unzipped_grad, o1, unzipped_probs
+    ):
+        """w4a8 反向 down dgrad: do2 = do3(fp8 1x32) @ w2(fp4 1x32)
+
+        [m_sum, n] = [m_sum, k] * [num_groups, k, n]
+        w2 [E, N, K] 不转置，收缩维为 K（do3 的列维）。
+        """
+        w2_fp4, w2_sf = _w4a8_stack_quant(
+            expert_w2,
+            transpose=False,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
+        grad_fp8, grad_sf = _w4a8_quant(
+            unzipped_grad,
+            quant_dtype="fp8",
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
+
+        do2_s = paddle.empty(
+            [grad_fp8.shape[0], w2_fp4.shape[1]], dtype=unzipped_grad.dtype
+        )
+        if numpy.prod(grad_fp8.shape) != 0:
+            self._w4a8_grouped_gemm(grad_fp8, grad_sf, w2_fp4, w2_sf, do2_s)
+
+        # swiglu 反向沿用现有逻辑（clamp / inplace / out-of-place 分支）
+        with paddle.amp.auto_cast(False):
+            if self.clamp_value is not None and self.clamp_value > 0:
+                do1, probs_grad, o2_s = fused_swiglu_weighted_clamp_bwd(
+                    o1,
+                    unzipped_probs,
+                    do2_s,
+                    float(self.clamp_value),
+                )
+            elif USE_INPLACE_SWIGLU_BWD:
+                do1, probs_grad, o2_s = _fused_swiglu_probs_bwd(
+                    o1, do2_s, unzipped_probs, True
+                )
+            else:
+                do1, probs_grad, o2_s = (
+                    paddle.incubate.nn.functional.fused_swiglu_weighted_bwd(
+                        o1, do2_s, unzipped_probs
+                    )
+                )
+
+        return do1, o2_s, probs_grad
+
+    def _bwd_gate_up_input_w4a8(self, do1, expert_w1, dx=None):
+        """w4a8 反向 up_gate dgrad: dx = do1(fp8 1x32) @ w1(fp4 1x32)
+
+        [m_sum, k] = [m_sum, n] * [num_groups, n, k]
+        w1 [E, K, N] 不转置，收缩维为 N（do1 的列维）。
+        """
+        w1_fp4, w1_sf = _w4a8_stack_quant(
+            expert_w1,
+            transpose=False,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
+        do1_fp8, do1_sf = _w4a8_quant(
+            do1,
+            quant_dtype="fp8",
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
+
+        dx_shape = [do1_fp8.shape[0], w1_fp4.shape[1]]
+        if dx is None:
+            dx = paddle.empty(shape=dx_shape, dtype=do1.dtype)
+        else:
+            assert dx.shape == dx_shape, f"{dx.shape} vs {dx_shape}"
+            dx.zero_()
+        if numpy.prod(do1_fp8.shape) != 0:
+            self._w4a8_grouped_gemm(do1_fp8, do1_sf, w1_fp4, w1_sf, dx)
+        return dx
 
     def fwd_swiglu(self, o1):
         o2 = swiglu(o1)
@@ -909,6 +1466,10 @@ class ExpertsGroupGemmContiguousNode:
         o3 = o2 * w2
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
+        if self.use_w4a8:
+            return self._fwd_down_w4a8(
+                o1, unzipped_probs, expert_w2, o3=o3, clear_o1=clear_o1
+            )
         # concat and transpose w2
 
         if (
@@ -988,7 +1549,7 @@ class ExpertsGroupGemmContiguousNode:
                     (o2_fp8, o2_scale),
                     (w2_quant, w2_scale),
                     o3,
-                    m_indices=self.m_indices,
+                    self.m_indices,
                 )
         return o3
 
@@ -1095,9 +1656,19 @@ class ExpertsGroupGemmContiguousNode:
                 )
                 d_gate_f32 = gate_g.grad
                 d_up_f32 = val_g.grad
-                d_scale_f32 = scale_g.grad.reshape(unzipped_probs.shape).astype(
-                    "float32"
-                )
+
+                # This ffn-dimension reduction uses a different accumulation order in fp32 than MG(torch) -> dL/dprobs.
+                # The last-bit split causes a 1-ULP gate wgrad difference (isolated test: fp32 vs fp64 differs by ~3.5e-8).
+                # Summing only in fp64 removes the accumulation-order noise and makes both sides converge to the same value; do1 still follows the fp32 path above
+                # while autograd stays unchanged, keeping expert wgrad aligned.
+                probs_grad_fp64 = (
+                    F.silu(gate_c.detach().astype("float64"))
+                    * val_c.detach().astype("float64")
+                    * do2_s.astype("float64").detach()
+                ).sum(axis=-1, keepdim=True)
+                d_scale_f32 = probs_grad_fp64.reshape(
+                    unzipped_probs.shape
+                ).astype("float32")
 
             do1 = paddle.concat([d_gate_f32, d_up_f32], axis=-1).astype(
                 o1.dtype
@@ -1174,6 +1745,10 @@ class ExpertsGroupGemmContiguousNode:
         do2 = do3 * w2_t
         [m_sum, n] = [m_sum, k] * [num_groups, k, n]
         """
+        if self.use_w4a8:
+            return self._bwd_down_input_w4a8(
+                expert_w2, unzipped_grad, o1, unzipped_probs
+            )
         # recompute concated_w2_2d
 
         if hasattr(self, "grouped_gemm_experts"):
@@ -1269,7 +1844,7 @@ class ExpertsGroupGemmContiguousNode:
                     (unzipped_grad_fp8, unzipped_grad_scale),
                     (bw_w2_quant, bw_w2_scale),
                     do2_s,
-                    m_indices=self.m_indices,
+                    self.m_indices,
                 )
 
         with paddle.amp.auto_cast(False):
@@ -1358,6 +1933,8 @@ class ExpertsGroupGemmContiguousNode:
         dx = do1 * w1_t
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
+        if self.use_w4a8:
+            return self._bwd_gate_up_input_w4a8(do1, expert_w1, dx=dx)
         # recompute concated_w1_t
 
         if hasattr(self, "grouped_gemm_experts"):
@@ -1442,7 +2019,7 @@ class ExpertsGroupGemmContiguousNode:
                     (do1_fp8, do1_scale),
                     (bw_w1_quant, bw_w1_scale),
                     dx,
-                    m_indices=self.m_indices,
+                    self.m_indices,
                 )
 
         return dx
@@ -1460,6 +2037,8 @@ class ExpertsGroupGemmContiguousNode:
         dw2 = do2_t * do3
         [n, k] = [n, m_sum] * [m_sum, k] (m_sum = sum(tokens_per_expert))
         """
+        if expert_weights_all_frozen(expert_w2):
+            return
         o2_t_fp8, o2_t_scale = self.fused_transpose_split_quant(
             o2, None, self.tokens_per_expert, True
         )
@@ -1525,6 +2104,12 @@ class ExpertsGroupGemmContiguousNode:
         dw1 = dx_t * do1
         [k, n] = [k, m_sum] * [m_sum, n] (m_sum = sum(tokens_per_expert))
         """
+        if expert_weights_all_frozen(expert_w1):
+            if clear_input:
+                self.input = None
+                self.input_fp8 = None
+                self.input_scale = None
+            return
 
         if input_x is None:
             if self.dequant_input:
@@ -1708,6 +2293,11 @@ class ExpertsGroupGemmContiguousNode:
                     if expert is None:
                         continue
 
+                    if expert_weights_all_frozen(
+                        [expert.down_proj.weight, expert.up_gate_proj.weight]
+                    ):
+                        continue
+
                     if hasattr(expert.down_proj.weight, "main_grad"):
                         if expert.down_proj.weight.main_grad is None:
                             expert.down_proj.weight.main_grad = paddle.zeros(
@@ -1734,34 +2324,24 @@ class ExpertsGroupGemmContiguousNode:
                                 dtype=paddle.float32,
                             )
             else:
-                if hasattr(self.grouped_gemm_experts.weight1, "main_grad"):
-                    if self.grouped_gemm_experts.weight1.main_grad is None:
-                        self.grouped_gemm_experts.weight1.main_grad = (
-                            paddle.zeros(
-                                shape=self.grouped_gemm_experts.weight1.shape,
-                                dtype=paddle.float32,
+                for weight in (
+                    self.grouped_gemm_experts.weight1,
+                    self.grouped_gemm_experts.weight2,
+                ):
+                    # `weight` may be a per-expert view; the predicate resolves it
+                    # to the parent parameter. Skipping matters most for the
+                    # offline-fp8 view: its main_grad setter allocates an fp32
+                    # buffer for the whole parent, not just this expert's slice.
+                    if expert_weights_all_frozen(weight):
+                        continue
+                    if hasattr(weight, "main_grad"):
+                        if weight.main_grad is None:
+                            weight.main_grad = paddle.zeros(
+                                shape=weight.shape, dtype=paddle.float32
                             )
-                        )
-                else:
-                    if self.grouped_gemm_experts.weight1.grad is None:
-                        self.grouped_gemm_experts.weight1.grad = paddle.zeros(
-                            shape=self.grouped_gemm_experts.weight1.shape,
-                            dtype=paddle.float32,
-                        )
-
-                if hasattr(self.grouped_gemm_experts.weight2, "main_grad"):
-                    if self.grouped_gemm_experts.weight2.main_grad is None:
-                        self.grouped_gemm_experts.weight2.main_grad = (
-                            paddle.zeros(
-                                shape=self.grouped_gemm_experts.weight2.shape,
-                                dtype=paddle.float32,
-                            )
-                        )
-                else:
-                    if self.grouped_gemm_experts.weight2.grad is None:
-                        self.grouped_gemm_experts.weight2.grad = paddle.zeros(
-                            shape=self.grouped_gemm_experts.weight2.shape,
-                            dtype=paddle.float32,
+                    elif weight.grad is None:
+                        weight.grad = paddle.zeros(
+                            shape=weight.shape, dtype=paddle.float32
                         )
 
             if a2a_async_fn:
@@ -2042,7 +2622,6 @@ class ExpertsGroupGemmContiguousNode:
         if used_inplace_swiglu:
             del o1
         self.o1 = None
-
         if a2a_async_fn is None:
             # dw1
             if self.use_bf16_gemm_weight_grad:
@@ -2065,6 +2644,7 @@ class ExpertsGroupGemmContiguousNode:
 
             # dx
             dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
+
             # out-of-place 路径下 fused_swiglu_weighted_bwd 异步读 o1，但此时
             # 中间已经执行了 dw1、dw2 等多个 GEMM kernel（同一 stream 顺序入队），
             # 到达此处时 o1 的读取早已完成，del 安全。
@@ -2107,11 +2687,23 @@ class ExpertsGroupGemmContiguousNode:
         """
         BF16 GEMM for weight grad
         """
+        # `weights` may be a per-expert view; the predicate resolves it to the
+        # parent parameter. The GEMM below still uses the per-expert `weights`.
+        if expert_weights_all_frozen(weights):
+            return
         if x is None:
             if self.dequant_input:
-                x = paddle.incubate.nn.functional.fused_act_dequant(
-                    self.input_fp8, self.input_scale
-                )
+                if self.use_w4a8:
+                    # w4a8 输入是 fp8 1x32 量化（fused_act_dequant 仅支持 1x128）
+                    x = _w4a8_dequant(
+                        self.input_fp8,
+                        self.input_scale,
+                        use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+                    )
+                else:
+                    x = paddle.incubate.nn.functional.fused_act_dequant(
+                        self.input_fp8, self.input_scale
+                    )
             else:
                 x = self.input
 
