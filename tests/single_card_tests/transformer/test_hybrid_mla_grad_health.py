@@ -463,10 +463,11 @@ class TestSplitKvBProj(unittest.TestCase):
         """What the loader must produce for the two split-out parameters.
 
         Both are stored 2-D (leading dims folded), which is what the AOA
-        statements can express and what the parameters actually are.
+        statements can express and what the parameters actually are. The unsplit
+        key is dropped: the split layer does not own that parameter any more.
         """
         heads = mod.num_attention_heads_per_partition
-        w = state["kv_b_proj.weight"].reshape([mod.kv_lora_rank, heads, -1])
+        w = state.pop("kv_b_proj.weight").reshape([mod.kv_lora_rank, heads, -1])
         state["k_b_proj"] = (
             w[:, :, : mod.qk_nope_head_dim]
             .transpose([1, 0, 2])
@@ -480,6 +481,42 @@ class TestSplitKvBProj(unittest.TestCase):
             .contiguous()
         )
         return state
+
+    def test_split_replaces_kv_b_proj_instead_of_duplicating_it(self):
+        """The split must not add a second copy of the projection.
+
+        ``k_b_proj`` and ``v_b_proj`` together hold exactly the elements of
+        ``kv_b_proj.weight``, which gets no gradient once they exist. Keeping it
+        alongside them would double this projection's resident bytes *and* its
+        checkpoint footprint, so it must not be built at all.
+        """
+        base = _build("mqa")
+        ded = _build("mqa", split_kv_b=True)
+        self.assertIsNone(ded.kv_b_proj)
+
+        state = ded.state_dict()
+        self.assertNotIn("kv_b_proj.weight", state)
+        self.assertIn("k_b_proj", state)
+        self.assertIn("v_b_proj", state)
+
+        def _numel(mod):
+            return sum(int(np.prod(p.shape)) for p in mod.parameters())
+
+        self.assertEqual(_numel(ded), _numel(base))
+
+    def test_backward_dw_skips_the_absent_projection(self):
+        # The delayed weight-gradient pass walks every KV projection.
+        # ``kv_b_proj`` does not exist in this mode, so the walk must skip it
+        # instead of dereferencing None, and still reach the A projection.
+        ded = _build("mqa", split_kv_b=True)
+        self.assertIsNone(ded.kv_b_proj)
+
+        calls = []
+        # The A projection's own dw pass is a linear-layer detail; stub it so the
+        # test covers only the None guard.
+        ded.kv_a_proj_with_mqa.backward_dw = lambda: calls.append("kv_a")
+        ded._backward_kv_proj()
+        self.assertEqual(calls, ["kv_a"])
 
     def test_absorbed_query_matches_kv_b_proj_slice(self):
         base = _build("mqa")
@@ -509,7 +546,10 @@ class TestSplitKvBProj(unittest.TestCase):
         self.assertTrue(core.split_kv_b)
 
         heads = ded.num_attention_heads_per_partition
-        w = ded.kv_b_proj.weight.reshape([ded.kv_lora_rank, heads, -1])
+        # The split layer has no ``kv_b_proj``; take the reference weight from an
+        # unsplit one so both branches see the same numbers.
+        kv_b_weight = _build("mqa").kv_b_proj.weight
+        w = kv_b_weight.reshape([ded.kv_lora_rank, heads, -1])
         w_einsum = w[:, :, ded.qk_nope_head_dim :]  # [l, h, v]
         w_grouped = w_einsum.transpose([1, 2, 0]).contiguous()  # [h, v, l]
 
@@ -517,7 +557,7 @@ class TestSplitKvBProj(unittest.TestCase):
         core_out = paddle.to_tensor(
             rng.randn(1, self.SEQ, heads * ded.kv_lora_rank).astype("float32")
             / np.sqrt(ded.kv_lora_rank),
-            dtype=ded.kv_b_proj.weight.dtype,
+            dtype=kv_b_weight.dtype,
         )
         ref = core._deabsorb(core_out, w_einsum, False)
         got = core._deabsorb(core_out, w_grouped, True)

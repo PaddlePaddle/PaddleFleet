@@ -182,6 +182,14 @@ class TestMQAGuards(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.module(query, key, None, None, v_b_proj_weight=w_v)
 
+    def test_v_b_proj_weight_rank_mismatch_rejected(self):
+        # A folded 2-D parameter that was never reshaped back must be named as
+        # such, not fail later on an unpacking whose message hides the cause.
+        query, key, _ = self._args()
+        w_v = paddle.zeros([H * V_HEAD_DIM, DV], dtype="bfloat16")
+        with self.assertRaisesRegex(ValueError, "must be 3-D"):
+            self.module(query, key, None, None, v_b_proj_weight=w_v)
+
     def test_kv_lora_rank_comes_from_the_hybrid_field(self):
         # The rank is not derivable from ``v_b_proj_weight.shape[0]`` once the
         # grouped-matmul layout is in play, so the layer reads it from the
@@ -533,6 +541,20 @@ class TestHybridMLAConfig(unittest.TestCase):
                     )
                 )
                 self.assertTrue(config.mqa_split_kv_b_proj)
+
+    def test_split_kv_b_proj_rejects_hy_sparse_attention(self):
+        # HySparse swaps the layer class for MQASelfAttention, whose forward and
+        # decode paths still absorb against kv_b_proj.weight -- the parameter the
+        # split removes. Accepting the combination would fail on a None
+        # attribute deep in the forward.
+        with self.assertRaisesRegex(ValueError, "enable_hy_sparse_attention"):
+            TransformerConfig(
+                **self._mqa_dsa_kwargs(
+                    hybrid_mla_attention="mqa_dsa",
+                    mqa_split_kv_b_proj=True,
+                    enable_hy_sparse_attention=True,
+                )
+            )
 
     def test_mqa_full_causal_does_not_require_index_dims(self):
         # No indexer is built, so the index_* validation must be skipped -- these
