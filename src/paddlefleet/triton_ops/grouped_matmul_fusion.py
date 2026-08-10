@@ -284,11 +284,22 @@ def _grouped_3d_strides(t):
         return None
     if stride_g < shape[-1] or stride_m < shape[-2] * stride_g:
         return None
-    # Leading dims collapse into M only if each is packed w.r.t. the next one.
-    # A size-1 dim contributes nothing to M, so its own stride is irrelevant.
-    for i in range(len(shape) - 3):
-        if shape[i] != 1 and strides[i] != shape[i + 1] * strides[i + 1]:
+    # Leading dims collapse into M only if each is packed against the *span* of
+    # everything inside it. ``span`` is that extent, grown right-to-left.
+    #
+    # A size-1 dim contributes nothing to M, so its own stride is irrelevant and
+    # its span is passed through untouched. Comparing against
+    # ``shape[i + 1] * strides[i + 1]`` instead would make a singleton neighbour
+    # satisfy any outer stride -- shape (2, 1, 3, 4, 6) with strides
+    # (100, 100, 24, 6, 1) would be accepted although the six M rows start at
+    # 0, 24, 48, 100, 124, 148 rather than at multiples of ``stride_m``.
+    span = shape[-3] * stride_m
+    for i in range(len(shape) - 4, -1, -1):
+        if shape[i] == 1:
+            continue
+        if strides[i] != span:
             return None
+        span *= shape[i]
     return stride_m, stride_g, stride_x
 
 

@@ -405,6 +405,21 @@ class MQALatentAttention(FleetLayer):
         # grouped-matmul layout and first in the einsum one. Checking it here
         # turns a silently-wrong ``[G, R, D]`` / ``[l, h, v]`` mix-up (both
         # reshape fine) into an error at the first forward.
+        # The rank is checked before the contraction dim: a folded 2-D
+        # parameter that was never reshaped back would otherwise pass the
+        # contraction test and fail deeper down, on an unpacking or reshape
+        # whose message says nothing about the layout.
+        if len(v_b_proj_weight.shape) != 3:
+            expected = (
+                "[h, v_head_dim, kv_lora_rank]"
+                if self.split_kv_b
+                else "[kv_lora_rank, h, v_head_dim]"
+            )
+            raise ValueError(
+                f"v_b_proj_weight must be 3-D {expected}, got shape "
+                f"{v_b_proj_weight.shape} with "
+                f"mqa_split_kv_b_proj={self.split_kv_b}."
+            )
         contraction = v_b_proj_weight.shape[-1 if self.split_kv_b else 0]
         if int(contraction) != kv_lora_rank:
             raise ValueError(

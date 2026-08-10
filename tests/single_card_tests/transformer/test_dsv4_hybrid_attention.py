@@ -3150,6 +3150,20 @@ class TestGroupedMatmulLayoutGuard(unittest.TestCase):
         self.assertNotEqual(x.strides[0], x.shape[1] * x.strides[1])
         self.assertIsNone(_grouped_3d_strides(x))
 
+    def test_rejects_unfoldable_dims_hidden_behind_a_singleton(self):
+        # A size-1 dim in the middle must not launder an outer stride: its own
+        # stride is arbitrary, so comparing the outer one against
+        # shape[i + 1] * strides[i + 1] would always hold. Here the six M rows
+        # start at 0, 24, 48, 100, 124, 148 -- not at multiples of stride_m=24 --
+        # so the kernel would read six wrong rows if this were accepted.
+        flat = paddle.randn([200])
+        x = paddle.as_strided(flat, [2, 1, 3, 4, 6], [100, 100, 24, 6, 1])
+        self.assertIsNone(_grouped_3d_strides(x))
+        # The same shape *is* foldable once the outer dim spans exactly the
+        # 3 * 24 elements below it.
+        packed = paddle.as_strided(flat, [2, 1, 3, 4, 6], [72, 72, 24, 6, 1])
+        self.assertEqual(_grouped_3d_strides(packed), (24, 6, 1))
+
 
 class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
     """``add_full_attention_sink_bias`` must give the same parameter in both

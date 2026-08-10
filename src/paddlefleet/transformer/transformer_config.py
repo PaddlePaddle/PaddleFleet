@@ -937,10 +937,16 @@ class TransformerConfig(ModelParallelConfig):
     with a zero-copy reshape. The fold exists because the AOA engine cannot
     change a tensor's rank, so the checkpoint side has to be 2-D. Each side is
     then one grouped Triton GEMM with no slice, no einsum and no transpose.
-    ``kv_b_proj`` receives no gradient at all in this mode and the parameter set
-    is no longer byte-compatible with a dense MHA phase: a checkpoint without
-    these two keys must have them split out of ``kv_b_proj.weight`` by the loader
-    (``_mla_split_kv_b_statements`` generates the AOA statements that do it).
+    ``kv_b_proj`` is not built at all in this mode -- the two parameters hold
+    exactly its elements, so the resident parameter bytes and the checkpoint
+    size are unchanged -- and the parameter set is no longer byte-compatible
+    with a dense MHA phase: the checkpoint must already contain ``k_b_proj`` /
+    ``v_b_proj``. Converting an older ``kv_b_proj.weight``-only checkpoint needs
+    AOA statements that split it; those are not wired up yet, so such a
+    checkpoint cannot be resumed with this flag on.
+
+    Incompatible with ``enable_hy_sparse_attention``, whose ``MQASelfAttention``
+    layer still absorbs against ``kv_b_proj.weight``.
     """
 
     v_head_dim: int | None = None
@@ -1778,6 +1784,21 @@ class TransformerConfig(ModelParallelConfig):
                         "hybrid_mla_attention='mqa_dsa' or 'mqa_full_causal'; "
                         "it splits those modes' kv_b_proj into standalone "
                         "k_b_proj / v_b_proj absorption parameters."
+                    )
+                if self.mqa_split_kv_b_proj and getattr(
+                    self, "enable_hy_sparse_attention", False
+                ):
+                    # The split replaces ``kv_b_proj`` entirely, but HySparse
+                    # swaps the layer class for ``MQASelfAttention``, whose
+                    # forward and decode paths still read
+                    # ``kv_b_proj.weight``. Allowing the combination would
+                    # either resurrect the duplicate parameter or fail on a
+                    # ``None`` attribute deep in the forward.
+                    raise ValueError(
+                        "mqa_split_kv_b_proj=True is incompatible with "
+                        "enable_hy_sparse_attention: the HySparse MQA layer "
+                        "still absorbs against kv_b_proj.weight, which the "
+                        "split removes."
                     )
                 if self.hybrid_mla_attention == "mqa_dsa":
                     # The -2 layers' indexer reuses the CSA indexer fields.

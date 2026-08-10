@@ -465,12 +465,13 @@ class MultiLatentAttention(Attention):
             config, "hybrid_mla_attention", "mha"
         ) in ("mqa_dsa", "mqa_full_causal")
         # ``mqa_split_kv_b_proj`` trades that property for speed:
-        # ``kv_b_proj`` is split into standalone ``k_b_proj`` / ``v_b_proj``
+        # ``kv_b_proj`` is replaced by standalone ``k_b_proj`` / ``v_b_proj``
         # absorption parameters, pre-laid-out so each side is one grouped GEMM
-        # instead of a slice + ``einsum``. A checkpoint that predates them must
-        # have both split out of ``kv_b_proj.weight`` by the loader. Applies to
-        # both latent MQA modes -- the split only concerns absorption, not the
-        # indexer.
+        # instead of a slice + ``einsum``. The two together hold exactly the
+        # elements of ``kv_b_proj.weight``, which is therefore not built at all;
+        # a checkpoint that predates them cannot be resumed in this mode until
+        # the AOA statements that split it exist. Applies to both latent MQA
+        # modes -- the split only concerns absorption, not the indexer.
         self.mqa_latent_split_kv_b = self.mqa_latent and getattr(
             config, "mqa_split_kv_b_proj", False
         )
@@ -1394,46 +1395,57 @@ class MLASelfAttention(MultiLatentAttention):
             tp_group=pg_collection.tp,
         )
 
-        self.kv_b_proj = build_spec_layer(
-            sublayers_spec.kv_b_proj,
-            kv_lora_rank,
-            self.num_attention_heads
-            * (self.qk_nope_head_dim + self.v_head_dim),
-            config=self.config,
-            init_method=self.config.init_method,
-            gather_output=False,
-            bias=False,
-            skip_bias_add=False,
-            is_expert=False,
-            tp_comm_buffer_name="kv_b_proj",
-            tp_group=pg_collection.tp,
+        # In split mode ``k_b_proj`` / ``v_b_proj`` below *replace* this
+        # projection: together they hold exactly its elements, nothing in the
+        # forward reads it, and it would never receive a gradient. Building it
+        # anyway would double both the resident parameter bytes and the
+        # checkpoint size for this projection, so it is not built at all.
+        self.kv_b_proj = (
+            None
+            if self.mqa_latent_split_kv_b
+            else build_spec_layer(
+                sublayers_spec.kv_b_proj,
+                kv_lora_rank,
+                self.num_attention_heads
+                * (self.qk_nope_head_dim + self.v_head_dim),
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="kv_b_proj",
+                tp_group=pg_collection.tp,
+            )
         )
 
         if self.mqa_latent_split_kv_b:
-            # K absorption half of ``kv_b_proj``. Logically
-            # [heads, kv_lora_rank, qk_nope_head_dim] -- ``fused_grouped_matmul``'s
-            # ``[G, R, D]`` contract, which lets the kernel walk the head dim
-            # through strides -- but *stored* with the leading two dims folded so
-            # the parameter itself is 2-D.
+            # K absorption half of ``kv_b_proj``, which this mode replaces.
+            # Logically [heads, kv_lora_rank, qk_nope_head_dim] --
+            # ``fused_grouped_matmul``'s ``[G, R, D]`` contract, which lets the
+            # kernel walk the head dim through strides -- but *stored* with the
+            # leading two dims folded so the parameter itself is 2-D.
             #
-            # The fold is what the checkpoint needs: the AOA statements that split
-            # this out of ``kv_b_proj`` only have split / concat / permute and no
-            # reshape primitive (``flex_checkpoint/aoa/aoa_engine.py:519``), so
-            # they cannot produce a 3-D tensor. Exposing a reshaped *view* from
-            # ``sharded_state_dict`` instead is not safe: DCP reshapes the
-            # ``ShardedWeight.local_tensor`` in place (``reshape_`` /``flatten_``
-            # at ``dcp/load_state_dict.py:557,741,998``), which on a view that
+            # The fold is what the checkpoint needs: AOA statements have only
+            # split / concat / permute and no reshape primitive
+            # (``flex_checkpoint/aoa/aoa_engine.py:519``), so a conversion from
+            # an unsplit ``kv_b_proj.weight`` cannot produce a 3-D tensor.
+            # Exposing a reshaped *view* from ``sharded_state_dict`` instead is
+            # not safe: DCP reshapes the ``ShardedWeight.local_tensor`` in place
+            # (``reshape_`` /``flatten_`` at
+            # ``dcp/load_state_dict.py:557,741,998``), which on a view that
             # aliases the parameter corrupts the parameter's own shape.
             #
             # The 3-D form is recovered per forward with a zero-copy reshape.
             # TP is forced to 1 in this mode, so ``num_attention_heads_per_partition``
             # is the full head count and the parameter needs no TP attributes.
+            params_dtype = self.config.params_dtype
             self.k_b_proj = self.create_parameter(
                 shape=[
                     self.num_attention_heads_per_partition * kv_lora_rank,
                     self.qk_nope_head_dim,
                 ],
-                dtype=self.kv_b_proj.weight.dtype,
+                dtype=params_dtype,
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             self.config.init_method(self.k_b_proj)
@@ -1445,7 +1457,7 @@ class MLASelfAttention(MultiLatentAttention):
                     self.num_attention_heads_per_partition * self.v_head_dim,
                     kv_lora_rank,
                 ],
-                dtype=self.kv_b_proj.weight.dtype,
+                dtype=params_dtype,
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             self.config.init_method(self.v_b_proj)
@@ -2268,7 +2280,10 @@ class MLASelfAttention(MultiLatentAttention):
 
     def _backward_kv_proj(self):
         """Computes weight gradients of KV projection layers"""
-        self.kv_b_proj.backward_dw()
+        # ``kv_b_proj`` does not exist in the split-absorption mode; the two
+        # parameters that replace it are plain tensors with no delayed dw pass.
+        if self.kv_b_proj is not None:
+            self.kv_b_proj.backward_dw()
         self.kv_a_proj_with_mqa.backward_dw()
 
     def _backward_q_proj(self):
