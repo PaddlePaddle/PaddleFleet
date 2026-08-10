@@ -1182,10 +1182,10 @@ class TransformerConfig(ModelParallelConfig):
       **silently** throw away all Indexer training done so far.
 
     Because ``True`` is the destructive direction, it is rejected outright for
-    the sparse phase (``dsa_indexer_use_sparse_loss=True``, i.e. phase 3/4):
-    that phase always continues a warmup checkpoint, which does hold trained
-    Indexer weights, and the add primitive would drop them. ``__post_init__``
-    raises rather than letting the run start.
+    the sparse phase (``dsa_indexer_use_sparse_loss=True``, i.e. phase 3/4) of
+    *either* flavour: that phase always continues a warmup checkpoint, which
+    does hold trained Indexer weights, and the add primitive would drop them.
+    ``__post_init__`` raises rather than letting the run start.
 
     The flag is only read by the model's ``_gen_aoa_config``, which only runs on the
     HF-loading path. There it is **mandatory**: leaving it ``None`` raises, because
@@ -1716,32 +1716,6 @@ class TransformerConfig(ModelParallelConfig):
                     "train_indexer_only=True; the sparse training phase pairs "
                     "dsa_indexer_use_sparse_loss=True with a trainable backbone."
                 )
-            if (
-                self.dsa_indexer_use_sparse_loss
-                and self.indexer_init_from_scratch
-            ):
-                # The sparse phase always continues a warmup checkpoint, which
-                # does contain trained Indexer tensors. Asking for a
-                # from-scratch Indexer there makes ``_gen_aoa_config`` emit the
-                # ``_ -> key`` add primitive, and that primitive *ignores* a
-                # checkpoint tensor of the same name instead of preferring it,
-                # so the whole warmup phase is thrown away with nothing louder
-                # than an "Unexpected keys" warning. Starting the sparse phase
-                # from a checkpoint that has no Indexer at all is not a
-                # supported configuration either: attention consumes the
-                # Indexer's ranking there, so a random Indexer means attending
-                # to random columns -- that is precisely what the warmup phase
-                # exists to prevent. Fail here, before any weight is loaded.
-                raise ValueError(
-                    "indexer_init_from_scratch=True with "
-                    "dsa_indexer_use_sparse_loss=True is not a valid phase. "
-                    "The sparse phase resumes the warmup checkpoint, which "
-                    "already holds trained Indexer weights, and the HF-loading "
-                    "add primitive would silently discard them. Set "
-                    "indexer_init_from_scratch=False; only the warmup phase "
-                    "(dsa_indexer_use_sparse_loss=False), which starts from a "
-                    "checkpoint with no Indexer at all, may set it True."
-                )
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
@@ -1786,6 +1760,47 @@ class TransformerConfig(ModelParallelConfig):
                         f"0 (window), an integer in [2, 127] "
                         f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
+            # There are two Indexer flavours, one per attention family, and both
+            # are configured by the same two fields. ``csa_dense_mode`` drops the
+            # CSAIndexer and only ``hybrid_mla_attention='mqa_dsa'`` builds the
+            # DSAIndexer, exactly as ``gpt_layer_specs.py`` decides.
+            has_csa_indexer = not self.csa_dense_mode and any(
+                1 < int(ratio) < 128 for ratio in self.csa_compress_ratios
+            )
+            has_mqa_indexer = self.hybrid_mla_attention == "mqa_dsa" and any(
+                int(ratio) == -2 for ratio in self.csa_compress_ratios
+            )
+            if (
+                (has_csa_indexer or has_mqa_indexer)
+                and self.dsa_indexer_use_sparse_loss
+                and self.indexer_init_from_scratch
+            ):
+                # The sparse phase always continues a warmup checkpoint, which
+                # does contain trained Indexer tensors. Asking for a
+                # from-scratch Indexer there makes the caller's AOA config emit
+                # the ``_ -> key`` add primitive, and that primitive *ignores* a
+                # checkpoint tensor of the same name instead of preferring it,
+                # so the whole warmup phase is thrown away with nothing louder
+                # than an "Unexpected keys" warning. Starting the sparse phase
+                # from a checkpoint that has no Indexer at all is not a
+                # supported configuration either: attention consumes the
+                # Indexer's ranking there (CSA through
+                # ``_resolve_topk_effective``, latent MQA through the window +
+                # top-k index table), so a random Indexer means attending to
+                # random columns -- precisely what the warmup phase exists to
+                # prevent. Fail here, before any weight is loaded.
+                raise ValueError(
+                    "indexer_init_from_scratch=True with "
+                    "dsa_indexer_use_sparse_loss=True is not a valid phase. "
+                    "This config builds an Indexer (CSAIndexer="
+                    f"{has_csa_indexer}, DSAIndexer={has_mqa_indexer}) and the "
+                    "sparse phase resumes the warmup checkpoint, which already "
+                    "holds trained Indexer weights that the HF-loading add "
+                    "primitive would silently discard. Set "
+                    "indexer_init_from_scratch=False; only the warmup phase "
+                    "(dsa_indexer_use_sparse_loss=False), which starts from a "
+                    "checkpoint with no Indexer at all, may set it True."
+                )
             if -2 in self.csa_compress_ratios:
                 hybrid_mla_fields = (
                     "hybrid_mla_q_lora_rank",
@@ -1924,21 +1939,8 @@ class TransformerConfig(ModelParallelConfig):
                         f"dsa_indexer_loss_coeff, got {loss_coeff!r}; otherwise the "
                         "Indexer receives no training signal."
                     )
-                # There are two kinds of Indexer, one per attention flavour, and
-                # either one is enough to have something to train. Both
-                # conditions mirror how the layer spec decides
-                # (``gpt_layer_specs.py``: ``csa_dense_mode`` drops the
-                # CSAIndexer, and only ``hybrid_mla_attention="mqa_dsa"`` builds
-                # the DSAIndexer).
-                has_csa_indexer = not self.csa_dense_mode and any(
-                    1 < int(ratio) < 128 for ratio in self.csa_compress_ratios
-                )
-                has_mqa_indexer = (
-                    self.hybrid_mla_attention == "mqa_dsa"
-                    and any(
-                        int(ratio) == -2 for ratio in self.csa_compress_ratios
-                    )
-                )
+                # Either Indexer flavour is enough to have something to train
+                # (``has_csa_indexer`` / ``has_mqa_indexer`` computed above).
                 if not (has_csa_indexer or has_mqa_indexer):
                     raise ValueError(
                         "train_indexer_only=True requires the model to build at "

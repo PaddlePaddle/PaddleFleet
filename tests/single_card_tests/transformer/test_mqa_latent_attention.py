@@ -580,8 +580,12 @@ class TestHybridMLAConfig(unittest.TestCase):
         keys" warning. Rejecting it in ``__post_init__`` is the only place that
         can fail *before* a weight is loaded.
 
-        The two legal combinations must still build, otherwise this would just
-        be forbidding the field.
+        Both fields are shared by the two Indexer flavours, so the rejection is
+        flavour-agnostic: it fires for the ``DSAIndexer`` of a ``-2`` layer
+        under ``"mqa_dsa"`` *and* for the ``CSAIndexer`` of a ``1 < ratio <
+        128`` layer, which exists for any ``hybrid_mla_attention`` as long as
+        ``csa_dense_mode=False``. A config that builds neither is not policed,
+        otherwise this would just be forbidding the field.
         """
         with self.assertRaisesRegex(ValueError, "is not a valid phase"):
             TransformerConfig(
@@ -609,8 +613,29 @@ class TestHybridMLAConfig(unittest.TestCase):
                 self.assertEqual(
                     config.dsa_indexer_use_sparse_loss, sparse_loss
                 )
-        # ``"mha"`` builds no Indexer, so neither field means anything there and
-        # the pair must not be policed.
+        # The CSA flavour, i.e. no latent MQA layer and no "mqa_dsa" at all: a
+        # ratio in [2, 127] builds a CSAIndexer unless csa_dense_mode drops it,
+        # and CSA reads dsa_indexer_use_sparse_loss as the same phase selector
+        # (``_resolve_topk_effective``, csa_attention.py:2059-2074). So the same
+        # pair discards the same trained weights and must be rejected the same
+        # way -- and must stay legal once csa_dense_mode builds no Indexer.
+        csa_kwargs = dict(
+            hybrid_mla_attention="mha",
+            csa_compress_ratios=[64, 128],
+            dsa_indexer_use_sparse_loss=True,
+            indexer_init_from_scratch=True,
+            dsa_index_n_heads=INDEX_HEADS,
+            dsa_index_head_dim=INDEX_HEAD_DIM,
+            dsa_index_topk=INDEX_TOPK,
+        )
+        with self.assertRaisesRegex(ValueError, "CSAIndexer=True"):
+            TransformerConfig(**self._kwargs(**csa_kwargs))
+        config = TransformerConfig(
+            **self._kwargs(csa_dense_mode=True, **csa_kwargs)
+        )
+        self.assertEqual(config.indexer_init_from_scratch, True)
+        # ``"mha"`` over -2 layers builds no Indexer either, so neither field
+        # means anything there and the pair must not be policed.
         config = TransformerConfig(
             **self._kwargs(
                 hybrid_mla_attention="mha",
