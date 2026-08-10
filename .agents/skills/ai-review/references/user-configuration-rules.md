@@ -43,7 +43,7 @@
 ## 命名与声明规范
 
 - 与所在功能域分段中现有开关的命名风格保持一致，沿用既有功能域前缀（`moe_`、`csa_`、`dsa_`、`fp8_`、`cp_`、`tp_comm_`、`recompute_` 等）。
-- 布尔开关使用名词或形容词短语命名，True 表示打开、False 表示关闭，例如 `gated_attention`、`csa_dense_mode`、`qk_norm_fusion`。避免 `enable_xxx` / `disable_xxx`：`enable` 与布尔 True 语义重复，`enable` 与 `disable` 并存会造成语义混乱。名词结构过短不足以表达时，用“功能域前缀 + 动宾”构成名词化短语，例如 `moe_dequant_input`、`train_indexer_only`。
+- 布尔开关使用名词或形容词短语命名，True 表示打开、False 表示关闭，例如 `gated_attention`、`csa_dense_mode`、`qk_norm_fusion`。避免 `enable_xxx` / `disable_xxx`：`enable` 与布尔 True 语义重复，`enable` 与 `disable` 并存会造成语义混乱。名词结构过短不足以表达时，用“功能域前缀 + 动宾”构成名词化短语，例如 `moe_dequant_input`、`train_indexer_only`。新增开关采用 `enable_xxx` / `disable_xxx` 形式时，必须单独报告一条命名问题并给出建议命名，不得因为该字段已有其他问题被报告就省略；同一功能同时新增 `enable_x` 与 `disable_x` 两个开关必须报告，应合并为单个布尔开关，由取值本身表达开关状态。例外见“生态一致性”一节。
 - 传值开关用 `<功能域>_<对象>` 加类型后缀，例如 `_size`、`_ratio`、`_coeff`、`_backend`、`_mode`、`_type`。多个互斥实现用单个字符串枚举字段表达（参考 `csa_indexer_backend`），不要拆成多个互斥布尔开关。
 - 配置命名空间是扁平的：`TransformerConfig` 继承 `ModelParallelConfig`，所有字段处于同一层命名空间。不要新增子配置 dataclass 制造嵌套。确需结构化取值时用 dict/list 字段，嵌套不超过两级，并在 docstring 列出全部合法键。
 - 禁止重复声明同名字段。新增字段前用 `rg` 确认本类与基类中不存在同名字段；重复声明会让后一次声明静默覆盖前一次，且可能与 docstring 描述的默认值不一致。
@@ -78,7 +78,7 @@
 ## 校验与测试
 
 - 开关之间的依赖与互斥必须在 `__post_init__` 中校验并抛出 `ValueError`，不使用 `assert`（与基础规则一致）。错误信息要包含冲突的开关名、当前值和期望值。
-- 新增或修改开关必须补充测试，覆盖默认取值路径、至少一个非默认取值路径，以及用 `pytest.raises` 验证非法组合：
+- 新增或修改开关必须补充测试，覆盖默认取值路径和至少一个非默认取值路径。仅当该开关定义了非法取值、与其他开关的依赖或互斥关系时，才要求用 `pytest.raises` 覆盖对应校验；开关只有默认/非默认两条合法路径、不存在需要拒绝的组合时，不要求构造异常测试。
   - `transformer_config.py` 的通用校验放在 `tests/single_card_tests/test_transformer_config.py`；特定功能的开关放在 `tests/single_card_tests/transformer/` 下对应功能的测试文件。
   - `model_parallel_config.py` 的校验放在 `tests/single_card_tests/ai_edited_test/distributed/test_ai_model_parallel_config.py`。
   - 开关影响并行行为时需要 `tests/multi_card_tests/` 下的代表性多卡覆盖。
