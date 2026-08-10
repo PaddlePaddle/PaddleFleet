@@ -619,15 +619,15 @@ class TestHybridMLAConfig(unittest.TestCase):
         # (``_resolve_topk_effective``, csa_attention.py:2059-2074). So the same
         # pair discards the same trained weights and must be rejected the same
         # way -- and must stay legal once csa_dense_mode builds no Indexer.
-        csa_kwargs = dict(
-            hybrid_mla_attention="mha",
-            csa_compress_ratios=[64, 128],
-            dsa_indexer_use_sparse_loss=True,
-            indexer_init_from_scratch=True,
-            dsa_index_n_heads=INDEX_HEADS,
-            dsa_index_head_dim=INDEX_HEAD_DIM,
-            dsa_index_topk=INDEX_TOPK,
-        )
+        csa_kwargs = {
+            "hybrid_mla_attention": "mha",
+            "csa_compress_ratios": [64, 128],
+            "dsa_indexer_use_sparse_loss": True,
+            "indexer_init_from_scratch": True,
+            "dsa_index_n_heads": INDEX_HEADS,
+            "dsa_index_head_dim": INDEX_HEAD_DIM,
+            "dsa_index_topk": INDEX_TOPK,
+        }
         with self.assertRaisesRegex(ValueError, "CSAIndexer=True"):
             TransformerConfig(**self._kwargs(**csa_kwargs))
         config = TransformerConfig(
