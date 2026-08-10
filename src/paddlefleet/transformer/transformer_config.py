@@ -986,6 +986,15 @@ class TransformerConfig(ModelParallelConfig):
     layer still absorbs against ``kv_b_proj.weight``.
     """
 
+    hybrid_mla_cp_mode: str | None = None
+    """Context parallel mode for the MLA layers only, overriding ``cp_balance_mode``.
+
+    ``None`` (default) inherits ``cp_balance_mode``. Set to ``contiguous_a2a``
+    to run Ulysses on the MLA layers of a DSV4 MLA+HCA hybrid while the HCA
+    layers keep ``contiguous_allgather``; both modes share one global token
+    layout, which is what makes mixing them safe.
+    """
+
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
@@ -2330,4 +2339,17 @@ class TransformerConfig(ModelParallelConfig):
             raise ValueError(
                 f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
                 "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
+            )
+
+        # only support hybrid_mla_cp_mode == contiguous_a2a if not None
+        if self.hybrid_mla_cp_mode is not None and (
+            self.hybrid_mla_cp_mode != "contiguous_a2a"
+            or not self.cp_balance_mode.startswith("contiguous")
+        ):
+            raise ValueError(
+                f"hybrid_mla_cp_mode={self.hybrid_mla_cp_mode!r} with "
+                f"cp_balance_mode={self.cp_balance_mode!r} is invalid: "
+                "hybrid_mla_cp_mode must be None or 'contiguous_a2a' "
+                "(other paths are simply not currently supported yet), "
+                "and cp_balance_mode must be in the same token layout."
             )

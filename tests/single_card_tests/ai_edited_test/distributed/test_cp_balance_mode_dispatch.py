@@ -802,5 +802,46 @@ class TestTransformerConfigCpBalanceMode(unittest.TestCase):
         self.assertEqual(config.cp_balance_mode, "contiguous_allgather")
 
 
+class TestTransformerConfigHybridMlaCpMode(unittest.TestCase):
+    """Tests for the hybrid_mla_cp_mode per-layer override."""
+
+    @staticmethod
+    def _config(**kwargs):
+        from paddlefleet.transformer.transformer_config import (
+            TransformerConfig,
+        )
+
+        return TransformerConfig(**kwargs)
+
+    def test_default_is_none(self):
+        """Unset means 'inherit cp_balance_mode'."""
+        self.assertIsNone(self._config().hybrid_mla_cp_mode)
+
+    def test_same_layout_family_accepted(self):
+        """contiguous_a2a on MLA next to contiguous_allgather elsewhere."""
+        config = self._config(
+            cp_balance_mode="contiguous_allgather",
+            hybrid_mla_cp_mode="contiguous_a2a",
+        )
+        self.assertEqual(config.hybrid_mla_cp_mode, "contiguous_a2a")
+
+    def test_invalid_value_rejected(self):
+        """Only the two contiguous modes are overridable per layer."""
+        for mode in ("nonexistent_mode", "dualchunk_allgather"):
+            with (
+                self.subTest(mode=mode),
+                self.assertRaisesRegex(ValueError, "hybrid_mla_cp_mode"),
+            ):
+                self._config(hybrid_mla_cp_mode=mode)
+
+    def test_cross_layout_family_rejected(self):
+        """dualchunk and contiguous place tokens differently, so no mixing."""
+        with self.assertRaisesRegex(ValueError, "same token layout"):
+            self._config(
+                cp_balance_mode="dualchunk_allgather",
+                hybrid_mla_cp_mode="contiguous_a2a",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
