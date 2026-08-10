@@ -43,15 +43,17 @@ the full-MLA integration):
 6. The attention sink under CP.
 7. The ``cp_balance_mode`` guard.
 
-Run (2 GPUs)::
+Run (2 GPUs), from the repository root::
 
-    PYTHONPATH=./third_party/PaddleFleet/src python -m paddle.distributed.launch \
+    PYTHONPATH=.:./src python -m paddle.distributed.launch \
         --devices 0,1 --nnodes 1 --master 127.0.0.1:<port> \
-        third_party/PaddleFleet/tests/multi_card_tests/transformer/test_mqa_dsa_cp.py
+        tests/multi_card_tests/transformer/test_mqa_dsa_cp.py
+
+The repository root on ``PYTHONPATH`` is what makes the shared
+``tests.single_card_tests.transformer.hybrid_mla_utils`` helper importable;
+``ci/multi-card_test.sh`` exports it for the same reason.
 """
 
-import os
-import sys
 import types
 import unittest
 
@@ -62,15 +64,10 @@ from paddle.distributed import fleet
 
 from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(
-    0,
-    os.path.normpath(
-        os.path.join(_HERE, "..", "..", "single_card_tests", "transformer")
-    ),
-)
-
-import hybrid_mla_utils as U
+# ``tests`` is a package, so the single-card helper is a normal import; the
+# multi-card runner puts the repository root on ``PYTHONPATH``
+# (``ci/multi-card_test.sh``).
+from tests.single_card_tests.transformer import hybrid_mla_utils as U
 
 CP_SIZE = None
 CP_RANK = None

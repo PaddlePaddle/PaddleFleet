@@ -31,17 +31,18 @@ layer in one process we must:
      (world size 1 -> plain full-sequence attention, no RoPE scatter), then
   2. install the fleet CP group into parallel_state, build + run the CP layer.
 
-Run (2 GPUs)::
+Run (2 GPUs), from the repository root::
 
-    PYTHONPATH=./third_party/PaddleFleet/src:./third_party/PaddleFormers \
-    CUDA_VISIBLE_DEVICES=<a>,<b> python -m paddle.distributed.launch \
+    PYTHONPATH=.:./src CUDA_VISIBLE_DEVICES=<a>,<b> \
+    python -m paddle.distributed.launch \
         --devices 0,1 --nnodes 1 --master 127.0.0.1:<port> \
-        third_party/PaddleFleet/tests/multi_card_tests/transformer/\
-test_mla_cp_contiguous_allgather.py
+        tests/multi_card_tests/transformer/test_mla_cp_contiguous_allgather.py
+
+The repository root on ``PYTHONPATH`` is what makes the shared
+``tests.single_card_tests.transformer.hybrid_mla_utils`` helper importable;
+``ci/multi-card_test.sh`` exports it for the same reason.
 """
 
-import os
-import sys
 import types
 import unittest
 
@@ -71,19 +72,10 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
 
 # ``hybrid_mla_utils`` owns the sublayer stubs and the SM100 kernel-availability
-# skip shared with the single-card hybrid-MLA suites.
-sys.path.insert(
-    0,
-    os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..",
-        "..",
-        "single_card_tests",
-        "transformer",
-    ),
-)
-
-import hybrid_mla_utils as U
+# skip shared with the single-card hybrid-MLA suites. ``tests`` is a package, so
+# this is a normal import; the multi-card runner puts the repository root on
+# ``PYTHONPATH`` (``ci/multi-card_test.sh``).
+from tests.single_card_tests.transformer import hybrid_mla_utils as U
 
 DTYPE = "bfloat16"
 
