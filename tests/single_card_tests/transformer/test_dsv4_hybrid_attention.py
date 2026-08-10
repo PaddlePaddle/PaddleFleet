@@ -102,7 +102,11 @@ from paddlefleet.transformer.mqa_latent_attention import (
 )
 from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.triton_ops import fused_grouped_matmul
+from paddlefleet.triton_ops import (
+    fused_grouped_matmul,
+    grouped_matmul_fusion as _gmf,
+)
+from paddlefleet.triton_ops.grouped_matmul_fusion import _grouped_3d_strides
 
 _SEED = 42
 
@@ -3036,6 +3040,53 @@ class TestFusedGroupedMatmul(unittest.TestCase):
         self.assertIsNotNone(x.grad)
         self.assertIsNone(param.grad)
 
+    def test_copy_fallback_matches_the_zero_copy_view(self):
+        """The dense-copy fallback and the zero-copy view must agree bit-exactly.
+
+        A rejected layout falls back to ``x.reshape([M, G, D]).contiguous()``
+        (and the same for ``dy`` in backward). Forcing that fallback on a view
+        the guard *would* accept is what makes the zero-copy path safe to take:
+        same values, same order, same kernel, so the results are identical bit
+        for bit rather than merely close.
+        """
+        wide = paddle.randn(
+            [1, 7, self._G, self._D + 5], dtype="float32"
+        ).astype("bfloat16")
+        w0 = paddle.randn([self._G, self._R, self._D], dtype="float32").astype(
+            "bfloat16"
+        )
+        grad_out = paddle.randn([1, 7, self._G, self._R], dtype="float32")
+
+        def run(force_copy):
+            x = wide[..., : self._D].detach()
+            x.stop_gradient = False
+            wi = w0.detach()
+            wi.stop_gradient = False
+            if force_copy:
+                with patch.object(
+                    _gmf, "_grouped_3d_strides", return_value=None
+                ):
+                    out = fused_grouped_matmul(x, wi)
+                    (out.astype("float32") * grad_out).sum().backward()
+            else:
+                out = fused_grouped_matmul(x, wi)
+                (out.astype("float32") * grad_out).sum().backward()
+            return (
+                out.astype("float32").numpy(),
+                x.grad.astype("float32").numpy(),
+                wi.grad.astype("float32").numpy(),
+            )
+
+        # The unpatched run must actually be on the zero-copy path, otherwise
+        # this compares the fallback against itself.
+        self.assertIsNotNone(_grouped_3d_strides(wide[..., : self._D]))
+        for view, copied, name in zip(
+            run(force_copy=False), run(force_copy=True), ("out", "dx", "dw")
+        ):
+            self.assertTrue(
+                np.array_equal(view, copied), f"{name} is not bit-identical"
+            )
+
     def test_frozen_input_gets_no_dgrad(self):
         x, param, out = self._run_with_frozen(
             x_trainable=False, w_trainable=True
@@ -3051,6 +3102,53 @@ class TestFusedGroupedMatmul(unittest.TestCase):
         self.assertTrue(out.stop_gradient)
         self.assertIsNone(x.grad)
         self.assertIsNone(param.grad)
+
+
+class TestGroupedMatmulLayoutGuard(unittest.TestCase):
+    """``_grouped_3d_strides`` gates the zero-copy path.
+
+    It must accept only layouts a dense copy would linearize element for
+    element; everything else has to fall back to ``.contiguous()``. The guard
+    is pure stride arithmetic, so it needs no device.
+    """
+
+    def test_accepts_a_foldable_strided_view(self):
+        # ``q[..., :qk_nope_head_dim]``-shaped view: group stride is the full
+        # head dim rather than D, which the kernels handle via strides.
+        x = paddle.randn([2, 3, 4, 10])[..., :6]
+        self.assertEqual(_grouped_3d_strides(x), tuple(x.strides[-3:]))
+
+    def test_accepts_size_one_leading_dims(self):
+        # A size-1 dim contributes nothing to M, so its stride is irrelevant.
+        x = paddle.randn([1, 1, 3, 4, 10])[..., :6]
+        self.assertEqual(_grouped_3d_strides(x), tuple(x.strides[-3:]))
+
+    def test_rejects_fewer_than_three_dims(self):
+        self.assertIsNone(_grouped_3d_strides(paddle.randn([4, 6])))
+
+    def test_rejects_non_unit_innermost_stride(self):
+        x = paddle.randn([2, 6, 3]).transpose([0, 2, 1])
+        self.assertNotEqual(x.strides[-1], 1)
+        self.assertIsNone(_grouped_3d_strides(x))
+
+    def test_rejects_degenerate_group_strides(self):
+        # A broadcast (stride 0) or self-overlapping group step reads the same
+        # element from several groups, which no dense copy would reproduce.
+        flat = paddle.randn([2, 30])
+        for stride_g in (0, 3):
+            with self.subTest(stride_g=stride_g):
+                x = paddle.as_strided(flat, [2, 3, 6], [30, stride_g, 1])
+                self.assertIsNone(_grouped_3d_strides(x))
+        # Same for a row step that overlaps the groups below it.
+        x = paddle.as_strided(flat, [2, 3, 6], [6, 6, 1])
+        self.assertIsNone(_grouped_3d_strides(x))
+
+    def test_rejects_unfoldable_leading_dims(self):
+        # Sliced on a middle axis: the leading stride no longer equals
+        # shape[1] * strides[1], so the leading dims cannot collapse into M.
+        x = paddle.randn([4, 3, 2, 5])[:, :2]
+        self.assertNotEqual(x.strides[0], x.shape[1] * x.strides[1])
+        self.assertIsNone(_grouped_3d_strides(x))
 
 
 class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
