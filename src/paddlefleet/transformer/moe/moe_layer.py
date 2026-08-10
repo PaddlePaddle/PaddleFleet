@@ -59,6 +59,7 @@ from .token_dispatcher import (
     AllGatherTokenDispatcher,
     AllToAllTokenDispatcher,
     MoEFlexTokenDispatcher,
+    RingMoETokenDispatcher,
     is_hybrid_ep_backend_selected,
 )
 
@@ -190,6 +191,15 @@ class MoELayer(nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        # RingMoE (scheme-1) shares all of allgather's setup: intermediate-dim
+        # expert sharding, checkpoint IO, validations and combine routing. Only
+        # the collective schedule differs. Normalize to "allgather" everywhere
+        # (incl. the shared config that experts read) and keep the intent in
+        # use_ring_moe; the sole divergence is the dispatcher instance below.
+        self.use_ring_moe = self.moe_token_dispatcher_type == "ringmoe"
+        if self.use_ring_moe:
+            self.moe_token_dispatcher_type = "allgather"
+            config.moe_token_dispatcher_type = "allgather"
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
@@ -556,7 +566,12 @@ class MoELayer(nn.Layer):
                     ),
                 )
             elif self.moe_token_dispatcher_type == "allgather":
-                self.token_dispatcher = AllGatherTokenDispatcher(
+                dispatcher_cls = (
+                    RingMoETokenDispatcher
+                    if self.use_ring_moe
+                    else AllGatherTokenDispatcher
+                )
+                self.token_dispatcher = dispatcher_cls(
                     self.moe_group,
                     self.expert_model_parallel_size,
                     self.num_experts,
@@ -1159,6 +1174,38 @@ class MoELayer(nn.Layer):
 
         return hidden_states
 
+    def ringmoe_forward(
+        self,
+        hidden_states: paddle.Tensor,
+        probs: paddle.Tensor,
+        routing_map: paddle.Tensor,
+        topk_weights: paddle.Tensor | None = None,
+        topk_indices: paddle.Tensor | None = None,
+    ):
+        """RingMoE scheme-1 MoE forward (bf16 + SonicMoE, serial, no overlap).
+
+        Standalone path: instead of the flat dispatch/compute/combine pipeline,
+        it drives the 2-level ring collectives (RingMoETokenDispatcher.ring_forward)
+        around the SonicMoE expert GEMM. Latent projection is applied here (same
+        as fusion_moe_forward), the ring runs in latent space, then the output is
+        projected back.
+        """
+        if not self.using_sonic_moe:
+            raise ValueError(
+                "moe_token_dispatcher_type='ringmoe' requires using_sonic_moe=True."
+            )
+        hidden_states = self._project_to_latent(hidden_states)
+        hidden_states = self.token_dispatcher.ring_forward(
+            hidden_states,
+            topk_weights,
+            topk_indices,
+            self.grouped_gemm_experts,
+            probs.dtype,
+        )
+        if self.use_latent_moe:
+            hidden_states = self.fc2_latent_proj(hidden_states)
+        return hidden_states
+
     def compute_gate(
         self, hidden_states, input_ids=None, origin_input_ids=None
     ):
@@ -1472,7 +1519,15 @@ class MoELayer(nn.Layer):
 
         expert_input = self._prepare_expert_input(_hs_dispatcher_path, residual)
         if self.expert_model_parallel_size > 1:
-            if self.moe_use_fusion_node:
+            if self.use_ring_moe:
+                output = self.ringmoe_forward(
+                    expert_input,
+                    probs,
+                    mask,
+                    topk_weights=topk_weights,
+                    topk_indices=topk_indices,
+                )
+            elif self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
                     expert_input,
                     probs,
