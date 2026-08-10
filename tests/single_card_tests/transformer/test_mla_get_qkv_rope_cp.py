@@ -299,6 +299,10 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         # Set in MLASelfAttention.__init__; the absorbed-MQA branch of
         # get_query_key_value_tensors reads it.
         layer.mqa_latent = False
+        # Also set in __init__ (mqa_split_kv_b_proj): picks the grouped-matmul
+        # ``k_b_proj`` over the ``kv_b_proj`` slice + einsum. This fixture only
+        # builds the unsplit layout.
+        layer.mqa_latent_split_kv_b = False
         return layer
 
     def _hidden(self, batch=2, seq=32, hidden=16):
@@ -870,6 +874,9 @@ class TestLatentMQARopeFusion(unittest.TestCase):
         layer.training = True
         layer.recompute_qkv_up_porj_and_rope = False
         layer.mqa_latent = True
+        # This fixture folds W_k_b out of ``kv_b_proj.weight``, i.e. the unsplit
+        # absorption layout.
+        layer.mqa_latent_split_kv_b = False
         return layer
 
     def _hidden(self, batch=2, seq=16):
