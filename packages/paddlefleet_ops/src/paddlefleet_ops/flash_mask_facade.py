@@ -46,9 +46,8 @@ def get_fa_version(
     Dispatch rules:
       * XPU device -> FA2.
       * Otherwise, respect ``FLAGS_flash_attn_version`` by default.
-      * If ``fa_version == 3`` and deterministic is required, FA3 only supports
-        ``head_dim <= 128``. For ``head_dim > 128``, fall back to FA2.
-      * FA4 is only used when both ``hdim_ok`` and ``mask_ok`` hold:
+      * FA3 and FA4 both require ``hdim_ok``; FA4 additionally requires
+        ``mask_ok``:
 
         - ``hdim_ok``: one of
           * ``head_dim <= 128`` and ``head_dim_v <= 128``
@@ -86,31 +85,54 @@ def get_fa_version(
         "FLAGS_cudnn_deterministic"
     ]
 
-    if fa_version == 3:
-        if deterministic and head_dim > 128:
-            return 2
-
-    if fa_version == 4:
+    if fa_version in (3, 4):
         _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
-        fa4_hdim_ok = (
+        cutedsl_hdim_ok = (
             (head_dim <= 128 and _head_dim_v <= 128)
             or (head_dim == 192 and _head_dim_v == 128)
             or (head_dim == 256 and _head_dim_v == 256)
-            # Both of these exceed 256 and so take FA4's big-head-dim backward,
-            # which asserts ``not deterministic`` (``flash_mask/cute/
-            # interface.py``: ``is_bigd_bwd`` -> "deterministic reduction is not
-            # supported by big-headdim bwd"). Degrade instead of aborting, the
-            # same way FA3 degrades above.
-            or (head_dim == 512 and _head_dim_v == 512 and not deterministic)
-            or (head_dim == 576 and _head_dim_v == 512 and not deterministic)
         )
+        # FA4 additionally supports larger head dims (non-deterministic only)
+        if fa_version == 4 and not deterministic:
+            cutedsl_hdim_ok = cutedsl_hdim_ok or (
+                (head_dim == 512 and _head_dim_v == 512)
+                or (head_dim == 576 and _head_dim_v == 512)
+            )
+        if not cutedsl_hdim_ok:
+            return 2
         fa4_mask_ok = (
             startend_row_indices is None or startend_row_indices.shape[-1] != 4
         )
-        if not (fa4_hdim_ok and fa4_mask_ok):
-            return 2
+        if fa_version == 4:
+            if not fa4_mask_ok:
+                return 2
 
     return fa_version
+
+
+def is_value_padding_needed(
+    fa_version: int,
+    head_dim: int,
+    head_dim_v: int,
+) -> bool:
+    """Whether ``value`` must be zero-padded from ``head_dim_v`` to ``head_dim``.
+
+    Args:
+        fa_version: The version returned by :func:`get_fa_version`.
+        head_dim: Query/Key head dim.
+        head_dim_v: Value head dim.
+
+    Returns:
+        ``True`` when ``value`` needs padding.
+    """
+    fa3_native_pair = (fa_version == 3) and (
+        head_dim == 192 and head_dim_v == 128
+    )
+    fa4_native_pair = (fa_version == 4) and (
+        (head_dim == 192 and head_dim_v == 128)
+        or (head_dim == 576 and head_dim_v == 512)
+    )
+    return head_dim != head_dim_v and not (fa3_native_pair or fa4_native_pair)
 
 
 def flashmask_attention(
@@ -144,10 +166,10 @@ def flashmask_attention(
             not in inspect.signature(_flashmask_attention).parameters
         ):
             raise NotImplementedError(
-                "learnable_sink (softmax sink) requires FA4 (cute backend); the "
-                "installed flash_mask / current device (e.g. H-card fa2/fa3) does "
-                "not support it. Disable the attention sink or run on a "
-                "FA4-capable device."
+                "learnable_sink (softmax sink) requires FA3 or FA4 (cutedsl "
+                "backend); the installed flash_mask / current device does not "
+                "support it. Disable the attention sink or run on a "
+                "FA3/FA4-capable device."
             )
 
     bsz, q_len, num_heads, q_head_dim = query.shape
@@ -155,19 +177,13 @@ def flashmask_attention(
 
     fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
 
-    need_value_padding = (
-        not (
-            fa_version == 4
-            and (
-                (q_head_dim == 192 and v_head_dim == 128)
-                or (q_head_dim == 576 and v_head_dim == 512)
-            )
-        )
-    ) and q_head_dim != v_head_dim
+    need_value_padding = is_value_padding_needed(
+        fa_version, q_head_dim, v_head_dim
+    )
 
     if need_value_padding:
         value_padding = paddle.zeros(
-            [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+            [*value.shape[:-1], q_head_dim - v_head_dim],
             dtype=value.dtype,
         )
         value = paddle.concat([value, value_padding], axis=-1)
@@ -237,19 +253,13 @@ def flash_attention(
     # startend_row_indices is None
     fa_version = get_fa_version(q_head_dim, v_head_dim)
 
-    need_value_padding = (
-        not (
-            fa_version == 4
-            and (
-                (q_head_dim == 192 and v_head_dim == 128)
-                or (q_head_dim == 576 and v_head_dim == 512)
-            )
-        )
-    ) and q_head_dim != v_head_dim
+    need_value_padding = is_value_padding_needed(
+        fa_version, q_head_dim, v_head_dim
+    )
 
     if need_value_padding:
         value_padding = paddle.zeros(
-            [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+            [*value.shape[:-1], q_head_dim - v_head_dim],
             dtype=value.dtype,
         )
         value = paddle.concat([value, value_padding], axis=-1)
@@ -280,4 +290,5 @@ __all__ = [
     "flashmask_attention",
     "flash_attention",
     "get_fa_version",
+    "is_value_padding_needed",
 ]

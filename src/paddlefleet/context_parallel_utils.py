@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 
 import paddle
 import paddlefleet_ops.flash_mask_facade
@@ -26,7 +25,7 @@ _flash_mask_available = False
 try:
     if (
         paddle.cuda.is_available()
-        and paddle.cuda.get_device_capability()[0] == 10
+        and paddle.cuda.get_device_capability()[0] >= 9
     ):
         from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
             FlashMaskInfoPaddle,
@@ -740,7 +739,7 @@ def cp_flashmask_allgatherkv_balance_forward(
     v_head_dim = value_gathered.shape[-1]
     fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
 
-    if fa_version == 4 and _flash_mask_available:
+    if fa_version in (3, 4):
         output, log_sum_exp = _flash_attn_fwd(
             query,
             key_gathered,
@@ -755,7 +754,7 @@ def cp_flashmask_allgatherkv_balance_forward(
     else:
         if learnable_sink is not None:
             raise NotImplementedError(
-                "learnable_sink only supported on fa_version==4 cute backend"
+                "learnable_sink only supported on fa3 or fa4 cute backend"
             )
         output, log_sum_exp = flashmask_attention(
             query,
@@ -827,7 +826,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     if fa_version == 2:
         if learnable_sink is not None:
             raise NotImplementedError(
-                "learnable_sink only supported on fa_version==4 cute backend"
+                "learnable_sink only supported on fa3 or fa4 cute backend"
             )
         if softmax_scale is not None:
             raise NotImplementedError(
@@ -853,65 +852,7 @@ def cp_flashmask_allgatherkv_balance_backward(
                 causal,
             )
         )
-    elif fa_version == 3:
-        if learnable_sink is not None:
-            raise NotImplementedError(
-                "learnable_sink only supported on fa_version==4 cute backend"
-            )
-        sig_params = inspect.signature(flashmask_attention).parameters
-        if "group" in sig_params:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    None,  # block_mask
-                    output_grad,
-                    query.shape[-1] ** (-0.5)
-                    if softmax_scale is None
-                    else softmax_scale,
-                    False,
-                    0,  # rank
-                    1,  # nranks
-                )
-            )
-        elif "block_mask" in sig_params:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    None,  # block_mask
-                    output_grad,
-                    query.shape[-1] ** (-0.5)
-                    if softmax_scale is None
-                    else softmax_scale,
-                    False,
-                )
-            )
-        else:
-            query_grad, key_grad_gathered, value_grad_gathered = (
-                paddle._C_ops.flashmask_attention_v2_grad(
-                    query,
-                    key_gathered,
-                    value_gathered,
-                    output,
-                    log_sum_exp,
-                    startend_row_indices,
-                    output_grad,
-                    query.shape[-1] ** (-0.5)
-                    if softmax_scale is None
-                    else softmax_scale,
-                    False,
-                )
-            )
-    elif fa_version == 4 and _flash_mask_available:
+    elif fa_version in (3, 4):
         if startend_row_indices is not None:
             flashmask_info = FlashMaskInfoPaddle(
                 startend_row_indices=startend_row_indices,

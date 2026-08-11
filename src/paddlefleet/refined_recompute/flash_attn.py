@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import inspect
 import logging
 import queue
 
@@ -20,7 +19,6 @@ import paddle
 from paddle import _C_ops, framework
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
-from paddle.nn.functional.flash_attention import flashmask_attention
 from paddlefleet_ops import is_flash_mask_available
 from paddlefleet_ops.flash_mask_facade import get_fa_version
 
@@ -123,14 +121,7 @@ class FlashAttnFunctor(PyLayer):
                 dropout,
                 causal,
             )
-        elif fa_version == 3:
-            result_attention = hold_tensors["result_attention"]
-            softmax_lse = hold_tensors["softmax_lse"]
-            causal = hold_tensors["causal"]
-            ctx.save_for_backward(
-                q, k, v, result_attention, softmax_lse, causal
-            )
-        elif fa_version == 4:
+        elif fa_version in (3, 4):
             result_attention = hold_tensors["result_attention"]
             softmax_lse = hold_tensors["softmax_lse"]
             causal = hold_tensors["causal"]
@@ -185,25 +176,7 @@ class FlashAttnFunctor(PyLayer):
                 causal,
             )
             seed_offset._clear_dataptr()
-        elif fa_version == 3:
-            q, k, v, result_attention, softmax_lse, causal = ctx.saved_tensor()
-            q_grad, k_grad, v_grad = _C_ops.flash_attn_v3_grad(
-                q.detach(),
-                k.detach(),
-                v.detach(),
-                result_attention,
-                softmax_lse,
-                grad,
-                q.shape[-1] ** (-0.5)
-                if ctx.softmax_scale is None
-                else ctx.softmax_scale,  # softmax_scale
-                causal,
-                -1,  # window_size_left
-                -1,  # window_size_right
-                0.0,  # softcap
-                0,  # sm_margin
-            )
-        elif fa_version == 4:
+        elif fa_version in (3, 4):
             flashmask_info = None
             q, k, v, result_attention, softmax_lse, causal = ctx.saved_tensor()
             q_grad, k_grad, v_grad, _ = _flash_attn_bwd(
@@ -336,35 +309,7 @@ class RefinedRcomputeFlashAttention:
                 "dropout": dropout,
                 "causal": causal,
             }
-        elif fa_version == 3:
-            (result_attention, softmax_lse) = _C_ops.flash_attn_v3(
-                query_states,
-                key_states,
-                value_states,
-                None,
-                None,
-                None,
-                None,
-                query_states.shape[-1] ** (-0.5)
-                if softmax_scale is None
-                else softmax_scale,
-                causal,
-                -1,
-                -1,
-                0.0,
-                1,
-                False,
-                False,
-                0,
-            )
-            hold_tensors = {
-                "result_attention": result_attention,
-                "softmax_lse": softmax_lse,
-                "causal": causal,
-                "softmax_scale": softmax_scale,
-            }
-            result_softmax = None  # FA v3 does not return softmax.
-        elif fa_version == 4:
+        elif fa_version in (3, 4):
             (result_attention, softmax_lse) = _flash_attn_fwd(
                 query_states,
                 key_states,
@@ -455,20 +400,7 @@ class FlashMaskAttnFunctor(PyLayer):
                 dropout,
                 causal,
             )
-        elif fa_version == 3:
-            result_attention = hold_tensors["result_attention"]
-            softmax_lse = hold_tensors["softmax_lse"]
-            causal = hold_tensors["causal"]
-            ctx.save_for_backward(
-                q,
-                k,
-                v,
-                startend_row_indices,
-                result_attention,
-                softmax_lse,
-                causal,
-            )
-        elif fa_version == 4:
+        elif fa_version in (3, 4):
             result_attention = hold_tensors["result_attention"]
             softmax_lse = hold_tensors["softmax_lse"]
             causal = hold_tensors["causal"]
@@ -521,66 +453,7 @@ class FlashMaskAttnFunctor(PyLayer):
                 causal,
             )
             seed_offset._clear_dataptr()
-        elif fa_version == 3:
-            (
-                q,
-                k,
-                v,
-                startend_row_indices,
-                result_attention,
-                softmax_lse,
-                causal,
-            ) = ctx.saved_tensor()
-
-            sig_params = inspect.signature(flashmask_attention).parameters
-
-            softmax_scale = (
-                q.shape[-1] ** (-0.5)
-                if ctx.softmax_scale is None
-                else ctx.softmax_scale
-            )
-
-            if "group" in sig_params:
-                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q.detach(),
-                    k.detach(),
-                    v.detach(),
-                    result_attention,
-                    softmax_lse,
-                    startend_row_indices,
-                    None,  # block_mask
-                    grad,
-                    softmax_scale,
-                    causal,
-                    0,  # rank
-                    1,  # nranks
-                )
-            elif "block_mask" in sig_params:
-                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q.detach(),
-                    k.detach(),
-                    v.detach(),
-                    result_attention,
-                    softmax_lse,
-                    startend_row_indices,
-                    None,  # block_mask
-                    grad,
-                    softmax_scale,
-                    causal,
-                )
-            else:
-                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q.detach(),
-                    k.detach(),
-                    v.detach(),
-                    result_attention,
-                    softmax_lse,
-                    startend_row_indices,
-                    grad,
-                    softmax_scale,
-                    causal,
-                )
-        elif fa_version == 4:
+        elif fa_version in (3, 4):
             (
                 q,
                 k,
@@ -668,9 +541,9 @@ class RefinedRcomputeFlashMaskAttention:
                 value_states.shape[-1],
                 startend_row_indices,
             )
-            if fa_version != 4:
+            if fa_version not in (3, 4):
                 raise NotImplementedError(
-                    "learnable_sink only supported on fa_version==4 cute backend"
+                    "learnable_sink only supported on fa3 or fa4 cute backend"
                 )
         if not framework._dygraph_tracer()._has_grad:
             # This is the initial, normal forward pass.
@@ -752,52 +625,7 @@ class RefinedRcomputeFlashMaskAttention:
                 "dropout": dropout,
                 "causal": causal,
             }
-        elif fa_version == 3:
-            sig_params = inspect.signature(flashmask_attention).parameters
-            scale = (
-                query_states.shape[-1] ** (-0.5)
-                if softmax_scale is None
-                else softmax_scale
-            )
-            if "group" in sig_params:
-                (result_attention, softmax_lse) = _C_ops.flashmask_attention_v2(
-                    query_states,
-                    key_states,
-                    value_states,
-                    startend_row_indices,
-                    None,  # block_mask
-                    None,  # nvshmem unique id
-                    scale,
-                    causal,
-                    0,  # rank
-                    1,  # nranks
-                )
-            elif "block_mask" in sig_params:
-                (result_attention, softmax_lse) = _C_ops.flashmask_attention_v2(
-                    query_states,
-                    key_states,
-                    value_states,
-                    startend_row_indices,
-                    None,  # block_mask
-                    scale,
-                    causal,
-                )
-            else:
-                (result_attention, softmax_lse) = _C_ops.flashmask_attention_v2(
-                    query_states,
-                    key_states,
-                    value_states,
-                    startend_row_indices,
-                    scale,
-                    causal,
-                )
-            hold_tensors = {
-                "result_attention": result_attention,
-                "softmax_lse": softmax_lse,
-                "causal": causal,
-                "softmax_scale": softmax_scale,
-            }
-        elif fa_version == 4:
+        elif fa_version in (3, 4):
             (result_attention, softmax_lse) = _flash_attn_fwd(
                 query_states,
                 key_states,
@@ -1044,54 +872,7 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
                 causal,
             )
             seed_offset._clear_dataptr()
-        elif ctx.fa_version == 3:
-            sig_params = inspect.signature(flashmask_attention).parameters
-            scale = (
-                q.shape[-1] ** (-0.5)
-                if ctx.softmax_scale is None
-                else ctx.softmax_scale
-            )
-            if "group" in sig_params:
-                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q.detach(),
-                    k.detach(),
-                    v.detach(),
-                    result_attention,
-                    softmax_lse,
-                    startend_row_indices,
-                    None,
-                    local_grad,
-                    scale,
-                    causal,
-                    0,
-                    1,
-                )
-            elif "block_mask" in sig_params:
-                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q.detach(),
-                    k.detach(),
-                    v.detach(),
-                    result_attention,
-                    softmax_lse,
-                    startend_row_indices,
-                    None,
-                    local_grad,
-                    scale,
-                    causal,
-                )
-            else:
-                q_grad, k_grad, v_grad = _C_ops.flashmask_attention_v2_grad(
-                    q.detach(),
-                    k.detach(),
-                    v.detach(),
-                    result_attention,
-                    softmax_lse,
-                    startend_row_indices,
-                    local_grad,
-                    scale,
-                    causal,
-                )
-        elif ctx.fa_version == 4:
+        elif ctx.fa_version in (3, 4):
             if startend_row_indices is not None:
                 flashmask_info = FlashMaskInfoPaddle(
                     startend_row_indices=startend_row_indices,
@@ -1301,52 +1082,7 @@ def ulysses_local_flashmask_first_fwd(
             "dropout": 0.0,
             "causal": causal,
         }
-    elif fa_version == 3:
-        sig_params = inspect.signature(flashmask_attention).parameters
-        scale = (
-            query_states.shape[-1] ** (-0.5)
-            if softmax_scale is None
-            else softmax_scale
-        )
-        if "group" in sig_params:
-            result_attention, softmax_lse = _C_ops.flashmask_attention_v2(
-                query_states,
-                key_states,
-                value_states,
-                startend_row_indices,
-                None,
-                None,
-                scale,
-                causal,
-                0,
-                1,
-            )
-        elif "block_mask" in sig_params:
-            result_attention, softmax_lse = _C_ops.flashmask_attention_v2(
-                query_states,
-                key_states,
-                value_states,
-                startend_row_indices,
-                None,
-                scale,
-                causal,
-            )
-        else:
-            result_attention, softmax_lse = _C_ops.flashmask_attention_v2(
-                query_states,
-                key_states,
-                value_states,
-                startend_row_indices,
-                scale,
-                causal,
-            )
-        hold_tensors = {
-            "result_attention": result_attention,
-            "softmax_lse": softmax_lse,
-            "causal": causal,
-            "softmax_scale": softmax_scale,
-        }
-    elif fa_version == 4:
+    elif fa_version in (3, 4):
         result_attention, softmax_lse = _flash_attn_fwd(
             query_states,
             key_states,
@@ -1408,9 +1144,9 @@ class RefinedRcomputeFlashMaskCpAttention:
                 value_states.shape[-1],
                 startend_row_indices,
             )
-            if not fa_version == 4:
+            if fa_version not in (3, 4):
                 raise NotImplementedError(
-                    "learnable_sink only supported on fa_version==4 cute backend"
+                    "learnable_sink only supported on fa3 or fa4 cute backend"
                 )
         if not framework._dygraph_tracer()._has_grad:
             # This is the initial, normal forward pass.

@@ -253,10 +253,9 @@ if paddle.is_compiled_with_cuda():
         _DEEP_EP_AVAILABLE = True
         _FLASH_MLA_AVAILABLE = True
         _MOON_EP_AVAILABLE = True
+        _FLASH_MASK_AVAILABLE = True
         if _cuda_version >= (12, 9):
             _HYBRID_EP_AVAILABLE = True
-    if paddle.cuda.get_device_capability()[0] >= 10:
-        _FLASH_MASK_AVAILABLE = True
     if (
         sys.version_info >= (3, 12)
         and paddle.cuda.get_device_capability()[0] >= 10
