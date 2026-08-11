@@ -43,7 +43,7 @@ from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.triton_ops.utils import is_torch_compat_available
+from paddlefleet.triton_ops.utils import is_triton_available
 from paddlefleet.utils import (
     get_pg_size,
     log_single_rank,
@@ -170,9 +170,10 @@ def build_cu_seqlens(
     ends = startend_row_indices[:, 0, :, 0].astype("int64")
 
     # Fused Triton path: the same boundary detection + start compaction done in
-    # a single kernel. Only available under torch-compat (CUDA); fall back to
-    # the pure-paddle implementation below otherwise (e.g. CPU).
-    if is_torch_compat_available():
+    # a single kernel. Requires a CUDA-enabled build with an initialized Triton
+    # driver AND the mask living on a GPU place; on a CPU build / CPU device we
+    # must fall back to the pure-paddle implementation below.
+    if is_triton_available() and ends.place.is_gpu_place():
         from paddlefleet.triton_ops.document_mask_fusion import (
             cu_seqlens_triton,
         )

@@ -252,6 +252,31 @@ class TestDocumentMaskFusion(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_cu_seqlens(paddle.ones([2, 2, 4, 1], dtype="int32"), 2, 4)
 
+    def test_build_cu_seqlens_cpu_fallback(self):
+        """On a CPU device / CPU tensor build_cu_seqlens must NOT launch the
+        CUDA Triton kernel; it has to take the pure-paddle fallback.
+
+        Guards the dispatch condition: a CUDA-compiled Paddle keeps
+        ``is_compiled_with_cuda()`` True even on ``set_device('cpu')``, so the
+        gate has to consult the tensor's place, not just torch-compat. Without
+        that check this call would try to run a GPU kernel on a CPU tensor and
+        crash.
+        """
+        prev = paddle.device.get_device()
+        try:
+            paddle.device.set_device("cpu")
+            startend = paddle.to_tensor(
+                [[2, 2, 5, 5, 6, 6]], dtype="int32"
+            ).reshape([1, 1, 6, 1])
+            self.assertTrue(startend.place.is_cpu_place())
+            out = build_cu_seqlens(startend, 1, 6)
+            # result stays on CPU -> the paddle path ran, not the GPU kernel.
+            self.assertTrue(out.place.is_cpu_place())
+            ref = _cu_seqlens_paddle_ref(startend, 1, 6)
+            np.testing.assert_array_equal(out, ref)
+        finally:
+            paddle.device.set_device(prev)
+
     def test_window_topk_idxs_kernel(self):
         """window_topk_idxs_kernel -> [1, seqlen, window_size]."""
         window_ref = _build_window_topk_idxs_from_doc_bounds(
