@@ -805,6 +805,22 @@ class TestTransformerConfigCpBalanceMode(unittest.TestCase):
 class TestTransformerConfigHybridMlaCpMode(unittest.TestCase):
     """Tests for the hybrid_mla_cp_mode per-layer override."""
 
+    # The only context where the override is legal: a dsv4_hybrid whose
+    # csa_compress_ratios declares an MLA layer. That -2 also mandates the
+    # explicit MLA dimensions below.
+    MLA_HYBRID = {
+        "experimental_attention_variant": "dsv4_hybrid",
+        "num_hidden_layers": 2,
+        "csa_compress_ratios": [-2, 128],
+        "hybrid_mla_q_lora_rank": 8,
+        "hybrid_mla_kv_lora_rank": 8,
+        "hybrid_mla_qk_nope_head_dim": 8,
+        "hybrid_mla_qk_rope_head_dim": 8,
+        "hybrid_mla_v_head_dim": 8,
+        "hybrid_mla_num_attention_heads": 4,
+        "hybrid_mla_num_key_value_heads": 4,
+    }
+
     @staticmethod
     def _config(**kwargs):
         from paddlefleet.transformer.transformer_config import (
@@ -822,6 +838,7 @@ class TestTransformerConfigHybridMlaCpMode(unittest.TestCase):
         config = self._config(
             cp_balance_mode="contiguous_allgather",
             hybrid_mla_cp_mode="contiguous_a2a",
+            **self.MLA_HYBRID,
         )
         self.assertEqual(config.hybrid_mla_cp_mode, "contiguous_a2a")
 
@@ -841,6 +858,26 @@ class TestTransformerConfigHybridMlaCpMode(unittest.TestCase):
                 cp_balance_mode="dualchunk_allgather",
                 hybrid_mla_cp_mode="contiguous_a2a",
             )
+
+    def test_requires_dsv4_hybrid_with_mla_layer(self):
+        """The override only reaches MLA layers, so a config declaring none is
+        a dead setting: neither a plain model (no csa_compress_ratios at all)
+        nor a hybrid without a -2 layer may set it."""
+        for kwargs in (
+            {},
+            {**self.MLA_HYBRID, "csa_compress_ratios": [128, 0]},
+        ):
+            with (
+                self.subTest(ratios=kwargs.get("csa_compress_ratios")),
+                self.assertRaisesRegex(
+                    ValueError, "only be set in dsv4_hybrid"
+                ),
+            ):
+                self._config(
+                    cp_balance_mode="contiguous_allgather",
+                    hybrid_mla_cp_mode="contiguous_a2a",
+                    **kwargs,
+                )
 
 
 if __name__ == "__main__":

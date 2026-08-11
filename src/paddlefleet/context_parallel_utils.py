@@ -1881,10 +1881,11 @@ def flashmask_attention_ulysses(
     # The softmax sink holds one entry per query head and is replicated on every
     # rank, so it needs the same head partition as Q/K/V (which the all-to-all below applies)
     if learnable_sink is not None:
-        assert learnable_sink.shape[0] == num_q_heads, (
-            f"learnable_sink must have one entry per query head ({num_q_heads}), "
-            f"got shape {learnable_sink.shape}"
-        )
+        if learnable_sink.shape[0] != num_q_heads:
+            raise ValueError(
+                f"learnable_sink must have one entry per query head ({num_q_heads}), "
+                f"got shape {learnable_sink.shape}"
+            )
         heads_per_rank = num_q_heads // cp_size
         learnable_sink = learnable_sink[
             cp_rank * heads_per_rank : (cp_rank + 1) * heads_per_rank

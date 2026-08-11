@@ -275,9 +275,10 @@ class DotProductAttention(FleetLayer):
         # ``contiguous_swap2p`` keys on ``config.multi_latent_attention``, which
         # is False in a DSV4 hybrid, so an SWA layer here would silently run on
         # the non-SWA Ulysses path. ``is_swa`` is per layer, hence the check.
-        assert self.hybrid_mla_cp_mode is None or not is_swa, (
-            "When hybrid_mla_cp_mode is set, setting SWA is not supported."
-        )
+        if self.hybrid_mla_cp_mode is not None and is_swa:
+            raise ValueError(
+                "When hybrid_mla_cp_mode is set, setting SWA is not supported."
+            )
 
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
