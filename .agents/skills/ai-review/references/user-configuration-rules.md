@@ -25,10 +25,10 @@
 
 - 框架、驱动或第三方库自身定义的变量：Paddle 的 `FLAGS_*`、`NCCL_*` / `BCCL_*`、`CUDA_*` 等。
 - 启动器或调度平台注入的运行时上下文，例如 rank 信息与断点续训位置（`PADDLE_*`、`PDC_*`、`TRAINER_GLOBAL_STEP`、`RECOVER_STEP`）。这类值描述运行环境而非模型行为，不应反向塞进配置类。
-- 向只接受环境变量传参的外部库传值：只允许由配置字段推导后写入 `os.environ`，不允许把用户直接设置的值当作开关读回来。参考 `transformer/moe/moe_layer.py` 中根据 EP 配置自动设置 `NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` 的做法。
+- 向只接受环境变量传参的外部库传值：只允许**单向、纯推导**地写入 `os.environ`，即取值完全由配置字段计算得出，代码不读取该变量的用户取值、也不因用户已设置而跳过写入。一旦实现变成"用户设了就用用户的、没设才自动推导"，该变量就成了用户开关，按本节报告。
 - 纯观测/调试且不改变数值结果的开关（张量 dump、日志、md5 校验），需在注释中注明不影响数值、默认关闭，并说明回收条件。
 
-现网反例（存量，不因本节报告，除非本 PR 正在改动它们）：`transformer/dsv4_hybrid_attention.py` 在 import 期读取 `FLEET_FP8_WO_A_GEMM` 并直接 gate FP8 GEMM 路径；`transformer/moe/moe_router.py` 的 `FLEET_MOE_ROUTER_SCALE_FAST`；`transformer/moe/fused_a2a.py` 的 `FLEET_MOE_EP_BARRIER_ASYNC`；`pipeline_parallel/pp_utils/p2p_communication.py` 的 `PADDLE_P2P_SYNC_SEND`。这些都是应当收敛为配置字段的形态，新增代码不得沿用。
+现网反例（存量，不因本节报告，除非本 PR 正在改动它们）：`transformer/dsv4_hybrid_attention.py` 在 import 期读取 `FLEET_FP8_WO_A_GEMM` 并直接 gate FP8 GEMM 路径；`transformer/moe/moe_router.py` 的 `FLEET_MOE_ROUTER_SCALE_FAST`；`transformer/moe/fused_a2a.py` 的 `FLEET_MOE_EP_BARRIER_ASYNC`；`pipeline_parallel/pp_utils/p2p_communication.py` 的 `PADDLE_P2P_SYNC_SEND`。`transformer/moe/moe_layer.py` 对 `NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` 的处理同样是反例而非允许形态：它先判断用户是否已设置、仅在未设置时才由 EP 配置推导，等于把并行域大小交给用户通过环境变量覆盖，正确做法是把可调的 domain size 收敛为配置字段。这些都是应当收敛为配置字段的形态，新增代码不得沿用。
 
 迁移要求：确有必须用环境变量的理由时，在 PR 描述和代码注释中说明为什么配置字段无法承载，并给出回收条件；同时不得让该变量与任何已有配置字段语义重叠。
 
