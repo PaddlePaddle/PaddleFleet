@@ -12,41 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import re
-import subprocess
 import unittest
 
 import paddle
 import paddle.distributed as dist
 from paddlefleet_ops import is_moonep_available
-
-
-def _get_nvlink_fabric_status():
-    selected_gpu = os.environ.get("FLAGS_selected_gpus") or os.environ.get(
-        "CUDA_VISIBLE_DEVICES", ""
-    )
-    device_id = selected_gpu.split(",", maxsplit=1)[0]
-    try:
-        output = subprocess.check_output(
-            ["nvidia-smi", "-q", "-i", device_id],
-            text=True,
-            stderr=subprocess.STDOUT,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return device_id or "unknown", "unknown", "unknown", "unknown"
-
-    fabric_match = re.search(
-        r"(?ms)^\s*Fabric\s*$\n"
-        r"\s*State\s*:\s*(\S+)\s*$\n"
-        r"\s*Status\s*:\s*(\S+)\s*$\n"
-        r"\s*CliqueId\s*:\s*(\S+)\s*$",
-        output,
-    )
-    if fabric_match is None:
-        return device_id, "unknown", "unknown", "unknown"
-    return device_id, *fabric_match.groups()
 
 
 class TestMoonEP(unittest.TestCase):
@@ -61,20 +31,6 @@ class TestMoonEP(unittest.TestCase):
         if cls.world_size != 2:
             dist.destroy_process_group()
             raise unittest.SkipTest("MoonEP smoke test requires two ranks")
-
-        fabric_statuses = []
-        dist.all_gather_object(fabric_statuses, _get_nvlink_fabric_status())
-        ready = all(
-            state == "Completed" and status == "Success"
-            for _, state, status, _ in fabric_statuses
-        )
-        cliques = {clique for _, _, _, clique in fabric_statuses}
-        if not ready or len(cliques) != 1:
-            details = "; ".join(str(item) for item in fabric_statuses)
-            dist.destroy_process_group()
-            raise unittest.SkipTest(
-                f"MoonEP requires a ready NVSwitch fabric: {details}"
-            )
 
         from paddlefleet_ops.moonep import Buffer, MoonEPCommPlan
 
