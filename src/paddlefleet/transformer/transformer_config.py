@@ -20,6 +20,7 @@ from __future__ import annotations
 import functools
 import logging
 import math
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -1571,6 +1572,19 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.head_dim is None:
             self.head_dim = self.hidden_size // self.num_attention_heads
+
+        # Allow overriding the attention logit cap from the launch script so a
+        # cap can be tried without touching the YAML config.
+        _cap_override = os.environ.get("FLEET_ATTENTION_LOGIT_CAP")
+        if _cap_override is not None:
+            self.attention_logit_cap = float(_cap_override)
+
+        # Pass the expert-parallel group size down to the external all-to-all
+        # library, which only accepts it through the environment.
+        if self.expert_model_parallel_size > 1:
+            os.environ["FLEET_EP_GROUP_SIZE"] = str(
+                self.expert_model_parallel_size
+            )
 
         if self.v_head_dim is None:
             self.v_head_dim = self.head_dim

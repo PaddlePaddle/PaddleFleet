@@ -96,6 +96,16 @@ def _log_moe_md5(tensor, name, layer_idx=None):
 
 _ROUTER_SCALE_FAST = None
 
+# Read once at import time so the hot path stays branch-free.
+_ROUTER_BIAS_UPDATE_STRIDE = int(
+    os.environ.get("FLEET_MOE_ROUTER_BIAS_UPDATE_STRIDE", "1")
+)
+
+
+def _router_bias_update_stride():
+    """Number of steps between two expert-bias updates of the aux-loss-free router."""
+    return _ROUTER_BIAS_UPDATE_STRIDE
+
 
 def _router_scale_fast_enabled():
     """Opt-in switch for the atomic-free routed-scaling-factor gather backward.
