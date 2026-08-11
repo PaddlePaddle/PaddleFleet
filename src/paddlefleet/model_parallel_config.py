@@ -184,6 +184,13 @@ class ModelParallelConfig:
     async_tensor_model_parallel_allreduce: bool = False
     """NOTE: Deprecated. This flag is ignored."""
 
+    grad_reduce_comm_overlap: bool = False
+    """If true, overlaps the gradient reduce-scatter/all-reduce of the data
+    parallel group with the backward pass computation instead of issuing it
+    after the whole backward pass finishes. Defaults to False to keep the
+    current serialized behaviour.
+    """
+
     use_te_rng_tracker: bool = False
     """If true, uses RNG state tracker in TransformerEngine if exists.
     """

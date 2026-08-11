@@ -836,6 +836,22 @@ class TransformerConfig(ModelParallelConfig):
     to facilitate garbage collection of input."""
 
     ####################
+    # CUDA Graph
+    ####################
+    enable_cuda_graph: bool = False
+    """When set to True, capture the transformer layer forward/backward into a
+    CUDA graph and replay it on every step, removing per-step kernel launch
+    overhead. Requires static input shapes. Defaults to False so that dynamic
+    shape training keeps working. Name and semantics follow NVIDIA Megatron-LM
+    ``TransformerConfig.enable_cuda_graph``.
+    """
+
+    cuda_graph_warmup_steps: int = 0
+    """Number of eager warmup steps executed before the CUDA graph is captured.
+    Only meaningful when ``enable_cuda_graph`` is True.
+    """
+
+    ####################
     # SonicMoE
     ####################``
     using_sonic_moe: bool = False
