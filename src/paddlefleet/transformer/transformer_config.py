@@ -60,6 +60,11 @@ class TransformerConfig(ModelParallelConfig):
     train_mtp_only: bool = False
     """Whether to train MTP only."""
 
+    disable_llm_training: bool = False
+    """If True, the parameters of the language-model backbone are excluded from
+    the optimizer and only the auxiliary heads keep training. Defaults to False
+    so that the whole model is trained."""
+
     mtp_distillation_loss: bool = False
     """Whether to use distillation MTP loss."""
 
@@ -207,6 +212,13 @@ class TransformerConfig(ModelParallelConfig):
 
     attention_bias: bool = False
     """Include a bias term in QKV projections."""
+
+    mlp_bias: bool = False
+    """Include a bias term in the two linear layers of the MLP block. True adds
+    the bias, False omits it. Independent of ``attention_bias``, which only
+    controls the QKV projections. Name and default follow Huggingface
+    Transformers ``LlamaConfig.mlp_bias``; behaviour is identical. Defaults to
+    False, matching all currently supported models."""
 
     output_layer_init_method: Callable | None = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
@@ -382,6 +394,22 @@ class TransformerConfig(ModelParallelConfig):
     block attention residuals. Controls how many layers
     accumulate standard residuals before applying the learned
     attention-weighted combination across blocks."""
+
+    ####################
+    # Logit softcapping
+    ####################
+    attention_logit_cap: float | None = None
+    """Scale used when applying ``tanh`` softcapping to the attention scores
+    before the softmax: ``scores = cap * tanh(scores / cap)``. None disables
+    softcapping and keeps the raw scores. A positive float bounds the scores to
+    ``(-cap, cap)``, which stabilises training of deep models at the cost of one
+    extra elementwise pass. Defaults to None so existing models are unchanged."""
+
+    final_logit_softcapping: float | None = 50.0
+    """Scale used when applying ``tanh`` softcapping to the output-layer logits,
+    with the same formula as ``attention_logit_cap``. None disables it. Applies
+    to the language-model head only and is independent of
+    ``attention_logit_cap``."""
 
     ####################
     # mixed-precision
