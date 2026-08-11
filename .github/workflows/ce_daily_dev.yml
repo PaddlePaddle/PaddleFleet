@@ -150,10 +150,10 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
@@ -312,10 +312,10 @@ jobs:
           source /root/proxy
           pip install --upgrade pip
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
@@ -491,10 +491,10 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
@@ -755,10 +755,10 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
@@ -1274,10 +1274,10 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
