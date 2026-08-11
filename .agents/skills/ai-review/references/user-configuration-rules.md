@@ -1,14 +1,36 @@
 # PaddleFleet 用户配置开关规则
 
-- 适用路径：`src/paddlefleet/transformer/transformer_config.py`、`src/paddlefleet/model_parallel_config.py`
-- 触发条件：在上述文件中新增、重命名或删除用户配置开关，修改开关默认值、取值集合或行为，或在 `__post_init__` 中新增/修改开关之间的约束
+- 适用路径：`src/paddlefleet/transformer/transformer_config.py`、`src/paddlefleet/model_parallel_config.py`；「禁止用环境变量绕过配置评审」一节的适用路径扩展到 `src/paddlefleet/` 下所有 Python 文件
+- 触发条件：在上述配置文件中新增、重命名或删除用户配置开关，修改开关默认值、取值集合或行为，或在 `__post_init__` 中新增/修改开关之间的约束；或在 `src/paddlefleet/` 任意位置新增环境变量读取
 - 规则来源：`ci/check_approval.sh` 将这两个文件列为需指定审批人的受控配置文件；其余检查项来自两文件现有的命名分区、docstring 和 `__post_init__` 校验约定
 - 引用约定：本文档只用符号名（字段名、函数名、分区注释）定位代码，不写行号
-- 评审范围：只评审本 PR diff 中新增或修改的开关。存量开关（含已有的 `enable_*`、`use_*` 字段和重复声明）不因不符合本规则而报告，除非本 PR 正在改动它们。
+- 评审范围：只评审本 PR diff 中新增或修改的开关。存量开关（含已有的 `enable_*`、`use_*` 字段、重复声明和已有的环境变量读取）不因不符合本规则而报告，除非本 PR 正在改动它们。
 
 ## 规则优先级
 
-必要性、跨版本兼容性、二次解析、校验与测试缺失优先于命名、分段与文档问题。生态一致性优先于本文档的命名偏好：上游框架已有等价开关时沿用上游命名，即使其形式与“命名与声明规范”一节冲突。
+环境变量绕过、必要性、跨版本兼容性、二次解析、校验与测试缺失优先于命名、分段与文档问题。生态一致性优先于本文档的命名偏好：上游框架已有等价开关时沿用上游命名，即使其形式与“命名与声明规范”一节冲突。
+
+## 禁止用环境变量绕过配置评审
+
+判定标准：新增读取的环境变量（`os.environ[...]`、`os.environ.get`、`os.getenv`）只要会改变计算路径、数值结果、并行/通信行为或性能策略，它就是一个用户配置开关，必须声明为 `TransformerConfig` / `ModelParallelConfig` 字段并接受本文档全部规则的评审。用环境变量承载这类开关等于绕过配置评审：它不进配置类、不随配置落盘、不被 `__post_init__` 校验、也不会被 `ci/check_approval.sh` 拦到受控文件审批。报告时给出应新增的字段名和所属分段。
+
+禁止的具体形态：
+
+- 模块级 / import 期读取，例如在文件顶层写 `_X = os.environ.get("...", "0")` 再在函数里用它。取值在 `from_config` 之前就已固定，配置无法覆盖，同一进程内不同配置也无法区分。
+- 环境变量与配置字段并存且环境变量优先，或在 `__post_init__` 中用环境变量改写字段取值。既有 YAML/JSON 配置会被进程外的变量静默改变行为，与「跨版本兼容性」一节禁止的静默变更同类。
+- 以"先不进 config、跑通再说"为理由的临时旁路或灰度开关。
+- 把环境变量的字符串取值散落在各消费点自行解析（`== "1"`、`in ("0", "false", "False")`、`int(...)`、按分隔符切分）。这与「反面模式」一节的二次解析是同一问题。
+
+允许的例外（不报告）：
+
+- 框架、驱动或第三方库自身定义的变量：Paddle 的 `FLAGS_*`、`NCCL_*` / `BCCL_*`、`CUDA_*` 等。
+- 启动器或调度平台注入的运行时上下文，例如 rank 信息与断点续训位置（`PADDLE_*`、`PDC_*`、`TRAINER_GLOBAL_STEP`、`RECOVER_STEP`）。这类值描述运行环境而非模型行为，不应反向塞进配置类。
+- 向只接受环境变量传参的外部库传值：只允许由配置字段推导后写入 `os.environ`，不允许把用户直接设置的值当作开关读回来。参考 `transformer/moe/moe_layer.py` 中根据 EP 配置自动设置 `NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` 的做法。
+- 纯观测/调试且不改变数值结果的开关（张量 dump、日志、md5 校验），需在注释中注明不影响数值、默认关闭，并说明回收条件。
+
+现网反例（存量，不因本节报告，除非本 PR 正在改动它们）：`transformer/dsv4_hybrid_attention.py` 在 import 期读取 `FLEET_FP8_WO_A_GEMM` 并直接 gate FP8 GEMM 路径；`transformer/moe/moe_router.py` 的 `FLEET_MOE_ROUTER_SCALE_FAST`；`transformer/moe/fused_a2a.py` 的 `FLEET_MOE_EP_BARRIER_ASYNC`；`pipeline_parallel/pp_utils/p2p_communication.py` 的 `PADDLE_P2P_SYNC_SEND`。这些都是应当收敛为配置字段的形态，新增代码不得沿用。
+
+迁移要求：确有必须用环境变量的理由时，在 PR 描述和代码注释中说明为什么配置字段无法承载，并给出回收条件；同时不得让该变量与任何已有配置字段语义重叠。
 
 ## 开关必要性
 
