@@ -254,6 +254,42 @@ class TestKdaDecodeGuards(unittest.TestCase):
         paddle.seed(0)
         self.kda = _build_kda()
 
+    def _assert_cache_rejected(self, message, **kwargs):
+        with self.assertRaisesRegex(NotImplementedError, message):
+            self.kda(
+                paddle.randn([1, 1, HIDDEN_SIZE]),
+                past_key_values=_make_cache(),
+                layer_idx=0,
+                use_cache=True,
+                **kwargs,
+            )
+
+    def test_tensor_parallel_rejected(self):
+        self.kda.tp_size = 2
+        self._assert_cache_rejected("tensor parallel")
+
+    def test_sequence_parallel_rejected(self):
+        self.kda.config.sequence_parallel = True
+        self._assert_cache_rejected("sequence parallel")
+
+    def test_context_parallel_rejected(self):
+        self.kda.cp_size = 2
+        self._assert_cache_rejected("context parallel")
+
+    def test_cu_seqlens_rejected(self):
+        self._assert_cache_rejected(
+            "variable-length",
+            cu_seqlens=paddle.to_tensor([0, 1], dtype="int32"),
+        )
+
+    def test_startend_mask_rejected(self):
+        self._assert_cache_rejected(
+            "variable-length",
+            attn_mask_startend_row_indices=paddle.ones(
+                [1, 1, 1, 1], dtype="int32"
+            ),
+        )
+
     def test_multi_token_decode_rejected(self):
         cache = _make_cache()
         hidden = paddle.randn([1, 8, HIDDEN_SIZE])
