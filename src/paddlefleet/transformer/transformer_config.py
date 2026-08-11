@@ -848,7 +848,7 @@ class TransformerConfig(ModelParallelConfig):
 
     cuda_graph_warmup_steps: int = 0
     """Number of eager warmup steps executed before the CUDA graph is captured.
-    Only meaningful when ``enable_cuda_graph`` is True.
+    Only meaningful when ``enable_cuda_graph`` is True. Must be non-negative.
     """
 
     ####################
