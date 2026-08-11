@@ -741,36 +741,36 @@ class GPTEmbedding(FleetLayer):
                 else None
             ),
         }
-        # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
-        # through dict_args to MTP layer. They must both be present or both be absent.
+        # Pass either compressed or dense per-depth MTP masks through to the MTP layer.
         mtp_startend_row_indices_all = dict_args.get(
             "mtp_startend_row_indices_all", None
         )
+        mtp_attn_mask = dict_args.get("mtp_attn_mask", None)
         mtp_hidden_inputs_mask_all = dict_args.get(
             "mtp_hidden_inputs_mask_all", None
         )
-        assert (mtp_startend_row_indices_all is None) == (
-            mtp_hidden_inputs_mask_all is None
-        ), (
-            "mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all must both be None or both be not None, "
-            f"got mtp_startend_row_indices_all={'None' if mtp_startend_row_indices_all is None else 'not None'}, "
-            f"mtp_hidden_inputs_mask_all={'None' if mtp_hidden_inputs_mask_all is None else 'not None'}"
+        assert not (
+            mtp_startend_row_indices_all is not None and mtp_attn_mask is not None
+        ), "MTP compressed and dense attention masks are mutually exclusive"
+        has_mtp_attention_mask = (
+            mtp_startend_row_indices_all is not None or mtp_attn_mask is not None
         )
-        if mtp_startend_row_indices_all is not None:
-            # Ensure tensor is on GPU (dataloader may deliver it as pinned CPU memory).
-            # PP P2P communication (NCCL) cannot send pinned tensors directly.
-            if not mtp_startend_row_indices_all.place.is_gpu_place():
-                mtp_startend_row_indices_all = (
-                    mtp_startend_row_indices_all.cuda()
-                )
-            preproc_output["mtp_startend_row_indices_all"] = (
-                mtp_startend_row_indices_all
-            )
+        assert has_mtp_attention_mask == (mtp_hidden_inputs_mask_all is not None), (
+            "an MTP attention mask and mtp_hidden_inputs_mask_all must both be present or both be absent"
+        )
+        if has_mtp_attention_mask:
+            # Ensure tensors are on GPU; PP P2P communication cannot send pinned tensors directly.
+            if mtp_startend_row_indices_all is not None:
+                if not mtp_startend_row_indices_all.place.is_gpu_place():
+                    mtp_startend_row_indices_all = mtp_startend_row_indices_all.cuda()
+                preproc_output["mtp_startend_row_indices_all"] = mtp_startend_row_indices_all
+            else:
+                if not mtp_attn_mask.place.is_gpu_place():
+                    mtp_attn_mask = mtp_attn_mask.cuda()
+                preproc_output["mtp_attn_mask"] = mtp_attn_mask
             if not mtp_hidden_inputs_mask_all.place.is_gpu_place():
                 mtp_hidden_inputs_mask_all = mtp_hidden_inputs_mask_all.cuda()
-            preproc_output["mtp_hidden_inputs_mask_all"] = (
-                mtp_hidden_inputs_mask_all
-            )
+            preproc_output["mtp_hidden_inputs_mask_all"] = mtp_hidden_inputs_mask_all
         if mtp_emb_res is not None:
             assert (
                 self.config.num_nextn_predict_layers is not None

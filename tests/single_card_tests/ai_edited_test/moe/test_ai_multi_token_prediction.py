@@ -27,6 +27,7 @@ sys.path.insert(
 
 import unittest
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -114,6 +115,30 @@ def _common_patches():
 
 class TestMultiTokenPrediction(unittest.TestCase):
     """Unit tests for multi_token_prediction module."""
+
+    def test_dense_mtp_mask_is_selected_by_prediction_depth(self):
+        from paddlefleet.transformer.multi_token_prediction import (
+            _apply_mtp_layer_masks,
+        )
+
+        dense_mask = paddle.arange(18, dtype="float32").reshape([1, 2, 3, 3])
+        hidden_mask = paddle.arange(6, dtype="float32").reshape([1, 2, 3])
+        dict_args = {
+            "mtp_attn_mask": dense_mask,
+            "mtp_hidden_inputs_mask_all": hidden_mask,
+        }
+
+        _apply_mtp_layer_masks(
+            dict_args,
+            depth=1,
+            config=SimpleNamespace(gpt_model_use_experimental_version=False),
+        )
+
+        self.assertEqual(list(dict_args["attention_mask"].shape), [1, 1, 3, 3])
+        self.assertTrue(paddle.equal_all(dict_args["attention_mask"], dense_mask[:, 1:2]))
+        self.assertEqual(list(dict_args["mtp_hidden_inputs_mask"].shape), [1, 1, 3])
+        self.assertNotIn("mtp_attn_mask", dict_args)
+        self.assertNotIn("mtp_hidden_inputs_mask_all", dict_args)
 
     def test_mtp_loss_logging_helper_save_loss(self):
         """Test MTPLossLoggingHelper.save_loss_to_tracker."""
@@ -289,6 +314,30 @@ class TestMultiTokenPrediction(unittest.TestCase):
                     actual, paddle.to_tensor([1, 2, 3, 0], dtype="int64")
                 ).item()
             )
+
+            raw_carrier = paddle.to_tensor(
+                [[0, 1, 2, 3, 4, 5, 6, 0]], dtype="int64"
+            )
+            normalized = mtp._mtp_shift_position_ids(
+                raw_carrier,
+                paddle.zeros([1, 7, 2]),
+                layer_number=0,
+                sequence_parallel=False,
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    normalized,
+                    paddle.to_tensor([1, 2, 3, 4, 5, 6, 0], dtype="int64"),
+                ).item()
+            )
+            with self.assertRaisesRegex(ValueError, "shorter than"):
+                mtp._mtp_shift_position_ids(
+                    paddle.to_tensor([[0, 1, 2]], dtype="int64"),
+                    paddle.zeros([1, 4, 2]),
+                    layer_number=0,
+                    sequence_parallel=False,
+                )
+
             actual = mtp._mtp_shift_position_ids(
                 position_ids,
                 paddle.zeros([1, 4, 2]),

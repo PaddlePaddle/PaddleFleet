@@ -61,15 +61,20 @@ class TestRotaryEmbeddingInit(unittest.TestCase):
 
         mock_ps.get_context_parallel_group.return_value = None
         with patch.object(rope_module, "_ACCURACY_COMPATIBLE_KERNEL", True):
-            rope = rope_module.RotaryEmbedding(
-                head_dim=64,
-                rotary_percent=1.0,
-                rotary_base=8_000_000,
-            )
+            with patch.object(
+                paddle.device,
+                "device_guard",
+                side_effect=AssertionError("accuracy-compatible RoPE must not stage on CPU"),
+            ):
+                rope = rope_module.RotaryEmbedding(
+                    head_dim=64,
+                    rotary_percent=1.0,
+                    rotary_base=8_000_000,
+                )
         raw = rope.inv_freq.cpu().contiguous().numpy().tobytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
-            "3e2d22ef0e3defc2ed17027c7fd7afa42c933825b48864c0b465db4f4daf9f21",
+            "9e78d33b35847cf67fd73e02e2a11a9abe79b0c174e86911294d301e9260fdab",
         )
 
     @patch(

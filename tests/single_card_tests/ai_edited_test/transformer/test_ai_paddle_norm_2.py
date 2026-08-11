@@ -26,7 +26,6 @@ sys.path.insert(
 import unittest
 from unittest.mock import patch
 
-import numpy as np
 import paddle
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
@@ -123,8 +122,9 @@ class TestRMSNormForwardDetailed(unittest.TestCase):
         self.assertTrue(np.all(grad_bits == 0))
 
     @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "0"})
+
     @patch("paddlefleet.transformer.paddle_norm.rms_norm")
-    def test_default_forward_keeps_native_rms_norm(self, mock_rms_norm):
+    def test_forward_uses_native_rms_norm(self, mock_rms_norm):
         config = _make_config(params_dtype="float32")
         norm = RMSNorm(config=config, normalized_shape=64)
         x = paddle.randn([2, 3, 64], dtype="float32")

@@ -73,6 +73,48 @@ class TestAccuracyCompatibleMLARope(unittest.TestCase):
         paddle.testing.assert_close(q_out, expected)
         paddle.testing.assert_close(k_out, expected)
 
+    def test_sequence_parallel_trims_mtp_lookahead_position(self):
+        import paddle
+
+        seq_len, heads, dim = 4, 2, 4
+        q_pe = paddle.randn([seq_len, 1, heads, dim])
+        k_pe = paddle.randn([seq_len, 1, 1, dim])
+        position_ids = paddle.arange(seq_len + 1, dtype="int64")
+
+        q_out, k_out = _accuracy_compatible_mla_rope_apply(
+            q_pe,
+            k_pe,
+            rope_base=100.0,
+            position_ids=position_ids,
+            sequence_parallel=True,
+        )
+        expected_q, expected_k = _accuracy_compatible_mla_rope_apply(
+            q_pe,
+            k_pe,
+            rope_base=100.0,
+            position_ids=position_ids[:seq_len],
+            sequence_parallel=True,
+        )
+
+        self.assertEqual(q_out.shape, q_pe.shape)
+        self.assertEqual(k_out.shape, k_pe.shape)
+        paddle.testing.assert_close(q_out, expected_q)
+        paddle.testing.assert_close(k_out, expected_k)
+
+    def test_rejects_short_position_ids(self):
+        import paddle
+
+        q_pe = paddle.randn([4, 1, 2, 4])
+        k_pe = paddle.randn([4, 1, 1, 4])
+        with self.assertRaisesRegex(ValueError, "shorter than the query sequence"):
+            _accuracy_compatible_mla_rope_apply(
+                q_pe,
+                k_pe,
+                rope_base=100.0,
+                position_ids=paddle.arange(3, dtype="int64"),
+                sequence_parallel=True,
+            )
+
 
 class TestAccuracyCompatibleProjection(unittest.TestCase):
     def test_matches_functional_linear_and_preserves_skip_bias_contract(self):

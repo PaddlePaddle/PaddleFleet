@@ -67,6 +67,7 @@ class _AccuracyCompatibleRMSNormFunction(paddle.autograd.PyLayer):
         )
 
 
+
 if TYPE_CHECKING:
     from paddle import Tensor
 

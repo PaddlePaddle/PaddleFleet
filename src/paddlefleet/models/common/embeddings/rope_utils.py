@@ -243,6 +243,18 @@ def _apply_rotary_pos_emb_bshd(
                 freqs = freqs[
                     :, sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :
                 ]
+        elif freqs.ndim == 4:
+            # Sequence-first 4D MLA cache: [S, B, H, D] when time_major,
+            # or [B, S, H, D] otherwise.
+            seq_axis = 0 if time_major else 1
+            seq_len = freqs.shape[seq_axis]
+            seq_per_rank = seq_len // sp_size
+            start = sp_rank * seq_per_rank
+            end = (sp_rank + 1) * seq_per_rank
+            if time_major:
+                freqs = freqs[start:end, :, :, :]
+            else:
+                freqs = freqs[:, start:end, :, :]
 
     # For M-RoPE with sequence parallel, freqs may be [S, B, D] while t is [B, S, H, D].
     # When the first two dims are swapped (same product but different order), transpose

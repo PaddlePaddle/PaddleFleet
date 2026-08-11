@@ -54,7 +54,6 @@ from paddlefleet.recompute_utils import (
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
-    gather_from_sequence_parallel_region,
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
@@ -116,15 +115,32 @@ def _accuracy_compatible_mla_rope_apply(
     k_pe,
     rope_base,
     position_ids,
+    sequence_parallel=False,
 ):
     """Apply Megatron MLA RoPE ordering for explicit MTP position IDs."""
     head_dim = q_pe.shape[-1]
+    seq_axis = 0 if sequence_parallel else 1
+    seq_len = q_pe.shape[seq_axis]
+    if position_ids.ndim != 1:
+        position_ids = position_ids.reshape([-1])
+    if position_ids.shape[0] < seq_len:
+        raise ValueError(
+            f"MLA RoPE position_ids length {position_ids.shape[0]} is shorter than "
+            f"the query sequence length {seq_len}."
+        )
+    # MTP retains one look-ahead token in the input batch, while the backbone
+    # attention tensors contain only the first seq_len positions.
+    position_ids = position_ids[:seq_len]
     inv_freq = paddle.pow(
         paddle.to_tensor(rope_base, dtype="float32"),
         -paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim),
     )
     freqs = paddle.outer(position_ids.cast("float32"), inv_freq)
-    freqs = paddle.concat((freqs, freqs), axis=-1)[None, :, None, :]
+    freqs = paddle.concat((freqs, freqs), axis=-1)
+    if sequence_parallel:
+        freqs = freqs[:, None, None, :]
+    else:
+        freqs = freqs[None, :, None, :]
 
     def rotate(tensor):
         tensor = paddle.concat((tensor[..., 0::2], tensor[..., 1::2]), axis=-1)
@@ -1019,6 +1035,14 @@ class MultiLatentAttention(Attention):
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
 
+        # DSA's indexer keeps x/qr sequence-first, while absorbed MLA
+        # auxiliaries must follow the batch-first core attention tensors.
+        core_kv_compressed = kv_compressed
+        core_k_pos_emb = k_pos_emb
+        if self.config.sequence_parallel:
+            core_kv_compressed = kv_compressed.transpose([1, 0, 2]).contiguous()
+            core_k_pos_emb = k_pos_emb.transpose([1, 0, 2]).contiguous()
+
         # Extract inference kwargs to pass through to core_attention
         past_key_values = kwargs.get("past_key_values")
         layer_idx = kwargs.get("layer_idx")
@@ -1146,8 +1170,8 @@ class MultiLatentAttention(Attention):
                 x=keep_indexer_grad_path(hidden_states, self.config),
                 qr=q_compressed,
                 # fastdeploy support
-                kv_compressed=kv_compressed,
-                k_pos_emb=k_pos_emb,
+                kv_compressed=core_kv_compressed,
+                k_pos_emb=core_k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
                 **core_attn_extra,
@@ -1174,8 +1198,8 @@ class MultiLatentAttention(Attention):
                 x=hidden_states,
                 qr=q_compressed,
                 # fastdeploy support
-                kv_compressed=kv_compressed,
-                k_pos_emb=k_pos_emb,
+                kv_compressed=core_kv_compressed,
+                k_pos_emb=core_k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
                 **core_attn_extra,
@@ -1658,6 +1682,15 @@ class MLASelfAttention(MultiLatentAttention):
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             self.config.init_method(self.v_b_proj)
+        elif self.config.sequence_parallel and self.kv_b_proj is not None:
+            # KV up-projection consumes the already local compressed-KV sequence.
+            # Its SP linear path would all-gather that input once more, doubling the
+            # sequence length before it is concatenated with the positional branch.
+            self.kv_b_proj.sequence_parallel = False
+            self.kv_b_proj.allreduce_dgrad = (
+                self.kv_b_proj.world_size > 1
+                and not self.kv_b_proj.disable_grad_reduce
+            )
 
         if q_lora_rank is not None:
             self.q_a_layernorm = build_spec_layer(
@@ -1942,26 +1975,14 @@ class MLASelfAttention(MultiLatentAttention):
                 [self.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
-            if self.config.sequence_parallel:
-                # kv_compressed:[b, s / TP, kv_lora_rank]
-                kv_compressed = scatter_to_sequence_parallel_region(
-                    kv_compressed
-                )
         else:
-            # kv_compressed:[b, s / TP, kv_lora_rank], k_pos_emb: [b, s / TP, qk_rope_head_dim]
+            # This projection already returns sequence-sharded tensors when SP is
+            # active; keep the compressed KV and RoPE branches on the same axis.
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
                 [self.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
-            if (
-                get_pg_size(self.pg_collection.tp) > 1
-                and self.config.sequence_parallel
-            ):
-                # k_pos_emb: [b, s, qk_rope_head_dim]
-                k_pos_emb = gather_from_sequence_parallel_region(
-                    k_pos_emb, group=self.pg_collection.tp
-                )
 
         # if packed_seq_params is not None:
         #     # PaddleFleet batch-first: [b=1, t, h] -> squeeze dim0 (batch) -> [t, h]
@@ -2245,6 +2266,7 @@ class MLASelfAttention(MultiLatentAttention):
                         k_pos_emb,
                         self.rope_theta,
                         position_ids,
+                        sequence_parallel=self.config.sequence_parallel,
                     )
                 elif self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
