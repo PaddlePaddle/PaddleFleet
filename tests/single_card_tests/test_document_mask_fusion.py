@@ -277,6 +277,28 @@ class TestDocumentMaskFusion(unittest.TestCase):
         finally:
             paddle.device.set_device(prev)
 
+    def test_build_cu_seqlens_triton_branch(self):
+        """Force build_cu_seqlens through the fused Triton branch.
+
+        The other build_cu_seqlens tests build tensors on the *default* device,
+        so on a CPU test run the ``is_gpu_place()`` guard short-circuits and the
+        triton dispatch branch is never executed. This test puts the mask
+        explicitly on a GPU place so the branch is covered; it is skipped when
+        Triton is unavailable.
+        """
+        from paddlefleet.triton_ops.utils import is_triton_available
+
+        if not is_triton_available():
+            self.skipTest("Triton not available")
+        startend = paddle.to_tensor(
+            [[2, 2, 5, 5, 6, 6]], dtype="int32", place=paddle.CUDAPlace(0)
+        ).reshape([1, 1, 6, 1])
+        self.assertTrue(startend.place.is_gpu_place())
+        # is_triton_available() and is_gpu_place() -> the triton branch runs.
+        out = build_cu_seqlens(startend, 1, 6)
+        ref = _cu_seqlens_paddle_ref(startend, 1, 6)
+        np.testing.assert_array_equal(out, ref)
+
     def test_window_topk_idxs_kernel(self):
         """window_topk_idxs_kernel -> [1, seqlen, window_size]."""
         window_ref = _build_window_topk_idxs_from_doc_bounds(
