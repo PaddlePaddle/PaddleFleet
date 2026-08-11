@@ -55,7 +55,7 @@
 参考来源：
 
 - Huggingface Transformers：https://github.com/huggingface/transformers 、https://github.com/huggingface/transformers/blob/8e7d47a325d647d9e78b832b8e003c9d676b658a/docs/source/en/custom_models.md?plain=1#L26
-- ms-swift：https://github.com/modelscope/ms-swift 、https://swift.readthedocs.io/zh-cn/latest/Instruction/Command-line-parameters.html
+- ms-swift：https://github.com/modelscope/ms-swift 、https://swift.readthedocs.io/en/latest/Megatron-SWIFT/Command-line-parameters.html
 - Megatron-LM：https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/transformer/transformer_config.py
 
 ## 跨版本兼容性
