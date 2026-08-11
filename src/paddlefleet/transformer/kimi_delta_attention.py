@@ -734,7 +734,7 @@ class KimiDeltaAttention(FleetLayer):
         value = value.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
 
         nvtx_range_push(suffix="kimi_delta_rule")
-        if self.use_fused_kernels:
+        if self.use_fused_kernels and not cache_active:
             # L2 norm, the log-space gate and sigmoid(beta) are all folded into
             # the kernel, matching the reference implementation.
             core_attn_out, _ = chunk_kda(
@@ -839,13 +839,6 @@ class KimiDeltaAttention(FleetLayer):
                 "KDA inference cache does not support variable-length "
                 "(packed) input yet."
             )
-        if self.use_fused_kernels:
-            raise NotImplementedError(
-                "KDA inference cache has no fused kernel path yet: it needs "
-                "fused_recurrent_kda plus a causal_conv1d_update op. See "
-                "docs/kda_decode_plan.md. Use deterministic_mode to fall back "
-                "to the paddle native path."
-            )
 
     def _decode_step(self, hidden_states, past_key_values, layer_idx):
         """Advance one token using the cached recurrent state and conv window.
@@ -894,7 +887,7 @@ class KimiDeltaAttention(FleetLayer):
         conv_out = (window * self.conv1d.weight.squeeze(1)).sum(-1)
         if self.conv1d.bias is not None:
             conv_out = conv_out + self.conv1d.bias
-        qkv = self.act_fn(conv_out).astype(qkv_dtype).unsqueeze(1)
+        qkv = self.activation(conv_out).astype(qkv_dtype).unsqueeze(1)
 
         query, key, value = paddle.split(
             qkv, [self.qk_dim, self.qk_dim, self.v_dim], axis=-1

@@ -232,9 +232,9 @@ def _make_kda_model(vocab_size: int = 64, num_layers: int = 2):
     for ``kimi_delta_attention`` here -- a mixed stack would let a standard
     attention layer's KV cache carry the parity and hide a KDA state bug.
 
-    ``deterministic_mode=True`` forces the paddle-native recurrence: the fused
-    fla kernels have no decode step yet, and ``KimiDeltaAttention`` rejects the
-    cache path outright when they are enabled.
+    The default configuration is intentional: when FLA is available,
+    ``use_fused_kernels`` is true for the no-cache path, while cache calls use
+    the implemented paddle-native recurrence.
 
     Unlike the HySparse model this needs no ``paddle.amp.decorate``: KDA already
     pins its state, conv weight, ``A_log``, ``dt_bias`` and out-norm to fp32 and
@@ -270,7 +270,6 @@ def _make_kda_model(vocab_size: int = 64, num_layers: int = 2):
         linear_gate_lora_rank=KDA_HEAD_DIM,
         linear_use_full_rank_gate=True,
         linear_gate_lower_bound=-5.0,
-        deterministic_mode=True,
     )
     return gpt_builder(config, num_stages=1), config
 
