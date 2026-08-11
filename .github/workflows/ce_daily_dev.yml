@@ -146,7 +146,7 @@ jobs:
           source /root/proxy
           mkdir -p /home/.cache/pip
           pip cache dir
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q --tries=3 --retry-connrefused https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -310,7 +310,7 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q --tries=3 --retry-connrefused https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -491,7 +491,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q --tries=3 --retry-connrefused https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -757,7 +757,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q --tries=3 --retry-connrefused https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
@@ -1278,7 +1278,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          wget -q --tries=3 --retry-connrefused https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
