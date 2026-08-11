@@ -131,8 +131,22 @@ def _indexer_top_k_unfused(
     """
     Deterministic topk in replacement of cudnn indexer_top_k_wrapper.
 
-    Expects input_values be masked by seq_lens (as indexer_forward_wrapper does).
+    ``seq_lens`` is a hard per-row limit: only columns ``[0, seq_lens)`` may be
+    selected. ``indexer_forward_wrapper`` already writes ``-inf`` beyond each
+    row's *causal* limit, but a caller whose valid window is **narrower** than
+    that limit -- the hybrid MLA indexer excludes the forced local window, so its
+    ``valid_range`` end sits ``csa_window_size`` before the diagonal -- leaves
+    finite scores in ``[seq_lens, causal_len)``. ``paddle.topk`` scans the whole
+    row, so those columns would win top slots and be returned; blanking only the
+    output slots past ``seq_lens`` does not remove them. Mask the columns first.
+    For the pure-causal callers this is a no-op (already ``-inf`` there).
     """
+    seq_lens_col = seq_lens.reshape([-1, 1]).cast("int32")
+    input_values = paddle.where(
+        paddle.arange(input_values.shape[-1], dtype="int32") < seq_lens_col,
+        input_values,
+        paddle.full_like(input_values, float("-inf")),
+    )
     # Note: paddle.topk doesn't allow k greater than the axis size.
     k = min(top_k, input_values.shape[-1])
     topk_values, topk_indices = paddle.topk(input_values, k, axis=-1)
@@ -146,11 +160,11 @@ def _indexer_top_k_unfused(
             topk_indices, (0, 0, 0, top_k - k), value=-1
         )
 
-    # Entries outside each row's valid prefix [0, seq_lens) are already -inf.
-    # Since topk returns results in descending order, these invalid entries occupy
-    # output slots [seq_lens, top_k), whose indices can therefore be set to -1.
+    # With the columns masked above, the invalid entries are exactly the ones
+    # ``topk`` had to fill from the ``-inf`` tail, i.e. output slots
+    # ``[seq_lens, top_k)``; their indices are meaningless, so blank them.
     topk_indices = paddle.where(
-        paddle.arange(top_k, dtype="int32") < seq_lens[:, None],
+        paddle.arange(top_k, dtype="int32") < seq_lens_col,
         topk_indices,
         paddle.full_like(topk_indices, -1),
     )

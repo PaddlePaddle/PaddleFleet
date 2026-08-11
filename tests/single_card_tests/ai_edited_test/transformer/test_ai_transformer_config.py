@@ -74,6 +74,14 @@ class TestTransformerConfigDefaults(unittest.TestCase):
         cfg = _make_config()
         self.assertEqual(cfg.rms_norm_eps, 1e-5)
 
+    def test_default_qk_norm_eps(self):
+        cfg = _make_config()
+        self.assertIsNone(cfg.qk_norm_eps)
+
+    def test_explicit_qk_norm_eps(self):
+        cfg = _make_config(qk_norm_eps=1e-6)
+        self.assertEqual(cfg.qk_norm_eps, 1e-6)
+
     def test_default_hidden_dropout(self):
         cfg = _make_config()
         self.assertEqual(cfg.hidden_dropout_prob, 0.0)

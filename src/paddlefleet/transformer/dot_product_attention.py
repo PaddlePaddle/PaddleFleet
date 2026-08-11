@@ -199,6 +199,36 @@ def scaled_dot_product_attention_with_softmax_offset(
     return attn_output
 
 
+def build_softmax_offset(layer, config, num_heads: int, is_swa: bool):
+    """Create the per-head softmax sink offset of a core attention.
+
+    Shared by :class:`DotProductAttention` and ``MQALatentAttention`` so that the
+    dense and the non-absorbed-MQA phase of a hybrid MLA run agree on both the
+    switch (``softmax_type`` / ``add_*_attention_sink_bias``) and the parameter
+    (name ``<core_attention>.softmax_offset``, hence checkpoint compatible).
+
+    Returns ``None`` when no sink is configured.
+    """
+    softmax_type = config.softmax_type
+    if (config.add_full_attention_sink_bias and not is_swa) or (
+        config.add_swa_attention_sink_bias and is_swa
+    ):
+        softmax_type = "learnable"
+
+    if softmax_type == "vanilla":
+        return None
+    if softmax_type == "off-by-one":
+        return paddle.zeros(num_heads)
+    if softmax_type == "learnable":
+        offset = layer.create_parameter(
+            shape=[num_heads], dtype=config.params_dtype
+        )
+        if config.perform_initialization:
+            config.init_method(offset)
+        return offset
+    raise ValueError("Softmax type not supported")
+
+
 class DotProductAttention(FleetLayer):
     """
     Region where selective activation recomputation is applied.
@@ -335,27 +365,12 @@ class DotProductAttention(FleetLayer):
             else attention_dropout
         )
 
-        softmax_type = self.config.softmax_type
-        if (self.config.add_full_attention_sink_bias and not self.is_swa) or (
-            self.config.add_swa_attention_sink_bias and self.is_swa
-        ):
-            softmax_type = "learnable"
-
-        if softmax_type == "vanilla":
-            self.softmax_offset = None
-        elif softmax_type == "off-by-one":
-            self.softmax_offset = paddle.zeros(
-                self.num_attention_heads_per_partition
-            )
-        elif softmax_type == "learnable":
-            self.softmax_offset = self.create_parameter(
-                shape=[self.num_attention_heads_per_partition],
-                dtype=self.config.params_dtype,
-            )
-            if config.perform_initialization:
-                config.init_method(self.softmax_offset)
-        else:
-            raise ValueError("Softmax type not supported")
+        self.softmax_offset = build_softmax_offset(
+            self,
+            self.config,
+            self.num_attention_heads_per_partition,
+            self.is_swa,
+        )
         self.rr_flashmask_attention_func = rr_flashmask_attention()
         self.rr_flashmask_attention_cp_func = rr_flashmask_attention_cp()
 

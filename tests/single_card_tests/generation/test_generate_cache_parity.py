@@ -418,7 +418,7 @@ class TestGenerateCacheParityKDA(_CacheParityTests, unittest.TestCase):
         cls.vocab_size = 64
         cls.model, cls.config = _make_kda_model(vocab_size=cls.vocab_size)
         cls.gen = GreedyGenerator(cls.model)
-        cls.input_ids = paddle.to_tensor([[1, 5, 10, 3]], dtype="int64")
+        cls.input_ids = paddle.to_tensor([[4, 14, 25, 24]], dtype="int64")
 
 
 if __name__ == "__main__":
