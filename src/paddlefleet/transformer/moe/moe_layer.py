@@ -410,6 +410,7 @@ class MoELayer(nn.Layer):
                 f"fp8_weight_quant_format ({self.config.fp8_weight_quant_format}) configuration currently only works in SonicMoE."
             )
 
+        self._use_grouped_mlp_expert = False
         if use_fused_weight:
             if (
                 self.moe_token_dispatcher_type == "allgather"
@@ -437,6 +438,7 @@ class MoELayer(nn.Layer):
                 )
             else:
                 # TODO: replace grouped_gemm_experts with fusion_experts
+                self._use_grouped_mlp_expert = True
                 self.grouped_gemm_experts = GroupedMLPExpert(
                     self.num_local_experts,
                     routed_expert_config,
@@ -734,7 +736,21 @@ class MoELayer(nn.Layer):
         self,
         dispatched_input,
         tokens_per_expert,
+        expert_weights=None,
     ):
+        if self._use_grouped_mlp_expert:
+            outputs, _ = self.grouped_gemm_experts(
+                dispatched_input,
+                tokens_per_expert,
+                expert_weights=expert_weights,
+            )
+            return outputs
+
+        if expert_weights is not None:
+            raise ValueError(
+                "External expert weights require grouped expert storage."
+            )
+
         outputs = []
         tokens_per_expert = (
             tokens_per_expert.tolist()
@@ -846,20 +862,16 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
     ):
         global_input_tokens, tokens_per_expert = self.permute(hidden_states)
+        runtime_weights = None
         if self.moe_token_dispatcher_type == "moonep":
             runtime_weights = self.token_dispatcher.runtime_expert_weights(
                 self.grouped_gemm_experts
             )
-            expert_outs, _ = self.grouped_gemm_experts(
-                global_input_tokens,
-                tokens_per_expert,
-                expert_weights=runtime_weights,
-            )
-        else:
-            expert_outs = self.expert_forward(
-                global_input_tokens,
-                tokens_per_expert,
-            )
+        expert_outs = self.expert_forward(
+            global_input_tokens,
+            tokens_per_expert,
+            expert_weights=runtime_weights,
+        )
         return self.unpermute(expert_outs)
 
     def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):

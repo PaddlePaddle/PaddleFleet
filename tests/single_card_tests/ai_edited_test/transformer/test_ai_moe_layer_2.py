@@ -30,7 +30,7 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer
 
 
 class MinimalMoE:
-    pass
+    _use_grouped_mlp_expert = False
 
 
 class Expert:

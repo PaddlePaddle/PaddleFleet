@@ -276,6 +276,31 @@ class TestMoonEPDispatcher(unittest.TestCase):
         self.assertIs(activation.call_args.args[0], fc1_output)
         self.assertTrue(bool(paddle.equal_all(output, expected)))
 
+    def test_expert_forward_delegates_runtime_weights_to_grouped_expert(self):
+        hidden = paddle.ones([2, 2])
+        tokens_per_expert = paddle.to_tensor([2], dtype="int64")
+        runtime_weights = (mock.sentinel.weight1, mock.sentinel.weight2)
+        expected = paddle.full([2, 2], 3.0)
+        grouped_expert = mock.Mock(return_value=(expected, None))
+        layer = types.SimpleNamespace(
+            _use_grouped_mlp_expert=True,
+            grouped_gemm_experts=grouped_expert,
+        )
+
+        output = MoELayer.expert_forward(
+            layer,
+            hidden,
+            tokens_per_expert,
+            expert_weights=runtime_weights,
+        )
+
+        self.assertIs(output, expected)
+        grouped_expert.assert_called_once_with(
+            hidden,
+            tokens_per_expert,
+            expert_weights=runtime_weights,
+        )
+
     def test_runtime_weights_delegate_gradient_reduction(self):
         class _Bridge:
             def __init__(self):

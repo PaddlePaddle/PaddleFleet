@@ -184,6 +184,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
         layer.config = config
         layer.moe_rank = 0
         layer.num_experts_per_device = 4
+        layer._use_grouped_mlp_expert = False
         layer.experts = []
         for i in range(4):
             expert = MagicMock()
@@ -204,6 +205,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
         layer.num_experts = 4
         layer.moe_rank = 0
         layer.num_experts_per_device = 4
+        layer._use_grouped_mlp_expert = False
         layer.experts = [MagicMock() for _ in range(4)]
 
         dispatched = paddle.randn([0, 64])
