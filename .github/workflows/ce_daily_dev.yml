@@ -149,8 +149,8 @@ jobs:
           wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
@@ -313,8 +313,8 @@ jobs:
           wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
@@ -494,8 +494,8 @@ jobs:
           wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
@@ -760,8 +760,8 @@ jobs:
           wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
@@ -1281,8 +1281,8 @@ jobs:
           wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main || true
+          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r || true
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
           conda activate python${PYTHON_VERSION}
