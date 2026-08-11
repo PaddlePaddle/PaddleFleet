@@ -48,6 +48,35 @@ from paddlefleet.transformer.transformer_layer import (
 
 logger = logging.getLogger(__name__)
 
+_VISION_MERGE_PREFIX = "vision_merge."
+_VISION_MODEL_PREFIX = "vision_merge.vision_model."
+
+
+def is_vision_merge_key(key: str) -> bool:
+    """Whether ``key`` belongs to the vision encoder held by ``vision_merge``.
+
+    ``vision_merge`` (qwen3_5 PP mode) is a thin wrapper whose only parameters
+    live under ``vision_model``; those keys are dropped from the pipeline name
+    mapping and re-added from the vision model's own state dict. A parameter
+    placed directly on the wrapper would be dropped without being re-added,
+    i.e. silently missing from every checkpoint, so reject it loudly.
+
+    Raises ``ValueError`` (not ``assert``) on purpose: with ``python -O`` an
+    assertion would vanish, this function would answer ``True`` and the
+    parameter would be silently lost from the checkpoint.
+    """
+    if not key.startswith(_VISION_MERGE_PREFIX):
+        return False
+    if not key.startswith(_VISION_MODEL_PREFIX):
+        raise ValueError(
+            f"Unexpected parameter {key!r} directly on vision_merge. Only "
+            f"{_VISION_MODEL_PREFIX}* is re-exported through the vision "
+            "model's own state dict; anything else would be silently dropped "
+            "from the checkpoint. Move the parameter under vision_model or "
+            "extend the state-dict plumbing in GPTModel."
+        )
+    return True
+
 
 def build_overlapped_nodes(forward_chunk, backward_chunk):
     """Build overlapped nodes for TransformerLayer."""
@@ -604,6 +633,7 @@ class GPTModel(PipelineLayer):
             pp_to_single_mapping = {}
 
             state_dict_keys = list(super().state_dict().keys())
+
             # Whether the layers are chunked is a property of the model, not
             # something the key shapes can tell: a chunk key is
             # `{chunk_start}.{local_idx}.xxx`, but an ordinary PP
@@ -623,6 +653,9 @@ class GPTModel(PipelineLayer):
                 if isinstance(layer, SharedLayerDesc)
             }
             for k in state_dict_keys:
+                # Skip vision_merge.* keys - they are handled separately
+                if is_vision_merge_key(k):
+                    continue
                 name_splited = k.split(".")
                 if use_virtual_pp_degree:
                     if name_splited[0].isdigit():
@@ -707,6 +740,16 @@ class GPTModel(PipelineLayer):
             name_prefix = ""
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
+
+        # Remove the vision encoder's keys; they are re-added with the proper
+        # mapping below. ``is_vision_merge_key`` also rejects parameters placed
+        # directly on the wrapper, which would otherwise vanish silently.
+        vision_merge_keys = [
+            k for k in state_dict.keys() if is_vision_merge_key(k)
+        ]
+        for k in vision_merge_keys:
+            state_dict.pop(k)
+
         # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
         for k in list(state_dict.keys()):
             v = state_dict.pop(k)
@@ -717,6 +760,14 @@ class GPTModel(PipelineLayer):
                 continue
             v.key = self._pp_to_single_mapping[k]
             state_dict[self._pp_to_single_mapping[k]] = v
+
+        # Re-add vision model keys with proper mapping
+        if hasattr(self, "vision_merge") and self.vision_merge is not None:
+            vision_model = self.vision_merge.vision_model
+            if hasattr(vision_model, "state_dict"):
+                vm_state = vision_model.state_dict()
+                state_dict.update(vm_state)
+
         return state_dict
 
     def set_state_dict(self, state_dict, *args, **kwargs):
@@ -726,11 +777,35 @@ class GPTModel(PipelineLayer):
             "The pipeline stage must have parameters!"
         )
 
+        # Separate vision model keys for vision_merge sublayer
+        vision_state = {}
+        if hasattr(self, "vision_merge") and self.vision_merge is not None:
+            for k in list(state_dict.keys()):
+                if k.startswith("model.vision_model."):
+                    vision_state[k] = state_dict.pop(k)
+            if not vision_state:
+                logger.warning(
+                    "This stage owns a vision_merge sublayer but the state dict "
+                    "has no 'model.vision_model.*' keys, so the vision encoder "
+                    "keeps its initial weights. Check that the checkpoint is a "
+                    "multimodal one."
+                )
+
         for k in list(state_dict.keys()):
             v = state_dict.pop(k)
             if k not in self._pipeline_name_mapping:
                 continue
             state_dict[self._pipeline_name_mapping[k]] = v
+
+        # Load vision model state into vision_merge.vision_model
+        if (
+            vision_state
+            and hasattr(self, "vision_merge")
+            and self.vision_merge is not None
+        ):
+            vision_model = self.vision_merge.vision_model
+            if hasattr(vision_model, "set_state_dict"):
+                vision_model.set_state_dict(vision_state)
 
         ret = super().set_state_dict(state_dict, *args, **kwargs)
         return ret
@@ -742,6 +817,9 @@ class GPTModel(PipelineLayer):
         super_state_dict = super().state_dict()
         structure_name_to_tensor = {}
         for k, v in super_state_dict.items():
+            # Skip vision_merge.* keys - handled separately
+            if is_vision_merge_key(k):
+                continue
             k = self._pp_to_single_mapping[k]
             if k not in structure_name_to_tensor:
                 structure_name_to_tensor[k] = v
@@ -774,6 +852,16 @@ class GPTModel(PipelineLayer):
         else:
             name_prefix = ""
 
+        # For qwen3_5 PP mode: vision_merge is added as sublayer of GPTModel,
+        # so its keys appear as "vision_merge.*" in super().sharded_state_dict().
+        # Remove them here; we'll re-add properly remapped keys from
+        # vision_model.sharded_state_dict() below.
+        vision_merge_keys = [
+            k for k in sharded_state_dict.keys() if is_vision_merge_key(k)
+        ]
+        for k in vision_merge_keys:
+            sharded_state_dict.pop(k)
+
         for k in list(sharded_state_dict.keys()):
             v = sharded_state_dict.pop(k)
             # remove name_prefix
@@ -784,6 +872,17 @@ class GPTModel(PipelineLayer):
                 continue
             v.key = self._pp_to_single_mapping[k]
             sharded_state_dict[self._pp_to_single_mapping[k]] = v
+
+        # For qwen3_5 PP mode: get properly remapped vision model keys
+        # from the VisionModel's own sharded_state_dict (which uses
+        # _pp_to_single_mapping to produce "model.vision_model.*" keys).
+        if hasattr(self, "vision_merge") and self.vision_merge is not None:
+            vision_model = self.vision_merge.vision_model
+            if hasattr(vision_model, "sharded_state_dict"):
+                vm_sharded = vision_model.sharded_state_dict(
+                    structured_name_prefix=""
+                )
+                sharded_state_dict.update(vm_sharded)
 
         def increment_expert_number(s, increment):
             import re

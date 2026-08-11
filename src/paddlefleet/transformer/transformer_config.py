@@ -1482,6 +1482,19 @@ class TransformerConfig(ModelParallelConfig):
             assert self.pipeline_model_parallel_size > 1, (
                 "enable_mtp_magic_send requires pipeline_model_parallel_size > 1"
             )
+            # Raise instead of assert: with ``python -O`` an assertion would be
+            # stripped and the run would silently enter a branch that is known
+            # to be wrong (double sequence-parallel scatter of the embedding and
+            # an untruncated visual mask).
+            if self.multimodal_embedding:
+                raise ValueError(
+                    "enable_mtp_magic_send with multimodal_embedding=True is "
+                    "not supported: GPTEmbedding's magic-send branch truncates "
+                    "(and, under sequence_parallel, already scatters) "
+                    "decoder_input without producing mtp_emb_res, so the "
+                    "multimodal branch would scatter a second time and leave "
+                    "visual_pos_masks at full length."
+                )
             if (
                 self.virtual_pipeline_model_parallel_size is not None
                 and self.virtual_pipeline_model_parallel_size > 1

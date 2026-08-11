@@ -757,11 +757,13 @@ class TransformerLayer(nn.Layer):
             if not self.config.gpt_model_use_experimental_version:
                 if "position_ids" in dict_args.keys():
                     position_ids = dict_args["position_ids"]
+                    # Slice the sequence axis, which is the last one for both
+                    # [B, S] and mRoPE's [3, B, S].
                     decoder_ids = position_ids[
-                        :, : -self.config.num_nextn_predict_layers
+                        ..., : -self.config.num_nextn_predict_layers
                     ]
                     mtp_ids = position_ids[
-                        :, -self.config.num_nextn_predict_layers :
+                        ..., -self.config.num_nextn_predict_layers :
                     ]
                     dict_args["position_ids"] = decoder_ids
 
@@ -995,7 +997,7 @@ class TransformerLayer(nn.Layer):
             if not self.config.gpt_model_use_experimental_version:
                 if "position_ids" in dict_args.keys():
                     position_ids = paddle.concat(
-                        [dict_args["position_ids"], mtp_ids], axis=1
+                        [dict_args["position_ids"], mtp_ids], axis=-1
                     )
                     dict_args["position_ids"] = position_ids
 
