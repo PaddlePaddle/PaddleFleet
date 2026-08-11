@@ -416,7 +416,7 @@ class TestFlashmaskAttentionUlysses(unittest.TestCase):
             "paddle.distributed.fleet.get_hybrid_communicate_group",
             return_value=mock_hcg,
         ):
-            with self.assertRaises(AssertionError) as ctx:
+            with self.assertRaises(ValueError) as ctx:
                 flashmask_attention_ulysses(
                     query=paddle.randn([2, 4, 4, 8]),
                     key=paddle.randn([2, 4, 4, 8]),
@@ -1279,9 +1279,12 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
         config = self._make_config(
             cp_balance_mode="contiguous_allgather",
-            hybrid_mla_cp_mode="contiguous_a2a",
             multi_latent_attention=False,
         )
+        # Set past __post_init__ on purpose: whether this field may be set at
+        # all is a config-level concern (it needs a dsv4_hybrid with a -2
+        # layer), while this test only covers how DPA dispatches on it.
+        config.hybrid_mla_cp_mode = "contiguous_a2a"
         attn = self._make_attn_instance(config)
         attn.eval()
 
@@ -1327,16 +1330,14 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         )
         from paddlefleet.transformer.enums import AttnMaskType
 
-        config = self._make_config(
-            cp_balance_mode="contiguous_allgather",
-            hybrid_mla_cp_mode="contiguous_a2a",
-        )
+        config = self._make_config(cp_balance_mode="contiguous_allgather")
+        config.hybrid_mla_cp_mode = "contiguous_a2a"
         with (
             patch(
                 "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
-            self.assertRaises(AssertionError) as ctx,
+            self.assertRaises(ValueError) as ctx,
         ):
             DotProductAttention(
                 config=config,

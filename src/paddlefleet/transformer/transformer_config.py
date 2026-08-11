@@ -2067,14 +2067,25 @@ class TransformerConfig(ModelParallelConfig):
             )
 
         # only support hybrid_mla_cp_mode == contiguous_a2a if not None
-        if self.hybrid_mla_cp_mode is not None and (
-            self.hybrid_mla_cp_mode != "contiguous_a2a"
-            or not self.cp_balance_mode.startswith("contiguous")
-        ):
-            raise ValueError(
-                f"hybrid_mla_cp_mode={self.hybrid_mla_cp_mode!r} with "
-                f"cp_balance_mode={self.cp_balance_mode!r} is invalid: "
-                "hybrid_mla_cp_mode must be None or 'contiguous_a2a' "
-                "(other paths are simply not currently supported yet), "
-                "and cp_balance_mode must be in the same token layout."
-            )
+        if self.hybrid_mla_cp_mode is not None:
+            if (
+                self.hybrid_mla_cp_mode != "contiguous_a2a"
+                or not self.cp_balance_mode.startswith("contiguous")
+            ):
+                raise ValueError(
+                    f"hybrid_mla_cp_mode={self.hybrid_mla_cp_mode!r} with "
+                    f"cp_balance_mode={self.cp_balance_mode!r} is invalid: "
+                    "hybrid_mla_cp_mode must be None or 'contiguous_a2a' "
+                    "(other paths are simply not currently supported yet), "
+                    "and cp_balance_mode must be in the same token layout."
+                )
+            # ``csa_compress_ratios`` defaults to None off a dsv4_hybrid, so
+            # ``or ()`` keeps the membership test total instead of relying on
+            # the left operand short-circuiting it.
+            if self.experimental_attention_variant != "dsv4_hybrid" or (
+                -2 not in (self.csa_compress_ratios or ())
+            ):
+                raise ValueError(
+                    "hybrid_mla_cp_mode can only be set in dsv4_hybrid with "
+                    "-2 in csa_compress_ratios."
+                )
