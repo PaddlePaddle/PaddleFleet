@@ -29,15 +29,14 @@ else:
 if _MOONEP_AVAILABLE:
     from paddlefleet_ops.moonep import Buffer as MoonEPBuffer
     from paddlefleet_ops.moonep._C import (
+        nvl_dist_alloc,
         nvl_dist_map,
-        nvl_dist_map_fabric,
         nvl_release_mem_handle,
     )
     from paddlefleet_ops.moonep.buffer import (
-        _alloc_nvl_chunk,
-        _exchange_fabric_handles,
+        _all_gather_shareables,
         _exchange_ipc_fds,
-        _mnnvl_enabled,
+        _use_fabric_for_group,
         get_vmm_granularity,
     )
     from paddlefleet_ops.moonep.grad_reduce import launch_grad_reduce
@@ -148,67 +147,70 @@ def _allocate_mapping(
             f"bytes={chunk_nbytes}, granularity={granularity}."
         )
 
-    use_mnnvl = _mnnvl_enabled()
+    use_fabric = _use_fabric_for_group(group)
     expert_keepalive = slot_keepalive = None
     expert_owned = slot_owned = None
     open_fds = set()
     try:
-        expert_keepalive, expert_handle, expert_owned = _alloc_nvl_chunk(
-            chunk_shape, dtype
+        expert_keepalive, expert_handle, expert_owned = nvl_dist_alloc(
+            shape=chunk_shape, dtype=dtype, use_fabric=use_fabric
         )
-        if not use_mnnvl:
-            open_fds.add(expert_handle)
-        slot_keepalive, slot_handle, slot_owned = _alloc_nvl_chunk(
-            chunk_shape, dtype
+        if not use_fabric:
+            expert_fd = int(expert_handle.item())
+            open_fds.add(expert_fd)
+        slot_keepalive, slot_handle, slot_owned = nvl_dist_alloc(
+            shape=chunk_shape, dtype=dtype, use_fabric=use_fabric
         )
-        if not use_mnnvl:
-            open_fds.add(slot_handle)
-        if use_mnnvl:
-            expert_handles = _exchange_fabric_handles(
-                expert_handle, world_size, group
+        if not use_fabric:
+            slot_fd = int(slot_handle.item())
+            open_fds.add(slot_fd)
+        if use_fabric:
+            expert_handles = _all_gather_shareables(expert_handle, group)
+            full_handles = paddle.concat(
+                [expert_handles, slot_handle.reshape([1, -1])], axis=0
             )
-            full = nvl_dist_map_fabric(
+            full = nvl_dist_map(
                 chunk_shape=chunk_shape,
                 dtype=dtype,
-                fabric_handles=[*expert_handles, slot_handle],
+                shareables=full_handles,
                 local_rank=rank,
                 world_size=world_size + 1,
+                use_fabric=True,
             )
             reduce_view = None
             if with_reduce_view:
-                slot_handles = _exchange_fabric_handles(
-                    slot_handle, world_size, group
-                )
-                reduce_view = nvl_dist_map_fabric(
+                slot_handles = _all_gather_shareables(slot_handle, group)
+                reduce_view = nvl_dist_map(
                     chunk_shape=chunk_shape,
                     dtype=dtype,
-                    fabric_handles=slot_handles,
+                    shareables=slot_handles,
                     local_rank=rank,
                     world_size=world_size,
+                    use_fabric=True,
                 )
         else:
             expert_fds = _exchange_ipc_fds(
-                expert_handle,
+                expert_fd,
                 list(range(world_size)),
                 rank,
                 world_size,
                 group,
             )
             open_fds.update(expert_fds.values())
-            os.close(expert_handle)
-            open_fds.remove(expert_handle)
+            os.close(expert_fd)
+            open_fds.remove(expert_fd)
 
             if with_reduce_view:
                 slot_fds = _exchange_ipc_fds(
-                    slot_handle,
+                    slot_fd,
                     list(range(world_size)),
                     rank,
                     world_size,
                     group,
                 )
                 open_fds.update(slot_fds.values())
-                os.close(slot_handle)
-                open_fds.remove(slot_handle)
+                os.close(slot_fd)
+                open_fds.remove(slot_fd)
                 full_fds = [
                     *(expert_fds[index] for index in range(world_size)),
                     slot_fds[rank],
@@ -216,32 +218,43 @@ def _allocate_mapping(
                 full = nvl_dist_map(
                     chunk_shape=chunk_shape,
                     dtype=dtype,
-                    fds=full_fds,
+                    shareables=paddle.to_tensor(
+                        full_fds, dtype="int64", place=paddle.CPUPlace()
+                    ),
                     local_rank=rank,
                     world_size=world_size + 1,
+                    use_fabric=False,
                 )
                 reduce_view = nvl_dist_map(
                     chunk_shape=chunk_shape,
                     dtype=dtype,
-                    fds=[slot_fds[index] for index in range(world_size)],
+                    shareables=paddle.to_tensor(
+                        [slot_fds[index] for index in range(world_size)],
+                        dtype="int64",
+                        place=paddle.CPUPlace(),
+                    ),
                     local_rank=rank,
                     world_size=world_size,
+                    use_fabric=False,
                 )
             else:
                 full_fds = [
                     *(expert_fds[index] for index in range(world_size)),
-                    slot_handle,
+                    slot_fd,
                 ]
                 full = nvl_dist_map(
                     chunk_shape=chunk_shape,
                     dtype=dtype,
-                    fds=full_fds,
+                    shareables=paddle.to_tensor(
+                        full_fds, dtype="int64", place=paddle.CPUPlace()
+                    ),
                     local_rank=rank,
                     world_size=world_size + 1,
+                    use_fabric=False,
                 )
                 reduce_view = None
     finally:
-        if not use_mnnvl:
+        if not use_fabric:
             _close_fds(open_fds)
         if expert_owned is not None:
             nvl_release_mem_handle(expert_owned)
