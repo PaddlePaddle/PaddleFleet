@@ -1530,7 +1530,17 @@ class TestGroupedMLPExpertShardedStateDict(unittest.TestCase):
         """Duck-typed expert for direct method testing."""
         from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
 
-        e = type("E", (), {})()
+        # ``intermediate_ep_sharded`` is a property on the real class, and
+        # sharded_state_dict routes on it, so the stand-in has to carry it too;
+        # attaching it to the class keeps it dynamic (a test that flips
+        # ``config.moe_token_dispatcher_type`` afterwards still takes effect).
+        e = type(
+            "E",
+            (),
+            {
+                "intermediate_ep_sharded": GroupedMLPExpert.intermediate_ep_sharded
+            },
+        )()
         e._get_intermediate_sharded_state_dict = (
             GroupedMLPExpert._get_intermediate_sharded_state_dict.__get__(e)
         )

@@ -13,6 +13,7 @@ know nothing about muon configs or module structure.
 """
 
 import paddle
+import paddle.distributed as dist
 
 
 def ortho_blocks(weight, ortho_fn, sizes, axis=-1):
@@ -64,6 +65,96 @@ def ortho_stacked(weight, ortho_fn):
         )
 
     return ortho_fn(weight)
+
+
+def ortho_ep_full_intermediate(
+    weight,
+    ortho_fn,
+    ep_group=None,
+    shard_axis=-1,
+    gate_up=False,
+    split_gate_up=True,
+):
+    """Orthogonalise EP-sharded expert weights on their full intermediate dim.
+
+    With the 'allgather' MoE dispatcher and EP > 1 a rank holds *every* expert
+    but only ``moe_intermediate_size // EP`` of each one, so a local
+    Newton-Schulz would orthogonalise a slab instead of the real matrix. This
+    wrapper redistributes to the traditional EP layout (``E // EP`` experts,
+    full intermediate) with an all-to-all, orthogonalises there, and sends the
+    result back the same way, reproducing the update a non-EP run would make.
+
+    ``shard_axis`` is the axis the intermediate dim was sharded along: -1 for
+    the fc1 weight ``[E, H, 2I/EP]``, -2 for the fc2 weight ``[E, I/EP, H]``.
+
+    Set ``gate_up`` when ``shard_axis`` packs a fused ``[gate | up]`` pair: each
+    rank then owns ``[gate_shard | up_shard]``, so the halves must be
+    de-interleaved before they can be concatenated into full-width matrices.
+    ``split_gate_up`` (i.e. ``muon_ffn_split``) then decides whether gate and up
+    are orthogonalised independently or as one fused matrix.
+    """
+    if weight.ndim != 3:
+        raise ValueError(
+            f"EP redistribution expects a 3D expert tensor, got {weight.shape}"
+        )
+    if ep_group is None:
+        raise ValueError(
+            "EP redistribution requires an expert-parallel process group"
+        )
+
+    ep_size = ep_group.nranks
+    if weight.shape[0] % ep_size != 0:
+        raise ValueError(
+            f"Expert axis {weight.shape[0]} is not divisible by EP={ep_size}."
+        )
+    if gate_up and weight.shape[shard_axis] % 2 != 0:
+        raise ValueError(
+            f"Fused gate/up axis must be even, got shape {weight.shape}."
+        )
+
+    # Splitting a contiguous tensor along axis 0 yields contiguous blocks, so
+    # the forward all-to-all needs no extra copy.
+    send = list(paddle.split(weight, ep_size, axis=0))
+    recv = [paddle.empty_like(send[0]) for _ in send]
+    dist.alltoall(recv, send, group=ep_group)
+
+    if not gate_up:
+        owned = ortho_fn(paddle.concat(recv, axis=shard_axis))
+        back = [
+            chunk.contiguous()
+            for chunk in paddle.split(owned, ep_size, axis=shard_axis)
+        ]
+    else:
+        gates, ups = zip(
+            *(paddle.split(chunk, 2, axis=shard_axis) for chunk in recv)
+        )
+        gate_in = paddle.concat(gates, axis=shard_axis)
+        up_in = paddle.concat(ups, axis=shard_axis)
+
+        if split_gate_up:
+            # Stack on the expert axis so a single batched Newton-Schulz still
+            # treats gate and up as independent matrices.
+            n_experts = gate_in.shape[0]
+            stacked = ortho_fn(paddle.concat([gate_in, up_in], axis=0))
+            gate_out, up_out = stacked[:n_experts], stacked[n_experts:]
+        else:
+            gate_out, up_out = paddle.split(
+                ortho_fn(paddle.concat([gate_in, up_in], axis=shard_axis)),
+                2,
+                axis=shard_axis,
+            )
+
+        back = [
+            paddle.concat([gate, up], axis=shard_axis)
+            for gate, up in zip(
+                paddle.split(gate_out, ep_size, axis=shard_axis),
+                paddle.split(up_out, ep_size, axis=shard_axis),
+            )
+        ]
+
+    reverse = [paddle.empty_like(back[0]) for _ in back]
+    dist.alltoall(reverse, back, group=ep_group)
+    return paddle.concat(reverse, axis=0)
 
 
 def ortho_qkv_interleaved(
