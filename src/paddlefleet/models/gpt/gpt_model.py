@@ -407,11 +407,16 @@ class GPTModel(PipelineLayer):
         # multimax
         multimax_mode = getattr(self.config, "multimax_modules", None) or []
         use_multimax_lmhead = "lm_head" in multimax_mode
-        lmhead_shared_weights = [
-            "embedding_weight",
-            "multimax_ranges",
-            "multimax_ts",
-        ]
+        if use_multimax_lmhead and getattr(
+            self.config, "separate_mtp_headloss", False
+        ):
+            lmhead_shared_weights = [
+                "embedding_weight",
+                "multimax_ranges",
+                "multimax_ts",
+            ]
+        else:
+            lmhead_shared_weights = ["embedding_weight"]
 
         if spec.mtp_lm_head:
             self.add_sequential_layer(
@@ -419,9 +424,7 @@ class GPTModel(PipelineLayer):
                 SharedLayerDesc(
                     "embed",
                     spec.mtp_lm_head,
-                    shared_weight_attr=lmhead_shared_weights
-                    if use_multimax_lmhead
-                    else "embedding_weight",
+                    shared_weight_attr=lmhead_shared_weights,
                 ),
                 f"{name_prefix}.shared_mtp_lm_head",
             )
@@ -455,9 +458,7 @@ class GPTModel(PipelineLayer):
                 SharedLayerDesc(
                     "embed",
                     spec.lm_head,
-                    shared_weight_attr=lmhead_shared_weights
-                    if use_multimax_lmhead
-                    else "embedding_weight",
+                    shared_weight_attr=lmhead_shared_weights,
                 ),
                 f"{name_prefix}.shared_head",
             )
