@@ -42,6 +42,7 @@ from paddlefleet.transformer.multi_latent_attention import (
 )
 from paddlefleet.transformer.muon_utils import (
     ortho_blocks,
+    ortho_ep_full_intermediate,
     ortho_gate_up,
     ortho_per_head,
     ortho_qkv_contiguous,
@@ -535,10 +536,18 @@ class TestMLPSpecs(unittest.TestCase):
 
 
 class TestGroupedMLPExpertSpecs(unittest.TestCase):
+    @staticmethod
+    def _fake(gated=True, ep_sharded=False):
+        """Stand-in layer. ``ep_group`` is only forwarded, never called here."""
+        return SimpleNamespace(
+            config=SimpleNamespace(gated_linear_unit=gated),
+            intermediate_ep_sharded=ep_sharded,
+            ep_group=SimpleNamespace(nranks=2),
+        )
+
     def test_gated_with_ffn_split(self):
-        fake = SimpleNamespace(config=SimpleNamespace(gated_linear_unit=True))
         specs = GroupedMLPExpert.muon_slice_specs(
-            fake, {"muon_ffn_split": True}
+            self._fake(), {"muon_ffn_split": True}
         )
         self.assertEqual(set(specs), {"weight1", "weight2"})
         _run_specs(
@@ -547,11 +556,40 @@ class TestGroupedMLPExpertSpecs(unittest.TestCase):
         )
 
     def test_non_gated_keeps_weight2_only(self):
-        fake = SimpleNamespace(config=SimpleNamespace(gated_linear_unit=False))
         specs = GroupedMLPExpert.muon_slice_specs(
-            fake, {"muon_ffn_split": True}
+            self._fake(gated=False), {"muon_ffn_split": True}
         )
         self.assertEqual(set(specs), {"weight2"})
+
+    def test_ep_sharded_routes_both_weights(self):
+        """An EP-sharded rank must redistribute instead of slicing locally."""
+        for ffn_split in (True, False):
+            with self.subTest(muon_ffn_split=ffn_split):
+                fake = self._fake(ep_sharded=True)
+                specs = GroupedMLPExpert.muon_slice_specs(
+                    fake, {"muon_ffn_split": ffn_split}
+                )
+                self.assertEqual(set(specs), {"weight1", "weight2"})
+
+                fn, kwargs = specs["weight1"]
+                self.assertIs(fn, ortho_ep_full_intermediate)
+                self.assertIs(kwargs["ep_group"], fake.ep_group)
+                self.assertEqual(kwargs["shard_axis"], -1)
+                self.assertTrue(kwargs["gate_up"])
+                # muon_ffn_split keeps deciding gate/up independence
+                self.assertEqual(kwargs["split_gate_up"], ffn_split)
+
+                fn, kwargs = specs["weight2"]
+                self.assertIs(fn, ortho_ep_full_intermediate)
+                self.assertIs(kwargs["ep_group"], fake.ep_group)
+                self.assertEqual(kwargs["shard_axis"], -2)
+                self.assertNotIn("gate_up", kwargs)
+
+    def test_ep_sharded_non_gated_has_no_fused_gate_up(self):
+        specs = GroupedMLPExpert.muon_slice_specs(
+            self._fake(gated=False, ep_sharded=True), {"muon_ffn_split": True}
+        )
+        self.assertFalse(specs["weight1"][1]["gate_up"])
 
 
 class TestCSASpecs(unittest.TestCase):

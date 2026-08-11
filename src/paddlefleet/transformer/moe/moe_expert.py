@@ -266,22 +266,61 @@ class GroupedMLPExpert(FleetLayer):
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
+    @property
+    def intermediate_ep_sharded(self):
+        """Whether this rank owns all experts but only ``I // EP`` of each.
+
+        The 'allgather' dispatcher shards the experts along their intermediate
+        dim instead of along the expert dim, so a rank holds every expert.
+        ``sharded_state_dict`` keys off the same condition; keep the two in sync.
+        """
+        return (
+            getattr(self.config, "moe_token_dispatcher_type", None)
+            == "allgather"
+            and self.expert_parallel
+        )
+
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice specs for fused grouped-gemm expert weights.
 
         weight1 (fused gate/up) is split by shape when ``muon_ffn_split`` is on;
         weight2 (down) is always orthogonalised per-expert (grouped gemm is
         inherently a fused 3D expert tensor).
+
+        When this rank only holds a slice of every expert's intermediate dim
+        (allgather dispatcher with EP > 1) both weights must first be
+        redistributed to the traditional EP layout, otherwise Newton-Schulz runs
+        on a slab instead of the real matrix. ``muon_ffn_split`` keeps
+        controlling whether gate and up are orthogonalised independently.
         """
         from paddlefleet.transformer.muon_utils import (
+            ortho_ep_full_intermediate,
             ortho_gate_up,
             ortho_stacked,
         )
 
+        gate_up_fused = self.config.gated_linear_unit
+        ffn_split = muon_configs.get("muon_ffn_split", False)
+
+        if self.intermediate_ep_sharded:
+            return {
+                "weight1": (
+                    ortho_ep_full_intermediate,
+                    {
+                        "ep_group": self.ep_group,
+                        "shard_axis": -1,
+                        "gate_up": gate_up_fused,
+                        "split_gate_up": ffn_split,
+                    },
+                ),
+                "weight2": (
+                    ortho_ep_full_intermediate,
+                    {"ep_group": self.ep_group, "shard_axis": -2},
+                ),
+            }
+
         specs = {}
-        if self.config.gated_linear_unit and muon_configs.get(
-            "muon_ffn_split", False
-        ):
+        if gate_up_fused and ffn_split:
             specs["weight1"] = (ortho_gate_up, {})
         specs["weight2"] = (ortho_stacked, {})
         return specs
@@ -357,15 +396,9 @@ class GroupedMLPExpert(FleetLayer):
         # allgather: shard on intermediate dim, each rank owns all experts.
         # Cross-topology reshard is handled by the DCP resharder.
         # See _get_intermediate_sharded_state_dict for allgather details.
-        is_intermediate_sharded = (
-            getattr(self.config, "moe_token_dispatcher_type", None)
-            == "allgather"
-            and self.expert_parallel
-        )
-
         state_dict = self.state_dict(structured_name_prefix="")
 
-        if is_intermediate_sharded:
+        if self.intermediate_ep_sharded:
             return self._get_intermediate_sharded_state_dict(
                 state_dict, structured_name_prefix
             )
