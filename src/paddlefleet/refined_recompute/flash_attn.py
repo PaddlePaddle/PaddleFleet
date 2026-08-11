@@ -1247,10 +1247,11 @@ def slice_ulysses_sink_heads(learnable_sink, num_q_heads, cp_group):
     """Slice the per-query-head softmax sink for the local Ulysses head shard."""
     if learnable_sink is None:
         return None
-    assert learnable_sink.shape[0] == num_q_heads, (
-        f"learnable_sink must have one entry per query head ({num_q_heads}), "
-        f"got shape {learnable_sink.shape}"
-    )
+    if learnable_sink.shape[0] != num_q_heads:
+        raise ValueError(
+            f"learnable_sink must have one entry per query head ({num_q_heads}), "
+            f"got shape {learnable_sink.shape}"
+        )
     heads_per_rank = num_q_heads // cp_group.nranks
     head_start = cp_group.rank * heads_per_rank
     return learnable_sink[head_start : head_start + heads_per_rank]

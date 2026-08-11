@@ -255,7 +255,7 @@ class TestUlyssesHelpers(unittest.TestCase):
 
         # The sink is replicated on every rank, so a wrong length silently
         # mismatching the head shard would corrupt the attention numerics.
-        with self.assertRaisesRegex(AssertionError, "one entry per query head"):
+        with self.assertRaisesRegex(ValueError, "one entry per query head"):
             fa.slice_ulysses_sink_heads(paddle.zeros([3]), 4, CpGroup())
 
         # rank 1 of 2 owns the second contiguous head block, which is exactly
