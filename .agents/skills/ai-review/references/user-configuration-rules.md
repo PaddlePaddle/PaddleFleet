@@ -19,6 +19,7 @@
 - 模块级 / import 期读取，例如在文件顶层写 `_X = os.environ.get("...", "0")` 再在函数里用它。取值在 `from_config` 之前就已固定，配置无法覆盖，同一进程内不同配置也无法区分。
 - 环境变量与配置字段并存且环境变量优先，或在 `__post_init__` 中用环境变量改写字段取值。既有 YAML/JSON 配置会被进程外的变量静默改变行为，与「跨版本兼容性」一节禁止的静默变更同类。
 - 以"先不进 config、跑通再说"为理由的临时旁路或灰度开关。
+- 调试与观测开关同样不得用环境变量承载。只要代码要入库，dump 张量、打印中间值、算 md5、对照参考实现这类开关就是对外可见的用户接口，必须声明为配置字段，并按「开关必要性」一节在 docstring 注明它是临时调试开关还是长期用户接口、临时开关的回收条件是什么。"不改变数值结果"不构成豁免理由：它同样需要被 `__post_init__` 校验、随配置落盘、在实验复现时可追溯。只存在于本地、不进入 PR 的临时打印不受本节约束。
 - 把环境变量的字符串取值散落在各消费点自行解析（`== "1"`、`in ("0", "false", "False")`、`int(...)`、按分隔符切分）。这与「反面模式」一节的二次解析是同一问题。
 
 允许的例外（不报告）：
@@ -26,9 +27,10 @@
 - 框架、驱动或第三方库自身定义的变量：Paddle 的 `FLAGS_*`、`NCCL_*` / `BCCL_*`、`CUDA_*` 等。
 - 启动器或调度平台注入的运行时上下文，例如 rank 信息与断点续训位置（`PADDLE_*`、`PDC_*`、`TRAINER_GLOBAL_STEP`、`RECOVER_STEP`）。这类值描述运行环境而非模型行为，不应反向塞进配置类。
 - 向只接受环境变量传参的外部库传值：只允许**单向、纯推导**地写入 `os.environ`，即取值完全由配置字段计算得出，代码不读取该变量的用户取值、也不因用户已设置而跳过写入。一旦实现变成"用户设了就用用户的、没设才自动推导"，该变量就成了用户开关，按本节报告。
-- 纯观测/调试且不改变数值结果的开关（张量 dump、日志、md5 校验），需在注释中注明不影响数值、默认关闭，并说明回收条件。
 
 现网反例（存量，不因本节报告，除非本 PR 正在改动它们）：`transformer/dsv4_hybrid_attention.py` 在 import 期读取 `FLEET_FP8_WO_A_GEMM` 并直接 gate FP8 GEMM 路径；`transformer/moe/moe_router.py` 的 `FLEET_MOE_ROUTER_SCALE_FAST`；`transformer/moe/fused_a2a.py` 的 `FLEET_MOE_EP_BARRIER_ASYNC`；`pipeline_parallel/pp_utils/p2p_communication.py` 的 `PADDLE_P2P_SYNC_SEND`。`transformer/moe/moe_layer.py` 对 `NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN` 的处理同样是反例而非允许形态：它先判断用户是否已设置、仅在未设置时才由 EP 配置推导，等于把并行域大小交给用户通过环境变量覆盖，正确做法是把可调的 domain size 收敛为配置字段。这些都是应当收敛为配置字段的形态，新增代码不得沿用。
+
+调试与观测类的存量反例（同样不因本节报告，除非本 PR 正在改动它们）：`LOG_LAYER_MD5` 在 `transformer/attention.py`、`transformer/moe/moe_layer.py`、`transformer/moe/moe_router.py` 于 import 期读取、在 `transformer/transformer_layer.py` 于类定义期读取，又在 `models/common/language_loss/language_loss.py`、`transformer/multi_latent_attention.py`、`transformer/paddle_norm.py` 各自重复解析同一个字符串；同类还有 `LOG_LOSS_MD5`、`GREEDY_DEBUG`（`generation/greedy_generator.py`）、`VHA_DEBUG`（`transformer/attention.py`）以及 `transformer/utils.py` 里的 `ABLATION_*` 系列（其中 `ABLATION_INFO_SKIP_TAGS` / `ABLATION_DUMP_SKIP_TAGS` 还要在消费点按逗号切分）。它们正是本节禁止的「import 期读取 + 各消费点二次解析」形态，新增调试开关必须改为配置字段。
 
 迁移要求：确有必须用环境变量的理由时，在 PR 描述和代码注释中说明为什么配置字段无法承载，并给出回收条件；同时不得让该变量与任何已有配置字段语义重叠。
 
