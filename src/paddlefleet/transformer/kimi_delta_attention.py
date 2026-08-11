@@ -887,7 +887,7 @@ class KimiDeltaAttention(FleetLayer):
         conv_out = (window * self.conv1d.weight.squeeze(1)).sum(-1)
         if self.conv1d.bias is not None:
             conv_out = conv_out + self.conv1d.bias
-        qkv = self.act_fn(conv_out).astype(qkv_dtype).unsqueeze(1)
+        qkv = self.config.hidden_act(conv_out).astype(qkv_dtype).unsqueeze(1)
 
         query, key, value = paddle.split(
             qkv, [self.qk_dim, self.qk_dim, self.v_dim], axis=-1
