@@ -143,7 +143,7 @@ jobs:
           source /root/proxy
           mkdir -p /home/.cache/pip
           pip cache dir
-          wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
@@ -290,7 +290,7 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           pip install --upgrade pip
-          wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
@@ -453,7 +453,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
@@ -693,7 +693,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
@@ -1152,7 +1152,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
