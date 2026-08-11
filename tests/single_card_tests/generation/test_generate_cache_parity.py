@@ -50,6 +50,7 @@ import functools
 import unittest
 
 import paddle
+import paddle.nn.functional as F
 from paddle.distributed import fleet
 
 from paddlefleet.generation.greedy_generator import GreedyGenerator
@@ -248,6 +249,7 @@ def _make_kda_model(vocab_size: int = 64, num_layers: int = 2):
         max_sequence_length=64,
         intermediate_size=KDA_HIDDEN * 2,
         num_attention_heads=KDA_HEADS,
+        hidden_act=F.silu,
         normalization="RMSNorm",
         hidden_dropout_prob=0.0,
         attention_dropout=0.0,
