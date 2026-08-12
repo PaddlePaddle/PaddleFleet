@@ -1154,8 +1154,12 @@ class TestGatedNormRecompute(unittest.TestCase):
         self.assertFalse(flag(1, ["rms_norm_gated"], num_layers=1))
 
         # block behaves the same for a single-stage config
-        self.assertTrue(flag(0, ["rms_norm_gated"], num_layers=1, method="block"))
-        self.assertFalse(flag(1, ["rms_norm_gated"], num_layers=1, method="block"))
+        self.assertTrue(
+            flag(0, ["rms_norm_gated"], num_layers=1, method="block")
+        )
+        self.assertFalse(
+            flag(1, ["rms_norm_gated"], num_layers=1, method="block")
+        )
 
         # dict form: the value is the per-module layer count
         self.assertTrue(flag(0, {"rms_norm_gated": 1}))
