@@ -138,6 +138,18 @@ logger.warning(
     """Due to potential compatibility issues between PaddlePaddle and PyTorch in PaddleFleet, PaddleFleet defaults `transformers.utils.import_utils.is_torch_available` and `transformers.utils.import_utils.is_torchvision_available` to False. If you need to use PyTorch in transformers or torchvision, please add `del sys.modules['transformers']` before using them."""
 )
 
+# Force ``transformers.modeling_utils`` to resolve its ``torch.nn.Module`` type
+# hints now, while the real torch submodules are still registered in
+# ``sys.modules``. Later, ``paddlefleet.triton_ops`` modules call
+# ``paddle.enable_compat(scope={"triton"})`` at import time, which evicts torch
+# submodules (e.g. ``torch.nn.modules.module``) from ``sys.modules``. If
+# ``modeling_utils`` is first imported after that eviction, ``get_type_hints()``
+# in ``PreTrainedModel.__init_subclass__`` fails to resolve the ``'Module'``
+# forward reference and raises ``NameError: name 'Module' is not defined``.
+if sys.modules.get("torch") is not None:
+    with suppress(Exception):
+        import transformers.modeling_utils  # noqa: F401
+
 if "datasets" in sys.modules.keys():
 
     logger.warning(
