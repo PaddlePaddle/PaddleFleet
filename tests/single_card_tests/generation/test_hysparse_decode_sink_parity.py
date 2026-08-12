@@ -188,12 +188,19 @@ class TestHySparseDecodeSinkParity(unittest.TestCase):
     # ---- builders -----------------------------------------------------
 
     def _build_config(self, block_sparse_use_tilelang):
-        """Online HySparse MQA dims (Dk=256, Dv=448, H=64), sinks ON."""
+        """Online HySparse MQA dims (Dk=256, Dv=448, H=64), sinks ON.
+
+        ``num_key_value_heads`` must equal ``num_attention_heads``:
+        :class:`MultiLatentAttention` rejects GQA outright. It costs no
+        coverage -- MLA absorbs KV into ``kv_lora_rank`` and hardcodes
+        ``num_key_value_heads=1`` for ``core_attention``, so the config field
+        is never read on this path.
+        """
         return TransformerConfig(
             hidden_size=HIDDEN,
             head_dim=192,
             num_attention_heads=HEADS,
-            num_key_value_heads=4,
+            num_key_value_heads=HEADS,
             gated_attention=True,
             gated_attn_use_q_lora=True,
             q_lora_rank=1024,
@@ -210,7 +217,7 @@ class TestHySparseDecodeSinkParity(unittest.TestCase):
             swa_head_dim=192,
             swa_v_head_dim=256,
             swa_num_attention_heads=HEADS,
-            swa_num_key_value_heads=4,
+            swa_num_key_value_heads=HEADS,
             window_attn_skip_freq=2,
             enable_hy_sparse_attention=True,
             hy_sparse_full_attn_use_tilelang=True,

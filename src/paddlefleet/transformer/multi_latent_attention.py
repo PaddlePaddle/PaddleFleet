@@ -1692,46 +1692,48 @@ class MLASelfAttention(MultiLatentAttention):
         mscale = 1.0
         rotary_pos_cos = None
         rotary_pos_sin = None
+        rotary_pos_emb = None
         packed_seq = (
             packed_seq_params is not None
             and packed_seq_params.qkv_format == "thd"
         )
-        if self.config.rope_type == "rope":
-            rotary_pos_emb = self.rotary_pos_emb(
-                rotary_seq_len,
-                packed_seq=packed_seq,
-                position_ids=None if self.training else position_ids,
-            )
-        else:
-            if bool(self.config.apply_rope_fusion) and not self.mqa_latent:
-                rotary_pos_cos, rotary_pos_sin = (
-                    self.rotary_pos_emb.get_cached_cos_sin(
-                        rotary_seq_len,
-                        dtype=hidden_states.dtype,
-                        packed_seq=packed_seq,
-                    )
-                )
-                rotary_pos_emb = None
-                from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
-                    fused_apply_mla_rope_for_kv,
-                    fused_apply_mla_rope_for_q,
-                )
-
-                assert (
-                    fused_apply_mla_rope_for_q is not None
-                    and fused_apply_mla_rope_for_kv is not None
-                ), "Fused MLA RoPE apply is not imported successfully"
-            else:
-                rotary_pos_emb, mscale = self.rotary_pos_emb(
+        if not getattr(self.config, "mla_use_nope", False):
+            if self.config.rope_type == "rope":
+                rotary_pos_emb = self.rotary_pos_emb(
                     rotary_seq_len,
                     packed_seq=packed_seq,
                     position_ids=None if self.training else position_ids,
                 )
-                # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
-                # mscale = 1.0
+            else:
+                if bool(self.config.apply_rope_fusion) and not self.mqa_latent:
+                    rotary_pos_cos, rotary_pos_sin = (
+                        self.rotary_pos_emb.get_cached_cos_sin(
+                            rotary_seq_len,
+                            dtype=hidden_states.dtype,
+                            packed_seq=packed_seq,
+                        )
+                    )
+                    rotary_pos_emb = None
+                    from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
+                        fused_apply_mla_rope_for_kv,
+                        fused_apply_mla_rope_for_q,
+                    )
+
+                    assert (
+                        fused_apply_mla_rope_for_q is not None
+                        and fused_apply_mla_rope_for_kv is not None
+                    ), "Fused MLA RoPE apply is not imported successfully"
+                else:
+                    rotary_pos_emb, mscale = self.rotary_pos_emb(
+                        rotary_seq_len,
+                        packed_seq=packed_seq,
+                        position_ids=None if self.training else position_ids,
+                    )
+                    # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
+                    # mscale = 1.0
 
         cp_size = get_context_parallel_world_size()
-        if cp_size > 1:
+        if cp_size > 1 and not getattr(self.config, "mla_use_nope", False):
             # Keep RoPE inputs local to the current CP rank before the fused
             # and non-fused apply paths consume them.
             if packed_seq_params is not None:

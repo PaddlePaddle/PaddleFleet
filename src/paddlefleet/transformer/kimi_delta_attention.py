@@ -43,6 +43,7 @@ from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.triton_ops.utils import is_triton_available
 from paddlefleet.utils import (
     get_pg_size,
     log_single_rank,
@@ -167,6 +168,20 @@ def build_cu_seqlens(
         )
     # Column 0 is the exclusive document end.
     ends = startend_row_indices[:, 0, :, 0].astype("int64")
+
+    # Fused Triton path: the same boundary detection + start compaction done in
+    # a single kernel. Requires a CUDA-enabled build with an initialized Triton
+    # driver AND the mask living on a GPU place; on a CPU build / CPU device we
+    # must fall back to the pure-paddle implementation below.
+    if is_triton_available() and ends.place.is_gpu_place():
+        from paddlefleet.triton_ops.document_mask_fusion import (
+            cu_seqlens_triton,
+        )
+
+        return cu_seqlens_triton(
+            ends.flatten(), seq_len, keep_single_segment=keep_single_segment
+        )
+
     doc_edges = ends[:, 1:] != ends[:, :-1]
 
     # Position 0 of every row is always a start, so the row seams become
@@ -500,6 +515,9 @@ class KimiDeltaAttention(FleetLayer):
         packed_seq_params=None,
         input_ids: paddle.Tensor | None = None,
         cu_seqlens: paddle.Tensor | None = None,
+        past_key_values=None,
+        layer_idx: int | None = None,
+        use_cache: bool = False,
         **kwargs,
     ) -> tuple[paddle.Tensor, paddle.Tensor | None]:
         """
@@ -518,6 +536,13 @@ class KimiDeltaAttention(FleetLayer):
             cu_seqlens: Packed cu_seqlens built once per step by the
                 embedding (see ``build_cu_seqlens``) and passed down through
                 ``dict_args``. Built here when None.
+            past_key_values: Inference cache. KDA stores a fixed-size recurrent
+                state plus the short conv's sliding window in it (see
+                ``DynamicKVCache.set_kda_state``) instead of a growing K/V.
+            layer_idx: This layer's slot in ``past_key_values``.
+            use_cache: Whether to read/write ``past_key_values``. With it unset
+                the whole sequence is recomputed from scratch, which is the
+                ground truth the cached decode path is compared against.
 
         Returns:
             Tuple of (output, output_bias).
@@ -526,6 +551,21 @@ class KimiDeltaAttention(FleetLayer):
             raise NotImplementedError(
                 "KDA does not support packed sequence for now."
             )
+
+        # Inference cache: the first pass prefills the recurrent state, every
+        # later pass consumes it one token at a time. Both branches need the
+        # cache slot, so a layer_idx-less cache is treated as no cache at all.
+        cache_active = (
+            use_cache and past_key_values is not None and layer_idx is not None
+        )
+        if cache_active:
+            self._check_decode_supported(
+                cu_seqlens, attn_mask_startend_row_indices
+            )
+            if past_key_values.has_kda_state(layer_idx):
+                return self._decode_step(
+                    hidden_states, past_key_values, layer_idx
+                )
 
         hidden_states = hidden_states.contiguous()
         if self.config.sequence_parallel and self.sp_size > 1:
@@ -540,17 +580,6 @@ class KimiDeltaAttention(FleetLayer):
             # (part_len = total // world_size, rank_start = part_len * rank),
             # which is exactly scatter_contiguous. Other balance modes reorder
             # tokens, so the rank ranges would not match.
-            max_seq_len = getattr(self.config, "max_sequence_length", None)
-            if (
-                max_seq_len is not None
-                and seq_len * self.cp_size != max_seq_len
-            ):
-                raise ValueError(
-                    "KDA context parallel expects hidden_states to be a "
-                    "1/cp_size contiguous shard of the full sequence: "
-                    f"seq_len={seq_len} * cp_size={self.cp_size} != "
-                    f"max_sequence_length={max_seq_len}"
-                )
             if batch != 1:
                 raise NotImplementedError(
                     "KDA context parallel requires batch == 1 (the packed "
@@ -650,6 +679,25 @@ class KimiDeltaAttention(FleetLayer):
         gate = gate.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
         alpha = alpha.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
 
+        # Prefill: snapshot the trailing conv window of the *pre-conv* qkv. The
+        # depthwise conv of the next token needs the kernel_dim-1 raw inputs
+        # before it, and nothing downstream of the conv can reconstruct them.
+        # Zero-left-padded when the prompt is shorter than the window, which is
+        # exactly what nn.Conv1D's causal padding contributed here.
+        conv_state = None
+        if cache_active:
+            window = self.conv_kernel_dim - 1
+            conv_state = paddle.zeros(
+                [eff_batch, qkv.shape[-1], window], dtype=paddle.float32
+            )
+            if window > 0:
+                kept = min(window, eff_seq)
+                conv_state[..., window - kept :] = (
+                    qkv[:, eff_seq - kept :, :]
+                    .transpose([0, 2, 1])
+                    .astype(paddle.float32)
+                )
+
         # Convolution on qkv
         nvtx_range_push(suffix="conv1d")
         if self.use_fused_kernels:
@@ -690,7 +738,7 @@ class KimiDeltaAttention(FleetLayer):
         value = value.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
 
         nvtx_range_push(suffix="kimi_delta_rule")
-        if self.use_fused_kernels:
+        if self.use_fused_kernels and not cache_active:
             # L2 norm, the log-space gate and sigmoid(beta) are all folded into
             # the kernel, matching the reference implementation.
             core_attn_out, _ = chunk_kda(
@@ -714,7 +762,7 @@ class KimiDeltaAttention(FleetLayer):
             if self.use_qk_l2norm:
                 query = _l2norm(query.contiguous())
                 key = _l2norm(key.contiguous())
-            core_attn_out, _ = paddle_chunk_kda(
+            core_attn_out, recurrent_state = paddle_chunk_kda(
                 query.contiguous(),
                 key.contiguous(),
                 value.contiguous(),
@@ -727,8 +775,21 @@ class KimiDeltaAttention(FleetLayer):
                 use_beta_sigmoid_in_kernel=True,
                 safe_gate=self.gate_lower_bound is not None,
                 lower_bound=self.gate_lower_bound,
+                output_final_state=cache_active,
             )
         nvtx_range_pop(suffix="kimi_delta_rule")
+
+        if cache_active:
+            # Seed the decode loop. paddle_chunk_kda's final state is already the
+            # fp32 [b, hv, k, v] the single-step recurrence expects, so no
+            # correction term is needed between the last prefill token and the
+            # first decode step.
+            past_key_values.set_kda_state(
+                layer_idx,
+                recurrent_state,
+                conv_state,
+                num_new_tokens=seq_len,
+            )
 
         # Gated norm
         nvtx_range_push(suffix="gated_norm")
@@ -756,6 +817,121 @@ class KimiDeltaAttention(FleetLayer):
         nvtx_range_pop(suffix="out_proj")
 
         return out, out_bias
+
+    def _check_decode_supported(
+        self, cu_seqlens, attn_mask_startend_row_indices
+    ):
+        """Reject what the paddle-native decode path does not cover yet.
+
+        Raising here rather than in ``__init__`` keeps training unaffected: these
+        features all work fine as long as the cache is not used.
+        """
+        if self.tp_size > 1:
+            raise NotImplementedError(
+                "KDA inference cache does not support tensor parallel yet."
+            )
+        if self.config.sequence_parallel:
+            raise NotImplementedError(
+                "KDA inference cache does not support sequence parallel yet."
+            )
+        if self.cp_size > 1:
+            raise NotImplementedError(
+                "KDA inference cache does not support context parallel yet."
+            )
+        if cu_seqlens is not None or attn_mask_startend_row_indices is not None:
+            raise NotImplementedError(
+                "KDA inference cache does not support variable-length "
+                "(packed) input yet."
+            )
+
+    def _decode_step(self, hidden_states, past_key_values, layer_idx):
+        """Advance one token using the cached recurrent state and conv window.
+
+        This is the incremental form of the whole forward: the recurrence is
+        unrolled for a single step in fp32 so it reproduces
+        ``paddle_chunk_kda``'s scan exactly, and the short conv is evaluated
+        against the cached window instead of the (no longer available) prefix.
+        """
+        batch, seq_len, _ = hidden_states.shape
+        if seq_len != 1:
+            raise NotImplementedError(
+                "KDA decode consumes one token per step, got "
+                f"seq_len={seq_len}. Chunked prefill would need the conv window "
+                "and the recurrent state to be advanced by a whole block."
+            )
+        state, conv_state = past_key_values.get_kda_state(layer_idx)
+
+        qkvbz, _ = self.in_proj(hidden_states)
+        alpha, _ = self.f_b_proj(self.f_a_proj(hidden_states)[0])
+        # _check_decode_supported has already rejected tp_size > 1, so the
+        # unsharded widths are the local ones here. Spelling them without the
+        # "// tp_size" of the full-sequence path keeps the TP restriction stated
+        # in exactly one place instead of half-implemented in two.
+        split_sizes = [self.conv_dim, self.num_value_heads]
+        if self.use_full_rank_gate:
+            split_sizes.append(self.v_dim)
+            qkv, beta, gate = paddle.split(qkvbz, split_sizes, axis=-1)
+        else:
+            qkv, beta = paddle.split(qkvbz, split_sizes, axis=-1)
+            gate, _ = self.g_b_proj(self.g_a_proj(hidden_states)[0])
+
+        # Depthwise conv over [cached window | new token]. nn.Conv1D with
+        # padding=w-1 truncated to the input length computes
+        #   y[t] = sum_i weight[i] * x[t - (w-1) + i]
+        # so weight index 0 pairs with the *oldest* token: the window must be
+        # ordered oldest -> newest, and it slides left by one afterwards.
+        qkv_dtype = qkv.dtype
+        window = paddle.concat(
+            [
+                conv_state,
+                qkv.transpose([0, 2, 1]).astype(conv_state.dtype),
+            ],
+            axis=-1,
+        )
+        conv_out = (window * self.conv1d.weight.squeeze(1)).sum(-1)
+        if self.conv1d.bias is not None:
+            conv_out = conv_out + self.conv1d.bias
+        qkv = F.silu(conv_out).astype(qkv_dtype).unsqueeze(1)
+
+        query, key, value = paddle.split(
+            qkv, [self.qk_dim, self.qk_dim, self.v_dim], axis=-1
+        )
+        query = query.reshape([batch, -1, self.key_head_dim])
+        key = key.reshape([batch, -1, self.key_head_dim])
+        value = value.reshape([batch, -1, self.value_head_dim])
+        alpha = alpha.reshape([batch, 1, -1, self.value_head_dim])
+        gate = gate.reshape([batch, 1, -1, self.value_head_dim])
+
+        if self.use_qk_l2norm:
+            query = _l2norm(query)
+            key = _l2norm(key)
+        g = kda_gate(
+            alpha,
+            self.A_log,
+            self.dt_bias,
+            safe_gate=self.gate_lower_bound is not None,
+            lower_bound=self.gate_lower_bound,
+        ).squeeze(1)
+        beta = F.sigmoid(beta.reshape([batch, -1]).astype(paddle.float32))
+
+        core_attn_out, state = paddle_recurrent_kda_step(
+            query.astype(paddle.float32),
+            key.astype(paddle.float32),
+            value.astype(paddle.float32),
+            g,
+            beta,
+            self.key_head_dim**-0.5,
+            state,
+        )
+        past_key_values.set_kda_state(
+            layer_idx, state, window[..., 1:], num_new_tokens=1
+        )
+
+        norm_out = self._apply_gated_norm(
+            core_attn_out.astype(value.dtype), gate
+        )
+        norm_out = norm_out.reshape([batch, seq_len, -1])
+        return self.out_proj(norm_out)
 
     @jit_fuser
     def _apply_gated_norm(self, x, gate):
@@ -960,6 +1136,37 @@ def _chunk_kda_scan(
         [batch, num_v_heads, num_chunks * BT, v_head_dim]
     )[:, :, :seq_len]
     return core_attn_out.transpose([0, 2, 1, 3]), state
+
+
+def paddle_recurrent_kda_step(query, key, value, g, beta, scale, state):
+    """One step of the KDA recurrence, matching _naive_recurrent_kda exactly.
+
+    Shapes:
+        query, key: [b, h, k]     (h = num_key_heads before GVA)
+        value:     [b, hv, v]
+        g:         [b, hv, k]     already in log-space (post kda_gate)
+        beta:      [b, hv]        already through sigmoid
+        state:     [b, hv, k, v]  fp32, updated in place-of-return
+    Returns: (out [b, hv, v], new_state [b, hv, k, v]).
+    """
+    num_v_heads = value.shape[1]
+    num_k_heads = query.shape[1]
+    group = num_v_heads // num_k_heads
+    if group > 1:
+        query = paddle.repeat_interleave(query, group, axis=1)
+        key = paddle.repeat_interleave(key, group, axis=1)
+    query = query * scale
+    # state[b, hv, k, v] *= exp(g)[b, hv, k, 1]
+    state = state * g.unsqueeze(-1).exp()
+    # delta[b, hv, v] = v - sum_k(k * state)
+    delta = value - (key.unsqueeze(-1) * state).sum(-2)
+    # state += (beta * k)[b, hv, k, 1] * delta[b, hv, 1, v]
+    state = state + (beta.unsqueeze(-1) * key).unsqueeze(-1) * delta.unsqueeze(
+        -2
+    )
+    # out[b, hv, v] = sum_k(q * state)
+    out = (query.unsqueeze(-1) * state).sum(-2)
+    return out, state
 
 
 def paddle_chunk_kda(

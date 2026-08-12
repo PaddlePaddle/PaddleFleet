@@ -25,6 +25,27 @@ def is_torch_compat_available() -> bool:
     return hasattr(paddle, "enable_compat")
 
 
+def is_triton_available() -> bool:
+    """Return True if Triton CUDA kernels can actually be launched.
+
+    Stronger than :func:`is_torch_compat_available`: it also requires a
+    CUDA-enabled Paddle build and an installed Triton package. It deliberately
+    does *not* require torch / ``_paddle_driver``: the document_mask_fusion
+    kernels run purely through ``paddle.enable_compat(scope={"triton"})`` and
+    are not wrapped with :func:`swap_driver_guard`, so they work in a
+    torch-free environment (e.g. the CI image ships triton without torch).
+
+    Callers that may run on CPU should gate the Triton path on this *and*
+    verify the operand tensor is on a GPU place; on a CPU build / CPU device
+    the pure-paddle fallback must be used instead.
+    """
+    return (
+        is_torch_compat_available()
+        and paddle.is_compiled_with_cuda()
+        and _is_package_installed("triton")
+    )
+
+
 def dispatch_to(dispatch_fn, *, cond=None):
     """Decorator: call dispatch_fn when cond is True, else fall back to fn.
 

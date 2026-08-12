@@ -185,6 +185,11 @@ class DynamicKVCache:
     layers' block-sparse branch. During training that tensor is threaded through
     ``dict_args``; during incremental decode only the new token's slice is
     computed, so it is accumulated here via :meth:`update_shared`.
+
+    Linear-attention (KDA) layers add a third kind of slot: they summarise the
+    whole past in a fixed-size recurrent state plus the short causal conv's
+    sliding window, so there is nothing to concatenate. See
+    :meth:`set_kda_state`.
     """
 
     def __init__(
@@ -197,6 +202,11 @@ class DynamicKVCache:
         self.v: list[paddle.Tensor | None] = [None] * num_layers
         # HySparse shared (compressed) KV latent produced by full layers.
         self.shared_k: list[paddle.Tensor | None] = [None] * num_layers
+        # KDA (linear attention) per-layer state: recurrent state
+        # [b, hv, k, v] fp32 + conv sliding window [b, conv_dim, kernel-1] fp32.
+        # Standard attention layers ignore these; KDA layers ignore k/v/shared_k.
+        self.kda_state: list[paddle.Tensor | None] = [None] * num_layers
+        self.kda_conv_state: list[paddle.Tensor | None] = [None] * num_layers
         self.swa_layers = swa_layers or [False] * num_layers
         self.window_size = window_size
         # Track absolute sequence length independently of truncated cache
@@ -220,6 +230,46 @@ class DynamicKVCache:
         the current decode token.
         """
         return self.k[layer_idx], self.v[layer_idx]
+
+    # -- KDA / linear-attention state -------------------------------------
+    #
+    # A linear-attention layer has no growing K/V history: the whole past is
+    # summarised by a fixed-size recurrent state plus the short causal conv's
+    # sliding window. Both are therefore *replaced* every step rather than
+    # concatenated, which is why they need their own slots instead of
+    # ``update()``.
+
+    def has_kda_state(self, layer_idx: int) -> bool:
+        """Whether ``layer_idx`` already published a KDA state (i.e. decoding).
+
+        KDA uses this exactly like ``has_layer_cache``: the first pass is a
+        prefill that produces the state, every later pass is a single-token
+        decode step that consumes and replaces it.
+        """
+        return self.kda_state[layer_idx] is not None
+
+    def get_kda_state(
+        self, layer_idx: int
+    ) -> tuple[paddle.Tensor | None, paddle.Tensor | None]:
+        """Cached ``(recurrent_state, conv_state)`` of KDA layer ``layer_idx``."""
+        return self.kda_state[layer_idx], self.kda_conv_state[layer_idx]
+
+    def set_kda_state(
+        self,
+        layer_idx: int,
+        state: paddle.Tensor,
+        conv_state: paddle.Tensor,
+        num_new_tokens: int = 0,
+    ) -> None:
+        """Store the KDA state of ``layer_idx``, advancing the sequence length.
+
+        ``num_new_tokens`` keeps ``get_seq_len`` meaningful for models whose
+        layers are *all* linear attention: nothing else would ever bump the
+        counter, so the decode loop would hand every step ``position_ids=0``.
+        """
+        self.kda_state[layer_idx] = state
+        self.kda_conv_state[layer_idx] = conv_state
+        self._seq_len[layer_idx] = self._seq_len[layer_idx] + num_new_tokens
 
     def update_shared(
         self, shared_key: paddle.Tensor, layer_idx: int
@@ -279,6 +329,8 @@ class DynamicKVCache:
             self.k[i] = None
             self.v[i] = None
             self.shared_k[i] = None
+            self.kda_state[i] = None
+            self.kda_conv_state[i] = None
             self._seq_len[i] = 0
 
 
