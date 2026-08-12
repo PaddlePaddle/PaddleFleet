@@ -74,6 +74,18 @@ class TestMoonEPDispatcher(unittest.TestCase):
         self.assertEqual(manager.token_probs.dtype, paddle.float32)
         self.assertEqual(manager.tokens_per_expert.tolist(), [1, 2, 0, 1])
 
+    def test_setup_metadata_falls_back_to_probability_topk(self):
+        manager = object.__new__(_MoonEPManager)
+        manager.router_topk = 2
+        manager.num_experts = 4
+        routing_map = paddle.to_tensor([[1, 0, 1, 0]], dtype="bool")
+        probs = paddle.to_tensor([[0.6, 0.0, 0.4, 0.0]], dtype="float32")
+
+        manager.setup_metadata(routing_map, probs)
+
+        self.assertEqual(manager.token_indices.tolist(), [[0, 2]])
+        self.assertEqual(manager.tokens_per_expert.tolist(), [1, 0, 1, 0])
+
     def test_setup_metadata_sanitizes_padding_routes(self):
         manager = object.__new__(_MoonEPManager)
         manager.router_topk = 2
@@ -129,6 +141,18 @@ class TestMoonEPDispatcher(unittest.TestCase):
                 paddle.zeros([2, 1], dtype="int32"),
                 paddle.ones([2, 1], dtype="float32"),
             )
+
+    def test_manager_requires_bound_experts_and_active_plan(self):
+        manager = object.__new__(_MoonEPManager)
+        manager._bridge = None
+        with self.assertRaisesRegex(RuntimeError, "must be bound"):
+            manager._ensure_buffer(paddle.ones([2, 4], dtype="bfloat16"))
+
+        manager.handle = None
+        with self.assertRaisesRegex(RuntimeError, "active plan"):
+            manager.runtime_expert_weights(object())
+        with self.assertRaisesRegex(NotImplementedError, "E\\+B group counts"):
+            manager.get_dispatched_metadata()
 
     def test_buffer_rejects_inconsistent_rank_signatures(self):
         manager = object.__new__(_MoonEPManager)
@@ -240,7 +264,11 @@ class TestMoonEPDispatcher(unittest.TestCase):
                 setattr(owner, target, original)
 
         config.gated_linear_unit = False
+        layer.moe_use_fusion_node = True
+        layer.moe_shared_expert_overlap = True
         MoELayer._validate_moonep_config(layer)
+        self.assertFalse(layer.moe_use_fusion_node)
+        self.assertFalse(layer.moe_shared_expert_overlap)
 
     def test_grouped_expert_uses_runtime_weights_and_activation(self):
         activation = mock.Mock(side_effect=lambda hidden: hidden + 1)
@@ -300,6 +328,15 @@ class TestMoonEPDispatcher(unittest.TestCase):
             tokens_per_expert,
             expert_weights=runtime_weights,
         )
+
+        layer._use_grouped_mlp_expert = False
+        with self.assertRaisesRegex(ValueError, "grouped expert storage"):
+            MoELayer.expert_forward(
+                layer,
+                hidden,
+                tokens_per_expert,
+                expert_weights=runtime_weights,
+            )
 
     def test_runtime_weights_delegate_gradient_reduction(self):
         class _Bridge:
@@ -379,8 +416,8 @@ class TestMoonEPBufferCache(unittest.TestCase):
                 moonep, "MoonEPBuffer", side_effect=buffers
             ) as buffer_cls,
         ):
-            first = moonep.get_moonep_buffer(S=2, **common)
-            first_again = moonep.get_moonep_buffer(S=2, **common)
+            first = moonep.get_moonep_buffer(S=2, num_sms="8", **common)
+            first_again = moonep.get_moonep_buffer(S=2, num_sms=8, **common)
             second = moonep.get_moonep_buffer(S=3, **common)
 
         self.assertIs(first, buffers[0])
