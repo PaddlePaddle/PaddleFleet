@@ -513,6 +513,7 @@ def apply_rotary_pos_emb(
     position_ids: Tensor | None = None,
     inverse: bool = False,
     mla_output_remove_interleaving: bool = False,
+    apply_rope_fusion: bool | None = None,
 ):
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
@@ -541,9 +542,20 @@ def apply_rotary_pos_emb(
         inverse (bool): If True, negate sin to apply inverse RoPE rotation.
         mla_output_remove_interleaving (bool): If True, un-interleave the output
             after MLA-style RoPE (used by DSv4 Hybrid for inverse RoPE on output).
+        apply_rope_fusion (bool | None): Per-call override of
+            ``config.apply_rope_fusion``. ``None`` (default) means "follow the
+            config". Callers that own a q/k pair the fused kernels cannot
+            handle -- e.g. absorbed MQA, whose per-head K/V never exists --
+            pass ``False`` so only their layer falls back to the eager path
+            while the rest of the model keeps the fusion.
     """
+    use_fusion = (
+        config.apply_rope_fusion
+        if apply_rope_fusion is None
+        else apply_rope_fusion
+    )
     rope_kwargs = {
-        "apply_rope_fusion": config.apply_rope_fusion if not inverse else False,
+        "apply_rope_fusion": use_fusion if not inverse else False,
         "rotary_interleaved": config.rotary_interleaved,
         "multi_latent_attention": config.multi_latent_attention,
         "high_precision_rope": config.high_precision_rope,

@@ -103,23 +103,21 @@ class TestBlockAttnResFunc(unittest.TestCase):
     def _reference_forward(
         self, partial_block, proj_weight, norm_weight, blocks
     ):
-        """Reference implementation without PyLayer."""
-        all_repr = [*blocks, partial_block]
-        logits_list = []
-        for repr_i in all_repr:
-            variance = (
-                repr_i.astype("float32").pow(2).mean(axis=-1, keepdim=True)
+        """Official FP32 batched reduction without calling the product helper."""
+        with paddle.amp.auto_cast(enable=False):
+            values = paddle.stack([*blocks, partial_block], axis=-2).astype(
+                "float32"
             )
-            rms = paddle.sqrt(variance + self.norm_eps)
-            k_i = repr_i / rms * norm_weight
-            logit_i = (k_i * proj_weight).sum(axis=-1)
-            logits_list.append(logit_i)
-        logits = paddle.stack(logits_list, axis=0)
-        weights = paddle.nn.functional.softmax(logits, axis=0)
-        h = weights[0].unsqueeze(-1) * all_repr[0]
-        for i in range(1, len(all_repr)):
-            h = h + weights[i].unsqueeze(-1) * all_repr[i]
-        return h
+            variance = values.pow(2).mean(axis=-1, keepdim=True)
+            normalized = values * paddle.rsqrt(variance + self.norm_eps)
+            score_weight = norm_weight.astype("float32") * proj_weight.astype(
+                "float32"
+            ).reshape([-1])
+            scores = (normalized * score_weight).sum(axis=-1)
+            probabilities = paddle.nn.functional.softmax(
+                scores, axis=-1
+            ).unsqueeze(-2)
+            return paddle.matmul(probabilities, values).squeeze(-2)
 
     def test_forward_matches_reference(self):
         """BlockAttnResFunc.forward output matches naive implementation."""
@@ -255,6 +253,71 @@ class TestBlockAttnResFunc(unittest.TestCase):
         self.assertIsNotNone(partial_block.grad)
         self.assertIsNotNone(norm_weight.grad)
         self.assertIsNotNone(blocks[1].grad)
+
+    def test_backward_releases_saved_context(self):
+        """First-order backward must release the saved distributed tensors."""
+
+        class _Context:
+            def save_for_backward(self, *tensors):
+                self.container = tensors
+
+            def saved_tensor(self):
+                return self.container
+
+        partial_block, proj_weight, norm_weight, blocks = self._make_inputs(
+            num_blocks=2, requires_grad=True
+        )
+        ctx = _Context()
+        output = BlockAttnResFunc.forward(
+            ctx,
+            partial_block,
+            proj_weight,
+            norm_weight,
+            self.norm_eps,
+            *blocks,
+        )
+        self.assertEqual(len(ctx.container), 5)
+
+        grads = BlockAttnResFunc.backward(ctx, paddle.ones_like(output))
+
+        self.assertEqual(len(grads), 5)
+        self.assertEqual(ctx.container, ())
+        for grad in grads:
+            self.assertTrue(paddle.isfinite(grad).all().item())
+
+    @unittest.skipUnless(paddle.is_compiled_with_cuda(), "requires CUDA AMP")
+    def test_bf16_amp_forward_matches_fp32_batched_reference(self):
+        """BF16 O2 must not downcast the official FP32 reduction."""
+        original_device = paddle.device.get_device()
+        try:
+            paddle.set_device("gpu")
+            paddle.manual_seed(2026)
+            partial_block = paddle.randn([1, 4, self.H], dtype="bfloat16")
+            blocks = [
+                paddle.randn([1, 4, self.H], dtype="bfloat16"),
+                paddle.randn([1, 4, self.H], dtype="bfloat16"),
+            ]
+            proj_weight = paddle.randn([1, self.H], dtype="bfloat16")
+            norm_weight = paddle.randn([self.H], dtype="bfloat16")
+
+            expected = self._reference_forward(
+                partial_block, proj_weight, norm_weight, blocks
+            )
+            with paddle.amp.auto_cast(
+                enable=True, dtype="bfloat16", level="O2"
+            ):
+                actual = BlockAttnResFunc.apply(
+                    partial_block,
+                    proj_weight,
+                    norm_weight,
+                    self.norm_eps,
+                    *blocks,
+                )
+
+            self.assertEqual(actual.dtype, paddle.float32)
+            self.assertTrue(paddle.equal_all(actual, expected).item())
+        finally:
+            paddle.set_device(original_device)
 
 
 # ---------------------------------------------------------------------------

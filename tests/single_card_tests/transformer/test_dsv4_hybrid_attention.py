@@ -99,9 +99,16 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
     build_document_rope_freqs,
 )
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.mqa_latent_attention import (
+    MQALatentAttention,
+)
 from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.triton_ops import fused_grouped_matmul
+from paddlefleet.triton_ops import (
+    fused_grouped_matmul,
+    grouped_matmul_fusion as _gmf,
+)
+from paddlefleet.triton_ops.grouped_matmul_fusion import _grouped_3d_strides
 
 _SEED = 42
 # An index_topk larger than any n_compressed reached in the decode-alignment
@@ -169,9 +176,9 @@ def _make_config(
     hybrid_mla_v_head_dim=256,
     hybrid_mla_num_attention_heads=64,
     hybrid_mla_num_key_value_heads=64,
-    hybrid_index_n_heads=4,
-    hybrid_index_head_dim=128,
-    hybrid_index_topk=8,
+    hybrid_mla_attention="mha",
+    dsa_indexer_use_sparse_loss=False,
+    add_full_attention_sink_bias=False,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -199,9 +206,8 @@ def _make_config(
         hybrid_mla_v_head_dim=hybrid_mla_v_head_dim,
         hybrid_mla_num_attention_heads=hybrid_mla_num_attention_heads,
         hybrid_mla_num_key_value_heads=hybrid_mla_num_key_value_heads,
-        hybrid_index_n_heads=hybrid_index_n_heads,
-        hybrid_index_head_dim=hybrid_index_head_dim,
-        hybrid_index_topk=hybrid_index_topk,
+        hybrid_mla_attention=hybrid_mla_attention,
+        add_full_attention_sink_bias=add_full_attention_sink_bias,
         o_groups=o_groups,
         o_lora_rank=o_lora_rank,
         rope_type=rope_type,
@@ -215,7 +221,7 @@ def _make_config(
         dsa_index_head_dim=dsa_index_head_dim,
         dsa_index_topk=dsa_index_topk,
         dsa_indexer_loss_coeff=dsa_indexer_loss_coeff,
-        dsa_indexer_use_sparse_loss=False,
+        dsa_indexer_use_sparse_loss=dsa_indexer_use_sparse_loss,
         dsa_indexer_rotary_interleaved=False,
         apply_rope_fusion=apply_rope_fusion,
         attention_dropout=0.0,
@@ -305,8 +311,10 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             hidden_size=256,
             q_lora_rank=1024,
             csa_compress_ratios=[-2],
+            hybrid_mla_attention="mqa_dsa",
             dsa_index_n_heads=4,
             dsa_index_head_dim=128,
+            dsa_index_topk=128,
             params_dtype=paddle.float32,
             bf16=False,
         )
@@ -330,13 +338,18 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         self.assertEqual(list(indexer.wk.weight.shape), [256, 128])
         self.assertEqual(list(indexer.weights_proj.weight.shape), [256, 4])
 
-    def test_hybrid_mla_without_hybrid_index_uses_standard_attention(self):
+    def test_hybrid_mla_with_mha_mode_uses_standard_attention(self):
+        # A ``dsv4_hybrid`` model's ``-2`` layer is dense MHA
+        # (``DotProductAttention``) unless ``hybrid_mla_attention`` turns it into
+        # latent MQA (+ DSA indexer). Field presence of the model-wide
+        # ``dsa_index_*`` no longer selects ``DSAttention`` for these layers
+        # (``gpt_layer_specs.py`` forces ``use_dsa=False`` for the hybrid
+        # variant), so the core attention must never be ``DSAttention`` and,
+        # with ``hybrid_mla_attention="mha"``, never ``MQALatentAttention`` either.
         config = _make_config(
             num_layers=1,
             csa_compress_ratios=[-2],
-            hybrid_index_n_heads=None,
-            hybrid_index_head_dim=None,
-            hybrid_index_topk=None,
+            hybrid_mla_attention="mha",
         )
         mla_spec = get_gpt_layer_local_spec(
             config=config,
@@ -344,10 +357,11 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             layer_number=0,
         ).sublayers_spec.self_attn
 
-        self.assertIsNot(
-            getattr(mla_spec.sublayers_spec.core_attention, "layer", None),
-            DSAttention,
+        core_attention_layer = getattr(
+            mla_spec.sublayers_spec.core_attention, "layer", None
         )
+        self.assertIsNot(core_attention_layer, DSAttention)
+        self.assertIsNot(core_attention_layer, MQALatentAttention)
 
     def test_legacy_all_mla_constructs_with_local_dimensions(self):
         model_parallel_cuda_manual_seed(_SEED)
@@ -406,12 +420,82 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 hybrid_mla_v_head_dim=None,
             )
 
-        with self.assertRaisesRegex(ValueError, "hybrid_index_head_dim"):
+        # hybrid_mla_attention="mqa_dsa" runs a DSA indexer on the -2 layers, so
+        # the model-wide dsa_index_* fields must be legal for the cuDNN indexer:
+        # positive ints, head_dim == 128, topk a multiple of 128 and <= 2048.
+        # With "mha" (dense MHA) these constraints do not
+        # apply, so the same otherwise-illegal values must round-trip.
+        with self.assertRaisesRegex(ValueError, "index_n_heads"):
             _make_config(
                 num_layers=1,
                 csa_compress_ratios=[-2],
-                hybrid_index_head_dim=None,
+                hybrid_mla_attention="mqa_dsa",
+                dsa_index_n_heads=None,
+                dsa_index_head_dim=128,
+                dsa_index_topk=128,
             )
+
+        with self.assertRaisesRegex(ValueError, "index_head_dim=128"):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_mla_attention="mqa_dsa",
+                dsa_index_n_heads=4,
+                dsa_index_head_dim=32,
+                dsa_index_topk=128,
+            )
+
+        # ``index_topk`` is checked in the sparse phase only -- the warmup phase
+        # runs no top-k at all, so it must not be forced to carry a legal budget.
+        with self.assertRaisesRegex(
+            ValueError, "index_topk must be a multiple"
+        ):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_mla_attention="mqa_dsa",
+                dsa_indexer_use_sparse_loss=True,
+                dsa_index_n_heads=4,
+                dsa_index_head_dim=128,
+                dsa_index_topk=8,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "index_topk must be a multiple"
+        ):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_mla_attention="mqa_dsa",
+                dsa_indexer_use_sparse_loss=True,
+                dsa_index_n_heads=4,
+                dsa_index_head_dim=128,
+                dsa_index_topk=2176,
+            )
+
+        # Same values, warmup phase: accepted, because nothing reads them.
+        cfg_warmup = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-2],
+            hybrid_mla_attention="mqa_dsa",
+            dsa_indexer_use_sparse_loss=False,
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=128,
+            dsa_index_topk=2176,
+        )
+        self.assertEqual(cfg_warmup.hybrid_mla_attention, "mqa_dsa")
+
+        # Dense MHA (hybrid_mla_attention="mha") skips the indexer constraints
+        # entirely: head_dim 32 and topk 8 are fine because no indexer is built.
+        cfg = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-2],
+            hybrid_mla_attention="mha",
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=32,
+            dsa_index_topk=8,
+        )
+        self.assertEqual(cfg.hybrid_mla_attention, "mha")
 
     def test_csa_compress_ratios_accepts_general_set(self):
         # full-causal MQA (-1), window (0), CSA over the full [2, 127] range
@@ -2827,6 +2911,40 @@ class TestMQADecodeAlignment(unittest.TestCase):
         self._assert_close(full_out[:, prefix:, :], decode_out)
 
 
+@_REQUIRES_USABLE_CUDA
+class TestYarnRopeFusionConstructionTime(unittest.TestCase):
+    """Fusion must not run at construction, but must still run in forward."""
+
+    def test_fusion_not_invoked_during_construction(self):
+        from paddlefleet import triton_ops
+
+        real_fn = triton_ops.fused_yarn_rope_freqs
+        with patch.object(
+            triton_ops, "fused_yarn_rope_freqs", side_effect=real_fn
+        ) as mock_fused:
+            rope = YarnRotaryEmbedding(
+                head_dim=64,
+                scaling_factor=40.0,
+                original_max_position_embeddings=128,
+                yarn_rope_fusion=True,
+            )
+            # Contract 1: the __init__ cache build must take the unfused path,
+            # so no Triton JIT (and no ptxas fork/exec) happens while every
+            # rank is in lockstep during model construction.
+            mock_fused.assert_not_called()
+
+            # Contract 2: an explicit forward still honors yarn_rope_fusion.
+            rope.forward(64)
+            self.assertEqual(mock_fused.call_count, 1)
+
+            # Contract 3: seq_len <= original_max_position_embeddings hits the
+            # cache, so nothing is rebuilt and the kernel is not called again.
+            # This is the production case: 8192 <= 65536.
+            rope.get_cached_cos_sin(64)
+            self.assertEqual(mock_fused.call_count, 1)
+
+
+@_REQUIRES_USABLE_CUDA
 class TestDSv4PackedForwardBackwardEquivalence(unittest.TestCase):
     """Verify packed B=2 forward/backward matches two independent B=1 runs.
 
@@ -3353,6 +3471,30 @@ class TestFusedGroupedMatmul(unittest.TestCase):
         with self.assertRaises(ValueError):
             fused_grouped_matmul(x, w)
 
+    def test_shape_mismatch_raises(self):
+        # G and D reach the kernel from w while x is read through its own
+        # strides, so a mismatching x would be read past its group (or out of
+        # bounds) rather than rejected. The dense path got this from
+        # ``x.reshape([M, G, D])``; the zero-copy view path never reshapes.
+        w = paddle.randn([self._G, self._R, self._D], dtype="bfloat16")
+        for shape in (
+            [1, 4, self._G, self._D - 1],  # wrong D
+            [1, 4, self._G + 1, self._D],  # wrong G
+            [self._G * self._D],  # not even 2-D
+        ):
+            with self.subTest(x_shape=shape):
+                x = paddle.randn(shape, dtype="bfloat16")
+                with self.assertRaises(ValueError):
+                    fused_grouped_matmul(x, w)
+        # A strided view of the right trailing shape still goes through.
+        wide = paddle.randn([1, 4, self._G, self._D + 5], dtype="bfloat16")
+        out = fused_grouped_matmul(wide[..., : self._D], w)
+        self.assertEqual(list(out.shape), [1, 4, self._G, self._R])
+        with self.assertRaises(ValueError):
+            fused_grouped_matmul(
+                wide[..., : self._D], w.reshape([self._G * self._R, self._D])
+            )
+
     def _run_with_frozen(self, x_trainable, w_trainable):
         """Phase 2 shape: the o_groups weight is frozen while x stays live.
 
@@ -3389,6 +3531,53 @@ class TestFusedGroupedMatmul(unittest.TestCase):
         self.assertIsNotNone(x.grad)
         self.assertIsNone(param.grad)
 
+    def test_copy_fallback_matches_the_zero_copy_view(self):
+        """The dense-copy fallback and the zero-copy view must agree bit-exactly.
+
+        A rejected layout falls back to ``x.reshape([M, G, D]).contiguous()``
+        (and the same for ``dy`` in backward). Forcing that fallback on a view
+        the guard *would* accept is what makes the zero-copy path safe to take:
+        same values, same order, same kernel, so the results are identical bit
+        for bit rather than merely close.
+        """
+        wide = paddle.randn(
+            [1, 7, self._G, self._D + 5], dtype="float32"
+        ).astype("bfloat16")
+        w0 = paddle.randn([self._G, self._R, self._D], dtype="float32").astype(
+            "bfloat16"
+        )
+        grad_out = paddle.randn([1, 7, self._G, self._R], dtype="float32")
+
+        def run(force_copy):
+            x = wide[..., : self._D].detach()
+            x.stop_gradient = False
+            wi = w0.detach()
+            wi.stop_gradient = False
+            if force_copy:
+                with patch.object(
+                    _gmf, "_grouped_3d_strides", return_value=None
+                ):
+                    out = fused_grouped_matmul(x, wi)
+                    (out.astype("float32") * grad_out).sum().backward()
+            else:
+                out = fused_grouped_matmul(x, wi)
+                (out.astype("float32") * grad_out).sum().backward()
+            return (
+                out.astype("float32").numpy(),
+                x.grad.astype("float32").numpy(),
+                wi.grad.astype("float32").numpy(),
+            )
+
+        # The unpatched run must actually be on the zero-copy path, otherwise
+        # this compares the fallback against itself.
+        self.assertIsNotNone(_grouped_3d_strides(wide[..., : self._D]))
+        for view, copied, name in zip(
+            run(force_copy=False), run(force_copy=True), ("out", "dx", "dw")
+        ):
+            self.assertTrue(
+                np.array_equal(view, copied), f"{name} is not bit-identical"
+            )
+
     def test_frozen_input_gets_no_dgrad(self):
         x, param, out = self._run_with_frozen(
             x_trainable=False, w_trainable=True
@@ -3404,6 +3593,276 @@ class TestFusedGroupedMatmul(unittest.TestCase):
         self.assertTrue(out.stop_gradient)
         self.assertIsNone(x.grad)
         self.assertIsNone(param.grad)
+
+
+class TestGroupedMatmulLayoutGuard(unittest.TestCase):
+    """``_grouped_3d_strides`` gates the zero-copy path.
+
+    It must accept only layouts a dense copy would linearize element for
+    element; everything else has to fall back to ``.contiguous()``. The guard
+    is pure stride arithmetic, so it needs no device.
+    """
+
+    def test_accepts_a_foldable_strided_view(self):
+        # ``q[..., :qk_nope_head_dim]``-shaped view: group stride is the full
+        # head dim rather than D, which the kernels handle via strides.
+        x = paddle.randn([2, 3, 4, 10])[..., :6]
+        self.assertEqual(_grouped_3d_strides(x), tuple(x.strides[-3:]))
+
+    def test_accepts_size_one_leading_dims(self):
+        # A size-1 dim contributes nothing to M, so its stride is irrelevant.
+        x = paddle.randn([1, 1, 3, 4, 10])[..., :6]
+        self.assertEqual(_grouped_3d_strides(x), tuple(x.strides[-3:]))
+
+    def test_rejects_fewer_than_three_dims(self):
+        self.assertIsNone(_grouped_3d_strides(paddle.randn([4, 6])))
+
+    def test_rejects_non_unit_innermost_stride(self):
+        x = paddle.randn([2, 6, 3]).transpose([0, 2, 1])
+        self.assertNotEqual(x.strides[-1], 1)
+        self.assertIsNone(_grouped_3d_strides(x))
+
+    def test_rejects_degenerate_group_strides(self):
+        # A broadcast (stride 0) or self-overlapping group step reads the same
+        # element from several groups, which no dense copy would reproduce.
+        flat = paddle.randn([2, 30])
+        for stride_g in (0, 3):
+            with self.subTest(stride_g=stride_g):
+                x = paddle.as_strided(flat, [2, 3, 6], [30, stride_g, 1])
+                self.assertIsNone(_grouped_3d_strides(x))
+        # Same for a row step that overlaps the groups below it.
+        x = paddle.as_strided(flat, [2, 3, 6], [6, 6, 1])
+        self.assertIsNone(_grouped_3d_strides(x))
+
+    def test_rejects_unfoldable_leading_dims(self):
+        # Sliced on a middle axis: the leading stride no longer equals
+        # shape[1] * strides[1], so the leading dims cannot collapse into M.
+        x = paddle.randn([4, 3, 2, 5])[:, :2]
+        self.assertNotEqual(x.strides[0], x.shape[1] * x.strides[1])
+        self.assertIsNone(_grouped_3d_strides(x))
+
+    def test_rejects_unfoldable_dims_hidden_behind_a_singleton(self):
+        # A size-1 dim in the middle must not launder an outer stride: its own
+        # stride is arbitrary, so comparing the outer one against
+        # shape[i + 1] * strides[i + 1] would always hold. Here the six M rows
+        # start at 0, 24, 48, 100, 124, 148 -- not at multiples of stride_m=24 --
+        # so the kernel would read six wrong rows if this were accepted.
+        flat = paddle.randn([200])
+        x = paddle.as_strided(flat, [2, 1, 3, 4, 6], [100, 100, 24, 6, 1])
+        self.assertIsNone(_grouped_3d_strides(x))
+        # The same shape *is* foldable once the outer dim spans exactly the
+        # 3 * 24 elements below it.
+        packed = paddle.as_strided(flat, [2, 1, 3, 4, 6], [72, 72, 24, 6, 1])
+        self.assertEqual(_grouped_3d_strides(packed), (24, 6, 1))
+
+
+class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
+    """``add_full_attention_sink_bias`` must give the same parameter in both
+    hybrid MLA phases.
+
+    The sink is created by ``build_softmax_offset`` *on the core attention*, so
+    its state_dict name is ``core_attention.softmax_offset`` for the dense MHA
+    phase (``hybrid_mla_attention="mha"``, where ``DotProductAttention`` consumes
+    it as the FA4 ``learnable_sink``) as well as for the latent MQA + DSA
+    indexer phase (``hybrid_mla_attention="mqa_dsa"``, where
+    ``MQALatentAttention`` feeds it to the block-sparse kernel). Keeping one
+    name, one shape and one dtype is what lets an MHA checkpoint load into a
+    latent-MQA run unchanged.
+    """
+
+    def _build(self, hybrid_mla_attention, sink):
+        # ``MultiLatentAttention.__init__`` refuses to create the sink for the
+        # dense MHA phase unless ``FLAGS_flash_attn_version in (3, 4)``: that
+        # phase consumes it as ``flashmask_attention_func(learnable_sink=...)``,
+        # which only exists on the cute path. The image default is 2, so flip
+        # the flag for the construction and restore it -- these tests only
+        # inspect the parameter, and the process-global default must stay
+        # untouched for the other suites in this file. The absorbed phase owns
+        # its sink inside the block-sparse kernel and needs no flag.
+        needs_fa4 = sink and hybrid_mla_attention == "mha"
+        previous = paddle.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        if needs_fa4:
+            paddle.set_flags({"FLAGS_flash_attn_version": 4})
+        try:
+            return self._build_raw(hybrid_mla_attention, sink)
+        finally:
+            if needs_fa4:
+                paddle.set_flags({"FLAGS_flash_attn_version": previous})
+
+    def _build_raw(
+        self, hybrid_mla_attention, sink, params_dtype=paddle.bfloat16
+    ):
+        """Build without touching ``FLAGS_flash_attn_version``."""
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=2,
+            hidden_size=256,
+            params_dtype=params_dtype,
+            csa_compress_ratios=[-2, 128],
+            hybrid_mla_attention=hybrid_mla_attention,
+            add_full_attention_sink_bias=sink,
+            # The -2 layer's DSA indexer (built only for
+            # hybrid_mla_attention="mqa_dsa") reads these model-wide fields; the
+            # cuDNN indexer needs head_dim 128 and a topk that is a multiple of
+            # 128. They are inert for the dense MHA phase (use_dsa is forced
+            # False for dsv4_hybrid), so the same config drives both phases.
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=128,
+            dsa_index_topk=128,
+        )
+        spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=0,
+        ).sublayers_spec.self_attn
+        return build_spec_layer(
+            spec,
+            config=config,
+            layer_number=0,
+            pg_collection=_FakePGCollection(),
+        )
+
+    @staticmethod
+    def _sink_keys(module):
+        return sorted(
+            name
+            for name in module.state_dict().keys()
+            if name.endswith("softmax_offset")
+        )
+
+    # The two hybrid MLA phases: dense MHA (``"mha"``) and latent MQA + DSA
+    # indexer (``"mqa_dsa"``). The indexer-less latent MQA mode
+    # (``"mqa_full_causal"``) exists only for equivalence experiments and shares
+    # the ``"mqa_dsa"`` sink layout, so it is not a separate phase here.
+    _PHASES = ("mha", "mqa_dsa")
+
+    def test_disabled_creates_no_parameter(self):
+        for hybrid_mla_attention in self._PHASES:
+            with self.subTest(hybrid_mla_attention=hybrid_mla_attention):
+                mla = self._build(hybrid_mla_attention, sink=False)
+                self.assertIsNone(mla.core_attention.softmax_offset)
+                self.assertEqual(self._sink_keys(mla), [])
+
+    def test_enabled_creates_one_zero_initialised_per_head_parameter(self):
+        for hybrid_mla_attention in self._PHASES:
+            with self.subTest(hybrid_mla_attention=hybrid_mla_attention):
+                mla = self._build(hybrid_mla_attention, sink=True)
+                sink = mla.core_attention.softmax_offset
+                self.assertIsNotNone(sink)
+                # One logit per local head of the hybrid MLA layer.
+                self.assertEqual(list(sink.shape), [64])
+                # bf16 == params_dtype: the FA4 cute kernel of the dense MHA
+                # phase asserts learnable_sink.dtype == bfloat16.
+                self.assertEqual(sink.dtype, paddle.bfloat16)
+                # The shared ``build_softmax_offset`` helper initialises the
+                # learnable sink with ``config.init_method`` (normal, std=0.02)
+                # when ``perform_initialization`` is set -- NOT the neutral zero
+                # of the old hybrid-specific injection block. Assert a finite,
+                # init_method-scaled parameter rather than exact zeros.
+                self.assertTrue(bool(paddle.isfinite(sink).all()))
+                self.assertLess(float(sink.astype("float32").abs().max()), 1.0)
+                self.assertFalse(sink.stop_gradient)
+                self.assertEqual(
+                    self._sink_keys(mla), ["core_attention.softmax_offset"]
+                )
+
+    def test_state_dict_name_is_identical_across_phases(self):
+        # The valuable "an MHA checkpoint stays loadable into a latent-MQA
+        # run" guarantee: same name, shape and dtype in both phases.
+        mha = self._build(hybrid_mla_attention="mha", sink=True)
+        mqa = self._build(hybrid_mla_attention="mqa_dsa", sink=True)
+        self.assertEqual(self._sink_keys(mha), self._sink_keys(mqa))
+        self.assertEqual(
+            mha.core_attention.softmax_offset.shape,
+            mqa.core_attention.softmax_offset.shape,
+        )
+        self.assertEqual(
+            mha.core_attention.softmax_offset.dtype,
+            mqa.core_attention.softmax_offset.dtype,
+        )
+
+    def test_mha_sink_without_fa4_is_rejected_at_construction(self):
+        # The dense MHA phase reaches the sink only through the flashmask cute
+        # kernel, which is gated on FLAGS_flash_attn_version in (3, 4). With the
+        # image default of 2 the run used to die at the *first forward* on an
+        # opaque ``learnable_sink is only supported on the flashmask v4 (cute)
+        # path`` assertion; ``MultiLatentAttention.__init__`` now refuses up
+        # front.
+        previous = paddle.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        paddle.set_flags({"FLAGS_flash_attn_version": 2})
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError, "FLAGS_flash_attn_version"
+            ):
+                self._build_raw(hybrid_mla_attention="mha", sink=True)
+            # The absorbed phase owns its sink inside the block-sparse kernel,
+            # so the flag must NOT gate it.
+            self.assertIsNotNone(
+                self._build_raw(
+                    hybrid_mla_attention="mqa_dsa", sink=True
+                ).core_attention.softmax_offset
+            )
+        finally:
+            paddle.set_flags({"FLAGS_flash_attn_version": previous})
+
+    def test_mha_sink_with_non_bf16_params_dtype_is_rejected(self):
+        # Second requirement of the same cute kernel: it asserts the learnable
+        # sink is bf16, and the sink is created with ``params_dtype``. An fp32
+        # run therefore used to pass construction and die on the first forward
+        # with a terse ``learnable_sink must be bfloat16`` that names no config
+        # knob. The guard now names ``params_dtype`` at construction time.
+        previous = paddle.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        paddle.set_flags({"FLAGS_flash_attn_version": 4})
+        try:
+            with self.assertRaisesRegex(RuntimeError, "params_dtype"):
+                self._build_raw(
+                    hybrid_mla_attention="mha",
+                    sink=True,
+                    params_dtype=paddle.float32,
+                )
+            # The block-sparse kernel up-casts the sink itself, so the absorbed
+            # phase must stay dtype agnostic.
+            mqa = self._build_raw(
+                hybrid_mla_attention="mqa_dsa",
+                sink=True,
+                params_dtype=paddle.float32,
+            )
+            self.assertEqual(
+                mqa.core_attention.softmax_offset.dtype, paddle.float32
+            )
+        finally:
+            paddle.set_flags({"FLAGS_flash_attn_version": previous})
+
+    def test_sink_is_not_created_on_the_non_hybrid_layers(self):
+        # The HCA (``128``) layer owns its own sink; the model-wide
+        # ``add_full_attention_sink_bias`` must not add a ``softmax_offset``
+        # there.
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=2,
+            hidden_size=256,
+            csa_compress_ratios=[-2, 128],
+            add_full_attention_sink_bias=True,
+            dsa_index_n_heads=None,
+        )
+        hca = build_spec_layer(
+            get_gpt_layer_local_spec(
+                config=config,
+                normalization=config.normalization,
+                layer_number=1,
+            ).sublayers_spec.self_attn,
+            config=config,
+            layer_number=1,
+            pg_collection=_FakePGCollection(),
+        )
+        self.assertIsInstance(hca, DSv4HybridSelfAttention)
+        self.assertEqual(self._sink_keys(hca), [])
 
 
 if __name__ == "__main__":

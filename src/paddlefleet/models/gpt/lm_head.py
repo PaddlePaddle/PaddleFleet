@@ -361,11 +361,18 @@ class GPTMainLMHead(GPTLMHead):
         hidden_states = dict_args["hidden_states"]
         mtp_loss = dict_args.get("mtp_loss", None)
 
-        tensor_list = paddle.split(
-            hidden_states,
-            self.config.num_nextn_predict_layers + 1,
-        )
-        logits = self._forward(tensor_list[0])
+        if (
+            self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not getattr(self.config, "mtp_load_weight_only", False)
+        ):
+            tensor_list = paddle.split(
+                hidden_states,
+                self.config.num_nextn_predict_layers + 1,
+            )
+            logits = self._forward(tensor_list[0])
+        else:
+            logits = self._forward(hidden_states)
         ret = {
             "logits": logits,
             "mtp_loss": mtp_loss,

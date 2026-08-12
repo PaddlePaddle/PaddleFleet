@@ -54,6 +54,19 @@ class GPTEmbeddingSpec:
     rope_embedding: LayerSpec | None
 
 
+def make_contiguous(value):
+    """Return ``value`` with every tensor it holds made contiguous.
+
+    Pipeline P2P send (NCCL) rejects non-contiguous buffers, and the embedding
+    output carries both bare tensors and lists of them (deepstack features).
+    """
+    if isinstance(value, paddle.Tensor):
+        return value if value.is_contiguous() else value.contiguous()
+    if isinstance(value, (list, tuple)):
+        return type(value)(make_contiguous(v) for v in value)
+    return value
+
+
 class GPTEmbedding(FleetLayer):
     def __init__(
         self,
@@ -152,6 +165,127 @@ class GPTEmbedding(FleetLayer):
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="GPTEmbedding")
 
+    def _merge_multimodal(
+        self,
+        dict_args,
+        input_ids,
+        decoder_input,
+        deepstack_image_embeds,
+        deepstack_video_embeds,
+    ):
+        """Replace image/video placeholder tokens with encoded visual features.
+
+        Must run on a full-length ``decoder_input``: ``get_placeholder_mask``
+        expands the token mask with ``expand_as`` and checks element counts, so
+        it cannot operate on a sequence already truncated by
+        ``num_nextn_predict_layers``. This is why the caller invokes it *before*
+        the MTP split.
+
+        The sequence-parallel scatter is deliberately not done here; the caller
+        applies it once, after the MTP split, so the two paths cannot scatter
+        the same tensor twice.
+
+        Returns ``(decoder_input, visual_pos_masks, deepstack_visual_embeds)``.
+        """
+        visual_pos_masks = None
+        deepstack_visual_embeds = None
+        image_embeds = dict_args.get("image_embeds", None)
+        video_embeds = dict_args.get("video_embeds", None)
+        image_mask = None
+        video_mask = None
+        if image_embeds is not None:
+            image_mask, _ = self.get_placeholder_mask(
+                input_ids,
+                inputs_embeds=decoder_input,
+                image_features=image_embeds,
+            )
+            # Replace masked_scatter with arithmetic blend to avoid
+            # IndexingBackwardKernel (sparse scatter) in the backward pass.
+            #   image_mask : [B, S, H] bool
+            #   image_embeds: [N_img, H]  (N_img = number of image tokens)
+            # Expand image_embeds into the full [B, S, H] space by:
+            #   1. flatten decoder_input and image_mask to 1-D
+            #   2. use paddle.scatter (dense backward = gather) to place
+            #      image_embeds values at the True positions
+            #   3. blend with original decoder_input via mask arithmetic
+            #
+            # Optimization: reuse decoder_input's flattened buffer as the
+            # scatter base (scaled by (1-mask)) to avoid a separate
+            # paddle.zeros([n_total]) allocation (~192 MB bf16 tensor).
+            image_mask_f = image_mask.astype(
+                decoder_input.dtype
+            )  # [B,S,H] float
+            flat_indices = paddle.nonzero(image_mask.reshape([-1])).squeeze(
+                -1
+            )  # [N_img*H] int64 — dense nonzero, no scatter bwd
+            # Scale the base tensor by (1 - mask) in-place before scatter
+            # so that visual positions are zero — no extra zeros allocation.
+            base_flat = (decoder_input * (1.0 - image_mask_f)).reshape([-1])
+            image_src_flat = paddle.scatter(
+                base_flat,
+                flat_indices,
+                image_embeds.astype(decoder_input.dtype).reshape([-1]),
+            )  # scatter bwd is a simple gather — no sparse atomics
+            decoder_input = image_src_flat.reshape(decoder_input.shape)
+            visual_pos_masks = image_mask[..., 0]
+            deepstack_visual_embeds = deepstack_image_embeds
+        if video_embeds is not None:
+            _, video_mask = self.get_placeholder_mask(
+                input_ids,
+                inputs_embeds=decoder_input,
+                video_features=video_embeds,
+            )
+            video_mask_f = video_mask.astype(decoder_input.dtype)
+            flat_indices = paddle.nonzero(video_mask.reshape([-1])).squeeze(-1)
+            base_flat = (decoder_input * (1.0 - video_mask_f)).reshape([-1])
+            video_src_flat = paddle.scatter(
+                base_flat,
+                flat_indices,
+                video_embeds.astype(decoder_input.dtype).reshape([-1]),
+            )
+            decoder_input = video_src_flat.reshape(decoder_input.shape)
+            visual_pos_masks = video_mask[..., 0]
+            deepstack_visual_embeds = deepstack_video_embeds
+        if image_embeds is not None and video_embeds is not None:
+            image_mask = image_mask[..., 0]  # [B, S] bool
+            video_mask = video_mask[..., 0]  # [B, S] bool
+            visual_pos_masks = image_mask | video_mask
+            deepstack_visual_embeds = []
+            for img_embed, vid_embed in zip(
+                deepstack_image_embeds, deepstack_video_embeds
+            ):
+                # Build embed_joint [N_visual, H] without boolean-index
+                # scatter. Use dense mask arithmetic instead.
+                #   img_embed : [N_img, H]
+                #   vid_embed : [N_vid, H]
+                #   visual_pos_masks: [B, S] bool, N_visual True entries
+                # img_mask_in_visual[i] = True  iff visual position i is image
+                # Computed as: image_mask flattened, keep only visual positions,
+                # expressed as a dense [N_visual] float mask — no indexing.
+                h = img_embed.shape[-1]
+                n_visual = int(visual_pos_masks.sum())
+                # visual_pos_flat: [B*S] bool
+                visual_pos_flat = visual_pos_masks.reshape([-1])
+                image_mask_flat = image_mask.reshape([-1])  # [B*S] bool
+                video_mask_flat = video_mask.reshape([-1])  # [B*S] bool
+                # Dense [B*S] float masks, then compress to [N_visual] via
+                # paddle.masked_select (forward: gather, backward: scatter_add
+                # — but scalar backward is efficient, no sparse atomics)
+                img_mask_in_vis_f = paddle.masked_select(
+                    image_mask_flat.astype(img_embed.dtype),
+                    visual_pos_flat,
+                ).unsqueeze(-1)  # [N_visual, 1]
+                vid_mask_in_vis_f = paddle.masked_select(
+                    video_mask_flat.astype(vid_embed.dtype),
+                    visual_pos_flat,
+                ).unsqueeze(-1)  # [N_visual, 1]
+                embed_joint = (
+                    img_embed.reshape([n_visual, h]) * img_mask_in_vis_f
+                    + vid_embed.reshape([n_visual, h]) * vid_mask_in_vis_f
+                )
+                deepstack_visual_embeds.append(embed_joint)
+        return decoder_input, visual_pos_masks, deepstack_visual_embeds
+
     def forward(
         self,
         dict_args: dict,
@@ -231,14 +365,29 @@ class GPTEmbedding(FleetLayer):
                     decoder_input, text_padding_indices, 0
                 )
                 input_ids_for_moe_mask = input_ids
+
+            # Multimodal merge runs *before* the MTP split below, so the shifted
+            # MTP embeddings carry the visual features. This matches the order
+            # the non-PP path uses. The sequence-parallel scatter that used to
+            # close this block is applied after the MTP split instead.
+            if self.multimodal_embedding:
+                (
+                    decoder_input,
+                    visual_pos_masks,
+                    deepstack_visual_embeds,
+                ) = self._merge_multimodal(
+                    dict_args,
+                    input_ids,
+                    decoder_input,
+                    deepstack_image_embeds,
+                    deepstack_video_embeds,
+                )
+
             if (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
                 and not self.config.mtp_load_weight_only
             ):
-                assert not self.multimodal_embedding, (
-                    "MTP not support mm for now."
-                )
                 # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
                 if input_ids_for_moe_mask is not None:
                     # Main backbone input_ids: [B, max_seq]
@@ -375,122 +524,39 @@ class GPTEmbedding(FleetLayer):
                         mtp_emb_res.append(inputs_embeds_mtp)
 
             if self.multimodal_embedding:
-                image_embeds = dict_args.get("image_embeds", None)
-                video_embeds = dict_args.get("video_embeds", None)
-                if image_embeds is not None:
-                    image_mask, _ = self.get_placeholder_mask(
-                        input_ids,
-                        inputs_embeds=decoder_input,
-                        image_features=image_embeds,
-                    )
-                    # Replace masked_scatter with arithmetic blend to avoid
-                    # IndexingBackwardKernel (sparse scatter) in the backward pass.
-                    #   image_mask : [B, S, H] bool
-                    #   image_embeds: [N_img, H]  (N_img = number of image tokens)
-                    # Expand image_embeds into the full [B, S, H] space by:
-                    #   1. flatten decoder_input and image_mask to 1-D
-                    #   2. use paddle.scatter (dense backward = gather) to place
-                    #      image_embeds values at the True positions
-                    #   3. blend with original decoder_input via mask arithmetic
-                    #
-                    # Optimization: reuse decoder_input's flattened buffer as the
-                    # scatter base (scaled by (1-mask)) to avoid a separate
-                    # paddle.zeros([n_total]) allocation (~192 MB bf16 tensor).
-                    image_mask_f = image_mask.astype(
-                        decoder_input.dtype
-                    )  # [B,S,H] float
-                    flat_indices = paddle.nonzero(
-                        image_mask.reshape([-1])
-                    ).squeeze(
-                        -1
-                    )  # [N_img*H] int64 — dense nonzero, no scatter bwd
-                    # Scale the base tensor by (1 - mask) in-place before scatter
-                    # so that visual positions are zero — no extra zeros allocation.
-                    base_flat = (decoder_input * (1.0 - image_mask_f)).reshape(
-                        [-1]
-                    )
-                    image_src_flat = paddle.scatter(
-                        base_flat,
-                        flat_indices,
-                        image_embeds.astype(decoder_input.dtype).reshape([-1]),
-                    )  # scatter bwd is a simple gather — no sparse atomics
-                    decoder_input = image_src_flat.reshape(decoder_input.shape)
-                    visual_pos_masks = image_mask[..., 0]
-                    deepstack_visual_embeds = deepstack_image_embeds
-
-                if video_embeds is not None:
-                    _, video_mask = self.get_placeholder_mask(
-                        input_ids,
-                        inputs_embeds=decoder_input,
-                        video_features=video_embeds,
-                    )
-                    video_mask_f = video_mask.astype(decoder_input.dtype)
-                    flat_indices = paddle.nonzero(
-                        video_mask.reshape([-1])
-                    ).squeeze(-1)
-                    base_flat = (decoder_input * (1.0 - video_mask_f)).reshape(
-                        [-1]
-                    )
-                    video_src_flat = paddle.scatter(
-                        base_flat,
-                        flat_indices,
-                        video_embeds.astype(decoder_input.dtype).reshape([-1]),
-                    )
-                    decoder_input = video_src_flat.reshape(decoder_input.shape)
-                    visual_pos_masks = video_mask[..., 0]
-                    deepstack_visual_embeds = deepstack_video_embeds
-
-                if image_embeds is not None and video_embeds is not None:
-                    image_mask = image_mask[..., 0]  # [B, S] bool
-                    video_mask = video_mask[..., 0]  # [B, S] bool
-                    visual_pos_masks = image_mask | video_mask
-                    deepstack_visual_embeds = []
-                    for img_embed, vid_embed in zip(
-                        deepstack_image_embeds, deepstack_video_embeds
-                    ):
-                        # Build embed_joint [N_visual, H] without boolean-index
-                        # scatter. Use dense mask arithmetic instead.
-                        #   img_embed : [N_img, H]
-                        #   vid_embed : [N_vid, H]
-                        #   visual_pos_masks: [B, S] bool, N_visual True entries
-                        # img_mask_in_visual[i] = True  iff visual position i is image
-                        # Computed as: image_mask flattened, keep only visual positions,
-                        # expressed as a dense [N_visual] float mask — no indexing.
-                        h = img_embed.shape[-1]
-                        n_visual = int(visual_pos_masks.sum())
-                        # visual_pos_flat: [B*S] bool
-                        visual_pos_flat = visual_pos_masks.reshape([-1])
-                        image_mask_flat = image_mask.reshape([-1])  # [B*S] bool
-                        video_mask_flat = video_mask.reshape([-1])  # [B*S] bool
-                        # Dense [B*S] float masks, then compress to [N_visual] via
-                        # paddle.masked_select (forward: gather, backward: scatter_add
-                        # — but scalar backward is efficient, no sparse atomics)
-                        img_mask_in_vis_f = paddle.masked_select(
-                            image_mask_flat.astype(img_embed.dtype),
-                            visual_pos_flat,
-                        ).unsqueeze(-1)  # [N_visual, 1]
-                        vid_mask_in_vis_f = paddle.masked_select(
-                            video_mask_flat.astype(vid_embed.dtype),
-                            visual_pos_flat,
-                        ).unsqueeze(-1)  # [N_visual, 1]
-                        embed_joint = (
-                            img_embed.reshape([n_visual, h]) * img_mask_in_vis_f
-                            + vid_embed.reshape([n_visual, h])
-                            * vid_mask_in_vis_f
+                if mtp_emb_res is None:
+                    # Scatter decoder_input to SP format [S/tp, B, H] after
+                    # multimodal token replacement, since
+                    # LanguageModelEmbedding's internal scatter was disabled to
+                    # allow image/video embedding insertion first. When MTP is
+                    # active the scatter already happened per chunk inside the
+                    # MTP branch above, so doing it here would scatter twice.
+                    if self.sequence_parallel:
+                        decoder_input = decoder_input.transpose(
+                            [1, 0, 2]
+                        ).contiguous()
+                        decoder_input = scatter_to_sequence_parallel_region(
+                            decoder_input, group=self.embedding.tp_group
                         )
-                        deepstack_visual_embeds.append(embed_joint)
-                # Scatter decoder_input to SP format [S/tp, B, H] after multimodal
-                # token replacement, since LanguageModelEmbedding's internal scatter
-                # was disabled to allow image/video embedding insertion first.
-                if self.sequence_parallel:
-                    decoder_input = decoder_input.transpose(
-                        [1, 0, 2]
-                    ).contiguous()
-                    decoder_input = scatter_to_sequence_parallel_region(
-                        decoder_input, group=self.embedding.tp_group
-                    )
-                    if self.config.clone_scatter_output_in_embedding:
-                        decoder_input = decoder_input.clone()
+                        if self.config.clone_scatter_output_in_embedding:
+                            decoder_input = decoder_input.clone()
+                else:
+                    # The MTP split shortened the main branch by
+                    # num_nextn_predict_layers, so the full-length visual masks
+                    # no longer line up with hidden_states. Raise instead of
+                    # assert: with ``python -O`` an assertion is stripped and
+                    # the unsupported combination would keep running on
+                    # mismatched shapes.
+                    if deepstack_visual_embeds is not None:
+                        raise ValueError(
+                            "deepstack visual embeds are indexed by "
+                            "visual_pos_masks, which MTP truncates; "
+                            "deepstack + MTP is not supported."
+                        )
+                    if visual_pos_masks is not None:
+                        visual_pos_masks = visual_pos_masks[
+                            ..., : -self.config.num_nextn_predict_layers
+                        ]
             # CP scatter for the plain (no-MTP, no-multimodal) path must happen
             # before rope generation so that get_rotary_seq_len sees local seq len.
             if (
@@ -531,8 +597,9 @@ class GPTEmbedding(FleetLayer):
         ):
             # mtp_emb_res[0] has shape [B, seq_len - num_nextn_predict_layers, H]
             actual_seq_len = mtp_emb_res[0].shape[1]
-            if position_ids.shape[1] > actual_seq_len:
-                mtp_position_ids = position_ids[:, :actual_seq_len]
+            # Sequence is the last axis for both [B, S] and mRoPE's [3, B, S].
+            if position_ids.shape[-1] > actual_seq_len:
+                mtp_position_ids = position_ids[..., :actual_seq_len]
 
         if (
             self.position_embedding_type == "rope"
@@ -756,6 +823,12 @@ class GPTEmbedding(FleetLayer):
         for key in list(preproc_output.keys()):
             if preproc_output[key] is None:
                 preproc_output.pop(key)
+
+        # Ensure all tensors are contiguous for PP P2P send (NCCL requires it).
+        # Containers matter too: "deepstack_visual_emb" is a list of tensors.
+        for key in list(preproc_output.keys()):
+            preproc_output[key] = make_contiguous(preproc_output[key])
+
         return preproc_output
 
     def get_placeholder_mask(

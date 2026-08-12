@@ -269,6 +269,7 @@ class TestPaddleChunkKda(unittest.TestCase):
 def _build_kda(
     use_full_rank_gate=True,
     sequence_parallel=False,
+    hidden_act=F.silu,
     deterministic_mode=True,
     out_norm=SimpleRMSNorm,
     **overrides,
@@ -277,7 +278,7 @@ def _build_kda(
         hidden_size=HIDDEN_SIZE,
         num_attention_heads=NUM_KEY_HEADS,
         num_hidden_layers=2,
-        hidden_act=F.silu,
+        hidden_act=hidden_act,
         rms_norm_eps=1e-5,
         normalization="RMSNorm",
         sequence_parallel=sequence_parallel,
@@ -453,6 +454,8 @@ class TestKimiDeltaAttention(unittest.TestCase):
 
         mock_chunk_kda.assert_called_once()
         call_kwargs = mock_chunk_kda.call_args.kwargs
+        self.assertEqual(call_kwargs["beta"].dtype, paddle.float32)
+        self.assertTrue(call_kwargs["use_qk_l2norm_in_kernel"])
         self.assertTrue(call_kwargs["use_gate_in_kernel"])
         self.assertTrue(call_kwargs["use_beta_sigmoid_in_kernel"])
         self.assertTrue(call_kwargs["safe_gate"])
@@ -460,6 +463,136 @@ class TestKimiDeltaAttention(unittest.TestCase):
         self.assertEqual(
             list(out.shape), [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
         )
+
+    def test_short_conv_always_uses_silu(self):
+        """KDA short convolution uses the official SiLU, not hidden_act."""
+        kda = _build_kda(hidden_act=F.relu)
+        self.assertFalse(hasattr(kda, "act_fn"))
+        self.assertFalse(hasattr(kda, "activation"))
+        x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
+
+        with patch.object(kda_mod.F, "silu", wraps=kda_mod.F.silu) as mock_silu:
+            kda(hidden_states=x, attention_mask=None)
+
+        mock_silu.assert_called_once()
+
+    @unittest.skipUnless(
+        HAVE_FLA, "paddlefleet_ops fla kernels are not available"
+    )
+    def test_fused_sigmoid_gated_norm_contract(self):
+        """Output gating delegates to FLA RMSNorm with sigmoid and Fleet eps."""
+        kda = _build_kda(deterministic_mode=False)
+        hidden_states = paddle.randn(
+            [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
+        )
+        core_attn_out = paddle.randn(
+            [MICRO_BATCH_SIZE, SEQ_LENGTH, NUM_VALUE_HEADS, VALUE_HEAD_DIM]
+        )
+        fused_shape = [
+            MICRO_BATCH_SIZE * SEQ_LENGTH * NUM_VALUE_HEADS,
+            VALUE_HEAD_DIM,
+        ]
+        expected = paddle.randn(fused_shape)
+
+        with (
+            patch.object(
+                kda_mod,
+                "causal_conv1d",
+                side_effect=lambda x, **kwargs: (x, None),
+            ),
+            patch.object(
+                kda_mod,
+                "chunk_kda",
+                return_value=(core_attn_out, None),
+            ),
+            patch.object(
+                kda_mod,
+                "rms_norm_gated",
+                return_value=expected,
+            ) as mock_rms_norm_gated,
+        ):
+            actual, _ = kda(hidden_states=hidden_states, attention_mask=None)
+
+        self.assertEqual(
+            list(actual.shape), [MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE]
+        )
+        args = mock_rms_norm_gated.call_args.args
+        kwargs = mock_rms_norm_gated.call_args.kwargs
+        self.assertEqual(list(args[0].shape), fused_shape)
+        self.assertEqual(list(args[1].shape), fused_shape)
+        self.assertIs(args[2], kda.out_norm.weight)
+        self.assertIsNone(args[3])
+        self.assertEqual(kwargs["activation"], "sigmoid")
+        self.assertEqual(kwargs["eps"], kda.config.rms_norm_eps)
+
+    @unittest.skipUnless(
+        HAVE_FLA, "paddlefleet_ops fla kernels are not available"
+    )
+    def test_fused_sigmoid_gated_norm_forward_backward(self):
+        """Fused RMSNorm+sigmoid matches an independent FP32 oracle."""
+        shape = [2, 7, NUM_VALUE_HEADS, VALUE_HEAD_DIM]
+        for dtype, rtol, atol in (
+            ("float32", 1e-5, 1e-5),
+            ("bfloat16", 1e-2, 1e-2),
+        ):
+            with self.subTest(dtype=dtype):
+                paddle.seed(2026)
+                kda = _build_kda(deterministic_mode=False)
+                kda.out_norm.weight.set_value(
+                    paddle.linspace(0.5, 1.5, VALUE_HEAD_DIM, dtype="float32")
+                )
+
+                x = paddle.randn(shape, dtype=dtype)
+                gate = paddle.randn(shape, dtype=dtype)
+                x.stop_gradient = False
+                gate.stop_gradient = False
+                x_ref = x.detach().clone()
+                gate_ref = gate.detach().clone()
+                weight_ref = kda.out_norm.weight.detach().clone()
+                x_ref.stop_gradient = False
+                gate_ref.stop_gradient = False
+                weight_ref.stop_gradient = False
+
+                actual = kda_mod.rms_norm_gated(
+                    x.reshape([-1, VALUE_HEAD_DIM]),
+                    gate.reshape([-1, VALUE_HEAD_DIM]),
+                    kda.out_norm.weight,
+                    None,
+                    activation="sigmoid",
+                    eps=kda.config.rms_norm_eps,
+                ).reshape(shape)
+                x_ref_fp32 = x_ref.astype("float32")
+                expected = x_ref_fp32 * paddle.rsqrt(
+                    x_ref_fp32.square().mean(axis=-1, keepdim=True)
+                    + kda.config.rms_norm_eps
+                )
+                expected = (
+                    expected
+                    * weight_ref.astype("float32")
+                    * F.sigmoid(gate_ref.astype("float32"))
+                ).astype(dtype)
+
+                output_gradient = paddle.randn(shape, dtype=dtype)
+                (
+                    actual.astype("float32") * output_gradient.astype("float32")
+                ).sum().backward()
+                (
+                    expected.astype("float32")
+                    * output_gradient.astype("float32")
+                ).sum().backward()
+
+                for actual_value, expected_value in (
+                    (actual, expected),
+                    (x.grad, x_ref.grad),
+                    (gate.grad, gate_ref.grad),
+                    (kda.out_norm.weight.grad, weight_ref.grad),
+                ):
+                    paddle.testing.assert_close(
+                        actual_value.astype("float32"),
+                        expected_value.astype("float32"),
+                        rtol=rtol,
+                        atol=atol,
+                    )
 
     def test_forward_low_rank_gate(self):
         kda = _build_kda(use_full_rank_gate=False)
