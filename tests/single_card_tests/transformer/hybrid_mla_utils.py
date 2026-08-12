@@ -53,6 +53,23 @@ from paddlefleet.transformer.mqa_latent_attention import (
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
 
+# An installed ``paddlefleet`` wheel shadows this checkout whenever the source
+# tree misses from ``sys.path`` -- a mistyped ``PYTHONPATH`` is enough, and the
+# symptom is not an ImportError but a stale class: every test that touches a
+# method added after the wheel was built dies with a bare
+# ``AttributeError: 'RecordingMQA' object has no attribute '_dense_attn'`` out of
+# ``Layer.__getattr__``, which says nothing about where the class came from.
+# Name the resolved file instead. ``_dense_attn`` is only a marker; any method
+# this file's fixtures rely on would do.
+if not hasattr(MQALatentAttention, "_dense_attn"):
+    raise ImportError(
+        "MQALatentAttention was imported from "
+        f"{sys.modules[MQALatentAttention.__module__].__file__}, which predates "
+        "the code these fixtures test (no _dense_attn). Put the PaddleFleet "
+        "source tree ahead of site-packages on PYTHONPATH -- e.g. "
+        "PYTHONPATH=<checkout>:<checkout>/src."
+    )
+
 # ---------------------------------------------------------------------------
 # Geometry. DK/DV are hard requirements of the FlashMLA sparse kernel
 # (d_qk in {512, 576}, d_v == 512). K_CHANNELS is the *MHA* q_head_dim
@@ -301,6 +318,28 @@ def _row_end(doc_lens, seqlen):
             break
     if pos < seqlen:
         out[pos:] = seqlen
+    return paddle.to_tensor(out).reshape([1, 1, seqlen, 1])
+
+
+def _pad_row_end(doc_lens, seqlen):
+    """``[1, 1, s, 1]`` int32 ``row_end`` that produces real pad rows.
+
+    ``_row_end`` fills the trailing gap with ``seqlen``, which
+    ``_derive_csa_doc_boundaries`` reads as one more document, so every row comes
+    back ``is_valid``. Repeating the *last document's* end instead leaves
+    ``doc_len_per_pos`` short of ``pos_in_doc`` for the tail, which is the
+    ``is_valid == False`` state a packed batch's padding actually takes.
+    """
+    out = np.empty([seqlen], dtype="int32")
+    pos, end = 0, 0
+    for length in doc_lens:
+        end = pos + length
+        out[pos : min(end, seqlen)] = end
+        pos = end
+        if pos >= seqlen:
+            break
+    if pos < seqlen:
+        out[pos:] = end
     return paddle.to_tensor(out).reshape([1, 1, seqlen, 1])
 
 
@@ -606,6 +645,24 @@ def _production_fa_version():
     if (major, minor) == (9, 0):
         return 3
     return 2
+
+
+@contextlib.contextmanager
+def _cudnn_deterministic(value):
+    """Temporarily pin the process-global ``FLAGS_cudnn_deterministic``.
+
+    Set by the accuracy-diff harnesses (``script/test_aadiff/check_aadiff.sh``,
+    ``script/run_compare_fleet_ec.sh``), and read by
+    ``paddlefleet_ops.flash_mask_facade.get_fa_version``, so it takes part in
+    backend selection rather than only in kernel behaviour.
+    """
+    key = "FLAGS_cudnn_deterministic"
+    previous = paddle.get_flags([key])[key]
+    paddle.set_flags({key: value})
+    try:
+        yield
+    finally:
+        paddle.set_flags({key: previous})
 
 
 def _load_provider(name):

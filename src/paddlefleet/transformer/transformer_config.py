@@ -1677,9 +1677,14 @@ class TransformerConfig(ModelParallelConfig):
                 )
         if self.hybrid_mla_attention == "mqa_full_causal":
             logger.warning(
-                "hybrid_mla_attention='mqa_full_causal' builds a [b, s, s] int32 "
-                "index table per MLA layer (268 MB per layer at s=8192). It "
-                "exists to isolate absorption from sparsity, not to save memory."
+                "hybrid_mla_attention='mqa_full_causal' attends over the whole "
+                "per-document causal span on every MLA layer. It exists to "
+                "isolate absorption from sparsity, not to save memory: FA4 "
+                "serves that span densely, and only where FA4 cannot (fa2/fa3 "
+                "box, context parallelism, FLAGS_cudnn_deterministic) does it "
+                "fall back to a [b, s, s] int32 column table, costing 268 MB "
+                "per layer at s=8192 -- see "
+                "MQALatentAttention._dense_can_serve_full_causal."
             )
         if self.hybrid_mla_attention == "mqa_dsa":
             # On the ``-2`` layers ``dsa_indexer_use_sparse_loss`` decides both

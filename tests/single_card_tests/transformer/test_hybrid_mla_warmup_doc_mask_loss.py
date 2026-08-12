@@ -87,6 +87,7 @@ from .hybrid_mla_utils import (
     _create_mqa_config,
     _doc_meta,
     _make_inputs,
+    _pad_row_end,
     _row_end,
 )
 
@@ -119,28 +120,6 @@ _PAD_LAYOUTS = [
     ([40, 88], 256),  # 128 pad rows after two documents
     ([100, 50, 60], 256),  # 46 pad rows after three documents
 ]
-
-
-def _pad_row_end(doc_lens, seqlen):
-    """``[1, 1, s, 1]`` int32 ``row_end`` that produces real pad rows.
-
-    ``hybrid_mla_utils._row_end`` fills the trailing gap with ``seqlen``, which
-    ``_derive_csa_doc_boundaries`` reads as one more document, so every row comes
-    back ``is_valid``. Repeating the *last document's* end instead leaves
-    ``doc_len_per_pos`` short of ``pos_in_doc`` for the tail, which is the
-    ``is_valid == False`` state a packed batch's padding actually takes.
-    """
-    out = np.empty([seqlen], dtype="int32")
-    pos, end = 0, 0
-    for length in doc_lens:
-        end = pos + length
-        out[pos : min(end, seqlen)] = end
-        pos = end
-        if pos >= seqlen:
-            break
-    if pos < seqlen:
-        out[pos:] = end
-    return paddle.to_tensor(out).reshape([1, 1, seqlen, 1])
 
 
 def _segments(row_end, seqlen):

@@ -54,6 +54,11 @@ def get_fa_version(
           * ``head_dim <= 128`` and ``head_dim_v <= 128``
           * ``head_dim == 192`` and ``head_dim_v == 128``
           * ``head_dim == 256`` and ``head_dim_v == 256``
+          * ``head_dim == 512`` and ``head_dim_v == 512``, unless deterministic
+            is required
+          * ``head_dim == 576`` and ``head_dim_v == 512``, unless deterministic
+            is required -- both of these pairs take FA4's big-head-dim backward,
+            which has no ordered-accumulation variant.
         - ``mask_ok``: ``startend_row_indices is None`` or
           ``startend_row_indices.shape[-1] != 4``
 
@@ -91,8 +96,13 @@ def get_fa_version(
             (head_dim <= 128 and _head_dim_v <= 128)
             or (head_dim == 192 and _head_dim_v == 128)
             or (head_dim == 256 and _head_dim_v == 256)
-            or (head_dim == 512 and _head_dim_v == 512)
-            or (head_dim == 576 and _head_dim_v == 512)
+            # Both of these exceed 256 and so take FA4's big-head-dim backward,
+            # which asserts ``not deterministic`` (``flash_mask/cute/
+            # interface.py``: ``is_bigd_bwd`` -> "deterministic reduction is not
+            # supported by big-headdim bwd"). Degrade instead of aborting, the
+            # same way FA3 degrades above.
+            or (head_dim == 512 and _head_dim_v == 512 and not deterministic)
+            or (head_dim == 576 and _head_dim_v == 512 and not deterministic)
         )
         fa4_mask_ok = (
             startend_row_indices is None or startend_row_indices.shape[-1] != 4
