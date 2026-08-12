@@ -361,6 +361,14 @@ class Trainer:
             args = TrainingArguments(output_dir=output_dir)
 
         self.args = args
+        # Apply the reshard broadcast toggle once here: Trainer.__init__ is the
+        # single point every reshard/EMA path runs after, so all_gather_state_dict
+        # need not thread the flag and no construction site is missed (incl. the
+        # non-ZCC EMA assembler that bypasses create_ema_state_assembler). Difers
+        reshard_util.set_bucketed_broadcast(getattr(self.args, "use_reshard_bucketed_broadcast", False))
+        reshard_util.set_broadcast_max_chunk_bytes(
+            int(getattr(self.args, "reshard_bucketed_broadcast_max_chunk_gb", 2.0) * (1024**3))
+        )
         self.is_in_train = False
         # self.do_grad_scaling = args.fp16
 
@@ -1317,58 +1325,14 @@ class Trainer:
                 else:
                     opt_states[k] = v
 
-            # When a checkpoint dumped under one MoE dispatcher layout is loaded
-            # under another (e.g. allgather N-D experts vs deepep flattened 2-D),
-            # grouped-gemm expert tensors have matching element counts but a
-            # different global_shape, which the flex-checkpoint resharder rejects
-            # with "Global shapes must be the same". Inject AOA reshape statements
-            # so the source is reshaped to the target layout during load.
-            # Restricted to grouped-gemm keys, and only when the two shapes form a
-            # valid canonical(N-D) <-> flattened([d0*d1, prod(rest)]) pair, so it
-            # is a no-op whenever the layouts already agree.
-            grouped_gemm_structs = {
-                k for k, v in model_sharded_state_dict.items() if getattr(v, "grouped_gemm_param", False)
-            }
-
-            def _grouped_gemm_reshape_statements(target_state_dict):
-                statements = []
-                seen = set()
-                for k, sw in target_state_dict.items():
-                    struct_name = re.sub(r"\.(w_0|moment1_0|moment2_0)$", "", k)
-                    if struct_name not in grouped_gemm_structs or struct_name in seen:
-                        continue
-                    meta = state_dict_metadata.get(k)
-                    if meta is None:
-                        continue
-                    meta = meta[0] if isinstance(meta, (list, tuple)) else meta
-                    src_shape = tuple(meta.global_shape)
-                    dst_shape = tuple(sw.global_shape)
-                    if src_shape == dst_shape:
-                        continue
-                    canonical = src_shape if len(src_shape) >= len(dst_shape) else dst_shape
-                    if len(canonical) < 3:
-                        continue
-                    flattened = (canonical[0] * canonical[1], math.prod(canonical[2:]))
-                    if {src_shape, dst_shape} != {canonical, flattened}:
-                        continue
-                    # AOA keys weights by the base model-state name (the optimizer
-                    # suffix is stripped internally), so the statement must use the
-                    # suffix-free struct name on both sides.
-                    seen.add(struct_name)
-                    statements.append(f"{struct_name} -> {struct_name}, reshape = '{list(canonical)}'")
-                return statements
-
-            def _merge_reshape_aoa(aoa_config, statements):
-                if not statements:
-                    return aoa_config
-                merged = dict(aoa_config or {})
-                existing = list(merged.get("aoa_statements", []))
-                merged["aoa_statements"] = existing + [s for s in statements if s not in existing]
-                return merged
-
             # use filtered AOA for master_weight (excludes FP32-only params)
             master_weight_aoa = getattr(self.args, "aoa_config_master_weight", None) or self.args.aoa_config
-            master_weight_aoa = _merge_reshape_aoa(master_weight_aoa, _grouped_gemm_reshape_statements(master_weights))
+            if os.getenv("HACK_CONVERT_CKPT", "0").lower() in ["true", "1"] and os.getenv(
+                "HACK_CONVERT_CKPT_NOPP_TO_PP", "0"
+            ).lower() in ["true", "1"]:
+                logger.info("[AOAConfig] generate master_weight_aoa by _gen_ckpt_convert_aoa !")
+                master_weight_aoa = self.model._gen_ckpt_convert_aoa(self.model.config)
+
             dist.load_state_dict(
                 master_weights,
                 master_weights_path,
@@ -1379,10 +1343,17 @@ class Trainer:
             )
 
             if not self.args.ignore_load_lr_and_optim:
+                opt_stat_aoa = self.args.aoa_config
+                if os.getenv("HACK_CONVERT_CKPT", "0").lower() in ["true", "1"] and os.getenv(
+                    "HACK_CONVERT_CKPT_NOPP_TO_PP", "0"
+                ).lower() in ["true", "1"]:
+                    logger.info("[AOAConfig] generate opt_stat_aoa by _gen_ckpt_convert_aoa !")
+                    opt_stat_aoa = self.model._gen_ckpt_convert_aoa(self.model.config, target="opt_state")
+
                 dist.load_state_dict(
                     opt_states,
                     opt_states_path,
-                    aoa_config=_merge_reshape_aoa(self.args.aoa_config, _grouped_gemm_reshape_statements(opt_states)),
+                    aoa_config=opt_stat_aoa,
                     offload=self.args.load_via_cpu,
                     comm_method=flex_ckpt_comm_method,
                     worker_groups=worker_groups,
@@ -1454,6 +1425,10 @@ class Trainer:
                 if enable_bf16_opt:
                     model_sharded_state_dict = bf16_filtered_sharded_state_dict(model_sharded_state_dict)
                 aoa_config = getattr(self.args, "aoa_config_model_state", None)
+                if os.getenv("HACK_CONVERT_CKPT_NOPP_TO_PP", "0").lower() in ["true", "1"]:
+                    logger.info("[AOAConfig] generate model_state_aoa by _gen_ckpt_convert_aoa_model_state !")
+                    aoa_config = self.model._gen_ckpt_convert_aoa_model_state(self.model.config)
+
             elif enable_bf16_opt:
                 model_sharded_state_dict = bf16_filtered_sharded_state_dict(model_sharded_state_dict)
                 aoa_config = None
@@ -1472,17 +1447,6 @@ class Trainer:
         if enable_bf16_opt:
             opt_state_dict = self.optimizer.state_dict()
 
-            # Structure names of grouped-gemm MoE experts, identified by the
-            # `grouped_gemm_param` attribute on the sharded tensor (same signal
-            # used by the ZCC worker in zero_cost_checkpoint.py). Their saved
-            # master weight can be flattened 2-D while the live param is N-D
-            # (or vice versa) depending on the dispatcher layout, so only these
-            # keys are allowed to reshape on an element-count match. Every other
-            # bf16 param keeps the exact shape check.
-            grouped_gemm_keys = {
-                k for k, v in self.model.sharded_state_dict().items() if getattr(v, "grouped_gemm_param", False)
-            }
-
             def _assign_master_weights_to_model(master_weights):
                 model_state_dict = self.model.state_dict()
                 for key, param in model_state_dict.items():
@@ -1492,13 +1456,9 @@ class Trainer:
                             f"shape {master_weights[param.name].shape} to param "
                             f"{param.name} shape{param.shape}"
                         )
-                        mw_shape = master_weights[param.name].shape
-                        if key in grouped_gemm_keys:
-                            assert math.prod(param.shape) == math.prod(
-                                mw_shape
-                            ), f"grouped-gemm element count mismatch: {param.shape} vs {mw_shape}"
-                        else:
-                            assert param.shape == mw_shape, f"shape mismatch: {param.shape} vs {mw_shape}"
+                        assert (
+                            param.shape == master_weights[param.name].shape
+                        ), f"got {param.shape} vs {master_weights[param.name].shape}"
                         master_weight = paddle.reshape(master_weights[param.name], param.shape)
                         paddle.assign(paddle.cast(to_device(master_weight), paddle.bfloat16), model_state_dict[key])
 
@@ -1580,13 +1540,9 @@ class Trainer:
                             logger.debug(
                                 f"key {key}, convert master weights {param.name} shape {master_weights[param.name].shape} to param {param.name} shape{param.shape}"
                             )
-                            mw_shape = master_weights[param.name].shape
-                            if key in grouped_gemm_keys:
-                                assert math.prod(param.shape) == math.prod(
-                                    mw_shape
-                                ), f"grouped-gemm element count mismatch: {param.shape} vs {mw_shape}"
-                            else:
-                                assert param.shape == mw_shape, f"shape mismatch: {param.shape} vs {mw_shape}"
+                            assert (
+                                param.shape == master_weights[param.name].shape
+                            ), f"got {param.shape} vs {master_weights[param.name].shape}"
                             master_weight = paddle.reshape(master_weights[param.name], param.shape)
                             paddle.assign(
                                 paddle.cast(to_device(master_weight), paddle.bfloat16), model_state_dict[key]
@@ -2470,6 +2426,17 @@ class Trainer:
 
                 for inputs in inputs_list:
                     if step_control % args.gradient_accumulation_steps == 0:
+                        # The ZCC snapshot of the previous step reads GPU buffers over CUDA IPC
+                        # from a separate process. It must be finished before any callback or
+                        # optimizer mutates those buffers, and the earliest mutator is
+                        # `on_step_begin` (FP8 expert quantization clears the bf16 param storage),
+                        # which runs before `on_optimizer_begin`. Sync here, not there.
+                        if (
+                            not args.enable_auto_parallel
+                            and self.args.enable_zero_cost_checkpoint
+                            and self.zcc_manager is not None
+                        ):
+                            self.zcc_manager.maybe_sync_offload_status()
                         self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
                         self.timers and self.timers("forward-backward").start()
 

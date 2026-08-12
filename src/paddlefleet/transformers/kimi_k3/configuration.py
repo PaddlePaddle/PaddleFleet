@@ -221,8 +221,11 @@ class KimiK3TextConfig(PretrainedConfig):
 
         # KDA/MLA hybrid attention schedule
         self.linear_attn_config = linear_attn_config
-        self.layer_types = self._build_layer_types()
-        self._flatten_linear_attn_config()
+        self.layer_types = kwargs.pop("layer_types", None)
+        if isinstance(linear_attn_config, dict):
+            if self.layer_types is None:
+                self.layer_types = self._build_layer_types()
+            self._flatten_linear_attn_config()
         self.attn_res_block_size = attn_res_block_size
 
         # MLA
@@ -305,7 +308,10 @@ class KimiK3TextConfig(PretrainedConfig):
         rules so both derive the KDA/MLA layout from a single source.
         """
         if not isinstance(self.linear_attn_config, dict):
-            raise ValueError("Kimi-K3 requires layer_types or linear_attn_config.")
+            # HF's to_diff_dict() requires no-arg instantiation to succeed.
+            # When constructed without arguments, linear_attn_config is None,
+            # so we return an empty list as a safe default.
+            return []
         kda_layers = self._layer_numbers("kda_layers")
         full_attn_layers = self._layer_numbers("full_attn_layers")
         overlap = kda_layers & full_attn_layers
@@ -346,7 +352,9 @@ class KimiK3TextConfig(PretrainedConfig):
         """
         cfg = self.linear_attn_config
         if not isinstance(cfg, dict):
-            raise ValueError("Kimi-K3 requires linear_attn_config to expose KDA fields.")
+            # No-arg instantiation (e.g. from to_diff_dict()) has no
+            # linear_attn_config; skip flattening silently.
+            return
         head_dim = cfg["head_dim"]
         num_heads = cfg["num_heads"]
         self.linear_conv_kernel_dim = cfg["short_conv_kernel_size"]

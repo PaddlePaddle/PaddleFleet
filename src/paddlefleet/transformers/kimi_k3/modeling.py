@@ -101,6 +101,7 @@ class KimiK3PretrainedModel(PretrainedModel):
         num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
         params_dtype = getattr(config, "params_dtype", getattr(config, "dtype", "bfloat16"))
         layer_types = config.layer_types
+        num_head_empty_layers = getattr(config, "num_empty_layers_add_in_head", 0) or 0
 
         src_model = "language_model.model"
         statements = [
@@ -237,7 +238,7 @@ class KimiK3PretrainedModel(PretrainedModel):
 
         for layer_idx, attention_type in enumerate(layer_types):
             src = f"{src_model}.layers.{layer_idx}"
-            dst = f"model.layers.{layer_idx}"
+            dst = f"model.layers.{layer_idx + num_head_empty_layers}"
             add_attention(src, dst, attention_type)
             add_attention_residual(src, dst)
             if cls._is_moe_layer(config, layer_idx):
@@ -245,16 +246,11 @@ class KimiK3PretrainedModel(PretrainedModel):
             else:
                 add_dense_mlp(src, dst)
 
-        # The released HF checkpoint has no MTP weights. Initialise its
-        # projection/norms normally and seed compatible transformer weights
-        # from the final decoder layer. Fleet builds the MTP attention from
-        # the global attention setting, so a hybrid Kimi config may produce a
-        # regular self-attention block that has no compatible HF source.
+        # The released HF checkpoint has no MTP weights.
         if num_mtp_layers:
-            src = f"{src_model}.layers.{num_layers - 1}"
             for mtp_idx in range(num_mtp_layers):
                 layer_idx = num_layers + mtp_idx
-                mtp = f"model.layers.{layer_idx}"
+                mtp = f"model.layers.{layer_idx + num_head_empty_layers}"
                 dst = f"{mtp}.transformer_layer"
                 statements.extend(
                     [
@@ -264,13 +260,29 @@ class KimiK3PretrainedModel(PretrainedModel):
                         f"_ -> {mtp}.norm.weight",
                     ]
                 )
+                # MTP layers have no HF checkpoint source — cold-init everything.
+                statements.extend(
+                    [
+                        f"_ -> {dst}.input_layernorm.weight",
+                        f"_ -> {dst}.post_attention_layernorm.weight",
+                    ]
+                )
                 if getattr(config, "multi_latent_attention", False):
-                    add_attention(src, dst, "multi_latent_attention")
+                    statements.extend(
+                        [
+                            f"_ -> {dst}.self_attn.q_a_proj.weight",
+                            f"_ -> {dst}.self_attn.q_b_proj.weight",
+                            f"_ -> {dst}.self_attn.kv_a_proj_with_mqa.weight",
+                            f"_ -> {dst}.self_attn.kv_b_proj.weight",
+                            f"_ -> {dst}.self_attn.q_a_layernorm.weight",
+                            f"_ -> {dst}.self_attn.kv_a_layernorm.weight",
+                            f"_ -> {dst}.self_attn.gate_proj.weight",
+                            f"_ -> {dst}.self_attn.o_proj.weight",
+                        ]
+                    )
                 else:
                     statements.extend(
                         [
-                            f"{src}.input_layernorm.weight -> {dst}.input_layernorm.weight",
-                            f"{src}.post_attention_layernorm.weight -> {dst}.post_attention_layernorm.weight",
                             f"_ -> {dst}.self_attn.qkv_proj.weight",
                             f"_ -> {dst}.self_attn.q_norm.weight",
                             f"_ -> {dst}.self_attn.k_norm.weight",
@@ -278,9 +290,45 @@ class KimiK3PretrainedModel(PretrainedModel):
                         ]
                     )
                 if cls._is_moe_layer(config, num_layers - 1):
-                    add_moe(src, dst)
+                    dst_moe = f"{dst}.mlp"
+                    statements.extend(
+                        [
+                            f"_ -> {dst_moe}.gate.weight",
+                            f"_ -> {dst_moe}.gate.e_score_correction_bias",
+                            f"_ -> {dst_moe}.fc1_latent_proj.weight",
+                            f"_ -> {dst_moe}.fc2_latent_proj.weight",
+                            f"_ -> {dst_moe}.latent_norm.weight",
+                        ]
+                    )
+                    if getattr(config, "topk_method", None) == "quantile_balancing":
+                        statements.extend(
+                            [
+                                f"_ -> {dst_moe}.gate.qb_bin_min",
+                                f"_ -> {dst_moe}.gate.qb_bin_max",
+                            ]
+                        )
+                    for expert_idx in range(num_experts):
+                        dst_expert = f"{dst_moe}.experts.{expert_idx}"
+                        statements.extend(
+                            [
+                                f"_ -> {dst_expert}.up_gate_proj.weight",
+                                f"_ -> {dst_expert}.down_proj.weight",
+                            ]
+                        )
+                    if getattr(config, "n_shared_experts", 0) > 0:
+                        statements.extend(
+                            [
+                                f"_ -> {dst_moe}.shared_experts.up_gate_proj.weight",
+                                f"_ -> {dst_moe}.shared_experts.down_proj.weight",
+                            ]
+                        )
                 else:
-                    add_dense_mlp(src, dst)
+                    statements.extend(
+                        [
+                            f"_ -> {dst}.mlp.up_gate_proj.weight",
+                            f"_ -> {dst}.mlp.down_proj.weight",
+                        ]
+                    )
 
         return {"aoa_statements": statements}
 
@@ -294,6 +342,7 @@ class KimiK3PretrainedModel(PretrainedModel):
         num_experts = config.n_routed_experts
         num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
         layer_types = config.layer_types
+        num_head_empty_layers = getattr(config, "num_empty_layers_add_in_head", 0) or 0
         if getattr(config, "moe_expert_fusion", False):
             raise ValueError("Kimi-K3 HF export does not support fused expert weights.")
 
@@ -450,7 +499,7 @@ class KimiK3PretrainedModel(PretrainedModel):
                 )
 
         for layer_idx, attention_type in reversed(list(enumerate(layer_types))):
-            src = f"model.layers.{layer_idx}"
+            src = f"model.layers.{layer_idx + num_head_empty_layers}"
             dst = f"{hf_model}.layers.{layer_idx}"
             add_attention(src, dst, attention_type)
             add_attention_residual(src, dst)
@@ -464,7 +513,7 @@ class KimiK3PretrainedModel(PretrainedModel):
         # an otherwise reloadable HF checkpoint.
         for mtp_idx in range(num_mtp_layers):
             layer_idx = num_layers + mtp_idx
-            mtp = f"model.layers.{layer_idx}"
+            mtp = f"model.layers.{layer_idx + num_head_empty_layers}"
             transformer = f"{mtp}.transformer_layer"
             mtp_keys = [
                 f"{mtp}.enorm.weight",
@@ -807,13 +856,172 @@ def _build_vl_model(config, criterion):
         ignore_index=getattr(config, "ignore_index", -100),
     )
     model.config_to_save = config
-    return FleetKimiK3ForConditionalGeneration(config, model, criterion)
+    wrapper = FleetKimiK3ForConditionalGeneration(config, model, criterion)
+    wrapper._gen_aoa_config = KimiK3ForConditionalGeneration._gen_aoa_config
+    wrapper._gen_inv_aoa_config = KimiK3ForConditionalGeneration._gen_inv_aoa_config
+    return wrapper
 
 
 class KimiK3ForConditionalGeneration(KimiK3PretrainedModel):
     """Kimi-K3 multimodal model: MoonViT3d vision tower + KDA/MLA text backbone."""
 
     is_fleet = True
+
+    @staticmethod
+    def _vl_language_name(name, num_layers):
+        prefix = "model.language_model._layers."
+        if name == "model.embedding.embed_tokens.weight":
+            return f"{prefix}0.embedding.embed_tokens.weight"
+        if name.startswith("model.layers."):
+            index, _, tail = name[len("model.layers.") :].partition(".")
+            return f"{prefix}{int(index) + 1}.{tail}"
+        if name.startswith("model.output_attn_res."):
+            return f"{prefix}{num_layers + 1}.{name[len('model.output_attn_res.') :]}"
+        if name == "model.norm.weight":
+            return f"{prefix}{num_layers + 2}.norm.weight"
+        if name == "model.lm_head.weight":
+            return f"{prefix}{num_layers + 3}.weight"
+        return name
+
+    @classmethod
+    def _gen_aoa_config(cls, config):
+        """Vision statements plus the text statements of the base class, retargeted for VL.
+
+        Shadows the text-only mapping of :class:`KimiK3PretrainedModel` so both halves load
+        from one checkpoint.
+        """
+        text_config = config.get_text_config()
+        vision_config = config.vision_config
+        dtype = getattr(text_config, "dtype", None) or getattr(config, "dtype", None)
+        cast = f", dtype='{dtype}'" if dtype else ""
+        num_layers = text_config.num_hidden_layers
+        vt_layers = vision_config.vt_num_hidden_layers
+        vt_heads = vision_config.vt_num_attention_heads
+        visual_prefix = "model.visual._layers."
+
+        # language model: the text-only targets name a flat model.layers.{i} backbone, which
+        # _vl_language_name maps onto the VL layout. The embedding and the lm head appear
+        # twice in sharded_state_dict(), hence aliases.
+        aliases = {
+            "model.embedding.embed_tokens.weight": "model.language_embedding.embedding.embed_tokens.weight",
+            "model.lm_head.weight": "model.language_lm_head.weight",
+        }
+        aoa_config = {"aoa_statements": []}
+        for statement in KimiK3PretrainedModel._gen_aoa_config(config)["aoa_statements"]:
+            sources, _, target_part = statement.partition("->")
+            target, comma, options = target_part.strip().partition(",")
+            target = target.strip()
+            options = f",{options}" if comma else ""
+            vl_target = cls._vl_language_name(target, num_layers)
+            aoa_config["aoa_statements"].append(f"{sources.strip()} -> {vl_target}{options}")
+            if target in aliases:
+                aoa_config["aoa_statements"].append(f"{sources.strip()} -> {aliases[target]}{options}")
+
+        # visual model: patch-embed, the encoder blocks, the final norm, the sd2_tpool merger
+        # (no parameters) and the projector are consecutive children, so vt_layers + 2 is
+        # skipped. Pipeline-parallel vision would re-number them.
+        if (getattr(vision_config, "pipeline_model_parallel_size", 1) or 1) != 1:
+            raise NotImplementedError(
+                "Kimi-K3 vision AOA statements only cover the single-stage tower; "
+                "pipeline-parallel vision re-numbers the child layers."
+            )
+        aoa_config["aoa_statements"] += [
+            f"vision_tower.patch_embed.proj.weight -> {visual_prefix}0.embedding.proj.weight{cast}",
+            f"vision_tower.patch_embed.pos_emb.weight -> {visual_prefix}0.embedding.pos_emb.weight{cast}",
+            f"vision_tower.encoder.final_layernorm.weight -> {visual_prefix}{vt_layers + 1}.norm.weight{cast}",
+            f"mm_projector.proj.0.weight^T -> {visual_prefix}{vt_layers + 3}.proj.up_gate_proj.weight{cast}",
+            f"mm_projector.proj.2.weight^T -> {visual_prefix}{vt_layers + 3}.proj.down_proj.weight{cast}",
+            f"mm_projector.post_norm.weight -> {visual_prefix}{vt_layers + 3}.post_norm.weight{cast}",
+        ]
+        # HF block i maps to child i + 1, so $LAYER_ID cannot express it.
+        aoa_config["aoa_statements"] += [
+            f"vision_tower.encoder.blocks.{layer_id}.{hf}{'^T' if transpose else ''} -> "
+            f"{visual_prefix}{layer_id + 1}.{fleet}{cast}"
+            for layer_id in range(vt_layers)
+            for hf, fleet, transpose in (
+                ("norm0.weight", "input_layernorm.weight", False),
+                ("wo.weight", "self_attn.o_proj.weight", True),
+                ("norm1.weight", "post_attention_layernorm.weight", False),
+                ("mlp.fc0.weight", "mlp.up_gate_proj.weight", True),
+                ("mlp.fc1.weight", "mlp.down_proj.weight", True),
+            )
+        ]
+        # visual attention qkv: HF fuses as [all Q | all K | all V] while Fleet expects the
+        # interleaved [q0 k0 v0 ...] layout, so a plain ^T would load and compute garbage.
+        aoa_config["aoa_statements"] += [
+            stmt
+            for layer_id in range(vt_layers)
+            for stmt in (
+                f"vision_tower.encoder.blocks.{layer_id}.wqkv.weight -> k3vqkv{layer_id}{cast}",
+                f"k3vqkv{layer_id} -> k3vqkv{layer_id}q,k3vqkv{layer_id}k,k3vqkv{layer_id}v, axis=0",
+                f"k3vqkv{layer_id}q^T,k3vqkv{layer_id}k^T,k3vqkv{layer_id}v^T -> "
+                f"{visual_prefix}{layer_id + 1}.self_attn.qkv_proj.weight, fused_qkv, "
+                f"num_heads={vt_heads}, num_key_value_groups={vt_heads}",
+            )
+        ]
+        return aoa_config
+
+    @classmethod
+    def _gen_inv_aoa_config(cls, config):
+        """Inverse of :meth:`_gen_aoa_config`: VL weights back to the official HF schema."""
+        text_config = config.get_text_config()
+        vision_config = config.vision_config
+        num_layers = text_config.num_hidden_layers
+        vt_layers = vision_config.vt_num_hidden_layers
+        vt_heads = vision_config.vt_num_attention_heads
+        visual_prefix = "model.visual._layers."
+
+        # language model: here the Fleet names are the sources, so rewrite the left side.
+        aoa_config = {"aoa_statements": []}
+        for statement in KimiK3PretrainedModel._gen_inv_aoa_config(config)["aoa_statements"]:
+            source_part, _, targets = statement.partition("->")
+            sources = []
+            for source in source_part.split(","):
+                source = source.strip()
+                transposed = source.endswith("^T")
+                name = cls._vl_language_name(source[:-2] if transposed else source, num_layers)
+                sources.append(f"{name}^T" if transposed else name)
+            aoa_config["aoa_statements"].append(f"{','.join(sources)} -> {targets.strip()}")
+
+        aoa_config["aoa_statements"] += [
+            "model.language_embedding.embedding.embed_tokens.weight -> _",
+            "model.language_lm_head.weight -> _",
+        ]
+
+        # visual model
+        aoa_config["aoa_statements"] += [
+            f"{visual_prefix}0.embedding.proj.weight -> vision_tower.patch_embed.proj.weight",
+            f"{visual_prefix}0.embedding.pos_emb.weight -> vision_tower.patch_embed.pos_emb.weight",
+            f"{visual_prefix}{vt_layers + 1}.norm.weight -> vision_tower.encoder.final_layernorm.weight",
+            f"{visual_prefix}{vt_layers + 3}.proj.up_gate_proj.weight^T -> mm_projector.proj.0.weight",
+            f"{visual_prefix}{vt_layers + 3}.proj.down_proj.weight^T -> mm_projector.proj.2.weight",
+            f"{visual_prefix}{vt_layers + 3}.post_norm.weight -> mm_projector.post_norm.weight",
+        ]
+        aoa_config["aoa_statements"] += [
+            f"{visual_prefix}{layer_id + 1}.{fleet}{'^T' if transpose else ''} -> "
+            f"vision_tower.encoder.blocks.{layer_id}.{hf}"
+            for layer_id in range(vt_layers)
+            for hf, fleet, transpose in (
+                ("norm0.weight", "input_layernorm.weight", False),
+                ("wo.weight", "self_attn.o_proj.weight", True),
+                ("norm1.weight", "post_attention_layernorm.weight", False),
+                ("mlp.fc0.weight", "mlp.up_gate_proj.weight", True),
+                ("mlp.fc1.weight", "mlp.down_proj.weight", True),
+            )
+        ]
+        # visual attention qkv: unfuse the interleaved layout, then concatenate as HF stores it
+        aoa_config["aoa_statements"] += [
+            stmt
+            for layer_id in range(vt_layers)
+            for stmt in (
+                f"{visual_prefix}{layer_id + 1}.self_attn.qkv_proj.weight -> "
+                f"k3vqkv{layer_id}q,k3vqkv{layer_id}k,k3vqkv{layer_id}v, fused_qkv, "
+                f"num_heads={vt_heads}, num_key_value_groups={vt_heads}",
+                f"k3vqkv{layer_id}q^T,k3vqkv{layer_id}k^T,k3vqkv{layer_id}v^T -> "
+                f"vision_tower.encoder.blocks.{layer_id}.wqkv.weight, axis=0",
+            )
+        ]
+        return aoa_config
 
     def __new__(cls, config, have_criterion=True):
         if getattr(config, "vision_config", None) is None:

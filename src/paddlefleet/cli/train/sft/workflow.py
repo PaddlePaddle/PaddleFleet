@@ -336,6 +336,7 @@ def run_sft(
     # Sync arguments to MLLM sub_config
     if getattr(model_config, "text_config", None) is not None:
         LlmMetaConfig.set_llm_config(model_config.text_config, training_args)
+        model_config.text_config._attn_implementation = model_args._attn_implementation
         model_config.text_config.max_sequence_length = data_args.max_seq_len
         if hasattr(model_config.text_config, "mtp_num_hidden_layers"):
             model_config.text_config.mtp_num_hidden_layers = getattr(training_args, "num_nextn_predict_layers", 0)
@@ -344,6 +345,9 @@ def run_sft(
         model_config.vision_config.recompute_granularity = model_config.recompute_granularity
         model_config.vision_config.recompute_method = model_config.recompute_method
         model_config.vision_config.recompute_num_layers = model_config.recompute_num_layers
+        # recompute_granularity="selective" requires recompute_modules to be set,
+        # otherwise the vision TransformerConfig.__post_init__ assertion fails.
+        model_config.vision_config.recompute_modules = getattr(model_config, "recompute_modules", None)
 
     # Sync freeze_config to model_config so that Fleet model providers can read it
     freeze_config = getattr(training_args, "freeze_config", "")
