@@ -11,30 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import sys
 import unittest
 import warnings
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
-# Prefer the in-tree source over any (possibly stale) installed paddlefleet so
-# the tests exercise the code under `src/` in this workspace.
-_REPO_ROOT = os.path.dirname(
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    )
-)
-sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 
 class TestSeparateMtpHeadlossValidation(unittest.TestCase):
