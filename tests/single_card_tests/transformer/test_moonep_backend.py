@@ -448,6 +448,166 @@ class TestMoonEPBufferCache(unittest.TestCase):
         self.assertEqual(moonep._buffer_cache, {})
 
 
+class TestMoonEPWeightBridge(unittest.TestCase):
+    def test_unavailable_runtime_and_unaligned_storage_are_rejected(self):
+        with (
+            mock.patch.object(moonep, "_MOONEP_AVAILABLE", False),
+            self.assertRaisesRegex(ImportError, "MoonEP is unavailable"),
+        ):
+            moonep._require_moonep()
+
+        group = object()
+        with (
+            mock.patch.object(moonep, "_MOONEP_AVAILABLE", True),
+            mock.patch.object(paddle.distributed, "get_rank", return_value=0),
+            mock.patch.object(
+                paddle.distributed, "get_world_size", return_value=2
+            ),
+            mock.patch.object(
+                moonep, "get_vmm_granularity", return_value=256, create=True
+            ),
+            self.assertRaisesRegex(ValueError, "must be VMM aligned"),
+        ):
+            moonep._allocate_mapping(
+                [1], paddle.float32, group, with_reduce_view=False
+            )
+
+    def test_fabric_mapping_includes_owner_and_reduce_views(self):
+        group = object()
+        expert_handle = paddle.to_tensor([11, 12], dtype="int64")
+        slot_handle = paddle.to_tensor([21, 22], dtype="int64")
+        gathered_experts = paddle.to_tensor([[11, 12], [13, 14]], dtype="int64")
+        gathered_slots = paddle.to_tensor([[21, 22], [23, 24]], dtype="int64")
+
+        with (
+            mock.patch.object(moonep, "_MOONEP_AVAILABLE", True),
+            mock.patch.object(paddle.distributed, "get_rank", return_value=1),
+            mock.patch.object(
+                paddle.distributed, "get_world_size", return_value=2
+            ),
+            mock.patch.object(
+                moonep, "get_vmm_granularity", return_value=128, create=True
+            ),
+            mock.patch.object(
+                moonep, "_use_fabric_for_group", return_value=True, create=True
+            ),
+            mock.patch.object(
+                moonep,
+                "nvl_dist_alloc",
+                side_effect=(
+                    (
+                        mock.sentinel.expert_keepalive,
+                        expert_handle,
+                        mock.sentinel.expert_owned,
+                    ),
+                    (
+                        mock.sentinel.slot_keepalive,
+                        slot_handle,
+                        mock.sentinel.slot_owned,
+                    ),
+                ),
+                create=True,
+            ),
+            mock.patch.object(
+                moonep,
+                "_all_gather_shareables",
+                side_effect=(gathered_experts, gathered_slots),
+                create=True,
+            ) as gather,
+            mock.patch.object(
+                moonep,
+                "nvl_dist_map",
+                side_effect=(mock.sentinel.full, mock.sentinel.reduce_view),
+                create=True,
+            ),
+            mock.patch.object(
+                moonep, "nvl_release_mem_handle", create=True
+            ) as release_handle,
+        ):
+            mapped, mapped_reduce, keepalives = moonep._allocate_mapping(
+                [128], paddle.bfloat16, group, with_reduce_view=True
+            )
+
+        self.assertIs(mapped, mock.sentinel.full)
+        self.assertIs(mapped_reduce, mock.sentinel.reduce_view)
+        self.assertEqual(
+            keepalives,
+            (mock.sentinel.expert_keepalive, mock.sentinel.slot_keepalive),
+        )
+        self.assertEqual(gather.call_count, 2)
+        release_handle.assert_has_calls(
+            [
+                mock.call(mock.sentinel.expert_owned),
+                mock.call(mock.sentinel.slot_owned),
+            ]
+        )
+
+    def test_bridge_validates_layout_and_requires_a_buffer(self):
+        common = {
+            "group": object(),
+            "num_local_experts": 1,
+            "weight1_shape": [1, 128, 128],
+            "weight2_shape": [1, 128, 128],
+        }
+        with (
+            mock.patch.object(paddle.distributed, "get_rank", return_value=0),
+            mock.patch.object(
+                paddle.distributed, "get_world_size", return_value=2
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "even expert distribution"):
+                moonep.MoonEPWeightBridge(num_experts=3, **common)
+            with self.assertRaisesRegex(
+                ValueError, "grouped 3-D expert weights"
+            ):
+                moonep.MoonEPWeightBridge(
+                    num_experts=2,
+                    **{**common, "weight1_shape": [128, 128]},
+                )
+            with (
+                mock.patch.object(
+                    moonep,
+                    "_allocate_mapping",
+                    side_effect=RuntimeError("stop after validation"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "stop after validation"),
+            ):
+                moonep.MoonEPWeightBridge(num_experts=2, **common)
+
+        bridge = object.__new__(moonep.MoonEPWeightBridge)
+        bridge.buffer = None
+        with self.assertRaisesRegex(RuntimeError, "no communication buffer"):
+            bridge.prepare(None, None, None)
+
+        bridge.buffer = mock.Mock()
+        bridge.rank = 0
+        bridge.num_local_experts = 1
+        bridge.projections = []
+        plan = object()
+        with (
+            mock.patch.object(
+                moonep, "launch_inter_rank_sync", create=True
+            ) as sync,
+            mock.patch.object(bridge, "prefetch") as prefetch,
+        ):
+            bridge.prepare(None, None, plan)
+        sync.assert_called_once_with(bridge.buffer._require_ctx.return_value)
+        prefetch.assert_called_once_with(plan)
+
+    def test_destroy_is_idempotent(self):
+        bridge = object.__new__(moonep.MoonEPWeightBridge)
+        bridge.projections = [object()]
+        bridge.buffer = object()
+        bridge._destroyed = False
+
+        bridge.destroy()
+        bridge.destroy()
+
+        self.assertEqual(bridge.projections, [])
+        self.assertIsNone(bridge.buffer)
+        self.assertTrue(bridge._destroyed)
+
+
 class TestMoonEPBalanceLog(unittest.TestCase):
     @staticmethod
     def _layer(dispatcher_type):
