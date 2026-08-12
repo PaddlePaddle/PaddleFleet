@@ -1468,11 +1468,13 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
-            assert self.activation_type not in ("geglu", "situ"), (
-                "FP8 MoE path only supports activation_type='swiglu' yet, "
-                f"but got {self.activation_type!r}. Please disable fp8 or "
-                "implement the corresponding FP8 activation kernel."
-            )
+            if self.activation_type in ("geglu", "situ"):
+                raise ValueError(
+                    "FP8 MoE path only supports activation_type='swiglu' "
+                    f"yet, but got {self.activation_type!r}. Please disable "
+                    "fp8 or implement the corresponding FP8 activation "
+                    "kernel."
+                )
             return self.fwd_down_fp8(
                 o1, unzipped_probs, expert_w2, num_expert, o3, clear_o1
             )

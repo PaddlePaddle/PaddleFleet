@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 
@@ -70,31 +73,37 @@ class TestSituGLU(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "even last dimension"):
             situ_glu(paddle.ones([2, 7]))
 
-    def test_rejects_non_positive_scales(self):
+    def test_rejects_invalid_scales(self):
         x = paddle.ones([2, 8])
         probs = paddle.ones([2])
         out_grad = paddle.ones([2, 4])
-        invalid_scales = (-1.0, 0.0)
+        invalid_scales = (
+            -1.0,
+            0.0,
+            float("-inf"),
+            float("inf"),
+            float("nan"),
+        )
 
         for beta in invalid_scales:
             with (
                 self.subTest(beta=beta, function="situ"),
-                self.assertRaises(AssertionError),
+                self.assertRaisesRegex(ValueError, "positive finite"),
             ):
                 situ(x, beta=beta)
             with (
                 self.subTest(beta=beta, function="situ_glu"),
-                self.assertRaises(AssertionError),
+                self.assertRaisesRegex(ValueError, "positive finite"),
             ):
                 situ_glu(x, beta=beta)
             with (
                 self.subTest(beta=beta, function="situ_glu_scale_forward"),
-                self.assertRaises(AssertionError),
+                self.assertRaisesRegex(ValueError, "positive finite"),
             ):
                 situ_glu_scale_forward(x, probs, beta=beta)
             with (
                 self.subTest(beta=beta, function="situ_glu_scale_backward"),
-                self.assertRaises(AssertionError),
+                self.assertRaisesRegex(ValueError, "positive finite"),
             ):
                 situ_glu_scale_backward(x, probs, out_grad, beta=beta)
 
@@ -104,7 +113,7 @@ class TestSituGLU(unittest.TestCase):
                     linear_beta=linear_beta,
                     function="situ_glu",
                 ),
-                self.assertRaises(AssertionError),
+                self.assertRaisesRegex(ValueError, "positive finite"),
             ):
                 situ_glu(x, linear_beta=linear_beta)
             with (
@@ -112,7 +121,7 @@ class TestSituGLU(unittest.TestCase):
                     linear_beta=linear_beta,
                     function="situ_glu_scale_forward",
                 ),
-                self.assertRaises(AssertionError),
+                self.assertRaisesRegex(ValueError, "positive finite"),
             ):
                 situ_glu_scale_forward(x, probs, linear_beta=linear_beta)
             with (
@@ -120,7 +129,7 @@ class TestSituGLU(unittest.TestCase):
                     linear_beta=linear_beta,
                     function="situ_glu_scale_backward",
                 ),
-                self.assertRaises(AssertionError),
+                self.assertRaisesRegex(ValueError, "positive finite"),
             ):
                 situ_glu_scale_backward(
                     x,
@@ -289,15 +298,49 @@ class TestSituGLU(unittest.TestCase):
                     )
                 )
 
-    def test_fused_node_rejects_situ_fp8(self):
-        node = ExpertsGroupGemmContiguousNode.__new__(
-            ExpertsGroupGemmContiguousNode
-        )
-        node.use_fp8_mlp = True
-        node.activation_type = "situ"
+    def test_fused_node_rejects_unsupported_fp8_activations(self):
+        for activation_type in ("geglu", "situ"):
+            with self.subTest(activation_type=activation_type):
+                node = ExpertsGroupGemmContiguousNode.__new__(
+                    ExpertsGroupGemmContiguousNode
+                )
+                node.use_fp8_mlp = True
+                node.activation_type = activation_type
 
-        with self.assertRaisesRegex(AssertionError, "only supports.*swiglu"):
-            node.fwd_down(None, None, None, 0)
+                with self.assertRaisesRegex(
+                    ValueError, "only supports.*swiglu"
+                ):
+                    node.fwd_down(None, None, None, 0)
+
+    def test_runtime_guards_survive_optimized_mode(self):
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../..")
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [
+                os.path.join(repo_root, "src"),
+                os.path.dirname(__file__),
+                env.get("PYTHONPATH", ""),
+            ]
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-O",
+                "-m",
+                "unittest",
+                "-v",
+                "test_situ_glu.TestSituGLU.test_rejects_invalid_scales",
+                "test_situ_glu.TestSituGLU."
+                "test_fused_node_rejects_unsupported_fp8_activations",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_moe_layer_accepts_situ_fusion_options(self):
         model_parallel_cuda_manual_seed(2026)

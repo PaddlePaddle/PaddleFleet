@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import math
+
 import paddle
 import paddle.nn.functional as F
 
@@ -21,7 +23,10 @@ import paddle.nn.functional as F
 def situ(x: paddle.Tensor, beta: float = 1.0) -> paddle.Tensor:
     """Apply the SiTU gate activation with float32 intermediates."""
 
-    assert beta > 0
+    if not math.isfinite(beta) or beta <= 0:
+        raise ValueError(
+            f"SiTU beta must be a positive finite value, but got {beta!r}."
+        )
 
     input_dtype = x.dtype
     x = x.astype("float32")
@@ -42,8 +47,17 @@ def situ_glu(
             f"concatenated [gate, up] projections, but got {x.shape[-1]}."
         )
 
-    assert beta > 0
-    assert linear_beta is None or linear_beta > 0
+    if not math.isfinite(beta) or beta <= 0:
+        raise ValueError(
+            f"SiTU beta must be a positive finite value, but got {beta!r}."
+        )
+    if linear_beta is not None and (
+        not math.isfinite(linear_beta) or linear_beta <= 0
+    ):
+        raise ValueError(
+            "SiTU linear_beta must be a positive finite value or None, "
+            f"but got {linear_beta!r}."
+        )
 
     input_dtype = x.dtype
     gate, up = paddle.chunk(x, chunks=2, axis=-1)
@@ -83,8 +97,17 @@ def situ_glu_scale_backward(
 ) -> tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Backward for :func:`situ_glu_scale_forward`."""
 
-    assert beta > 0
-    assert linear_beta is None or linear_beta > 0
+    if not math.isfinite(beta) or beta <= 0:
+        raise ValueError(
+            f"SiTU beta must be a positive finite value, but got {beta!r}."
+        )
+    if linear_beta is not None and (
+        not math.isfinite(linear_beta) or linear_beta <= 0
+    ):
+        raise ValueError(
+            "SiTU linear_beta must be a positive finite value or None, "
+            f"but got {linear_beta!r}."
+        )
 
     gate, up = paddle.chunk(x, chunks=2, axis=-1)
     gate = gate.astype("float32")
