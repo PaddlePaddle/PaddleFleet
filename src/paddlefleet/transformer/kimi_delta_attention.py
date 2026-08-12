@@ -41,6 +41,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 
 from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.triton_ops.utils import is_triton_available
@@ -305,6 +306,16 @@ class KimiDeltaAttention(FleetLayer):
         if self.use_fused_kernels and not _FUSED_KERNEL_LOGGED:
             _FUSED_KERNEL_LOGGED = True
             log_single_rank(logger, logging.INFO, "KDA will use fused kernel")
+
+        # Selectively recompute the gated RMSNorm in backward instead of keeping
+        # its output activation around. Uses RecomputeWithoutOutput so the norm
+        # output buffer is discarded after the forward and rebuilt just before
+        # out_proj's backward needs it.
+        self.recompute_rms_norm_gated = (
+            self.config.recompute_granularity == "selective"
+            and self.config.recompute_modules is not None
+            and "rms_norm_gated" in self.config.recompute_modules
+        )
 
         # q/k/v/beta are all sharded by head, so both head counts must divide
         # evenly; otherwise the per-tensor split sizes in forward() silently stop
@@ -793,6 +804,42 @@ class KimiDeltaAttention(FleetLayer):
 
         # Gated norm
         nvtx_range_push(suffix="gated_norm")
+        gated_norm_recompute = None
+        if self.recompute_rms_norm_gated and self.training:
+            # Drop the norm output activation now and re-run the gated norm
+            # in backward. The recompute hook is registered on out_proj's
+            # output below, so it fires right before out_proj needs its input.
+            # The reshape/transpose are folded into the recomputed function so
+            # the discarded tensor is exactly the one out_proj saves; otherwise
+            # out_proj would hold a separate reshape view and nothing is freed.
+            gated_norm_recompute = RecomputeWithoutOutput()
+            norm_out = gated_norm_recompute.recompute(
+                lambda c, g: self._gated_norm(c, g, batch, seq_len),
+                core_attn_out,
+                gate,
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+        else:
+            norm_out = self._gated_norm(core_attn_out, gate, batch, seq_len)
+        nvtx_range_pop(suffix="gated_norm")
+
+        nvtx_range_push(suffix="out_proj")
+        out, out_bias = self.out_proj(norm_out)
+        nvtx_range_pop(suffix="out_proj")
+
+        if gated_norm_recompute is not None:
+            gated_norm_recompute.discard_output_and_register_recompute(out)
+
+        return out, out_bias
+
+    def _gated_norm(self, core_attn_out, gate, batch, seq_len):
+        """Per-head gated RMSNorm, returning the [b, s, v_dim] output.
+
+        Wraps both the fused FLA kernel and the paddle-native fallback, and
+        folds in the final reshape (and the sequence-parallel transpose) so the
+        whole gated-norm block is a single self-contained recompute segment.
+        """
         if self.use_fused_kernels:
             norm_out = rms_norm_gated(
                 core_attn_out.reshape([-1, self.value_head_dim]),
@@ -804,19 +851,13 @@ class KimiDeltaAttention(FleetLayer):
             )
         else:
             norm_out = self._apply_gated_norm(core_attn_out, gate)
-        nvtx_range_pop(suffix="gated_norm")
 
         # [b, s, num_heads, head_dim] -> [b, s, v_dim]
         norm_out = norm_out.reshape([batch, seq_len, -1])
 
         if self.config.sequence_parallel:
             norm_out = norm_out.transpose([1, 0, 2]).contiguous()
-
-        nvtx_range_push(suffix="out_proj")
-        out, out_bias = self.out_proj(norm_out)
-        nvtx_range_pop(suffix="out_proj")
-
-        return out, out_bias
+        return norm_out
 
     def _check_decode_supported(
         self, cu_seqlens, attn_mask_startend_row_indices
