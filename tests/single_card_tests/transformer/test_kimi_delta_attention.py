@@ -1168,6 +1168,22 @@ class TestGatedNormRecompute(unittest.TestCase):
         # list without a count still recomputes every layer
         self.assertTrue(flag(1, ["rms_norm_gated"]))
 
+    def test_layer_count_without_valid_method_raises(self):
+        """A layer count with no first_n/block method must raise, not silently
+        fall through to first_n (which an assert would under python -O)."""
+        # recompute_method=None is accepted by the config for selective, so the
+        # guard has to live in the layer resolver itself.
+        for modules in (["rms_norm_gated"], {"rms_norm_gated": 1}):
+            overrides = {
+                "recompute_granularity": "selective",
+                "recompute_modules": modules,
+                "recompute_method": None,
+            }
+            if isinstance(modules, list):
+                overrides["recompute_num_layers"] = 1
+            with self.assertRaises(ValueError):
+                _build_kda(layer_number=0, config_overrides=overrides)
+
     def _assert_matches_baseline(self, deterministic):
         paddle.seed(0)
         baseline = _build_kda(deterministic_mode=deterministic)

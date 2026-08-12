@@ -473,18 +473,22 @@ class KimiDeltaAttention(FleetLayer):
         """Whether this layer_number is in the selective-recompute set.
 
         Mirrors Attention/MLA: recompute_method picks first_n vs block, and
-        recompute_num_layers is the per-module layer count.
+        recompute_num_layers is the per-module layer count. Uses an explicit
+        raise (not assert) so an invalid method cannot silently fall through to
+        first_n under ``python -O``, which would change the recompute set.
         """
-        assert self.config.recompute_method in ["first_n", "block"], (
-            "selective recompute of rms_norm_gated with a layer count requires "
-            "recompute_method to be 'first_n' or 'block'"
-        )
         if self.config.recompute_method == "block":
             return need_recompute_in_block(
                 self.layer_number, self.config, recompute_num_layers
             )
-        return need_recompute_in_first_n(
-            self.layer_number, self.config, recompute_num_layers
+        if self.config.recompute_method == "first_n":
+            return need_recompute_in_first_n(
+                self.layer_number, self.config, recompute_num_layers
+            )
+        raise ValueError(
+            "selective recompute of rms_norm_gated with a layer count requires "
+            "recompute_method to be 'first_n' or 'block', got "
+            f"{self.config.recompute_method!r}"
         )
 
     def _build_lora_pair(self, a_spec, b_spec):
