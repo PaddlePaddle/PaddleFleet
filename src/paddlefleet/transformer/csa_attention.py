@@ -2245,10 +2245,13 @@ class CompressedSparseAttention(FleetLayer):
             x_det.stop_gradient = False
             qr_det.stop_gradient = False
 
-        # Loss and main attention intentionally use different top-k widths
-        # during phase 2. ``dsa_indexer_use_sparse_loss=False`` expands only
-        # the indexer loss to the full compressed range; the main CSA attention
-        # remains sparse and consumes ``min(index_topk, n_compressed)``.
+        # Phase 2 (``dsa_indexer_use_sparse_loss=False``) widens *both* the main
+        # attention and the indexer loss to the full compressed range: an
+        # indexer that is still being learned must not steer attention, so
+        # ``_resolve_topk_effective`` returns ``n_compressed`` and the single
+        # ``topk_effective`` below feeds the attention selection and
+        # ``FusedDSAIndexerLoss`` alike. Phase 3/4 narrows both to
+        # ``min(index_topk, n_compressed)``.
         indexer_backend = getattr(
             self.config, "csa_indexer_backend", "tilelang"
         )

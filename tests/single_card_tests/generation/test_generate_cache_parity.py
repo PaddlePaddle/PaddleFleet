@@ -30,9 +30,19 @@ and the per-step ``return_log_probs`` must match up to bf16 recompute noise. A
 divergence means the incremental-decode path (KV read-back, position ids, cache
 bookkeeping) disagrees with the ground-truth full recompute.
 
+The parity assertions are shared by :class:`_CacheParityTests` and applied to
+one model per attention flavour, because the two ``generate`` paths diverge for
+different reasons in each:
+
+* :class:`TestGenerateCacheParity` -- a tiny dense ``GPTModel`` with standard
+  ``DotProductAttention``, exercising the plain full-attention KV cache.
+* :class:`TestGenerateCacheParityHySparse` -- the HySparse MLA-absorbed MQA
+  stack (sliding-window + block-sparse branches, two attention sinks), which is
+  what the ``_is_incremental_decode`` / ``_hy_sparse_decode_block_indices``
+  machinery actually exists for. Skipped unless the TileLang kernels can run.
+
 This exercises a real ``GPTModel`` end to end, so unlike
-``test_hysparse_decode_unit.py`` it needs a CUDA device (standard
-``DotProductAttention``; no SM10.x/FlashMask/DSA required) and is *skipped on
+``test_hysparse_decode_unit.py`` it needs a CUDA device and is *skipped on
 CPU-only CI runners* -- which the reviewer explicitly accepted for this case.
 """
 
@@ -40,6 +50,7 @@ import functools
 import unittest
 
 import paddle
+import paddle.nn.functional as F
 from paddle.distributed import fleet
 
 from paddlefleet.generation.greedy_generator import GreedyGenerator
@@ -107,20 +118,173 @@ def _make_model(
     return gpt_builder(config, num_stages=1), config
 
 
-@unittest.skipUnless(
-    paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0,
-    "generate() runs the real GPTModel forward, which needs a CUDA device",
-)
-class TestGenerateCacheParity(unittest.TestCase):
-    """Full-prefill (no_cache) vs prefill+incremental-decode must agree."""
+# ---- HySparse MQA model ---------------------------------------------------
 
-    @classmethod
-    def setUpClass(cls):
-        cls.vocab_size = 64
-        cls.model, cls.config = _make_model(vocab_size=cls.vocab_size)
-        cls.gen = GreedyGenerator(cls.model)
-        cls.input_ids = paddle.to_tensor([[1, 5, 10, 3]], dtype="int64")
-        cls.max_new_tokens = 8
+HYSPARSE_HIDDEN = 2048
+HYSPARSE_HEADS = 64
+HYSPARSE_WINDOW = 128
+HYSPARSE_BLOCK = 64
+HYSPARSE_TOPK = 16
+# 24 key blocks > TOPK, so the block-sparse branch really selects a subset (a
+# prompt short enough to fit in TOPK blocks would select everything and hide
+# selection bugs in the decode path).
+HYSPARSE_PROMPT_LEN = 1536
+
+
+def _hysparse_available() -> bool:
+    """Whether the TileLang HySparse kernels can run (needs SM 10.x)."""
+    if (
+        not paddle.is_compiled_with_cuda()
+        or paddle.device.cuda.device_count() == 0
+        or paddle.device.cuda.get_device_capability()[0] != 10
+    ):
+        return False
+    try:
+        from paddlefleet.tilelang_ops.hysparse import (  # noqa: F401
+            sliding_window_mqa_attention,
+        )
+        from paddlefleet.tilelang_ops.hysparse.block_sparse_mqa_tl import (  # noqa: F401
+            block_sparse_mqa_attention_tl,
+        )
+    except (ImportError, RuntimeError):
+        return False
+    return True
+
+
+def _make_hysparse_model(vocab_size: int = 256, num_layers: int = 2):
+    """Build the HySparse MLA-absorbed MQA model as a full ``GPTModel``.
+
+    The attention dims and HySparse flags mirror
+    ``test_hysparse_decode_sink_parity.TestHySparseDecodeSinkParity._build_config``
+    so this covers the same architecture end to end, with one deviation:
+    ``num_key_value_heads`` must equal ``num_attention_heads`` because
+    :class:`MultiLatentAttention` rejects GQA. That costs no coverage -- MLA
+    absorbs KV into ``kv_lora_rank`` and hardcodes ``num_key_value_heads=1`` for
+    ``core_attention``, so the config field is unused on this path.
+
+    ``window_attn_skip_freq=2`` makes layer 0 full attention and layer 1 SWA,
+    which is the pairing ``HySparseTransformerLayer`` requires: the full layer
+    publishes ``shared_key`` / ``block_indices`` that the SWA layer consumes.
+    ``gpt_builder`` picks ``HySparseTransformerLayer`` + ``MQASelfAttention``
+    from ``multi_latent_attention`` + ``enable_hy_sparse_attention`` alone.
+    """
+    paddle.manual_seed(0)
+    config = GPTConfig(
+        num_hidden_layers=num_layers,
+        vocab_size=vocab_size,
+        max_sequence_length=HYSPARSE_PROMPT_LEN + 64,
+        hidden_size=HYSPARSE_HIDDEN,
+        intermediate_size=HYSPARSE_HIDDEN * 2,
+        normalization="RMSNorm",
+        hidden_dropout_prob=0.0,
+        attention_dropout=0.0,
+        tie_word_embeddings=True,
+        init_method=functools.partial(paddle.nn.init.xavier_uniform_, gain=1.0),
+        output_layer_init_method=functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        head_dim=192,
+        num_attention_heads=HYSPARSE_HEADS,
+        num_key_value_heads=HYSPARSE_HEADS,
+        gated_attention=True,
+        gated_attn_use_q_lora=True,
+        q_lora_rank=1024,
+        qk_rope_head_dim=64,
+        qk_nope_head_dim=192,
+        v_head_dim=256,
+        kv_lora_rank=448,
+        rope_theta=640000,
+        use_qk_norm=True,
+        multi_latent_attention=True,
+        rope_type="rope",
+        add_swa_attention_sink_bias=True,
+        sliding_window=[HYSPARSE_WINDOW, HYSPARSE_WINDOW],
+        swa_head_dim=192,
+        swa_v_head_dim=256,
+        swa_num_attention_heads=HYSPARSE_HEADS,
+        swa_num_key_value_heads=HYSPARSE_HEADS,
+        window_attn_skip_freq=2,
+        enable_hy_sparse_attention=True,
+        hy_sparse_full_attn_use_tilelang=True,
+        hy_sparse_block_sparse_use_tilelang=True,
+        hy_sparse_block_size=HYSPARSE_BLOCK,
+        hy_sparse_topk=HYSPARSE_TOPK,
+    )
+    model = gpt_builder(config, num_stages=1)
+    # The HySparse TileLang kernels take bf16 K/V directly and reject fp32
+    # master weights, so the O2 cast has to be baked into the parameters
+    # instead of relying on ``generate``'s ``auto_cast`` alone.
+    model = paddle.amp.decorate(models=model, level="O2", dtype="bfloat16")
+    return model, config
+
+
+# ---- KDA (linear attention) model -----------------------------------------
+
+KDA_HIDDEN = 64
+KDA_HEAD_DIM = 16
+KDA_HEADS = 4
+
+
+def _make_kda_model(vocab_size: int = 64, num_layers: int = 2):
+    """Build a tiny all-KDA ``GPTModel``.
+
+    ``layer_types`` is the only selector for the attention flavour
+    (``gpt_layer_specs.get_gpt_decoder_layers_spec``), so every layer is asked
+    for ``kimi_delta_attention`` here -- a mixed stack would let a standard
+    attention layer's KV cache carry the parity and hide a KDA state bug.
+
+    The default configuration is intentional: when FLA is available,
+    ``use_fused_kernels`` is true for the no-cache path, while cache calls use
+    the implemented paddle-native recurrence.
+
+    Unlike the HySparse model this needs no ``paddle.amp.decorate``: KDA already
+    pins its state, conv weight, ``A_log``, ``dt_bias`` and out-norm to fp32 and
+    upcasts the recurrence itself.
+    """
+    paddle.manual_seed(0)
+    config = GPTConfig(
+        num_hidden_layers=num_layers,
+        hidden_size=KDA_HIDDEN,
+        vocab_size=vocab_size,
+        max_sequence_length=64,
+        intermediate_size=KDA_HIDDEN * 2,
+        num_attention_heads=KDA_HEADS,
+        hidden_act=F.silu,
+        normalization="RMSNorm",
+        hidden_dropout_prob=0.0,
+        attention_dropout=0.0,
+        tie_word_embeddings=True,
+        position_embedding_type="rope",
+        rotary_base=10000,
+        rotary_percent=1.0,
+        rope_scaling=1.0,
+        init_method=functools.partial(paddle.nn.init.xavier_uniform_, gain=1.0),
+        output_layer_init_method=functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        layer_types=["kimi_delta_attention"] * num_layers,
+        linear_conv_kernel_dim=4,
+        # KDA requires key_head_dim == value_head_dim.
+        linear_key_head_dim=KDA_HEAD_DIM,
+        linear_value_head_dim=KDA_HEAD_DIM,
+        linear_num_key_heads=KDA_HEADS,
+        linear_num_value_heads=KDA_HEADS,
+        linear_gate_lora_rank=KDA_HEAD_DIM,
+        linear_use_full_rank_gate=True,
+        linear_gate_lower_bound=-5.0,
+    )
+    return gpt_builder(config, num_stages=1), config
+
+
+class _CacheParityTests:
+    """Full-prefill (no_cache) vs prefill+incremental-decode must agree.
+
+    Subclasses set up ``model`` / ``gen`` / ``input_ids`` for one attention
+    flavour; ``log_prob_delta`` is the per-step log-prob tolerance.
+    """
+
+    max_new_tokens = 8
+    log_prob_delta = 1e-2
 
     def _greedy(self, no_cache: bool, return_log_probs: bool = False):
         return self.gen.generate(
@@ -155,9 +319,9 @@ class TestGenerateCacheParity(unittest.TestCase):
         The full-prefill path recomputes attention over the whole sequence
         every step; the cache path reads stored KV and attends incrementally.
         Same math, so the chosen-token log-probs should track closely -- the
-        only gap is bf16 reduction-order noise, measured at 0.0 here with the
-        CI determinism flags. ``1e-2`` keeps a safety margin for other GPUs
-        while still being tight enough to flag a real decode-path regression.
+        only gap is bf16 reduction-order noise. ``log_prob_delta`` keeps a
+        safety margin for other GPUs while still being tight enough to flag a
+        real decode-path regression.
         """
         full_tokens, full_lp = self._greedy(
             no_cache=True, return_log_probs=True
@@ -174,9 +338,87 @@ class TestGenerateCacheParity(unittest.TestCase):
                 self.assertAlmostEqual(
                     a,
                     c,
-                    delta=1e-2,
+                    delta=self.log_prob_delta,
                     msg=f"log-prob mismatch batch={b} step={step}",
                 )
+
+
+@unittest.skipUnless(
+    paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0,
+    "generate() runs the real GPTModel forward, which needs a CUDA device",
+)
+class TestGenerateCacheParity(_CacheParityTests, unittest.TestCase):
+    """Tiny dense model with standard ``DotProductAttention``."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.vocab_size = 64
+        cls.model, cls.config = _make_model(vocab_size=cls.vocab_size)
+        cls.gen = GreedyGenerator(cls.model)
+        cls.input_ids = paddle.to_tensor([[1, 5, 10, 3]], dtype="int64")
+
+
+@unittest.skipUnless(
+    _hysparse_available(),
+    "HySparse TileLang kernels require SM 10.x and an importable backend",
+)
+class TestGenerateCacheParityHySparse(_CacheParityTests, unittest.TestCase):
+    """HySparse MLA-absorbed MQA stack (sliding-window + block-sparse + sinks).
+
+    ``max_new_tokens`` is smaller than the dense case because every no-cache
+    step re-prefills all ``HYSPARSE_PROMPT_LEN`` tokens through the TileLang
+    kernels. ``log_prob_delta`` is looser because the two sink softmaxes and the
+    score-dependent top-k block selection amplify bf16 noise: the max per-step
+    deviation measured here is 1.4e-2, against 0.0 for the dense stack. 5e-2
+    leaves margin for other GPUs while staying far below the gap a mis-read KV
+    cache or a dropped sink would open.
+    """
+
+    max_new_tokens = 6
+    log_prob_delta = 5e-2
+
+    @classmethod
+    def setUpClass(cls):
+        cls.vocab_size = 256
+        cls.model, cls.config = _make_hysparse_model(vocab_size=cls.vocab_size)
+        cls.gen = GreedyGenerator(cls.model)
+        paddle.seed(7)
+        cls.input_ids = paddle.randint(
+            0, cls.vocab_size, [1, HYSPARSE_PROMPT_LEN], dtype="int64"
+        )
+
+
+@unittest.skipUnless(
+    paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0,
+    "generate() runs the real GPTModel forward, which needs a CUDA device",
+)
+class TestGenerateCacheParityKDA(_CacheParityTests, unittest.TestCase):
+    """Tiny all-KDA (linear attention) model.
+
+    The KDA decode path summarises the prefix into a fixed-size recurrent state
+    plus a short conv sliding window (no growing K/V cache). This validates that
+    the cached single-step decode reproduces the full-sequence recompute end to
+    end through ``GreedyGenerator.generate()``.
+
+    The recurrence itself is fp32, but ``generate`` wraps both paths in
+    ``paddle.amp.auto_cast(level="O2", dtype="bfloat16")``, so the surrounding
+    MLP / RMSNorm / logit projection run in bf16 in both paths. The full-prefill
+    path recomputes them from scratch every step while the cache path
+    accumulates incrementally, and the two orderings round differently: measured
+    max per-step deviation here is 1.4e-2, against 0.0 for the dense stack.
+    ``log_prob_delta = 3e-2`` leaves margin for other GPUs while staying far
+    below the gap a mis-read recurrent state would open. Tokens must still match
+    exactly, which is the real cache-consistency signal.
+    """
+
+    log_prob_delta = 3e-2
+
+    @classmethod
+    def setUpClass(cls):
+        cls.vocab_size = 64
+        cls.model, cls.config = _make_kda_model(vocab_size=cls.vocab_size)
+        cls.gen = GreedyGenerator(cls.model)
+        cls.input_ids = paddle.to_tensor([[4, 14, 25, 24]], dtype="int64")
 
 
 if __name__ == "__main__":

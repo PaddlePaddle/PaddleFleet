@@ -66,6 +66,37 @@ class BlockAttnResSublayersSpec:
     norm: LayerSpec | type = IdentityOp
 
 
+def _block_attn_res_rmsnorm(
+    partial_block: Tensor,
+    blocks: list[Tensor],
+    proj_weight: Tensor,
+    norm_weight: Tensor,
+    norm_eps: float,
+) -> Tensor:
+    """Apply the official FP32 AttentionRes reduction for RMSNorm inputs."""
+    with paddle.amp.auto_cast(enable=False):
+        all_repr = [*blocks, partial_block]
+        hidden_size = partial_block.shape[-1]
+        values = paddle.stack(
+            [
+                representation.reshape([-1, hidden_size])
+                for representation in all_repr
+            ],
+            axis=1,
+        ).astype("float32")
+        variance = values.pow(2).mean(axis=-1, keepdim=True)
+        normalized = values * paddle.rsqrt(variance + norm_eps)
+        score_weight = norm_weight.astype("float32") * proj_weight.astype(
+            "float32"
+        ).reshape([-1])
+        scores = (normalized * score_weight).sum(axis=-1)
+        probabilities = paddle.nn.functional.softmax(scores, axis=-1).unsqueeze(
+            1
+        )
+        output = paddle.matmul(probabilities, values).squeeze(1)
+    return output.reshape(partial_block.shape)
+
+
 class BlockAttnResFunc(paddle.autograd.PyLayer):
     """Custom forward/backward for BlockAttnRes to save memory.
 
@@ -84,26 +115,14 @@ class BlockAttnResFunc(paddle.autograd.PyLayer):
         ctx.num_blocks = len(blocks)
 
         # Compute forward without building autograd graph
-        all_repr = [*blocks, partial_block]
-
         with paddle.no_grad():
-            logits_list = []
-            for repr_i in all_repr:
-                variance = (
-                    repr_i.astype("float32").pow(2).mean(axis=-1, keepdim=True)
-                )
-                rms = paddle.sqrt(variance + norm_eps)
-                k_i = repr_i / rms * norm_weight
-                logit_i = (k_i * proj_weight).sum(axis=-1)
-                logits_list.append(logit_i)
-
-            logits = paddle.stack(logits_list, axis=0)  # [N+1, B, S]
-            weights = paddle.nn.functional.softmax(logits, axis=0)
-
-            # Weighted sum (iterative to avoid large stacked tensor)
-            h = weights[0].unsqueeze(-1) * all_repr[0]
-            for i in range(1, len(all_repr)):
-                h = h + weights[i].unsqueeze(-1) * all_repr[i]
+            h = _block_attn_res_rmsnorm(
+                partial_block,
+                list(blocks),
+                proj_weight,
+                norm_weight,
+                norm_eps,
+            )
 
         return h
 
@@ -138,22 +157,13 @@ class BlockAttnResFunc(paddle.autograd.PyLayer):
             norm_weight_d = norm_weight.detach()
             norm_weight_d.stop_gradient = False
 
-            logits_list = []
-            for rd in repr_detached:
-                variance = (
-                    rd.astype("float32").pow(2).mean(axis=-1, keepdim=True)
-                )
-                rms = paddle.sqrt(variance + norm_eps)
-                k_i = rd / rms * norm_weight_d
-                logit_i = (k_i * proj_weight_d).sum(axis=-1)
-                logits_list.append(logit_i)
-
-            logits = paddle.stack(logits_list, axis=0)
-            weights = paddle.nn.functional.softmax(logits, axis=0)
-
-            h = weights[0].unsqueeze(-1) * repr_detached[0]
-            for i in range(1, num_repr):
-                h = h + weights[i].unsqueeze(-1) * repr_detached[i]
+            h = _block_attn_res_rmsnorm(
+                repr_detached[-1],
+                repr_detached[:-1],
+                proj_weight_d,
+                norm_weight_d,
+                norm_eps,
+            )
 
             # Compute gradients via autograd
             grad_targets = [*repr_detached, proj_weight_d, norm_weight_d]
@@ -183,6 +193,12 @@ class BlockAttnResFunc(paddle.autograd.PyLayer):
         for need, g in zip(needs_grad, raw_grads):
             result.append(g if need else None)
 
+        # This PyLayer only supports first-order backward.  Release the saved
+        # distributed activations as soon as their gradients are materialized;
+        # otherwise the Python context can retain the AttentionRes graph until
+        # interpreter shutdown, after NCCL communicators have already begun
+        # teardown.
+        ctx.container = ()
         return tuple(result)
 
 

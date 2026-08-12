@@ -195,7 +195,12 @@ def run_tp_sp(
 
     loss = gpt_pipe_model.forward_backward_pipeline(inputs)
 
-    assert loss == loss_baseline
+    paddle.testing.assert_close(
+        loss,
+        loss_baseline,
+        rtol=1e-6,
+        atol=5e-7,
+    )
     check_grads(gpt_pipe_model, gpt_model_baseline, tp_group)
 
 

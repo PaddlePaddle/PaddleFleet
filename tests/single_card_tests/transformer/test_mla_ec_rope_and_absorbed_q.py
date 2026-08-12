@@ -909,7 +909,17 @@ class TestNonExperimentalVersionPositionIds(unittest.TestCase):
 
 
 class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
-    """Test that apply_rope_fusion raises NotImplementedError in eval mode (L994-1000)."""
+    """Test that apply_rope_fusion raises NotImplementedError in eval mode (L994-1000).
+
+    Both tests below flip ``config.apply_rope_fusion`` on the *already built*
+    model and rely on the change taking effect at forward time. They are the
+    regression guard for that contract: the effective fusion decision
+    (``config.apply_rope_fusion and not mqa_latent``) is read at each use site
+    rather than snapshotted in ``__init__``, so toggling the config after
+    construction -- as generation/greedy_generator.py does for KV cache -- still
+    works. A construction-time snapshot would leave the flag False here and this
+    test would stop raising.
+    """
 
     def test_apply_rope_fusion_raises_in_eval(self):
         """apply_rope_fusion=True in eval mode should raise NotImplementedError."""

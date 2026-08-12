@@ -417,7 +417,18 @@ def scatter_contiguous(input_tensor, group=None, axis=0):
     if nranks == 1:
         return input_tensor.clone()
     rank = group.rank
-    chunk_size = input_tensor.shape[axis] // nranks
+    # An uneven split would silently drop the tail here and nothing downstream
+    # could tell: the shards are equal-sized, so all_gather_contiguous returns a
+    # shorter sequence than went in. Consumers that work in global sequence
+    # coordinates (e.g. KimiDeltaAttention) would then be off by the remainder.
+    length = input_tensor.shape[axis]
+    if length % nranks != 0:
+        raise ValueError(
+            f"contiguous context parallel needs axis {axis} of the input to be "
+            f"divisible by cp_size({nranks}), got {length}; truncate the tail "
+            "before the model instead of letting the scatter drop it"
+        )
+    chunk_size = length // nranks
     result = paddle.slice(
         input_tensor,
         axes=[axis],
@@ -1829,6 +1840,8 @@ def flashmask_attention_ulysses(
         value: [batch, seq_len/P, num_kv_heads, head_dim] - sequence-partitioned value
         startend_row_indices: [b, num_mask_heads, seq_len, cols] attention mask indices
             num_mask_heads must be 1 (broadcast) or equal to num_kv_heads.
+        learnable_sink: [num_heads] softmax sink, replicated on every rank. Sliced
+            to this rank's head group to match the post-all-to-all layout.
         dropout: dropout probability
         causal: whether to use causal attention
         training: whether in training mode
@@ -1836,12 +1849,6 @@ def flashmask_attention_ulysses(
     Returns:
         [batch, seq_len/P, num_heads, head_dim] - sequence-partitioned output
     """
-    if learnable_sink is not None:
-        raise NotImplementedError(
-            "flashmask_attention_ulysses does not support learnable_sink "
-            "(softmax sink)"
-        )
-
     if softmax_scale is not None:
         raise NotImplementedError(
             "flashmask_attention_ulysses does not support setting softmax_scale"
@@ -1880,6 +1887,19 @@ def flashmask_attention_ulysses(
             :, head_start:head_end, :, :
         ]
 
+    # The softmax sink holds one entry per query head and is replicated on every
+    # rank, so it needs the same head partition as Q/K/V (which the all-to-all below applies)
+    if learnable_sink is not None:
+        if learnable_sink.shape[0] != num_q_heads:
+            raise ValueError(
+                f"learnable_sink must have one entry per query head ({num_q_heads}), "
+                f"got shape {learnable_sink.shape}"
+            )
+        heads_per_rank = num_q_heads // cp_size
+        learnable_sink = learnable_sink[
+            cp_rank * heads_per_rank : (cp_rank + 1) * heads_per_rank
+        ]  # slice part of the sink
+
     # Before attention: scatter heads across ranks, gather full sequence from all ranks
     # [b, N/P, h, d] -> [b, N, h/P, d]
     query = UlyssesAlltoAll.apply(
@@ -1900,6 +1920,7 @@ def flashmask_attention_ulysses(
         startend_row_indices=startend_row_indices,
         causal=causal,
         softmax_scale=softmax_scale,
+        learnable_sink=learnable_sink,
     )
 
     # After attention: scatter sequence across ranks, gather full heads from all ranks
@@ -1985,7 +2006,7 @@ def flashmask_attention_cp(
             mode,
             window_size,
         )
-    elif mode == "dualchunk_allgather":
+    elif mode in ("dualchunk_allgather", "contiguous_allgather"):
         output = FlashMaskContextParallel.apply(
             query,
             key,

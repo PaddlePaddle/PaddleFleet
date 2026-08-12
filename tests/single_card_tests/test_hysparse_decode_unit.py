@@ -381,6 +381,9 @@ class TestMLAHySparseForwardRouting(unittest.TestCase):
             ),
             attn_mask_type=None,
             core_attention=core_attention,
+            # HySparse layers are dense/SWA MLA, never the hybrid-MLA
+            # non-absorbed MQA path.
+            mqa_latent=False,
             recompute_core_attention=False,
             recompute_qkv_up_porj_and_rope=False,
             training=False,
