@@ -154,6 +154,17 @@ class DotProductAttention(FleetLayer):
 
         self.context_parallel_size = get_context_parallel_world_size()
 
+        # following is None by default. We allow MLA to set its own comm mode
+        self.hybrid_mla_cp_mode = getattr(config, "hybrid_mla_cp_mode", None)
+        # The SWA fast path that rewrites ``contiguous_a2a`` into
+        # ``contiguous_swap2p`` keys on ``config.multi_latent_attention``, which
+        # is False in a DSV4 hybrid, so an SWA layer here would silently run on
+        # the non-SWA Ulysses path. ``is_swa`` is per layer, hence the check.
+        if self.hybrid_mla_cp_mode is not None and is_swa:
+            raise ValueError(
+                "When hybrid_mla_cp_mode is set, setting SWA is not supported."
+            )
+
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
         self.attention_type = attention_type  # unused for now
@@ -393,6 +404,7 @@ class DotProductAttention(FleetLayer):
             )
 
         use_mla = bool(getattr(self.config, "multi_latent_attention", False))
+        cp_balance_mode = self.hybrid_mla_cp_mode or self.config.cp_balance_mode
 
         if self.context_parallel_size > 1:
             assert packed_seq_params is None, (
@@ -401,9 +413,7 @@ class DotProductAttention(FleetLayer):
             assert not self.config.flashmask_use_varlen, (
                 "flashmask_use_varlen does not support context parallel now."
             )
-            if self.config.cp_balance_mode != "contiguous_a2a" or (
-                self.is_swa and use_mla
-            ):
+            if cp_balance_mode != "contiguous_a2a" or (self.is_swa and use_mla):
                 attn_mask_startend_row_indices = (
                     self.expand_attn_mask_startend_row_indices_for_cp(
                         attn_mask_startend_row_indices, key
@@ -574,12 +584,9 @@ class DotProductAttention(FleetLayer):
                             "RefinedRcomputeFlashMaskAttention does not support custom softmax_scale. "
                             "Disable refined_recompute or use default softmax_scale."
                         )
-                extra_kwargs["mode"] = self.config.cp_balance_mode
-                if self.config.cp_balance_mode == "contiguous_a2a":
-                    if not self.config.multi_latent_attention:
-                        raise NotImplementedError(
-                            "cp_balance_mode contiguous_a2a only supports mla now"
-                        )
+                extra_kwargs["mode"] = cp_balance_mode
+                if cp_balance_mode == "contiguous_a2a":
+                    # allow non-MLA (for DSV4 hybrid attn)
                     if self.is_swa and use_mla:
                         extra_kwargs["mode"] = "contiguous_swap2p"
                         left_window = get_sliding_window_left_size(
