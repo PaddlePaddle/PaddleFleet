@@ -2371,11 +2371,7 @@ class TransformerConfig(ModelParallelConfig):
 
             # Resolve the effective number of MTP layers, following the same
             # logic used elsewhere in __post_init__ (see the csa branch above).
-            mtp_num_layers = (
-                self.mtp_num_layers
-                if self.mtp_num_layers > 0
-                else self.num_nextn_predict_layers
-            )
+            mtp_num_layers = self.num_nextn_predict_layers
             mtp_enabled = mtp_num_layers > 0
             pp_enabled = self.pipeline_model_parallel_size > 1
 
