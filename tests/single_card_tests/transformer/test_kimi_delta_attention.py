@@ -1128,6 +1128,42 @@ class TestGatedNormRecompute(unittest.TestCase):
         # no recompute configured at all
         self.assertFalse(_build_kda().recompute_rms_norm_gated)
 
+    def test_layer_range_restricts_recompute(self):
+        """recompute_num_layers / dict values must scope recompute by layer.
+
+        With the test config (num_hidden_layers=2, pp=vpp=1) first_n/block with
+        a count of 1 selects only layer 0, so layer 1 must stay off instead of
+        every KDA layer recomputing.
+        """
+
+        def flag(layer_number, modules, num_layers=None, method="first_n"):
+            overrides = {
+                "recompute_granularity": "selective",
+                "recompute_modules": modules,
+                "recompute_method": method,
+            }
+            if num_layers is not None:
+                overrides["recompute_num_layers"] = num_layers
+            kda = _build_kda(
+                layer_number=layer_number, config_overrides=overrides
+            )
+            return kda.recompute_rms_norm_gated
+
+        # list + recompute_num_layers=1, first_n -> only layer 0
+        self.assertTrue(flag(0, ["rms_norm_gated"], num_layers=1))
+        self.assertFalse(flag(1, ["rms_norm_gated"], num_layers=1))
+
+        # block behaves the same for a single-stage config
+        self.assertTrue(flag(0, ["rms_norm_gated"], num_layers=1, method="block"))
+        self.assertFalse(flag(1, ["rms_norm_gated"], num_layers=1, method="block"))
+
+        # dict form: the value is the per-module layer count
+        self.assertTrue(flag(0, {"rms_norm_gated": 1}))
+        self.assertFalse(flag(1, {"rms_norm_gated": 1}))
+
+        # list without a count still recomputes every layer
+        self.assertTrue(flag(1, ["rms_norm_gated"]))
+
     def _assert_matches_baseline(self, deterministic):
         paddle.seed(0)
         baseline = _build_kda(deterministic_mode=deterministic)
