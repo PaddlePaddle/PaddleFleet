@@ -930,13 +930,38 @@ def _cudnn_indexer_available():
     "cuDNN indexer CP requires the cuDNN frontend on Blackwell (SM100)",
 )
 class TestCudnnIndexerDocmaskCP(unittest.TestCase):
-    """Regression coverage for CP docmask arguments sent to cuDNN indexer."""
+    """Regression coverage for CP docmask arguments sent to cuDNN indexer.
 
-    def test_fwd_only_passes_local_docmask_slice_and_seq_offset(self):
+    ``topk_effective`` is phase-dependent since ``_resolve_topk_effective``
+    (``csa_attention.py:2059``) was introduced: with
+    ``dsa_indexer_use_sparse_loss=False`` (phase 2, which is what
+    ``_build_csa_config`` sets) the *main* attention widens to the full
+    compressed range ``n_compressed``, because an indexer that is still being
+    learned must not steer attention; with ``True`` (phase 3/4) it narrows to
+    ``min(index_topk, n_compressed)``.
+
+    The assertion below used to hard-code ``index_topk`` and only ran the
+    ``False`` case, so it failed once the phase branch landed. It now derives the
+    expectation from the phase and exercises both branches. ``index_topk`` is
+    varied too: at ``index_topk == 8`` the old expectation coincided with
+    ``sq_local // ratio == 8``, so a single value cannot distinguish "narrowed to
+    index_topk" from "narrowed to the CP-local compressed length".
+    """
+
+    _CASES = (
+        # (dsa_indexer_use_sparse_loss, dsa_index_topk)
+        (False, 8),
+        (False, 4),
+        (True, 8),
+        (True, 4),
+    )
+
+    def _capture(self, use_sparse_loss, dsa_index_topk):
+        """Run one fwd-only CP step with the cuDNN indexer spied on."""
         sq_global = 128
         compress_ratio = 4
         sq_local = sq_global // CP_SIZE
-        topk = 8
+        n_compressed = sq_global // compress_ratio
         b, head_dim, hidden_size, q_lora_rank = 1, 64, 256, 64
         s, e = CP_RANK * sq_local, (CP_RANK + 1) * sq_local
 
@@ -946,11 +971,12 @@ class TestCudnnIndexerDocmaskCP(unittest.TestCase):
             head_dim=head_dim,
             q_lora_rank=q_lora_rank,
             csa_window_size=32,
-            dsa_index_topk=topk,
+            dsa_index_topk=dsa_index_topk,
             dsa_indexer_loss_coeff=0.0,
         )
         config.csa_indexer_backend = "cudnn"
         config.csa_sparse_attn_backend = "unfused"
+        config.dsa_indexer_use_sparse_loss = use_sparse_loss
 
         paddle.seed(2026)
         csa_cp = _build_csa(config, compress_ratio, head_dim)
@@ -1031,18 +1057,77 @@ class TestCudnnIndexerDocmaskCP(unittest.TestCase):
             cudnn_indexer_module.cudnn_indexer_topk_fwd = original
 
         self.assertEqual(list(out.shape), [b, sq_local, 8 * head_dim])
-        self.assertEqual(captured["seq_offset"], s)
-        self.assertEqual(captured["ratio"], compress_ratio)
-        self.assertEqual(captured["topk_effective"], topk)
-        self.assertEqual(captured["q_shape"][1], sq_local)
-        self.assertEqual(list(captured["valid_range"].shape), [b, sq_local, 2])
-        self.assertTrue(
-            paddle.equal_all(
-                captured["valid_range"], expected_valid_range
-            ).item()
+        return {
+            "captured": captured,
+            "expected_valid_range": expected_valid_range,
+            "startend_row_indices": startend_row_indices,
+            "doc_lens_list": docmask_meta.doc_lens_list,
+            "sq_local": sq_local,
+            "seq_offset": s,
+            "compress_ratio": compress_ratio,
+            "n_compressed": n_compressed,
+            "b": b,
+        }
+
+    def test_fwd_only_passes_local_docmask_slice_and_seq_offset(self):
+        for use_sparse_loss, dsa_index_topk in self._CASES:
+            with self.subTest(
+                use_sparse_loss=use_sparse_loss, index_topk=dsa_index_topk
+            ):
+                run = self._capture(use_sparse_loss, dsa_index_topk)
+                captured = run["captured"]
+                n_compressed = run["n_compressed"]
+                sq_local = run["sq_local"]
+                # ``_resolve_topk_effective``: phase 2 hands the main attention
+                # the full compressed range, phase 3/4 the indexer's top-k.
+                expected_topk = (
+                    min(dsa_index_topk, n_compressed)
+                    if use_sparse_loss
+                    else n_compressed
+                )
+                self.assertEqual(captured["seq_offset"], run["seq_offset"])
+                self.assertEqual(captured["ratio"], run["compress_ratio"])
+                self.assertEqual(captured["topk_effective"], expected_topk)
+                self.assertEqual(captured["q_shape"][1], sq_local)
+                self.assertEqual(
+                    list(captured["valid_range"].shape),
+                    [run["b"], sq_local, 2],
+                )
+                self.assertTrue(
+                    paddle.equal_all(
+                        captured["valid_range"], run["expected_valid_range"]
+                    ).item()
+                )
+                self.assertIs(
+                    captured["startend_row_indices"],
+                    run["startend_row_indices"],
+                )
+                self.assertEqual(captured["doc_lens"], run["doc_lens_list"])
+
+    def test_topk_effective_actually_differs_between_phases(self):
+        """Anti-vacuity: the two phases must not collapse to the same width.
+
+        Without this, the assertion above would still pass if
+        ``_resolve_topk_effective`` lost its branch and always returned one of
+        the two values, as long as the fixture happened to make them equal.
+        """
+        widths = {
+            (use_sparse_loss, topk): self._capture(use_sparse_loss, topk)[
+                "captured"
+            ]["topk_effective"]
+            for use_sparse_loss, topk in self._CASES
+        }
+        self.assertNotEqual(
+            widths[(False, 4)],
+            widths[(True, 4)],
+            f"phase 2 and phase 3 produced the same width: {widths}",
         )
-        self.assertIs(captured["startend_row_indices"], startend_row_indices)
-        self.assertEqual(captured["doc_lens"], docmask_meta.doc_lens_list)
+        # ...and phase 3 must follow ``index_topk``, not the CP-local length.
+        self.assertNotEqual(
+            widths[(True, 4)],
+            widths[(True, 8)],
+            f"phase 3 ignored index_topk: {widths}",
+        )
 
 
 # ---------------------------------------------------------------------------

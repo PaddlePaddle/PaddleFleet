@@ -30,7 +30,7 @@ def keep_indexer_grad_path(hidden_states, config):
 
     Every recompute wrapper in this repo is a PyLayer, so whether its output is
     differentiable depends only on its input tensors, not on the parameters used
-    inside. With every backbone parameter frozen (``csa_train_indexer_only``) the
+    inside. With every backbone parameter frozen (``train_indexer_only``) the
     segment input has ``stop_gradient=True``, the segment output inherits it, and
     the indexer loss attached inside the segment silently never gets a backward
     pass. ``RecomputeWithoutOutput`` is worse than ``recompute``: it skips
@@ -46,7 +46,7 @@ def keep_indexer_grad_path(hidden_states, config):
     Indexer: the base ``TransformerLayer`` layer-level segment, and
     ``DSv4HybridAttention``'s inner ``full_attn`` segment.
     """
-    if not getattr(config, "csa_train_indexer_only", False):
+    if not getattr(config, "train_indexer_only", False):
         return hidden_states
     if not isinstance(hidden_states, paddle.Tensor):
         return hidden_states

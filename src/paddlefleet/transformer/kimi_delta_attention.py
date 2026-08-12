@@ -272,8 +272,6 @@ class KimiDeltaAttention(FleetLayer):
 
         # Attributes from config
         self.hidden_size = config.hidden_size
-        self.act_fn = config.hidden_act
-        self.activation = getattr(self.act_fn, "__name__", "silu")
         self.conv_kernel_dim = conv_kernel_dim
         self.key_head_dim = key_head_dim
         self.value_head_dim = value_head_dim
@@ -646,7 +644,9 @@ class KimiDeltaAttention(FleetLayer):
         else:
             qkv, beta = paddle.split(qkvbz, split_sizes, axis=-1)
         qkv = qkv.reshape([eff_batch, eff_seq, -1])
-        beta = beta.reshape([eff_batch, eff_seq, -1])
+        # The official router-strength projection is promoted before the
+        # in-kernel sigmoid; keeping BF16 here changes the KDA state update.
+        beta = beta.astype(paddle.float32).reshape([eff_batch, eff_seq, -1])
         gate = gate.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
         alpha = alpha.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
 
@@ -661,7 +661,7 @@ class KimiDeltaAttention(FleetLayer):
                 qkv.contiguous(),
                 weight=self.conv1d.weight.squeeze(1),
                 bias=self.conv1d.bias,
-                activation=self.activation,
+                activation="silu",
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
                 cp_context=cp_context,
@@ -672,7 +672,7 @@ class KimiDeltaAttention(FleetLayer):
             qkv_dtype = qkv.dtype
             qkv = qkv.transpose([0, 2, 1]).contiguous()  # b, s, d -> b, d, s
             qkv = self.conv1d(qkv.astype(self.conv1d.weight.dtype))
-            qkv = self.act_fn(qkv[..., :eff_seq]).astype(qkv_dtype)
+            qkv = F.silu(qkv[..., :eff_seq]).astype(qkv_dtype)
             qkv = qkv.transpose([0, 2, 1])  # b, d, s -> b, s, d
         nvtx_range_pop(suffix="conv1d")
 
