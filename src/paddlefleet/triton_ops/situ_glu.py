@@ -208,6 +208,11 @@ def _validate_inputs(
     probs: paddle.Tensor,
     out_grad: paddle.Tensor | None = None,
 ) -> tuple[int, int]:
+    tensors = (x, probs) if out_grad is None else (x, probs, out_grad)
+    if any(not tensor.place.is_gpu_place() for tensor in tensors):
+        raise ValueError("SiTU-GLU Triton inputs must be GPU tensors")
+    if any(tensor.place != x.place for tensor in tensors[1:]):
+        raise ValueError("SiTU-GLU Triton inputs must be on the same GPU")
     if x.ndim != 2 or x.shape[1] % 2:
         raise ValueError(f"x must have shape [M, 2N], got {list(x.shape)}")
     if not x.is_contiguous():

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import paddle
 import paddle.nn.functional as F
@@ -44,6 +45,30 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class TestSituGLU(unittest.TestCase):
+    def test_default_fused_falls_back_without_triton(self):
+        x = paddle.randn([3, 8], dtype="float32")
+        probs = paddle.rand([3], dtype="float32")
+        out_grad = paddle.randn([3, 4], dtype="float32")
+        expected_forward = situ_glu_scale_forward(
+            x, probs, use_fused_situ_glu=False
+        )
+        expected_backward = situ_glu_scale_backward(
+            x, probs, out_grad, use_fused_situ_glu=False
+        )
+
+        with mock.patch(
+            "paddlefleet.transformer.activations.is_triton_available",
+            return_value=False,
+        ):
+            actual_forward = situ_glu_scale_forward(x, probs)
+            actual_backward = situ_glu_scale_backward(x, probs, out_grad)
+
+        self.assertTrue(paddle.equal_all(actual_forward, expected_forward))
+        for actual, expected in zip(
+            actual_backward, expected_backward, strict=True
+        ):
+            self.assertTrue(paddle.equal_all(actual, expected))
+
     def test_config_resolves_situ_name(self):
         config = TransformerConfig.from_config(
             SimpleNamespace(

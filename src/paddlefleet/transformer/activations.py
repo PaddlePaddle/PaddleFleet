@@ -19,6 +19,8 @@ import math
 import paddle
 import paddle.nn.functional as F
 
+from paddlefleet.triton_ops.utils import is_triton_available
+
 
 def situ(x: paddle.Tensor, beta: float = 1.0) -> paddle.Tensor:
     """Apply the SiTU gate activation with float32 intermediates."""
@@ -79,7 +81,7 @@ def situ_glu_scale_forward(
 ) -> paddle.Tensor:
     """Apply SiTU-GLU and router scaling with float32 intermediates."""
 
-    if use_fused_situ_glu:
+    if use_fused_situ_glu and is_triton_available():
         from paddlefleet.triton_ops.situ_glu import (
             situ_glu_scale_forward_triton,
         )
@@ -117,7 +119,7 @@ def situ_glu_scale_backward(
             "SiTU linear_beta must be a positive finite value or None, "
             f"but got {linear_beta!r}."
         )
-    if use_fused_situ_glu:
+    if use_fused_situ_glu and is_triton_available():
         from paddlefleet.triton_ops.situ_glu import (
             situ_glu_scale_backward_triton,
         )

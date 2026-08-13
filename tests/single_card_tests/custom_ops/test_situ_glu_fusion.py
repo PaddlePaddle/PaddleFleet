@@ -30,6 +30,19 @@ from paddlefleet.triton_ops.situ_glu import (
 
 
 class TestSituGLUFusion(unittest.TestCase):
+    def test_triton_entries_reject_cpu_inputs(self):
+        cpu_place = paddle.CPUPlace()
+        x = paddle.to_tensor([[1.0] * 8] * 2, dtype="float32", place=cpu_place)
+        probs = paddle.to_tensor([1.0, 1.0], dtype="float32", place=cpu_place)
+        out_grad = paddle.to_tensor(
+            [[1.0] * 4] * 2, dtype="float32", place=cpu_place
+        )
+
+        with self.assertRaisesRegex(ValueError, "must be GPU tensors"):
+            situ_glu_scale_forward_triton(x, probs)
+        with self.assertRaisesRegex(ValueError, "must be GPU tensors"):
+            situ_glu_scale_backward_triton(x, probs, out_grad)
+
     def test_triton_entries_reject_invalid_scales(self):
         invalid_scales = (
             -1.0,
