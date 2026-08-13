@@ -91,6 +91,8 @@ def get_fa_version(
             (head_dim <= 128 and _head_dim_v <= 128)
             or (head_dim == 192 and _head_dim_v == 128)
             or (head_dim == 256 and _head_dim_v == 256)
+            or (head_dim == 512 and _head_dim_v == 512)
+            or (head_dim == 576 and _head_dim_v == 512)
         )
         fa4_mask_ok = (
             startend_row_indices is None or startend_row_indices.shape[-1] != 4
@@ -144,7 +146,13 @@ def flashmask_attention(
     fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
 
     need_value_padding = (
-        not (fa_version == 4 and q_head_dim == 192 and v_head_dim == 128)
+        not (
+            fa_version == 4
+            and (
+                (q_head_dim == 192 and v_head_dim == 128)
+                or (q_head_dim == 576 and v_head_dim == 512)
+            )
+        )
     ) and q_head_dim != v_head_dim
 
     if need_value_padding:
@@ -220,7 +228,13 @@ def flash_attention(
     fa_version = get_fa_version(q_head_dim, v_head_dim)
 
     need_value_padding = (
-        not (fa_version == 4 and q_head_dim == 192 and v_head_dim == 128)
+        not (
+            fa_version == 4
+            and (
+                (q_head_dim == 192 and v_head_dim == 128)
+                or (q_head_dim == 576 and v_head_dim == 512)
+            )
+        )
     ) and q_head_dim != v_head_dim
 
     if need_value_padding:
