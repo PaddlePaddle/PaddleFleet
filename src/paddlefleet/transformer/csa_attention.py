@@ -1968,6 +1968,19 @@ class CSAIndexer(nn.Layer):
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
         self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
+        self.use_moh = getattr(config, "use_moh", False)
+        if self.use_moh:
+            self.num_activated_heads = config.num_activated_heads
+            self.register_buffer(
+                "indexer_moh_bias",
+                paddle.zeros([self.index_n_heads], dtype="float32"),
+                persistable=True,
+            )
+            self.register_buffer(
+                "local_tokens_per_indexer_moh",
+                paddle.zeros([self.index_n_heads], dtype="float32"),
+                persistable=False,
+            )
 
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice spec for the indexer q-up projection."""
@@ -2032,6 +2045,53 @@ class CSAIndexer(nn.Layer):
         # Weights
         weights, _ = self.linear_weights_proj(x)  # [b, sq, n_heads]
         weights = weights * (self.index_n_heads**-0.5)
+
+        if self.use_moh:
+            scores_for_choice = paddle.abs(weights).cast(
+                "float32"
+            ) + self.indexer_moh_bias.reshape([1, 1, -1])
+            _, top_idx = paddle.topk(
+                scores_for_choice,
+                k=self.num_activated_heads,
+                axis=-1,
+                sorted=False,
+            )  # [b, sq, num_activated_heads]
+
+            idx_q = top_idx.unsqueeze(-1).expand(
+                [b, sq, self.num_activated_heads, self.index_head_dim]
+            )
+            q = paddle.take_along_axis(
+                q, idx_q, axis=2
+            )  # [b, sq, num_activated_heads, head_dim]
+            weights = paddle.take_along_axis(
+                weights, top_idx, axis=2
+            )  # [b, sq, num_activated_heads]
+
+            if self.training:
+                with paddle.no_grad():
+                    routing_map = paddle.put_along_axis(
+                        paddle.zeros(
+                            [b, sq, self.index_n_heads], dtype="float32"
+                        ),
+                        top_idx,
+                        paddle.ones_like(top_idx, dtype="float32"),
+                        axis=2,
+                    )
+                    self.local_tokens_per_indexer_moh += routing_map.sum(
+                        axis=[0, 1]
+                    )
+
+            _TL_MIN_HEADS = 16
+            if q.shape[2] < _TL_MIN_HEADS:
+                pad_h = _TL_MIN_HEADS - q.shape[2]
+                q = F.pad(
+                    q,
+                    [0, 0, 0, pad_h],
+                    mode="constant",
+                    value=0,
+                    data_format="NCHW",
+                )  # 注意维度顺序
+                weights = F.pad(weights, [0, pad_h], mode="constant", value=0)
 
         return q, k, weights
 
