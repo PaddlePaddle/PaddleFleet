@@ -91,6 +91,7 @@ def get_fa_version(
             (head_dim <= 128 and _head_dim_v <= 128)
             or (head_dim == 192 and _head_dim_v == 128)
             or (head_dim == 256 and _head_dim_v == 256)
+            or (head_dim == 512 and _head_dim_v == 512)
             or (head_dim == 576 and _head_dim_v == 512)
         )
         fa4_mask_ok = (
