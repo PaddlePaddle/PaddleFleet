@@ -142,6 +142,14 @@ class TestBlockAttnResVPPEquivalence(unittest.TestCase):
         self.batch_size = 12
         self.seq_len = 128
         self.vocab_size = 1024
+        self._env_backup = os.environ.get("BLOCK_ATTEN_RES_COMM_OPT")
+
+    def tearDown(self):
+        # _build_and_run flips this switch; do not leak it to other tests.
+        if self._env_backup is None:
+            os.environ.pop("BLOCK_ATTEN_RES_COMM_OPT", None)
+        else:
+            os.environ["BLOCK_ATTEN_RES_COMM_OPT"] = self._env_backup
 
     @unittest.skipUnless(
         FEATURE_AVAILABLE,
@@ -175,9 +183,14 @@ class TestBlockAttnResVPPEquivalence(unittest.TestCase):
                 "mp",
             ],
             # BlockAttnRes comm opt does not support the overlap scheduler.
+            # BlockAttnRes sends "hidden + blocks", and the number of blocks
+            # grows along the pipeline, so the p2p shape meta must not be
+            # cached across sends -> dynamic shape is required (VPP itself
+            # requires p2p_cache_shape, so this is the only way).
             "pp_configs": {
                 "forward_backward_overlap_scheduler": False,
                 "overlap_p2p_comm": False,
+                "enable_dynamic_shape": True,
             },
         }
         strategy.pipeline_configs = {
