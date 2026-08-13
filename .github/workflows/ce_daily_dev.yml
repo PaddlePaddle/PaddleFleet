@@ -147,7 +147,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
+          bash miniconda.sh -b -p $HOME/miniconda > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
@@ -166,6 +166,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
+          pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -309,7 +310,7 @@ jobs:
           source /root/proxy
           pip install --upgrade pip
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
+          bash miniconda.sh -b -p $HOME/miniconda > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
@@ -327,6 +328,7 @@ jobs:
           git config pull.rebase false
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
+          pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -488,7 +490,7 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
+          bash miniconda.sh -b -p $HOME/miniconda > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
@@ -500,6 +502,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
+          pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -752,7 +755,7 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
+          bash miniconda.sh -b -p $HOME/miniconda > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
@@ -764,6 +767,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           pip install colorlog>=6.10.1
+          pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -1271,7 +1275,7 @@ jobs:
           pip cache dir
           pip install --upgrade pip
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
+          bash miniconda.sh -b -p $HOME/miniconda > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda init bash
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
@@ -1284,7 +1288,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
-          pip install colorlog>=6.10.1
+          pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
