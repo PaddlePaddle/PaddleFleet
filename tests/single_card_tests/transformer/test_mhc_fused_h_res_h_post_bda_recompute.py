@@ -54,6 +54,7 @@ from paddlefleet.tensor_parallel.random import (
     RecomputeWithoutOutput,
     model_parallel_cuda_manual_seed,
 )
+from paddlefleet.transformer import hyper_connection
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.transformer_layer import (
     HyperConnectionTransformerLayer,
@@ -214,6 +215,9 @@ def _run(
     span under test was actually created instead of silently comparing two
     identical no-span runs.
     """
+    # Reseed so the dropout configurations draw the same mask in every run;
+    # without this the comparison below could only ever be run with dropout off.
+    paddle.seed(1234)
     resid, w, bias = _inputs(resid_np, w_np, bias_np, dtype)
 
     n_spans = 0
@@ -245,10 +249,22 @@ def _random_inputs(with_bias, seed=0):
 
 
 def _use_fused_kernel(test_case, hc):
+    """Swap in the cuTile BDA kernel, or skip if cuTile is unavailable.
+
+    The import alone is not a capability check: without ``cuda.tile``
+    ``fused_mhc_kernels`` still binds ``fused_h_post_bda``, to a stub that
+    raises at call time. Ask ``is_cutile_available()`` instead so the test skips
+    rather than fails on a CUDA box without cuTile.
+    """
     try:
-        from paddlefleet.fusions.fused_mhc_kernels import fused_h_post_bda
+        from paddlefleet.fusions.fused_mhc_kernels import (
+            fused_h_post_bda,
+            is_cutile_available,
+        )
     except ImportError as exc:  # pragma: no cover - env dependent
-        test_case.skipTest(f"fused_h_post_bda unavailable: {exc}")
+        test_case.skipTest(f"fused_mhc_kernels unavailable: {exc}")
+    if not is_cutile_available():  # pragma: no cover - env dependent
+        test_case.skipTest("cuTile unavailable, fused_h_post_bda is a stub")
     hc._h_post_bda_op = fused_h_post_bda
 
 
@@ -338,6 +354,25 @@ class TestFusedHResHPostBDASpanNumerics(_CompareMixin, unittest.TestCase):
         # there would cost a replay and save nothing.
         self._check({"high_precision_mhc": False}, expect_span=False)
 
+    def test_sequential_path_with_dropout_with_bias(self):
+        # Active dropout takes fused_h_res_h_post_bda down the sequential path,
+        # where the span hides that path's own intermediates instead of an
+        # up-cast, and the replay has to restore the RNG state to reproduce the
+        # mask. Bitwise equality is what proves the restore works.
+        self._check({"hidden_dropout_prob": 0.1}, with_bias=True)
+
+    def test_sequential_path_with_dropout_without_bias(self):
+        self._check({"hidden_dropout_prob": 0.1}, with_bias=False)
+
+    def test_accuracy_compatible_kernel_is_not_wrapped(self):
+        # FLAGS_use_accuracy_compatible_kernel keeps the whole mHC path in the
+        # incoming dtype, so there is no up-cast to hide and the helper must
+        # decline (measured: 1040 KiB retained either way, minus the clones).
+        with mock.patch.object(
+            hyper_connection, "_ACCURACY_COMPATIBLE_KERNEL", True
+        ):
+            self._check(expect_span=False)
+
 
 def _bda_inputs(layer, hc, dtype, s=S, b=B, c=C, seed=0):
     """Everything ``_fused_h_res_h_post_bda`` consumes, plus the residual."""
@@ -390,6 +425,47 @@ class TestFusedHResHPostBDASpanContract(_CompareMixin, unittest.TestCase):
             hc, h_res, resid, h_post, (x, None), True
         )
         self.assertIsInstance(span, RecomputeWithoutOutput)
+
+    def test_no_span_with_accuracy_compatible_kernel(self):
+        # The accuracy-compatible switch keeps mHC in the incoming dtype, so the
+        # fast path has no up-cast to hide and the helper must veto the caller.
+        layer, hc = self._prepare()
+        resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
+        with mock.patch.object(
+            hyper_connection, "_ACCURACY_COMPATIBLE_KERNEL", True
+        ):
+            out, span = layer._fused_h_res_h_post_bda(
+                hc, h_res, resid, h_post, (x, None), True
+            )
+        self.assertIsNone(span)
+        self.assertEqual(out.dtype, paddle.float32)
+
+    def test_span_created_when_dropout_is_active(self):
+        # Sequential path: no up-cast, but its own intermediates and the dropout
+        # mask are worth hiding, so the span stays (measured: 252 KiB per
+        # half-layer at [128, 2, 4*256]).
+        layer, hc = self._prepare(hidden_dropout_prob=0.1)
+        resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
+        _, span = layer._fused_h_res_h_post_bda(
+            hc, h_res, resid, h_post, (x, None), True
+        )
+        self.assertIsInstance(span, RecomputeWithoutOutput)
+        self.assertTrue(
+            span.preserve_rng_state,
+            "the dropout mask cannot be reproduced without the RNG state",
+        )
+
+    def test_span_created_in_eval_with_dropout_configured(self):
+        # eval(): dropout is configured but does not run, so the call is back on
+        # the fast path and the RNG snapshot is not needed.
+        layer, hc = self._prepare(hidden_dropout_prob=0.1)
+        layer.eval()
+        resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
+        _, span = layer._fused_h_res_h_post_bda(
+            hc, h_res, resid, h_post, (x, None), True
+        )
+        self.assertIsInstance(span, RecomputeWithoutOutput)
+        self.assertFalse(span.preserve_rng_state)
 
     def test_discard_releases_the_fp32_result(self):
         # bf16 residual: the cast is a real cast, so the span owns the fp32
@@ -454,14 +530,18 @@ class TestFusedHResHPostBDASpanContract(_CompareMixin, unittest.TestCase):
 class TestFusedHResHPostBDASpanMemory(unittest.TestCase):
     """The span has no other purpose than this, so measure it."""
 
-    def test_span_shrinks_the_retained_set(self):
-        s, b, c = 128, 2, 256
+    S_MEM, B_MEM, C_MEM = 128, 2, 256
+
+    def _retained(self, dtype, **config_kw):
+        """Bytes still held after one half-layer's BDA, without / with the span."""
+        s, b, c = self.S_MEM, self.B_MEM, self.C_MEM
+        if dtype == "bfloat16":
+            config_kw.update(params_dtype=paddle.bfloat16, bf16=True)
         config = _make_config(
             hidden_size=c,
             intermediate_size=2 * c,
             head_dim=c // 4,
-            params_dtype=paddle.bfloat16,
-            bf16=True,
+            **config_kw,
         )
         layer = _make_layer(config)
         layer.train()
@@ -469,22 +549,25 @@ class TestFusedHResHPostBDASpanMemory(unittest.TestCase):
 
         def retained(wrap_bda):
             resid, w, h_res, h_post, x = _bda_inputs(
-                layer, hc, "bfloat16", s=s, b=b, c=c
+                layer, hc, dtype, s=s, b=b, c=c
             )
             paddle.device.synchronize()
-            base = paddle.device.cuda.memory_allocated()
+            base = paddle.device.memory_allocated()
             out, span = layer._fused_h_res_h_post_bda(
                 hc, h_res, resid, h_post, (x, None), wrap_bda
             )
             out = layer._cast_and_discard_fused_bda(out, resid.dtype, span)
             paddle.device.synchronize()
-            used = paddle.device.cuda.memory_allocated() - base
+            used = paddle.device.memory_allocated() - base
             self.assertEqual(span is not None, wrap_bda)
             del out, span, resid, w, h_res, h_post, x
             return used
 
-        without = retained(False)
-        with_span = retained(True)
+        return retained(False), retained(True)
+
+    def test_span_shrinks_the_retained_set(self):
+        s, b, c = self.S_MEM, self.B_MEM, self.C_MEM
+        without, with_span = self._retained("bfloat16")
         # The kernel's save_for_backward pins two fp32 up-casts when
         # high_precision_mhc is on: the [s, b, n, c] residual and the [s, b, c]
         # layer output. Those are what the span removes; the fp32 result itself
@@ -507,6 +590,27 @@ class TestFusedHResHPostBDASpanMemory(unittest.TestCase):
             f"span saved only {saved} B, expected at least "
             f"{upcast - overhead} B "
             f"(baseline {without} B, with span {with_span} B)",
+        )
+
+    def test_span_shrinks_the_retained_set_on_the_sequential_path(self):
+        # Why active dropout keeps its span even though nothing is up-cast: the
+        # sequential path saves its own [s, b, n*c] intermediates and the mask,
+        # and the span hides those. fp32 here because the sequential path cannot
+        # run in bf16 today -- apply_h_res() bmm's an fp32 h_res against a bf16
+        # residual and Paddle raises instead of promoting (pre-existing, on the
+        # no-span path too).
+        s, b, c = self.S_MEM, self.B_MEM, self.C_MEM
+        without, with_span = self._retained("float32", hidden_dropout_prob=0.1)
+        saved = without - with_span
+        # Conservative floor: one [s, b, c] fp32 intermediate, less the h_res
+        # [s, b, n, n] / h_post [s, b, n] clones the span adds back. Measured
+        # saving at this shape is 252 KiB.
+        floor = s * b * c * 4 - s * b * (N * N + N) * 4
+        self.assertGreaterEqual(
+            saved,
+            floor,
+            f"span saved only {saved} B on the sequential path, expected at "
+            f"least {floor} B (baseline {without} B, with span {with_span} B)",
         )
 
 
