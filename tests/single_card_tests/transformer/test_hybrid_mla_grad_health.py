@@ -45,7 +45,6 @@ Run (SM100+ / Blackwell required for the absorbed cuDNN block-sparse kernel):
         CUDA_VISIBLE_DEVICES=4 python -m pytest <file> -q -p no:warnings -s
 """
 
-import contextlib
 import inspect
 import math
 import unittest
@@ -92,7 +91,13 @@ from paddlefleet.transformer.transformer_config import (
     TransformerConfig,
 )
 
-from .hybrid_mla_utils import _row_end as _row_end_from_docs
+from .hybrid_mla_utils import _fa4_module_hooks, _row_end as _row_end_from_docs
+
+# The full-causal phases have exactly one backend: ``_assert_dense_fa4`` raises
+# unless the process flags resolve to FA4, and the ``mha`` sink parameter is
+# likewise only created under FA3/FA4. Reproducing the flag the trainer derives
+# once per module covers both.
+setUpModule, tearDownModule = _fa4_module_hooks()
 
 try:
     from paddlefleet.cudnn_ops.block_sparse_mqa_dsa import is_dsa_available
@@ -218,36 +223,10 @@ def _build(
         normalization=cfg.normalization,
         layer_number=0,
     ).sublayers_spec.self_attn
-    with _fa4_for_mha_sink(mode, sink):
-        module = build_spec_layer(
-            spec, config=cfg, layer_number=0, pg_collection=_FakePGCollection()
-        )
+    module = build_spec_layer(
+        spec, config=cfg, layer_number=0, pg_collection=_FakePGCollection()
+    )
     return module
-
-
-@contextlib.contextmanager
-def _fa4_for_mha_sink(mode, sink):
-    """Satisfy the ``mha`` + sink FA4 requirement for the duration of a build.
-
-    ``MultiLatentAttention.__init__`` refuses to create the sink for ``mha``
-    unless ``FLAGS_flash_attn_version in (3, 4)``, because ``mha`` consumes it as
-    ``flashmask_attention_func(learnable_sink=...)`` which only exists on the
-    cute path (multi_latent_attention.py, guard next to the parameter creation).
-    The default flag value in this image is 2. These tests only inspect the
-    parameter, so we flip the flag around construction and restore it -- the
-    process-global default must stay untouched for the other suites.
-    """
-    if not (sink and mode == "mha"):
-        yield
-        return
-    previous = paddle.get_flags(["FLAGS_flash_attn_version"])[
-        "FLAGS_flash_attn_version"
-    ]
-    paddle.set_flags({"FLAGS_flash_attn_version": 4})
-    try:
-        yield
-    finally:
-        paddle.set_flags({"FLAGS_flash_attn_version": previous})
 
 
 # Modes exercised here, as (label, vestigial ``indexer`` argument). Only two of

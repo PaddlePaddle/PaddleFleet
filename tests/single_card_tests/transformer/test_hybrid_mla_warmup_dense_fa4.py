@@ -12,44 +12,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The warmup phase's attention half runs as dense FA4, not as an s^2 table.
+"""The full-causal phases run as dense FA4, and refuse to run as anything else.
 
-Phase 2 (``hybrid_mla_attention="mqa_dsa"`` +
-``dsa_indexer_use_sparse_loss=False``) attends over the *whole* per-document
-causal span. Expressing that span as an explicit ``[b, s, s]`` column table for
-the FlashMLA sparse kernel costs ``O(s^2)`` memory for no benefit: measured peak
-for the table alone is 2.1 GiB at s=8192, 27.3 GiB at s=32768 and 100.0 GiB at
-s=65536, and past s=46336 the sparse kernel's own ``(b*s-1)*topk_padded`` index
-arithmetic overflows int32 -- which does *not* reliably crash: s=46337 returns
-finite but wrong numbers (see ``_assert_index_table_addressable``). So
-``MQALatentAttention._dense_attn`` hands the same softmax to FA4's dense
+Phase 1 (``hybrid_mla_attention="mqa_full_causal"``) and phase 2
+(``"mqa_dsa"`` + ``dsa_indexer_use_sparse_loss=False``) both attend over the
+*whole* per-document causal span. Expressing that span as an explicit
+``[b, s, s]`` column table for the FlashMLA sparse kernel costs ``O(s^2)`` memory
+for no benefit: measured net allocation for the table alone is 1.6 GiB at s=8192,
+25.0 GiB at s=32768 and 100.0 GiB at s=65536 (against 3.3 / 13.0 / 26.0 GiB for a
+dense forward *and* backward), and past s=46336 the sparse kernel's own
+``(b*s-1)*topk_padded`` index arithmetic overflows int32 -- which does *not*
+reliably crash: s=46337 returns finite but wrong numbers for its last 55 rows.
+So ``MQALatentAttention._dense_attn`` hands the same softmax to FA4's dense
 flashmask instead, keeping the document structure in the caller's own
-``startend_row_indices``.
+``startend_row_indices`` -- and ``_assert_dense_fa4`` raises rather than
+substituting the table when FA4 is not what the environment resolves to.
 
 What is pinned here:
 
-* ``TestDensePathSelection`` -- exactly which configurations take the dense
-  path. Phase 1 (``mqa_full_causal``) attends over the same whole span and shares
-  ``_forward_full_causal``, so it goes dense too; only the phase-3 sparse forward,
-  which genuinely selects 640 columns, still reaches ``_sparse_attn``.
+* ``TestBackendSelection`` -- the dense path is taken whenever it can be, and
+  every way of not resolving to FA4 raises instead of degrading. Phase 1 shares
+  ``_forward_full_causal`` with the warmup's attention half, so both are covered
+  by one selection point; phase 3, which genuinely selects 640 columns, keeps
+  ``_sparse_attn`` and is *not* subject to the assertion.
+* ``TestCpRowBounds`` -- context parallelism keeps the dense path, which needs
+  the causal diagonal expressed as an explicit flashmask bound in this rank's
+  row space instead of the kernel's own bottom-right-aligned one.
 * ``TestDenseWarmupPrecision`` -- the numerical case. Both backends are compared
   against the same fp32 eager reference, and the sparse path is used as the
   *yardstick*: replacing it is only legitimate if dense is at least as close to
   fp32 as sparse is, forward and backward. No hand-picked tolerance decides the
-  verdict.
+  verdict. Since production has no sparse full-causal path any more, the
+  yardstick is built here, by feeding ``_sparse_attn`` the explicit table from
+  ``hybrid_mla_utils._full_causal_indices``.
 * ``TestDenseWarmupPadRows`` -- a pad row is a query row with *every* column
   masked, which is a softmax-over-nothing hazard the sparse path avoids
   structurally (all ``-1`` columns). FA4 returns exact zeros there instead of
   NaN; that is a kernel property, so it needs a regression test.
-* ``TestFrozenSink`` -- ``train_indexer_only`` freezes ``softmax_offset``, and a
-  ``PyLayer`` whose input has ``stop_gradient=True`` must get ``None`` back at
-  that position, which ``flashmask_attention`` does not do. ``_dense_sink_arg``
-  works around it; the workaround must be forward-neutral.
+* ``TestFrozenInputs`` -- ``train_indexer_only`` freezes the backbone and can
+  freeze ``softmax_offset``, and a ``PyLayer`` whose input has
+  ``stop_gradient=True`` must get ``None`` back at that position, which
+  ``flashmask_attention`` does not do. ``_dense_pylayer_inputs`` works around
+  it, for the sink and for a frozen q/k/v alike; the workaround must be
+  forward-neutral.
 
 ``FLAGS_flash_attn_version`` is process-global and a bare pytest process never
 constructs ``TrainingArguments``, so it keeps the image default 2. Production on
-this SM100 box gets 4 from ``training_args.py:1764-1780``; the tests pin it
-explicitly with ``hybrid_mla_utils._flash_attn_version``.
+this SM100 box gets 4 from ``training_args.py:1764-1780``. Every case that runs a
+full-causal forward therefore has to pin it with
+``hybrid_mla_utils._flash_attn_version(4)`` -- without that the forward now
+raises rather than quietly taking a second backend.
 
 Run:
     R=<erniebot checkout>
@@ -59,12 +71,17 @@ Run:
 """
 
 import contextlib
+import types
 import unittest
 
+import numpy as np
 import paddle
+
+from paddlefleet.transformer.csa_attention import _derive_csa_doc_boundaries
 
 from .hybrid_mla_utils import (
     _GPU,
+    DV,
     H,
     MQALatentAttention,
     _build_module,
@@ -72,6 +89,7 @@ from .hybrid_mla_utils import (
     _cudnn_deterministic,
     _dense_reference,
     _flash_attn_version,
+    _full_causal_indices,
     _make_inputs,
     _pad_row_end,
     _production_fa_version,
@@ -177,10 +195,43 @@ def _forward(module, tensors, row_end, w_v, training=True):
     )
 
 
+def _sparse_full_causal(module, tensors, row_end, w_v):
+    """The full-causal softmax through the *sparse* kernel, as a yardstick.
+
+    Production no longer has this path: ``_forward_full_causal`` only knows
+    ``_dense_attn``. But the sparse kernel is what the dense one replaced, and
+    "at least as accurate as what it replaced" is the only tolerance-free way to
+    judge the replacement, so the comparison is reconstructed here out of the
+    same two production pieces the phase-3 forward uses -- ``_sparse_attn`` on an
+    explicit column table, then ``_deabsorb``.
+
+    Mirrors ``_forward_sparse``'s tail exactly (``mqa_latent_attention.py``
+    ``:1147-1150``): no indexer, no ``indexer_topk``, and the table is the whole
+    per-document causal span rather than window + top-k.
+    """
+    query, key = tensors[0], tensors[1]
+    seqlen = int(query.shape[1])
+    kv = key.squeeze(2).contiguous()
+    with paddle.no_grad():
+        doc_start, _, is_valid, _, _ = _derive_csa_doc_boundaries(
+            row_end, seqlen
+        )
+    table = _full_causal_indices(1, seqlen, doc_start, is_valid)
+    core_out = module._sparse_attn(query, kv, table, module.softmax_scale, DV)
+    return module._deabsorb(core_out, w_v, module.split_kv_b)
+
+
 @_GPU
 @_FA4
-class TestDensePathSelection(unittest.TestCase):
-    """Which configurations reach ``_dense_attn`` and which keep the table."""
+class TestBackendSelection(unittest.TestCase):
+    """Dense whenever FA4 serves it, a hard error whenever it does not.
+
+    The full-causal phases have one backend. Not resolving to FA4 used to mean
+    falling back to an ``O(s^2)`` column table; it now means refusing to start,
+    so each way of not resolving to FA4 has to be pinned as a raise -- otherwise
+    a silent change of backend could reappear and only show up as a memory
+    figure.
+    """
 
     def _calls(self, module, fa_version, seqlen=256):
         row_end = _row_end([seqlen], seqlen)
@@ -189,167 +240,253 @@ class TestDensePathSelection(unittest.TestCase):
             _forward(module, tensors, row_end, w_v)
         return calls
 
-    def test_fa4_takes_the_dense_path(self):
-        module = _module()
-        self.assertEqual(self._calls(module, 4), ["dense"])
-
-    def test_fa2_falls_back_to_the_sparse_table(self):
-        """The fallback is what keeps a non-FA4 box working, so pin it too."""
-        module = _module()
-        self.assertEqual(self._calls(module, 2), ["sparse"])
-
-    def test_cp_falls_back_to_the_sparse_table(self):
-        """flashmask's causal diagonal assumes query row i == key column i.
-
-        Under CP this rank owns a row *slice* against an all-gathered key, so the
-        row indices in ``row_end`` no longer address its rows. Only the predicate
-        is exercised here: building a real CP group is
-        ``tests/multi_card_tests/transformer/test_mqa_dsa_cp.py``'s job.
-        """
-        module = _module()
-        row_end = _row_end([256], 256)
-        with _flash_attn_version(4):
-            self.assertTrue(
-                module._dense_can_serve_full_causal(576, 512, row_end)
-            )
-            module.cp_size = 2
-            self.assertFalse(
-                module._dense_can_serve_full_causal(576, 512, row_end)
-            )
-
-    def test_unsupported_head_dims_fall_back(self):
-        """The head-dim pair comes from the layer, not from a constant."""
-        module = _module()
-        row_end = _row_end([256], 256)
-        with _flash_attn_version(4):
-            self.assertFalse(
-                module._dense_can_serve_full_causal(576, 511, row_end)
-            )
-
-    def test_deterministic_falls_back_to_the_sparse_table(self):
-        """(576, 512) has no deterministic FA4 backward.
-
-        FA4 solves it with the big-head-dim kernel, which asserts
-        ``not deterministic``. The accuracy-diff harnesses do set
-        ``FLAGS_cudnn_deterministic=1``, so without the fallback in
-        ``get_fa_version`` they would abort in the first backward rather than
-        merely lose bit-reproducibility -- and this path used to be reachable for
-        them, because before the head-dim pair was whitelisted it took FA2.
-        """
-        module = _module()
-        row_end = _row_end([256], 256)
-        with _flash_attn_version(4), _cudnn_deterministic(1):
-            self.assertFalse(
-                module._dense_can_serve_full_causal(576, 512, row_end)
-            )
-        # Nothing else about the layer changed: the same call goes dense again
-        # once determinism is off.
-        with _flash_attn_version(4), _cudnn_deterministic(0):
-            self.assertTrue(
-                module._dense_can_serve_full_causal(576, 512, row_end)
-            )
-
-    def test_deterministic_backward_runs_on_the_fallback(self):
-        """The point of the fallback: a deterministic run must survive backward."""
-        module = _module()
+    def _assert_forward_refuses(self, module, fa_version=4, deterministic=0):
+        """The forward must raise, and must do so before touching a backend."""
         seqlen = 256
         row_end = _row_end([seqlen], seqlen)
         tensors, w_v = _inputs(seqlen)
         with (
+            _flash_attn_version(fa_version),
+            _cudnn_deterministic(deterministic),
+            _backend_spy(module) as calls,
+            self.assertRaisesRegex(RuntimeError, "requires FA4"),
+        ):
+            _forward(module, tensors, row_end, w_v)
+        self.assertEqual(calls, [])
+
+    def test_fa4_takes_the_dense_path(self):
+        module = _module()
+        self.assertEqual(self._calls(module, 4), ["dense"])
+
+    def test_fa2_raises(self):
+        """No FA4, no full-causal attention -- and no s^2 table either."""
+        self._assert_forward_refuses(_module(), fa_version=2)
+
+    def test_the_message_names_all_three_inputs(self):
+        """The head-dim pair alone rarely explains ``get_fa_version``'s answer.
+
+        It reads a whitelist *and* two process-global flags, so a message that
+        only quoted the head dims would send the reader looking at the layer
+        when the cause is the environment.
+        """
+        module = _module()
+        seqlen = 256
+        row_end = _row_end([seqlen], seqlen)
+        tensors, w_v = _inputs(seqlen)
+        with _flash_attn_version(2), self.assertRaises(RuntimeError) as caught:
+            _forward(module, tensors, row_end, w_v)
+        message = str(caught.exception)
+        self.assertIn("(576, 512)", message)
+        self.assertIn("FLAGS_flash_attn_version=2", message)
+        self.assertIn("FLAGS_cudnn_deterministic", message)
+
+    def test_cp_is_not_a_rejection_condition(self):
+        """CP keeps the dense path -- ``_cp_row_bounds`` handles it.
+
+        The row indices in ``row_end`` address *global* rows while this rank owns
+        a row slice, so they cannot be handed to the kernel as they are; but
+        localising them is arithmetic, not an obstacle, and it is the same
+        contract the rest of the model's CP attention uses. An earlier revision
+        did refuse under CP, which is precisely the geometry where the ``s^2``
+        table is least affordable -- its column count is ``s_global``. The
+        localisation itself is checked by ``TestCpRowBounds`` and end to end by
+        ``tests/multi_card_tests/transformer/test_mqa_dsa_warmup_cp.py``.
+        """
+        module = _module()
+        row_end = _row_end([256], 256)
+        with _flash_attn_version(4):
+            module.cp_size, module.cp_rank = 2, 1
+            self.assertIsNone(module._assert_dense_fa4(576, 512, row_end))
+
+    def test_unsupported_head_dims_raise(self):
+        """The head-dim pair comes from the layer, not from a constant."""
+        module = _module()
+        row_end = _row_end([256], 256)
+        with (
+            _flash_attn_version(4),
+            self.assertRaisesRegex(RuntimeError, r"\(576, 511\)"),
+        ):
+            module._assert_dense_fa4(576, 511, row_end)
+
+    def test_deterministic_raises(self):
+        """(576, 512) has no deterministic FA4 backward.
+
+        FA4 solves it with the big-head-dim kernel, which asserts
+        ``not deterministic`` (``flash_mask/cute/interface.py:1238,1249``), so
+        ``get_fa_version`` degrades the pair under ``FLAGS_cudnn_deterministic``.
+        For these phases that degradation is not usable, and a Python error
+        naming the flag is more actionable than the kernel's own assert firing in
+        the middle of a backward.
+        """
+        module = _module()
+        row_end = _row_end([256], 256)
+        with (
             _flash_attn_version(4),
             _cudnn_deterministic(1),
-            _backend_spy(module) as calls,
+            self.assertRaisesRegex(RuntimeError, "cudnn_deterministic"),
         ):
-            out = _forward(module, tensors, row_end, w_v)
-            paddle.autograd.backward(out.cast("float32").sum())
-        self.assertEqual(calls, ["sparse"])
-        self.assertTrue(paddle.isfinite(out.cast("float32")).all())
-        self.assertIsNotNone(tensors[0].grad)
+            module._assert_dense_fa4(576, 512, row_end)
+        # Nothing else about the layer changed: the same call is fine again
+        # once determinism is off.
+        with _flash_attn_version(4), _cudnn_deterministic(0):
+            self.assertIsNone(module._assert_dense_fa4(576, 512, row_end))
+
+    def test_deterministic_forward_raises_before_the_backward(self):
+        """The error has to arrive in the forward, not in the backward.
+
+        Reaching the kernel's own ``assert not deterministic`` would mean a step
+        that had already spent its forward, with a message that names neither
+        the layer nor the flag.
+        """
+        self._assert_forward_refuses(_module(), deterministic=1)
 
     def test_full_causal_phase_also_takes_the_dense_path(self):
         """Phase 1 attends over the same whole causal span, so same backend.
 
         It shares ``_forward_full_causal`` with the warmup's attention half --
-        the point of routing the choice there rather than into the warmup is that
-        there is exactly one place where a column table can be built.
+        the point of routing the check there rather than into the warmup is that
+        there is exactly one selection point for both phases.
         """
         module = _module(mode="mqa")
         self.assertEqual(self._calls(module, 4), ["dense"])
 
-    def test_full_causal_phase_keeps_the_fallback(self):
-        module = _module(mode="mqa")
-        self.assertEqual(self._calls(module, 2), ["sparse"])
+    def test_full_causal_phase_raises_on_fa2(self):
+        self._assert_forward_refuses(_module(mode="mqa"), fa_version=2)
 
     def test_sparse_phase_is_untouched(self):
         """Phase 3 selects 640 columns, not s -- 544 MiB at s=65536."""
         module = _module(sparse_loss=True)
         self.assertEqual(self._calls(module, 4), ["sparse"])
 
+    def test_the_assertion_is_scoped_to_the_full_causal_phases(self):
+        """Phase 3 does not go through FA4 at all, so it must not be gated.
 
-class TestSparseTableAddressability(unittest.TestCase):
-    """The fallback's own ceiling, checked before the table is allocated.
+        Its forward is the FlashMLA sparse kernel, whose availability has nothing
+        to do with ``FLAGS_flash_attn_version``. Pinning this keeps the new hard
+        error from spreading into the phase that legitimately selects columns.
+        """
+        module = _module(sparse_loss=True)
+        self.assertEqual(self._calls(module, 2), ["sparse"])
 
-    Pure index arithmetic, so no device is needed. The boundary values come from
-    measurements on this box, quoted in
-    ``MQALatentAttention._assert_index_table_addressable``: at ``topk == s`` the
-    last clean length is 46336, and 46337 does *not* crash -- it returns wrong
-    numbers for its last rows. That silent-corruption window is the reason the
-    guard raises instead of trusting the kernel to fail.
+
+class TestCpRowBounds(unittest.TestCase):
+    """``_cp_row_bounds`` must reproduce the global mask on every rank.
+
+    Under CP the dense path cannot use the kernel's own ``causal=True``: FA4
+    bottom-right-aligns the diagonal at ``seqlen_k - seqlen_q``, which is this
+    rank's offset only on the last rank, and ``row_end``'s values are global row
+    ids compared against local rows. So the diagonal becomes an explicit second
+    bound and both bounds are shifted into local row space -- the contract
+    ``DotProductAttention`` and the HySparse MLA scorer already use.
+
+    The assertion is the mask itself rather than the numbers in the bounds: with
+    ``causal=False`` and two bounds the kernel masks ``row >= LTS or row < UTE``
+    (``flash_mask/cute/mask.py:513-518``), i.e. column ``j`` is visible on rows
+    ``[UTE_j, LTS_j)``. Decoding the returned pair through *that* rule and
+    comparing against a brute-force per-document causal mask, sliced to this
+    rank's rows, is what makes the test independent of how the shift is spelled.
+
+    Pure integer arithmetic on 1-element-wide bounds, so no device is needed --
+    ``preprocess_index`` is a subtract plus a clip.
     """
 
-    _guard = staticmethod(MQALatentAttention._assert_index_table_addressable)
+    @staticmethod
+    def _localise(row_end, cp_rank, s_local):
+        """The method under test, on a stand-in carrying only ``cp_rank``.
 
-    def test_the_production_shape_is_far_from_the_limit(self):
-        """s=8192 x b=8 is two orders of magnitude below the wrap."""
-        self._guard(8, 8192, 8192)
-
-    def test_last_addressable_length_is_accepted(self):
-        self._guard(1, 46336, 46336)
-
-    def test_first_overflowing_length_is_rejected(self):
-        """The one that returns finite-but-wrong numbers unguarded."""
-        with self.assertRaisesRegex(ValueError, "does not fit int32"):
-            self._guard(1, 46337, 46337)
-
-    def test_the_bound_is_on_b_times_rows_not_on_rows(self):
-        """Batch multiplies the flat row index, so it moves the ceiling.
-
-        The last addressable length at b=1 must be rejected at b=2 -- pinning
-        this keeps the check from degrading into a plain sequence-length limit.
-        Measured on the raw kernel the same way round: b=64, s=1024 crashes at a
-        column count that b=1, s=65536 survives.
+        Bound as a plain function so the case does not need a built layer (and
+        therefore a GPU) to exercise index arithmetic.
         """
-        self._guard(1, 46336, 46336)
-        with self.assertRaisesRegex(ValueError, "does not fit int32"):
-            self._guard(2, 46336, 46336)
+        return MQALatentAttention._cp_row_bounds(
+            types.SimpleNamespace(cp_rank=cp_rank), row_end, s_local
+        )
 
-    def test_the_phase_3_budget_never_trips_it(self):
-        """Only the full-causal fallback can reach the limit.
+    @staticmethod
+    def _global_mask(doc_lens, s_global):
+        """``[s_global, s_global]`` bool: per-document causal, brute force."""
+        mask = np.zeros([s_global, s_global], dtype=bool)
+        pos = 0
+        for length in doc_lens:
+            end = min(pos + length, s_global)
+            for row in range(pos, end):
+                mask[row, pos : row + 1] = True
+            pos = end
+        return mask
 
-        Phase 3 passes ``topk = index_topk <= 2048``, which needs s > 1e6 -- so
-        the guard must not become a surprise ceiling for the sparse phase.
+    def _assert_rank_mask(self, doc_lens, s_global, cp_size):
+        row_end = _row_end(doc_lens, s_global)
+        s_local = s_global // cp_size
+        expected = self._global_mask(doc_lens, s_global)
+        for cp_rank in range(cp_size):
+            bounds = self._localise(row_end, cp_rank, s_local).numpy()[0, 0]
+            lts, ute = bounds[:, 0], bounds[:, 1]
+            rows = np.arange(s_local).reshape([s_local, 1])
+            got = ~((rows >= lts) | (rows < ute))
+            base = cp_rank * s_local
+            with self.subTest(cp_size=cp_size, cp_rank=cp_rank, docs=doc_lens):
+                self.assertEqual(bounds.shape, (s_global, 2))
+                np.testing.assert_array_equal(
+                    got, expected[base : base + s_local]
+                )
+
+    def test_single_rank_reproduces_the_kernel_causal_mask(self):
+        """cp_size=1 is the calibration: the pair must equal ``causal=True``.
+
+        ``_dense_attn`` does not take this branch at cp_size=1, but if the two
+        formulations disagreed here they would disagree everywhere, and this is
+        the one shape where the kernel's own diagonal is known to be right.
         """
-        self._guard(8, 65536, 2048)
+        for doc_lens in ([16], [7, 9], [5, 3, 8]):
+            self._assert_rank_mask(doc_lens, 16, 1)
 
-    def test_the_column_count_is_padded_before_the_check(self):
-        """The kernel pads ``topk`` up to 64, so the check has to as well.
+    def test_every_rank_sees_its_own_slice(self):
+        for cp_size in (2, 4):
+            for doc_lens in ([16], [8, 8], [7, 9], [5, 3, 8], [1, 14, 1]):
+                self._assert_rank_mask(doc_lens, 16, cp_size)
 
-        A budget of 2049 costs 2112 columns per row, not 2049; ignoring that
-        would let a table through whose real stride overflows.
+    def test_documents_are_not_leaked_across_ranks(self):
+        """The failure mode the localisation exists to prevent.
+
+        Handing the kernel the *unshifted* global bounds with ``causal=True``
+        leaves an earlier document fully visible to a later rank -- rank 1's
+        local row 0 is global row 8, and every column of document A (0-7) sits
+        below the bottom-right diagonal with ``LTS`` values it never reaches. So
+        pin that document A contributes nothing on rank 1, and that rank 0 sees
+        nothing of document B.
         """
-        rows_ok = (2**31 - 1) // 2112 + 1
-        self._guard(1, rows_ok, 2049)
-        with self.assertRaisesRegex(ValueError, r"\* 2112 = "):
-            self._guard(1, rows_ok + 1, 2049)
+        row_end = _row_end([8, 8], 16)
+        first = self._localise(row_end, cp_rank=1, s_local=8).numpy()[0, 0]
+        # Document A masked from local row 0 on == masked everywhere.
+        np.testing.assert_array_equal(first[:8, 0], np.zeros(8, dtype="int32"))
+        # Document B keeps its own diagonal, now in local rows.
+        np.testing.assert_array_equal(first[8:, 1], np.arange(8, dtype="int32"))
 
-    def test_the_guard_runs_before_the_table_is_built(self):
-        """Reached through the real builder, not only as a static method.
+        second = self._localise(row_end, cp_rank=0, s_local=8).numpy()[0, 0]
+        # Document B is entirely in the future: visible from local row 8, which
+        # this rank does not have.
+        np.testing.assert_array_equal(second[8:, 1], np.full(8, 8, "int32"))
+        np.testing.assert_array_equal(second[:8, 0], np.full(8, 8, "int32"))
 
-        ``_build_full_causal_indices`` would otherwise try to materialise
-        ``[1, 46337, 46337]`` int32 (8.6 TiB) before anything checked it.
+    def test_pad_rows_stay_empty_on_every_rank(self):
+        """A pad row must not acquire columns from the shift.
+
+        ``_pad_row_end`` repeats the last document's end, so the tail rows are
+        past every ``LTS``. Clipping must keep them that way rather than folding
+        them to ``s_local``, which would make them fully *visible*.
         """
-        with self.assertRaisesRegex(ValueError, "does not fit int32"):
-            MQALatentAttention._build_full_causal_indices(1, 46337, None, None)
+        doc_lens, s_global = [4, 4], 16
+        row_end = _pad_row_end(doc_lens, s_global)
+        for cp_size in (2, 4):
+            s_local = s_global // cp_size
+            for cp_rank in range(cp_size):
+                bounds = self._localise(row_end, cp_rank, s_local).numpy()[0, 0]
+                lts, ute = bounds[:, 0], bounds[:, 1]
+                rows = np.arange(s_local).reshape([s_local, 1])
+                got = ~((rows >= lts) | (rows < ute))
+                base = cp_rank * s_local
+                pad = max(0, min(s_local, base + s_local - sum(doc_lens)))
+                with self.subTest(cp_size=cp_size, cp_rank=cp_rank):
+                    self.assertFalse(got[s_local - pad :].any())
 
 
 def _loss_weight(seqlen, seed=7):
@@ -371,6 +508,10 @@ class TestDenseWarmupPrecision(unittest.TestCase):
     own error is the yardstick, so the verdict does not rest on a hand-picked
     tolerance; the absolute floors below only stop the assertion from tightening
     to zero when the yardstick happens to be unusually good on a shape.
+
+    The yardstick is built by ``_sparse_full_causal`` rather than by flipping a
+    flag: production has one backend for these phases, so the sparse comparison
+    exists only here, out of ``_sparse_attn`` plus an explicit column table.
 
     Measured relative Frobenius error against fp32, over the three layouts with
     and without a sink (dense / sparse):
@@ -406,12 +547,20 @@ class TestDenseWarmupPrecision(unittest.TestCase):
         expected = (ref, tensors[0].grad, tensors[1].grad, w_v.grad)
 
         got = {}
-        for tag, version in (("dense", 4), ("sparse", 2)):
+        for tag in ("dense", "sparse"):
             module.clear_gradients()
             tensors, w_v = _inputs(seqlen)
-            with _flash_attn_version(version), _backend_spy(module) as calls:
-                out = _forward(module, tensors, row_end, w_v)
-            self.assertEqual(calls, [tag])
+            if tag == "dense":
+                # The production path, through the module's own forward.
+                with _flash_attn_version(4), _backend_spy(module) as calls:
+                    out = _forward(module, tensors, row_end, w_v)
+                self.assertEqual(calls, ["dense"])
+            else:
+                # The yardstick, assembled from the same two production pieces
+                # phase 3 uses. Not reachable through the module's forward any
+                # more, which is the point of the comparison.
+                module.train()
+                out = _sparse_full_causal(module, tensors, row_end, w_v)
             paddle.autograd.backward((out.cast("float32") * weight).sum())
             sink_grad = (
                 None
@@ -541,25 +690,37 @@ class TestDenseWarmupPadRows(unittest.TestCase):
 
 @_GPU
 @_FA4
-class TestFrozenSink(unittest.TestCase):
-    """``train_indexer_only`` freezes the sink; the dense path must survive it.
+class TestFrozenInputs(unittest.TestCase):
+    """Frozen inputs on the dense path, which ``train_indexer_only`` produces.
 
     A ``PyLayer`` whose input arrives with ``stop_gradient=True`` must get
     ``None`` back at that position, and ``flashmask_attention`` does not do that
     -- it aborts with "backward function should return None at N position".
-    ``_dense_sink_arg`` hands the kernel a ``stop_gradient=False`` detached proxy
-    instead. Neither ``.detach()`` alone nor ``* 1.0`` works, and the sparse
-    backend needs none of this (``csa_sparse_attn.py:178-182`` records
-    ``attn_sink_needs_grad`` itself), so the workaround is dense-only and its
-    forward-neutrality is what has to be pinned.
+    ``_dense_pylayer_inputs`` hands the kernel a ``stop_gradient=False``
+    detached proxy of every frozen input instead. Neither ``.detach()`` alone
+    nor ``* 1.0`` works, and the sparse backend needs none of this
+    (``csa_sparse_attn.py:178-182`` records ``attn_sink_needs_grad`` itself), so
+    the workaround is dense-only and its forward-neutrality is what has to be
+    pinned.
+
+    Which subset arrives frozen is a property of the configuration, not of this
+    layer: ``train_indexer_only`` freezes the backbone (so q/kv reach the kernel
+    frozen) while the sink is a parameter of its own, so all four combinations
+    below are reachable.
     """
 
-    def _forward_with(self, freeze):
+    def _forward_with(self, freeze, freeze_qkv=False):
         doc_lens, seqlen = _LAYOUTS[1]
         row_end = _row_end(doc_lens, seqlen)
         module = _module(sink=_SINK)
         module.softmax_offset.stop_gradient = freeze
         tensors, w_v = _inputs(seqlen)
+        if freeze_qkv:
+            # ``query`` / ``key`` are what become the kernel's q/k/v; freezing
+            # them while the sink stays trainable is the *partially* frozen case
+            # that trips the contract at position 1 rather than 3.
+            tensors[0].stop_gradient = True
+            tensors[1].stop_gradient = True
         with _flash_attn_version(4), _backend_spy(module) as calls:
             out = _forward(module, tensors, row_end, w_v)
         self.assertEqual(calls, ["dense"])
@@ -573,12 +734,37 @@ class TestFrozenSink(unittest.TestCase):
         self.assertIsNotNone(tensors[0].grad)
         self.assertTrue(paddle.isfinite(tensors[0].grad.cast("float32")).all())
 
-    def test_freezing_the_sink_does_not_change_the_forward(self):
+    def test_frozen_qkv_backward_runs_and_leaves_them_alone(self):
+        """Frozen q/kv with a trainable sink: only the sink may receive."""
+        out, sink, tensors = self._forward_with(freeze=False, freeze_qkv=True)
+        self.assertTrue(paddle.isfinite(out.cast("float32")).all())
+        self.assertIsNotNone(sink.grad)
+        self.assertTrue(paddle.isfinite(sink.grad.cast("float32")).all())
+        self.assertIsNone(tensors[0].grad, "frozen query received a gradient")
+        self.assertIsNone(tensors[1].grad, "frozen key received a gradient")
+
+    def test_everything_frozen_builds_no_grad_node(self):
+        """Nothing wants a gradient, so no proxy and no contract to satisfy."""
+        out, sink, tensors = self._forward_with(freeze=True, freeze_qkv=True)
+        self.assertTrue(paddle.isfinite(out.cast("float32")).all())
+        self.assertIsNone(sink.grad)
+        self.assertIsNone(tensors[0].grad)
+        self.assertIsNone(tensors[1].grad)
+
+    def test_freezing_does_not_change_the_forward(self):
         """The proxy must be numerically the same tensor, bit for bit."""
-        frozen, _, _ = self._forward_with(freeze=True)
         trainable, sink, _ = self._forward_with(freeze=False)
         self.assertIsNotNone(sink.grad)
-        # ``equal_all`` has no bfloat16 kernel; the cast is exact.
-        self.assertTrue(
-            paddle.equal_all(frozen.cast("float32"), trainable.cast("float32"))
-        )
+        reference = trainable.cast("float32")
+        for label, kwargs in (
+            ("frozen sink", {"freeze": True}),
+            ("frozen q/kv", {"freeze": False, "freeze_qkv": True}),
+            ("all frozen", {"freeze": True, "freeze_qkv": True}),
+        ):
+            with self.subTest(case=label):
+                out, _, _ = self._forward_with(**kwargs)
+                # ``equal_all`` has no bfloat16 kernel; the cast is exact.
+                self.assertTrue(
+                    paddle.equal_all(out.cast("float32"), reference),
+                    f"{label} changed the forward",
+                )

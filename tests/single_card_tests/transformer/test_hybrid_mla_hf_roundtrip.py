@@ -25,7 +25,7 @@ runs the statements through the real engine: it drives
 real ``csa_compress_ratios == -2`` layer built from the production
 ``model_config.json``.
 
-What is proven here, and why each one matters for the phase-1 -> phase-2/3/4
+What is proven here, and why each one matters for the phase-1 -> phase-2/3
 continuation story:
 
 1. **Save is complete.** Every tensor of the built module reaches disk exactly

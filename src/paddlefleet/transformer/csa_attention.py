@@ -2101,7 +2101,7 @@ class CompressedSparseAttention(FleetLayer):
         # indexer that is still being learned must not steer attention, so
         # ``_resolve_topk_effective`` returns ``n_compressed`` and the single
         # ``topk_effective`` below feeds the attention selection and
-        # ``FusedDSAIndexerLoss`` alike. Phase 3/4 narrows both to
+        # ``FusedDSAIndexerLoss`` alike. Phase 3 narrows both to
         # ``min(index_topk, n_compressed)``.
         indexer_backend = getattr(
             self.config, "csa_indexer_backend", "tilelang"
