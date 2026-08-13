@@ -662,22 +662,24 @@ class HyperConnectionModule(nn.Layer):
 
         Two things are worth hiding from the live set:
 
+        * the dropout mask the sequential path keeps whenever dropout is active
+          -- one byte per element of the ``[..., n*C]`` output, independent of
+          ``high_precision_mhc`` and of the accuracy-compatible kernel, since
+          all three of those configurations take the same sequential path;
         * the fp32 up-casts the fast path pins through ``save_for_backward`` --
           only under ``high_precision_mhc``, and only while the
-          accuracy-compatible kernel is off, since that switch keeps the whole
-          mHC path in the incoming dtype;
-        * the sequential path's own ``[..., n*C]`` intermediates and dropout
-          mask, which it keeps whenever dropout is active.
+          accuracy-compatible kernel is off, since that switch keeps the mHC
+          input in the incoming dtype.
 
         With neither, the call saves only tensors that are live anyway and a
         span would cost a replay plus the caller's ``h_res``/``h_post`` clones.
         An already-fp32 residual makes the fast-path up-cast a no-op, i.e. a
         wash rather than a loss, and is not special-cased here.
         """
-        if not self.config.high_precision_mhc:
-            return False
         if dropout_prob > 0.0 and training:
             return True
+        if not self.config.high_precision_mhc:
+            return False
         return not _use_accuracy_compatible_kernel()
 
     def fused_h_res_h_post_bda(

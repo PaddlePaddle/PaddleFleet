@@ -354,20 +354,31 @@ class TestFusedHResHPostBDASpanNumerics(_CompareMixin, unittest.TestCase):
         # there would cost a replay and save nothing.
         self._check({"high_precision_mhc": False}, expect_span=False)
 
+    def test_low_precision_mhc_with_dropout_is_wrapped(self):
+        # ...but active dropout puts even a low-precision config on the
+        # sequential path, whose mask the span does hide, so the
+        # high_precision_mhc veto must not swallow this case.
+        self._check(
+            {"high_precision_mhc": False, "hidden_dropout_prob": 0.1},
+            with_bias=True,
+        )
+
     def test_sequential_path_with_dropout_with_bias(self):
         # Active dropout takes fused_h_res_h_post_bda down the sequential path,
-        # where the span hides that path's own intermediates instead of an
-        # up-cast, and the replay has to restore the RNG state to reproduce the
-        # mask. Bitwise equality is what proves the restore works.
+        # where the span hides that path's dropout mask instead of an up-cast,
+        # and the replay has to restore the RNG state to reproduce the mask.
+        # Bitwise equality is what proves the restore works.
         self._check({"hidden_dropout_prob": 0.1}, with_bias=True)
 
     def test_sequential_path_with_dropout_without_bias(self):
         self._check({"hidden_dropout_prob": 0.1}, with_bias=False)
 
     def test_accuracy_compatible_kernel_is_not_wrapped(self):
-        # FLAGS_use_accuracy_compatible_kernel keeps the whole mHC path in the
+        # FLAGS_use_accuracy_compatible_kernel keeps the mHC input in the
         # incoming dtype, so there is no up-cast to hide and the helper must
         # decline (measured: 1040 KiB retained either way, minus the clones).
+        # Only holds while dropout is off -- see the contract test for the
+        # combination.
         with mock.patch.object(
             hyper_connection, "_ACCURACY_COMPATIBLE_KERNEL", True
         ):
@@ -441,9 +452,8 @@ class TestFusedHResHPostBDASpanContract(_CompareMixin, unittest.TestCase):
         self.assertEqual(out.dtype, paddle.float32)
 
     def test_span_created_when_dropout_is_active(self):
-        # Sequential path: no up-cast, but its own intermediates and the dropout
-        # mask are worth hiding, so the span stays (measured: 252 KiB per
-        # half-layer at [128, 2, 4*256]).
+        # Sequential path: no up-cast, but the dropout mask is worth hiding, so
+        # the span stays (measured: 252 KiB per half-layer at [128, 2, 4*256]).
         layer, hc = self._prepare(hidden_dropout_prob=0.1)
         resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
         _, span = layer._fused_h_res_h_post_bda(
@@ -454,6 +464,32 @@ class TestFusedHResHPostBDASpanContract(_CompareMixin, unittest.TestCase):
             span.preserve_rng_state,
             "the dropout mask cannot be reproduced without the RNG state",
         )
+
+    def test_span_created_for_low_precision_dropout(self):
+        # The mask is a byte per output element whatever the mHC precision, so
+        # the high_precision_mhc veto must not run before the dropout check
+        # (measured: same 252 KiB saving as the high-precision config).
+        layer, hc = self._prepare(
+            high_precision_mhc=False, hidden_dropout_prob=0.1
+        )
+        resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
+        _, span = layer._fused_h_res_h_post_bda(
+            hc, h_res, resid, h_post, (x, None), True
+        )
+        self.assertIsInstance(span, RecomputeWithoutOutput)
+
+    def test_span_created_for_accuracy_compatible_kernel_with_dropout(self):
+        # Same reasoning for the other sequential-path trigger: the switch
+        # removes the up-cast, not the mask.
+        layer, hc = self._prepare(hidden_dropout_prob=0.1)
+        resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
+        with mock.patch.object(
+            hyper_connection, "_ACCURACY_COMPATIBLE_KERNEL", True
+        ):
+            _, span = layer._fused_h_res_h_post_bda(
+                hc, h_res, resid, h_post, (x, None), True
+            )
+        self.assertIsInstance(span, RecomputeWithoutOutput)
 
     def test_span_created_in_eval_with_dropout_configured(self):
         # eval(): dropout is configured but does not run, so the call is back on
@@ -592,26 +628,37 @@ class TestFusedHResHPostBDASpanMemory(unittest.TestCase):
             f"(baseline {without} B, with span {with_span} B)",
         )
 
-    def test_span_shrinks_the_retained_set_on_the_sequential_path(self):
-        # Why active dropout keeps its span even though nothing is up-cast: the
-        # sequential path saves its own [s, b, n*c] intermediates and the mask,
-        # and the span hides those. fp32 here because the sequential path cannot
-        # run in bf16 today -- apply_h_res() bmm's an fp32 h_res against a bf16
-        # residual and Paddle raises instead of promoting (pre-existing, on the
-        # no-span path too).
+    def _assert_sequential_span_saves(self, **config_kw):
+        """Active dropout, i.e. the sequential path: the span hides the mask.
+
+        fp32 because the sequential path cannot run in bf16 today -- apply_h_res()
+        bmm's an fp32 h_res (the mapping/sinkhorn output stays fp32 whatever
+        high_precision_mhc says) against a bf16 residual and Paddle raises
+        instead of promoting. Pre-existing, on the no-span path too.
+        """
         s, b, c = self.S_MEM, self.B_MEM, self.C_MEM
-        without, with_span = self._retained("float32", hidden_dropout_prob=0.1)
+        without, with_span = self._retained(
+            "float32", hidden_dropout_prob=0.1, **config_kw
+        )
         saved = without - with_span
-        # Conservative floor: one [s, b, c] fp32 intermediate, less the h_res
-        # [s, b, n, n] / h_post [s, b, n] clones the span adds back. Measured
-        # saving at this shape is 252 KiB.
-        floor = s * b * c * 4 - s * b * (N * N + N) * 4
+        # Floor: the dropout mask is a byte per element of the [s, b, n*c]
+        # output, less the h_res [s, b, n, n] / h_post [s, b, n] clones the span
+        # adds back. Measured saving at this shape is 252 KiB.
+        floor = s * b * N * c - s * b * (N * N + N) * 4
         self.assertGreaterEqual(
             saved,
             floor,
             f"span saved only {saved} B on the sequential path, expected at "
             f"least {floor} B (baseline {without} B, with span {with_span} B)",
         )
+
+    def test_span_shrinks_the_retained_set_on_the_sequential_path(self):
+        self._assert_sequential_span_saves()
+
+    def test_span_shrinks_the_retained_set_without_high_precision_mhc(self):
+        # The mask does not care about mHC precision, so the gate must not veto
+        # this config on the high_precision_mhc check alone.
+        self._assert_sequential_span_saves(high_precision_mhc=False)
 
 
 def _span_spy(created, force_disable=False):
