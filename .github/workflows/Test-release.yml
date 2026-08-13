@@ -22,7 +22,6 @@ env:
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
   build_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:cuda12.9-cudnn9.9-trt10.5-gcc11"
-  formers_branch: "release/1.2"
 
 defaults:
   run:
@@ -436,7 +435,7 @@ jobs:
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddle commit:"
           python -c "import paddle; print(paddle.version.commit)"
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
 
@@ -484,6 +483,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
           docker rm -f ${{ env.container_name }}
 
+
   integration-test-H20-single-card:
     needs: [check-bypass, build_whl, check_documents_type]
     if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' }}
@@ -521,7 +521,6 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
-            -e formers_branch \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
@@ -551,7 +550,7 @@ jobs:
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -559,23 +558,18 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
           python -m pip install --upgrade pip
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
-          git config --global --add safe.directory /workspace/PaddleFormers
-          if [ ${BRANCH} != "develop" ]; then
-            git checkout ${formers_branch}
-          fi
+          cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
           git log -1
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
-          pip install -e .
+          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
+          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           pip install librosa==0.11.0
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -590,11 +584,11 @@ jobs:
           '
 
       - name: Proprocess for integration test
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/preprocess.sh
+          bash -x PaddleFleet/test/formers/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
@@ -605,7 +599,7 @@ jobs:
           '
 
       - name: Integration test (GLM4.5 single-card)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -613,7 +607,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_single_card.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
@@ -624,7 +618,7 @@ jobs:
           '
 
       # - name: Integration test (Qwen3-30B-A3B single-card)
-      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
       #   timeout-minutes: 5
       #   run: |
       #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -632,7 +626,7 @@ jobs:
       #     mkdir -p /workspace/PaddleFleet/coveragedata-qwen
       #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
       #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-      #     bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
+      #     bash -x PaddleFleet/test/formers/integration_test/qwen3_single_card.sh
       #     qwen3_single_card_exit_code=$?
       #     if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
       #       echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
@@ -643,7 +637,7 @@ jobs:
       #     '
 
       - name: Qwen3-vl-8k-single-card
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -651,7 +645,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-qwen3vl-single
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft_single_card.sh single
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-vl-8k-single-card.\033[0m"
@@ -718,7 +712,6 @@ jobs:
             -e CACHE_DIR \
             -e no_proxy \
             -e CI_name \
-            -e formers_branch \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
@@ -746,7 +739,7 @@ jobs:
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -754,22 +747,17 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
           python -m pip install --upgrade pip
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
-          if [ ${BRANCH} != "develop" ]; then
-            git checkout ${formers_branch}
-          fi
+          cd PaddleFleet
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
-          git config --global --add safe.directory /workspace/PaddleFormers
+          git config --global --add safe.directory /workspace/PaddleFleet
           git log -1
-          pip install -e .
           pip install librosa==0.11.0
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -784,7 +772,7 @@ jobs:
           '
 
       - name: GLM4.5 pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -792,7 +780,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -803,7 +791,7 @@ jobs:
           '
 
       - name: GLM4.5 sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -811,7 +799,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -822,12 +810,12 @@ jobs:
           '
 
       - name: GLM4.5 sft cp
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_sft_cp.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 sft cp.\033[0m"
@@ -838,7 +826,7 @@ jobs:
           '
 
       - name: GLM4.5 lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -846,7 +834,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -857,7 +845,7 @@ jobs:
           '
 
       - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -865,7 +853,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
@@ -876,7 +864,7 @@ jobs:
           '
 
       - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -884,11 +872,11 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo_lora.sh
           '
 
       - name: Integration test (GLM4.5 multi-card FP8)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -896,7 +884,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -907,7 +895,7 @@ jobs:
           '
 
       - name: GLM4.5 pre-train (Grouped GEMM)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -915,7 +903,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
@@ -926,7 +914,7 @@ jobs:
           '
 
       - name: GLM4.5 pre-train (EP4)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -934,11 +922,11 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_ep4.sh
           '
 
       - name: Qwen pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -946,11 +934,11 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh pt
           '
 
       - name: Qwen sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -958,11 +946,11 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh sft
           '
 
       - name: Qwen lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -970,11 +958,11 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/qwen.sh lora
           '
 
       - name: Qwen vl sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -982,11 +970,11 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
       - name: Qwen vl lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -994,11 +982,11 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh h20
           '
 
       - name: Qwen vl moe
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -1006,11 +994,11 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe h20
           '
 
       - name: Qwen3-vl-8k-fsdp
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
@@ -1018,7 +1006,7 @@ jobs:
           mkdir -p /workspace/PaddleFleet/coveragedata-multi
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh fsdp h20
           '
 
       - name: H20 Coverage Upload to BOS
@@ -1076,7 +1064,6 @@ jobs:
             -e ci_scripts \
             -e CACHE_DIR \
             -e no_proxy \
-            -e formers_branch \
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
@@ -1105,7 +1092,7 @@ jobs:
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -1113,24 +1100,19 @@ jobs:
           python -c "import paddle; print(paddle.version.commit)"
           '
 
-      - name: Install PaddleFormers
-        id: formers_install
+      - name: Prepare model tests
+        id: model_test_prepare
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           set -x
           python -m pip install --upgrade pip
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
-          cd PaddleFormers
-          git config --global --add safe.directory /workspace/PaddleFormers
-          if [ ${BRANCH} != "develop" ]; then
-            git checkout ${formers_branch}
-          fi
+          cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          pip install -e .
           pip install librosa==0.11.0
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -1151,7 +1133,7 @@ jobs:
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh pt
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -1162,14 +1144,14 @@ jobs:
           '
 
       - name: GLM4.5 sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh sft
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 sft.\033[0m"
@@ -1180,14 +1162,14 @@ jobs:
           '
 
       - name: GLM4.5 lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh lora
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 lora.\033[0m"
@@ -1198,14 +1180,14 @@ jobs:
           '
 
       - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
@@ -1216,14 +1198,14 @@ jobs:
           '
 
       - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_a100.sh dpo_lora
+          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo_lora
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo lora.\033[0m"
@@ -1234,69 +1216,69 @@ jobs:
           '
 
       - name: Qwen pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh pt
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh pt
           '
 
       - name: Qwen sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh sft
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh sft
           '
 
       - name: Qwen lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3_a100.sh lora
+          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh lora
           '
 
       - name: Qwen vl sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 a100
           '
 
       - name: Qwen vl lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh a100
           '
 
       - name: Qwen vl moe
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe a100
+          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe a100
           '
 
       - name: A100 Coverage Upload to BOS
@@ -1327,7 +1309,7 @@ jobs:
 
   coverage_check:
     name: Coverage Upload And Check
-    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, check-bypass]
+    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, integration-test-H20-multi-card, unittest-gpu-ci, check-bypass]
     if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' && needs.single_card_test.result != 'skipped' }}
     runs-on:
       group: APPROVAL
@@ -1358,6 +1340,7 @@ jobs:
           h20_multi_coverage.xml:h20-multi/coverage.xml
           h20_single_coverage.xml:h20-single/coverage.xml
           a100_coverage.xml:a100/coverage.xml
+          unittest_coverage.xml:unittest-gpu/coverage.xml
           "
           base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
 
@@ -1365,7 +1348,8 @@ jobs:
             if [ -n "$config" ]; then
                 filename="${config%%:*}"
                 filepath="${config#*:}"
-                wget "${base_url}/${filepath}" -O "$filename" --no-proxy
+                wget -q "${base_url}/${filepath}" -O "$filename" --no-proxy \
+                  && echo "Downloaded: $filename" || echo "WARNING: failed to download $filename"
             fi
           done
           # 豁免文件/目录列表：这些路径下的改动不计入覆盖率检查
@@ -1382,13 +1366,9 @@ jobs:
 
           git diff origin/${{ github.event.pull_request.base.ref }}...HEAD --unified=0 \
             -- . "${EXCLUDE_ARGS[@]}" > diff.txt
-          echo "=== DIFF FILE (after exclusion) ==="
-          cat diff.txt
-          echo "================="
-          python -m pip install diff-cover
-          echo "=== 覆盖率文件 ==="
-          ls *.xml
-          echo "================="
+          echo "Diff size: $(wc -l < diff.txt) lines ($(wc -c < diff.txt) bytes)"
+          python -m pip install diff-cover -q
+          echo "Coverage XML files: $(ls *.xml 2>/dev/null | tr '\n' ' ')"
           COVERAGE_EXIT_CODE=0
           diff-cover *.xml --diff-file=diff.txt --fail-under=90 || COVERAGE_EXIT_CODE=9
           exit ${COVERAGE_EXIT_CODE}
@@ -1396,8 +1376,7 @@ jobs:
       - name: Check full coverage
         if: always()
         run: |
-          echo "=== 全量覆盖率检查 ==="
-          python -m pip install coverage==7.13.0
+          python -m pip install coverage==7.13.0 -q
 
           # 定义所有覆盖率文件
           COVERAGE_FILES=(
@@ -1406,6 +1385,7 @@ jobs:
             "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
             "a100_coverage.xml"
+            "unittest_coverage.xml"
           )
 
           # 检查哪些文件存在
@@ -1416,7 +1396,7 @@ jobs:
             fi
           done
 
-          echo "找到 ${#EXISTING_FILES[@]} 个覆盖率文件"
+          echo "找到 ${#EXISTING_FILES[@]} 个覆盖率文件: ${EXISTING_FILES[*]}"
 
           # 使用脚本合并 XML 覆盖率文件并输出全量覆盖率报告
           python ci/merge_and_check_coverage.py "${EXISTING_FILES[@]}" --report-only
@@ -1424,7 +1404,6 @@ jobs:
       - name: filter coverage files and remove backup files
         if: always()
         run: |
-          echo "=== CHECKING COVERAGE FILES ==="
 
           COVERAGE_FILES=(
             "multi_coverage.xml"
@@ -1432,6 +1411,7 @@ jobs:
             "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
             "a100_coverage.xml"
+            "unittest_coverage.xml"
           )
 
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
@@ -1453,9 +1433,247 @@ jobs:
             ./h20_multi_coverage.xml,
             ./h20_single_coverage.xml,
             ./h20_qwen_coverage.xml,
-            ./a100_coverage.xml
+            ./a100_coverage.xml,
+            ./unittest_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
           use_oidc: true
-          verbose: true
+          verbose: false
+
+  unittest-gpu-ci:
+    needs: [check-bypass, build_whl, check_documents_type]
+    if: ${{ needs.check-bypass.outputs.can-skip != 'true' && needs.check_documents_type.outputs.is_md_only != 'true' && !contains(github.event.pull_request.labels.*.name, 'skip-unittest-ci') }}
+    name: unittest-gpu-ci
+    runs-on: 'ernie-unittest'
+    env:
+      work_dir: ${{ github.workspace }}
+      CI_JOB_NAME: unittest-gpu-ci
+      TASK: PaddleFleet_CI_unittest_gpu_${{ github.event.pull_request.number || github.run_id }}
+      IMAGE_NAME: ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:cuda129-dev
+      python_version: 3.12
+      paddle_whl: https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.9-Cudnn9.9-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp312-cp312-linux_x86_64.whl
+      PYTEST_EXECUTE_FLAG_FILE: ${{ github.workspace }}/../../../PYTEST_EXECUTE_FLAG_FILE/${{ github.event.pull_request.number || '0' }}/${{ github.event.pull_request.head.sha || github.sha }}/pytest_execute.flag
+    outputs:
+      pytest_execute_flag: ${{ steps.set_pytest_flag.outputs.pytest_execute_flag }}
+    steps:
+      - name: Determine the runner
+        run: |
+          gpu_id=$(( $(echo "$PWD" | awk -F'/' '{print $4}' | awk -F'_' '{print $2}') ))
+          echo "GPU_DEVICES=$gpu_id" >> "$GITHUB_ENV"
+      - name: Run Container
+        env:
+          FLAGS_dynamic_static_unified_comm: "True"
+          PIP_CACHE_DIR: /root/.cache/pip
+          GPU_DEVICES: ${{ env.GPU_DEVICES }}
+        run: |
+          work_dir="${{ github.workspace }}"
+          container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
+          echo "container_name=${container_name}" >> "$GITHUB_ENV"
+          docker run -d -t --name "${container_name}" --gpus device="${GPU_DEVICES}" --runtime=nvidia --net=host \
+            -v /dev/shm:/dev/shm --shm-size=32G \
+            -v "${work_dir}/../../..:${work_dir}/../../.." \
+            -v "${work_dir}:/workspace" \
+            -v /home/.cache/:/root/.cache/ \
+            -v /home/paddle-1/models/:/home/models/ \
+            -e PF_HOME=/home/models/ \
+            -e "work_dir=$work_dir" \
+            -e "PR_ID=$PR_ID" \
+            -e "BRANCH=$BRANCH" \
+            -e "COMMIT_ID=$COMMIT_ID" \
+            -e CUDA_VISIBLE_DEVICES="${GPU_DEVICES}" \
+            -e NVIDIA_VISIBLE_DEVICES="${GPU_DEVICES}" \
+            -e "PYTEST_EXECUTE_FLAG_FILE=$PYTEST_EXECUTE_FLAG_FILE" \
+            -e "no_proxy=$no_proxy" \
+            -e "paddle_whl=$paddle_whl" \
+            -e "FLAGS_dynamic_static_unified_comm=$FLAGS_dynamic_static_unified_comm" \
+            -e "python_version=$python_version" \
+            -e "HF_PROXY_PATH=$work_dir/../../../proxy_huggingface" \
+            -e "AISTUDIO_PROXY_PATH=$work_dir/../../../proxy_aistudio" \
+            -e "HF_DATASETS_CACHE=$work_dir/../../../paddlenlp/huggingface/datasets" \
+            -e "TRANSFORMERS_CACHE=$work_dir/../../../paddlenlp/huggingface/transformers" \
+            -e PIP_CACHE_DIR \
+            -w /workspace --privileged "${IMAGE_NAME}"
+      - name: Download PaddleFleet build
+        run: |
+          work_dir="${{ github.workspace }}"
+          docker exec -i -e "work_dir=$work_dir" "$container_name" /bin/bash <<-DOCKER_EOF
+          rm -rf * .[^.]*
+          mkdir PaddleFleet
+          cd PaddleFleet
+          wget -q --tries=5 --no-proxy --no-check-certificate \
+            https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          tar -xf paddlefleet.tar.gz --strip-components=1
+          git config --global --add safe.directory /workspace/PaddleFleet
+          DOCKER_EOF
+      - name: Change python version
+        run: |
+          docker exec -i \
+            -e "work_dir=$work_dir" \
+            -e "python_version=$python_version" \
+            "$container_name" /bin/bash <<-DOCKER_EOF
+          echo "Change python version to $python_version"
+          set -e
+          cp /home/models/Miniforge3-Linux-x86_64.sh /tmp/miniforge.sh
+          bash /tmp/miniforge.sh -b -p /opt/conda
+          /opt/conda/bin/conda create -n py_\$python_version python=\$python_version -y \
+            --override-channels \
+            -c conda-forge
+          . /opt/conda/etc/profile.d/conda.sh
+          conda activate py_\$python_version
+          python --version
+          DOCKER_EOF
+      - name: Install test dependencies
+        run: |
+          work_dir="${{ github.workspace }}"
+          docker exec -i \
+            -e "work_dir=$work_dir" \
+            -e "python_version=$python_version" \
+            "$container_name" /bin/bash <<-DOCKER_EOF
+          set -e
+          . /opt/conda/etc/profile.d/conda.sh
+          conda activate py_\$python_version
+          python -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          source \$work_dir/../../../proxy
+          python -m pip uninstall paddlepaddle paddlepaddle_gpu paddlefleet -y
+          cd /home/models/my_packages
+          dpkg -i *.deb
+          cd /workspace/PaddleFleet
+          python -m pip install --upgrade pip
+          python -m pip install dist/${{ needs.build_whl.outputs.root_whl_name }} \
+            --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
+            --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          python -m pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} \
+            --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
+            --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
+          python -m pip install --group test-formers -i https://pypi.org/simple
+          python -m pip install "torch>=2.1,<2.11" -i https://pypi.org/simple
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          DOCKER_EOF
+      - name: Test
+        id: test
+        run: |
+          docker exec -t "$container_name" /bin/bash -c '
+          . /opt/conda/etc/profile.d/conda.sh
+          conda activate py_$python_version
+          python --version
+          ldconfig
+          mkdir -p /root/.cache/pip
+          rm -rf /root/.cache/aistudio/
+          cd /workspace/PaddleFleet
+          source $work_dir/../../../proxy
+          source $work_dir/../../../AISTUDIO_ACCESS_TOKEN
+          bash -x scripts/unit_test/ci_unittest.sh \
+            ${paddle_whl} false ${PYTEST_EXECUTE_FLAG_FILE}
+          '
+      - name: Display Test Summary
+        if: always()
+        run: |
+          file_log=${{ github.workspace }}/PaddleFleet/unittest_logs/unittest.log
+          file_failed=${{ github.workspace }}/PaddleFleet/unittest_logs/unittest_FAIL.log
+
+          if [[ "${{ steps.test.outcome }}" == "success" ]]; then
+            stats=$(tail -n 1 "${file_log}" 2>/dev/null || echo "")
+            echo "## ✅ All Tests Passed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "${stats}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Test Failures" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            # Collect FAILED lines from log
+            failed_lines=$(grep "^FAILED " "${file_log}" 2>/dev/null | sort -u || true)
+            stats=$(grep -E "[0-9]+ failed" "${file_log}" 2>/dev/null | tail -n 1 || true)
+
+            if [[ -n "${failed_lines}" ]]; then
+              echo "| # | Failed Test |" >> $GITHUB_STEP_SUMMARY
+              echo "|---|-------------|" >> $GITHUB_STEP_SUMMARY
+              i=1
+              while IFS= read -r line; do
+                test_id="${line#FAILED }"
+                echo "| ${i} | \`${test_id}\` |" >> $GITHUB_STEP_SUMMARY
+                i=$((i+1))
+              done <<< "${failed_lines}"
+              echo "" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            if [[ -n "${stats}" ]]; then
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+              echo "${stats}" >> $GITHUB_STEP_SUMMARY
+              echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            fi
+
+            # Also print to action log with color for visibility
+            echo ""
+            echo "::error::Test failures detected"
+            if [[ -n "${failed_lines}" ]]; then
+              while IFS= read -r line; do
+                echo "::error::${line}"
+              done <<< "${failed_lines}"
+            fi
+            echo ""
+            [[ -n "${stats}" ]] && echo "${stats}"
+          fi
+      - name: Upload Products
+        if: always()
+        env:
+          home_path: ${{ github.workspace }}/../../..
+          bos_file: ${{ github.workspace }}/../../../bos/BosClient.py
+          java_file: ${{ github.workspace }}/../../../jdk1.8.0_351
+          allure_file: ${{ github.workspace }}/../../../allure-2.19.0/bin/allure
+        run: |
+          docker exec -t "$container_name" /bin/bash -c '
+          source ${work_dir}/../../../proxy_huggingface
+          python -m pip install bce-python-sdk==0.8.74 -i https://pypi.org/simple
+          if [ ! -f "${{ env.bos_file }}" ]; then
+            wget -q --no-proxy -O ${{ env.home_path }}/bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
+            mkdir -p ${{ env.home_path }}/bos
+            tar xf ${{ env.home_path }}/bos_new.tar.gz -C ${{ env.home_path }}/bos
+          fi
+          if [ ! -f "${{ env.java_file }}" ]; then
+            wget -q --no-proxy -O ${{ env.home_path }}/java_linux.tar.gz https://paddle-qa.bj.bcebos.com/java/java_linux.tar.gz --no-check-certificate
+            tar xf ${{ env.home_path }}/java_linux.tar.gz -C ${{ env.home_path }}
+          fi
+          if [ ! -f "${{ env.allure_file }}" ]; then
+            wget -q --no-proxy -O ${{ env.home_path }}/allure-2.19.0.zip https://xly-devops.bj.bcebos.com/tools/allure-2.19.0.zip --no-check-certificate
+            unzip -q ${{ env.home_path }}/allure-2.19.0.zip -d ${{ env.home_path }}
+          fi
+          bos_prefix="${PR_ID}/${COMMIT_ID}"
+          cd /workspace/PaddleFleet
+          if [ -f "${PYTEST_EXECUTE_FLAG_FILE}" ] && [ -f coverage.xml ]; then
+            python ${{ env.bos_file }} coverage.xml paddle-github-action/${{ github.repository }}/pull/${PR_ID}/${COMMIT_ID}/unittest-gpu
+            echo "coverage: https://paddle-github-action.bj.bcebos.com/${{ github.repository }}/pull/${PR_ID}/${COMMIT_ID}/unittest-gpu/coverage.xml"
+          fi
+          cd /workspace/PaddleFleet/unittest_logs
+          for FILE in *; do
+            [ -f "$FILE" ] || continue
+            python ${{ env.bos_file }} "$FILE" paddle-github-action/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs
+            echo "$FILE: https://paddle-github-action.bj.bcebos.com/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs/$FILE"
+          done
+          cd /workspace/PaddleFleet
+          export JAVA_HOME="${{ env.java_file }}"
+          export JRE_HOME="${JAVA_HOME}/jre"
+          export CLASSPATH="${JAVA_HOME}/lib"
+          export PATH="${JAVA_HOME}/bin:${PATH}"
+          if [ -d result ]; then
+            ${{ env.allure_file }} generate result -o report
+            tar -czf report.tar.gz report
+            python ${{ env.bos_file }} report.tar.gz paddle-github-action/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs
+            echo "report: https://paddle-github-action.bj.bcebos.com/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs/report.tar.gz"
+          fi
+          '
+      - name: Set pytest execute flag output
+        if: always()
+        id: set_pytest_flag
+        run: |
+          if [ -f "${{ env.PYTEST_EXECUTE_FLAG_FILE }}" ]; then
+            echo "pytest_execute_flag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pytest_execute_flag=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Terminate And Delete the Container
+        if: always()
+        run: |
+          docker rm -f "$container_name" 2>/dev/null || true

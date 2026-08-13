@@ -45,7 +45,7 @@ def new_attention_forward(
     key_states = self.k_proj(hidden_states).reshape(kv_shape).transpose(1, 2)
     value_states = self.v_proj(hidden_states).reshape(kv_shape).transpose(1, 2)
 
-    from paddleformers.transformers.llama.modeling import apply_rotary_pos_emb
+    from paddlefleet.transformers.llama.modeling import apply_rotary_pos_emb
 
     cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(
@@ -82,7 +82,7 @@ def patch_llama_attention(
     rrattn_version: str = "v1",
     **kwargs,
 ):
-    from paddleformers.transformers.llama.modeling import LLamaAttention
+    from paddlefleet.transformers.llama.modeling import LLamaAttention
 
     from .patch_utils import patch_attention_layers
 

@@ -29,6 +29,12 @@ import wrapt
 from paddlefleet.transformer.layer import FleetLayer
 
 
+def test_trainer_constant_import():
+    from paddlefleet.trainer.trainer import PREFIX_CHECKPOINT_DIR
+
+    assert PREFIX_CHECKPOINT_DIR == "checkpoint"
+
+
 def import_class_by_path(path: str):
     paths = path.split(".")
     path = ".".join(paths[:-1])
@@ -131,6 +137,8 @@ def _test_domain_module_imports(module, subdomains: list):
 
 def test_domain_core():
     import paddlefleet
+
+    assert paddlefleet.transformer.__name__ == "paddlefleet.transformer"
 
     all_passed = _test_domain_module_imports(
         paddlefleet, subdomains=["transformer"]

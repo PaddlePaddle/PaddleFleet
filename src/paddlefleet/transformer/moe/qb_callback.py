@@ -21,7 +21,7 @@ Implements the QB bias update algorithm from Kimi K3 (Technical Report §2.3.3):
      interpolation on the merged histogram.
   3. Assigns the quantile as the new expert bias (zero-mean normalized).
 
-Usage (PaddleFormers TrainerCallback interface):
+Usage (PaddleFleet TrainerCallback interface):
     from paddlefleet.transformer.moe.qb_callback import MoEQuantileBalancingCallback
     callback = MoEQuantileBalancingCallback()
     trainer.add_callback(callback)

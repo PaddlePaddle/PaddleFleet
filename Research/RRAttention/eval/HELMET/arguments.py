@@ -56,7 +56,7 @@ def parse_arguments():
         type=str,
         default="auto",
         choices=["auto", "llama", "qwen", "ernie", "ernie_moe"],
-        help="PaddleFormers model family used by the Paddle worker",
+        help="PaddleFleet model family used by the Paddle worker",
     )
     parser.add_argument(
         "--paddle_worker_python",
