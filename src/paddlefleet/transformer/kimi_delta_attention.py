@@ -48,7 +48,6 @@ from paddlefleet.recompute_utils import (
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.triton_ops.utils import is_triton_available
 from paddlefleet.utils import (
     get_pg_size,
     log_single_rank,
@@ -178,6 +177,14 @@ def build_cu_seqlens(
     # a single kernel. Requires a CUDA-enabled build with an initialized Triton
     # driver AND the mask living on a GPU place; on a CPU build / CPU device we
     # must fall back to the pure-paddle implementation below.
+    # NOTE: imported lazily (not at module top-level) on purpose. A module-level
+    # `from paddlefleet.triton_ops.utils import is_triton_available` drags the whole
+    # paddlefleet.triton_ops package into the paddlefleet import graph early, which
+    # perturbs the transformers>=5.3 modeling_utils type-hint resolution order and
+    # triggers `NameError: name 'Module' is not defined`. Keeping it function-local
+    # preserves behavior without touching import ordering.
+    from paddlefleet.triton_ops.utils import is_triton_available
+
     if is_triton_available() and ends.place.is_gpu_place():
         from paddlefleet.triton_ops.document_mask_fusion import (
             cu_seqlens_triton,
