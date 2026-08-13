@@ -166,7 +166,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          python -m pip install s
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
@@ -311,7 +311,7 @@ jobs:
           git config pull.rebase false
           git submodule update --init --recursive
           git fetch --all
-          python -m pip install s
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
@@ -470,7 +470,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           git fetch --all
-          python -m pip install s
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
@@ -504,7 +504,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          python -m pip install s
+          python -m pip install setuptools
           formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
@@ -711,7 +711,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          python -m pip install s
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
@@ -748,7 +748,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          python -m pip install s
+          python -m pip install setuptools
           formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
@@ -1172,7 +1172,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          python -m pip install s
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
 
@@ -1207,7 +1207,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
-          python -m pip install s
+          python -m pip install setuptools
           formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
