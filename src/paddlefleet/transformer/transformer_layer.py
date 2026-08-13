@@ -1674,6 +1674,114 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                         )
                     )
 
+    def _fused_h_res_h_post_bda(
+        self,
+        hyper_connection,
+        h_res,
+        original_residual,
+        h_post,
+        layer_output_with_bias,
+        enable_recompute,
+    ):
+        """Run fused_h_res_h_post_bda, optionally in a RecomputeWithoutOutput span.
+
+        The span exists purely to keep the fp32 up-casts that
+        ``FusedHPostBDA.save_for_backward`` would otherwise pin -- the [..., n, C]
+        residual and the [..., C] layer output, i.e. two more activation-sized
+        buffers per half-layer -- out of the live set: the span body runs under
+        ``no_grad``, where an inner PyLayer's ``save_for_backward`` retains
+        nothing, and backward re-runs the kernel from the low-precision inputs
+        instead.
+
+        Returns ``(output, span)``. ``output`` is the [..., n*C] result; when
+        ``span`` is not None the caller MUST hand it to
+        ``_cast_and_discard_fused_bda`` -- see there for why the discard is not
+        optional.
+        """
+        bda_kwargs = {
+            "dropout_prob": self.hidden_dropout_prob,
+            "training": self.training,
+            "fused": self.config.bias_dropout_fusion,
+        }
+        # Without high_precision_mhc there is no up-cast: the kernel saves
+        # h_res/h_post/x and a *view* of original_residual (reshape does not
+        # copy), all of which are live anyway, so the span would buy nothing and
+        # only cost a replay.
+        if not self.config.high_precision_mhc:
+            enable_recompute = False
+        if not enable_recompute:
+            output = hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=layer_output_with_bias,
+                **bda_kwargs,
+            )
+            return output, None
+
+        x, bias = layer_output_with_bias
+
+        def _fused(h_res, original_residual, h_post, x, bias):
+            return hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=(x, bias),
+                **bda_kwargs,
+            )
+
+        span = RecomputeWithoutOutput()
+        output = span.recompute(
+            _fused,
+            # h_res/h_post are outputs of the mHC-aggregate span, which clears
+            # them with Tensor._clear_data(). detach() shares the holder, so the
+            # alias that save_for_backward keeps would be emptied too and the
+            # replay would read a dangling tensor. They are [..., n, n] and
+            # [..., n], i.e. smaller than the residual by a factor of C, so clone
+            # instead of depending on the hook registration order of the two
+            # spans.
+            h_res.clone(),
+            original_residual,
+            h_post.clone(),
+            x,
+            bias,
+            # No dropout on the fast path, so the replay is deterministic
+            # without paying for an RNG-state snapshot.
+            preserve_rng_state=self.hidden_dropout_prob > 0.0 and self.training,
+            share_grad_holder=True,
+        )
+        return output, span
+
+    @staticmethod
+    def _cast_and_discard_fused_bda(output, ori_dtype, span):
+        """Cast the BDA result back to ``ori_dtype`` and close ``span``.
+
+        The fp32 [..., n*C] BDA result is dead the moment it is cast: cast
+        backward only needs the grad, not the input data. But the span pins it
+        through ``self.outputs``, so without the discard the span would trade the
+        two ``save_for_backward`` up-casts for a retained fp32 output and give
+        most of the saving back. The discard is also what registers
+        ``_recompute``, and ``_recompute`` is the only place that sets
+        ``ctx.inputs``/``ctx.outputs`` for
+        ``RecomputeWithoutOutputFunction.backward`` -- so it is mandatory, not an
+        optimization. The hook goes on the cast result because that is the first
+        tensor whose grad is produced after the fp32 data is dead; the cast
+        result itself must stay live for the whole half-layer, so the span cannot
+        be extended to swallow the cast.
+        """
+        casted = output.to(ori_dtype)
+        if span is None:
+            return casted
+        if casted is output:
+            # Tensor.to() is an identity when the dtype already matches, so the
+            # span output and the tensor the rest of the layer holds would be the
+            # same object and the discard would clear live data. Reachable when
+            # the residual is already fp32 (fp32 training); give the caller its
+            # own copy so the span still owns something discardable.
+            casted = output.clone()
+        span.discard_output_and_register_recompute(casted)
+        return casted
+
     def _forward_attention(
         self,
         hidden_states: Tensor,
@@ -1785,16 +1893,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        hidden_states = (
-            self.self_attention_hyper_connection.fused_h_res_h_post_bda(
-                h_res=h_res,
-                original_residual=original_residual,
-                h_post=h_post,
-                layer_output_with_bias=attention_output_with_bias,
-                dropout_prob=self.hidden_dropout_prob,
-                training=self.training,
-                fused=self.config.bias_dropout_fusion,
-            )
+        hidden_states, fused_span = self._fused_h_res_h_post_bda(
+            self.self_attention_hyper_connection,
+            h_res,
+            original_residual,
+            h_post,
+            attention_output_with_bias,
+            self.recompute_mhc_forward and self.training,
         )
         # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
         if self.recompute_mhc_forward and self.training:
@@ -1802,7 +1907,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 hidden_states
             )
             self._attn_mhc_recompute = None
-        hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = self._cast_and_discard_fused_bda(
+            hidden_states, ori_dtype, fused_span
+        )
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -1908,14 +2015,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
-            h_res=h_res,
-            original_residual=original_residual,
-            h_post=h_post,
-            layer_output_with_bias=mlp_output_with_bias,
-            dropout_prob=self.hidden_dropout_prob,
-            training=self.training,
-            fused=self.config.bias_dropout_fusion,
+        hidden_states, fused_span = self._fused_h_res_h_post_bda(
+            self.mlp_hyper_connection,
+            h_res,
+            original_residual,
+            h_post,
+            mlp_output_with_bias,
+            self.recompute_mhc_forward and self.training,
         )
         # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
         if self.recompute_mhc_forward and self.training:
@@ -1923,7 +2029,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 hidden_states
             )
             self._mlp_mhc_recompute = None
-        hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = self._cast_and_discard_fused_bda(
+            hidden_states, ori_dtype, fused_span
+        )
 
         if is_first_fwd:
             hidden_states.stop_gradient = False
