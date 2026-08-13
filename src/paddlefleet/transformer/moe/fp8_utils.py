@@ -913,6 +913,7 @@ class ExpertsGroupGemmContiguousNode:
         self.activation_situ_linear_beta = getattr(
             config, "activation_situ_linear_beta", None
         )
+        self.use_fused_situ_glu = getattr(config, "use_fused_situ_glu", True)
         self.use_accuracy_compatible = use_accuracy_compatible
         self.token_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
@@ -1404,6 +1405,7 @@ class ExpertsGroupGemmContiguousNode:
                     unzipped_probs,
                     self.activation_situ_beta,
                     self.activation_situ_linear_beta,
+                    use_fused_situ_glu=self.use_fused_situ_glu,
                 )
             elif self.activation_type == "geglu":
                 # GeGLU: gelu_tanh(gate) * up, then scale by probs
@@ -1704,6 +1706,7 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s,
                 self.activation_situ_beta,
                 self.activation_situ_linear_beta,
+                use_fused_situ_glu=self.use_fused_situ_glu,
             )
 
         if self.activation_type == "geglu":

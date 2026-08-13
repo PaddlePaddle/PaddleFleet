@@ -54,6 +54,17 @@ class TestSituGLU(unittest.TestCase):
         )
 
         self.assertIs(config.hidden_act, situ)
+        self.assertTrue(config.use_fused_situ_glu)
+
+        disabled_config = TransformerConfig.from_config(
+            SimpleNamespace(
+                hidden_size=8,
+                num_attention_heads=2,
+                hidden_act="situ",
+                use_fused_situ_glu=False,
+            )
+        )
+        self.assertFalse(disabled_config.use_fused_situ_glu)
 
     def test_matches_official_formula(self):
         x = paddle.linspace(-8.0, 8.0, 32).reshape([2, 16])
@@ -430,7 +441,12 @@ class TestSituGLU(unittest.TestCase):
         probs = paddle.rand([256], dtype="float32")
         out_grad = paddle.randn([256, hidden_size], dtype="bfloat16")
 
-        def run(deep_gemm, use_accuracy_compatible=False):
+        def run(
+            deep_gemm,
+            use_accuracy_compatible=False,
+            use_fused_situ_glu=True,
+        ):
+            config.use_fused_situ_glu = use_fused_situ_glu
             expert = GroupedMLPExpert(
                 num_local_experts=2,
                 config=config,
@@ -470,6 +486,7 @@ class TestSituGLU(unittest.TestCase):
         grouped = run(False)
         deep_gemm = run(True)
         accuracy_compatible = run(False, use_accuracy_compatible=True)
+        unfused_situ_glu = run(False, use_fused_situ_glu=False)
         tolerances = (
             (1e-3, 1e-3),
             (1e-3, 1e-3),
@@ -480,6 +497,7 @@ class TestSituGLU(unittest.TestCase):
         for path, actuals in (
             ("deep_gemm", deep_gemm),
             ("accuracy_compatible", accuracy_compatible),
+            ("unfused_situ_glu", unfused_situ_glu),
         ):
             for name, expected, actual, (atol, rtol) in zip(
                 (
