@@ -1685,13 +1685,18 @@ class HyperConnectionTransformerLayer(TransformerLayer):
     ):
         """Run fused_h_res_h_post_bda, optionally in a RecomputeWithoutOutput span.
 
-        The span exists purely to keep the fp32 up-casts that
+        On the fp32 fast path the span keeps the up-casts that
         ``FusedHPostBDA.save_for_backward`` would otherwise pin -- the [..., n, C]
         residual and the [..., C] layer output, i.e. two more activation-sized
-        buffers per half-layer -- out of the live set: the span body runs under
+        buffers per half-layer -- out of the live set. On the sequential path
+        (active dropout) it hides that path's own [..., n*C] intermediates and
+        the dropout mask instead. Either way the span body runs under
         ``no_grad``, where an inner PyLayer's ``save_for_backward`` retains
-        nothing, and backward re-runs the kernel from the low-precision inputs
-        instead.
+        nothing, and backward re-runs the kernel from the low-precision inputs.
+
+        ``hyper_connection.bda_span_pays_off`` vetoes the configurations where
+        neither applies; ``enable_recompute`` is the caller's own switch on top
+        of that.
 
         Returns ``(output, span)``. ``output`` is the [..., n*C] result; when
         ``span`` is not None the caller MUST hand it to
@@ -1703,11 +1708,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             "training": self.training,
             "fused": self.config.bias_dropout_fusion,
         }
-        # Without high_precision_mhc there is no up-cast: the kernel saves
-        # h_res/h_post/x and a *view* of original_residual (reshape does not
-        # copy), all of which are live anyway, so the span would buy nothing and
-        # only cost a replay.
-        if not self.config.high_precision_mhc:
+        # Only wrap when the call actually retains something the span can hide;
+        # ``bda_span_pays_off`` owns that predicate because it depends on which
+        # path ``fused_h_res_h_post_bda`` takes.
+        if not hyper_connection.bda_span_pays_off(
+            self.hidden_dropout_prob, self.training
+        ):
             enable_recompute = False
         if not enable_recompute:
             output = hyper_connection.fused_h_res_h_post_bda(
