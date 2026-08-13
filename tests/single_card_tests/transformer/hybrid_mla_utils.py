@@ -776,20 +776,52 @@ def _flash_attn_version(value):
         paddle.set_flags({key: previous})
 
 
-def _fa4_module_hooks():
-    """``(setUpModule, tearDownModule)`` pinning ``FLAGS_flash_attn_version=4``.
+def _fa4_can_serve():
+    """Whether pinning ``FLAGS_flash_attn_version=4`` can actually be served.
+
+    ``flash_mask_facade.get_fa_version`` answers from the flag and the head dims
+    alone -- it never checks that a FA4 backend exists. With no cute kernel the
+    facade's ``_flashmask_attention`` is ``paddle.nn.functional``'s, which knows
+    only 2 and 3 and raises ``ValueError: Invalid flash attention version: 4``
+    (``paddle/nn/functional/flash_attention.py:2179``) for *every* head-dim pair
+    the facade whitelists, ``(256, 256)`` plain MHA included. The upstream CI
+    images are cc 9.0 without the kernel, so pinning 4 unconditionally would
+    break the ``mha`` cases, which are not ``_GPU``-gated and used to run there
+    on the image default 2.
+    """
+    try:
+        from paddlefleet_ops import is_flash_mask_available
+    except ImportError:  # pragma: no cover - packaged build always has it
+        return False
+    return bool(is_flash_mask_available()) and _production_fa_version() == 4
+
+
+@contextlib.contextmanager
+def _fa4_pin():
+    """``_flash_attn_version(4)`` where FA4 can serve, a no-op where it cannot.
 
     The full-causal phases have exactly one backend, and
     ``MQALatentAttention._assert_dense_fa4`` raises when the process flags do not
-    resolve to FA4. A module whose cases run such a forward therefore has to
-    reproduce the production flag value; doing it once per module beats repeating
-    ``_flash_attn_version(4)`` at every call site, and the restore keeps the
-    pinning from leaking into modules that assert on the refusal.
-
-    Only correct because these suites are ``_GPU``-gated to the SM100 boxes,
-    where ``_production_fa_version()`` is 4 anyway.
+    resolve to FA4, so a module running such a forward has to reproduce the
+    production flag value. Those cases are all ``_GPU``-gated to the SM100 boxes,
+    where ``_fa4_can_serve()`` is True -- and the same modules also hold ``mha``
+    cases that do run without FA4, which is why the pin has to stand down rather
+    than force a value the box cannot honour.
     """
-    pin = _flash_attn_version(4)
+    if not _fa4_can_serve():
+        yield
+        return
+    with _flash_attn_version(4):
+        yield
+
+
+def _fa4_module_hooks():
+    """``(setUpModule, tearDownModule)`` wrapping the module in ``_fa4_pin()``.
+
+    Doing it once per module beats repeating the pin at every call site, and the
+    restore keeps it from leaking into modules that assert on the refusal.
+    """
+    pin = _fa4_pin()
 
     def setUpModule():
         pin.__enter__()

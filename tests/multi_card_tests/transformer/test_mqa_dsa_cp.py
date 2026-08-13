@@ -99,9 +99,10 @@ S_GLOBAL = 512
 
 # The full-causal phases refuse to run on anything but dense FA4, and a bare
 # launcher process never constructs ``TrainingArguments``, so the flag has to be
-# pinned to the value production derives on these boxes. Module scope: nothing
-# here asserts on the refusal.
-_FA4_PIN = U._flash_attn_version(4)
+# pinned to the value production derives on these boxes -- and left alone where
+# no FA4 backend exists, or the non-``_GPU``-gated cases would break. Module
+# scope: nothing here asserts on the refusal.
+_FA4_PIN = U._fa4_pin()
 
 
 def setUpModule():
