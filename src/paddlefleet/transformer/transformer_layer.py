@@ -1689,9 +1689,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         ``FusedHPostBDA.save_for_backward`` would otherwise pin -- the [..., n, C]
         residual and the [..., C] layer output, i.e. two more activation-sized
         buffers per half-layer -- out of the live set. On the sequential path
-        (active dropout) it hides that path's own [..., n*C] intermediates and
-        the dropout mask instead. Either way the span body runs under
-        ``no_grad``, where an inner PyLayer's ``save_for_backward`` retains
+        (active dropout) it hides that path's dropout mask instead, which is a
+        byte per element of the [..., n*C] output. Either way the span body runs
+        under ``no_grad``, where an inner PyLayer's ``save_for_backward`` retains
         nothing, and backward re-runs the kernel from the low-precision inputs.
 
         ``hyper_connection.bda_span_pays_off`` vetoes the configurations where
