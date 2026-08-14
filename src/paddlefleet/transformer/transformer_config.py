@@ -1243,8 +1243,23 @@ class TransformerConfig(ModelParallelConfig):
     num_activated_heads: int | None = None
     """Number of indexer heads kept by MoH routing (see :attr:`use_moh`).
 
-    Ignored when ``use_moh=False``; required to be ``1 <= num_activated_heads <=
-    dsa_index_n_heads`` when ``use_moh=True``.
+    Ignored when ``use_moh=False``. When ``use_moh=True`` the range checks are:
+
+    * ``1 <= num_activated_heads <= dsa_index_n_heads``
+    * ``CSAIndexer.forward_before_topk`` right-pads the routed head dim from
+      ``num_activated_heads`` up to 16 before the indexer kernel, so the value
+      the kernel actually sees is ``max(num_activated_heads, 16)``. That
+      padded count must satisfy the kernel-specific constraint set by
+      ``csa_indexer_backend``:
+
+      - ``"tilelang"`` — padded heads ``<= 64`` and divisible by 8
+        (i.e. num_activated_heads in ``{1..16, 24, 32, 40, 48, 56, 64}``).
+      - ``"cudnn"``   — padded heads exactly ``32`` or ``64`` (num_activated_heads
+        must equal 32 or 64; the pad-to-16 does not reach 32, so smaller values
+        are rejected).
+      - ``"unfused"`` — no head-count constraint.
+
+    ``__post_init__`` enforces all three.
     """
 
     ####################
@@ -2209,6 +2224,50 @@ class TransformerConfig(ModelParallelConfig):
                     "the top-k and the gather. Set use_moh=False instead, or "
                     "lower num_activated_heads."
                 )
+
+            # Backend-aware kernel-shape check.
+            #
+            # ``CSAIndexer.forward_before_topk`` (see ``csa_attention.py``)
+            # right-pads the routed head dim from ``num_activated_heads`` up
+            # to ``_TL_MIN_HEADS`` (16) BEFORE handing the tensor to the
+            # indexer kernel, but only when the value is strictly below 16.
+            # So the head count the kernel actually sees is:
+            _MOH_PAD_MIN = 16
+            effective_heads = max(self.num_activated_heads, _MOH_PAD_MIN)
+
+            # TileLang kernel: heads <= 64 AND heads % 8 == 0
+            #   (see tilelang_ops/indexer/csa_indexer_fwd.py assertion:
+            #        assert heads <= 64 and heads % 8 == 0)
+            # cuDNN kernel:    heads in {32, 64}
+            #   (see cudnn_ops/indexer/csa_indexer_fwd_cudnn.py check:
+            #        if heads not in (32, 64): raise)
+            # ``unfused`` uses pure paddle ops and has no head constraint.
+            indexer_backend = self.csa_indexer_backend
+            if indexer_backend == "tilelang":
+                if effective_heads > 64 or effective_heads % 8 != 0:
+                    raise ValueError(
+                        "csa_indexer_backend='tilelang' requires the routed "
+                        "MoH head count (after the implicit pad to 16) to be "
+                        "<= 64 AND divisible by 8, but "
+                        f"num_activated_heads={self.num_activated_heads} pads "
+                        f"to effective heads={effective_heads}. Pick "
+                        "num_activated_heads in {8, 16, 24, 32, 40, 48, 56, 64} "
+                        "(values below 16 all pad up to 16), or switch "
+                        "csa_indexer_backend to 'cudnn' / 'unfused'."
+                    )
+            elif indexer_backend == "cudnn":
+                if effective_heads not in (32, 64):
+                    raise ValueError(
+                        "csa_indexer_backend='cudnn' requires the routed "
+                        "MoH head count (after the implicit pad to 16) to be "
+                        f"exactly 32 or 64, but num_activated_heads="
+                        f"{self.num_activated_heads} pads to effective "
+                        f"heads={effective_heads}. Pick num_activated_heads "
+                        "== 32 or 64 (the pad-to-16 does NOT reach 32; values "
+                        "below 32 are unsupported by cuDNN), or switch "
+                        "csa_indexer_backend to 'tilelang' / 'unfused'."
+                    )
+            # ``unfused`` has no head-count restriction.
         elif self.num_activated_heads is not None:
             # A num_activated_heads without use_moh is read by nothing; the
             # indexer only looks at it inside the ``use_moh`` branch. Silently

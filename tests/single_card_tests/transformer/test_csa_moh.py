@@ -372,5 +372,117 @@ class TestTransformerConfigMoH(unittest.TestCase):
             )
 
 
+class TestTransformerConfigMoHKernelShape(unittest.TestCase):
+    """Backend-aware kernel-shape checks on ``num_activated_heads``.
+
+    ``CSAIndexer.forward_before_topk`` right-pads the routed head dim from
+    ``num_activated_heads`` up to 16 before the indexer kernel, but only when
+    the value is strictly below 16. So the count the kernel sees is
+    ``max(num_activated_heads, 16)``, and that padded count has to fit the
+    per-backend constraint:
+
+      * ``tilelang`` — <= 64 AND divisible by 8
+      * ``cudnn``    — exactly 32 or 64
+      * ``unfused``  — no constraint
+    """
+
+    @staticmethod
+    def _config(**overrides):
+        # Start from the same base as ``TestTransformerConfigMoH`` but leave
+        # ``csa_indexer_backend`` as a per-test override.
+        kwargs = {
+            "num_hidden_layers": 2,
+            "hidden_size": 256,
+            "num_attention_heads": 8,
+            "multi_latent_attention": True,
+            "experimental_attention_variant": "dsv4_hybrid",
+            "csa_compress_ratios": [0, 4],
+            "csa_window_size": 16,
+            "q_lora_rank": 64,
+            "kv_lora_rank": 16,
+            "qk_nope_head_dim": 16,
+            "qk_rope_head_dim": 16,
+            "qk_pos_emb_head_dim": 16,
+            "v_head_dim": 32,
+            "dsa_index_n_heads": 64,
+            "dsa_index_head_dim": 32,
+            "dsa_index_topk": 8,
+            "csa_sparse_attn_backend": "unfused",
+            "use_moh": True,
+        }
+        kwargs.update(overrides)
+        return TransformerConfig(**kwargs)
+
+    # --- tilelang backend --------------------------------------------------
+    def test_tilelang_accepts_multiples_of_8_up_to_64(self):
+        # All of these produce effective heads (max(v, 16)) that are <= 64
+        # and divisible by 8, so tilelang should accept them.
+        # 17 is intentionally excluded here (see the reject test below).
+        for v in (1, 8, 15, 16, 24, 32, 40, 48, 56, 64):
+            with self.subTest(num_activated_heads=v):
+                cfg = self._config(
+                    csa_indexer_backend="tilelang", num_activated_heads=v
+                )
+                self.assertEqual(cfg.num_activated_heads, v)
+
+    def test_tilelang_rejects_17_not_divisible_by_8(self):
+        # Pre-fix regression: num_activated_heads=17 keeps 17 heads (>=16, so
+        # no pad), and the tilelang kernel asserts heads % 8 == 0 -- so the
+        # first forward would blow up. Now caught at config time.
+        with self.assertRaisesRegex(ValueError, "tilelang"):
+            self._config(csa_indexer_backend="tilelang", num_activated_heads=17)
+
+    def test_tilelang_rejects_over_64(self):
+        # Sanity: 72 would sneak past the "must not exceed dsa_index_n_heads"
+        # check when dsa_index_n_heads is bumped, so the backend check has to
+        # kick in independently.
+        with self.assertRaisesRegex(ValueError, "tilelang"):
+            self._config(
+                csa_indexer_backend="tilelang",
+                dsa_index_n_heads=128,
+                num_activated_heads=72,
+            )
+
+    # --- cudnn backend -----------------------------------------------------
+    def test_cudnn_accepts_32(self):
+        cfg = self._config(csa_indexer_backend="cudnn", num_activated_heads=32)
+        self.assertEqual(cfg.num_activated_heads, 32)
+
+    def test_cudnn_accepts_64(self):
+        cfg = self._config(csa_indexer_backend="cudnn", num_activated_heads=64)
+        self.assertEqual(cfg.num_activated_heads, 64)
+
+    def test_cudnn_rejects_below_32_even_when_padded_to_16(self):
+        # Pre-fix regression: with cuDNN, num_activated_heads=8 pads to 16 and
+        # cuDNN's kernel accepts only {32, 64} -- first forward would raise.
+        with self.assertRaisesRegex(ValueError, "cudnn"):
+            self._config(csa_indexer_backend="cudnn", num_activated_heads=8)
+
+    def test_cudnn_rejects_16(self):
+        # 16 is the tilelang minimum after pad but still not one of {32, 64}.
+        with self.assertRaisesRegex(ValueError, "cudnn"):
+            self._config(csa_indexer_backend="cudnn", num_activated_heads=16)
+
+    def test_cudnn_rejects_non_32_or_64(self):
+        # 24, 40, 48 are all in-range for tilelang but rejected by cuDNN.
+        for v in (24, 40, 48, 56):
+            with (
+                self.subTest(num_activated_heads=v),
+                self.assertRaisesRegex(ValueError, "cudnn"),
+            ):
+                self._config(csa_indexer_backend="cudnn", num_activated_heads=v)
+
+    # --- unfused backend ---------------------------------------------------
+    def test_unfused_accepts_any_shape(self):
+        # ``unfused`` runs pure paddle ops and has no head-count constraint.
+        # 17 and 24 both fail tilelang / cudnn but must pass here.
+        for v in (1, 3, 8, 17, 24, 40):
+            with self.subTest(num_activated_heads=v):
+                cfg = self._config(
+                    csa_indexer_backend="unfused", num_activated_heads=v
+                )
+                self.assertEqual(cfg.num_activated_heads, v)
+
+
 if __name__ == "__main__":
     unittest.main()
