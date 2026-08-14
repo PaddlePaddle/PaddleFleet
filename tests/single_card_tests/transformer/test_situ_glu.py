@@ -50,10 +50,10 @@ class TestSituGLU(unittest.TestCase):
         probs = paddle.rand([3], dtype="float32")
         out_grad = paddle.randn([3, 4], dtype="float32")
         expected_forward = situ_glu_scale_forward(
-            x, probs, use_fused_situ_glu=False
+            x, probs, situ_glu_fusion=False
         )
         expected_backward = situ_glu_scale_backward(
-            x, probs, out_grad, use_fused_situ_glu=False
+            x, probs, out_grad, situ_glu_fusion=False
         )
 
         with mock.patch(
@@ -79,17 +79,17 @@ class TestSituGLU(unittest.TestCase):
         )
 
         self.assertIs(config.hidden_act, situ)
-        self.assertTrue(config.use_fused_situ_glu)
+        self.assertTrue(config.situ_glu_fusion)
 
         disabled_config = TransformerConfig.from_config(
             SimpleNamespace(
                 hidden_size=8,
                 num_attention_heads=2,
                 hidden_act="situ",
-                use_fused_situ_glu=False,
+                situ_glu_fusion=False,
             )
         )
-        self.assertFalse(disabled_config.use_fused_situ_glu)
+        self.assertFalse(disabled_config.situ_glu_fusion)
 
     def test_matches_official_formula(self):
         x = paddle.linspace(-8.0, 8.0, 32).reshape([2, 16])
@@ -469,9 +469,9 @@ class TestSituGLU(unittest.TestCase):
         def run(
             deep_gemm,
             use_accuracy_compatible=False,
-            use_fused_situ_glu=True,
+            situ_glu_fusion=True,
         ):
-            config.use_fused_situ_glu = use_fused_situ_glu
+            config.situ_glu_fusion = situ_glu_fusion
             expert = GroupedMLPExpert(
                 num_local_experts=2,
                 config=config,
@@ -511,7 +511,7 @@ class TestSituGLU(unittest.TestCase):
         grouped = run(False)
         deep_gemm = run(True)
         accuracy_compatible = run(False, use_accuracy_compatible=True)
-        unfused_situ_glu = run(False, use_fused_situ_glu=False)
+        unfused_situ_glu = run(False, situ_glu_fusion=False)
         tolerances = (
             (1e-3, 1e-3),
             (1e-3, 1e-3),

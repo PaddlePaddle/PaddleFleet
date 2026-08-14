@@ -120,7 +120,7 @@ for function, args in entries:
         out_grad = paddle.randn([17, 3072], dtype="bfloat16")
 
         expected_forward = situ_glu_scale_forward(
-            x, probs, 4.0, 25.0, use_fused_situ_glu=False
+            x, probs, 4.0, 25.0, situ_glu_fusion=False
         )
         expected_backward = situ_glu_scale_backward(
             x,
@@ -128,7 +128,7 @@ for function, args in entries:
             out_grad,
             4.0,
             25.0,
-            use_fused_situ_glu=False,
+            situ_glu_fusion=False,
         )
 
         actual_forward = situ_glu_scale_forward(x, probs, 4.0, 25.0)
@@ -175,7 +175,7 @@ for function, args in entries:
                     out_grad,
                     4.0,
                     linear_beta,
-                    use_fused_situ_glu=False,
+                    situ_glu_fusion=False,
                 )
                 actual = situ_glu_scale_backward(
                     x,
@@ -211,7 +211,7 @@ for function, args in entries:
         rows = 65536
         x = paddle.ones([rows, 8], dtype="bfloat16")
         probs = paddle.ones([rows], dtype="float32")
-        expected = situ_glu_scale_forward(x, probs, use_fused_situ_glu=False)
+        expected = situ_glu_scale_forward(x, probs, situ_glu_fusion=False)
         actual = situ_glu_scale_forward(x, probs)
         self.assertTrue(
             paddle.equal_all(

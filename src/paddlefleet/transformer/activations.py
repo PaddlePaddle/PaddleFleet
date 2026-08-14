@@ -75,11 +75,11 @@ def situ_glu_scale_forward(
     probs: paddle.Tensor,
     beta: float = 1.0,
     linear_beta: float | None = None,
-    use_fused_situ_glu: bool = True,
+    situ_glu_fusion: bool = True,
 ) -> paddle.Tensor:
     """Apply SiTU-GLU and router scaling with float32 intermediates."""
 
-    if use_fused_situ_glu:
+    if situ_glu_fusion:
         from paddlefleet.triton_ops.utils import is_triton_available
 
         if is_triton_available():
@@ -105,7 +105,7 @@ def situ_glu_scale_backward(
     out_grad: paddle.Tensor,
     beta: float = 1.0,
     linear_beta: float | None = None,
-    use_fused_situ_glu: bool = True,
+    situ_glu_fusion: bool = True,
 ) -> tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Backward for :func:`situ_glu_scale_forward`."""
 
@@ -120,7 +120,7 @@ def situ_glu_scale_backward(
             "SiTU linear_beta must be a positive finite value or None, "
             f"but got {linear_beta!r}."
         )
-    if use_fused_situ_glu:
+    if situ_glu_fusion:
         from paddlefleet.triton_ops.utils import is_triton_available
 
         if is_triton_available():

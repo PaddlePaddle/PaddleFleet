@@ -198,7 +198,7 @@ class TransformerConfig(ModelParallelConfig):
     activation_situ_linear_beta: float | None = None
     """Optional tanh scale applied to the linear branch of SiTU-GLU."""
 
-    use_fused_situ_glu: bool = True
+    situ_glu_fusion: bool = True
     """Use fused Triton SiTU-GLU in FusionMoe BF16 routed experts."""
 
     use_bias: bool = False
