@@ -25,6 +25,7 @@ readonly MCORE_BRIDGE_VERSION="1.4.3"
 readonly TE_VERSION="2.17.1"
 readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/nightly/cu130/"
 readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
+readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
 # readonly PADDLE_VERSION="xx"
 # PaddleFleet will install default paddle"
 readonly PADDLEFLEET_WHEEL="${PADDLEFLEET_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet/paddlefleet-0.4.0.dev20260807+d01517879a3-py3-none-any.whl}"
@@ -92,7 +93,8 @@ setup_torch_venv() {
     local torch_py="$1"
 
     echo "[setup_venvs] torch python : ${torch_py}"
-    uv pip install --python "${torch_py}" "torch==${TORCH_VERSION}"
+    uv pip install --python "${torch_py}" --index-url "${TORCH_INDEX_URL}" \
+        "torch==${TORCH_VERSION}"
 
     uv pip install --python "${torch_py}" \
         "setuptools>=66.1.0" pip wheel packaging cmake "ninja==1.11.1.1" \
@@ -138,7 +140,7 @@ setup_paddle_venv() {
         "pybind11[global]>=2.13,<3" "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5"
 
     # PaddleFleet
-    uv pip install --python "${paddle_py}" "${paddle_index[@]}" --no-deps \
+    uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
         --force-reinstall \
         "${PADDLEFLEET_WHEEL}"
     # (
