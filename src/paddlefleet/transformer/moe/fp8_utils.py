@@ -177,7 +177,7 @@ def fused_stack_quant_without_cache(
         )
 
     if use_ue8m0:
-        scale = scale.T
+        scale = scale.T.contiguous()
     return w, scale
 
 
