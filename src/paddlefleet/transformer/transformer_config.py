@@ -2388,8 +2388,21 @@ class TransformerConfig(ModelParallelConfig):
                 self.separate_mtp_headloss = False
             else:
                 # Once MTP and PP are both enabled:
-                # 2. separate_mtp_headloss requires that the total number of
-                #    layers be evenly split as exactly 1 layer per pp*vpp stage.
+                # 2. Layer-count vs pp*vpp guard.
+                #    The framework-enforced constraint is DIVISIBILITY: Paddle's
+                #    interleave segmentation (SegmentLayers.do_segment) asserts
+                #    the number of seg-weight-bearing layers is divisible by
+                #    pp*vpp, so an indivisible layout fails at build time.
+                #    Verified empirically on 8xH800 (pp=4, vpp=2): a divisible
+                #    layout with quotient > 1 (multiple layers per stage) builds
+                #    and constructs shared comm fine, so "exactly 1 layer per
+                #    stage" is stricter than the framework needs. We keep the
+                #    quotient==1 form as a conservative guard because the full
+                #    fwd/bwd path for separate_mtp_headloss under pp>1 is not yet
+                #    covered by any regression test; see
+                #    tests/multi_card_tests/pipeline_parallel/test_separate_mtp_headloss_pp.py
+                #    which asserts the build/segmentation/shared-layer-stage
+                #    contract.
                 pp_degree = self.pipeline_model_parallel_size
                 vpp_degree = self.virtual_pipeline_model_parallel_size
                 # When vpp is not enabled, vpp_degree may be None or a
