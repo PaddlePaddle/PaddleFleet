@@ -57,7 +57,7 @@ class TestSituGLU(unittest.TestCase):
         )
 
         with mock.patch(
-            "paddlefleet.transformer.activations.is_triton_available",
+            "paddlefleet.triton_ops.utils.is_triton_available",
             return_value=False,
         ):
             actual_forward = situ_glu_scale_forward(x, probs)
