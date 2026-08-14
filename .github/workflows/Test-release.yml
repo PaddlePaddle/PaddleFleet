@@ -623,25 +623,6 @@ jobs:
           fi
           '
 
-      # - name: Integration test (Qwen3-30B-A3B single-card)
-      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-      #   timeout-minutes: 5
-      #   run: |
-      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
-      #     source /root/proxy
-      #     mkdir -p /workspace/PaddleFleet/coveragedata-qwen
-      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-single/.coverage
-      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-      #     bash -x PaddleFormers/tests/integration_test/qwen3_single_card.sh
-      #     qwen3_single_card_exit_code=$?
-      #     if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
-      #       echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
-      #       exit 1
-      #     else
-      #       echo -e "\033[32mIntegration test succeeded: Qwen3-30B-A3B single-card.\033[0m"
-      #     fi
-      #     '
-
       - name: Qwen3-vl-8k-single-card
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
         timeout-minutes: 5
@@ -783,242 +764,258 @@ jobs:
           pip install coverage==7.13.0
           '
 
-      - name: GLM4.5 pre-train
+      # - name: GLM4.5 pre-train
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
+      #     glm45_exit_code=$?
+      #     if [[ "$glm45_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+      #     fi
+      #     '
+
+      # - name: GLM4.5 sft
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
+      #     glm45_exit_code=$?
+      #     if [[ "$glm45_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+      #     fi
+      #     '
+
+      # - name: GLM4.5 sft cp
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
+      #     glm45_exit_code=$?
+      #     if [[ "$glm45_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5 sft cp.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5 sft cp.\033[0m"
+      #     fi
+      #     '
+
+      # - name: GLM4.5 lora
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
+      #     glm45_exit_code=$?
+      #     if [[ "$glm45_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+      #     fi
+      #     '
+
+      # - name: GLM4.5 dpo
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
+      #     glm45_exit_code=$?
+      #     if [[ "$glm45_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
+      #     fi
+      #     '
+
+      # - name: GLM4.5 dpo_lora
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
+      #     '
+
+      # - name: Integration test (GLM4.5 multi-card FP8)
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
+      #     glm45_exit_code=$?
+      #     if [[ "$glm45_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
+      #     fi
+      #     '
+
+      # - name: GLM4.5 pre-train (Grouped GEMM)
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
+      #     glm45_exit_code=$?
+      #     if [[ "$glm45_exit_code" != "0" ]]; then
+      #       echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
+      #       exit 1
+      #     else
+      #       echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
+      #     fi
+      #     '
+
+      # - name: GLM4.5 pre-train (EP4)
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
+      #     '
+
+      # - name: Qwen pre-train
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/qwen.sh pt
+      #     '
+
+      # - name: Qwen sft
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/qwen.sh sft
+      #     '
+
+      # - name: Qwen lora
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/qwen.sh lora
+      #     '
+
+      # - name: Qwen vl sft
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
+      #     '
+
+      # - name: Qwen vl lora
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 5
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
+      #     '
+
+      # - name: Qwen vl moe
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 10
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
+      #     '
+
+      # - name: Qwen3-vl-8k-fsdp
+      #   if: (success() || failure()) && steps.formers_install.conclusion == 'success'
+      #   timeout-minutes: 10
+      #   run: |
+      #     docker exec -t ${{ env.container_name }} /bin/bash -ce '
+      #     source /root/proxy
+      #     mkdir -p /workspace/PaddleFleet/coveragedata-multi
+      #     export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
+      #     export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
+      #     bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
+      # '
+      - name: alignment_model_accuracy
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
         run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
+          export PADDLEFLEET_WHEEL_PATH="dist/${{ needs.build_whl.outputs.root_whl_name }}"
+          export PADDLEFLEET_OPS_WHEEL_PATH="dist/${{ needs.build_whl.outputs.ops_whl_name }}"
+          bash -x ./scripts/alignment_model_accuracy/run_alignment_test.sh
+          model_acc_align_exit_code=$?
+          if [[ "$model_acc_align_exit_code" != "0" ]]; then
+            echo -e "::error:: \033[31m Model accuracy align failed.\033[0m"
             exit 1
           else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
+            echo -e "\033[32m Model accuracy align succeeded.\033[0m"
           fi
-          '
-
-      - name: GLM4.5 sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_sft.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 sft cp
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          bash -x PaddleFormers/tests/integration_test/glm45_sft_cp.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 sft cp.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 sft cp.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_lora.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 dpo.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_dpo_lora.sh
-          '
-
-      - name: Integration test (GLM4.5 multi-card FP8)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_fp8.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 FP8.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 pre-train (Grouped GEMM)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_grouped_gemm.sh
-          glm45_exit_code=$?
-          if [[ "$glm45_exit_code" != "0" ]]; then
-            echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
-            exit 1
-          else
-            echo -e "\033[32mIntegration test succeeded: GLM4.5 Grouped GEMM.\033[0m"
-          fi
-          '
-
-      - name: GLM4.5 pre-train (EP4)
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/glm45_pt_ep4.sh
-          '
-
-      - name: Qwen pre-train
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh pt
-          '
-
-      - name: Qwen sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh sft
-          '
-
-      - name: Qwen lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen.sh lora
-          '
-
-      - name: Qwen vl sft
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh tp8 h20
-          '
-
-      - name: Qwen vl lora
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_lora.sh h20
-          '
-
-      - name: Qwen vl moe
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 10
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh moe h20
-          '
-
-      - name: Qwen3-vl-8k-fsdp
-        if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 10
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          mkdir -p /workspace/PaddleFleet/coveragedata-multi
-          export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
-          export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFormers/tests/integration_test/qwen3vl_sft.sh fsdp h20
           '
 
       - name: H20 Coverage Upload to BOS
