@@ -43,4 +43,3 @@ bash setup_venvs.sh
    `WORKSPACE_DIR` 的写法，指向本目录）。
 2. 在 `run_alignment_test.sh` 的 `CASES` 数组里加一行
    `"<CaseName> ./<CaseName>/run_paddle_xxx.sh ./<CaseName>/run_torch_xxx.sh"`。
-
