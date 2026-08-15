@@ -76,6 +76,8 @@ test = [
     "pytest",
     "pyyaml",
     "parameterized",
+    # config_adapter rewrites training YAMLs without dropping comments.
+    "ruamel.yaml>=0.17",
 ]
 build = [
     "pip",
