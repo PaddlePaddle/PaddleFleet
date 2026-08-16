@@ -37,6 +37,8 @@ that would delete the communication group under test.
 
 from __future__ import annotations
 
+import re
+
 from .constraints import (
     MIN_PARALLEL_DEGREE,
     check_ep_shrink,
@@ -47,8 +49,13 @@ from .constraints import (
     pp_candidates,
 )
 from .field_spec import describe_missing, resolve_fields
+from .layer_fields import plan_layer_field_shrink
 from .plan import ParallelismPlan
 from .topology import TopologyValidator
+
+# Matches a communication-group rejection ("C2 不满足：..."), so the diagnostic
+# can put the more actionable model-structure reasons first.
+_CONSTRAINT_RE = re.compile(r"C[1-4]\s*不满足")
 
 
 def plan_parallelism(
@@ -211,7 +218,7 @@ class ShrinkPlanner:
 
         if pp > MIN_PARALLEL_DEGREE and layout is not None:
             plan = self._plan_pp_only(
-                validator, dims, layout, target_cards, rejections
+                validator, dims, layout, target_cards, rejections, model_config
             )
             if plan is not None:
                 return plan, None
@@ -224,6 +231,7 @@ class ShrinkPlanner:
                     (num_experts, topk, experts_key),
                     target_cards,
                     rejections,
+                    model_config,
                 )
                 if plan is not None:
                     return plan, None
@@ -267,10 +275,13 @@ class ShrinkPlanner:
                 config.get("virtual_pipeline_model_parallel_size", 1) or 1
             ),
             "first_k": int(value_of("first_k_dense_replace") or 0),
+            "mtp": int(value_of("num_nextn_predict_layers") or 0),
         }, None
 
     @staticmethod
-    def _pp_changes(pp, pp_new, layout, meta, target_cards, note_extra=""):
+    def _pp_changes(
+        pp, pp_new, layout, meta, target_cards, layer_changes, note_extra=""
+    ):
         """YAML + JSON writes implied by a PP shrink."""
         yaml_changes = [
             (
@@ -306,9 +317,28 @@ class ShrinkPlanner:
                 f"{layout['layers']} -> {meta['layers_new']}",
             )
         ]
+        # Every per-layer list must follow num_hidden_layers or the framework
+        # refuses to start.
+        json_changes.extend(layer_changes)
         return yaml_changes, json_changes
 
-    def _plan_pp_only(self, validator, dims, layout, target_cards, rejections):
+    @staticmethod
+    def _layer_field_changes(model_config, layout, meta, rejections, label):
+        """Per-layer list rewrites for a candidate. ``(changes, ok)``."""
+        changes, err = plan_layer_field_shrink(
+            model_config,
+            layout["layers"],
+            meta["layers_new"],
+            layout["mtp"],
+        )
+        if err:
+            rejections.append(f"{label}：{err}")
+            return [], False
+        return changes, True
+
+    def _plan_pp_only(
+        self, validator, dims, layout, target_cards, rejections, model_config
+    ):
         """Tier 2: shrink PP only. Returns a plan or ``None``."""
         tp, pp, ep, cp, sep = dims
         pool = []
@@ -331,14 +361,25 @@ class ShrinkPlanner:
                     f"PP {pp} -> {pp_new}：{_first_constraint(why)}"
                 )
                 continue
-            pool.append((pp_new, meta))
+            layer_changes, ok = self._layer_field_changes(
+                model_config, layout, meta, rejections, f"PP {pp} -> {pp_new}"
+            )
+            if not ok:
+                continue
+            pool.append((pp_new, meta, layer_changes))
 
         if not pool:
             return None
 
-        pp_new, meta = max(pool, key=lambda item: item[0])
+        pp_new, meta, layer_changes = max(pool, key=lambda item: item[0])
         yaml_changes, json_changes = self._pp_changes(
-            pp, pp_new, layout, meta, target_cards, "（EP/TP/CP/SEP 不变）"
+            pp,
+            pp_new,
+            layout,
+            meta,
+            target_cards,
+            layer_changes,
+            "（EP/TP/CP/SEP 不变）",
         )
         return ParallelismPlan(
             tp,
@@ -353,7 +394,14 @@ class ShrinkPlanner:
         )
 
     def _plan_joint(
-        self, validator, dims, layout, moe, target_cards, rejections
+        self,
+        validator,
+        dims,
+        layout,
+        moe,
+        target_cards,
+        rejections,
+        model_config,
     ):
         """Tier 3: shrink EP and PP together. Returns a plan or ``None``.
 
@@ -390,18 +438,33 @@ class ShrinkPlanner:
                         f"{_first_constraint(why)}"
                     )
                     continue
-                pool.append((ep_new, pp_new, experts_new, meta))
+                layer_changes, ok = self._layer_field_changes(
+                    model_config,
+                    layout,
+                    meta,
+                    rejections,
+                    f"PP {pp} -> {pp_new}",
+                )
+                if not ok:
+                    continue
+                pool.append((ep_new, pp_new, experts_new, meta, layer_changes))
 
         if not pool:
             return None
 
         # Prefer the largest EP first, then the largest PP: one unit of EP
         # change is less intrusive on the model structure than one of PP.
-        ep_new, pp_new, experts_new, meta = max(
+        ep_new, pp_new, experts_new, meta, layer_changes = max(
             pool, key=lambda item: (item[0], item[1])
         )
         yaml_changes, json_changes = self._pp_changes(
-            pp, pp_new, layout, meta, target_cards, "（与 EP 联合缩容）"
+            pp,
+            pp_new,
+            layout,
+            meta,
+            target_cards,
+            layer_changes,
+            "（与 EP 联合缩容）",
         )
         yaml_changes.insert(
             0,
@@ -487,8 +550,12 @@ class ShrinkPlanner:
 
         # De-duplicated, truncated candidate rejections: the concrete reason a
         # given (EP, PP) pair was thrown away is usually the fastest way to
-        # see what to change.
-        detail = list(dict.fromkeys(rejections))[:6]
+        # see what to change.  Model-structure reasons come first -- they are
+        # actionable, while the C-constraint ones repeat the same arithmetic.
+        unique = list(dict.fromkeys(rejections))
+        topological = [r for r in unique if _CONSTRAINT_RE.search(r)]
+        structural = [r for r in unique if r not in topological]
+        detail = (structural + topological)[:6]
         detail_block = ""
         if detail:
             detail_block = "\n  候选淘汰明细：\n    " + "\n    ".join(detail)

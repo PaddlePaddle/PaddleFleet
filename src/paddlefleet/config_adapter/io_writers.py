@@ -26,7 +26,9 @@ semantics for both writers, given a flat ``{key: value}`` map:
 
 from __future__ import annotations
 
+import io
 import json
+import os
 from pathlib import Path
 
 
@@ -64,6 +66,23 @@ def _apply(document, config_map, protected=None):
     return changes
 
 
+def _write_atomically(output_path, text):
+    """Write ``text`` through a temp file + rename.
+
+    Never truncates the destination in place, so an interrupted run cannot
+    leave a half-written config behind.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(output_path.name + ".config_adapter.tmp")
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, output_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 class YamlWriter:
     """Loads a YAML document, applies a config map, serializes it back."""
 
@@ -81,12 +100,11 @@ class YamlWriter:
 
     def write(self, config, output_path, header=""):
         """Write ``config``, prepending an optional comment ``header``."""
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            if header:
-                f.write(header)
-            self.yaml.dump(config, f)
+        buffer = io.StringIO()
+        if header:
+            buffer.write(header)
+        self.yaml.dump(config, buffer)
+        _write_atomically(output_path, buffer.getvalue())
 
 
 class JsonWriter:
@@ -115,9 +133,7 @@ class JsonWriter:
 
     def write(self, config, output_path):
         """Write ``config`` with a trailing newline (POSIX friendly)."""
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
         text = json.dumps(
             config, indent=self.indent, ensure_ascii=self.ensure_ascii
         )
-        output_path.write_text(text + "\n", encoding="utf-8")
+        _write_atomically(output_path, text + "\n")

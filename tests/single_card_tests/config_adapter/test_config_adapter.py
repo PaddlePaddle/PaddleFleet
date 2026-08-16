@@ -404,6 +404,116 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
         self.assertNotIn("brand_new_field", self.load_output_yaml(8))
 
 
+class TestLayerFields(ConfigAdapterTestBase):
+    """Per-layer lists must follow num_hidden_layers, or the shrink is refused."""
+
+    def _with_layer_fields(self, ratios):
+        """Source JSON carrying per-layer lists consistent with 64 layers."""
+        self.write_json(
+            {
+                **MODEL_CONFIG,
+                "csa_compress_ratios": [*ratios, -2],  # 64 layers + 1 MTP
+                "window_attn_skip_freq": [0] * 65,
+                "layer_types": ["full_attention"] * 64,
+            }
+        )
+
+    def test_lists_are_truncated_with_the_layer_count(self):
+        self._with_layer_fields([128, 128, 128, -2] * 16)
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        model_config = self.load_output_json(8)
+        # 64 -> 16 layers, MTP entries kept at the tail.
+        self.assertEqual(model_config["num_hidden_layers"], 16)
+        self.assertEqual(len(model_config["csa_compress_ratios"]), 17)
+        self.assertEqual(model_config["csa_compress_ratios"][-1], -2)
+        self.assertEqual(len(model_config["window_attn_skip_freq"]), 17)
+        self.assertEqual(len(model_config["layer_types"]), 16)
+        # Both attention families of the source pattern survive.
+        self.assertIn(128, model_config["csa_compress_ratios"][:16])
+        self.assertIn(-2, model_config["csa_compress_ratios"][:16])
+        self.assertIn("逐层配置", message)
+
+    def test_refuses_when_an_attention_family_would_vanish(self):
+        # Every -2 layer sits beyond the shrunk layer range.
+        self._with_layer_fields([128] * 60 + [-2] * 4)
+        ok, message = self.adapt(target_nodes=1)
+        self.assertFalse(ok)
+        self.assertIn("丢掉注意力类型", message)
+
+    def test_refuses_when_the_source_lists_are_inconsistent(self):
+        self.write_json({**MODEL_CONFIG, "csa_compress_ratios": [128] * 10})
+        ok, message = self.adapt(target_nodes=1)
+        self.assertFalse(ok)
+        self.assertIn("不自洽", message)
+
+    def test_scalar_forms_are_left_alone(self):
+        self.write_json({**MODEL_CONFIG, "window_attn_skip_freq": 4})
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        self.assertEqual(self.load_output_json(8)["window_attn_skip_freq"], 4)
+
+
+class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
+    """Nothing is written until every check has passed."""
+
+    def test_batch_failure_does_not_touch_either_source(self):
+        # 1537 * 8 / 768 is not an integer, so batch scaling fails *after*
+        # the model structure has been planned.
+        self.write_yaml(
+            SOURCE_YAML.replace(
+                "global_batch_size: 1536", "global_batch_size: 1537"
+            )
+        )
+        ok, message = self.adapt(target_nodes=1, in_place=True)
+        self.assertFalse(ok)
+        self.assertIn("无法整除", message)
+        # Source model_config.json keeps its original structure ...
+        source_json = JsonWriter().load(self.json_path)
+        self.assertEqual(source_json["num_hidden_layers"], 64)
+        self.assertEqual(source_json["n_routed_experts"], 256)
+        # ... and the YAML still declares the original parallelism.
+        config = YamlWriter().load(self.yaml_path)
+        self.assertEqual(config["pipeline_model_parallel_size"], 8)
+        self.assertEqual(config["expert_model_parallel_size"], 64)
+
+    def test_no_adapted_dir_is_created_on_failure(self):
+        self.write_yaml(
+            SOURCE_YAML.replace(
+                "global_batch_size: 1536", "global_batch_size: 1537"
+            )
+        )
+        ok, _message = self.adapt(target_nodes=1)
+        self.assertFalse(ok)
+        self.assertFalse((self.output_dir / "model_config_separated").exists())
+
+
+class TestPinnedModelPathConflict(ConfigAdapterTestBase):
+    """A pinned model_name_or_path cannot coexist with a JSON rewrite."""
+
+    def test_pinning_the_path_is_rejected(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            yaml_overrides={"model_name_or_path": "./model_dir"},
+        )
+        self.assertFalse(ok)
+        self.assertIn("model_name_or_path", message)
+        self.assertIn("--in-place", message)
+
+    def test_in_place_accepts_a_pinned_path(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            in_place=True,
+            yaml_overrides={"model_name_or_path": "./model_dir"},
+        )
+        self.assertTrue(ok, message)
+        config = YamlWriter().load(self.yaml_path)
+        self.assertEqual(config["model_name_or_path"], "./model_dir")
+        self.assertEqual(
+            JsonWriter().load(self.json_path)["num_hidden_layers"], 16
+        )
+
+
 class TestInPlace(ConfigAdapterTestBase):
     """In-place rewrites both sources and keeps model_name_or_path."""
 

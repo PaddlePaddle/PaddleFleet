@@ -85,6 +85,9 @@ class ConfigAdapter:
         self.scale_tag = f"{self.target_cards}cards"
         self.yaml_writer = YamlWriter()
         self.json_writer = JsonWriter()
+        # Original bytes of an in-place rewritten model_config.json, used to
+        # roll back if the YAML write then fails.
+        self._json_backup = None
 
     # ------------------------------------------------------------------ main
     def adapt(self, input_path):
@@ -167,12 +170,6 @@ class ConfigAdapter:
         if self.options.inject_precision:
             skipped_switches = self._inject_precision(config, model_config, log)
 
-        model_config_output, err = self._write_model_config(
-            config, log, model_config, model_dir, json_path, input_path
-        )
-        if err:
-            return False, f"{input_path.name}: {err}"
-
         for key, value, reason in plan.yaml_changes:
             log.record(
                 "yaml",
@@ -198,6 +195,15 @@ class ConfigAdapter:
         if err:
             return False, f"{input_path.name}: {err}"
 
+        # Nothing has touched the filesystem up to this point: every rewrite
+        # above happened in memory, so a validation failure leaves both source
+        # files exactly as they were.
+        model_config_output, err = self._write_model_config(
+            config, log, model_config, model_dir, json_path, input_path
+        )
+        if err:
+            return False, f"{input_path.name}: {err}"
+
         info = self._build_info(
             input_path,
             orig_cards,
@@ -211,7 +217,14 @@ class ConfigAdapter:
         output_path = Path(info["output"])
         # In-place runs must not accumulate a new banner on every rewrite.
         header = "" if self.in_place else format_header(info)
-        self.yaml_writer.write(config, output_path, header=header)
+        try:
+            self.yaml_writer.write(config, output_path, header=header)
+        except OSError as exc:
+            # The companion JSON was already persisted; put it back so an
+            # in-place run cannot leave the two source files disagreeing.
+            if self._json_backup is not None:
+                Path(json_path).write_bytes(self._json_backup)
+            return False, f"{input_path.name}: 写出 {output_path} 失败：{exc}"
         return True, format_report(info, log)
 
     # --------------------------------------------------------------- stages
@@ -303,16 +316,33 @@ class ConfigAdapter:
     ):
         """Persist ``model_config.json`` when it changed.
 
-        Returns ``(path_or_None, error_or_None)``.  A pre-existing adapted
-        directory is refused unless ``--force`` was given: it usually means a
-        stale artefact from an earlier run that the user should look at.
+        Returns ``(path_or_None, error_or_None)``.  Called only after every
+        check has passed, so this is the first filesystem write of the run.
+        A pre-existing adapted directory is refused unless ``--force`` was
+        given: it usually means a stale artefact the user should look at.
         """
+        self._json_backup = None
         if model_config is None or not log.by_target("json"):
             return None, None
 
         if self.in_place:
+            # Keep the original bytes so a later YAML write failure can be
+            # rolled back (see adapt()).
+            self._json_backup = Path(json_path).read_bytes()
             self.json_writer.write(model_config, json_path)
             return str(json_path), None
+
+        # The generated YAML must point at the generated JSON, so this field
+        # cannot be pinned by the user at the same time.
+        if "model_name_or_path" in self.yaml_overrides:
+            return None, (
+                "本次需要改写模型结构并另存 model_config.json，"
+                "因此 model_name_or_path 必须指向新生成的目录，"
+                "不能同时用 --set 锁定它；"
+                "请去掉 --set yaml:model_name_or_path=...，"
+                "或改用 --in-place（就地改写源 model_config.json，"
+                "不改 model_name_or_path）"
+            )
 
         adapted_dir = build_adapted_dir(
             self.output_dir, model_dir.name, self.scale_tag
@@ -342,7 +372,6 @@ class ConfigAdapter:
                         bool(raw) and str(raw).startswith("/"),
                     )
                 },
-                protected=self.yaml_overrides,
             ),
             "指向本次生成的 model_config 目录（源 model_config.json 不修改）",
         )

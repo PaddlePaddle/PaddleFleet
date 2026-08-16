@@ -121,8 +121,18 @@ python -m paddlefleet.config_adapter --input config.yaml \
 
 - 缩 EP：专家数等比缩减，要求每个 EP rank 专家数相等（M1）且不小于 top-k（M2）。
 - 缩 PP：`num_hidden_layers` 等比缩减，再用 VPP/空尾层重新对齐（M3）；层数低于
-  推荐值只告警不拒绝（M4）；dense 前缀层必须放得下（M5）。
+  推荐值只告警不拒绝（M4）；dense 前缀层必须放得下（M5）。同时**逐层配置列表**
+  （`csa_compress_ratios` / `window_attn_skip_freq` / `layer_types` / 列表形式的
+  `moe_layer_freq`）按新层数裁剪：保留前 N 层，并原样接回末尾的 MTP 项，否则框架会
+  因长度不符直接启动失败。源列表长度本身与 `num_hidden_layers` 不一致，或裁剪会让
+  `csa_compress_ratios` 丢掉某一类注意力层（框架要求每类至少一层）时，该候选会被
+  拒绝而不是硬改。
 - 联合缩：EP × PP 笛卡尔积，平局时先取最大 EP，再取最大 PP。
+
+写盘时机：所有规划与校验都在内存里完成后才落盘，中途任何一步失败都不改动源文件；
+写文件走临时文件 + 原子替换，`--in-place` 下若 YAML 写失败会回滚已写的
+`model_config.json`。另外需要另存 `model_config.json` 时，`model_name_or_path`
+必须指向新目录，因此不允许同时用 `--set` 锁定它（会直接报错并提示改用 `--in-place`）。
 
 ### 约束体系
 
@@ -201,6 +211,7 @@ config_adapter/
 ├── strategies.py             # scale_batch / scale_accumulation
 ├── topology.py               # C1..C4 通信组约束
 ├── constraints.py            # E/M 族约束 + 候选枚举 + 层对齐
+├── layer_fields.py           # 逐层配置列表的裁剪与校验
 ├── field_spec.py             # model_config.json 字段别名注册表
 ├── model_config_resolver.py  # 定位/改写 model_config 路径
 ├── io_writers.py             # YAML / JSON 读改写
