@@ -453,6 +453,27 @@ class TestLayerFields(ConfigAdapterTestBase):
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_json(8)["window_attn_skip_freq"], 4)
 
+    def test_mtp_num_layers_alias_wins_over_a_zero(self):
+        # The framework resolves the MTP count as
+        # `mtp_num_layers or num_nextn_predict_layers`, so a zero in the
+        # second key must not hide a valid value in the first.
+        self.write_json(
+            {
+                **MODEL_CONFIG,
+                "num_nextn_predict_layers": 0,
+                "mtp_num_layers": 2,
+                "csa_compress_ratios": [128, 128, 128, -2] * 16 + [-2, -2],
+                "layer_types": ["full_attention"] * 64,
+            }
+        )
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        model_config = self.load_output_json(8)
+        self.assertEqual(model_config["num_hidden_layers"], 16)
+        # 16 layers + the 2 MTP entries.
+        self.assertEqual(len(model_config["csa_compress_ratios"]), 18)
+        self.assertEqual(len(model_config["layer_types"]), 16)
+
 
 class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
     """Nothing is written until every check has passed."""

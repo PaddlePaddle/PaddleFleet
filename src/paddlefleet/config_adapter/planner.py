@@ -49,7 +49,7 @@ from .constraints import (
     pp_candidates,
 )
 from .field_spec import describe_missing, resolve_fields
-from .layer_fields import plan_layer_field_shrink
+from .layer_fields import effective_mtp_layers, plan_layer_field_shrink
 from .plan import ParallelismPlan
 from .topology import TopologyValidator
 
@@ -212,7 +212,9 @@ class ShrinkPlanner:
                 )
 
         # ---- Tier 2 / Tier 3 need the pipeline layout --------------------
-        layout, err = self._pipeline_layout(config, resolved, missing)
+        layout, err = self._pipeline_layout(
+            config, resolved, missing, model_config
+        )
         if pp > MIN_PARALLEL_DEGREE and err:
             return None, err
 
@@ -248,7 +250,7 @@ class ShrinkPlanner:
 
     # -------------------------------------------------------------- helpers
     @staticmethod
-    def _pipeline_layout(config, resolved, missing):
+    def _pipeline_layout(config, resolved, missing, model_config):
         """Collect everything PP shrinking needs. ``(layout, error)``."""
         if "num_hidden_layers" in missing:
             return None, "精度模式：" + describe_missing(
@@ -259,12 +261,16 @@ class ShrinkPlanner:
             field = resolved.get(name)
             return field.value if field is not None else None
 
+        # Follow the framework's effective-MTP rule rather than a single
+        # alias: mtp_num_layers wins when non-zero.
+        mtp = effective_mtp_layers(model_config)
+
         # MTP layers only take part in the stage division when
         # separate_mtp_headloss is on; otherwise they are weight-0 free
         # passengers pinned to the last stage.
         head = int(config.get("num_empty_layers_add_in_head", 0) or 0)
         if config.get("separate_mtp_headloss"):
-            head += int(value_of("num_nextn_predict_layers") or 0)
+            head += mtp
 
         return {
             "layers": value_of("num_hidden_layers"),
@@ -275,7 +281,7 @@ class ShrinkPlanner:
                 config.get("virtual_pipeline_model_parallel_size", 1) or 1
             ),
             "first_k": int(value_of("first_k_dense_replace") or 0),
-            "mtp": int(value_of("num_nextn_predict_layers") or 0),
+            "mtp": mtp,
         }, None
 
     @staticmethod
