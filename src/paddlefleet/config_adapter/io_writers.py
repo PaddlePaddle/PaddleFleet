@@ -40,7 +40,8 @@ def make_yaml():
         raise ImportError(
             "config_adapter needs ruamel.yaml to rewrite training configs "
             "without losing comments; install it with "
-            "`pip install ruamel.yaml`."
+            '`pip install "paddlefleet[config-adapter]"` '
+            "(or `pip install ruamel.yaml`)."
         ) from exc
 
     yaml = YAML()

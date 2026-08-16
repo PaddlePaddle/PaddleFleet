@@ -88,7 +88,7 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           echo "Install uv"
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt ruamel.yaml
           echo "uv build"
           export UV_HTTP_TIMEOUT=300
           git submodule update --init --recursive
@@ -197,7 +197,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt ruamel.yaml
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
@@ -282,7 +282,7 @@ jobs:
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
           git submodule update --init --recursive
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt ruamel.yaml
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           export UV_SKIP_WHEEL_FILENAME_CHECK=1 #This environment variable allows installing the latest commit-level whl package of Paddle.
@@ -380,7 +380,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt ruamel.yaml
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
@@ -517,7 +517,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt ruamel.yaml
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
@@ -722,7 +722,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git pull --no-edit origin pull/${PR_ID}/head
-          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt
+          pip install uv coverage==7.6.1 bce-python-sdk==0.8.74 wrapt ruamel.yaml
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           wget https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/paddlefleet-0.0.1.dev-cp310-cp310-linux_x86_64.whl
           pip install paddlefleet_ops-0.0.1.dev-cp310-cp310-linux_x86_64.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/

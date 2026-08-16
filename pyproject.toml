@@ -49,6 +49,13 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+# config_adapter rewrites training YAMLs in place and must keep comments and
+# key order, which needs ruamel.yaml. Declared as an extra so the core wheel
+# stays dependency-free for users who never run the tool:
+#     pip install paddlefleet[config-adapter]
+[project.optional-dependencies]
+config-adapter = ["ruamel.yaml>=0.17"]
+
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
 Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
@@ -76,6 +83,7 @@ test = [
     "pytest",
     "pyyaml",
     "parameterized",
+    "ruamel.yaml>=0.17",
 ]
 build = [
     "pip",
