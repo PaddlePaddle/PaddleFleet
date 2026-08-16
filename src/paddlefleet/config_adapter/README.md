@@ -224,4 +224,3 @@ config_adapter/
 ```bash
 pytest -s tests/single_card_tests/config_adapter/test_config_adapter.py
 ```
-
