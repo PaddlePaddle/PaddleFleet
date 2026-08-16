@@ -17,10 +17,13 @@
 import contextlib
 import io
 import json
+import runpy
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from paddlefleet.config_adapter import (
     AdaptOptions,
@@ -31,13 +34,44 @@ from paddlefleet.config_adapter import (
     plan_precision_switches,
 )
 from paddlefleet.config_adapter.constraints import (
+    align_layers,
+    check_ep_shrink,
+    check_hardware,
+    check_pp_shrink,
     ep_candidates,
+    min_shrink_cards,
     pp_candidates,
+)
+from paddlefleet.config_adapter.field_spec import (
+    FIELD_SPECS,
+    describe_missing,
+    resolve_fields,
 )
 from paddlefleet.config_adapter.io_writers import JsonWriter, YamlWriter
 from paddlefleet.config_adapter.layer_fields import (
     effective_mtp_layers,
     plan_layer_field_shrink,
+)
+from paddlefleet.config_adapter.model_config_resolver import (
+    ModelConfigResolveError,
+    build_adapted_dir,
+    resolve_model_config,
+    rewrite_model_name_or_path,
+)
+from paddlefleet.config_adapter.report import (
+    ChangeLog,
+    format_header,
+    format_report,
+)
+from paddlefleet.config_adapter.strategies import (
+    scale_accumulation,
+    scale_batch,
+)
+from paddlefleet.config_adapter.topology import TopologyValidator
+from paddlefleet.config_adapter.utils import (
+    extract_parallel_params,
+    multi_lcm,
+    parse_value,
 )
 
 SOURCE_YAML = """\
@@ -215,6 +249,342 @@ class TestOverrideParsing(unittest.TestCase):
     def test_missing_value_is_an_error(self):
         with self.assertRaises(ValueError):
             parse_overrides(["max_steps"])
+
+
+class TestValueParsing(unittest.TestCase):
+    """``--set`` value inference and parallel-dim extraction."""
+
+    def test_parse_value_types(self):
+        self.assertIs(parse_value("true"), True)
+        self.assertIs(parse_value("False"), False)
+        self.assertIsNone(parse_value("null"))
+        self.assertIsNone(parse_value("None"))
+        self.assertEqual(parse_value("42"), 42)
+        self.assertEqual(parse_value("1e-5"), 1e-05)
+        self.assertEqual(parse_value("tilelang"), "tilelang")
+
+    def test_extract_parallel_params_defaults(self):
+        self.assertEqual(extract_parallel_params({}), (1, 1, 1, 1, 1))
+        self.assertEqual(
+            extract_parallel_params(
+                {
+                    "tensor_model_parallel_size": 2,
+                    "pipeline_model_parallel_size": None,
+                    "expert_model_parallel_size": 8,
+                    "context_parallel_size": -1,
+                    "sep_parallel_size": 4,
+                }
+            ),
+            (2, 1, 8, 1, 4),
+        )
+
+    def test_multi_lcm(self):
+        self.assertEqual(multi_lcm(4, 6, 8), 24)
+
+
+class TestBatchStrategies(unittest.TestCase):
+    """Batch scaling maths, including every refusal path."""
+
+    def test_scale_batch_happy_path(self):
+        config_map, reason, err = scale_batch(1536, 2, 768, 8)
+        self.assertIsNone(err)
+        self.assertEqual(config_map["global_batch_size"], 16)
+        self.assertEqual(config_map["gradient_accumulation_steps"], 2)
+        self.assertIn("等比缩放", reason)
+
+    def test_scale_batch_without_gbs_keeps_acc(self):
+        config_map, reason, err = scale_batch(None, 4, 768, 8)
+        self.assertIsNone(err)
+        self.assertEqual(config_map, {"gradient_accumulation_steps": 4})
+        self.assertIn("global_batch_size", reason)
+
+    def test_scale_batch_refuses_non_divisible(self):
+        _map, _reason, err = scale_batch(1537, 2, 768, 8)
+        self.assertIn("无法整除", err)
+
+    def test_scale_batch_refuses_zero(self):
+        # A source config declaring global_batch_size: 0 scales to 0.
+        _map, _reason, err = scale_batch(0, 2, 768, 8)
+        self.assertIn("<= 0", err)
+
+    def test_scale_accumulation_happy_path(self):
+        config_map, reason, err = scale_accumulation(1536, 2, 768, 8)
+        self.assertIsNone(err)
+        self.assertEqual(config_map["global_batch_size"], 1536)
+        self.assertEqual(config_map["gradient_accumulation_steps"], 192)
+        self.assertIn("等效 batch", reason)
+
+    def test_scale_accumulation_without_gbs_keeps_acc(self):
+        config_map, _reason, err = scale_accumulation(None, 4, 768, 8)
+        self.assertIsNone(err)
+        self.assertEqual(config_map, {"gradient_accumulation_steps": 4})
+
+    def test_scale_accumulation_refuses_non_divisible(self):
+        _map, _reason, err = scale_accumulation(1536, 3, 768, 7)
+        self.assertIn("无法整除", err)
+
+
+class TestTopologyConstraints(unittest.TestCase):
+    """C1..C4 and the suggestion helper."""
+
+    def test_valid_topology_reports_derived_groups(self):
+        ok, _msg, details = TopologyValidator(8, 8).validate(1, 2, 4, 1, 1)
+        self.assertTrue(ok)
+        self.assertEqual(details["sharding"], 4)
+        self.assertEqual(details["moe_sharding"], 1)
+
+    def test_c1_violation(self):
+        ok, msg, _d = TopologyValidator(8, 8).validate(3, 1, 1, 1, 1)
+        self.assertFalse(ok)
+        self.assertIn("C1", msg)
+
+    def test_c2_violation(self):
+        ok, msg, _d = TopologyValidator(8, 8).validate(1, 8, 64, 1, 1)
+        self.assertFalse(ok)
+        self.assertIn("C2", msg)
+
+    def test_c3_violation(self):
+        ok, msg, _d = TopologyValidator(8, 8).validate(4, 1, 2, 1, 1)
+        self.assertFalse(ok)
+        self.assertIn("C3", msg)
+
+    def test_c4_violation(self):
+        ok, msg, _d = TopologyValidator(8, 8).validate(1, 1, 1, 3, 1)
+        self.assertFalse(ok)
+        self.assertIn("C4", msg)
+
+    def test_suggestions_are_multiples_of_the_minimum_unit(self):
+        cards = TopologyValidator(8, 8).suggest_valid_cards(1, 2, 8, 1, 1)
+        self.assertTrue(all(c % 16 == 0 for c in cards), cards)
+
+
+class TestHardwareAndModelConstraints(unittest.TestCase):
+    """E-family and M-family checks."""
+
+    def test_e3_rejects_non_integer_dims(self):
+        ok, why = check_hardware(8, 8, 1, 1, "2", 1, 1)
+        self.assertFalse(ok)
+        self.assertIn("E3", why)
+
+    def test_e1_rejects_asymmetric_multi_node(self):
+        ok, why = check_hardware(12, 8, 1, 1, 1, 1, 1)
+        self.assertFalse(ok)
+        self.assertIn("E1", why)
+
+    def test_e2_rejects_tp_larger_than_the_node(self):
+        ok, why = check_hardware(8, 8, 16, 1, 1, 1, 1)
+        self.assertFalse(ok)
+        self.assertIn("E2", why)
+
+    def test_hardware_prereqs_pass(self):
+        ok, why = check_hardware(8, 8, 1, 8, 64, 1, 1)
+        self.assertTrue(ok, why)
+
+    def test_min_shrink_cards_respects_the_floor(self):
+        # PP and EP may only shrink to 2, so 2*2 = 4 cards is the floor here.
+        self.assertEqual(min_shrink_cards(1, 8, 8, 1, 1, 8), 8)
+
+    def test_m1_rejects_uneven_experts(self):
+        ok, why, experts = check_ep_shrink(64, 56, 32, 8)
+        self.assertFalse(ok)
+        self.assertIn("M1", why)
+        self.assertEqual(experts, 28)
+
+    def test_m2_rejects_fewer_experts_than_topk(self):
+        ok, why, _experts = check_ep_shrink(64, 2, 64, 8)
+        self.assertFalse(ok)
+        self.assertIn("M2", why)
+
+    def test_ep_growth_is_vacuous(self):
+        ok, _why, experts = check_ep_shrink(8, 8, 64, 8)
+        self.assertTrue(ok)
+        self.assertEqual(experts, 64)
+
+    def test_pp_shrink_reports_layer_and_alignment(self):
+        ok, why, meta = check_pp_shrink(8, 2, 64, 0, 0, 2)
+        self.assertTrue(ok, why)
+        self.assertEqual(meta["layers_new"], 16)
+        self.assertEqual(meta["vpp_new"], 2)
+
+    def test_pp_shrink_warns_on_few_layers(self):
+        _ok, _why, meta = check_pp_shrink(8, 2, 8, 0, 0, 1)
+        self.assertIn("推荐", meta["warning"])
+
+    def test_pp_shrink_rejects_zero_layers(self):
+        ok, why, _meta = check_pp_shrink(8, 2, 3, 0, 0, 1)
+        self.assertFalse(ok)
+        self.assertIn("至少需要 1 层", why)
+
+    def test_m5_rejects_a_dense_prefix_that_does_not_fit(self):
+        ok, why, _meta = check_pp_shrink(
+            8, 2, 64, 0, 0, 1, first_k_dense_replace=32
+        )
+        self.assertFalse(ok)
+        self.assertIn("M5", why)
+
+    def test_align_layers_pads_the_tail(self):
+        vpp_new, tail_new = align_layers(15, 0, 0, 2, 2)
+        self.assertEqual(vpp_new, 2)
+        self.assertEqual(tail_new, 1)
+
+    def test_align_layers_refuses_pp_below_the_floor(self):
+        self.assertEqual(align_layers(16, 0, 0, 1, 2), (None, None))
+
+
+class TestFieldSpec(unittest.TestCase):
+    """Alias resolution for model_config.json fields."""
+
+    def test_resolves_aliases_and_remembers_the_key(self):
+        resolved, missing = resolve_fields(
+            {
+                "num_hidden_layers": 8,
+                "num_local_experts": 16,
+                "moe_k": 4,
+            }
+        )
+        self.assertEqual(missing, {})
+        self.assertEqual(resolved["num_experts"].value, 16)
+        self.assertEqual(
+            resolved["num_experts"].writeback_key, "num_local_experts"
+        )
+        self.assertEqual(resolved["num_experts_per_tok"].value, 4)
+        # Optional fields fall back to their declared default.
+        self.assertEqual(resolved["first_k_dense_replace"].value, 0)
+        self.assertEqual(resolved["first_k_dense_replace"].origin, "<default>")
+
+    def test_missing_required_fields_are_reported(self):
+        resolved, missing = resolve_fields({"num_hidden_layers": 8})
+        self.assertIn("num_experts", missing)
+        self.assertNotIn("num_experts", resolved)
+        # Write-back falls back to the canonical spelling.
+        message = describe_missing("num_experts", FIELD_SPECS["num_experts"])
+        self.assertIn("n_routed_experts", message)
+        self.assertIn("--set json:", message)
+
+
+class TestModelConfigResolution(unittest.TestCase):
+    """Locating and re-pointing model_config.json."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.model_dir = self.root / "model_dir"
+        self.model_dir.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_empty_value_is_refused(self):
+        with self.assertRaises(ModelConfigResolveError) as ctx:
+            resolve_model_config(None, self.root)
+        self.assertIn("model_name_or_path", str(ctx.exception))
+
+    def test_missing_directory_lists_what_was_tried(self):
+        with self.assertRaises(ModelConfigResolveError) as ctx:
+            resolve_model_config("./nope", self.root)
+        self.assertIn("已尝试", str(ctx.exception))
+
+    def test_directory_without_json_is_refused(self):
+        with self.assertRaises(ModelConfigResolveError) as ctx:
+            resolve_model_config("./model_dir", self.root)
+        self.assertIn("model_config.json", str(ctx.exception))
+
+    def test_relative_and_absolute_values_both_resolve(self):
+        (self.model_dir / "model_config.json").write_text("{}\n")
+        for value in ("./model_dir", str(self.model_dir)):
+            found_dir, json_path = resolve_model_config(value, self.root)
+            self.assertEqual(found_dir, self.model_dir.resolve())
+            self.assertTrue(json_path.is_file())
+
+    def test_adapted_dir_layout(self):
+        path = build_adapted_dir("/out", "model_dir", "8cards")
+        self.assertEqual(
+            path,
+            Path("/out/model_config_separated/model_dir_adapted_8cards"),
+        )
+
+    def test_absolute_source_stays_absolute(self):
+        value = rewrite_model_name_or_path(
+            self.model_dir, self.root, source_was_absolute=True
+        )
+        self.assertTrue(Path(value).is_absolute())
+
+    def test_relative_source_stays_relative_inside_the_yaml_dir(self):
+        value = rewrite_model_name_or_path(
+            self.model_dir, self.root, source_was_absolute=False
+        )
+        self.assertEqual(value, "model_dir")
+
+
+class TestChangeReporting(unittest.TestCase):
+    """Change bookkeeping and the rendered report."""
+
+    def _info(self, **overrides):
+        return {
+            "input": "src.yaml",
+            "output": "out.yaml",
+            "profile": "accuracy",
+            "profile_flag": "--test-accuracy",
+            "batch_strategy": "scale_accumulation",
+            "orig_cards_label": 768,
+            "orig_nodes_label": 96,
+            "orig_scale_label": "96 节点 / 768 卡",
+            "target_cards": 8,
+            "target_nodes": 1,
+            "cards_per_node": 8,
+            "dims_line": "TP 1->1",
+            "sharding_line": "96 -> 4",
+            "plan_note": "仅缩 EP",
+            "model_config_output": None,
+            "skipped_switches": [],
+            "warnings": [],
+            **overrides,
+        }
+
+    def test_no_op_writes_are_dropped(self):
+        log = ChangeLog()
+        log.record("yaml", [("modified", "a", 1, 1)], "no-op")
+        log.record("yaml", [("modified", "b", 1, 2)], "real change")
+        log.record("json", [("added", "c", None, 3)], "added")
+        log.record_removed("yaml", "d", 9, "removed")
+        self.assertEqual(len(log), 3)
+        self.assertEqual([c.field for c in log.by_target("yaml")], ["b", "d"])
+
+    def test_report_lists_every_kind_with_its_reason(self):
+        log = ChangeLog()
+        log.record("yaml", [("modified", "ep", 64, 4)], "EP 缩容")
+        log.record("yaml", [("added", "new_key", None, 1)], "新增")
+        log.record_removed("yaml", "fa_version", 3, "环境相关")
+        log.record("json", [("modified", "experts", 256, 16)], "专家数")
+        text = format_report(
+            self._info(
+                model_config_output="out.json",
+                skipped_switches=["skipped one"],
+                warnings=["watch out"],
+            ),
+            log,
+        )
+        self.assertIn("CHANGE field=ep old=64 new=4", text)
+        self.assertIn("ADD field=new_key new=1", text)
+        self.assertIn("DELETE field=fa_version old=3", text)
+        self.assertIn("原因：EP 缩容", text)
+        self.assertIn("model_config.json 改动", text)
+        self.assertIn("跳过的精度开关：skipped one", text)
+        self.assertIn("WARNING：watch out", text)
+        self.assertIn("MODEL_CONFIG_OUTPUT=out.json", text)
+
+    def test_report_says_so_when_nothing_changed(self):
+        text = format_report(self._info(), ChangeLog())
+        self.assertIn("YAML 改动：无", text)
+
+    def test_header_is_a_comment_block(self):
+        header = format_header(self._info())
+        self.assertTrue(
+            all(
+                line.startswith("# [config_adapter]")
+                for line in header.strip().splitlines()
+            )
+        )
 
 
 class TestLayerFieldPlanning(unittest.TestCase):
@@ -475,6 +845,148 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_json(8)["brand_new_field"], 7)
         self.assertNotIn("brand_new_field", self.load_output_yaml(8))
+
+
+class TestErrorPaths(ConfigAdapterTestBase):
+    """Failure branches of the adapter."""
+
+    def test_empty_yaml_is_refused(self):
+        self.write_yaml("")
+        ok, message = self.adapt(target_nodes=1)
+        self.assertFalse(ok)
+        self.assertIn("配置文件为空", message)
+
+    def test_json_override_without_a_model_config(self):
+        self.write_yaml(SOURCE_YAML.replace("./model_dir", "./nope"))
+        ok, message = self.adapt(
+            target_nodes=1, json_overrides={"n_routed_experts": 32}
+        )
+        self.assertFalse(ok)
+        self.assertIn("--set json:", message)
+
+    def test_shrink_without_a_model_config(self):
+        self.write_yaml(SOURCE_YAML.replace("./model_dir", "./nope"))
+        ok, message = self.adapt(target_nodes=1)
+        self.assertFalse(ok)
+        self.assertIn("model_config.json", message)
+
+    def test_unknown_source_scale_is_refused(self):
+        # global_batch_size is present but nothing lets us infer the scale.
+        self.write_yaml(
+            SOURCE_YAML.replace("sharding_parallel_size: 96", "").replace(
+                "gradient_accumulation_steps: 2", ""
+            )
+        )
+        ok, message = self.adapt(target_nodes=1)
+        self.assertFalse(ok)
+        self.assertIn("无法推断源作业的卡数", message)
+
+    def test_pp_only_shrink_for_a_dense_model(self):
+        # EP=1 (no expert parallelism) leaves PP as the only axis to shrink,
+        # and 4 cards cannot host PP=8 (C1).
+        self.write_yaml(
+            SOURCE_YAML.replace(
+                "expert_model_parallel_size: 64",
+                "expert_model_parallel_size: 1",
+            )
+        )
+        ok, message = self.adapt(
+            target_nodes=1, cards_per_node=4, test_accuracy=True
+        )
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(4)
+        self.assertEqual(config["pipeline_model_parallel_size"], 4)
+        self.assertEqual(config["expert_model_parallel_size"], 1)
+        self.assertEqual(self.load_output_json(4)["num_hidden_layers"], 32)
+        self.assertIn("仅缩 PP", message)
+
+    def test_missing_layer_count_blocks_pp_shrink(self):
+        self.write_json(
+            {k: v for k, v in MODEL_CONFIG.items() if k != "num_hidden_layers"}
+        )
+        self.write_yaml(
+            SOURCE_YAML.replace(
+                "expert_model_parallel_size: 64",
+                "expert_model_parallel_size: 1",
+            )
+        )
+        ok, message = self.adapt(target_nodes=1, cards_per_node=4)
+        self.assertFalse(ok)
+        self.assertIn("num_hidden_layers", message)
+
+
+class TestCliErrorPaths(ConfigAdapterTestBase):
+    """Argument validation, straight through main()."""
+
+    def _run(self, argv):
+        buffer, err = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(buffer),
+            contextlib.redirect_stderr(err),
+        ):
+            code = main(argv)
+        return code, buffer.getvalue() + err.getvalue()
+
+    def test_missing_input_file(self):
+        code, out = self._run(["--input", str(self.root / "nope.yaml")])
+        self.assertEqual(code, 1)
+        self.assertIn("输入文件不存在", out)
+
+    def test_non_positive_cards_per_node(self):
+        code, out = self._run(
+            ["--input", str(self.yaml_path), "--cards-per-node", "0"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("cards-per-node", out)
+
+    def test_non_positive_target_nodes(self):
+        code, out = self._run(
+            ["--input", str(self.yaml_path), "--target-nodes", "0"]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("target-nodes", out)
+
+    def test_unparseable_set(self):
+        code, out = self._run(
+            [
+                "--input",
+                str(self.yaml_path),
+                "--target-nodes",
+                "1",
+                "--set",
+                "json:",
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("--set", out)
+
+    def test_adaptation_failure_is_reported(self):
+        code, out = self._run(
+            [
+                "--input",
+                str(self.yaml_path),
+                "--target-nodes",
+                "1",
+                "--test-performance",
+                "--output-dir",
+                str(self.output_dir),
+            ]
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("适配失败", out)
+
+    def test_python_m_entry_point(self):
+        # `python -m paddlefleet.config_adapter` must reach the same main().
+        argv = ["paddlefleet.config_adapter", "--input", str(self.yaml_path)]
+        buffer = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            contextlib.redirect_stdout(buffer),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            runpy.run_module("paddlefleet.config_adapter", run_name="__main__")
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("VALID_NODES=", buffer.getvalue())
 
 
 class TestLayerFields(ConfigAdapterTestBase):
