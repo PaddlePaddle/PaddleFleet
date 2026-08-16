@@ -224,3 +224,8 @@ config_adapter/
 ```bash
 pytest -s tests/single_card_tests/config_adapter/test_config_adapter.py
 ```
+
+`ruamel.yaml` 是这个工具的可选依赖（paddlefleet 自身不 import 它，代码里也是
+lazy import），所以**没装 ruamel.yaml 时，需要真正读写 YAML 的用例会 skip**，
+纯规划逻辑（并行度候选、约束、逐层字段裁剪、精度开关路由、`--set` 解析等）照常
+执行。想跑全量用例先 `pip install ruamel.yaml`。

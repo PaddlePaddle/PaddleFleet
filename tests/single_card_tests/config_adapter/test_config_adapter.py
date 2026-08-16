@@ -12,7 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for paddlefleet.config_adapter (pure Python, no device)."""
+"""Unit tests for paddlefleet.config_adapter (pure Python, no device).
+
+Rewriting a training YAML in place needs ``ruamel.yaml`` (comments and key
+order must survive), which is an optional, developer-facing dependency rather
+than something paddlefleet itself imports.  The tests that actually touch YAML
+are therefore skipped when it is missing; the pure planning logic below always
+runs.
+"""
 
 import contextlib
 import io
@@ -35,6 +42,21 @@ from paddlefleet.config_adapter.constraints import (
     pp_candidates,
 )
 from paddlefleet.config_adapter.io_writers import JsonWriter, YamlWriter
+from paddlefleet.config_adapter.layer_fields import (
+    effective_mtp_layers,
+    plan_layer_field_shrink,
+)
+
+try:
+    import ruamel.yaml  # noqa: F401
+
+    HAS_RUAMEL = True
+except ImportError:  # pragma: no cover - depends on the environment
+    HAS_RUAMEL = False
+
+NEEDS_RUAMEL = unittest.skipUnless(
+    HAS_RUAMEL, "config_adapter needs ruamel.yaml to rewrite YAML configs"
+)
 
 SOURCE_YAML = """\
 model_name_or_path: ./model_dir
@@ -213,6 +235,76 @@ class TestOverrideParsing(unittest.TestCase):
             parse_overrides(["max_steps"])
 
 
+class TestLayerFieldPlanning(unittest.TestCase):
+    """Per-layer list rewrites, exercised without touching any file."""
+
+    def _config(self, **overrides):
+        return {
+            "num_hidden_layers": 64,
+            "num_nextn_predict_layers": 1,
+            "csa_compress_ratios": [128, 128, 128, -2] * 16 + [-2],
+            "window_attn_skip_freq": [0] * 65,
+            "layer_types": ["full_attention"] * 64,
+            **overrides,
+        }
+
+    def test_effective_mtp_follows_the_framework_rule(self):
+        # mtp_num_layers wins whenever it is non-zero.
+        self.assertEqual(
+            effective_mtp_layers(
+                {"mtp_num_layers": 2, "num_nextn_predict_layers": 0}
+            ),
+            2,
+        )
+        self.assertEqual(
+            effective_mtp_layers({"num_nextn_predict_layers": 3}), 3
+        )
+        self.assertEqual(effective_mtp_layers({}), 0)
+        self.assertEqual(effective_mtp_layers(None), 0)
+
+    def test_truncates_layer_part_and_keeps_the_mtp_tail(self):
+        changes, err = plan_layer_field_shrink(self._config(), 64, 16, 1)
+        self.assertIsNone(err)
+        by_key = {key: value for key, value, _reason in changes}
+        self.assertEqual(len(by_key["csa_compress_ratios"]), 17)
+        self.assertEqual(by_key["csa_compress_ratios"][-1], -2)
+        self.assertEqual(len(by_key["window_attn_skip_freq"]), 17)
+        self.assertEqual(len(by_key["layer_types"]), 16)
+
+    def test_growing_or_equal_layer_counts_change_nothing(self):
+        changes, err = plan_layer_field_shrink(self._config(), 64, 64, 1)
+        self.assertIsNone(err)
+        self.assertEqual(changes, [])
+
+    def test_scalar_fields_are_ignored(self):
+        config = self._config(window_attn_skip_freq=4)
+        changes, err = plan_layer_field_shrink(config, 64, 16, 1)
+        self.assertIsNone(err)
+        self.assertNotIn(
+            "window_attn_skip_freq", [key for key, _v, _r in changes]
+        )
+
+    def test_inconsistent_source_length_is_refused(self):
+        config = self._config(csa_compress_ratios=[128] * 10)
+        _changes, err = plan_layer_field_shrink(config, 64, 16, 1)
+        self.assertIsNotNone(err)
+        self.assertIn("不自洽", err)
+
+    def test_losing_an_attention_family_is_refused(self):
+        config = self._config(csa_compress_ratios=[128] * 60 + [-2] * 4 + [-2])
+        _changes, err = plan_layer_field_shrink(config, 64, 16, 1)
+        self.assertIsNotNone(err)
+        self.assertIn("丢掉注意力类型", err)
+
+    def test_missing_lists_need_no_rewrite(self):
+        changes, err = plan_layer_field_shrink(
+            {"num_hidden_layers": 64}, 64, 16, 0
+        )
+        self.assertIsNone(err)
+        self.assertEqual(changes, [])
+
+
+@NEEDS_RUAMEL
 class TestDefaultAdaptation(ConfigAdapterTestBase):
     """No switch: just make the config fit, shrinking EP/PP if needed."""
 
@@ -257,6 +349,7 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertNotIn("max_steps", message)
 
 
+@NEEDS_RUAMEL
 class TestPerformanceSwitch(ConfigAdapterTestBase):
     """``--test-performance``: sharding + GBS only, everything else frozen."""
 
@@ -285,6 +378,7 @@ class TestPerformanceSwitch(ConfigAdapterTestBase):
         )
 
 
+@NEEDS_RUAMEL
 class TestAccuracySwitch(ConfigAdapterTestBase):
     """``--test-accuracy``: determinism switches + equivalent batch."""
 
@@ -357,6 +451,7 @@ class TestAccuracySwitch(ConfigAdapterTestBase):
         self.assertIn("最小值", message)
 
 
+@NEEDS_RUAMEL
 class TestAutoOverrideRouting(ConfigAdapterTestBase):
     """Prefix-less ``--set`` routes by which document declares the key."""
 
@@ -404,6 +499,7 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
         self.assertNotIn("brand_new_field", self.load_output_yaml(8))
 
 
+@NEEDS_RUAMEL
 class TestLayerFields(ConfigAdapterTestBase):
     """Per-layer lists must follow num_hidden_layers, or the shrink is refused."""
 
@@ -475,6 +571,7 @@ class TestLayerFields(ConfigAdapterTestBase):
         self.assertEqual(len(model_config["layer_types"]), 16)
 
 
+@NEEDS_RUAMEL
 class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
     """Nothing is written until every check has passed."""
 
@@ -509,6 +606,7 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
         self.assertFalse((self.output_dir / "model_config_separated").exists())
 
 
+@NEEDS_RUAMEL
 class TestPinnedModelPathConflict(ConfigAdapterTestBase):
     """A pinned model_name_or_path cannot coexist with a JSON rewrite."""
 
@@ -535,6 +633,7 @@ class TestPinnedModelPathConflict(ConfigAdapterTestBase):
         )
 
 
+@NEEDS_RUAMEL
 class TestInPlace(ConfigAdapterTestBase):
     """In-place rewrites both sources and keeps model_name_or_path."""
 
@@ -554,6 +653,7 @@ class TestInPlace(ConfigAdapterTestBase):
         )
 
 
+@NEEDS_RUAMEL
 class TestGeneratedPaths(ConfigAdapterTestBase):
     """model_name_or_path must stay resolvable."""
 
@@ -571,6 +671,7 @@ class TestGeneratedPaths(ConfigAdapterTestBase):
             shutil.rmtree(outside, ignore_errors=True)
 
 
+@NEEDS_RUAMEL
 class TestInspection(ConfigAdapterTestBase):
     """No target scale: report the source scale and legal node counts."""
 
@@ -583,6 +684,7 @@ class TestInspection(ConfigAdapterTestBase):
         self.assertEqual(valid_nodes, [64])
 
 
+@NEEDS_RUAMEL
 class TestCli(ConfigAdapterTestBase):
     """End-to-end checks through the argv entry point."""
 

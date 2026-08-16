@@ -76,7 +76,6 @@ test = [
     "pytest",
     "pyyaml",
     "parameterized",
-    "ruamel.yaml>=0.17",
 ]
 build = [
     "pip",
