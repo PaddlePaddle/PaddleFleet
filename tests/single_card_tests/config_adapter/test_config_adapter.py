@@ -946,7 +946,7 @@ class TestCliErrorPaths(ConfigAdapterTestBase):
         self.assertEqual(code, 1)
         self.assertIn("target-nodes", out)
 
-    def test_unparseable_set(self):
+    def test_malformed_set(self):
         code, out = self._run(
             [
                 "--input",
