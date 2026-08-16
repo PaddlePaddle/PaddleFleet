@@ -20,6 +20,7 @@ requires-python = ">=3.10"
 dependencies = [
     "colorlog>=6.10.1",
     "paddlepaddle-gpu==3.4.0.post20260812+a136cd3594a",
+    "ruamel.yaml>=0.17",
     "tilelang-paddle==0.1.12",
 ]
 license = { text = "Apache 2.0" }
@@ -49,13 +50,6 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# config_adapter rewrites training YAMLs in place and must keep comments and
-# key order, which needs ruamel.yaml. Declared as an extra so the core wheel
-# stays dependency-free for users who never run the tool:
-#     pip install paddlefleet[config-adapter]
-[project.optional-dependencies]
-config-adapter = ["ruamel.yaml>=0.17"]
-
 [project.urls]
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
 Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
@@ -83,7 +77,6 @@ test = [
     "pytest",
     "pyyaml",
     "parameterized",
-    "ruamel.yaml>=0.17",
 ]
 build = [
     "pip",

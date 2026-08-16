@@ -62,7 +62,7 @@ python -m paddlefleet.config_adapter --input config.yaml \
     --set max_steps=10 --set n_routed_experts=32
 ```
 
-依赖 `ruamel.yaml`（保留 YAML 注释与字段顺序）：`pip install "paddlefleet[config-adapter]"`（或 `pip install ruamel.yaml`）。
+改写 YAML 时用 `ruamel.yaml` 保留注释与字段顺序，它是 paddlefleet 的运行时依赖，随包一起安装，无需额外操作。
 
 ### 命令行参数
 
@@ -225,14 +225,3 @@ config_adapter/
 pytest -s tests/single_card_tests/config_adapter/test_config_adapter.py
 ```
 
-`ruamel.yaml` 是这个工具的可选依赖（paddlefleet 自身不 import 它，代码里也是
-lazy import），已声明为 extra，装法二选一：
-
-```bash
-pip install "paddlefleet[config-adapter]"   # 或
-pip install ruamel.yaml
-```
-
-必跑的单卡 CI 会安装它并执行全部用例；在没装 ruamel.yaml 的环境里，需要真正读写
-YAML 的用例会 skip，纯规划逻辑（并行度候选、约束、逐层字段裁剪、精度开关路由、
-`--set` 解析等）照常执行。

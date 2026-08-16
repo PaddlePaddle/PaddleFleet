@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for paddlefleet.config_adapter (pure Python, no device).
-
-Rewriting a training YAML in place needs ``ruamel.yaml`` (comments and key
-order must survive), which is an optional, developer-facing dependency rather
-than something paddlefleet itself imports.  The tests that actually touch YAML
-are therefore skipped when it is missing; the pure planning logic below always
-runs.
-"""
+"""Unit tests for paddlefleet.config_adapter (pure Python, no device)."""
 
 import contextlib
 import io
@@ -45,17 +38,6 @@ from paddlefleet.config_adapter.io_writers import JsonWriter, YamlWriter
 from paddlefleet.config_adapter.layer_fields import (
     effective_mtp_layers,
     plan_layer_field_shrink,
-)
-
-try:
-    import ruamel.yaml  # noqa: F401
-
-    HAS_RUAMEL = True
-except ImportError:  # pragma: no cover - depends on the environment
-    HAS_RUAMEL = False
-
-NEEDS_RUAMEL = unittest.skipUnless(
-    HAS_RUAMEL, "config_adapter needs ruamel.yaml to rewrite YAML configs"
 )
 
 SOURCE_YAML = """\
@@ -304,7 +286,6 @@ class TestLayerFieldPlanning(unittest.TestCase):
         self.assertEqual(changes, [])
 
 
-@NEEDS_RUAMEL
 class TestDefaultAdaptation(ConfigAdapterTestBase):
     """No switch: just make the config fit, shrinking EP/PP if needed."""
 
@@ -349,7 +330,6 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertNotIn("max_steps", message)
 
 
-@NEEDS_RUAMEL
 class TestPerformanceSwitch(ConfigAdapterTestBase):
     """``--test-performance``: sharding + GBS only, everything else frozen."""
 
@@ -378,7 +358,6 @@ class TestPerformanceSwitch(ConfigAdapterTestBase):
         )
 
 
-@NEEDS_RUAMEL
 class TestAccuracySwitch(ConfigAdapterTestBase):
     """``--test-accuracy``: determinism switches + equivalent batch."""
 
@@ -451,7 +430,6 @@ class TestAccuracySwitch(ConfigAdapterTestBase):
         self.assertIn("最小值", message)
 
 
-@NEEDS_RUAMEL
 class TestAutoOverrideRouting(ConfigAdapterTestBase):
     """Prefix-less ``--set`` routes by which document declares the key."""
 
@@ -499,7 +477,6 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
         self.assertNotIn("brand_new_field", self.load_output_yaml(8))
 
 
-@NEEDS_RUAMEL
 class TestLayerFields(ConfigAdapterTestBase):
     """Per-layer lists must follow num_hidden_layers, or the shrink is refused."""
 
@@ -571,7 +548,6 @@ class TestLayerFields(ConfigAdapterTestBase):
         self.assertEqual(len(model_config["layer_types"]), 16)
 
 
-@NEEDS_RUAMEL
 class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
     """Nothing is written until every check has passed."""
 
@@ -606,7 +582,6 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
         self.assertFalse((self.output_dir / "model_config_separated").exists())
 
 
-@NEEDS_RUAMEL
 class TestPinnedModelPathConflict(ConfigAdapterTestBase):
     """A pinned model_name_or_path cannot coexist with a JSON rewrite."""
 
@@ -633,7 +608,6 @@ class TestPinnedModelPathConflict(ConfigAdapterTestBase):
         )
 
 
-@NEEDS_RUAMEL
 class TestInPlace(ConfigAdapterTestBase):
     """In-place rewrites both sources and keeps model_name_or_path."""
 
@@ -653,7 +627,6 @@ class TestInPlace(ConfigAdapterTestBase):
         )
 
 
-@NEEDS_RUAMEL
 class TestGeneratedPaths(ConfigAdapterTestBase):
     """model_name_or_path must stay resolvable."""
 
@@ -671,7 +644,6 @@ class TestGeneratedPaths(ConfigAdapterTestBase):
             shutil.rmtree(outside, ignore_errors=True)
 
 
-@NEEDS_RUAMEL
 class TestInspection(ConfigAdapterTestBase):
     """No target scale: report the source scale and legal node counts."""
 
@@ -684,7 +656,6 @@ class TestInspection(ConfigAdapterTestBase):
         self.assertEqual(valid_nodes, [64])
 
 
-@NEEDS_RUAMEL
 class TestCli(ConfigAdapterTestBase):
     """End-to-end checks through the argv entry point."""
 

@@ -31,19 +31,11 @@ import json
 import os
 from pathlib import Path
 
+from ruamel.yaml import YAML
+
 
 def make_yaml():
     """Return a ruamel YAML that preserves quotes and never wraps lines."""
-    try:
-        from ruamel.yaml import YAML
-    except ImportError as exc:  # pragma: no cover - env dependent
-        raise ImportError(
-            "config_adapter needs ruamel.yaml to rewrite training configs "
-            "without losing comments; install it with "
-            '`pip install "paddlefleet[config-adapter]"` '
-            "(or `pip install ruamel.yaml`)."
-        ) from exc
-
     yaml = YAML()
     yaml.preserve_quotes = True
     yaml.width = 4096
