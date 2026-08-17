@@ -200,7 +200,7 @@ def dense_indexer_kl_bwd(
     )
 
     if grad_loss is None:
-        grad_loss = 1.0
+        grad_loss = paddle.ones([], dtype=paddle.float32)
     if (
         isinstance(grad_loss, paddle.Tensor)
         and grad_loss.dtype != paddle.float32
