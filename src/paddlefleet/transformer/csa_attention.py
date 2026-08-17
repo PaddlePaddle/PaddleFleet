@@ -2204,6 +2204,9 @@ class CompressedSparseAttention(FleetLayer):
             config, "csa_indexer_backend", "tilelang"
         )
         self.indexer_loss_coeff = getattr(config, "dsa_indexer_loss_coeff", 0.0)
+        self.global_kv_idx_remap_fusion = getattr(
+            config, "sparse_attn_global_kv_idx_remap_fusion", False
+        )
 
     def _resolve_topk_effective(self, n_compressed: int):
         """Return the CSA indexer top-k width for current phase.
@@ -3385,4 +3388,5 @@ class CompressedSparseAttention(FleetLayer):
             backend=sparse_attn_backend,
             topk_length=topk_length,
             indexer_topk=indexer_topk,
+            global_kv_idx_remap_fusion=self.global_kv_idx_remap_fusion,
         )
