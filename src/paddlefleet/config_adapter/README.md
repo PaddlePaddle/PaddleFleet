@@ -145,8 +145,7 @@ C3/C5 只取决于并行度本身，与卡数无关：这两项冲突时不会�
 
 写盘时机：所有规划与校验都在内存里完成后才落盘，中途任何一步失败都不改动源文件；
 写文件走临时文件 + 原子替换，`--in-place` 下若 YAML 写失败会回滚已写的
-`model_config.json`。另外需要另存 `model_config.json` 时，`model_name_or_path`
-必须指向新目录，因此不允许同时用 `--set` 锁定它（会直接报错并提示改用 `--in-place`）。
+`model_config.json`。
 
 ### 约束体系
 
