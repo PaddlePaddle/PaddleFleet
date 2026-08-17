@@ -35,8 +35,8 @@ readonly MEGATRON_CORE_WHEEL="https://paddle-qa.bj.bcebos.com/paddlefleet/whl/me
 readonly MS_SWIFT_WHEEL="https://paddle-qa.bj.bcebos.com/paddlefleet/whl/ms_swift-4.5.0.dev0-py3-none-any.whl"
 readonly NO_PROXY_LIST="localhost,127.0.0.1,0.0.0.0,bj.bcebos.com,su.bcebos.com,paddle-ci.gz.bcebos.com,baidu-int.com,.baidu.com,.bcebos.com"
 # readonly PROXY_URL="set your proxy"
-readonly UV_BIN_DIR="${HOME}/.local/bin"
-readonly UV_CACHE_DIR_PATH="${HOME}/.cache/uv"
+readonly UV_BIN_DIR="root/.local/bin"
+readonly UV_CACHE_DIR_PATH="root/.cache/uv"
 
 usage() {
     cat <<'EOF'
