@@ -297,6 +297,16 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
                 sink_bwd = paddle.full([hpad], _NEG_SINK, dtype="float32")
             lse_flat = lse_bwd.reshape([b * s, hpad])
 
+            # DSA passes topk_length=None (the guarded, full-width backward path)
+            # rather than compacting. Its ``[top-k | window]`` layout carries
+            # interior -1 holes, and the compact KV-load path is unguarded against
+            # them (would gather mKV[-1] -> NaN dq); None takes the guarded path,
+            # which handles -1. Compaction is deliberately NOT used here: the
+            # window sits last so ``_csa_compute_topk_length`` is already ~full
+            # width, i.e. there is almost no early-stop to recover, so a per-step
+            # sort would be pure overhead. (HCA *does* compact -- it has real
+            # leading holes and a much shorter valid count; see
+            # ``_csa_compact_topk_idxs`` in csa_sparse_attn.)
             dq_flat, dkv_flat, _d_sink_unused = csa_sparse_attn_bwd_cudnn(
                 q_flat,
                 kv_flat,
@@ -306,7 +316,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
                 sink_bwd,
                 gidx_flat,
                 softmax_scale=ctx.sm_scale,
-                topk_length=topk_len_flat,
+                topk_length=None,
             )
             # ``dkv`` is not run-to-run reproducible: this kernel accumulates the KV
             # gradient with atomics, so two calls on identical inputs differ --
