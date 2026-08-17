@@ -21,13 +21,13 @@ WORKSPACE_DIR="${SCRIPT_DIR}"
 
 readonly PYTHON_VERSION="3.12"
 readonly TORCH_VERSION="2.12.0+cu130"
+readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
 readonly MCORE_BRIDGE_VERSION="1.4.3"
 readonly TE_VERSION="2.17.1"
-readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/nightly/cu130/"
+readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu130/"
 readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
-readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
 # readonly PADDLE_VERSION="xx"
-# PaddleFleet will install default paddle"
+# PaddleFleet whill install default paddle"
 readonly PADDLEFLEET_WHEEL="${PADDLEFLEET_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet/paddlefleet-0.4.0.dev20260807+d01517879a3-py3-none-any.whl}"
 readonly PADDLEFLEET_OPS_WHEEL="${PADDLEFLEET_OPS_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet-ops/paddlefleet_ops-0.4.0.dev20260807+d0151787-cp312-cp312-linux_x86_64.whl}"
 readonly PADDLEFORMERS_WHEEL="${NIGHTLY_WHL_BASE}/paddleformers/paddleformers-0.0.0.dev-py3-none-any.whl"
@@ -123,7 +123,6 @@ setup_paddle_venv() {
     local paddle_py="$1"
 
     echo "[setup_venvs] paddle python: ${paddle_py}"
-    # Shared flags: nightly paddle index first, fall back to PyPI for the rest.
     local -a paddle_index=(
         --index-url "${PADDLE_INDEX_URL}"
         --extra-index-url https://pypi.org/simple/
@@ -139,7 +138,9 @@ setup_paddle_venv() {
         "setuptools>=66.1.0" pip wheel packaging "ninja==1.11.1.1" \
         "pybind11[global]>=2.13,<3" "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5"
 
-    # PaddleFleet
+    # PaddleFleet. --no-deps is intentionally dropped: the wheel's pinned
+    # paddlepaddle-gpu dependency must be installed here, otherwise
+    # venv/paddle/bin/paddleformers-cli fails to import paddle at runtime.
     uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
         --force-reinstall \
         "${PADDLEFLEET_WHEEL}"
@@ -172,6 +173,7 @@ main() {
 
     setup_proxy
     setup_cache
+    export UV_NO_PROGRESS=1
     export PATH="${UV_BIN_DIR}:${PATH}"
     require_command "uv"
 
