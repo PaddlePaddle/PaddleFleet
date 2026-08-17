@@ -64,13 +64,14 @@ def floor_dims(tp, pp, ep, cp, sep):
     return tp, shrink_floor(pp), shrink_floor(ep), cp, sep
 
 
-def ep_candidates(ep_orig, tp):
+def ep_candidates(ep_orig, tp, sep=1):
     """EP-shrink candidates, largest first.
 
     Set: ``({powers of 2} | {multiples of 8})`` restricted to
-    ``[MIN_PARALLEL_DEGREE, ep_orig)`` and filtered by ``ep_new % tp == 0``
-    (C3).  Real deployments only ever pick EP from those two families, which
-    keeps the search space small and avoids exotic values like EP=3.
+    ``[MIN_PARALLEL_DEGREE, ep_orig)`` and filtered by
+    ``ep_new % (tp * sep) == 0`` (C3: dense_sharding = EP / (TP * SEP)).
+    Real deployments only ever pick EP from those two families, which keeps
+    the search space small and avoids exotic values like EP=3.
     """
     if ep_orig <= MIN_PARALLEL_DEGREE:
         return []
@@ -79,8 +80,9 @@ def ep_candidates(ep_orig, tp):
     pool = (powers_of_2 | multiples_of_8) & set(
         range(MIN_PARALLEL_DEGREE, ep_orig)
     )
+    dense_factor = tp * sep
     return sorted(
-        (c for c in pool if tp == 1 or c % tp == 0),
+        (c for c in pool if dense_factor == 1 or c % dense_factor == 0),
         reverse=True,
     )
 

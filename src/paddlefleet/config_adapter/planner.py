@@ -162,7 +162,7 @@ class ShrinkPlanner:
         rejections = []
         if can_shrink_ep:
             pool = []
-            for ep_new in ep_candidates(ep, tp):
+            for ep_new in ep_candidates(ep, tp, sep):
                 ok, why, experts_new = check_ep_shrink(
                     ep, ep_new, num_experts, topk
                 )
@@ -419,7 +419,7 @@ class ShrinkPlanner:
         num_experts, topk, experts_key = moe
 
         pool = []
-        for ep_new in ep_candidates(ep, tp):
+        for ep_new in ep_candidates(ep, tp, sep):
             ok, why, experts_new = check_ep_shrink(
                 ep, ep_new, num_experts, topk
             )

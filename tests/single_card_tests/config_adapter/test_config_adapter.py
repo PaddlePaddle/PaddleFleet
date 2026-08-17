@@ -80,7 +80,7 @@ num_empty_layers_add_in_head: 0
 num_empty_layers_add_in_tail: 0
 separate_mtp_headloss: false
 fa_version: 3
-global_batch_size: 1536
+global_batch_size: 192
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 2
 sharding_parallel_size: 96
@@ -201,8 +201,9 @@ class TestCandidates(unittest.TestCase):
         self.assertEqual(pp_candidates(2), [])
 
     def test_ep_candidates_respect_tp(self):
-        # C3 requires ep_new % tp == 0.
+        # C3 requires ep_new % (tp * sep) == 0.
         self.assertTrue(all(c % 4 == 0 for c in ep_candidates(64, tp=4)))
+        self.assertTrue(all(c % 8 == 0 for c in ep_candidates(64, tp=2, sep=4)))
 
 
 class TestPrecisionSwitches(unittest.TestCase):
@@ -353,6 +354,17 @@ class TestTopologyConstraints(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("C4", msg)
 
+    def test_c3_accounts_for_sep(self):
+        # dense_sharding = EP / (TP * SEP) = 2 / 4 is not a positive integer.
+        ok, msg, _d = TopologyValidator(8, 8).validate(1, 1, 2, 1, 4)
+        self.assertFalse(ok)
+        self.assertIn("C3", msg)
+
+    def test_c5_forbids_sep_and_cp_together(self):
+        ok, msg, _d = TopologyValidator(8, 8).validate(1, 1, 1, 2, 2)
+        self.assertFalse(ok)
+        self.assertIn("C5", msg)
+
     def test_suggestions_are_multiples_of_the_minimum_unit(self):
         cards = TopologyValidator(8, 8).suggest_valid_cards(1, 2, 8, 1, 1)
         self.assertTrue(all(c % 16 == 0 for c in cards), cards)
@@ -429,6 +441,70 @@ class TestHardwareAndModelConstraints(unittest.TestCase):
 
     def test_align_layers_refuses_pp_below_the_floor(self):
         self.assertEqual(align_layers(16, 0, 0, 1, 2), (None, None))
+
+
+class TestSourceScaleInference(unittest.TestCase):
+    """The source world size, and how the two estimates are combined."""
+
+    def _source(self, **overrides):
+        base = {
+            "sharding_parallel_size": 96,
+            "data_parallel_size": 1,
+            "global_batch_size": 192,
+            "per_device_train_batch_size": 1,
+            "gradient_accumulation_steps": 2,
+        }
+        base.update(overrides)
+        return base
+
+    def test_consistent_estimates_agree_without_a_warning(self):
+        cards, warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(), (1, 8, 64, 1, 1)
+        )
+        self.assertIsNone(err)
+        self.assertIsNone(warning)
+        self.assertEqual(cards, 768)
+
+    def test_data_parallel_size_multiplies_the_group_estimate(self):
+        # 8 cards with sharding=4 and DP=2: sharding alone would say 4.
+        cards, _warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(
+                sharding_parallel_size=4,
+                data_parallel_size=2,
+                global_batch_size=8,
+                gradient_accumulation_steps=1,
+            ),
+            (1, 1, 1, 1, 1),
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 8)
+
+    def test_mismatch_is_surfaced_as_a_warning(self):
+        cards, warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(global_batch_size=8, gradient_accumulation_steps=1),
+            (1, 1, 1, 1, 1),
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 96)
+        self.assertIn("两种推断不一致", warning)
+
+    def test_batch_only_source(self):
+        cards, _warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(sharding_parallel_size=None), (1, 8, 1, 1, 1)
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 768)
+
+    def test_nothing_to_infer_from(self):
+        cards, _warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(
+                sharding_parallel_size=None,
+                gradient_accumulation_steps=None,
+            ),
+            (1, 1, 1, 1, 1),
+        )
+        self.assertIsNone(cards)
+        self.assertIn("无法推断源作业的卡数", err)
 
 
 class TestFieldSpec(unittest.TestCase):
@@ -672,7 +748,7 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertEqual(model_config["n_routed_experts"], 16)
         self.assertEqual(model_config["num_hidden_layers"], 16)
         # Default batch strategy shrinks GBS and leaves acc alone.
-        self.assertEqual(config["global_batch_size"], 16)
+        self.assertEqual(config["global_batch_size"], 2)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
         # No determinism switches unless --test-accuracy is given.
         self.assertEqual(config["csa_sparse_attn_backend"], "cudnn")
@@ -707,7 +783,7 @@ class TestPerformanceSwitch(ConfigAdapterTestBase):
         ok, message = self.adapt(target_nodes=64, test_performance=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(512)
-        self.assertEqual(config["global_batch_size"], 1024)
+        self.assertEqual(config["global_batch_size"], 128)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
         self.assertEqual(config["sharding_parallel_size"], 64)
         self.assertEqual(config["expert_model_parallel_size"], 64)
@@ -735,7 +811,7 @@ class TestAccuracySwitch(ConfigAdapterTestBase):
         ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(8)
-        self.assertEqual(config["global_batch_size"], 1536)
+        self.assertEqual(config["global_batch_size"], 192)
         self.assertEqual(config["gradient_accumulation_steps"], 192)
         self.assertEqual(config["csa_sparse_attn_backend"], "tilelang")
         self.assertIsNone(self.load_output_json(8)["multimax_modules"])
@@ -750,7 +826,7 @@ class TestAccuracySwitch(ConfigAdapterTestBase):
         # Frozen dims and acc, but the determinism switches still land.
         self.assertEqual(config["expert_model_parallel_size"], 64)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
-        self.assertEqual(config["global_batch_size"], 1024)
+        self.assertEqual(config["global_batch_size"], 128)
         self.assertEqual(config["csa_sparse_attn_backend"], "tilelang")
         self.assertIsNone(self.load_output_json(512)["multimax_modules"])
 
@@ -915,6 +991,44 @@ class TestErrorPaths(ConfigAdapterTestBase):
         self.assertIn("num_hidden_layers", message)
 
 
+class TestPinnedFieldRejection(ConfigAdapterTestBase):
+    """Adapter-controlled fields may not be pinned with --set."""
+
+    def test_pinning_a_parallel_dim_is_refused(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            yaml_overrides={"expert_model_parallel_size": 64},
+        )
+        self.assertFalse(ok)
+        self.assertIn("expert_model_parallel_size", message)
+        self.assertIn("不能用 --set 锁定", message)
+
+    def test_pinning_sharding_is_refused(self):
+        ok, message = self.adapt(
+            target_nodes=1, yaml_overrides={"sharding_parallel_size": 3}
+        )
+        self.assertFalse(ok)
+        self.assertIn("sharding_parallel_size", message)
+
+    def test_in_place_still_refuses_parallel_dims(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            in_place=True,
+            yaml_overrides={"pipeline_model_parallel_size": 8},
+        )
+        self.assertFalse(ok)
+        self.assertIn("pipeline_model_parallel_size", message)
+
+    def test_pinned_fa_version_is_kept(self):
+        ok, message = self.adapt(
+            target_nodes=1, yaml_overrides={"fa_version": 4}
+        )
+        self.assertTrue(ok, message)
+        # The pin wins: the field is neither deleted nor reported as deleted.
+        self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
+        self.assertNotIn("DELETE field=fa_version", message)
+
+
 class TestCliErrorPaths(ConfigAdapterTestBase):
     """Argument validation, straight through main()."""
 
@@ -1068,7 +1182,7 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
         # the model structure has been planned.
         self.write_yaml(
             SOURCE_YAML.replace(
-                "global_batch_size: 1536", "global_batch_size: 1537"
+                "global_batch_size: 192", "global_batch_size: 193"
             )
         )
         ok, message = self.adapt(target_nodes=1, in_place=True)
@@ -1086,7 +1200,7 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
     def test_no_adapted_dir_is_created_on_failure(self):
         self.write_yaml(
             SOURCE_YAML.replace(
-                "global_batch_size: 1536", "global_batch_size: 1537"
+                "global_batch_size: 192", "global_batch_size: 193"
             )
         )
         ok, _message = self.adapt(target_nodes=1)
@@ -1104,7 +1218,7 @@ class TestPinnedModelPathConflict(ConfigAdapterTestBase):
         )
         self.assertFalse(ok)
         self.assertIn("model_name_or_path", message)
-        self.assertIn("--in-place", message)
+        self.assertIn("--set", message)
 
     def test_in_place_accepts_a_pinned_path(self):
         ok, message = self.adapt(
