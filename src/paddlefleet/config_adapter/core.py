@@ -116,7 +116,10 @@ class ConfigAdapter:
         controlled = ADAPTER_CONTROLLED_FIELDS
         if self.in_place:
             controlled = controlled - {"model_name_or_path"}
-        pinned = sorted(controlled & set(self.yaml_overrides))
+        # Prefix-less --set values are routed to the YAML later, so they have
+        # to be checked here as well.
+        requested = set(self.yaml_overrides) | set(self.auto_overrides)
+        pinned = sorted(controlled & requested)
         if pinned:
             return False, (
                 f"以下字段由适配器统一计算，不能用 --set 锁定：{pinned}。"
@@ -411,15 +414,19 @@ class ConfigAdapter:
           would otherwise be under-counted;
         * batch settings: ``GBS / (micro_bs * acc) * TP * PP * CP``.
 
-        The comm-group estimate wins when both exist, but a mismatch is
-        surfaced as a warning: it means the source YAML is not self-consistent
-        and every derived batch value inherits that ambiguity.
+        When both exist and disagree, the estimate that is not missing a
+        factor wins: the comm-group one only if ``data_parallel_size`` is
+        declared, otherwise the batch one (an undeclared DP is exactly the
+        factor the comm-group formula would be missing).  Either way the
+        mismatch is reported as a warning, because it means the source YAML is
+        not self-consistent.
         """
         tp, pp, ep, cp, sep = dims_before
 
         sharding = scale_source["sharding_parallel_size"]
-        dp = scale_source["data_parallel_size"]
-        dp = int(dp) if dp and int(dp) > 0 else 1
+        raw_dp = scale_source["data_parallel_size"]
+        dp_declared = raw_dp is not None and int(raw_dp) > 0
+        dp = int(raw_dp) if dp_declared else 1
         group_based = None
         if sharding is not None and int(sharding) > 0:
             group_based = dp * int(sharding) * tp * sep * pp
@@ -433,19 +440,25 @@ class ConfigAdapter:
             if dataset_world_size > 0:
                 batch_based = dataset_world_size * tp * pp * cp
 
-        warning = None
         if group_based is not None and batch_based is not None:
-            if group_based != batch_based:
-                warning = (
-                    f"源卡数的两种推断不一致：按通信组"
-                    f"（DP={dp}×sharding={sharding}×TP={tp}×SEP={sep}×"
-                    f"PP={pp}）为 {group_based}，按 batch 字段"
-                    f"（GBS/(micro×acc)×TP×PP×CP）为 {batch_based}；"
-                    f"取通信组的 {group_based}。"
-                    f"如果不对，请修正源 YAML 的 data_parallel_size 或 "
-                    f"batch 字段后重新适配"
+            if group_based == batch_based:
+                return group_based, None, None
+            chosen = group_based if dp_declared else batch_based
+            warning = (
+                f"源卡数的两种推断不一致：按通信组"
+                f"（DP={dp}×sharding={sharding}×TP={tp}×SEP={sep}×PP={pp}）"
+                f"为 {group_based}，按 batch 字段"
+                f"（GBS/(micro×acc)×TP×PP×CP）为 {batch_based}；"
+                + (
+                    f"源 YAML 未声明 data_parallel_size，"
+                    f"通信组公式会漏掉这个因子，因此取 batch 字段的 {chosen}。"
+                    if not dp_declared
+                    else f"取通信组的 {chosen}。"
                 )
-            return group_based, warning, None
+                + "如果不对，请在源 YAML 里写明 data_parallel_size "
+                "或修正 batch 字段后重新适配"
+            )
+            return chosen, warning, None
         if group_based is not None:
             return group_based, None, None
         if batch_based is not None:

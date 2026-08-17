@@ -365,6 +365,15 @@ class TestTopologyConstraints(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("C5", msg)
 
+    def test_no_suggestions_for_dim_only_conflicts(self):
+        validator = TopologyValidator(8, 8)
+        # C3 and C5 depend only on the dims, so no card count can help.
+        self.assertEqual(validator.suggest_valid_cards(1, 1, 2, 1, 4), [])
+        self.assertEqual(validator.suggest_valid_cards(1, 1, 1, 2, 2), [])
+        _ok, msg, _d = validator.validate(1, 1, 2, 1, 4)
+        self.assertIn("没有任何卡数能满足", msg)
+        self.assertNotIn("合法节点数", msg)
+
     def test_suggestions_are_multiples_of_the_minimum_unit(self):
         cards = TopologyValidator(8, 8).suggest_valid_cards(1, 2, 8, 1, 1)
         self.assertTrue(all(c % 16 == 0 for c in cards), cards)
@@ -478,6 +487,22 @@ class TestSourceScaleInference(unittest.TestCase):
         )
         self.assertIsNone(err)
         self.assertEqual(cards, 8)
+
+    def test_batch_evidence_wins_when_dp_is_not_declared(self):
+        # sharding=4 without data_parallel_size, but the batch fields say 8:
+        # the comm-group formula is the one missing a factor.
+        cards, warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(
+                sharding_parallel_size=4,
+                data_parallel_size=None,
+                global_batch_size=8,
+                gradient_accumulation_steps=1,
+            ),
+            (1, 1, 1, 1, 1),
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 8)
+        self.assertIn("未声明 data_parallel_size", warning)
 
     def test_mismatch_is_surfaced_as_a_warning(self):
         cards, warning, err = ConfigAdapter._infer_orig_cards(
@@ -993,6 +1018,15 @@ class TestErrorPaths(ConfigAdapterTestBase):
 
 class TestPinnedFieldRejection(ConfigAdapterTestBase):
     """Adapter-controlled fields may not be pinned with --set."""
+
+    def test_pinning_a_parallel_dim_without_a_prefix_is_refused(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            auto_overrides={"expert_model_parallel_size": 64},
+        )
+        self.assertFalse(ok)
+        self.assertIn("expert_model_parallel_size", message)
+        self.assertIn("不能用 --set 锁定", message)
 
     def test_pinning_a_parallel_dim_is_refused(self):
         ok, message = self.adapt(
