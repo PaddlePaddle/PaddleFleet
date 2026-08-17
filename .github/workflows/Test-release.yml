@@ -169,7 +169,14 @@ jobs:
           rm -rf * .[^.]*
           set -x
           source /root/proxy
-          git clone https://github.com/PaddlePaddle/PaddleFleet.git .
+          clone_ok=0
+          for i in $(seq 1 5); do
+            if git clone https://github.com/PaddlePaddle/PaddleFleet.git .; then clone_ok=1; break; fi
+            echo "git clone attempt $i failed, retrying in 10s..."
+            rm -rf * .[^.]* || true
+            sleep 10
+          done
+          [ $clone_ok -eq 1 ] || { echo "git clone failed after 5 attempts"; exit 1; }
           git config --global --add safe.directory /paddle
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
@@ -565,7 +572,14 @@ jobs:
           source /root/proxy
           set -x
           python -m pip install --upgrade pip
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
+          clone_ok=0
+          for i in $(seq 1 5); do
+            if git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git; then clone_ok=1; break; fi
+            echo "git clone attempt $i failed, retrying in 10s..."
+            rm -rf PaddleFormers || true
+            sleep 10
+          done
+          [ $clone_ok -eq 1 ] || { echo "git clone failed after 5 attempts"; exit 1; }
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           if [ ${BRANCH} != "develop" ]; then
@@ -760,7 +774,14 @@ jobs:
           source /root/proxy
           set -x
           python -m pip install --upgrade pip
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
+          clone_ok=0
+          for i in $(seq 1 5); do
+            if git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git; then clone_ok=1; break; fi
+            echo "git clone attempt $i failed, retrying in 10s..."
+            rm -rf PaddleFormers || true
+            sleep 10
+          done
+          [ $clone_ok -eq 1 ] || { echo "git clone failed after 5 attempts"; exit 1; }
           cd PaddleFormers
           if [ ${BRANCH} != "develop" ]; then
             git checkout ${formers_branch}
@@ -1119,7 +1140,14 @@ jobs:
           source /root/proxy
           set -x
           python -m pip install --upgrade pip
-          git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git
+          clone_ok=0
+          for i in $(seq 1 5); do
+            if git clone -b develop https://github.com/PaddlePaddle/PaddleFormers.git; then clone_ok=1; break; fi
+            echo "git clone attempt $i failed, retrying in 10s..."
+            rm -rf PaddleFormers || true
+            sleep 10
+          done
+          [ $clone_ok -eq 1 ] || { echo "git clone failed after 5 attempts"; exit 1; }
           cd PaddleFormers
           git config --global --add safe.directory /workspace/PaddleFormers
           if [ ${BRANCH} != "develop" ]; then
