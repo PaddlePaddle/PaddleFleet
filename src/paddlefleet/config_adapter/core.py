@@ -115,9 +115,14 @@ class ConfigAdapter:
         # not rewrite it: repointing it mid-run would decide *which*
         # model_config.json is loaded, shrunk and snapshotted for the patch,
         # and the answer differs between the prefixed and prefix-less forms.
-        # Prefix-less --set values are routed to the YAML later, so they have
-        # to be checked here as well.
-        requested = set(self.yaml_overrides) | set(self.auto_overrides)
+        # Every --set form counts: prefix-less values are routed to the YAML
+        # later, and a json: prefix would park a training-parallelism key in
+        # model_config.json while the YAML keeps the adapter's own value.
+        requested = (
+            set(self.yaml_overrides)
+            | set(self.json_overrides)
+            | set(self.auto_overrides)
+        )
         pinned = sorted(ADAPTER_CONTROLLED_FIELDS & requested)
         if pinned:
             return False, (

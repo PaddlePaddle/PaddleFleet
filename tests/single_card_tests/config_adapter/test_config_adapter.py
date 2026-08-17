@@ -1028,6 +1028,15 @@ class TestPinnedFieldRejection(ConfigAdapterTestBase):
         self.assertIn("expert_model_parallel_size", message)
         self.assertIn("不能用 --set 锁定", message)
 
+    def test_pinning_a_parallel_dim_with_a_json_prefix_is_refused(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            json_overrides={"expert_model_parallel_size": 64},
+        )
+        self.assertFalse(ok)
+        self.assertIn("expert_model_parallel_size", message)
+        self.assertIn("不能用 --set 锁定", message)
+
     def test_pinning_a_parallel_dim_is_refused(self):
         ok, message = self.adapt(
             target_nodes=1,
