@@ -1254,18 +1254,16 @@ class TestPinnedModelPathConflict(ConfigAdapterTestBase):
         self.assertIn("model_name_or_path", message)
         self.assertIn("--set", message)
 
-    def test_in_place_accepts_a_pinned_path(self):
-        ok, message = self.adapt(
-            target_nodes=1,
-            in_place=True,
-            yaml_overrides={"model_name_or_path": "./model_dir"},
-        )
-        self.assertTrue(ok, message)
-        config = YamlWriter().load(self.yaml_path)
-        self.assertEqual(config["model_name_or_path"], "./model_dir")
-        self.assertEqual(
-            JsonWriter().load(self.json_path)["num_hidden_layers"], 16
-        )
+    def test_in_place_also_refuses_a_pinned_path(self):
+        # Repointing the model dir would decide which model_config.json gets
+        # loaded, shrunk and snapshotted for the patch.
+        for overrides in (
+            {"yaml_overrides": {"model_name_or_path": "./other_model"}},
+            {"auto_overrides": {"model_name_or_path": "./other_model"}},
+        ):
+            ok, message = self.adapt(target_nodes=1, in_place=True, **overrides)
+            self.assertFalse(ok)
+            self.assertIn("model_name_or_path", message)
 
 
 class TestInPlace(ConfigAdapterTestBase):

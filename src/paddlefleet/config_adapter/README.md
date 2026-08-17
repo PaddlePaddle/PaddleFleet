@@ -89,7 +89,9 @@ python -m paddlefleet.config_adapter --input config.yaml \
 被 `--set` 指定的字段是**受保护**的：后续任何自动规则都不会再覆盖它。但由适配器
 统一计算的字段（TP/PP/EP/CP/SEP、VPP、`num_empty_layers_add_in_tail`、
 `sharding_parallel_size`、`data_parallel_size`、`model_name_or_path`）**不允许**
-用 `--set` 锁定，否则生成的文件会与报告里的并行度对不上 —— 遇到这种组合会直接报错。当某个模型
+用 `--set` 锁定（带不带前缀都一样），否则生成的文件会与报告里的并行度对不上 ——
+遇到这种组合会直接报错。`model_name_or_path` 即使在 `--in-place` 下也不允许锁定：
+改它会决定「到底加载/缩容/快照哪一份 `model_config.json`」。当某个模型
 结构字段在 `model_config.json` 里读不到（不同模型家族命名不一致）时，也用
 `--set <字段>=<值>` 兜底。
 

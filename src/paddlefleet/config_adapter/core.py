@@ -111,15 +111,14 @@ class ConfigAdapter:
 
         # Fields the adapter must own: pinning them with --set would make the
         # generated file disagree with the reported parallelism / sharding.
-        # In-place runs never rewrite model_name_or_path, so pinning that one
-        # is harmless there.
-        controlled = ADAPTER_CONTROLLED_FIELDS
-        if self.in_place:
-            controlled = controlled - {"model_name_or_path"}
+        # model_name_or_path is in the set even for --in-place runs, which do
+        # not rewrite it: repointing it mid-run would decide *which*
+        # model_config.json is loaded, shrunk and snapshotted for the patch,
+        # and the answer differs between the prefixed and prefix-less forms.
         # Prefix-less --set values are routed to the YAML later, so they have
         # to be checked here as well.
         requested = set(self.yaml_overrides) | set(self.auto_overrides)
-        pinned = sorted(controlled & requested)
+        pinned = sorted(ADAPTER_CONTROLLED_FIELDS & requested)
         if pinned:
             return False, (
                 f"以下字段由适配器统一计算，不能用 --set 锁定：{pinned}。"
