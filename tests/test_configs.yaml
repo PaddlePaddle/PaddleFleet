@@ -154,6 +154,10 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_flash_mask_cp_a2a.py]
     products:
       - num_gpus: 2
+  # transformer: latent-MQA indexer dual-chunk row rebalance (CP=2)
+  - test_case: [tests/multi_card_tests/transformer/test_mqa_indexer_dualchunk_cp.py]
+    products:
+      - num_gpus: 2
   # transformer: CSA context-parallel, including cuDNN indexer docmask path (CP=2)
   - test_case: [tests/multi_card_tests/transformer/test_csa_attention_cp.py]
     products:

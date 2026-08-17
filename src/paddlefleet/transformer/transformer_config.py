@@ -998,6 +998,36 @@ class TransformerConfig(ModelParallelConfig):
     layout, which is what makes mixing them safe.
     """
 
+    mqa_indexer_cp_mode: str | None = None
+    """Row layout the latent-MQA indexer's forward runs on, under context parallel.
+
+    ``None`` (default) inherits ``cp_balance_mode``: the indexer scores this
+    rank's own contiguous row slice, so under a causal mask its cost grows with
+    the rank index. Measured at 256k/cp16: 2.2ms on cp0 vs 66.8ms on cp15 per
+    layer per pass, i.e. the slowest rank does 1.94x the average and every other
+    rank waits for it at the next collective.
+
+    ``"dualchunk_p2p"`` splits the global sequence into ``2 * cp_size`` chunks
+    and has rank ``r`` score chunks ``(2r, 2*cp_size-1-2r)`` instead of its own
+    ``(2r, 2r+1)``. The ids sum to ``2*cp_size-1`` on every rank, and a causal
+    row's candidate count grows linearly with its global position, so the work is
+    equal everywhere. Only the indexer's rows move -- attention is already
+    balanced at a fixed ``index_topk + window`` columns per row, so ``query`` and
+    the layer output never travel. Rank ``r`` keeps the chunk it already owns and
+    swaps the other with rank ``cp_size-1-r``, which reduces the exchange to a
+    single point-to-point sendrecv rather than an all-to-all.
+
+    The global token layout is untouched: this is a layer-local permutation,
+    undone before the layer returns, so the HCA layers of the same model are
+    unaffected and ``cp_balance_mode`` must stay contiguous.
+
+    Only the sparse training phase honours this, i.e. ``hybrid_mla_attention=
+    "mqa_dsa"`` with ``dsa_indexer_use_sparse_loss=True``. That is the only
+    phase whose indexer runs a top-k over per-rank rows; the warmup phase scores
+    the whole causal set through a different code path that does not permute
+    rows, so the other combinations are rejected rather than accepted-and-inert.
+    """
+
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
@@ -2469,6 +2499,70 @@ class TransformerConfig(ModelParallelConfig):
                     "hybrid_mla_cp_mode can only be set in dsv4_hybrid with "
                     "-2 in csa_compress_ratios."
                 )
+
+        # only support mqa_indexer_cp_mode == dualchunk_p2p if not None
+        if self.mqa_indexer_cp_mode is not None:
+            if self.mqa_indexer_cp_mode != "dualchunk_p2p":
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} is "
+                    "invalid. Must be None or 'dualchunk_p2p'."
+                )
+            # The permutation is layer-local: the rows are swapped inside the
+            # MQA layer and swapped back before it returns, which is only sound
+            # while the *global* layout is the contiguous one the index tables
+            # are built against ("build over the global sequence, then take this
+            # rank's rows"). A dualchunk global layout would double-permute.
+            #
+            # Exact value rather than ``startswith("contiguous")``: under a real
+            # CP group ``MQALatentAttention.__init__`` accepts only
+            # ``contiguous_allgather``, so admitting ``contiguous_a2a`` here
+            # would pass config validation and then raise NotImplementedError at
+            # module construction -- a contract split between two layers.
+            if self.cp_balance_mode != "contiguous_allgather":
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} needs "
+                    "cp_balance_mode='contiguous_allgather' (the only mode the "
+                    "latent-MQA layer supports under context parallel), got "
+                    f"{self.cp_balance_mode!r}."
+                )
+            # Same membership test as hybrid_mla_cp_mode above: no latent-MQA
+            # layer means no indexer to rebalance.
+            if self.experimental_attention_variant != "dsv4_hybrid" or (
+                -2 not in (self.csa_compress_ratios or ())
+            ):
+                raise ValueError(
+                    "mqa_indexer_cp_mode can only be set in dsv4_hybrid with "
+                    "-2 in csa_compress_ratios."
+                )
+            # ``MQALatentAttention`` reads the switch in ``_forward_sparse``
+            # only. The other two phases reach a different indexer path that
+            # does not permute rows -- ``hybrid_mla_attention="mha"`` builds no
+            # latent-MQA layer at all, and ``"mqa_dsa"`` with
+            # ``dsa_indexer_use_sparse_loss=False`` is the warmup phase, whose
+            # KL spans the whole per-document causal set with no top-k anywhere.
+            # Accepting those would start successfully and silently deliver none
+            # of the rebalance this switch advertises.
+            if (
+                self.hybrid_mla_attention != "mqa_dsa"
+                or not self.dsa_indexer_use_sparse_loss
+            ):
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} only "
+                    "takes effect in the sparse training phase, which is "
+                    "hybrid_mla_attention='mqa_dsa' together with "
+                    "dsa_indexer_use_sparse_loss=True. This config has "
+                    f"hybrid_mla_attention={self.hybrid_mla_attention!r} and "
+                    "dsa_indexer_use_sparse_loss="
+                    f"{self.dsa_indexer_use_sparse_loss!r}, which runs an "
+                    "indexer path that scores the full causal set and never "
+                    "permutes rows, so the rebalance would be silently inert. "
+                    "Drop mqa_indexer_cp_mode, or move to the sparse phase. "
+                    "Note that train_indexer_only=True is the warmup phase by "
+                    "definition and so cannot carry it either."
+                )
+            # The two-chunks-per-rank split needs an even per-rank row count.
+            # ``TransformerConfig`` does not carry the sequence length, so that
+            # is checked at the swap itself (``cp_utils.dualchunk_swap``).
 
         # separate_mtp_headloss validation.
         if self.separate_mtp_headloss:
