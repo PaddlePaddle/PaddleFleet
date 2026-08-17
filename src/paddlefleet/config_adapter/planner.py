@@ -567,6 +567,20 @@ class ShrinkPlanner:
             detail_block = "\n  候选淘汰明细：\n    " + "\n    ".join(detail)
 
         min_cards = min_shrink_cards(tp, pp, ep, cp, sep, cards_per_node)
+        if min_cards is None:
+            advice = (
+                "当前维度组合本身不合法（C3 要求 EP % (TP×SEP) == 0，"
+                "C5 禁止 SEP 与 CP 同时 >1），任何卡数都无法适配，"
+                "必须先修改 TP/SEP/EP/CP"
+            )
+            return (
+                f"精度模式：{target_cards} 卡下找不到合法的 EP/PP 缩容方案 "
+                f"(tp={tp}, pp={pp}, ep={ep}, cp={cp}, sep={sep})。\n"
+                f"  阻断原因：\n    "
+                + "\n    ".join(reasons)
+                + detail_block
+                + f"\n  建议：{advice}"
+            )
         min_nodes = max(min_cards // cards_per_node, 1)
         if min_cards > target_cards:
             advice = (

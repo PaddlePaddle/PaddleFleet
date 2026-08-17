@@ -401,6 +401,18 @@ class TestHardwareAndModelConstraints(unittest.TestCase):
         ok, why = check_hardware(8, 8, 1, 8, 64, 1, 1)
         self.assertTrue(ok, why)
 
+    def test_min_shrink_cards_is_none_for_dim_only_conflicts(self):
+        # C3 can never be satisfied here, so there is no minimum scale.
+        self.assertIsNone(min_shrink_cards(1, 1, 2, 1, 4, 8))
+
+    def test_e2_reports_dim_conflicts_instead_of_crashing(self):
+        # TP*SEP exceeds the target, and the dims themselves are illegal:
+        # the E2 diagnostic used to raise IndexError here.
+        ok, why = check_hardware(2, 8, 1, 1, 2, 1, 4)
+        self.assertFalse(ok)
+        self.assertIn("E2", why)
+        self.assertIn("任何卡数都无法适配", why)
+
     def test_min_shrink_cards_respects_the_floor(self):
         # PP and EP may only shrink to 2, so 2*2 = 4 cards is the floor here.
         self.assertEqual(min_shrink_cards(1, 8, 8, 1, 1, 8), 8)
@@ -512,6 +524,20 @@ class TestSourceScaleInference(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(cards, 96)
         self.assertIn("两种推断不一致", warning)
+
+    def test_batch_evidence_includes_sep(self):
+        # dataset_world_size = DP * sharding, so SEP multiplies back in:
+        # 8 / (1*1) * TP1 * SEP4 * PP1 * CP1 = 32.
+        cards, _warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(
+                sharding_parallel_size=None,
+                global_batch_size=8,
+                gradient_accumulation_steps=1,
+            ),
+            (1, 1, 1, 1, 4),
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 32)
 
     def test_batch_only_source(self):
         cards, _warning, err = ConfigAdapter._infer_orig_cards(
@@ -1061,6 +1087,14 @@ class TestPinnedFieldRejection(ConfigAdapterTestBase):
         )
         self.assertFalse(ok)
         self.assertIn("pipeline_model_parallel_size", message)
+
+    def test_prefix_less_fa_version_pin_is_kept(self):
+        ok, message = self.adapt(
+            target_nodes=1, auto_overrides={"fa_version": 4}
+        )
+        self.assertTrue(ok, message)
+        self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
+        self.assertNotIn("DELETE field=fa_version", message)
 
     def test_pinned_fa_version_is_kept(self):
         ok, message = self.adapt(

@@ -142,7 +142,10 @@ class ConfigAdapter:
                 "用户通过 --set yaml: 指定，自动适配不会再覆盖该字段",
             )
 
-        if "fa_version" in config and "fa_version" not in self.yaml_overrides:
+        fa_pinned = "fa_version" in self.yaml_overrides or (
+            "fa_version" in self.auto_overrides
+        )
+        if "fa_version" in config and not fa_pinned:
             log.record_removed(
                 "yaml",
                 "fa_version",
@@ -416,7 +419,10 @@ class ConfigAdapter:
         * comm groups: ``DP * sharding * TP * SEP * PP`` -- ``sharding`` alone
           is a group size, not the world size, so a dense job with ``DP > 1``
           would otherwise be under-counted;
-        * batch settings: ``GBS / (micro_bs * acc) * TP * PP * CP``.
+        * batch settings: ``GBS / (micro_bs * acc) * TP * SEP * PP * CP`` --
+          the trainer defines ``dataset_world_size = DP * sharding`` (or
+          ``sharding / CP`` when CP > 1), so every other degree multiplies
+          back in.
 
         When both exist and disagree, the estimate that is not missing a
         factor wins: the comm-group one only if ``data_parallel_size`` is
@@ -442,7 +448,7 @@ class ConfigAdapter:
         if gbs and micro_bs and grad_accum:
             dataset_world_size = int(gbs) // (int(micro_bs) * int(grad_accum))
             if dataset_world_size > 0:
-                batch_based = dataset_world_size * tp * pp * cp
+                batch_based = dataset_world_size * tp * sep * pp * cp
 
         if group_based is not None and batch_based is not None:
             if group_based == batch_based:
@@ -452,7 +458,7 @@ class ConfigAdapter:
                 f"源卡数的两种推断不一致：按通信组"
                 f"（DP={dp}×sharding={sharding}×TP={tp}×SEP={sep}×PP={pp}）"
                 f"为 {group_based}，按 batch 字段"
-                f"（GBS/(micro×acc)×TP×PP×CP）为 {batch_based}；"
+                f"（GBS/(micro×acc)×TP×SEP×PP×CP）为 {batch_based}；"
                 + (
                     f"源 YAML 未声明 data_parallel_size，"
                     f"通信组公式会漏掉这个因子，因此取 batch 字段的 {chosen}。"
