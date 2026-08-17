@@ -624,6 +624,16 @@ class DSv4HybridAttention(Attention):
                 f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
             )
 
+        # Which logical document mask this layer reads, used as part of the
+        # shared-metadata cache key (config.csa_share_docmask_meta). Main layers
+        # all read the same decoder mask and therefore share a group; every MTP
+        # depth is fed its own slice of ``mtp_startend_row_indices_all``, which
+        # has the same shape as the main mask but different contents, so each
+        # gets its own group. Deliberately independent of compress_ratio.
+        self.csa_mask_group = (
+            ("mtp", int(layer_number)) if is_mtp_layer else ("main",)
+        )
+
         # Resolve the per-attention-type RoPE variant override.
         # HCA layers: compress_ratio == 128; CSA layers: 2 <= compress_ratio < 128.
         # When the per-type field is unset (None), the historical default below
@@ -915,13 +925,40 @@ class DSv4HybridAttention(Attention):
         ratio = int(getattr(self.core_attention, "compress_ratio", 0))
         if startend_row_indices is not None:
             docmask_seqlen = sq * cp_size if cp_size > 1 else sq
-            docmask_meta = CSADocMaskMetadata.build(
-                max(1, ratio),
-                b,
-                docmask_seqlen,
-                startend_row_indices,
-                dense_mode=self.config.csa_dense_mode,
-            )
+            # csa_share_docmask_meta: the trainer built this step's metadata
+            # before the forward started. The micro-batch slot was picked in
+            # TransformerLayer.forward, i.e. outside any recompute wrapper, and
+            # handed down as docmask_mb_idx; the lookup is a pure read, so it is safe
+            # here even when this forward is being replayed by recompute.
+            docmask_mb_idx = kwargs.get("docmask_mb_idx", -1)
+            if (
+                getattr(self.config, "csa_share_docmask_meta", False)
+                and docmask_mb_idx >= 0
+            ):
+                from paddlefleet.transformer.doc_mask_meta_registry import (
+                    doc_mask_meta_registry,
+                )
+
+                # The trainer prebuilds only the main group: the MTP depths are
+                # fed a slice of their own mtp_startend_row_indices_all, absent
+                # from the store by design, so the lookup returns None there and
+                # the layer builds its own metadata below, mirroring
+                # MQALatentAttention. A main-group miss keeps raising.
+                docmask_meta = doc_mask_meta_registry.get(
+                    docmask_mb_idx,
+                    max(1, ratio),
+                    b,
+                    docmask_seqlen,
+                    self.csa_mask_group,
+                )
+            if docmask_meta is None:
+                docmask_meta = CSADocMaskMetadata.build(
+                    max(1, ratio),
+                    b,
+                    docmask_seqlen,
+                    startend_row_indices,
+                    dense_mode=self.config.csa_dense_mode,
+                )
 
         # Full attention recompute: wrap qkv + core_attn + inv_rope + o_group_proj + gated_attn
         # into one RecomputeWithoutOutput block. All intermediates (query, key, value, etc.)

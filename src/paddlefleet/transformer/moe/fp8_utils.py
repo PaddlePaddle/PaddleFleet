@@ -109,6 +109,11 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
 )
 
+from paddlefleet.transformer.activations import (
+    situ_glu_scale_backward,
+    situ_glu_scale_forward,
+)
+
 __all__ = [
     "ExpertsGroupGemmContiguousNode",
 ]
@@ -843,7 +848,7 @@ class ExpertsGroupGemmContiguousNode:
             recompute_moe_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
-            activation_type (str, optional): Activation function type. "swiglu" or "geglu". Defaults to "swiglu".
+            activation_type (str, optional): Activation function type. "swiglu", "geglu", or "situ". Defaults to "swiglu".
         """
         if moe_deep_gemm and expert_id is not None:
             # Per-expert node for deep_gemm: slice stacked weight to [1, K, N]
@@ -903,6 +908,12 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_expert_fusion = moe_expert_fusion
         self.clamp_value = clamp_value
         self.activation_type = activation_type
+        config = getattr(custom_map, "config", None)
+        self.activation_situ_beta = getattr(config, "activation_situ_beta", 1.0)
+        self.activation_situ_linear_beta = getattr(
+            config, "activation_situ_linear_beta", None
+        )
+        self.situ_glu_fusion = getattr(config, "situ_glu_fusion", True)
         self.use_accuracy_compatible = use_accuracy_compatible
         self.token_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
@@ -1356,8 +1367,10 @@ class ExpertsGroupGemmContiguousNode:
         #   forward is gelu on both paths and pairs with the analytic GeGLU
         #   backward, which is not gated on is_split_group_gemm.
         # ==================================================================
-        if self.use_accuracy_compatible and (
-            self.activation_type == "geglu" or self.is_split_group_gemm
+        if (
+            self.use_accuracy_compatible
+            and self.activation_type != "situ"
+            and (self.activation_type == "geglu" or self.is_split_group_gemm)
         ):
             x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
             probs = unzipped_probs
@@ -1386,7 +1399,15 @@ class ExpertsGroupGemmContiguousNode:
                     o1.dtype
                 )
         else:
-            if self.activation_type == "geglu":
+            if self.activation_type == "situ":
+                o2 = situ_glu_scale_forward(
+                    o1,
+                    unzipped_probs,
+                    self.activation_situ_beta,
+                    self.activation_situ_linear_beta,
+                    situ_glu_fusion=self.situ_glu_fusion,
+                )
+            elif self.activation_type == "geglu":
                 # GeGLU: gelu_tanh(gate) * up, then scale by probs
                 # F.gelu promotes bf16 to float32, cast back to bf16 for downstream ops
                 gate, up = paddle.chunk(o1, 2, dim=-1)
@@ -1449,12 +1470,13 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
-            assert self.activation_type != "geglu", (
-                "FP8 MoE path does not support activation_type='geglu' yet. "
-                "The fwd_down_fp8 branch uses fused SwiGLU FP8 kernels which are "
-                "incompatible with GeGLU. Please disable fp8 for Gemma4 MoE or "
-                "implement a GeGLU FP8 kernel."
-            )
+            if self.activation_type in ("geglu", "situ"):
+                raise ValueError(
+                    "FP8 MoE path only supports activation_type='swiglu' "
+                    f"yet, but got {self.activation_type!r}. Please disable "
+                    "fp8 or implement the corresponding FP8 activation "
+                    "kernel."
+                )
             return self.fwd_down_fp8(
                 o1, unzipped_probs, expert_w2, num_expert, o3, clear_o1
             )
@@ -1622,7 +1644,7 @@ class ExpertsGroupGemmContiguousNode:
         # ==================================================================
         if (
             self.use_accuracy_compatible
-            and self.activation_type != "geglu"
+            and self.activation_type not in ("geglu", "situ")
             and self.is_split_group_gemm
             and numpy.prod(unzipped_grad.shape) != 0
         ):
@@ -1676,6 +1698,16 @@ class ExpertsGroupGemmContiguousNode:
             o2_s = o2_f32.detach().astype(o1.dtype)
             probs_grad = d_scale_f32.astype(unzipped_probs.dtype)
             return do1, o2_s, probs_grad
+
+        if self.activation_type == "situ":
+            return situ_glu_scale_backward(
+                o1,
+                unzipped_probs,
+                do2_s,
+                self.activation_situ_beta,
+                self.activation_situ_linear_beta,
+                situ_glu_fusion=self.situ_glu_fusion,
+            )
 
         if self.activation_type == "geglu":
             # GeGLU forward recompute (needed for backward weight computation)

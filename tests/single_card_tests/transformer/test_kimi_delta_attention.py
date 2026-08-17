@@ -273,6 +273,7 @@ def _build_kda(
     hidden_act=F.silu,
     deterministic_mode=True,
     out_norm=SimpleRMSNorm,
+    config_overrides=None,
     **overrides,
 ):
     config = TransformerConfig(
@@ -284,6 +285,7 @@ def _build_kda(
         normalization="RMSNorm",
         sequence_parallel=sequence_parallel,
         deterministic_mode=deterministic_mode,
+        **(config_overrides or {}),
     )
     spec = KimiDeltaAttentionSublayersSpec(
         in_proj=NoBiasLinear,
@@ -1083,6 +1085,159 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
         np.testing.assert_array_equal(
             out["cu_seqlens"].numpy(), expected.numpy()
         )
+
+
+class TestGatedNormRecompute(unittest.TestCase):
+    """Selective recompute of the gated RMSNorm via RecomputeWithoutOutput.
+
+    The gated norm output is dropped after the forward and re-run in backward,
+    so the result must stay bit-exact while the norm is executed a second time.
+    """
+
+    def _forward_backward(self, kda, seed=1):
+        paddle.seed(seed)
+        x = paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
+        x.stop_gradient = False
+        out, _ = kda(hidden_states=x, attention_mask=None)
+        out.pow(2).mean().backward()
+        return (
+            out.numpy(),
+            x.grad.numpy(),
+            {n: p.grad.numpy() for n, p in kda.named_parameters()},
+        )
+
+    def test_flag_follows_recompute_modules(self):
+        """The flag is on only for selective recompute listing rms_norm_gated."""
+        on = _build_kda(
+            config_overrides={
+                "recompute_granularity": "selective",
+                "recompute_modules": ["rms_norm_gated"],
+            }
+        )
+        self.assertTrue(on.recompute_rms_norm_gated)
+
+        # selective, but a different module is requested
+        other = _build_kda(
+            config_overrides={
+                "recompute_granularity": "selective",
+                "recompute_modules": ["gated_attn"],
+            }
+        )
+        self.assertFalse(other.recompute_rms_norm_gated)
+
+        # no recompute configured at all
+        self.assertFalse(_build_kda().recompute_rms_norm_gated)
+
+    def test_layer_range_restricts_recompute(self):
+        """recompute_num_layers / dict values must scope recompute by layer.
+
+        With the test config (num_hidden_layers=2, pp=vpp=1) first_n/block with
+        a count of 1 selects only layer 0, so layer 1 must stay off instead of
+        every KDA layer recomputing.
+        """
+
+        def flag(layer_number, modules, num_layers=None, method="first_n"):
+            overrides = {
+                "recompute_granularity": "selective",
+                "recompute_modules": modules,
+                "recompute_method": method,
+            }
+            if num_layers is not None:
+                overrides["recompute_num_layers"] = num_layers
+            kda = _build_kda(
+                layer_number=layer_number, config_overrides=overrides
+            )
+            return kda.recompute_rms_norm_gated
+
+        # list + recompute_num_layers=1, first_n -> only layer 0
+        self.assertTrue(flag(0, ["rms_norm_gated"], num_layers=1))
+        self.assertFalse(flag(1, ["rms_norm_gated"], num_layers=1))
+
+        # block behaves the same for a single-stage config
+        self.assertTrue(
+            flag(0, ["rms_norm_gated"], num_layers=1, method="block")
+        )
+        self.assertFalse(
+            flag(1, ["rms_norm_gated"], num_layers=1, method="block")
+        )
+
+        # dict form: the value is the per-module layer count
+        self.assertTrue(flag(0, {"rms_norm_gated": 1}))
+        self.assertFalse(flag(1, {"rms_norm_gated": 1}))
+
+        # list without a count still recomputes every layer
+        self.assertTrue(flag(1, ["rms_norm_gated"]))
+
+    def test_layer_count_without_valid_method_raises(self):
+        """A layer count with no first_n/block method must raise, not silently
+        fall through to first_n (which an assert would under python -O)."""
+        # recompute_method=None is accepted by the config for selective, so the
+        # guard has to live in the layer resolver itself.
+        for modules in (["rms_norm_gated"], {"rms_norm_gated": 1}):
+            overrides = {
+                "recompute_granularity": "selective",
+                "recompute_modules": modules,
+                "recompute_method": None,
+            }
+            if isinstance(modules, list):
+                overrides["recompute_num_layers"] = 1
+            with self.assertRaises(ValueError):
+                _build_kda(layer_number=0, config_overrides=overrides)
+
+    def _assert_matches_baseline(self, deterministic):
+        paddle.seed(0)
+        baseline = _build_kda(deterministic_mode=deterministic)
+        baseline.train()
+        o0, gx0, g0 = self._forward_backward(baseline)
+
+        paddle.seed(0)
+        recomputed = _build_kda(deterministic_mode=deterministic)
+        recomputed.recompute_rms_norm_gated = True
+        recomputed.train()
+        o1, gx1, g1 = self._forward_backward(recomputed)
+
+        np.testing.assert_array_equal(o0, o1, err_msg="output")
+        np.testing.assert_array_equal(gx0, gx1, err_msg="grad_x")
+        for name in g0:
+            np.testing.assert_array_equal(g0[name], g1[name], err_msg=name)
+
+    def test_matches_baseline_native(self):
+        """Paddle-native fallback: recompute is bit-exact with the baseline."""
+        self._assert_matches_baseline(deterministic=True)
+
+    @unittest.skipUnless(
+        HAVE_FLA, "paddlefleet_ops fla kernels are not available"
+    )
+    def test_matches_baseline_fused(self):
+        """Fused FLA kernel: recompute is bit-exact with the baseline."""
+        self._assert_matches_baseline(deterministic=False)
+
+    def test_reruns_gated_norm_in_backward(self):
+        """With the flag on and training, the gated norm runs twice."""
+        kda = _build_kda()
+        kda.recompute_rms_norm_gated = True
+        kda.train()
+        with patch.object(kda, "_gated_norm", wraps=kda._gated_norm) as spy:
+            self._forward_backward(kda)
+        # once in forward, once when the backward hook recomputes it
+        self.assertEqual(spy.call_count, 2)
+
+    def test_no_recompute_without_flag(self):
+        """Baseline path runs the gated norm exactly once."""
+        kda = _build_kda()
+        kda.train()
+        with patch.object(kda, "_gated_norm", wraps=kda._gated_norm) as spy:
+            self._forward_backward(kda)
+        self.assertEqual(spy.call_count, 1)
+
+    def test_no_recompute_in_eval(self):
+        """Recompute is skipped outside training even when the flag is set."""
+        kda = _build_kda()
+        kda.recompute_rms_norm_gated = True
+        kda.eval()
+        with patch.object(kda, "_gated_norm", wraps=kda._gated_norm) as spy:
+            self._forward_backward(kda)
+        self.assertEqual(spy.call_count, 1)
 
 
 if __name__ == "__main__":

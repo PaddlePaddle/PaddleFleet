@@ -198,6 +198,9 @@ class TransformerConfig(ModelParallelConfig):
     activation_situ_linear_beta: float | None = None
     """Optional tanh scale applied to the linear branch of SiTU-GLU."""
 
+    situ_glu_fusion: bool = True
+    """Use fused Triton SiTU-GLU in FusionMoe BF16 routed experts."""
+
     use_bias: bool = False
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
     MLP layer)."""
@@ -1378,6 +1381,30 @@ class TransformerConfig(ModelParallelConfig):
         kernel.
     """
 
+    csa_share_docmask_meta: bool = False
+    """Share one ``CSADocMaskMetadata`` per (micro-batch, ratio, mask group).
+
+    ``CSADocMaskMetadata`` is a pure function of the document mask, the compress
+    ratio and the sequence length, so all DSv4-hybrid layers of a micro-batch
+    that agree on those inputs can reuse a single instance instead of each
+    rebuilding its own (see ``doc_mask_meta_registry.DocMaskMetaRegistry``). When
+    ``False`` every layer builds its own metadata exactly as before.
+
+    The trainer builds the whole step's metadata before
+    ``forward_backward_pipeline`` and audits the per-layer forward counters at
+    each step boundary (see ``PretrainingTrainer.training_pipeline_step``).
+    """
+
+    mqa_share_docmask_meta: bool = False
+    """Same sharing for the latent-MQA (``csa_compress_ratios == -2``) layers.
+
+    Separate from ``csa_share_docmask_meta`` because the two cover different
+    layer kinds with different metadata classes (``MQADocMeta`` vs
+    ``CSADocMaskMetadata``), so they can be enabled and measured independently.
+    Requires the layers to actually run latent MQA -- ``__post_init__`` rejects
+    the switch otherwise rather than let it be a silent no-op.
+    """
+
     stage1_overlap: bool = False
     """
     overlap backward with sharding gradient reduce for non-pipeline parallelism
@@ -1469,6 +1496,8 @@ class TransformerConfig(ModelParallelConfig):
         "csa_dense_mode": "csa_dense_mode",
         "csa_indexer_backend": "csa_indexer_backend",
         "csa_sparse_attn_backend": "csa_sparse_attn_backend",
+        "csa_share_docmask_meta": "csa_share_docmask_meta",
+        "mqa_share_docmask_meta": "mqa_share_docmask_meta",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -1837,9 +1866,14 @@ class TransformerConfig(ModelParallelConfig):
                 )
         if self.hybrid_mla_attention == "mqa_full_causal":
             logger.warning(
-                "hybrid_mla_attention='mqa_full_causal' builds a [b, s, s] int32 "
-                "index table per MLA layer (268 MB per layer at s=8192). It "
-                "exists to isolate absorption from sparsity, not to save memory."
+                "hybrid_mla_attention='mqa_full_causal' attends over the whole "
+                "per-document causal span on every MLA layer. It exists to "
+                "isolate absorption from sparsity, not to save memory. FA4 "
+                "dense flashmask is its only backend -- context parallelism "
+                "included -- so it needs an SM100+ box (as the sparse phases "
+                "do) with FLAGS_cudnn_deterministic off; anything else raises "
+                "in the first forward. See "
+                "MQALatentAttention._assert_dense_fa4."
             )
         if self.hybrid_mla_attention == "mqa_dsa":
             # On the ``-2`` layers ``dsa_indexer_use_sparse_loss`` decides both
@@ -1876,6 +1910,77 @@ class TransformerConfig(ModelParallelConfig):
                     "production warmup phase pairs it with "
                     "train_indexer_only=True; the sparse training phase pairs "
                     "dsa_indexer_use_sparse_loss=True with a trainable backbone."
+                )
+
+        # Hyper-connection (mHC) validation
+        if self.use_fused_mhc:
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "use_fused_mhc requires enable_hyper_connections=True."
+                )
+
+        # Shared document-mask metadata validation. Both switches only mean
+        # something on a DSv4-hybrid model, and the MQA one additionally needs the
+        # -2 layers to actually run latent MQA. A switch that no layer can honour
+        # is a configuration mistake and must fail at startup rather than be
+        # silently ignored -- same rule as hybrid_mla_attention above.
+        #
+        # ``experimental_dataflow`` is checked by the trainer instead, not here:
+        # it is not a model_config.json field, so a partial construction (the
+        # startup ``[plan]`` probe builds one from the JSON alone) would see the
+        # ``False`` default and fail on a config that is actually fine.
+        if self.csa_share_docmask_meta or self.mqa_share_docmask_meta:
+            if self.experimental_attention_variant != "dsv4_hybrid":
+                raise ValueError(
+                    "csa_share_docmask_meta / mqa_share_docmask_meta share the "
+                    "per-micro-batch document-mask metadata of the DSv4-hybrid "
+                    "layers, but experimental_attention_variant="
+                    f"{self.experimental_attention_variant!r}, so no layer would "
+                    "ever read it. Set experimental_attention_variant="
+                    "'dsv4_hybrid' or drop the switch."
+                )
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "csa_share_docmask_meta / mqa_share_docmask_meta require "
+                    "enable_hyper_connections=True. The per-micro-batch slot "
+                    "index is handed to the attention modules by "
+                    "HyperConnectionTransformerLayer's _docmask_meta_kwargs "
+                    "override; the base TransformerLayer opts out, so with "
+                    "enable_hyper_connections=False every layer would fall back "
+                    "to building its own metadata and the switch would do "
+                    "nothing at all."
+                )
+        if self.csa_share_docmask_meta:
+            csa_kinds = [
+                int(r)
+                for r in (self.csa_compress_ratios or [])
+                if int(r) in (-1, 0, 128) or 2 <= int(r) < 128
+            ]
+            if not csa_kinds:
+                raise ValueError(
+                    "csa_share_docmask_meta applies to the DSv4-hybrid layers, "
+                    "i.e. csa_compress_ratios entries in {-1, 0, 128} or "
+                    "2 <= r < 128, but this config has none: "
+                    f"csa_compress_ratios={self.csa_compress_ratios!r}. Only -2 "
+                    "layers are present, which are MLA -- use "
+                    "mqa_share_docmask_meta for those."
+                )
+        if self.mqa_share_docmask_meta:
+            has_latent_mqa = self.hybrid_mla_attention in (
+                "mqa_dsa",
+                "mqa_full_causal",
+            ) and -2 in [int(r) for r in (self.csa_compress_ratios or [])]
+            if not has_latent_mqa:
+                raise ValueError(
+                    "mqa_share_docmask_meta applies to the latent-MQA layers, "
+                    "i.e. csa_compress_ratios entries equal to -2 under "
+                    "hybrid_mla_attention='mqa_dsa' or 'mqa_full_causal', but "
+                    f"this config has hybrid_mla_attention="
+                    f"{self.hybrid_mla_attention!r} and "
+                    f"{'no' if -2 not in [int(r) for r in (self.csa_compress_ratios or [])] else 'some'}"
+                    " -2 layers. Under the default 'mha' those layers are dense "
+                    "MLA and build no MQADocMeta, so the switch would be a silent "
+                    "no-op. Use csa_share_docmask_meta for the HCA/CSA layers."
                 )
 
         # DSv4 Hybrid Attention validation

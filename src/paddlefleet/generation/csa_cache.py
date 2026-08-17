@@ -142,6 +142,20 @@ class CSADynamicCache:
     def get_csa_state(self, layer_idx: int) -> _CSALayerState:
         return self._states[layer_idx]
 
+    def has_layer_cache(self, layer_idx: int) -> bool:
+        """Whether ``layer_idx`` already cached something (prefill has run).
+
+        Mirrors :meth:`DynamicKVCache.has_layer_cache` so that
+        ``_is_incremental_decode`` in CSA/MLA attention correctly identifies
+        decode steps vs the first prefill pass.
+
+        A CSA layer is considered "primed" once ``raw_kv`` is populated
+        (set by ``_prime_cache_prefill``). A standard-attention layer in the
+        same model is primed once ``k`` is populated (set by ``update``).
+        """
+        st = self._states[layer_idx]
+        return st.raw_kv is not None or st.k is not None
+
     # -- standard-attention protocol ----------------------------------------
 
     def get_seq_len(self, layer_idx: int = 0) -> int:
