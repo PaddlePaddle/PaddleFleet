@@ -86,9 +86,17 @@ python -m paddlefleet.config_adapter --input config.yaml \
   `model_config.json` 必须显式写 `json:KEY=VALUE`。
 
 取值类型自动推断（整数→int、`true/false`→bool、`null/none`→None、其余→字符串）。
-被 `--set` 指定的字段是**受保护**的：后续任何自动规则都不会再覆盖它。当某个模型
+被 `--set` 指定的字段是**受保护**的：后续任何自动规则都不会再覆盖它。但由适配器
+统一计算的字段（TP/PP/EP/CP/SEP、VPP、`num_empty_layers_add_in_tail`、
+`sharding_parallel_size`、`data_parallel_size`、`model_name_or_path`）**不允许**
+用 `--set` 锁定，否则生成的文件会与报告里的并行度对不上 —— 遇到这种组合会直接报错。当某个模型
 结构字段在 `model_config.json` 里读不到（不同模型家族命名不一致）时，也用
 `--set <字段>=<值>` 兜底。
+
+源作业卡数按两条证据推断并交叉校验：通信组
+（`DP × sharding × TP × SEP × PP`）与 batch 字段
+（`GBS / (micro_bs × acc) × TP × PP × CP`）。两者都能算且不一致时，取通信组的结果
+并在报告里给出 WARNING，提示源 YAML 自身不自洽。
 
 `model_config.json` 的位置永远从 YAML 的 `model_name_or_path` 推断：绝对路径直接
 用，相对路径先按 YAML 所在目录、再按当前工作目录（Fleet 的解析方式）尝试。
@@ -140,8 +148,9 @@ python -m paddlefleet.config_adapter --input config.yaml \
 |---|---|---|
 | C1 | `N % (TP·SEP·PP) == 0` | sharding 为正整数 |
 | C2 | `N % (PP·EP) == 0`（EP>1） | moe_sharding 为正整数 |
-| C3 | `EP % TP == 0`（EP>1） | dense_sharding 为正整数 |
+| C3 | `EP % (TP·SEP) == 0`（EP>1） | dense_sharding = EP/(TP·SEP) 为正整数 |
 | C4 | `sharding % CP == 0` | cp_sharding 为正整数 |
+| C5 | 不允许 SEP>1 且 CP>1 | 框架禁止 sep 与 context 并行同时使用 |
 | E1 | 跨机必须整节点分配 | Fleet 的 rank 映射要求各机对称 |
 | E2 | `TP·SEP` 放得进单机 | TP/SEP 不缩，缩了有 OOM 风险 |
 | E3 | 所有并行度是 ≥1 的整数 | — |

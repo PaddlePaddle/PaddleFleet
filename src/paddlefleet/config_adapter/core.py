@@ -53,6 +53,20 @@ from .strategies import BATCH_STRATEGIES
 from .topology import TopologyValidator
 from .utils import PARALLEL_FIELDS, extract_parallel_params
 
+#: Fields whose value the adapter derives itself. A ``--set`` pin on any of
+#: them is refused rather than silently skipped, because the plan, the
+#: validation and the report all assume the adapter's own value.
+ADAPTER_CONTROLLED_FIELDS = frozenset(
+    set(PARALLEL_FIELDS.values())
+    | {
+        "virtual_pipeline_model_parallel_size",
+        "num_empty_layers_add_in_tail",
+        "sharding_parallel_size",
+        "data_parallel_size",
+        "model_name_or_path",
+    }
+)
+
 
 class ConfigAdapter:
     """Rewrites one training YAML (and its model_config.json) for a scale."""
@@ -95,6 +109,21 @@ class ConfigAdapter:
         input_path = Path(input_path)
         log = ChangeLog()
 
+        # Fields the adapter must own: pinning them with --set would make the
+        # generated file disagree with the reported parallelism / sharding.
+        # In-place runs never rewrite model_name_or_path, so pinning that one
+        # is harmless there.
+        controlled = ADAPTER_CONTROLLED_FIELDS
+        if self.in_place:
+            controlled = controlled - {"model_name_or_path"}
+        pinned = sorted(controlled & set(self.yaml_overrides))
+        if pinned:
+            return False, (
+                f"以下字段由适配器统一计算，不能用 --set 锁定：{pinned}。"
+                f"锁定后生成的配置会与报告里的并行度 / sharding 不一致；"
+                f"请去掉对应的 --set，或直接改源 YAML 后再适配"
+            )
+
         config = self.yaml_writer.load(input_path)
         if config is None:
             return False, f"配置文件为空：{input_path}"
@@ -106,7 +135,7 @@ class ConfigAdapter:
                 "用户通过 --set yaml: 指定，自动适配不会再覆盖该字段",
             )
 
-        if "fa_version" in config:
+        if "fa_version" in config and "fa_version" not in self.yaml_overrides:
             log.record_removed(
                 "yaml",
                 "fa_version",
@@ -120,6 +149,7 @@ class ConfigAdapter:
             key: config.get(key)
             for key in (
                 "sharding_parallel_size",
+                "data_parallel_size",
                 "global_batch_size",
                 "per_device_train_batch_size",
                 "gradient_accumulation_steps",
@@ -185,9 +215,13 @@ class ConfigAdapter:
         if not ok:
             return False, f"{input_path.name}: {message}"
 
-        orig_cards, err = self._infer_orig_cards(scale_source, dims_before)
+        orig_cards, scale_warning, err = self._infer_orig_cards(
+            scale_source, dims_before
+        )
         if err:
             return False, f"{input_path.name}: {err}"
+        if scale_warning:
+            plan.warnings.append(scale_warning)
 
         err = self._scale_batch_and_sharding(
             config, log, scale_source, orig_cards, dims_after
@@ -332,18 +366,6 @@ class ConfigAdapter:
             self.json_writer.write(model_config, json_path)
             return str(json_path), None
 
-        # The generated YAML must point at the generated JSON, so this field
-        # cannot be pinned by the user at the same time.
-        if "model_name_or_path" in self.yaml_overrides:
-            return None, (
-                "本次需要改写模型结构并另存 model_config.json，"
-                "因此 model_name_or_path 必须指向新生成的目录，"
-                "不能同时用 --set 锁定它；"
-                "请去掉 --set yaml:model_name_or_path=...，"
-                "或改用 --in-place（就地改写源 model_config.json，"
-                "不改 model_name_or_path）"
-            )
-
         adapted_dir = build_adapted_dir(
             self.output_dir, model_dir.name, self.scale_tag
         )
@@ -379,30 +401,69 @@ class ConfigAdapter:
 
     @staticmethod
     def _infer_orig_cards(scale_source, dims_before):
-        """Infer the source job's GPU count. Returns ``(cards, error)``."""
+        """Infer the source job's GPU count.
+
+        Returns ``(cards, warning, error)``.  Two independent estimates are
+        computed when the config carries enough information:
+
+        * comm groups: ``DP * sharding * TP * SEP * PP`` -- ``sharding`` alone
+          is a group size, not the world size, so a dense job with ``DP > 1``
+          would otherwise be under-counted;
+        * batch settings: ``GBS / (micro_bs * acc) * TP * PP * CP``.
+
+        The comm-group estimate wins when both exist, but a mismatch is
+        surfaced as a warning: it means the source YAML is not self-consistent
+        and every derived batch value inherits that ambiguity.
+        """
         tp, pp, ep, cp, sep = dims_before
 
         sharding = scale_source["sharding_parallel_size"]
+        dp = scale_source["data_parallel_size"]
+        dp = int(dp) if dp and int(dp) > 0 else 1
+        group_based = None
         if sharding is not None and int(sharding) > 0:
-            return int(sharding) * tp * sep * pp, None
+            group_based = dp * int(sharding) * tp * sep * pp
 
         gbs = scale_source["global_batch_size"]
         micro_bs = scale_source["per_device_train_batch_size"]
         grad_accum = scale_source["gradient_accumulation_steps"]
+        batch_based = None
         if gbs and micro_bs and grad_accum:
             dataset_world_size = int(gbs) // (int(micro_bs) * int(grad_accum))
             if dataset_world_size > 0:
-                return dataset_world_size * tp * pp * cp, None
+                batch_based = dataset_world_size * tp * pp * cp
+
+        warning = None
+        if group_based is not None and batch_based is not None:
+            if group_based != batch_based:
+                warning = (
+                    f"源卡数的两种推断不一致：按通信组"
+                    f"（DP={dp}×sharding={sharding}×TP={tp}×SEP={sep}×"
+                    f"PP={pp}）为 {group_based}，按 batch 字段"
+                    f"（GBS/(micro×acc)×TP×PP×CP）为 {batch_based}；"
+                    f"取通信组的 {group_based}。"
+                    f"如果不对，请修正源 YAML 的 data_parallel_size 或 "
+                    f"batch 字段后重新适配"
+                )
+            return group_based, warning, None
+        if group_based is not None:
+            return group_based, None, None
+        if batch_based is not None:
+            return batch_based, None, None
 
         if gbs is not None:
-            return None, (
-                "无法推断源作业的卡数：既没有可用的 sharding_parallel_size"
-                "（>0），也无法用 global_batch_size / "
-                "per_device_train_batch_size / gradient_accumulation_steps "
-                "反推。请在 YAML 里补全，或用 "
-                "--set yaml:sharding_parallel_size=<源 sharding> 指定"
+            return (
+                None,
+                None,
+                (
+                    "无法推断源作业的卡数：既没有可用的 sharding_parallel_size"
+                    "（>0），也无法用 global_batch_size / "
+                    "per_device_train_batch_size / gradient_accumulation_steps "
+                    "反推。请在源 YAML 里补上 sharding_parallel_size / "
+                    "data_parallel_size，或补全 batch 字段"
+                ),
             )
-        return None, None
+        return None, None, None
 
     def _scale_batch_and_sharding(
         self, config, log, scale_source, orig_cards, dims_after
@@ -557,12 +618,15 @@ def inspect_config(input_path, cards_per_node=8, max_nodes=16):
         key: config.get(key)
         for key in (
             "sharding_parallel_size",
+            "data_parallel_size",
             "global_batch_size",
             "per_device_train_batch_size",
             "gradient_accumulation_steps",
         )
     }
-    orig_cards, _err = ConfigAdapter._infer_orig_cards(scale_source, dims)
+    orig_cards, _warning, _err = ConfigAdapter._infer_orig_cards(
+        scale_source, dims
+    )
     orig_nodes = (
         orig_cards // cards_per_node
         if orig_cards and orig_cards % cards_per_node == 0

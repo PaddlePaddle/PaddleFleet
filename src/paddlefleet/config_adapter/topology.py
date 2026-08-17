@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Communication-group constraints for a given GPU count (C1..C4)."""
+"""Communication-group constraints for a given GPU count (C1..C5)."""
 
 from __future__ import annotations
 
@@ -22,11 +22,15 @@ from .utils import multi_lcm
 class TopologyValidator:
     """Validates Fleet communication-group constraints.
 
-    Constraints (derived from PaddlePaddle's topology.py):
+    Constraints (derived from PaddlePaddle's topology.py plus the trainer's
+    own assertions):
       C1: N % (TP * SEP * PP) == 0 -> sharding is a positive integer
       C2: N % (PP * EP) == 0       -> moe_sharding is a positive integer
-      C3: EP % TP == 0             -> dense_sharding is a positive integer
+      C3: EP % (TP * SEP) == 0     -> dense_sharding is a positive integer,
+          since dense_sharding = sharding / moe_sharding = EP / (TP * SEP)
       C4: sharding % CP == 0       -> cp_sharding is a positive integer
+      C5: not (SEP > 1 and CP > 1) -> "sep parallel and context parallel
+          cannot be used together" (PaddleFormers training_args.py)
     """
 
     def __init__(self, target_cards, cards_per_node=8):
@@ -34,7 +38,7 @@ class TopologyValidator:
         self.cards_per_node = cards_per_node
 
     def validate(self, tp, pp, ep, cp, sep=1):
-        """Check C1..C4. Returns ``(is_valid, message, details)``."""
+        """Check C1..C5. Returns ``(is_valid, message, details)``."""
         n = self.target_cards
         errors = []
 
@@ -50,9 +54,10 @@ class TopologyValidator:
                 f"!= 0，moe_sharding 不是整数"
             )
 
-        if ep > 1 and ep % tp != 0:
+        if ep > 1 and ep % (tp * sep) != 0:
             errors.append(
-                f"C3 不满足：EP={ep} % TP={tp} != 0，dense_sharding 不是整数"
+                f"C3 不满足：EP={ep} % (TP={tp} × SEP={sep}) != 0，"
+                f"dense_sharding = EP/(TP×SEP) 不是正整数"
             )
 
         if n % (tp * sep * pp) == 0:
@@ -62,6 +67,12 @@ class TopologyValidator:
                     f"C4 不满足：sharding={sharding} % CP={cp} = "
                     f"{sharding % cp} != 0，cp_sharding 不是整数"
                 )
+
+        if sep > 1 and cp > 1:
+            errors.append(
+                f"C5 不满足：SEP={sep} 与 CP={cp} 不能同时大于 1"
+                f"（框架禁止 sep parallel 与 context parallel 同时使用）"
+            )
 
         if errors:
             cards = self.suggest_valid_cards(tp, pp, ep, cp, sep)
