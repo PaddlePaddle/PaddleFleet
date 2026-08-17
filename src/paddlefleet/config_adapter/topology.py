@@ -75,15 +75,21 @@ class TopologyValidator:
             )
 
         if errors:
-            cards = self.suggest_valid_cards(tp, pp, ep, cp, sep)
-            nodes = [c // self.cards_per_node for c in cards]
             msg = "目标卡数 {} 不满足通信组约束：\n  {}".format(
                 n, "\n  ".join(errors)
             )
-            msg += (
-                f"\n  16 节点内的合法节点数：{nodes}"
-                f"（每节点 {self.cards_per_node} 卡）"
-            )
+            cards = self.suggest_valid_cards(tp, pp, ep, cp, sep)
+            if cards:
+                nodes = [c // self.cards_per_node for c in cards]
+                msg += (
+                    f"\n  16 节点内的合法节点数：{nodes}"
+                    f"（每节点 {self.cards_per_node} 卡）"
+                )
+            else:
+                msg += (
+                    "\n  没有任何卡数能满足：上面的 C3/C5 只取决于并行度本身，"
+                    "与卡数无关，必须先修改 TP/SEP/EP/CP 的组合"
+                )
             return False, msg, {}
 
         sharding = n // (tp * sep * pp)
@@ -99,7 +105,16 @@ class TopologyValidator:
         return True, "通信组约束校验通过", details
 
     def suggest_valid_cards(self, tp, pp, ep, cp, sep=1, max_nodes=16):
-        """List every valid GPU count within ``max_nodes``."""
+        """List every valid GPU count within ``max_nodes``.
+
+        Returns ``[]`` when the dims violate a card-count-independent rule
+        (C3 or C5): no target scale can rescue those, so offering "legal"
+        node counts would be misleading.
+        """
+        if ep > 1 and ep % (tp * sep) != 0:
+            return []
+        if sep > 1 and cp > 1:
+            return []
         factors = [tp * sep * pp, self.cards_per_node]
         if ep > 1:
             factors.append(pp * ep)

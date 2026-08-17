@@ -95,8 +95,12 @@ python -m paddlefleet.config_adapter --input config.yaml \
 
 源作业卡数按两条证据推断并交叉校验：通信组
 （`DP × sharding × TP × SEP × PP`）与 batch 字段
-（`GBS / (micro_bs × acc) × TP × PP × CP`）。两者都能算且不一致时，取通信组的结果
-并在报告里给出 WARNING，提示源 YAML 自身不自洽。
+（`GBS / (micro_bs × acc) × TP × PP × CP`）。两者都能算且不一致时，取「没漏因子」
+的那个 —— 源 YAML 声明了 `data_parallel_size` 就用通信组，没声明则用 batch 字段
+（未声明的 DP 正是通信组公式缺的那一项）—— 并在报告里给出 WARNING。
+
+C3/C5 只取决于并行度本身，与卡数无关：这两项冲突时不会再列出「合法节点数」，而是
+直接说明必须先改 TP/SEP/EP/CP 的组合。
 
 `model_config.json` 的位置永远从 YAML 的 `model_name_or_path` 推断：绝对路径直接
 用，相对路径先按 YAML 所在目录、再按当前工作目录（Fleet 的解析方式）尝试。
