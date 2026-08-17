@@ -963,13 +963,17 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
     """Surrogate PyLayer for RR Ulysses FlashMask CP attention."""
 
     @staticmethod
-    def forward(ctx, q, k, v, hold_tensors):
+    def forward(ctx, q, k, v, learnable_sink, hold_tensors):
         """Return saved final output and keep local tensors for backward."""
         local_hold_tensors = hold_tensors["local_hold_tensors"]
         ctx.group = hold_tensors["group"]
         ctx.softmax_scale = local_hold_tensors.get("softmax_scale")
         ctx.fa_version = local_hold_tensors["fa_version"]
         ctx.dropout = local_hold_tensors.get("dropout", 0.0)
+        ctx.learnable_sink = learnable_sink
+        ctx.sink_requires_grad = (
+            learnable_sink is not None and not learnable_sink.stop_gradient
+        )
         if ctx.fa_version == 2:
             ctx.save_for_backward(
                 hold_tensors["local_query"],
@@ -1095,7 +1099,7 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
                 )
             else:
                 flashmask_info = None
-            q_grad, k_grad, v_grad, _ = _flash_attn_bwd(
+            q_grad, k_grad, v_grad, sink_grad = _flash_attn_bwd(
                 q.detach(),
                 k.detach(),
                 v.detach(),
@@ -1103,7 +1107,7 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
                 local_grad,
                 softmax_lse,
                 flashmask_info,
-                learnable_sink=None,
+                learnable_sink=ctx.learnable_sink,
                 softmax_scale=ctx.softmax_scale,
                 causal=causal,
                 deterministic=bool(
@@ -1140,6 +1144,10 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
         )
         result_attention._clear_dataptr()
         softmax_lse._clear_dataptr()
+        # sink_grad is already in local head space; the differentiable slice
+        # outside this PyLayer maps it back into the full sink parameter.
+        if ctx.sink_requires_grad:
+            return query_grad, key_grad, value_grad, sink_grad
         return query_grad, key_grad, value_grad
 
 
@@ -1235,18 +1243,37 @@ def slice_ulysses_mask_heads(startend_row_indices, num_k_heads, cp_group):
     ]
 
 
+def slice_ulysses_sink_heads(learnable_sink, num_q_heads, cp_group):
+    """Slice the per-query-head softmax sink for the local Ulysses head shard."""
+    if learnable_sink is None:
+        return None
+    if learnable_sink.shape[0] != num_q_heads:
+        raise ValueError(
+            f"learnable_sink must have one entry per query head ({num_q_heads}), "
+            f"got shape {learnable_sink.shape}"
+        )
+    heads_per_rank = num_q_heads // cp_group.nranks
+    head_start = cp_group.rank * heads_per_rank
+    return learnable_sink[head_start : head_start + heads_per_rank]
+
+
 def ulysses_local_flashmask_first_fwd(
     query_states,
     key_states,
     value_states,
     startend_row_indices,
     causal,
+    learnable_sink,
     softmax_scale,
 ):
     """Run local Ulysses FlashMask first forward and save RR tensors."""
     fa_version = get_fa_version(
         query_states.shape[-1], value_states.shape[-1], startend_row_indices
     )
+    if learnable_sink is not None and fa_version != 4:
+        raise NotImplementedError(
+            "learnable_sink only supported on fa_version==4 cute backend"
+        )
     if fa_version == 2:
         if softmax_scale is not None:
             raise NotImplementedError(
@@ -1328,6 +1355,7 @@ def ulysses_local_flashmask_first_fwd(
             return_lse=True,
             startend_row_indices=startend_row_indices,
             pack_gqa=False,
+            learnable_sink=learnable_sink,
             softmax_scale=softmax_scale,
         )
         hold_tensors = {
@@ -1579,11 +1607,6 @@ class RefinedRcomputeFlashMaskCpAttention:
         softmax_scale,
     ):
         """Run first forward for RR Ulysses FlashMask CP."""
-        if learnable_sink is not None:
-            raise NotImplementedError(
-                "flashmask_attention_ulysses does not support learnable_sink "
-                "(softmax sink)"
-            )
         if softmax_scale is not None:
             raise NotImplementedError(
                 "flashmask_attention_ulysses does not support setting softmax_scale"
@@ -1611,6 +1634,7 @@ class RefinedRcomputeFlashMaskCpAttention:
             value,
             startend_row_indices,
             causal,
+            slice_ulysses_sink_heads(learnable_sink, num_q_heads, group),
             softmax_scale,
         )
         result_attention = self._ulysses_alltoall_output(local_attention, group)
@@ -1654,8 +1678,19 @@ class RefinedRcomputeFlashMaskCpAttention:
                 hold_tensors,
             )
         elif mode == "contiguous_a2a":
+            # slice differentiably here: the local grad is routed back into the
+            # full sink parameter by this getitem node, exactly as on the
+            # non-RR Ulysses path.
             return FlashMaskUlyssesCpFunctor.apply(
-                query_states, key_states, value_states, hold_tensors
+                query_states,
+                key_states,
+                value_states,
+                slice_ulysses_sink_heads(
+                    learnable_sink,
+                    query_states.shape[2],
+                    hold_tensors["group"],
+                ),
+                hold_tensors,
             )
         else:
             raise ValueError(f"invalid cp_balance_mode: {mode}")

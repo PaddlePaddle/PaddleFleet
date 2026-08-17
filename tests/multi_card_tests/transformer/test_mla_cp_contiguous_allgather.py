@@ -468,7 +468,14 @@ class TestMLAContiguousAllgatherCP(unittest.TestCase):
     # absorption (:1913-1939), ``o_proj``, and every parameter gradient after
     # the CP all-reduce.
     def _check_mqa(self, attn_mode):
-        r = run_mla_cp(_row_end([200, 150, 162], 512), attn_mode=attn_mode)
+        # ``mqa_full_causal`` (and the phase-2 warmup) accept dense FA4 only --
+        # ``MQALatentAttention._assert_dense_fa4`` raises otherwise -- and a bare
+        # launcher process leaves the flag at the image default 2. Pin it to the
+        # value ``TrainingArguments.__post_init__`` derives on these SM100 boxes.
+        # Call-site scoped, not module scoped: ``test_4`` asserts on the refusal
+        # the *default* flag produces.
+        with U._flash_attn_version(4):
+            r = run_mla_cp(_row_end([200, 150, 162], 512), attn_mode=attn_mode)
         self.assertLess(r["fwd"], FWD_RTOL, f"{attn_mode}: forward")
         self.assertLess(r["dH"], GRAD_RTOL, f"{attn_mode}: dH")
         for n, v in r["param_err"].items():

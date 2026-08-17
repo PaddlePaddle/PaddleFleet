@@ -92,7 +92,13 @@ from paddlefleet.transformer.transformer_config import (
     TransformerConfig,
 )
 
-from .hybrid_mla_utils import _row_end as _row_end_from_docs
+from .hybrid_mla_utils import _fa4_module_hooks, _row_end as _row_end_from_docs
+
+# The full-causal phases have exactly one backend: ``_assert_dense_fa4`` raises
+# unless the process flags resolve to FA4, and the ``mha`` sink parameter is
+# likewise only created under FA3/FA4. Reproducing the flag the trainer derives
+# once per module covers both.
+setUpModule, tearDownModule = _fa4_module_hooks()
 
 try:
     from paddlefleet.cudnn_ops.block_sparse_mqa_dsa import is_dsa_available
@@ -136,7 +142,9 @@ class _FakePGCollection:
 # invariants the kernels require: >= 64 heads, head_dim 128 indexer, topk % 128
 # == 0, kv_lora_rank 512 + qk_rope 64 == 576 latent key width, v == 512.
 # --------------------------------------------------------------------------- #
-def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
+def _make_config(
+    mode, sink, indexer=False, dtype=paddle.bfloat16, split_kv_b=False
+):
     # ``indexer`` is vestigial: the hybrid-MLA layer's DSA indexer is now built
     # unconditionally for ``hybrid_mla_attention="mqa_dsa"`` (see
     # gpt_layer_specs), so it is retained only for call-site compatibility.
@@ -166,6 +174,7 @@ def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
         hybrid_mla_num_attention_heads=64,
         hybrid_mla_num_key_value_heads=64,
         hybrid_mla_attention=hybrid_mla_attention,
+        mqa_split_kv_b_proj=split_kv_b,
         add_full_attention_sink_bias=sink,
         o_groups=4,
         o_lora_rank=32,
@@ -200,10 +209,16 @@ def _make_config(mode, sink, indexer=False, dtype=paddle.bfloat16):
     return cfg
 
 
-def _build(mode, sink=False, indexer=False, dtype=paddle.bfloat16):
+def _build(
+    mode,
+    sink=False,
+    indexer=False,
+    dtype=paddle.bfloat16,
+    split_kv_b=False,
+):
     """Build the layer-0 (hybrid-MLA) self-attention for ``mode``."""
     model_parallel_cuda_manual_seed(_SEED)
-    cfg = _make_config(mode, sink, indexer, dtype=dtype)
+    cfg = _make_config(mode, sink, indexer, dtype=dtype, split_kv_b=split_kv_b)
     spec = get_gpt_layer_local_spec(
         config=cfg,
         normalization=cfg.normalization,
@@ -224,9 +239,12 @@ def _fa4_for_mha_sink(mode, sink):
     unless ``FLAGS_flash_attn_version in (3, 4)``, because ``mha`` consumes it as
     ``flashmask_attention_func(learnable_sink=...)`` which only exists on the
     cute path (multi_latent_attention.py, guard next to the parameter creation).
-    The default flag value in this image is 2. These tests only inspect the
-    parameter, so we flip the flag around construction and restore it -- the
-    process-global default must stay untouched for the other suites.
+
+    The module-level ``_fa4_pin()`` cannot cover this: it stands down where no
+    FA4 backend can serve, which is every upstream CI box, and these ``mha``
+    cases are not gated to SM100. Creating the parameter launches no kernel, so
+    the flag only has to hold across the construction -- pin it here and restore,
+    exactly as this file did before the pin moved to module scope.
     """
     if not (sink and mode == "mha"):
         yield
@@ -439,6 +457,230 @@ class TestItem1StateDictAndGradientMatch(unittest.TestCase):
             self.assertTrue(
                 0.95 < ratio < 1.05, f"{key} grad-norm ratio off ({ratio})"
             )
+
+
+@_skip_if_no_cuda
+class TestSplitKvBProj(unittest.TestCase):
+    """``mqa_split_kv_b_proj``: the grouped-matmul ``k_b_proj`` /
+    ``v_b_proj`` must reproduce the ``kv_b_proj``-slice einsums, given the split
+    the loader performs."""
+
+    SEQ = 128
+
+    @staticmethod
+    def _loader_split(state, mod):
+        """What the loader must produce for the two split-out parameters.
+
+        Both are stored 2-D (leading dims folded), which is what the AOA
+        statements can express and what the parameters actually are. The unsplit
+        key is dropped: the split layer does not own that parameter any more.
+        """
+        heads = mod.num_attention_heads_per_partition
+        w = state.pop("kv_b_proj.weight").reshape([mod.kv_lora_rank, heads, -1])
+        state["k_b_proj"] = (
+            w[:, :, : mod.qk_nope_head_dim]
+            .transpose([1, 0, 2])
+            .reshape([heads * mod.kv_lora_rank, mod.qk_nope_head_dim])
+            .contiguous()
+        )
+        state["v_b_proj"] = (
+            w[:, :, mod.qk_nope_head_dim :]
+            .transpose([1, 2, 0])
+            .reshape([heads * mod.v_head_dim, mod.kv_lora_rank])
+            .contiguous()
+        )
+        return state
+
+    def test_split_replaces_kv_b_proj_instead_of_duplicating_it(self):
+        """The split must not add a second copy of the projection.
+
+        ``k_b_proj`` and ``v_b_proj`` together hold exactly the elements of
+        ``kv_b_proj.weight``, which gets no gradient once they exist. Keeping it
+        alongside them would double this projection's resident bytes *and* its
+        checkpoint footprint, so it must not be built at all.
+        """
+        base = _build("mqa")
+        ded = _build("mqa", split_kv_b=True)
+        self.assertIsNone(ded.kv_b_proj)
+
+        state = ded.state_dict()
+        self.assertNotIn("kv_b_proj.weight", state)
+        self.assertIn("k_b_proj", state)
+        self.assertIn("v_b_proj", state)
+
+        def _numel(mod):
+            return sum(int(np.prod(p.shape)) for p in mod.parameters())
+
+        self.assertEqual(_numel(ded), _numel(base))
+
+    def test_backward_dw_skips_the_absent_projection(self):
+        # The delayed weight-gradient pass walks every KV projection.
+        # ``kv_b_proj`` does not exist in this mode, so the walk must skip it
+        # instead of dereferencing None, and still reach the A projection.
+        ded = _build("mqa", split_kv_b=True)
+        self.assertIsNone(ded.kv_b_proj)
+
+        calls = []
+        # The A projection's own dw pass is a linear-layer detail; stub it so the
+        # test covers only the None guard.
+        ded.kv_a_proj_with_mqa.backward_dw = lambda: calls.append("kv_a")
+        ded._backward_kv_proj()
+        self.assertEqual(calls, ["kv_a"])
+
+    def test_absorbed_query_matches_kv_b_proj_slice(self):
+        base = _build("mqa")
+        ded = _build("mqa", split_kv_b=True)
+        self.assertFalse(base.mqa_latent_split_kv_b)
+        self.assertTrue(ded.mqa_latent_split_kv_b)
+
+        state = base.state_dict()
+        self.assertNotIn("k_b_proj", state)
+        self.assertNotIn("v_b_proj", state)
+        ded.set_state_dict(self._loader_split(state, ded))
+
+        x = _hidden(self.SEQ, seed=3)
+        q_base = base.get_query_key_value_tensors(x)[0]
+        q_ded = ded.get_query_key_value_tensors(x)[0]
+        self.assertEqual(q_ded.shape, q_base.shape)
+        err = _rel_err(
+            q_ded.astype("float32").numpy(), q_base.astype("float32").numpy()
+        )
+        self.assertLess(err, 1e-3, f"absorbed query diverged (rel L2 {err})")
+
+    def test_deabsorb_matches_einsum(self):
+        """The V-side de-absorption is layout-switched, so cover both paths on
+        the same numbers via the core attention's own helper."""
+        ded = _build("mqa", split_kv_b=True)
+        core = ded.core_attention
+        self.assertTrue(core.split_kv_b)
+
+        heads = ded.num_attention_heads_per_partition
+        # The split layer has no ``kv_b_proj``; take the reference weight from an
+        # unsplit one so both branches see the same numbers.
+        kv_b_weight = _build("mqa").kv_b_proj.weight
+        w = kv_b_weight.reshape([ded.kv_lora_rank, heads, -1])
+        w_einsum = w[:, :, ded.qk_nope_head_dim :]  # [l, h, v]
+        w_grouped = w_einsum.transpose([1, 2, 0]).contiguous()  # [h, v, l]
+
+        rng = np.random.RandomState(11)
+        core_out = paddle.to_tensor(
+            rng.randn(1, self.SEQ, heads * ded.kv_lora_rank).astype("float32")
+            / np.sqrt(ded.kv_lora_rank),
+            dtype=kv_b_weight.dtype,
+        )
+        ref = core._deabsorb(core_out, w_einsum, False)
+        got = core._deabsorb(core_out, w_grouped, True)
+        self.assertEqual(got.shape, ref.shape)
+        err = _rel_err(
+            got.astype("float32").numpy(), ref.astype("float32").numpy()
+        )
+        self.assertLess(err, 1e-3, f"de-absorption diverged (rel L2 {err})")
+
+    def test_full_forward_matches_unsplit(self):
+        if not _HAS_DSA:
+            self.skipTest("absorbed MQA forward requires SM100+ DSA kernel")
+        base = _build("mqa")
+        ded = _build("mqa", split_kv_b=True)
+        ded.set_state_dict(self._loader_split(base.state_dict(), ded))
+        re = _row_end(self.SEQ)
+        x = _hidden(self.SEQ, seed=5)
+        out_base, _ = base(
+            x, attention_mask=None, attn_mask_startend_row_indices=re
+        )
+        out_ded, _ = ded(
+            x, attention_mask=None, attn_mask_startend_row_indices=re
+        )
+        err = _rel_err(
+            out_ded.astype("float32").numpy(),
+            out_base.astype("float32").numpy(),
+        )
+        self.assertLess(err, 1e-3, f"layer output diverged (rel L2 {err})")
+
+    def test_warmup_eval_forward_matches_unsplit(self):
+        """``_forward_dsa``'s early-exit path must honour the split layout.
+
+        With ``dsa_indexer_use_sparse_loss=False`` and no indexer loss to attach
+        (eval / ``no_grad`` / the first forward of a fully recomputed layer),
+        attention skips the indexer and de-absorbs directly. That call site is
+        separate from the two grad-enabled ones, so it needs its own coverage:
+        reading the ``[h, v, l]`` weight through the ``[l, h, v]`` einsum branch
+        does not just lose accuracy, it fails the reshape outright.
+        """
+        if not _HAS_DSA:
+            self.skipTest("absorbed MQA forward requires SM100+ DSA kernel")
+        base = _build("mqa")
+        ded = _build("mqa", split_kv_b=True)
+        ded.set_state_dict(self._loader_split(base.state_dict(), ded))
+        re = _row_end(self.SEQ)
+        x = _hidden(self.SEQ, seed=7)
+        base.eval()
+        ded.eval()
+        with paddle.no_grad():
+            out_base, _ = base(
+                x, attention_mask=None, attn_mask_startend_row_indices=re
+            )
+            out_ded, _ = ded(
+                x, attention_mask=None, attn_mask_startend_row_indices=re
+            )
+        err = _rel_err(
+            out_ded.astype("float32").numpy(),
+            out_base.astype("float32").numpy(),
+        )
+        self.assertLess(err, 1e-3, f"warmup output diverged (rel L2 {err})")
+
+    def test_muon_slices_the_split_params_per_head(self):
+        """Muon must keep orthogonalising one head at a time.
+
+        Both split parameters are 2-D, so Muon picks them up, but the head dim
+        is folded into the leading axis -- without a spec each would be
+        orthogonalised as a single matrix with all heads mixed. ``axis=-2``
+        (not ``0``) also covers the 3-D input Muon produces when it batches
+        several same-shape parameters together.
+
+        The V side is additionally handed to ``ortho_fn`` transposed, i.e. in
+        the unsplit weight's ``[kv_lora_rank, v_head_dim]`` orientation: Muon's
+        ``muon_version`` 1/2 scaling is ``dout / din``, so the stored
+        ``[v_head_dim, kv_lora_rank]`` block would otherwise be scaled by the
+        reciprocal ratio.
+        """
+        ded = _build("mqa", split_kv_b=True)
+        specs = ded.muon_slice_specs({"muon_qkv_update_mode": "split_head"})
+        heads = ded.num_attention_heads_per_partition
+        # The unsplit weight gets no gradient in this mode, so it must not be
+        # orthogonalised either.
+        self.assertNotIn("kv_b_proj.weight", specs)
+
+        expected = {
+            "k_b_proj": (
+                {"heads": heads, "axis": -2},
+                [ded.kv_lora_rank, ded.qk_nope_head_dim],
+            ),
+            "v_b_proj": (
+                {"heads": heads, "axis": -2, "transposed": True},
+                [ded.kv_lora_rank, ded.v_head_dim],
+            ),
+        }
+        for name, (expected_kwargs, block) in expected.items():
+            self.assertIn(name, specs)
+            slice_fn, kwargs = specs[name]
+            self.assertEqual(kwargs, expected_kwargs)
+            weight = getattr(ded, name)
+            for extra in ([], [3]):
+                seen = []
+
+                def _record(block_tensor):
+                    seen.append(list(block_tensor.shape))
+                    return block_tensor
+
+                batched = (
+                    weight
+                    if not extra
+                    else paddle.stack([weight] * extra[0], axis=0)
+                )
+                out = slice_fn(batched, _record, **kwargs)
+                self.assertEqual(list(out.shape), list(batched.shape))
+                self.assertEqual(len(seen), heads)
+                self.assertEqual(seen, [extra + block] * heads)
 
 
 @_skip_if_no_cuda

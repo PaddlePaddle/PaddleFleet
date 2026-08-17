@@ -157,6 +157,43 @@ def _make_startend_indices(batch, seq_len, padding_start=None):
     return indices
 
 
+def _keep_vector(batch, seq_len, padding_start=None, sample=None):
+    """Build a [b, s] 0/1 keep mask. ``sample=None`` pads every sample."""
+    keep = paddle.ones([batch, seq_len], dtype="int64")
+    if padding_start is not None:
+        if sample is None:
+            keep[:, padding_start:] = 0
+        else:
+            keep[sample, padding_start:] = 0
+    return keep
+
+
+def _to_4d_causal(keep, dtype="float32"):
+    """Expand a [b, s] keep vector into the collator's [b, 1, s, s] mask.
+
+    Entry ``[i, j]`` is enabled iff ``j <= i`` and both tokens are real, so a
+    padding row has a zero diagonal — which is exactly the signal
+    ``_build_padding_mask`` reduces back to per-token validity.
+    """
+    batch, seq_len = keep.shape
+    causal = paddle.tril(paddle.ones([seq_len, seq_len], dtype="float32"))
+    keep_f = keep.astype("float32")
+    mask = causal.unsqueeze(0) * keep_f.unsqueeze(1) * keep_f.unsqueeze(2)
+    return mask.unsqueeze(1).astype(dtype)
+
+
+def _to_4d_block_diagonal(seq_len, doc_lens, dtype="float32"):
+    """Packed-sequence mask: causal within each document, blocked across."""
+    mask = paddle.zeros([seq_len, seq_len], dtype="float32")
+    start = 0
+    for length in doc_lens:
+        end = start + length
+        block = paddle.tril(paddle.ones([length, length], dtype="float32"))
+        mask[start:end, start:end] = block
+        start = end
+    return mask.unsqueeze(0).unsqueeze(0).astype(dtype)
+
+
 class TestBuildPaddingMaskNoSP(unittest.TestCase):
     """_build_padding_mask without sequence parallel."""
 
@@ -354,6 +391,190 @@ class TestForwardPaddingMask(unittest.TestCase):
         # Padding positions get zero gradient
         np.testing.assert_array_equal(x.grad[0, -8:].numpy(), np.zeros([8, H]))
         # Valid positions get non-zero gradient
+        self.assertFalse(np.allclose(x.grad[0, :24].numpy(), 0))
+
+
+class TestBuildPaddingMask4D(unittest.TestCase):
+    """4D ``[b, 1, s, s]`` masks, which the multimodal collator emits.
+
+    GDN is a recurrence and only needs per-token validity, so the block-causal
+    matrix is reduced to its diagonal. Before that reduction existed a 4D mask
+    fell through to ``attn_mask_startend_row_indices`` and, when the VL collator
+    supplied no indices, raised outright.
+    """
+
+    def setUp(self):
+        self.gdn = _make_gdn()
+
+    def test_4d_all_valid_returns_none(self):
+        mask = _to_4d_causal(_keep_vector(B, S))
+        self.assertIsNone(self.gdn._build_padding_mask(mask, None, B, S))
+
+    def test_4d_with_padding_returns_mask(self):
+        mask = _to_4d_causal(_keep_vector(B, S, padding_start=24, sample=0))
+        result = self.gdn._build_padding_mask(mask, None, B, S)
+        self.assertEqual(list(result.shape), [B, S, 1])
+        np.testing.assert_array_equal(result[0, :24, 0].numpy(), np.ones(24))
+        np.testing.assert_array_equal(result[0, 24:, 0].numpy(), np.zeros(8))
+        np.testing.assert_array_equal(result[1, :, 0].numpy(), np.ones(S))
+
+    def test_4d_matches_equivalent_2d(self):
+        keep = _keep_vector(B, S, padding_start=20, sample=0)
+        from_2d = self.gdn._build_padding_mask(keep, None, B, S)
+        from_4d = self.gdn._build_padding_mask(_to_4d_causal(keep), None, B, S)
+        np.testing.assert_array_equal(from_4d.numpy(), from_2d.numpy())
+
+    def test_4d_bool_dtype(self):
+        keep = _keep_vector(B, S, padding_start=28, sample=1)
+        mask = _to_4d_causal(keep, dtype="bool")
+        result = self.gdn._build_padding_mask(mask, None, B, S)
+        np.testing.assert_array_equal(result[1, 28:, 0].numpy(), np.zeros(4))
+        np.testing.assert_array_equal(result[0, :, 0].numpy(), np.ones(S))
+
+    def test_4d_packed_block_diagonal_is_all_valid(self):
+        """Document isolation is not padding: every token's diagonal is set.
+
+        GDN takes document boundaries from ``attn_mask_startend_row_indices``,
+        so a packed block-diagonal mask must not be mistaken for padding.
+        """
+        mask = _to_4d_block_diagonal(S, [12, 20])
+        self.assertIsNone(self.gdn._build_padding_mask(mask, None, 1, S))
+
+    def test_4d_shape_mismatch_falls_through_to_startend(self):
+        wrong = _to_4d_causal(_keep_vector(B, S + 4))
+        indices = _make_startend_indices(B, S, padding_start=24)
+        result = self.gdn._build_padding_mask(wrong, indices, B, S)
+        self.assertEqual(list(result.shape), [B, S, 1])
+        np.testing.assert_array_equal(result[0, 24:, 0].numpy(), np.zeros(8))
+
+    def test_4d_shape_mismatch_without_startend_raises(self):
+        wrong = _to_4d_causal(_keep_vector(B, S + 4))
+        with self.assertRaises(ValueError):
+            self.gdn._build_padding_mask(wrong, None, B, S)
+
+    def test_4d_non_square_falls_through(self):
+        """A ``[b, 1, s, s_kv]`` cross-attention-shaped mask is not reducible."""
+        mask = paddle.ones([B, 1, S, S + 8], dtype="float32")
+        with self.assertRaises(ValueError):
+            self.gdn._build_padding_mask(mask, None, B, S)
+
+    def test_4d_takes_priority_over_startend(self):
+        mask = _to_4d_causal(_keep_vector(B, S, padding_start=28, sample=0))
+        indices = _make_startend_indices(B, S, padding_start=None)
+        result = self.gdn._build_padding_mask(mask, indices, B, S)
+        np.testing.assert_array_equal(result[0, 28:, 0].numpy(), np.zeros(4))
+
+    def test_all_valid_check_survives_strided_input(self):
+        """Pin the reduction: ``all()`` over a strided float buffer lies.
+
+        ``paddle.diagonal`` returns a non-contiguous view, and
+        ``paddle.Tensor.all()`` on such a float tensor reports ``False`` even
+        when every element is 1.0 — which would return an all-ones mask instead
+        of ``None``. Assert the raw primitive still misbehaves (so this test
+        starts failing once Paddle fixes it and the guard can be dropped) and
+        that ``_build_padding_mask`` is nonetheless correct.
+        """
+        ones_4d = _to_4d_causal(_keep_vector(1, S))
+        strided = paddle.diagonal(
+            ones_4d[:, 0, :, :], axis1=-2, axis2=-1
+        ).unsqueeze(-1)
+        self.assertFalse(strided.is_contiguous())
+        np.testing.assert_array_equal(strided.numpy().ravel(), np.ones(S))
+        self.assertFalse(bool(strided.all()))
+        self.assertTrue(bool(strided.astype("bool").all()))
+        self.assertIsNone(self.gdn._build_padding_mask(ones_4d, None, 1, S))
+
+    def test_4d_returns_contiguous_mask(self):
+        mask = _to_4d_causal(_keep_vector(B, S, padding_start=24, sample=0))
+        result = self.gdn._build_padding_mask(mask, None, B, S)
+        self.assertTrue(result.is_contiguous())
+
+
+class TestBuildPaddingMask4DWithSP(unittest.TestCase):
+    """4D masks reuse the SP slicing path after being reduced to 2D."""
+
+    def setUp(self):
+        self.gdn = _make_gdn_sp()
+
+    def test_4d_rank0_all_valid(self):
+        mask = _to_4d_causal(_keep_vector(B, S))
+        with patch(f"{_GDN_MODULE}.get_pg_rank", return_value=0):
+            self.assertIsNone(self.gdn._build_padding_mask(mask, None, B, S))
+
+    def test_4d_rank1_with_padding(self):
+        mask = _to_4d_causal(_keep_vector(B, S, padding_start=28, sample=0))
+        with patch(f"{_GDN_MODULE}.get_pg_rank", return_value=1):
+            result = self.gdn._build_padding_mask(mask, None, B, S)
+        # SP layout is [s_local, b, 1]; rank 1 owns [16, 32) so 28-31 → 12-15.
+        self.assertEqual(list(result.shape), [16, B, 1])
+        np.testing.assert_array_equal(result[:12, 0, 0].numpy(), np.ones(12))
+        np.testing.assert_array_equal(result[12:, 0, 0].numpy(), np.zeros(4))
+        np.testing.assert_array_equal(result[:, 1, 0].numpy(), np.ones(16))
+
+    def test_4d_rank0_clean_rank1_padded(self):
+        mask = _to_4d_causal(_keep_vector(B, S, padding_start=20))
+        with patch(f"{_GDN_MODULE}.get_pg_rank", return_value=0):
+            self.assertIsNone(self.gdn._build_padding_mask(mask, None, B, S))
+        with patch(f"{_GDN_MODULE}.get_pg_rank", return_value=1):
+            result = self.gdn._build_padding_mask(mask, None, B, S)
+        np.testing.assert_array_equal(result[:4, 0, 0].numpy(), np.ones(4))
+        np.testing.assert_array_equal(result[4:, 0, 0].numpy(), np.zeros(12))
+
+    def test_4d_shape_mismatch_raises_under_sp(self):
+        wrong = _to_4d_causal(_keep_vector(B, S + 4))
+        with (
+            patch(f"{_GDN_MODULE}.get_pg_rank", return_value=0),
+            self.assertRaises(ValueError),
+        ):
+            self.gdn._build_padding_mask(wrong, None, B, S)
+
+
+class TestForward4DMask(unittest.TestCase):
+    """Forward-level checks that a VL-style 4D mask is honored, not rejected."""
+
+    def setUp(self):
+        self.gdn = _make_gdn()
+        self.gdn.eval()
+
+    def test_forward_accepts_4d_mask(self):
+        x = paddle.randn([B, S, H])
+        keep = _keep_vector(B, S, padding_start=24, sample=0)
+        out_4d, _ = self.gdn(x, attention_mask=_to_4d_causal(keep))
+        out_2d, _ = self.gdn(x, attention_mask=keep)
+        np.testing.assert_allclose(
+            out_4d.numpy(), out_2d.numpy(), rtol=1e-5, atol=1e-5
+        )
+
+    def test_forward_4d_all_valid_equals_no_mask(self):
+        x = paddle.randn([B, S, H])
+        out_4d, _ = self.gdn(
+            x, attention_mask=_to_4d_causal(_keep_vector(B, S))
+        )
+        out_none, _ = self.gdn(x, attention_mask=None)
+        np.testing.assert_allclose(
+            out_4d.numpy(), out_none.numpy(), rtol=1e-5, atol=1e-5
+        )
+
+    def test_forward_4d_padding_changes_output(self):
+        x = paddle.randn([B, S, H])
+        keep = _keep_vector(B, S, padding_start=0, sample=0)
+        out_pad, _ = self.gdn(x, attention_mask=_to_4d_causal(keep))
+        out_none, _ = self.gdn(x, attention_mask=None)
+        self.assertFalse(
+            np.allclose(out_pad[0].numpy(), out_none[0].numpy(), atol=1e-6)
+        )
+        np.testing.assert_allclose(
+            out_pad[1].numpy(), out_none[1].numpy(), rtol=1e-5, atol=1e-5
+        )
+
+    def test_forward_4d_backward_zeroes_padding_grad(self):
+        x = paddle.randn([B, S, H])
+        x.stop_gradient = False
+        keep = _keep_vector(B, S, padding_start=24, sample=0)
+        out, _ = self.gdn(x, attention_mask=_to_4d_causal(keep))
+        out.sum().backward()
+        self.assertTrue(paddle.isfinite(x.grad).all().item())
+        np.testing.assert_array_equal(x.grad[0, 24:].numpy(), np.zeros([8, H]))
         self.assertFalse(np.allclose(x.grad[0, :24].numpy(), 0))
 
 

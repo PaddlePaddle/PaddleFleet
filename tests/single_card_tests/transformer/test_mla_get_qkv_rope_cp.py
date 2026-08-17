@@ -577,6 +577,139 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
         self._assert_equal(key, expected_key, "NoPE key")
         self._assert_equal(value, expected_value, "NoPE value")
 
+    def _run_nope_cp4(self, rope_type, apply_rope_fusion):
+        """NoPE with CP=4 must not construct RoPE tables, apply rotary, or scatter."""
+        hidden_full = self._hidden(batch=2, seq=8)
+        ref_layer = self._make_layer(
+            rope_type=rope_type,
+            apply_rope_fusion=apply_rope_fusion,
+            context_parallel_size=1,
+            mla_use_nope=True,
+        )
+        # Poison both RoPE table construction and application on the reference layer
+        ref_layer.rotary_pos_emb = mock.MagicMock(
+            side_effect=AssertionError("NoPE must not call rotary_pos_emb()")
+        )
+        ref_layer.rotary_pos_emb.get_rotary_seq_len = _FakeRotaryEmbedding(
+            ref_layer.qk_rope_head_dim
+        ).get_rotary_seq_len
+        ref_layer.rotary_pos_emb.get_cached_cos_sin = mock.MagicMock(
+            side_effect=AssertionError(
+                "NoPE must not call get_cached_cos_sin()"
+            )
+        )
+
+        with mock.patch.object(
+            mla_mod,
+            "apply_rotary_pos_emb",
+            side_effect=AssertionError("NoPE must bypass rotary application"),
+        ):
+            q_ref, k_ref, v_ref, *_ = self._run_layer(
+                ref_layer, hidden_full, cp_size=1, cp_rank=0
+            )
+
+        for rank in range(4):
+            cp_layer = self._make_layer(
+                rope_type=rope_type,
+                apply_rope_fusion=apply_rope_fusion,
+                context_parallel_size=4,
+                mla_use_nope=True,
+            )
+            # Poison RoPE table construction paths
+            cp_layer.rotary_pos_emb = mock.MagicMock(
+                side_effect=AssertionError(
+                    "NoPE CP=4 must not call rotary_pos_emb()"
+                )
+            )
+            cp_layer.rotary_pos_emb.get_rotary_seq_len = _FakeRotaryEmbedding(
+                cp_layer.qk_rope_head_dim
+            ).get_rotary_seq_len
+            cp_layer.rotary_pos_emb.get_cached_cos_sin = mock.MagicMock(
+                side_effect=AssertionError(
+                    "NoPE CP=4 must not call get_cached_cos_sin()"
+                )
+            )
+
+            hidden_local = _scatter_for_rank(
+                hidden_full,
+                axis=1,
+                mode="dualchunk_allgather",
+                rank=rank,
+                size=4,
+            )
+            scatter_calls = []
+            with mock.patch.object(
+                mla_mod,
+                "apply_rotary_pos_emb",
+                side_effect=AssertionError(
+                    "NoPE must bypass rotary application"
+                ),
+            ):
+                q_cp, k_cp, v_cp, *_ = self._run_layer(
+                    cp_layer,
+                    hidden_local,
+                    cp_size=4,
+                    cp_rank=rank,
+                    scatter_calls=scatter_calls,
+                )
+
+            # No RoPE scatter calls should happen under NoPE
+            rope_table_calls = [
+                call for call in scatter_calls if call[0][0] == 1
+            ]
+            self.assertEqual(
+                len(rope_table_calls),
+                0,
+                f"NoPE CP=4 rank {rank} rope_type={rope_type} "
+                f"fused={apply_rope_fusion}: unexpected RoPE scatter calls",
+            )
+
+            self._assert_equal(
+                q_cp,
+                _scatter_for_rank(
+                    q_ref,
+                    axis=1,
+                    mode="dualchunk_allgather",
+                    rank=rank,
+                    size=4,
+                ),
+                f"NoPE CP=4 query rank {rank} rope_type={rope_type} fused={apply_rope_fusion}",
+            )
+            self._assert_equal(
+                k_cp,
+                _scatter_for_rank(
+                    k_ref,
+                    axis=1,
+                    mode="dualchunk_allgather",
+                    rank=rank,
+                    size=4,
+                ),
+                f"NoPE CP=4 key rank {rank} rope_type={rope_type} fused={apply_rope_fusion}",
+            )
+            self._assert_equal(
+                v_cp,
+                _scatter_for_rank(
+                    v_ref,
+                    axis=1,
+                    mode="dualchunk_allgather",
+                    rank=rank,
+                    size=4,
+                ),
+                f"NoPE CP=4 value rank {rank} rope_type={rope_type} fused={apply_rope_fusion}",
+            )
+
+    def test_nope_cp4_non_fused_rope(self):
+        self._run_nope_cp4("rope", apply_rope_fusion=False)
+
+    def test_nope_cp4_fused_rope(self):
+        self._run_nope_cp4("rope", apply_rope_fusion=True)
+
+    def test_nope_cp4_non_fused_yarn(self):
+        self._run_nope_cp4("yarn", apply_rope_fusion=False)
+
+    def test_nope_cp4_fused_yarn(self):
+        self._run_nope_cp4("yarn", apply_rope_fusion=True)
+
     def test_context_parallel_requires_prepared_rope_tensor(self):
         layer = self._make_layer(
             rope_type="rope",
