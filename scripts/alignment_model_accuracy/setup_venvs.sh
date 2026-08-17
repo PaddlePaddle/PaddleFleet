@@ -125,7 +125,6 @@ setup_paddle_venv() {
     echo "[setup_venvs] paddle python: ${paddle_py}"
     local -a paddle_index=(
         --index-url "${PADDLE_INDEX_URL}"
-        --extra-index-url https://pypi.org/simple/
         --index-strategy unsafe-best-match
     )
 
