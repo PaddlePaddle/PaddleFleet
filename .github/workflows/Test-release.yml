@@ -175,7 +175,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
-          git log -1
           git pull --no-edit origin pull/${PR_ID}/head
           export UV_HTTP_TIMEOUT=300
           echo "uv build"
@@ -571,7 +570,6 @@ jobs:
           if [ ${BRANCH} != "develop" ]; then
             git checkout ${formers_branch}
           fi
-          git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddleformers.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           pip install -e .
@@ -767,7 +765,6 @@ jobs:
           fi
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFormers
-          git log -1
           pip install -e .
           pip install librosa==0.11.0
           echo "paddlefleet commit:"
@@ -1128,7 +1125,6 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git log -1
           pip install -e .
           pip install librosa==0.11.0
           echo "paddlefleet commit:"
