@@ -109,7 +109,11 @@ from paddlefleet.context_parallel_utils import (
     preprocess_index,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.transformer.cp_utils import all_gather_cp
+from paddlefleet.transformer.cp_utils import (
+    all_gather_cp,
+    dualchunk_chunk_ids,
+    dualchunk_swap,
+)
 from paddlefleet.transformer.csa_attention import (
     TileLangCSAIndexerLossAutoScaler,
     _build_window_topk_idxs_from_doc_bounds,
@@ -755,6 +759,132 @@ class MQALatentAttention(FleetLayer):
         # Fused Triton epilogue for the analytic sink gradient. Only reachable
         # when ``softmax_offset`` exists; a sinkless layer has no sink gradient.
         self.sink_grad_fusion = getattr(config, "dsa_sink_grad_fusion", False)
+        # Row layout the indexer forward runs on; see ``mqa_indexer_cp_mode`` in
+        # ``transformer_config`` and ``_indexer_topk_dualchunk``. Gated on a real
+        # CP group: with ``cp_size == 1`` there is nothing to rebalance.
+        self.indexer_dualchunk = (
+            getattr(config, "mqa_indexer_cp_mode", None) == "dualchunk_p2p"
+            and self.cp_enabled
+            and self.cp_size > 1
+        )
+
+    def _chunk_valid_range(
+        self, meta, s_global, doc_start, doc_len, is_valid, offset, length
+    ):
+        """``valid_range [1, length, 2]`` for the rows at ``[offset, offset+length)``.
+
+        Both the cached ``MQADocMeta`` and the eager fallback expose the same
+        ``(offset, length)`` slice of one global table, which is what lets the
+        dual-chunk layout ask for its two segments by chunk offset instead of
+        needing a second table.
+        """
+        if meta is not None:
+            return meta.indexer_valid_range(self.window_size, offset, length)[0]
+        return self._indexer_valid_range(
+            s_global, doc_start, doc_len, is_valid, offset, length
+        )[0]
+
+    def _dualchunk_valid_range(
+        self, meta, s_global, doc_start, doc_len, is_valid, s
+    ):
+        """``valid_range [1, s, 2]`` for this rank's rows in dual-chunk order.
+
+        The same global table the contiguous path slices once, read instead as
+        the two chunks ``dualchunk_chunk_ids`` assigns, so it lines up
+        row-for-row with what ``dualchunk_swap`` produces and each kernel call
+        can be given its own ``seq_offset``.
+
+        ``row_empty`` deliberately has no counterpart here: it is applied to the
+        results after they come back, i.e. in contiguous order.
+        """
+        lo, hi = dualchunk_chunk_ids(self.cp_rank, self.cp_size)
+        m = s // 2
+        return paddle.concat(
+            [
+                self._chunk_valid_range(
+                    meta, s_global, doc_start, doc_len, is_valid, c * m, m
+                )
+                for c in (lo, hi)
+            ],
+            axis=1,
+        )
+
+    def _indexer_topk_dualchunk(
+        self, q_idx, w_idx, k_idx, topk, doc_lens_arg, vr_zz, need_loss
+    ):
+        """Indexer top-k on the balanced dual-chunk row layout.
+
+        Rank ``r`` scores global chunks ``(2r, 2*cp_size-1-2r)`` out of
+        ``2*cp_size`` instead of its contiguous ``(2r, 2r+1)``. The ids sum to
+        ``2*cp_size-1`` on every rank, and a causal row's candidate count grows
+        linearly with its global position, so the two halves' work sums to a
+        constant: measured 31x between cp0 and cp15 at 256k/cp16 collapses to 1x.
+
+        **Two calls, not one.** The kernel learns where its rows sit globally
+        from ``q_causal_offsets``, one scalar per batch
+        (``csa_indexer_fwd_cudnn.py``), so a single affine map cannot describe two
+        disjoint segments. Each chunk is internally contiguous, so each call
+        carries its own ``seq_offset``. This is the same shape as the query tiling
+        the dense path already does (it passes ``seq_offset + start`` per tile);
+        only the second segment's start jumps.
+
+        ``vr_zz`` must be the ``valid_range`` of exactly these rows, in the same
+        order. A ``seq_offset`` that disagrees with it is silently wrong in one
+        direction: too large only wastes work (the extra columns are masked out of
+        the top-k anyway), too small writes ``-inf`` over legal candidates so they
+        can never be selected.
+
+        The two results are concatenated and swapped back to the contiguous
+        layout before returning, so ``row_empty``, ``window_idxs``, attention, the
+        KL and ``TileLangCSAIndexerLossAutoScaler`` all keep seeing one unpermuted
+        ``[b, s_local, topk]`` tensor. Applying the loss PyLayer per chunk instead
+        would halve ``target.shape[1]``, which is where its backward reads the
+        row-count denominator, and double the gradient.
+
+        The swaps are not differentiable and do not need to be: this whole path
+        runs under ``paddle.no_grad()`` on detached inputs, and the indexer
+        gradient reaches the weights through the loss scaler applied to the
+        *unpermuted* tensors.
+        """
+        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+            cudnn_indexer_topk_fwd,
+        )
+
+        m = int(q_idx.shape[1]) // 2
+        lo, hi = dualchunk_chunk_ids(self.cp_rank, self.cp_size)
+
+        q_zz = dualchunk_swap(q_idx.detach(), self.cp_group, axis=1)
+        w_zz = dualchunk_swap(w_idx.detach(), self.cp_group, axis=1)
+
+        def _chunk(sl, chunk_id):
+            return cudnn_indexer_topk_fwd(
+                q_zz[:, sl].contiguous(),
+                k_idx.detach(),
+                w_zz[:, sl].contiguous(),
+                ratio=1,
+                topk_effective=topk,
+                valid_range=vr_zz[:, sl],
+                doc_lens=doc_lens_arg,
+                seq_offset=chunk_id * m,
+                return_topk_scores=need_loss,
+            )
+
+        r_lo = _chunk(slice(0, m), lo)
+        r_hi = _chunk(slice(m, 2 * m), hi)
+
+        selected = dualchunk_swap(
+            paddle.concat([r_lo[0], r_hi[0]], axis=1), self.cp_group, axis=1
+        )
+        scores_out = []
+        if need_loss:
+            scores_out = [
+                dualchunk_swap(
+                    paddle.concat([r_lo[2], r_hi[2]], axis=1),
+                    self.cp_group,
+                    axis=1,
+                )
+            ]
+        return selected, scores_out
 
     def _needs_indexer_loss(self) -> bool:
         """Whether this forward should build and attach the indexer loss.
@@ -1876,6 +2006,18 @@ class MQALatentAttention(FleetLayer):
                 valid_range, row_empty = self._indexer_valid_range(
                     s_global, doc_start, doc_len, is_valid, position_offset, s
                 )
+            # ``row_empty`` stays contiguous -- it is applied after the results
+            # come back. ``vr_zz`` is the same table read in dual-chunk row
+            # order, for the two kernel calls: both sources slice a cached
+            # global table by ``(offset, length)``, so asking twice with the
+            # chunk offsets is exactly the row set the swap produces.
+            vr_zz = (
+                self._dualchunk_valid_range(
+                    meta, s_global, doc_start, doc_len, is_valid, s
+                )
+                if self.indexer_dualchunk
+                else None
+            )
 
         q_idx, k_idx, w_idx = self._indexer_projections(
             x, qr, position_offset, grad_enabled=need_loss
@@ -1907,17 +2049,22 @@ class MQALatentAttention(FleetLayer):
         )
 
         with paddle.no_grad():
-            selected, _, *scores_out = cudnn_indexer_topk_fwd(
-                q_idx.detach(),
-                k_idx.detach(),
-                w_idx.detach(),
-                ratio=1,
-                topk_effective=topk,
-                valid_range=valid_range,
-                doc_lens=doc_lens_arg,
-                seq_offset=position_offset,
-                return_topk_scores=need_loss,
-            )
+            if self.indexer_dualchunk:
+                selected, scores_out = self._indexer_topk_dualchunk(
+                    q_idx, w_idx, k_idx, topk, doc_lens_arg, vr_zz, need_loss
+                )
+            else:
+                selected, _, *scores_out = cudnn_indexer_topk_fwd(
+                    q_idx.detach(),
+                    k_idx.detach(),
+                    w_idx.detach(),
+                    ratio=1,
+                    topk_effective=topk,
+                    valid_range=valid_range,
+                    doc_lens=doc_lens_arg,
+                    seq_offset=position_offset,
+                    return_topk_scores=need_loss,
+                )
             topk_indices = paddle.where(
                 row_empty, paddle.full_like(selected, -1), selected
             )

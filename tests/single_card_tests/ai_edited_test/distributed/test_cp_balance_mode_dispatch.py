@@ -861,5 +861,157 @@ class TestTransformerConfigHybridMlaCpMode(unittest.TestCase):
                 )
 
 
+class TestTransformerConfigMqaIndexerCpMode(unittest.TestCase):
+    """Tests for the mqa_indexer_cp_mode row-rebalance switch."""
+
+    # Same context hybrid_mla_cp_mode needs: a dsv4_hybrid whose
+    # csa_compress_ratios declares a latent-MQA layer (the -2), which is the
+    # only layer carrying an indexer to rebalance.
+    MQA_HYBRID = {
+        "experimental_attention_variant": "dsv4_hybrid",
+        "num_hidden_layers": 2,
+        "csa_compress_ratios": [-2, 128],
+        "hybrid_mla_q_lora_rank": 8,
+        "hybrid_mla_kv_lora_rank": 8,
+        "hybrid_mla_qk_nope_head_dim": 8,
+        "hybrid_mla_qk_rope_head_dim": 8,
+        "hybrid_mla_v_head_dim": 8,
+        "hybrid_mla_num_attention_heads": 4,
+        "hybrid_mla_num_key_value_heads": 4,
+        # The indexer shapes ``hybrid_mla_attention="mqa_dsa"`` requires in both
+        # DSA phases. ``index_head_dim`` is pinned to 128 by the cuDNN indexer
+        # and ``index_topk`` must be a multiple of 128.
+        "dsa_index_n_heads": 4,
+        "dsa_index_head_dim": 128,
+        "dsa_index_topk": 128,
+    }
+
+    # The only phase that reads the switch: ``MQALatentAttention`` consults
+    # ``indexer_dualchunk`` in ``_forward_sparse`` and nowhere else, so the
+    # warmup phase would accept the config and rebalance nothing.
+    SPARSE_PHASE = {
+        "hybrid_mla_attention": "mqa_dsa",
+        "dsa_indexer_use_sparse_loss": True,
+    }
+
+    @staticmethod
+    def _config(**kwargs):
+        from paddlefleet.transformer.transformer_config import (
+            TransformerConfig,
+        )
+
+        return TransformerConfig(**kwargs)
+
+    def test_default_is_none(self):
+        """Unset means 'score this rank's own contiguous rows'."""
+        self.assertIsNone(self._config().mqa_indexer_cp_mode)
+
+    def test_dualchunk_accepted(self):
+        """The rebalance is layer-local, so it rides on a contiguous global."""
+        config = self._config(
+            cp_balance_mode="contiguous_allgather",
+            mqa_indexer_cp_mode="dualchunk_p2p",
+            **self.MQA_HYBRID,
+            **self.SPARSE_PHASE,
+        )
+        self.assertEqual(config.mqa_indexer_cp_mode, "dualchunk_p2p")
+
+    def test_invalid_value_rejected(self):
+        """One mode only; a typo must not silently fall back to the default."""
+        for mode in ("nonexistent_mode", "dualchunk_allgather"):
+            with (
+                self.subTest(mode=mode),
+                self.assertRaisesRegex(ValueError, "mqa_indexer_cp_mode"),
+            ):
+                self._config(
+                    mqa_indexer_cp_mode=mode,
+                    **self.MQA_HYBRID,
+                    **self.SPARSE_PHASE,
+                )
+
+    def test_non_contiguous_global_layout_rejected(self):
+        """A dualchunk global layout would permute the same rows twice."""
+        with self.assertRaisesRegex(ValueError, "contiguous_allgather"):
+            self._config(
+                cp_balance_mode="dualchunk_allgather",
+                mqa_indexer_cp_mode="dualchunk_p2p",
+                **self.MQA_HYBRID,
+                **self.SPARSE_PHASE,
+            )
+
+    def test_contiguous_a2a_rejected(self):
+        """Rejected here rather than later: the latent-MQA layer accepts only
+        contiguous_allgather under CP, so admitting the sibling contiguous mode
+        would move the failure to module construction."""
+        with self.assertRaisesRegex(ValueError, "contiguous_allgather"):
+            self._config(
+                cp_balance_mode="contiguous_a2a",
+                mqa_indexer_cp_mode="dualchunk_p2p",
+                **self.MQA_HYBRID,
+                **self.SPARSE_PHASE,
+            )
+
+    def test_requires_dsv4_hybrid_with_mqa_layer(self):
+        """No latent-MQA layer means no indexer, so the setting is dead."""
+        for kwargs in (
+            {},
+            {**self.MQA_HYBRID, "csa_compress_ratios": [128, 0]},
+        ):
+            with (
+                self.subTest(ratios=kwargs.get("csa_compress_ratios")),
+                self.assertRaisesRegex(
+                    ValueError, "only be set in dsv4_hybrid"
+                ),
+            ):
+                self._config(
+                    cp_balance_mode="contiguous_allgather",
+                    mqa_indexer_cp_mode="dualchunk_p2p",
+                    **kwargs,
+                )
+
+    def test_requires_sparse_phase(self):
+        """Only ``_forward_sparse`` reads the switch, so nothing else may set it.
+
+        This is the accepted-but-inert combination the layer cannot catch:
+        ``hybrid_mla_attention`` defaulting to ``"mha"`` builds no latent-MQA
+        layer, ``"mqa_full_causal"`` has no indexer, and ``"mqa_dsa"`` with
+        ``dsa_indexer_use_sparse_loss=False`` (which is what
+        ``train_indexer_only=True`` pins) runs the warmup indexer path, whose KL
+        spans the whole causal set and never permutes rows. All three would
+        start successfully and rebalance nothing.
+        """
+        for label, phase in (
+            ("default mha", {}),
+            ("no indexer", {"hybrid_mla_attention": "mqa_full_causal"}),
+            (
+                "warmup",
+                {
+                    "hybrid_mla_attention": "mqa_dsa",
+                    "dsa_indexer_use_sparse_loss": False,
+                },
+            ),
+            (
+                "train_indexer_only warmup",
+                {
+                    "hybrid_mla_attention": "mqa_dsa",
+                    "dsa_indexer_use_sparse_loss": False,
+                    "train_indexer_only": True,
+                },
+            ),
+        ):
+            with (
+                self.subTest(phase=label),
+                self.assertRaisesRegex(
+                    ValueError, "takes effect in the sparse training phase"
+                ),
+            ):
+                self._config(
+                    cp_balance_mode="contiguous_allgather",
+                    mqa_indexer_cp_mode="dualchunk_p2p",
+                    **self.MQA_HYBRID,
+                    **phase,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
