@@ -47,7 +47,7 @@ MTP_DEGREE = 1
 SEG_METHOD = "layer:TransformerLayer|EmptyLayer|MultiTokenPredictionLayer"
 
 
-def _build_config():
+def _build_config(num_empty_layers_add_in_head=0):
     config = GPTConfig(
         moe_expert_fusion=False,
         vocab_size=1024,
@@ -73,7 +73,7 @@ def _build_config():
         use_qk_norm=True,
         # seg-weight layers = num_hidden(5) + mtp(1) + head(0) + tail_eff(2) = 8
         # = pp*vpp, so the __post_init__ guard keeps separate_mtp_headloss on.
-        num_empty_layers_add_in_head=0,
+        num_empty_layers_add_in_head=num_empty_layers_add_in_head,
         num_empty_layers_add_in_tail=3,
         pipeline_model_parallel_size=PP_DEGREE,
         virtual_pipeline_model_parallel_size=VPP_DEGREE,
@@ -93,7 +93,10 @@ def _build_config():
 
 
 class TestSeparateMtpHeadlossPP(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
+        # initialize_fleet must run exactly once per process, so it cannot live
+        # in setUp once this class holds more than one test.
         strategy = fleet.DistributedStrategy()
         strategy.hybrid_configs = {
             "dp_degree": 1,
@@ -174,6 +177,16 @@ class TestSeparateMtpHeadlossPP(unittest.TestCase):
         self.assertEqual(stages[embed_idxs[-1]], PP_DEGREE - 1)
         self.assertGreater(stages[embed_idxs[-2]], 0)
         self.assertLessEqual(stages[embed_idxs[-2]], stages[embed_idxs[-1]])
+
+    def test_guard_disables_layout_with_non_unit_quotient(self):
+        # Negative counterpart: proves the positive assertion above is not
+        # vacuous, i.e. __post_init__ really evaluates the guard. head=1 makes
+        # the seg-weight layer count 5 + 1 + (1 + 2) = 9, which is neither
+        # divisible by pp*vpp=8 nor a quotient of 1, so the flag must be
+        # force-disabled during construction.
+        with self.assertWarns(UserWarning):
+            config = _build_config(num_empty_layers_add_in_head=1)
+        self.assertFalse(config.separate_mtp_headloss)
 
 
 if __name__ == "__main__":
