@@ -1088,9 +1088,13 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
+          mkdir PaddleFleet && cd PaddleFleet
+          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          tar -xf paddlefleet.tar.gz --strip-components=1
+          git config --global --add safe.directory /workspace/PaddleFleet
+          git checkout ${BRANCH}
           export PADDLEFLEET_WHEEL_PATH="/workspace/PaddleFleet/dist/${{ needs.build_whl.outputs.root_whl_name }}"
           export PADDLEFLEET_OPS_WHEEL_PATH="/workspace/PaddleFleet/dist/${{ needs.build_whl.outputs.ops_whl_name }}"
-          bash -x PaddleFleet/scripts/alignment_model_accuracy/run_alignment_test.sh
           model_acc_align_exit_code=$?
           if [[ "$model_acc_align_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31m Model accuracy align failed.\033[0m"
