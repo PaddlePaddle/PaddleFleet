@@ -45,10 +45,10 @@ mkdir -p "${TORCH_LOG_DIR}" "${MG_TENSOR_DEBUG_DIR}"
 # ------- 训练参数 -----
 ARGS=(
     ### model
-    --model /root/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP
+    --model /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP
 
     ### data
-    --dataset /root/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_torch.jsonl
+    --dataset /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_torch.jsonl
     --max_length 128
     --packing False
     --padding_free False
