@@ -9,9 +9,9 @@ truncate_packing: false
 
 train_dataset_type: erniekit
 eval_dataset_type: erniekit
-train_dataset_path: /home/.cache/PaddleFormers/alignment_paddle.jsonl
+train_dataset_path: /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_paddle.jsonl
 train_dataset_prob: "1.0"
-eval_dataset_path: /home/.cache/PaddleFormers/alignment_paddle.jsonl
+eval_dataset_path: /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_paddle.jsonl
 eval_dataset_prob: "1.0"
 
 max_seq_len: 128
