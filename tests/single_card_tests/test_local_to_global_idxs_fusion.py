@@ -33,6 +33,34 @@ from paddlefleet.triton_ops.local_to_global_idxs_fusion import (
 )
 
 
+def _require_sm100_sparse_kernels(testcase):
+    """Skip unless the FlashMLA / DSA sparse-attention kernels can actually run.
+
+    Importing ``paddlefleet_ops.flash_mla`` is not a capability check: the
+    library loads on Hopper (the CI runner is SM 9.0 and the log shows
+    "Successfully loaded ecosystem library: flash_mla") while the kernels these
+    tests reach are SM100-only -- the backward the docstrings quote lives in
+    ``sparse_attention_backward/dsa_bwd_sm100.py``. Calling them on SM 9.x is
+    not a meaningful test, so gate on the capability the way
+    ``test_hysparse_online_tilelang_train_step`` does for the TileLang kernels.
+    """
+    if not paddle.device.is_compiled_with_cuda():
+        testcase.skipTest("CUDA build of Paddle is required")
+    if paddle.device.cuda.device_count() == 0:
+        testcase.skipTest("No CUDA device available")
+    major = paddle.device.cuda.get_device_capability()[0]
+    if major < 10:
+        testcase.skipTest(
+            f"FlashMLA / DSA sparse kernels require SM 10.x; got SM {major}.x"
+        )
+    try:
+        from paddlefleet_ops.flash_mla import (  # noqa: F401
+            flash_mla_sparse_fwd,
+        )
+    except (ImportError, RuntimeError):
+        testcase.skipTest("flash_mla is not available")
+
+
 def _assert_bitwise(case, ref, got):
     assert ref.dtype == got.dtype, f"{case}: dtype {ref.dtype} vs {got.dtype}"
     assert ref.shape == got.shape, f"{case}: shape {ref.shape} vs {got.shape}"
@@ -230,12 +258,7 @@ class TestConfigSwitch(unittest.TestCase):
         ``dq`` needs no such caveat: ``store_dQ`` writes it with a TMA store
         from the single CTA that owns each query row.
         """
-        try:
-            from paddlefleet_ops.flash_mla import (  # noqa: F401
-                flash_mla_sparse_fwd,
-            )
-        except (ImportError, RuntimeError):
-            self.skipTest("flash_mla is not available")
+        _require_sm100_sparse_kernels(self)
 
         from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
 
@@ -279,12 +302,7 @@ class TestConfigSwitch(unittest.TestCase):
         (SM100) with ``-1`` right after the remap, so the fused output has to
         survive that padding untouched.
         """
-        try:
-            from paddlefleet_ops.flash_mla import (  # noqa: F401
-                flash_mla_sparse_fwd,
-            )
-        except (ImportError, RuntimeError):
-            self.skipTest("flash_mla is not available")
+        _require_sm100_sparse_kernels(self)
 
         from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
 
@@ -326,12 +344,7 @@ class TestConfigSwitch(unittest.TestCase):
         Same exclusions as the CSA case: ``dkv`` uses the atomic epilogue, and
         ``s`` stays within one ``sum_dSink`` block so ``d_sink`` is exact.
         """
-        try:
-            from paddlefleet_ops.flash_mla import (  # noqa: F401
-                flash_mla_sparse_fwd,
-            )
-        except (ImportError, RuntimeError):
-            self.skipTest("flash_mla is not available")
+        _require_sm100_sparse_kernels(self)
 
         from paddlefleet.fusions.mqa_sparse_attn import mqa_sparse_attn
 
