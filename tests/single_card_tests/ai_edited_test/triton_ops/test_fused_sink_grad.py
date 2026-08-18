@@ -361,6 +361,7 @@ def _make_bwd_case(
         attn_sink_dtype=paddle.empty([0], dtype=attn_sink_dtype).dtype,
         learnable_sink=learnable_sink,
         sink_grad_fusion=fusion,
+        global_kv_idx_remap_fusion=False,
         needs_grad=(True, True, learnable_sink),
     )
     grad_output = (paddle.randn([b, s, h * d_v]) * 0.5).cast(dtype)
