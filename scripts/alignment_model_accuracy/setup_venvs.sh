@@ -100,7 +100,7 @@ setup_torch_venv() {
 
     uv pip install --python "${torch_py}" \
         "setuptools>=66.1.0" pip wheel packaging cmake "ninja==1.11.1.1" \
-        "pybind11[global]>=2.13,<3"
+        "pybind11[global]>=2.13,<3" Pillow
 
     uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
         --force-reinstall --no-deps \
