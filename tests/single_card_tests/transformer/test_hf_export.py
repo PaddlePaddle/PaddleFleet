@@ -19,6 +19,7 @@ detection, rope_scaling pack/unpack, window semantics, MTP trimming, mHC
 injection, and the provider-fallback accessor.
 """
 
+import functools
 import unittest
 from types import SimpleNamespace
 
@@ -27,8 +28,10 @@ from paddlefleet.transformer.hf_export import (
     HF_EXPORT_RULES,
     HF_IMPORT_RULES,
     check_window_export_conflict,
+    hidden_act_to_hf,
     inject_mhc_from_provider,
     is_active_window,
+    is_csa_config,
     pack_rope_scaling,
     rule_target,
     source_or_provider,
@@ -67,6 +70,35 @@ class TestRulesAndMapping(unittest.TestCase):
         # multimax_modules list -> scalar on export.
         spec = HF_EXPORT_RULES["multimax_modules"]
         self.assertEqual(spec[1](["lm_head"]), "lm_head")
+
+    def test_dtype_import_returns_canonical_string(self):
+        # HF torch_dtype "bfloat16" must import to a bare Paddle-accepted
+        # dtype string, NOT "paddle.bfloat16" (create_parameter rejects it).
+        spec = HF_IMPORT_RULES["torch_dtype"]
+        self.assertEqual(spec[0], "params_dtype")
+        self.assertEqual(spec[1]("bfloat16"), "bfloat16")
+        # A Fleet-native value still normalises to the bare name.
+        self.assertEqual(spec[1]("paddle.bfloat16"), "bfloat16")
+
+    def test_hidden_act_export_handles_partial(self):
+        # gelu_pytorch_tanh round-trips through functools.partial (no __name__).
+        act_fn = HF_EXPORT_RULES["hidden_act"][1]
+        partial = functools.partial(
+            lambda x, approximate=False: x, approximate=True
+        )
+        partial.func.__name__ = "gelu"
+        self.assertEqual(hidden_act_to_hf(partial), "gelu_pytorch_tanh")
+        # exposed via the export rule too.
+        self.assertEqual(act_fn(partial), "gelu_pytorch_tanh")
+
+    def test_hidden_act_export_named_callable(self):
+        def silu(x):
+            return x
+
+        self.assertEqual(hidden_act_to_hf(silu), "silu")
+
+    def test_hidden_act_export_passthrough_string(self):
+        self.assertEqual(hidden_act_to_hf("relu"), "relu")
 
 
 class TestSourceOrProvider(unittest.TestCase):
@@ -191,6 +223,17 @@ class TestRopeScaling(unittest.TestCase):
         self.assertEqual(flat["rotary_scaling_factor"], 4.0)
         self.assertEqual(flat["beta_fast"], 32)
 
+    def test_unpack_canonical_rope_type(self):
+        # Current HF configs use "rope_type" (not the legacy "type" alias);
+        # the YaRN type must survive import.
+        flat = unpack_rope_scaling({"rope_type": "yarn", "factor": 4})
+        self.assertEqual(flat["rope_type"], "yarn")
+        self.assertEqual(flat["rotary_scaling_factor"], 4)
+
+    def test_unpack_rope_type_wins_over_legacy_type(self):
+        flat = unpack_rope_scaling({"rope_type": "yarn", "type": "linear"})
+        self.assertEqual(flat["rope_type"], "yarn")
+
     def test_unpack_empty(self):
         self.assertEqual(unpack_rope_scaling(None), {})
 
@@ -220,10 +263,33 @@ class TestWindow(unittest.TestCase):
         self.assertNotIn("sliding_window", out)
         self.assertIn("other", out)
 
-    def test_swa_aware_import_rules_keeps_for_non_swa(self):
+    def test_swa_aware_import_rules_native_sliding_window_kept(self):
+        # Standard HF SWA (Mistral: bare sliding_window, no CSA markers) must
+        # keep its native name rather than be re-homed to csa_window_size.
+        rules = {"sliding_window": "csa_window_size", "other": "x"}
+        out = swa_aware_import_rules({"sliding_window": 4096}, rules)
+        self.assertNotIn("sliding_window", out)
+        self.assertIn("other", out)
+
+    def test_swa_aware_import_rules_keeps_rename_for_csa(self):
+        rules = {"sliding_window": "csa_window_size", "other": "x"}
+        out = swa_aware_import_rules({"compress_ratios": [128, 64]}, rules)
+        self.assertEqual(out["sliding_window"], "csa_window_size")
+        self.assertIn("other", out)
+
+    def test_swa_aware_import_rules_keeps_rename_for_dsv4_variant(self):
         rules = {"sliding_window": "csa_window_size"}
-        out = swa_aware_import_rules({"hidden_size": 8}, rules)
+        out = swa_aware_import_rules(
+            {"experimental_attention_variant": "dsv4_hybrid"}, rules
+        )
         self.assertIn("sliding_window", out)
+
+    def test_is_csa_config(self):
+        self.assertTrue(is_csa_config({"compress_ratios": [128]}))
+        self.assertTrue(
+            is_csa_config({"experimental_attention_variant": "dsv4_hybrid"})
+        )
+        self.assertFalse(is_csa_config({"sliding_window": 4096}))
 
 
 class TestMtpTrim(unittest.TestCase):
@@ -236,6 +302,19 @@ class TestMtpTrim(unittest.TestCase):
         trim_mtp_layers(out)
         self.assertEqual(out["window_attn_skip_freq"], [1, 2])
         self.assertEqual(out["csa_compress_ratios"], [4, 5])
+        self.assertEqual(out["num_nextn_predict_layers"], 0)
+
+    def test_trim_hf_renamed_keys(self):
+        # HF-side names: hybrid_layer_pattern <- window_attn_skip_freq and
+        # compress_ratios <- csa_compress_ratios must also be trimmed.
+        out = {
+            "num_nextn_predict_layers": 1,
+            "hybrid_layer_pattern": [1, 2, 3],
+            "compress_ratios": [4, 5, 6],
+        }
+        trim_mtp_layers(out)
+        self.assertEqual(out["hybrid_layer_pattern"], [1, 2])
+        self.assertEqual(out["compress_ratios"], [4, 5])
         self.assertEqual(out["num_nextn_predict_layers"], 0)
 
     def test_no_trim_when_no_mtp(self):

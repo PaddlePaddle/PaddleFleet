@@ -31,6 +31,31 @@ outbound / bidirectional counterpart. The export *strategy* (whitelist/blacklist
 orchestration, trainer I/O) lives above this layer, in the caller (erniebot).
 """
 
+import functools
+
+
+def hidden_act_to_hf(act):
+    """Fleet ``hidden_act`` (callable or str) -> HF ``hidden_act`` name.
+
+    Reverses ``TransformerConfig._process_attribute`` (``transformer_config.py``),
+    which turns an HF string into a callable: ``"gelu_pytorch_tanh"`` becomes
+    ``functools.partial(F.gelu, approximate=True)``, ``"situ"`` a named function,
+    and any other name ``n`` becomes ``getattr(F, n)`` (whose ``__name__`` is
+    ``n``). A ``partial`` has no ``__name__``, so reading it directly would raise
+    ``AttributeError``; the gelu-tanh partial is matched structurally instead.
+    """
+    if isinstance(act, str):
+        return act
+    if isinstance(act, functools.partial):
+        func_name = getattr(act.func, "__name__", None)
+        if func_name == "gelu" and act.keywords.get("approximate") is True:
+            return "gelu_pytorch_tanh"
+        if func_name is not None:
+            return func_name
+        return act
+    return getattr(act, "__name__", act)
+
+
 # rope_scaling structural map: HF nested key -> Fleet flat field name.
 ROPE_SCALING_KEYMAP = {
     "type": "rope_type",
@@ -56,14 +81,12 @@ FLEET_HF_FIELD_MAPPING = [
         "params_dtype",
         "torch_dtype",
         lambda v: str(v).replace("paddle.", ""),
-        lambda v: f"paddle.{v}"
-        if isinstance(v, str) and not v.startswith("paddle.")
-        else v,
+        lambda v: v.replace("paddle.", "") if isinstance(v, str) else v,
     ),
     (
         "hidden_act",
         "hidden_act",
-        lambda v: v.__name__ if callable(v) else v,
+        hidden_act_to_hf,
         None,
     ),
     ("window_attn_skip_freq", "hybrid_layer_pattern", None, None),
@@ -210,14 +233,24 @@ def pack_rope_scaling(raw, provider=None):
 
 
 def unpack_rope_scaling(rope_scaling):
-    """HF nested rope_scaling dict -> Fleet flat fields dict."""
+    """HF nested rope_scaling dict -> Fleet flat fields dict.
+
+    The RoPE type accepts both the current HF canonical key ``rope_type`` and
+    its legacy alias ``type`` (``ROPE_SCALING_KEYMAP`` only carries ``type``);
+    ``rope_type`` wins when both are present. Without this a modern config such
+    as ``{"rope_type": "yarn", "factor": 4}`` would drop the YaRN type and fall
+    back to plain RoPE.
+    """
     if not rope_scaling or not isinstance(rope_scaling, dict):
         return {}
-    return {
+    out = {
         fleet_key: rope_scaling[hf_key]
         for hf_key, fleet_key in ROPE_SCALING_KEYMAP.items()
         if hf_key in rope_scaling
     }
+    if "rope_type" in rope_scaling:
+        out["rope_type"] = rope_scaling["rope_type"]
+    return out
 
 
 def is_active_window(sw):
@@ -266,23 +299,45 @@ SWA_MARKER_HF_KEYS = [
 
 
 def is_swa_config(hf_config):
-    """Whether an HF config declares SWA-specific fields."""
+    """Whether an HF config declares SWA-specific companion fields."""
     return any(
         key in SWA_MARKER_HF_KEYS or key.startswith("swa_") for key in hf_config
     )
 
 
-def swa_aware_import_rules(hf_config, rules):
-    """Drop the ``sliding_window`` -> ``csa_window_size`` rename for SWA configs.
+# HF markers that identify a DSv4 CSA config, whose ``sliding_window`` is the
+# CSA window (renamed to ``csa_window_size`` on import). ``compress_ratios`` is
+# the HF name of ``csa_compress_ratios``; ``csa_compress_ratios`` covers a
+# Fleet-native input; ``experimental_attention_variant == "dsv4_hybrid"`` is the
+# structural flag. Any other ``sliding_window`` is a native SWA window.
+CSA_MARKER_HF_KEYS = ("compress_ratios", "csa_compress_ratios")
 
-    On export the HF ``sliding_window`` field has a single owner: SWA writes it
-    natively, CSA writes it through the ``csa_window_size`` rename, and
-    ``check_window_export_conflict`` rejects a config declaring both. Import has
-    to infer that owner from the config alone, so a config carrying any SWA
-    companion field keeps ``sliding_window`` as itself rather than reviving it as
-    a CSA window.
+
+def is_csa_config(hf_config):
+    """Whether an HF config's ``sliding_window`` is a DSv4 CSA window.
+
+    Only a dsv4_hybrid / compress-ratio config routes HF ``sliding_window`` to
+    Fleet ``csa_window_size``. A standard HF ``sliding_window`` (e.g. Mistral's
+    bare ``sliding_window=4096``) carries no CSA markers and must keep its
+    native name on import.
     """
-    if "sliding_window" not in rules or not is_swa_config(hf_config):
+    if hf_config.get("experimental_attention_variant") == "dsv4_hybrid":
+        return True
+    return any(key in hf_config for key in CSA_MARKER_HF_KEYS)
+
+
+def swa_aware_import_rules(hf_config, rules):
+    """Keep the ``sliding_window`` -> ``csa_window_size`` rename only for CSA.
+
+    On import HF ``sliding_window`` has two possible owners: DSv4 CSA, where it
+    is the compressed-attention window and must become ``csa_window_size``, and
+    everything else (native SWA -- Mistral's bare ``sliding_window``, or a Fleet
+    SWA config carrying ``swa_*`` companions), which must keep its own name.
+    The rename therefore applies *only* when the config carries CSA markers;
+    otherwise ``sliding_window`` passes through unchanged, so a standard HF SWA
+    config is no longer silently re-homed onto ``csa_window_size``.
+    """
+    if "sliding_window" not in rules or is_csa_config(hf_config):
         return rules
     return {
         hf_key: spec
@@ -292,11 +347,14 @@ def swa_aware_import_rules(hf_config, rules):
 
 
 # Per-layer list fields whose trailing MTP-layer entries are trimmed on import.
-# ``compress_ratios`` is the HF-side rename of ``csa_compress_ratios``; both are
-# listed so the same key set works whether the input is an HF ``config.json``
-# (renamed) or a Fleet-native ``model_config.json`` (original name).
+# Both Fleet-native and HF-renamed names are listed so the same key set works
+# whether the input is an HF ``config.json`` or a Fleet ``model_config.json``:
+# ``compress_ratios`` <- ``csa_compress_ratios`` and ``hybrid_layer_pattern`` <-
+# ``window_attn_skip_freq``. Missing the HF name leaves an over-long list that
+# fails ``TransformerConfig`` validation once ``num_nextn_predict_layers`` is 0.
 MTP_TRIM_KEYS = (
     "window_attn_skip_freq",
+    "hybrid_layer_pattern",
     "csa_compress_ratios",
     "compress_ratios",
 )
