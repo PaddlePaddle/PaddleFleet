@@ -272,6 +272,26 @@ class TestTeraMoEExpertForward(unittest.TestCase):
         self.assertEqual(self.expert.weight1.data_ptr(), w1_ptr)
         self.assertEqual(self.expert.weight2.data_ptr(), w2_ptr)
 
+    def test_forward_3d_input_reshape(self):
+        """3D input [B, S, H] is flattened to 2D before the kernel and the
+        output is reshaped back to 3D (covers the ndim==3 branch)."""
+        B, S = 2, 8
+        mock_buffer = MagicMock()
+        fake_out = paddle.randn([B * S, self.H], dtype=paddle.bfloat16)
+        mock_buffer.teramoe_autograd.return_value = fake_out
+
+        x = paddle.randn([B, S, self.H], dtype=paddle.bfloat16)
+        idx = paddle.randint(0, self.E, [B * S, self.K])
+        scores = F.softmax(paddle.randn([B * S, self.K]), axis=-1)
+
+        out = self.expert(x, idx, scores, self.E, mock_buffer)
+
+        # hidden_states handed to the kernel is the flattened 2D view.
+        called_hs = mock_buffer.teramoe_autograd.call_args[0][0]
+        self.assertEqual(list(called_hs.shape), [B * S, self.H])
+        # output is reshaped back to the original 3D layout.
+        self.assertEqual(list(out.shape), [B, S, self.H])
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Test 4: MoELayer instantiation with TeraMoE
@@ -478,6 +498,63 @@ class TestTeraMoEMoELayerForward(unittest.TestCase):
         self.assertEqual(kw["compute_batch_size"], 4096)
         self.assertEqual(kw["combine_start_head_percent"], 70)
 
+    @patch("paddlefleet.transformer.moe.moe_layer.get_teramoe_buffer")
+    def test_teramoe_forward_method(self, mock_get):
+        """teramoe_forward (the expert-parallel routing path) runs
+        _project_to_latent + _run_teramoe_forward end to end. forward() with
+        ep=1 never reaches it, so exercise it directly."""
+        layer = self._build()
+        buf = self._mock_buffer()
+        mock_get.return_value = buf
+
+        T = self.B * self.S
+        x = paddle.randn([T, self.H], dtype=paddle.bfloat16)
+        topk_w = F.softmax(paddle.randn([T, self.K]), axis=-1).astype(
+            paddle.bfloat16
+        )
+        topk_i = paddle.randint(0, self.E, [T, self.K])
+
+        with paddle.amp.auto_cast(level="O2", dtype="bfloat16"):
+            out = layer.teramoe_forward(
+                x, topk_weights=topk_w, topk_indices=topk_i
+            )
+
+        mock_get.assert_called_once()
+        buf.teramoe_autograd.assert_called_once()
+        self.assertEqual(list(out.shape), [T, self.H])
+
+    @patch("paddlefleet.transformer.moe.moe_layer.get_teramoe_buffer")
+    def test_run_teramoe_forward_passes_config_kwargs(self, mock_get):
+        """_run_teramoe_forward fetches the buffer for the moe group and
+        forwards the four teramoe tuning knobs to the expert."""
+        layer = self._build()
+        buf = self._mock_buffer()
+        mock_get.return_value = buf
+
+        T = self.B * self.S
+        x = paddle.randn([T, self.H], dtype=paddle.bfloat16)
+        topk_w = F.softmax(paddle.randn([T, self.K]), axis=-1).astype(
+            paddle.bfloat16
+        )
+        topk_i = paddle.randint(0, self.E, [T, self.K])
+
+        with paddle.amp.auto_cast(level="O2", dtype="bfloat16"):
+            layer._run_teramoe_forward(x, topk_w, topk_i)
+
+        mock_get.assert_called_once_with(
+            layer.moe_group, layer.teramoe_dispatch_sms
+        )
+        kw = buf.teramoe_autograd.call_args[1]
+        self.assertEqual(kw["num_dispatch_sms"], layer.teramoe_dispatch_sms)
+        self.assertEqual(kw["num_combine_sms"], layer.teramoe_combine_sms)
+        self.assertEqual(
+            kw["compute_batch_size"], layer.teramoe_compute_batch_size
+        )
+        self.assertEqual(
+            kw["combine_start_head_percent"],
+            layer.teramoe_combine_start_percent,
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Test 6: TeraMoE vs SonicMoE weight equivalence
@@ -527,6 +604,48 @@ class TestTeraMoEVsSonicMoEWeightEquivalence(unittest.TestCase):
         sonic.convert_weights_to_sonic_layout()
         self.assertLess(calc_diff(tera.weight1, sonic.weight1), 1e-10)
         self.assertLess(calc_diff(tera.weight2, sonic.weight2), 1e-10)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Test 7: get_teramoe_buffer caching in fused_a2a
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@unittest.skipUnless(
+    paddlefleet_ops.is_teramoe_available(),
+    "TeraMoE not available",
+)
+class TestGetTeraMoEBuffer(unittest.TestCase):
+    """get_teramoe_buffer creates one Buffer per process group and reuses it."""
+
+    def test_buffer_cached_and_rebuilt_per_group(self):
+        from paddlefleet.transformer.moe import fused_a2a
+
+        def make_buffer(group, **kwargs):
+            buf = MagicMock()
+            buf.group = group
+            return buf
+
+        group_a = object()
+        group_b = object()
+        saved = fused_a2a._teramoe_buffer
+        fused_a2a._teramoe_buffer = None
+        try:
+            with patch.object(fused_a2a, "teramoe") as mock_tera:
+                mock_tera.Buffer.side_effect = make_buffer
+
+                b1 = fused_a2a.get_teramoe_buffer(group_a, 48)
+                b2 = fused_a2a.get_teramoe_buffer(group_a, 48)
+                # Same group -> buffer reused, Buffer constructed once.
+                self.assertIs(b1, b2)
+                self.assertEqual(mock_tera.Buffer.call_count, 1)
+
+                b3 = fused_a2a.get_teramoe_buffer(group_b, 48)
+                # Different group -> a fresh buffer is built.
+                self.assertIsNot(b3, b1)
+                self.assertEqual(mock_tera.Buffer.call_count, 2)
+        finally:
+            fused_a2a._teramoe_buffer = saved
 
 
 if __name__ == "__main__":

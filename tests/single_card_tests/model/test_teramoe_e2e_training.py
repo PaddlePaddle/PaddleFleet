@@ -36,10 +36,12 @@ Run with:
 
 import os
 import sys
+import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
 import paddle.nn.functional as F
+import paddlefleet_ops
 from paddle.distributed import fleet
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../../src"))
@@ -340,8 +342,22 @@ def run_training(mock_get_buffer):
         print("=" * 60)
         print("  SOME CHECKS FAILED")
         print("=" * 60)
-        sys.exit(1)
+    return all_ok
+
+
+@unittest.skipUnless(
+    paddlefleet_ops.is_teramoe_available(),
+    "TeraMoE not available",
+)
+class TestTeraMoEE2ETraining(unittest.TestCase):
+    """Collectible wrapper so the E2E mini training loop runs under pytest and
+    exercises the TeraMoE MoELayer forward/backward/optimizer path."""
+
+    def test_e2e_training(self):
+        self.assertTrue(run_training(), "TeraMoE E2E training checks failed")
 
 
 if __name__ == "__main__":
-    run_training()
+    all_ok = run_training()
+    if not all_ok:
+        sys.exit(1)
