@@ -2189,5 +2189,50 @@ class TestQBFusionEndToEndBitExact(unittest.TestCase):
         self._run(paddle.to_tensor(ids))
 
 
+class TestNonQBFusionForward(unittest.TestCase):
+    """Covers the non-QB branch of the fused router path.
+
+    When ``moe_topk_fusion=True`` and ``topk_method != "quantile_balancing"``
+    (e.g. ``noaux_tc``), ``TopKRouter.forward`` takes the ``else`` branch that
+    lets the Triton kernel own normalization (``norm_gate_logits`` is passed
+    through). The QB fusion tests never reach it because they always run with
+    ``topk_method == "quantile_balancing"``.
+    """
+
+    def setUp(self):
+        paddle.seed(2027)
+        np.random.seed(2027)
+
+    def test_noaux_tc_fusion_forward_runs(self):
+        router = _build_qb_router(
+            topk_method="noaux_tc",
+            moe_topk_fusion=True,
+        )
+        # A non-uniform, non-zero bias makes the selection genuinely depend on
+        # it, so the kernel path is not trivially equivalent to an unbiased one.
+        bias = np.linspace(-0.1, 0.1, router.num_experts).astype(np.float32)
+        router.e_score_correction_bias.set_value(paddle.to_tensor(bias))
+
+        hidden = paddle.randn([4, 6, 32])
+        _, top_gate, top_idx, _, _, _, _, _ = router(hidden)
+
+        # Shapes agree and select num_experts_per_tok experts per token.
+        self.assertEqual(top_gate.shape, top_idx.shape)
+        self.assertEqual(top_idx.shape[-1], router.num_experts_per_tok)
+        # Selected indices are valid experts.
+        idx_np = top_idx.numpy()
+        self.assertTrue((idx_np >= 0).all())
+        self.assertTrue((idx_np < router.num_experts).all())
+        # norm_topk_prob=True -> the kernel normalizes the selected gates to 1.
+        np.testing.assert_allclose(
+            top_gate.sum(axis=-1).numpy().reshape(-1),
+            np.ones(
+                top_idx.size // router.num_experts_per_tok, dtype=np.float32
+            ),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

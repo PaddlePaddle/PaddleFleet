@@ -37,7 +37,7 @@ from .utils import enable_compat_on_triton_kernel
 
 @enable_compat_on_triton_kernel
 @triton.jit
-def _fwd_kernel(
+def _fwd_kernel(  # pragma: no cover - triton kernel body compiles to PTX, not python-instrumentable
     ptr_gate,
     ptr_choice,
     ptr_out_probs,
