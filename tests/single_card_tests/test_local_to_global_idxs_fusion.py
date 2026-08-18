@@ -47,10 +47,16 @@ def _assert_bitwise(case, ref, got):
 
 
 def _make_idxs(b, sq, topk, seqlen_kv, dtype, rng, pad_ratio=0.3):
-    """Random indices in [0, seqlen_kv), ``pad_ratio`` of them set to -1."""
+    """Random indices in [0, seqlen_kv), ``pad_ratio`` of them set to -1.
+
+    The pad mask is drawn as int16 rather than float64: these tables reach tens
+    of millions of entries and the mask would otherwise be the single largest
+    host allocation in the file.
+    """
     shape = (b, sq, topk)
     idxs = rng.integers(0, max(seqlen_kv, 1), size=shape).astype(np.int64)
-    idxs[rng.random(shape) < pad_ratio] = -1
+    pad = rng.integers(0, 1000, size=shape, dtype=np.int16)
+    idxs[pad < int(pad_ratio * 1000)] = -1
     return paddle.to_tensor(idxs, dtype=dtype)
 
 
@@ -88,10 +94,29 @@ class TestLocalToGlobalFlatFusion(unittest.TestCase):
         _assert_bitwise(case, ref, got)
         return ref
 
+    def test_smallest_possible_launch(self):
+        """One row, one column: the cheapest possible kernel launch.
+
+        Deliberately first in the file so the CI log distinguishes "the very
+        first Triton compile stalls" (no progress at all) from "the volume of a
+        later test is the problem" (this one's dot appears, then the stall).
+        """
+        idxs = paddle.to_tensor([[[3]]], dtype="int32")
+        got = local_to_global_flat_triton(idxs, 8)
+        self.assertEqual(list(got.shape), [1, 1])
+        self.assertEqual(int(got[0, 0]), 3)
+
     def test_ernielite_hca_shape(self):
-        """Real ernielite HCA shape: sq_local=16384, window+compress=640."""
+        """Real ernielite HCA widths: window+compress=640, seqlen_kv=65536+512.
+
+        ``sq`` is only a grid multiplier -- the kernel is one program per row and
+        ``cdiv(topk, BLOCK_K)`` along topk -- so it is kept small here. The real
+        sq_local=16384 costs 10.5M entries per dtype and, with the eager
+        reference plus the host round-trip in the comparison, dominated this
+        file's runtime.
+        """
         for dtype in ("int32", "int64"):
-            idxs = _make_idxs(1, 16384, 640, 65536 + 512, dtype, self.rng)
+            idxs = _make_idxs(1, 1024, 640, 65536 + 512, dtype, self.rng)
             self._check(f"hca[{dtype}]", idxs, 65536 + 512)
 
     def test_shapes_and_dtypes(self):
@@ -443,9 +468,12 @@ class TestBitwiseAgainstOracle(unittest.TestCase):
 
     def test_ernielite_real_shapes(self):
         """The two index-table widths this actually runs on in ernielite."""
+        # sq trimmed for the same reason as test_ernielite_hca_shape; the two
+        # topk widths and the seqlen_kv that sets the int32 offset range -- the
+        # things this test is about -- are the real ones.
         cases = [
-            (1, 16384, 128 + 512, 65536 + 512),  # HCA: window + compressed
-            (1, 16384, 128 + 2048, 65536 + 512),  # DSA: window + index_topk
+            (1, 1024, 128 + 512, 65536 + 512),  # HCA: window + compressed
+            (1, 1024, 128 + 2048, 65536 + 512),  # DSA: window + index_topk
         ]
         for b, sq, topk, skv in cases:
             for dtype in ("int32", "int64"):
