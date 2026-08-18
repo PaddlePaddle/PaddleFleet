@@ -175,119 +175,6 @@ def _rope_pe_gather_kernel(
 
 
 @triton.jit
-def _rope_transposed_kernel(
-    T,
-    T_OUT,
-    COS,
-    SIN,
-    nope_dim,
-    pe_dim: tl.constexpr,
-    head_num: tl.constexpr,
-    stride_in_seq,
-    stride_in_nheads,
-    stride_out_seq,
-    stride_out_nheads,
-    BLOCK_H: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    """Rotate the pe channels and write the whole row head-major.
-
-    Same arithmetic as ``_rope_mla_inplace_fwd_kernel`` with
-    ``OUT_OF_PLACE=True``, but with independent output strides, so a
-    ``[B*S, H, D]`` attention output becomes the ``[H, B*S, D]`` layout the
-    weight-gradient GEMM needs in a single pass. Folding the rotation into the
-    transpose replaces one 2N RoPE pass plus Paddle's own 2N
-    ``TilingSwapDim1And2`` with one 2N pass.
-    """
-    pid_m = tl.program_id(axis=0).to(tl.int64)
-    pid_head = tl.program_id(axis=1).to(tl.int64)
-
-    half: tl.constexpr = pe_dim // 2
-
-    cos_left = tl.load(COS + pid_m * pe_dim + tl.arange(0, half))
-    sin_left = tl.load(SIN + pid_m * pe_dim + tl.arange(0, half))
-    cos_right = tl.load(COS + pid_m * pe_dim + half + tl.arange(0, half))
-    sin_right = tl.load(SIN + pid_m * pe_dim + half + tl.arange(0, half))
-    cos_left = cos_left.expand_dims(0).broadcast_to(BLOCK_H, half)
-    sin_left = sin_left.expand_dims(0).broadcast_to(BLOCK_H, half)
-    cos_right = cos_right.expand_dims(0).broadcast_to(BLOCK_H, half)
-    sin_right = sin_right.expand_dims(0).broadcast_to(BLOCK_H, half)
-
-    T = T + pid_m * stride_in_seq + pid_head * BLOCK_H * stride_in_nheads
-    T_OUT = (
-        T_OUT + pid_m * stride_out_seq + pid_head * BLOCK_H * stride_out_nheads
-    )
-    in_head = tl.arange(0, BLOCK_H)[:, None] * stride_in_nheads.to(tl.int64)
-    out_head = tl.arange(0, BLOCK_H)[:, None] * stride_out_nheads.to(tl.int64)
-    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
-
-    # nope channels pass straight through
-    offs_d = tl.arange(0, BLOCK_D)
-    nope_mask = head_mask & (offs_d[None, :] < nope_dim)
-    tl.store(
-        T_OUT + out_head + offs_d[None, :],
-        tl.load(T + in_head + offs_d[None, :], mask=nope_mask),
-        mask=nope_mask,
-    )
-
-    in_off = in_head + nope_dim + tl.arange(0, pe_dim)[None, :]
-    out_off = out_head + nope_dim + tl.arange(0, pe_dim)[None, :]
-    x = tl.load(T + in_off, mask=head_mask)
-    x = tl.reshape(x, (BLOCK_H, half, 2))
-    x_1, x_2 = tl.split(x)
-
-    y_left = _mul_round_bf16(x_1, cos_left).to(tl.float32) - _mul_round_bf16(
-        x_2, sin_left
-    ).to(tl.float32)
-    y_right = _mul_round_bf16(x_2, cos_right).to(tl.float32) + _mul_round_bf16(
-        x_1, sin_right
-    ).to(tl.float32)
-
-    y = tl.join(y_left, y_right)
-    y = tl.reshape(y, (BLOCK_H, pe_dim))
-    tl.store(T_OUT + out_off, y, mask=head_mask)
-
-
-@triton.jit
-def _transpose_heads_first_kernel(
-    SRC,
-    DST,
-    d_dim,
-    head_num: tl.constexpr,
-    src_seq_stride,
-    src_head_stride,
-    dst_seq_stride,
-    dst_head_stride,
-    BLOCK_H: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    """``[M, H, D] -> [H, M, D]``.
-
-    Each program moves one token's block of heads, so both sides see ``D``-element
-    contiguous runs. Paddle's ``TilingSwapDim1And2`` only reaches 2.52 TB/s on
-    this shape (32x32 tiles, tuned for small trailing dims).
-    """
-    pid_m = tl.program_id(axis=0).to(tl.int64)
-    pid_head = tl.program_id(axis=1).to(tl.int64)
-
-    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
-    offs_d = tl.arange(0, BLOCK_D)
-    mask = head_mask & (offs_d[None, :] < d_dim)
-
-    src = SRC + pid_m * src_seq_stride + pid_head * BLOCK_H * src_head_stride
-    dst = DST + pid_m * dst_seq_stride + pid_head * BLOCK_H * dst_head_stride
-    src_off = (
-        tl.arange(0, BLOCK_H)[:, None] * src_head_stride.to(tl.int64)
-        + offs_d[None, :]
-    )
-    dst_off = (
-        tl.arange(0, BLOCK_H)[:, None] * dst_head_stride.to(tl.int64)
-        + offs_d[None, :]
-    )
-    tl.store(dst + dst_off, tl.load(src + src_off, mask=mask), mask=mask)
-
-
-@triton.jit
 def _pe_scatter_kernel(
     SRC,
     DST,
@@ -357,41 +244,6 @@ def rope_pe_to_compact(
     return out
 
 
-def rope_full_to_transposed(
-    t: paddle.Tensor,
-    cos: paddle.Tensor,
-    sin: paddle.Tensor,
-    nope_dim: int,
-    pe_dim: int,
-) -> paddle.Tensor:
-    """RoPE the pe channels of ``t`` [B*S, H, D] into a fresh [H, B*S, D] buffer.
-
-    Bitwise equal to
-    ``fused_apply_mla_rope_inplace(t, ...).transpose([1, 0, 2])`` in one pass
-    instead of two.
-    """
-    _check_rope_args(t, cos, sin, nope_dim, pe_dim)
-    m, h, d = t.shape
-    out = paddle.empty([h, m, d], dtype=t.dtype)
-    block_h = _get_block_h(h)
-    _rope_transposed_kernel[(m, triton.cdiv(h, block_h))](
-        t,
-        out,
-        cos,
-        sin,
-        nope_dim,
-        pe_dim,
-        h,
-        t.stride(0),
-        t.stride(1),
-        out.stride(1),
-        out.stride(0),
-        block_h,
-        triton.next_power_of_2(max(nope_dim, 1)),
-    )
-    return out
-
-
 def rope_full_out_of_place(
     t: paddle.Tensor,
     cos: paddle.Tensor,
@@ -454,32 +306,6 @@ def rope_pe_transpose_inplace_(
     return t
 
 
-def transpose_heads_first(t: paddle.Tensor) -> paddle.Tensor:
-    """``[M, H, D] -> [H, M, D]`` for a contiguous-last-dim tensor."""
-    if t.dim() != 3:
-        raise ValueError(f"t must be [M, H, D]; got {t.shape}")
-    if t.stride(-1) != 1:
-        raise ValueError("t must have a contiguous last dim")
-    m, h, d = t.shape
-    if h % _get_block_h(h) != 0:
-        raise ValueError(f"head_num {h} not divisible by its BLOCK_H")
-    out = paddle.empty([h, m, d], dtype=t.dtype)
-    block_h = _get_block_h(h)
-    _transpose_heads_first_kernel[(m, triton.cdiv(h, block_h))](
-        t,
-        out,
-        d,
-        h,
-        t.stride(0),
-        t.stride(1),
-        out.stride(1),
-        out.stride(0),
-        block_h,
-        triton.next_power_of_2(d),
-    )
-    return out
-
-
 def scatter_pe_slice_(
     t: paddle.Tensor, compact: paddle.Tensor, nope_dim: int, pe_dim: int
 ) -> paddle.Tensor:
@@ -527,14 +353,21 @@ class InvRopeVhaPostmixFusion(paddle.autograd.PyLayer):
       identical.
     - The weight gradient ``dM[h,h'] = sum_{t,c} dOut[t,h,c] * O_roped[t,h',c]``
       contracts over the *full* channel axis, so it cannot be assembled from two
-      partial sums without changing the reduction tree. A GEMM can only express
-      that contraction when the ``(t,c)`` pair is contiguous, i.e. with
-      head-major ``[H, B*S, D]`` operands -- which is why Paddle's own matmul
-      backward spends 73% of its time in two ``TilingSwapDim1And2`` passes
-      building them. Here the same two buffers are produced directly:
-      ``rope_full_to_transposed`` folds the RoPE into the transpose of ``O``, and
-      ``transpose_heads_first`` handles ``dOut``. Same operands, same GEMM, same
-      bits, but both passes run at the HBM roof instead of 2.5 TB/s.
+      partial sums without changing the reduction tree. The rotated tensor is
+      therefore rebuilt here and both gradients are taken from
+      ``paddle._C_ops.matmul_grad`` -- the same op the unfused postmix GEMM's
+      backward calls, so they match by construction on every architecture.
+
+      Hand-rolling that GEMM over head-major ``[H, B*S, D]`` operands (which is
+      what ``matmul_grad`` internally builds with two ``TilingSwapDim1And2``
+      passes at 2.5 TB/s) is ~870us/layer faster at the production shape, and
+      was bitwise equal across every shape tested on sm10.3 -- but not on sm90,
+      where CI caught ``head-major wgrad (128,4,64)`` differing in 8/16 elements.
+      For a small ``[nh,nh] x K`` GEMM cuBLAS selects its algorithm per
+      architecture, so no shape-based gate can make that route safe and it was
+      dropped. Only the *forward* split still rests on a cuBLAS property
+      (``matmul(M, X[..., a:b]) == matmul(M, X)[..., a:b]``), which is asserted
+      over a wide shape sweep in the unit test.
 
     Nothing is ever mutated in place on the saved attention output, which the CSA
     backward also reads for its ``delta = rowsum(dO * O)``.
@@ -559,39 +392,29 @@ class InvRopeVhaPostmixFusion(paddle.autograd.PyLayer):
         nope_dim, pe_dim = ctx.nope_dim, ctx.pe_dim
         if not d_out.is_contiguous():
             d_out = d_out.contiguous()
-        bs, nh, d = o_flat.shape
 
-        d_m = None
-        d_o = None
-        if ctx.m_needs_grad and nh & (nh - 1):
-            # Degenerate head counts (not a power of two) turn the weight
-            # gradient into an [nh, nh] x K GEMM small enough that cuBLAS picks
-            # its algorithm unpredictably, and the head-major operands below
-            # then stop being bitwise equal to Paddle's own matmul backward
-            # (observed at nh=3). Materialise the rotated tensor and let Paddle
-            # do it -- correctness first; no real config lands here.
-            o_roped = rope_full_out_of_place(o_flat, cos, sin, nope_dim, pe_dim)
-            d_m, d_o = paddle._C_ops.matmul_grad(
-                m, o_roped, d_out, False, False
-            )
-            del o_roped
-        elif ctx.m_needs_grad:
-            # Head-major operands, built here so the RoPE rides along in the
-            # same pass. Done before the activation gradient so the two 1N
-            # buffers are freed before `d_o` is allocated: peak 4N, not 5N.
-            x_t = rope_full_to_transposed(o_flat, cos, sin, nope_dim, pe_dim)
-            d_out_t = transpose_heads_first(d_out)
-            d_m = paddle.matmul(
-                d_out_t.reshape([nh, bs * d]),
-                x_t.reshape([nh, bs * d]),
-                transpose_y=True,
-            )
-            del x_t, d_out_t
-
-        if d_o is None:
+        if not ctx.m_needs_grad:
+            # Frozen postmix (an indexer-only warmup stage, say): only the
+            # activation gradient is wanted, and that never needs the rotated
+            # operand, so skip rebuilding it.
             d_o = paddle.matmul(m, d_out, transpose_x=True)
-        # Push the gradient back through the rotation exactly as the standalone
-        # RoPE op's backward does.
+            rope_pe_transpose_inplace_(d_o, cos, sin, nope_dim, pe_dim)
+            return d_o, None, None, None
+
+        # Rebuild the rotated tensor and hand both gradients to the very op the
+        # unfused path used, so they come out of the same kernels by
+        # construction rather than by a cuBLAS coincidence. Hand-rolling the
+        # weight-gradient GEMM over head-major operands is ~870us/layer faster
+        # at the production shape and was bitwise equal on sm10.3, but *not* on
+        # sm90 (CI caught `head-major wgrad (128,4,64)` differing by 8/16
+        # elements): for a small [nh,nh] x K GEMM cuBLAS picks its algorithm per
+        # architecture, so no shape-based gate can make that route safe.
+        o_roped = rope_full_out_of_place(o_flat, cos, sin, nope_dim, pe_dim)
+        d_m, d_o = paddle._C_ops.matmul_grad(m, o_roped, d_out, False, False)
+        del o_roped
+
+        # d_o is the gradient wrt the rotated tensor; push it back through the
+        # rotation exactly as the standalone RoPE op's backward does.
         rope_pe_transpose_inplace_(d_o, cos, sin, nope_dim, pe_dim)
         return d_o, d_m, None, None
 

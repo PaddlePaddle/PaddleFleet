@@ -49,10 +49,8 @@ from paddlefleet.triton_ops.inv_rope_vha_postmix_fusion import (
     build_mla_rope_cos_sin,
     fused_inv_rope_vha_postmix,
     rope_full_out_of_place,
-    rope_full_to_transposed,
     rope_pe_to_compact,
     scatter_pe_slice_,
-    transpose_heads_first,
 )
 
 # ernielite_layer43_pretrain_non_absorbed_mqa_hca_dsa_sparse_loss.yaml at 64K
@@ -92,10 +90,10 @@ def _make_inputs(bs: int, seed: int = 0):
     return o, u, v, freqs, d_out
 
 
-def _make_m(u: paddle.Tensor, v: paddle.Tensor) -> paddle.Tensor:
+def _make_m(u: paddle.Tensor, v: paddle.Tensor, nh: int = NH) -> paddle.Tensor:
     """Same construction as _apply_vha_postmix's ungrouped branch."""
     m = paddle.matmul(v, u, transpose_y=True)
-    return m + paddle.eye(NH, dtype=m.dtype)
+    return m + paddle.eye(nh, dtype=m.dtype)
 
 
 def _leaves(o, u, v):
@@ -283,44 +281,64 @@ class TestInvRopeVhaPostmixFusion(unittest.TestCase):
 
 
 class TestFusionAssumptions(unittest.TestCase):
-    """Pin the library behaviours the fusion's exactness rests on."""
+    """Pin the library behaviour the fusion's exactness rests on."""
 
     def test_split_n_gemm_is_bitwise(self) -> None:
         """matmul(M, X[..., a:b]) == matmul(M, X)[..., a:b].
 
         The postmix GEMM contracts the head axis, so the channel axis is a pure
-        N dimension and splitting it cannot reorder the accumulation. This is a
-        cuBLAS property, not a documented guarantee -- if a version bump breaks
-        it, the whole channel-split fusion is unsound and this must fail loudly.
+        N dimension and splitting it cannot reorder the accumulation. This is the
+        *only* cuBLAS property the fusion still relies on (the weight gradient
+        goes through `matmul_grad` precisely because a hand-rolled GEMM there
+        turned out to be architecture-dependent), so sweep it widely: small and
+        large head counts, powers of two and not, and both split points.
         """
-        paddle.seed(0)
-        m = _make_m(
-            paddle.randn([NH, RANK], "bfloat16"),
-            paddle.randn([NH, RANK], "bfloat16"),
-        )
-        x = paddle.randn([BS, NH, VD], "bfloat16")
-        with paddle.no_grad():
-            full = paddle.matmul(m, x)
-            _check_equal(
-                paddle.matmul(m, x[..., :NOPE]), full[..., :NOPE], "nope split"
+        for bs, nh, vd, pe in (
+            (BS, NH, VD, PE),
+            (PROD_BS, NH, VD, PE),
+            (1023, NH, VD, PE),
+            (1, NH, VD, PE),
+            (128, 4, 64, 32),
+            (128, 4, 64, 16),
+            (333, 8, 128, 32),
+            (97, 32, 96, 32),
+            (7, 3, 40, 8),
+            (64, 16, 256, 64),
+        ):
+            nope = vd - pe
+            rank = max(1, nh // 4)
+            paddle.seed(bs + nh)
+            m = _make_m(
+                paddle.randn([nh, rank], "bfloat16"),
+                paddle.randn([nh, rank], "bfloat16"),
+                nh,
             )
-            _check_equal(
-                paddle.matmul(m, x[..., NOPE:]), full[..., NOPE:], "pe split"
-            )
-            # the pe operand is a compact buffer in the fused path, not a view
-            _check_equal(
-                paddle.matmul(m, x[..., NOPE:].contiguous()),
-                full[..., NOPE:],
-                "pe split from a compact operand",
-            )
+            x = paddle.randn([bs, nh, vd], "bfloat16")
+            tag = f"({bs},{nh},{vd},pe={pe})"
+            with paddle.no_grad():
+                full = paddle.matmul(m, x)
+                _check_equal(
+                    paddle.matmul(m, x[..., :nope]),
+                    full[..., :nope],
+                    f"nope split {tag}",
+                )
+                _check_equal(
+                    paddle.matmul(m, x[..., nope:]),
+                    full[..., nope:],
+                    f"pe split {tag}",
+                )
+                # the pe operand is a compact buffer in the fused path, not a view
+                _check_equal(
+                    paddle.matmul(m, x[..., nope:].contiguous()),
+                    full[..., nope:],
+                    f"pe split from a compact operand {tag}",
+                )
 
     def test_backward_formulas_match_matmul_grad(self) -> None:
-        """The primitives the fused backward calls == autograd's own results.
+        """`matmul_grad` and the explicit dgrad == autograd's own results.
 
-        The fused backward assembles the two gradients itself: an explicit
-        dgrad GEMM, and a wgrad GEMM over head-major operands. Both must land on
-        exactly what Paddle's matmul backward produces, so pin them here (plus
-        `matmul_grad` and `einsum`, the two documented fallbacks).
+        The fused backward takes both gradients from `matmul_grad` and computes
+        the frozen-postmix dgrad explicitly, so pin both against autograd.
         """
         paddle.seed(0)
         u = paddle.randn([NH, RANK], "bfloat16")
@@ -341,15 +359,6 @@ class TestFusionAssumptions(unittest.TestCase):
                 x_l.grad,
                 "explicit dgrad",
             )
-            _check_equal(
-                paddle.matmul(
-                    transpose_heads_first(d_out).reshape([NH, BS * VD]),
-                    transpose_heads_first(x_d).reshape([NH, BS * VD]),
-                    transpose_y=True,
-                ),
-                m_l.grad,
-                "wgrad over head-major operands",
-            )
             d_m, d_x = paddle._C_ops.matmul_grad(m_d, x_d, d_out, False, False)
             _check_equal(d_m, m_l.grad, "matmul_grad wgrad")
             _check_equal(d_x, x_l.grad, "matmul_grad dgrad")
@@ -358,72 +367,6 @@ class TestFusionAssumptions(unittest.TestCase):
                 m_l.grad,
                 "einsum wgrad",
             )
-
-    def test_head_major_wgrad_bitwise_across_shapes(self) -> None:
-        """Pin the cuBLAS heuristic the head-major weight gradient relies on.
-
-        The fast path replaces Paddle's two `TilingSwapDim1And2` passes with its
-        own head-major operands and calls the GEMM itself. That only stays
-        bitwise equal while cuBLAS keeps picking the same algorithm, which it
-        does for power-of-two head counts but *not* for degenerate ones (nh=3
-        flips around), hence the fallback in the backward. If a cuBLAS upgrade
-        moves that boundary this test must fail rather than the loss curve drift.
-        """
-        for bs, nh, d in (
-            (1, 64, 512),
-            (7, 64, 512),
-            (128, 4, 64),
-            (333, 8, 128),
-            (1023, 64, 512),
-            (2048, 64, 512),
-            (16384, 64, 512),
-            (97, 32, 96),
-        ):
-            paddle.seed(bs + nh)
-            m0 = paddle.randn([nh, nh], "bfloat16")
-            x0 = paddle.randn([bs, nh, d], "bfloat16")
-            g = paddle.randn([bs, nh, d], "bfloat16")
-            m_l, x_l = m0.detach(), x0.detach()
-            m_l.stop_gradient = False
-            x_l.stop_gradient = False
-            paddle.matmul(m_l, x_l).backward(g.clone())
-            with paddle.no_grad():
-                got = paddle.matmul(
-                    transpose_heads_first(g).reshape([nh, bs * d]),
-                    transpose_heads_first(x0.detach()).reshape([nh, bs * d]),
-                    transpose_y=True,
-                )
-            _check_equal(got, m_l.grad, f"head-major wgrad ({bs},{nh},{d})")
-
-    def test_transposing_helpers_match_paddle(self) -> None:
-        """The two fused-transpose kernels == RoPE-then-transpose in Paddle."""
-        paddle.seed(0)
-        t = paddle.randn([BS, NH, VD], "bfloat16")
-        freqs = paddle.randn([1, BS, 1, PE], "float32")
-        freqs.stop_gradient = True
-        with paddle.no_grad():
-            _check_equal(
-                transpose_heads_first(t),
-                t.transpose([1, 0, 2]).contiguous(),
-                "transpose_heads_first",
-            )
-            for inverse in (True, False):
-                cos, sin = build_mla_rope_cos_sin(
-                    freqs, 1, BS, PE, 1.0, inverse, paddle.bfloat16
-                )
-                ref = fused_apply_mla_rope_inplace(
-                    t.reshape([1, BS, NH, VD]),
-                    freqs,
-                    NOPE,
-                    1.0,
-                    inverse=inverse,
-                    clone_input=True,
-                ).reshape([BS, NH, VD])
-                _check_equal(
-                    rope_full_to_transposed(t, cos, sin, NOPE, PE),
-                    ref.transpose([1, 0, 2]).contiguous(),
-                    f"rope_full_to_transposed (inverse={inverse})",
-                )
 
     def test_pe_scatter_matches_paddle(self) -> None:
         """The vectorised pe scatter == Paddle's strided slice assignment."""
@@ -564,73 +507,73 @@ class TestWiring(unittest.TestCase):
         _check_equal(v_f.grad, v_r.grad, "wired grad_V")
 
 
-class TestNonPowerOfTwoHeads(unittest.TestCase):
-    """The ``nh & (nh - 1)`` fallback branch of the backward.
+class TestSmallHeadCounts(unittest.TestCase):
+    """End-to-end bitwise equality at small head counts.
 
-    For a head count that is not a power of two the weight-gradient GEMM becomes
-    small enough that cuBLAS picks its algorithm unpredictably, so the head-major
-    operands stop matching Paddle's own matmul backward. The backward then
-    materialises the rotated tensor and defers to ``matmul_grad`` instead; that
-    branch has to stay bitwise correct too.
+    The production config has nh=64, but small head counts are where cuBLAS
+    algorithm selection gets unstable: an earlier revision hand-rolled the
+    weight-gradient GEMM over head-major operands and CI caught it diverging at
+    ``(bs=128, nh=4, d=64)`` on sm90 while it was bitwise equal on sm10.3. The
+    weight gradient now goes through ``matmul_grad`` on every path, so this must
+    hold on every architecture -- powers of two and not.
     """
 
-    NH, VD, PE = 3, 40, 8
-    NOPE = VD - PE
-    RANK = 1
-
-    def _run(self, fused, bs, seed):
+    def _run(self, fused, bs, nh, vd, pe, seed):
+        nope = vd - pe
+        rank = max(1, nh // 4)
         paddle.seed(seed)
-        o = paddle.randn([bs, self.NH, self.VD], "bfloat16")
-        u = (paddle.randn([self.NH, self.RANK], "float32") * 0.05).astype(
-            "bfloat16"
-        )
-        v = (paddle.randn([self.NH, self.RANK], "float32") * 0.05).astype(
-            "bfloat16"
-        )
-        freqs = paddle.randn([1, bs, 1, self.PE], "float32")
+        o = paddle.randn([bs, nh, vd], "bfloat16")
+        u = (paddle.randn([nh, rank], "float32") * 0.05).astype("bfloat16")
+        v = (paddle.randn([nh, rank], "float32") * 0.05).astype("bfloat16")
+        freqs = paddle.randn([1, bs, 1, pe], "float32")
         freqs.stop_gradient = True
-        d_out = paddle.randn([bs, self.NH, self.VD], "bfloat16")
+        d_out = paddle.randn([bs, nh, vd], "bfloat16")
 
         o_l, u_l, v_l = _leaves(o, u, v)
         m = paddle.matmul(v_l, u_l, transpose_y=True) + paddle.eye(
-            self.NH, dtype="bfloat16"
+            nh, dtype="bfloat16"
         )
         x = o_l * 1.0
         if fused:
             cos, sin = build_mla_rope_cos_sin(
-                freqs, 1, bs, self.PE, 1.0, True, paddle.bfloat16
+                freqs, 1, bs, pe, 1.0, True, paddle.bfloat16
             )
             out = InvRopeVhaPostmixFusion.apply(
-                x.reshape([bs, self.NH, self.VD]),
-                m,
-                cos,
-                sin,
-                self.NOPE,
-                self.PE,
+                x.reshape([bs, nh, vd]), m, cos, sin, nope, pe
             )
         else:
             roped = fused_apply_mla_rope_inplace(
-                x.reshape([1, bs, self.NH, self.VD]),
+                x.reshape([1, bs, nh, vd]),
                 freqs,
-                self.NOPE,
+                nope,
                 1.0,
                 inverse=True,
                 clone_input=True,
             )
-            out = paddle.matmul(m, roped.reshape([bs, self.NH, self.VD]))
+            out = paddle.matmul(m, roped.reshape([bs, nh, vd]))
         snapshot = o_l.clone()
         out.backward(d_out.clone())
         return out.detach(), o_l.grad, u_l.grad, v_l.grad, o_l, snapshot
 
     def test_bitwise(self) -> None:
-        for bs, seed in ((7, 0), (64, 1), (1023, 2)):
-            ref = self._run(False, bs, seed)
-            got = self._run(True, bs, seed)
+        for bs, nh, vd, pe, seed in (
+            (128, 4, 64, 32, 0),  # the shape CI flagged on sm90
+            (128, 4, 64, 16, 1),
+            (7, 3, 40, 8, 0),  # not a power of two
+            (64, 3, 40, 8, 1),
+            (1023, 3, 40, 8, 2),
+            (333, 8, 128, 32, 0),
+            (97, 32, 96, 32, 0),
+            (64, 16, 256, 64, 0),
+        ):
+            tag = f"(bs={bs}, nh={nh}, d={vd}, pe={pe})"
+            ref = self._run(False, bs, nh, vd, pe, seed)
+            got = self._run(True, bs, nh, vd, pe, seed)
             for name, a, b in zip(
                 ("out", "grad_O", "grad_U", "grad_V"), got, ref
             ):
-                _check_equal(a, b, f"{name} (nh=3, bs={bs}, seed={seed})")
-            _check_equal(got[4], got[5], f"O untouched (nh=3, bs={bs})")
+                _check_equal(a, b, f"{name} {tag}")
+            _check_equal(got[4], got[5], f"O untouched {tag}")
 
 
 class TestArgumentValidation(unittest.TestCase):
@@ -709,13 +652,9 @@ class TestArgumentValidation(unittest.TestCase):
                 PE,
             )
 
-    def test_transpose_rank_checked(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"\[M, H, D\]"):
-            transpose_heads_first(self.t.reshape([1, 32, NH, VD]))
-
 
 class TestOutOfPlaceRopeHelper(unittest.TestCase):
-    """``rope_full_out_of_place`` feeds the non-power-of-two fallback."""
+    """``rope_full_out_of_place`` rebuilds the operand the wgrad needs."""
 
     def test_matches_standalone_op(self) -> None:
         for bs, nh, vd, pe in (
