@@ -31,7 +31,7 @@ readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
 readonly PADDLEFLEET_WHEEL="${PADDLEFLEET_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet/paddlefleet-0.4.0.dev20260807+d01517879a3-py3-none-any.whl}"
 readonly PADDLEFLEET_OPS_WHEEL="${PADDLEFLEET_OPS_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet-ops/paddlefleet_ops-0.4.0.dev20260807+d0151787-cp312-cp312-linux_x86_64.whl}"
 readonly PADDLEFORMERS_WHEEL="${NIGHTLY_WHL_BASE}/paddleformers/paddleformers-0.0.0.dev-py3-none-any.whl"
-readonly MEGATRON_CORE_WHEEL="https://paddle-qa.bj.bcebos.com/paddlefleet/whl/megatron_core-0.19.0+460ba8c82-cp312-cp312-linux_x86_64.whl"
+readonly MEGATRON_CORE_WHEEL="wget https://paddle-qa.bj.bcebos.com/paddlefleet/whl/megatron_core-0.19.0+f2706b6f3-cp312-cp312-linux_x86_64.whl"
 readonly MS_SWIFT_WHEEL="https://paddle-qa.bj.bcebos.com/paddlefleet/whl/ms_swift-4.5.0.dev0-py3-none-any.whl"
 readonly NO_PROXY_LIST="localhost,127.0.0.1,0.0.0.0,bj.bcebos.com,su.bcebos.com,paddle-ci.gz.bcebos.com,baidu-int.com,.baidu.com,.bcebos.com"
 # readonly PROXY_URL="set your proxy"
@@ -133,7 +133,7 @@ setup_paddle_venv() {
 
     # Build-time deps must live in the venv so `uv sync --no-build-isolation`
     # can compile paddlefleet-ops against the paddle installed above.
-    uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
+    uv pip install --python "${paddle_py}" \
         "setuptools>=66.1.0" pip wheel packaging "ninja==1.11.1.1" \
         "pybind11[global]>=2.13,<3" "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5"
 
