@@ -192,18 +192,28 @@ class GatedDeltaNet(FleetLayer):
         # Time step projection (discretization)
         self.num_v_heads_local_tp = self.num_value_heads // self.tp_size
 
-        # dt_bias parameter — fp32 for numerical stability in softplus
+        # The reference implementation declares ``dt_bias``/``A_log`` as plain
+        # parameters, so they live in the model dtype (BF16) and are promoted to
+        # FP32 only at the softplus/exp computation boundary below. Creating FP32
+        # leaves instead changes the parameter, gradient and optimizer-state
+        # dtype relative to the official checkpoint, so honor the declared dtype
+        # in accuracy-compatible mode. The default path keeps the FP32 leaves.
+        state_param_dtype = (
+            config.params_dtype
+            if getattr(config, "use_accuracy_compatible", False)
+            else "float32"
+        )
+
         self.dt_bias = self.create_parameter(
             shape=[self.num_v_heads_local_tp],
-            dtype="float32",
+            dtype=state_param_dtype,
             default_initializer=nn.initializer.Constant(1.0),
         )
         self.dt_bias.is_distributed = True if self.tp_size > 1 else False
 
-        # A_log parameter — fp32 to avoid exp() overflow in bf16
         self.A_log = self.create_parameter(
             shape=[self.num_v_heads_local_tp],
-            dtype="float32",
+            dtype=state_param_dtype,
             default_initializer=nn.initializer.Constant(0.0),
         )
         self.A_log.is_distributed = True if self.tp_size > 1 else False
@@ -258,7 +268,7 @@ class GatedDeltaNet(FleetLayer):
             nn.initializer.Uniform(
                 low=self.A_init_range[0], high=self.A_init_range[1]
             )(A)
-            paddle.assign(paddle.log(A), self.A_log)
+            paddle.assign(paddle.log(A).astype(self.A_log.dtype), self.A_log)
 
     def _build_padding_mask(
         self,
@@ -270,32 +280,56 @@ class GatedDeltaNet(FleetLayer):
         """Derive a padding mask (1.0=valid, 0.0=padding) for GDN."""
         is_sp = self.config.sequence_parallel and self.sp_size > 1
 
-        if attention_mask is not None and attention_mask.ndim == 2:
-            full_seq = attention_mask.shape[-1]
-            if is_sp:
-                if full_seq != seq_len:
-                    # Shape mismatch under SP – fall through to startend indices.
+        if attention_mask is not None:
+            if attention_mask.ndim == 4:
+                if attention_mask.shape[-2:] != [seq_len, seq_len]:
+                    # Shape mismatch – fall through to startend indices.
                     pass
                 else:
-                    # attention_mask is [b, full_s], slice to local chunk
-                    seq_len_local = seq_len // self.sp_size
-                    tp_rank = get_pg_rank(self.pg_collection.tp)
-                    offset = tp_rank * seq_len_local
-                    local_mask = attention_mask[
-                        :, offset : offset + seq_len_local
-                    ]
-                    if local_mask.astype("bool").all():
-                        return None
-                    return local_mask.astype(paddle.float32).T.unsqueeze(-1)
-            else:
-                if full_seq == seq_len:
-                    mask = attention_mask.unsqueeze(-1).astype(paddle.float32)
-                    if mask.all():
-                        return None
-                    return mask
-                # full_seq != seq_len: attention_mask shape does not match the
-                # current sequence length (e.g. stale mask from a previous stage).
-                # Fall through to try attn_mask_startend_row_indices instead.
+                    # The multimodal collator provides a block-causal
+                    # ``[b, 1, s, s]`` mask, but GDN is a recurrence and only
+                    # needs per-token validity. A token is valid iff its own
+                    # causal diagonal entry is enabled; padding rows have a zero
+                    # diagonal. Reduce to ``[b, s]`` and reuse the 2D/SP logic
+                    # below instead of rejecting the mask. ``paddle.diagonal``
+                    # returns a strided view, so materialize it — reductions
+                    # over a non-contiguous float buffer read the wrong memory.
+                    attention_mask = paddle.diagonal(
+                        attention_mask[:, 0, :, :], axis1=-2, axis2=-1
+                    ).contiguous()
+
+            if attention_mask.ndim == 2:
+                full_seq = attention_mask.shape[-1]
+                if is_sp:
+                    if full_seq != seq_len:
+                        # Shape mismatch under SP – fall through to startend indices.
+                        pass
+                    else:
+                        # attention_mask is [b, full_s], slice to local chunk
+                        seq_len_local = seq_len // self.sp_size
+                        tp_rank = get_pg_rank(self.pg_collection.tp)
+                        offset = tp_rank * seq_len_local
+                        local_mask = attention_mask[
+                            :, offset : offset + seq_len_local
+                        ]
+                        if local_mask.astype("bool").all():
+                            return None
+                        return local_mask.astype(paddle.float32).T.unsqueeze(-1)
+                else:
+                    if full_seq == seq_len:
+                        mask = attention_mask.unsqueeze(-1).astype(
+                            paddle.float32
+                        )
+                        # Reduce through bool like the SP branch above: ``all()``
+                        # on a float tensor is not reliable, so a float mask of
+                        # all-ones would otherwise fail this check and skip the
+                        # ``None`` fast path.
+                        if mask.astype("bool").all():
+                            return None
+                        return mask
+                    # full_seq != seq_len: attention_mask shape does not match the
+                    # current sequence length (e.g. stale mask from a previous stage).
+                    # Fall through to try attn_mask_startend_row_indices instead.
 
         if attn_mask_startend_row_indices is not None:
             indices = attn_mask_startend_row_indices[:, 0, :, 0]

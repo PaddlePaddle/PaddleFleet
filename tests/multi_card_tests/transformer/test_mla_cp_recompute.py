@@ -60,9 +60,26 @@ from paddle.distributed.fleet.utils import recompute
 FWD_RTOL = 1e-5
 GRAD_RTOL = 5e-3
 
+# ``"mqa"`` (``mqa_full_causal``) accepts dense FA4 only --
+# ``MQALatentAttention._assert_dense_fa4`` raises otherwise -- and a bare
+# launcher process leaves ``FLAGS_flash_attn_version`` at the image default 2.
+# Pin the value ``TrainingArguments.__post_init__`` derives on these SM100 boxes,
+# which is also production's for the ``mha`` and ``mqa_dsa`` cases. ``_fa4_pin``
+# stands down where no FA4 backend exists, because ``test_mha_recompute_cp`` is
+# not ``_GPU``-gated and has to keep running on the cc 9.0 CI images. Module
+# scope: nothing here asserts on the refusal
+# (``test_mla_cp_contiguous_allgather``'s ``test_4`` does, which is why that
+# file scopes its pin per call).
+_FA4_PIN = H.U._fa4_pin()
+
 
 def setUpModule():
     H.setUpModule()
+    _FA4_PIN.__enter__()
+
+
+def tearDownModule():
+    _FA4_PIN.__exit__(None, None, None)
 
 
 def _run_recompute_pair(mask_full, attn_mode, sink=False, seed=2026):

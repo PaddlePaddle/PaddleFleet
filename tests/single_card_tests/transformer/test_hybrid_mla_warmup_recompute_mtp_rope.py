@@ -28,9 +28,10 @@ compose *around* it and were previously only exercised in phase 3
    ``_forward_impl``. ON must equal OFF, the ``token_indices`` must be
    re-derived bit-identically, and the indexer loss must be attached exactly
    once, on the grad-enabled pass. Warmup is strictly stronger than phase 3
-   here: the table is ``_build_full_causal_indices``, a pure integer function of
-   the document bounds, so it is bit-identical even on the single-document
-   layout whose top-k order phase 3 cannot reproduce. It also *skips the indexer
+   here: the column set is a pure integer function of the document bounds (the
+   dense FA4 row bound, ``hybrid_mla_utils._full_causal_indices`` written out),
+   so it is bit-identical even on the single-document layout whose top-k order
+   phase 3 cannot reproduce. It also *skips the indexer
    entirely* on the ``no_grad`` pass (the ``mqa_latent_attention.py:495`` early
    exit), which phase 3 does not.
 2. **MTP** (``TestWarmupMTP``) -- ``MultiTokenPredictionLayer`` builds its
@@ -83,6 +84,7 @@ from .hybrid_mla_utils import (
     _build_module,
     _check_index_invariants,
     _create_mqa_config,
+    _fa4_module_hooks,
     _make_inputs,
     _rel,
     _row_end,
@@ -94,6 +96,8 @@ from .test_hybrid_mla_rope_audit import (
     ref_rope_halfsplit,
 )
 from .test_mqa_latent_attention import _fp32, _full_causal_table
+
+setUpModule, tearDownModule = _fa4_module_hooks()
 
 SEQLEN = 256
 # Two documents, the second longer than the forced window (so the indexer's
@@ -150,13 +154,6 @@ class TestWarmupRecompute(unittest.TestCase):
     during backward. Both forwards must agree on the sparsity pattern, or the
     backward differentiates a set of columns the forward never used.
     """
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     def setUp(self):
         _CAPTURED.clear()
@@ -363,13 +360,6 @@ class TestWarmupMTP(unittest.TestCase):
     ``test_hybrid_mla_mtp_layer43_w6._build_mtp_module`` but with the phase-2
     switch off.
     """
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     def setUp(self):
         _CAPTURED.clear()
@@ -828,13 +818,6 @@ class TestRecomputeInnerForwardBitIdentical(unittest.TestCase):
     document bounds. The captured-call count is asserted first, otherwise a
     single-forward implementation would make the comparison vacuous.
     """
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     # ``mqa`` -> "mqa_full_causal"; the two ``mqa_dsa`` rows are warmup (wide
     # loss, full-causal attention) and phase 3 (narrow loss, top-k attention).

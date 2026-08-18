@@ -937,7 +937,7 @@ class TestCudnnIndexerDocmaskCP(unittest.TestCase):
     ``dsa_indexer_use_sparse_loss=False`` (phase 2, which is what
     ``_build_csa_config`` sets) the *main* attention widens to the full
     compressed range ``n_compressed``, because an indexer that is still being
-    learned must not steer attention; with ``True`` (phase 3/4) it narrows to
+    learned must not steer attention; with ``True`` (phase 3) it narrows to
     ``min(index_topk, n_compressed)``.
 
     The assertion below used to hard-code ``index_topk`` and only ran the
@@ -1079,7 +1079,7 @@ class TestCudnnIndexerDocmaskCP(unittest.TestCase):
                 n_compressed = run["n_compressed"]
                 sq_local = run["sq_local"]
                 # ``_resolve_topk_effective``: phase 2 hands the main attention
-                # the full compressed range, phase 3/4 the indexer's top-k.
+                # the full compressed range, phase 3 the indexer's top-k.
                 expected_topk = (
                     min(dsa_index_topk, n_compressed)
                     if use_sparse_loss
