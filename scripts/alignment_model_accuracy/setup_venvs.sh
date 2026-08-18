@@ -31,7 +31,7 @@ readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
 readonly PADDLEFLEET_WHEEL="${PADDLEFLEET_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet/paddlefleet-0.4.0.dev20260807+d01517879a3-py3-none-any.whl}"
 readonly PADDLEFLEET_OPS_WHEEL="${PADDLEFLEET_OPS_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet-ops/paddlefleet_ops-0.4.0.dev20260807+d0151787-cp312-cp312-linux_x86_64.whl}"
 readonly PADDLEFORMERS_WHEEL="${NIGHTLY_WHL_BASE}/paddleformers/paddleformers-0.0.0.dev-py3-none-any.whl"
-readonly MEGATRON_CORE_WHEEL="wget https://paddle-qa.bj.bcebos.com/paddlefleet/whl/megatron_core-0.19.0+f2706b6f3-cp312-cp312-linux_x86_64.whl"
+readonly MEGATRON_CORE_WHEEL="https://paddle-qa.bj.bcebos.com/paddlefleet/whl/megatron_core-0.19.0+f2706b6f3-cp312-cp312-linux_x86_64.whl"
 readonly MS_SWIFT_WHEEL="https://paddle-qa.bj.bcebos.com/paddlefleet/whl/ms_swift-4.5.0.dev0-py3-none-any.whl"
 readonly NO_PROXY_LIST="localhost,127.0.0.1,0.0.0.0,bj.bcebos.com,su.bcebos.com,paddle-ci.gz.bcebos.com,baidu-int.com,.baidu.com,.bcebos.com"
 # readonly PROXY_URL="set your proxy"
@@ -183,7 +183,7 @@ main() {
     ensure_venv "venv/torch"
     ensure_venv "venv/paddle"
 
-    setup_torch_venv "${WORKSPACE_DIR}/venv/torch/bin/python"
+    # setup_torch_venv "${WORKSPACE_DIR}/venv/torch/bin/python"
     setup_paddle_venv "${WORKSPACE_DIR}/venv/paddle/bin/python"
 }
 
