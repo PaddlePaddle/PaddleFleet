@@ -97,7 +97,7 @@ python -m paddlefleet.config_adapter --input config.yaml \
 
 源作业卡数按两条证据推断并交叉校验：通信组
 （`DP × sharding × TP × SEP × PP`）与 batch 字段
-（`GBS / (micro_bs × acc) × TP × PP × CP`）。两者都能算且不一致时，取「没漏因子」
+（`GBS / (micro_bs × acc) × TP × SEP × PP × CP`）。两者都能算且不一致时，取「没漏因子」
 的那个 —— 源 YAML 声明了 `data_parallel_size` 就用通信组，没声明则用 batch 字段
 （未声明的 DP 正是通信组公式缺的那一项）—— 并在报告里给出 WARNING。
 
