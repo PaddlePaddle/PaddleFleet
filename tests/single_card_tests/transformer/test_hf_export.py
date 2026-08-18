@@ -169,6 +169,48 @@ class TestUsesYarn(unittest.TestCase):
             )
         )
 
+    def test_dsv4_hybrid_global_yarn_but_all_layers_overridden_rope(self):
+        # Global rope_type="yarn" must NOT short-circuit for dsv4_hybrid: with
+        # HCA/CSA forced to "rope" and only a window layer, no layer uses YaRN.
+        self.assertFalse(
+            uses_yarn(
+                {
+                    "rope_type": "yarn",
+                    "experimental_attention_variant": "dsv4_hybrid",
+                    "csa_compress_ratios": [128, 64, 0],
+                    "hca_rope_type": "rope",
+                    "csa_rope_type": "rope",
+                }
+            )
+        )
+
+    def test_dsv4_hybrid_mla_layer_follows_global_yarn(self):
+        # An MLA (-2) layer is built on the plain MLA path and follows the
+        # global rope_type, so global "yarn" activates YaRN through it.
+        self.assertTrue(
+            uses_yarn(
+                {
+                    "rope_type": "yarn",
+                    "experimental_attention_variant": "dsv4_hybrid",
+                    "csa_compress_ratios": [-2, 0],
+                    "hca_rope_type": "rope",
+                    "csa_rope_type": "rope",
+                }
+            )
+        )
+
+    def test_dsv4_hybrid_mla_layer_global_rope_not_yarn(self):
+        # MLA layer with a non-yarn global rope_type stays plain RoPE.
+        self.assertFalse(
+            uses_yarn(
+                {
+                    "rope_type": "rope",
+                    "experimental_attention_variant": "dsv4_hybrid",
+                    "csa_compress_ratios": [-2, 0],
+                }
+            )
+        )
+
     def test_provider_fallback_rope_type(self):
         prov = SimpleNamespace(rope_type="yarn")
         self.assertTrue(uses_yarn({}, prov))

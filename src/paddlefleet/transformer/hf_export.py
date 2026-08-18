@@ -145,11 +145,13 @@ def source_or_provider(raw, provider, key):
 # dsv4_hybrid per-layer compress-ratio conventions. Source of truth:
 # paddlefleet/transformer/dsv4_hybrid_attention.py (``compress_ratio == 128`` ->
 # HCA; ``2 <= ratio < 128`` -> CSA; ``-1``/``0`` -> window; ``-2`` -> MLA).
-# Compressed layers (ratio > 1) default to YaRN.
+# Compressed layers (ratio > 1) default to YaRN; window layers stay plain RoPE;
+# MLA (-2) layers are built on the plain MLA path and follow global ``rope_type``.
 HCA_COMPRESS_RATIO = 128
 CSA_COMPRESS_RATIO_MIN = (
     2  # CSA range is [CSA_COMPRESS_RATIO_MIN, HCA_COMPRESS_RATIO)
 )
+MLA_COMPRESS_RATIO = -2
 
 
 def uses_yarn(raw, provider=None):
@@ -161,40 +163,47 @@ def uses_yarn(raw, provider=None):
     when RoPE runs in plain ``"rope"`` mode, so keying off ``factor != 1.0``
     yields false positives.
 
-    YaRN is used when either:
+    The global ``rope_type`` is authoritative only for **non-hybrid** models
+    (plain MLA / DSA, which read it directly in ``multi_latent_attention.py`` /
+    ``dsa_attention.py``). For ``dsv4_hybrid`` the RoPE mode is decided *per
+    layer* (``dsv4_hybrid_attention.py``), so the global value must NOT
+    short-circuit -- otherwise ``rope_type="yarn"`` with every layer overridden
+    to plain RoPE would wrongly export a YaRN ``rope_scaling``:
 
-    - the global ``rope_type == "yarn"`` -- the plain MLA / DSA path reads this
-      field directly (``multi_latent_attention.py`` / ``dsa_attention.py``); or
-    - the model is ``dsv4_hybrid`` and has at least one *compressed* layer
-      (``csa_compress_ratios`` entry > 1: HCA ratio 128 or CSA ratio in [2,128))
-      whose per-type override does not force ``"rope"``. Compressed layers
-      default to YaRN there (``dsv4_hybrid_attention.py``), independent of the
-      global ``rope_type``; ``hca_rope_type`` / ``csa_rope_type`` can override
-      HCA / CSA respectively. Window ratios (-1 / 0) and MLA (-2) never YaRN
-      via compression.
+    - HCA (ratio 128) / CSA (ratio in [2, 128)) layers default to YaRN and are
+      overridden per type by ``hca_rope_type`` / ``csa_rope_type``; a layer uses
+      YaRN unless its override forces ``"rope"``;
+    - MLA (ratio -2) layers are built on the plain MLA path and follow the
+      global ``rope_type``;
+    - window (ratio -1 / 0) layers stay plain RoPE.
     """
 
     def _pick(key):
         return source_or_provider(raw, provider, key)
 
-    if _pick("rope_type") == "yarn":
-        return True
+    global_rope_type = _pick("rope_type")
 
-    if _pick("experimental_attention_variant") == "dsv4_hybrid":
-        ratios = _pick("csa_compress_ratios") or []
-        hca_rope_type = _pick("hca_rope_type")
-        csa_rope_type = _pick("csa_rope_type")
-        for ratio in ratios:
-            if not isinstance(ratio, (int, float)):
-                continue
-            if ratio == HCA_COMPRESS_RATIO:
-                per_type = hca_rope_type
-            elif CSA_COMPRESS_RATIO_MIN <= ratio < HCA_COMPRESS_RATIO:
-                per_type = csa_rope_type
-            else:
-                continue  # window (-1 / 0) or MLA (-2): not YaRN via compression
-            if per_type != "rope":
+    if _pick("experimental_attention_variant") != "dsv4_hybrid":
+        return global_rope_type == "yarn"
+
+    ratios = _pick("csa_compress_ratios") or []
+    hca_rope_type = _pick("hca_rope_type")
+    csa_rope_type = _pick("csa_rope_type")
+    for ratio in ratios:
+        if not isinstance(ratio, (int, float)):
+            continue
+        if ratio == HCA_COMPRESS_RATIO:
+            per_type = hca_rope_type  # default YaRN unless overridden to "rope"
+        elif CSA_COMPRESS_RATIO_MIN <= ratio < HCA_COMPRESS_RATIO:
+            per_type = csa_rope_type  # default YaRN unless overridden to "rope"
+        elif ratio == MLA_COMPRESS_RATIO:
+            if global_rope_type == "yarn":  # MLA follows global rope_type
                 return True
+            continue
+        else:
+            continue  # window (-1 / 0): plain RoPE
+        if per_type != "rope":
+            return True
     return False
 
 
