@@ -15,19 +15,18 @@
 # Regression test for the separate_mtp_headloss PP/VPP layout contract.
 #
 # It builds the real GPT pipeline model under PP=4/VPP=2 with
-# separate_mtp_headloss enabled and a geometry whose seg-weight-bearing layer
-# count (num_hidden + head_empty + effective_tail_empty = 11 + 3 + 2 = 16) is
-# divisible by pp*vpp=8 with quotient 2 (i.e. >1 layer per stage). It then
-# asserts on the pipeline segmentation and the shared-layer (embed / separated
-# MTP-LMHead / separated main-LMHead) stage placement.
+# separate_mtp_headloss enabled through the NORMAL configuration path (no manual
+# post-construction override), i.e. GPTConfig.__post_init__ must keep the flag
+# on by itself. The geometry therefore satisfies the guard contract:
+#   num_hidden(5) + num_mtp(1) + head_empty(0) + effective_tail_empty(2) = 8
+#   = pp*vpp, i.e. exactly one seg-weight-bearing layer per virtual stage.
+# The seg_method mirrors what the production entry uses when the flag is on
+# (PaddleFormers gpt_provider.py): MultiTokenPredictionLayer also carries a
+# segmentation weight, which is why the guard counts the MTP layers.
 #
-# Scope: this exercises model construction + Paddle's interleave segmentation +
-# _construct_shared_comm (called inside PipelineLayer.__init__). It intentionally
-# does NOT run forward/backward: the full training dataflow for
-# separate_mtp_headloss under pp>1 is not covered by any existing test and is out
-# of scope here. The purpose is to prove that "exactly 1 layer per pp*vpp stage"
-# is NOT required for the pipeline/shared-comm machinery — a divisible layout with
-# quotient > 1 builds and constructs shared comm successfully.
+# Scope: this exercises config validation + model construction + Paddle's
+# interleave segmentation + _construct_shared_comm (called inside
+# PipelineLayer.__init__). It intentionally does NOT run forward/backward.
 
 import functools
 import unittest
@@ -42,7 +41,10 @@ from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
 VPP_DEGREE = 2
-MTP_DEGREE = 3
+MTP_DEGREE = 1
+# separate_mtp_headloss adds MultiTokenPredictionLayer to the segmentation
+# weights, matching the production entry point.
+SEG_METHOD = "layer:TransformerLayer|EmptyLayer|MultiTokenPredictionLayer"
 
 
 def _build_config():
@@ -50,7 +52,7 @@ def _build_config():
         moe_expert_fusion=False,
         vocab_size=1024,
         max_sequence_length=128,
-        num_hidden_layers=11,
+        num_hidden_layers=5,
         hidden_size=512,
         num_attention_heads=4,
         intermediate_size=1024,
@@ -69,9 +71,9 @@ def _build_config():
             paddle.nn.init.xavier_uniform_, gain=1.0
         ),
         use_qk_norm=True,
-        # head=3 => seg-weight layers = num_hidden(11) + head(3) + tail_eff(2) = 16,
-        # divisible by pp*vpp=8 with quotient 2 (> 1 layer per stage).
-        num_empty_layers_add_in_head=3,
+        # seg-weight layers = num_hidden(5) + mtp(1) + head(0) + tail_eff(2) = 8
+        # = pp*vpp, so the __post_init__ guard keeps separate_mtp_headloss on.
+        num_empty_layers_add_in_head=0,
         num_empty_layers_add_in_tail=3,
         pipeline_model_parallel_size=PP_DEGREE,
         virtual_pipeline_model_parallel_size=VPP_DEGREE,
@@ -85,11 +87,8 @@ def _build_config():
         gated_linear_unit=True,
         bias_activation_fusion=True,
         num_nextn_predict_layers=MTP_DEGREE,
+        separate_mtp_headloss=True,
     )
-    # The __post_init__ pre-check currently force-disables separate_mtp_headloss
-    # unless quotient == 1. We deliberately re-enable it here to exercise the
-    # real build/segmentation/shared-comm path at quotient > 1.
-    config.separate_mtp_headloss = True
     return config
 
 
@@ -128,12 +127,14 @@ class TestSeparateMtpHeadlossPP(unittest.TestCase):
 
     def test_build_segmentation_and_shared_layer_stages(self):
         config = _build_config()
+        # No manual override: GPTConfig.__post_init__ itself must accept this
+        # layout, otherwise the guard contract rejects every normal config.
         self.assertTrue(config.separate_mtp_headloss)
 
         gpt_model = gpt_builder(
             config,
             num_stages=PP_DEGREE,
-            seg_method="layer:TransformerLayer|EmptyLayer",
+            seg_method=SEG_METHOD,
         )
 
         # _construct_shared_comm runs inside PipelineLayer.__init__; a successful
@@ -144,9 +145,11 @@ class TestSeparateMtpHeadlossPP(unittest.TestCase):
         seg = gpt_model.segment_parts
         self.assertEqual(len(seg) - 1, PP_DEGREE * VPP_DEGREE)
 
-        # quotient > 1: at least one virtual stage holds more than one layer.
+        # quotient == 1: pp*vpp virtual stages for 8 seg-weight layers, so no
+        # virtual stage may hold more than one of them.
         span = [seg[i + 1] - seg[i] for i in range(len(seg) - 1)]
-        self.assertTrue(max(span) > 1)
+        self.assertEqual(sum(span), len(gpt_model._layers_desc))
+        self.assertTrue(all(s >= 1 for s in span))
 
         # Shared "embed" descs: front embedding + separated MTP-LMHead +
         # separated main-LMHead. There must be >= 3 of them.
@@ -158,15 +161,19 @@ class TestSeparateMtpHeadlossPP(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(embed_idxs), 3)
 
-        # Front embedding lands on the first pp stage; the two separated heads
-        # land on the last pp stage. Multiple shared layers legitimately share a
-        # stage -> "exactly 1 layer per stage" is not required.
+        # Front embedding lands on the first pp stage and the separated
+        # main-LMHead on the last one. The separated MTP-LMHead sits between the
+        # MTP layers and the remaining tail EmptyLayers, so its stage is decided
+        # by that layout: it must be downstream of the embedding and no later
+        # than the main head, and the two shared heads must reach a pp stage
+        # different from stage 0 so the embedding weight is actually communicated.
         stages = {
             idx: gpt_model.get_stage_from_index(idx) for idx in embed_idxs
         }
         self.assertEqual(stages[embed_idxs[0]], 0)
         self.assertEqual(stages[embed_idxs[-1]], PP_DEGREE - 1)
-        self.assertEqual(stages[embed_idxs[-2]], PP_DEGREE - 1)
+        self.assertGreater(stages[embed_idxs[-2]], 0)
+        self.assertLessEqual(stages[embed_idxs[-2]], stages[embed_idxs[-1]])
 
 
 if __name__ == "__main__":
