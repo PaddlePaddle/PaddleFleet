@@ -107,7 +107,7 @@ setup_torch_venv() {
         "${MEGATRON_CORE_WHEEL}" "${MS_SWIFT_WHEEL}"
 
     uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
-        omegaconf tensor-spec-worker datasets transformers_stream_generator \
+        omegaconf tensor-spec-worker datasets transformers_stream_generator tensorboard json_repair \
         "mcore-bridge==${MCORE_BRIDGE_VERSION}" \
         "transformer-engine[core_cu13]==${TE_VERSION}"
 
