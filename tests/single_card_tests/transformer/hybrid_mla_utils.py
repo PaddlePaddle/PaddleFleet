@@ -40,7 +40,10 @@ import paddle
 import paddle.nn.functional as F
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
-from paddlefleet.transformer.csa_attention import _derive_csa_doc_boundaries
+from paddlefleet.transformer.csa_attention import (
+    _build_mqa_causal_topk_idxs_from_doc_bounds,
+    _derive_csa_doc_boundaries,
+)
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexer,
     DSAIndexerSublayersSpec,
@@ -52,6 +55,23 @@ from paddlefleet.transformer.mqa_latent_attention import (
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
+
+# An installed ``paddlefleet`` wheel shadows this checkout whenever the source
+# tree misses from ``sys.path`` -- a mistyped ``PYTHONPATH`` is enough, and the
+# symptom is not an ImportError but a stale class: every test that touches a
+# method added after the wheel was built dies with a bare
+# ``AttributeError: 'RecordingMQA' object has no attribute '_dense_attn'`` out of
+# ``Layer.__getattr__``, which says nothing about where the class came from.
+# Name the resolved file instead. ``_dense_attn`` is only a marker; any method
+# this file's fixtures rely on would do.
+if not hasattr(MQALatentAttention, "_dense_attn"):
+    raise ImportError(
+        "MQALatentAttention was imported from "
+        f"{sys.modules[MQALatentAttention.__module__].__file__}, which predates "
+        "the code these fixtures test (no _dense_attn). Put the PaddleFleet "
+        "source tree ahead of site-packages on PYTHONPATH -- e.g. "
+        "PYTHONPATH=<checkout>:<checkout>/src."
+    )
 
 # ---------------------------------------------------------------------------
 # Geometry. DK/DV are hard requirements of the FlashMLA sparse kernel
@@ -211,7 +231,20 @@ _CAPTURED = []
 
 
 class RecordingMQA(MQALatentAttention):
-    """Captures the ``token_indices`` handed to the sparse kernel."""
+    """Captures, as a column table, what each backend was asked to attend over.
+
+    ``_sparse_attn`` (phase 3) receives that table literally. The full-causal
+    phases hand FA4 an ``O(s)`` flashmask row bound instead and never materialise
+    anything, so ``_dense_attn`` records the column set that bound *implies*,
+    derived from the very tensor the kernel is about to get. Both land in
+    ``_CAPTURED`` in call order, so a test can ask "what did attention see"
+    without caring which backend served it, and a recompute test still counts two
+    entries per recomputed step.
+
+    Skipped when ``cp_size > 1``: the bound is localised inside ``_dense_attn``
+    and its values are global row ids, so no per-rank ``[b, s, s]`` table is the
+    honest reconstruction. The CP suites assert on outputs and gradients instead.
+    """
 
     def _sparse_attn(
         self, query, kv, token_indices, sm_scale, d_v, indexer_topk=0
@@ -220,6 +253,29 @@ class RecordingMQA(MQALatentAttention):
         return super()._sparse_attn(
             query, kv, token_indices, sm_scale, d_v, indexer_topk
         )
+
+    def _dense_attn(self, query, kv, row_end, kv_lora_rank):
+        if self.cp_size == 1:
+            _CAPTURED.append(_row_end_column_table(row_end).numpy())
+        return super()._dense_attn(query, kv, row_end, kv_lora_rank)
+
+
+def _row_end_column_table(row_end):
+    """``[b, s, s]`` int32 column set implied by a flashmask row bound.
+
+    The dense backend's ``O(s)`` mask, written out. Same builder the CP suites
+    use (``_full_causal_indices``), fed from the document boundaries the
+    production deriver reads out of the bound itself, so this is a decoding of
+    what the kernel was told rather than a second opinion about it.
+    """
+    seqlen = int(row_end.shape[-2])
+    with paddle.no_grad():
+        doc_start, _, is_valid, _, _ = _derive_csa_doc_boundaries(
+            row_end, seqlen
+        )
+    return _full_causal_indices(
+        int(row_end.shape[0]), seqlen, doc_start, is_valid
+    )
 
 
 def _build_module(
@@ -304,9 +360,58 @@ def _row_end(doc_lens, seqlen):
     return paddle.to_tensor(out).reshape([1, 1, seqlen, 1])
 
 
+def _pad_row_end(doc_lens, seqlen):
+    """``[1, 1, s, 1]`` int32 ``row_end`` that produces real pad rows.
+
+    ``_row_end`` fills the trailing gap with ``seqlen``, which
+    ``_derive_csa_doc_boundaries`` reads as one more document, so every row comes
+    back ``is_valid``. Repeating the *last document's* end instead leaves
+    ``doc_len_per_pos`` short of ``pos_in_doc`` for the tail, which is the
+    ``is_valid == False`` state a packed batch's padding actually takes.
+    """
+    out = np.empty([seqlen], dtype="int32")
+    pos, end = 0, 0
+    for length in doc_lens:
+        end = pos + length
+        out[pos : min(end, seqlen)] = end
+        pos = end
+        if pos >= seqlen:
+            break
+    if pos < seqlen:
+        out[pos:] = end
+    return paddle.to_tensor(out).reshape([1, 1, seqlen, 1])
+
+
 def _doc_meta(row_end, seqlen):
     doc_start, _, is_valid, _, _ = _derive_csa_doc_boundaries(row_end, seqlen)
     return doc_start.numpy(), is_valid.numpy()
+
+
+def _full_causal_indices(
+    b, s_global, doc_start, is_valid, position_offset=0, s_local=None
+):
+    """Per-document full-causal ``[b, s_local, s_global]`` int32 (``-1`` pad).
+
+    The column set the two full-causal phases attend over, written out as an
+    explicit table. Production never materialises it -- ``_dense_attn`` hands the
+    same set to FA4 as an ``O(s)`` row bound -- so this lives on the test side,
+    with two uses: as an independent derivation of what the dense mask must be,
+    and as the input for feeding the sparse kernel directly (``_sparse_attn``)
+    when a test wants the two backends compared.
+
+    Built over the global sequence and row-sliced afterwards, so the column
+    values stay global token ids -- which is what the all-gathered KV of a CP
+    rank is indexed in.
+    """
+    with paddle.no_grad():
+        indices, _ = _build_mqa_causal_topk_idxs_from_doc_bounds(
+            b, s_global, doc_start, is_valid
+        )
+        if s_local is not None and s_local != s_global:
+            indices = indices[:, position_offset : position_offset + s_local]
+        indices = indices.contiguous()
+    indices.stop_gradient = True
+    return indices
 
 
 def _make_inputs(seqlen, seed=0, with_hidden=False):
@@ -326,6 +431,79 @@ def _rel(actual, expected):
     a = actual.cast("float32")
     e = expected.cast("float32")
     return float((a - e).norm() / e.norm().clip(min=1e-12))
+
+
+# One bf16 ULP, relative: bf16 carries 8 significant bits, so the smallest
+# representable step at magnitude ``m`` is ``m * 2**-8``.
+_BF16_ULP = 2.0**-8
+
+# How many of those steps a re-reduction is allowed to move the result by. The
+# measured worst case over every layout these suites use is 1.63 ULPs of the
+# compared slice's own maximum (layout ``[127]`` at ``s=256``, second document,
+# with a sink: 3.906e-03 at slice scale 0.613); 4 leaves ~2.5x headroom without
+# coming near the ~240 ULPs that losing document isolation costs on the same
+# tensors.
+_ULP_BUDGET = 4
+
+
+def _assert_agrees_to_bf16_ulps(test, actual, expected, msg):
+    """Two runs of the same mathematical softmax agree to a few bf16 ULPs.
+
+    Bit equality is the wrong bar whenever the two sides do not reduce in the
+    same order, and on these paths there are two ways that happens:
+
+    * *repacking* -- FA4 derives its tile scheduling, hence its accumulation
+      order, from the flashmask row bounds, so a packed batch and a
+      single-document run of the same rows are not bitwise equal even though
+      they sum over the same columns;
+    * *changing backend* -- the phase-3 sparse kernel reduces each query row over
+      an explicit column list in a fixed order, dense FA4 does not, so a claim
+      that the two agree on a layout where their column sets coincide is also
+      only an ULP claim.
+
+    A bit-equality assertion written against the sparse backend therefore does
+    not transfer. The tolerance is ``_ULP_BUDGET`` ULPs of the compared slice's
+    own scale; see that constant for the measurement behind it. Losing document
+    isolation -- the property most callers are actually testing -- costs the
+    output scale itself, some 240 ULPs, so the assertion still fails on a real
+    leak. ``_assert_isolation_is_observable`` pins that separation down where the
+    non-isolated variant is cheap to build.
+
+    Both arguments are fp32 numpy (the bf16 widening is exact).
+    """
+    worst = float(np.abs(actual - expected).max())
+    bound = _ulp_bound(actual)
+    test.assertLessEqual(
+        worst,
+        bound,
+        f"{msg}: maxabs {worst:.3e} > {_ULP_BUDGET} bf16 ULP {bound:.3e}",
+    )
+    return worst
+
+
+def _ulp_bound(reference):
+    return _ULP_BUDGET * _BF16_ULP * max(float(np.abs(reference).max()), 1e-6)
+
+
+def _assert_isolation_is_observable(test, worst, leaked, packed):
+    """The ULP bound of ``_assert_agrees_to_bf16_ulps`` is not vacuous.
+
+    ``leaked`` is the same comparison run against a deliberately non-isolated
+    forward (one document spanning the whole sequence). It has to miss by at
+    least an order of magnitude more than the tolerance the isolated case was
+    allowed, or the tolerance would be hiding cross-document attention.
+
+    Only meaningful for a document that does not start at row 0: the *first*
+    document's causal set is the same with and without isolation, so there the
+    control is identically zero and proves nothing either way.
+    """
+    bound = _ulp_bound(packed)
+    test.assertGreater(
+        leaked,
+        10.0 * bound,
+        f"a non-isolated forward only differs by {leaked:.3e}, so the "
+        f"{bound:.3e} tolerance on {worst:.3e} proves nothing",
+    )
 
 
 def _dense_reference(query, key, w_v, row_end, scale, sink=None):
@@ -456,7 +634,7 @@ _FULL_CAUSAL_CFG = "ernielite_layer43_non_absorbed_mqa_dense"
 # Phase 2 (DSA warmup): ``hybrid_mla_attention="mqa_dsa"`` +
 # ``dsa_indexer_use_sparse_loss=false`` + YAML ``train_indexer_only=true``.
 _DSA_CFG = "ernielite_layer43_non_absorbed_mqa_hca_dsa"
-# Phase 3/4: ``hybrid_mla_attention="mqa_dsa"`` +
+# Phase 3: ``hybrid_mla_attention="mqa_dsa"`` +
 # ``dsa_indexer_use_sparse_loss=true``, backbone unfrozen.
 _DSA_SPARSE_LOSS_CFG = "ernielite_layer43_non_absorbed_mqa_hca_dsa_sparse_loss"
 # CSA full-causal MQA (``csa_compress_ratios == -1``). NOT a hybrid-MLA config:
@@ -598,6 +776,62 @@ def _flash_attn_version(value):
         paddle.set_flags({key: previous})
 
 
+def _fa4_can_serve():
+    """Whether pinning ``FLAGS_flash_attn_version=4`` can actually be served.
+
+    ``flash_mask_facade.get_fa_version`` answers from the flag and the head dims
+    alone -- it never checks that a FA4 backend exists. With no cute kernel the
+    facade's ``_flashmask_attention`` is ``paddle.nn.functional``'s, which knows
+    only 2 and 3 and raises ``ValueError: Invalid flash attention version: 4``
+    (``paddle/nn/functional/flash_attention.py:2179``) for *every* head-dim pair
+    the facade whitelists, ``(256, 256)`` plain MHA included. The upstream CI
+    images are cc 9.0 without the kernel, so pinning 4 unconditionally would
+    break the ``mha`` cases, which are not ``_GPU``-gated and used to run there
+    on the image default 2.
+    """
+    try:
+        from paddlefleet_ops import is_flash_mask_available
+    except ImportError:  # pragma: no cover - packaged build always has it
+        return False
+    return bool(is_flash_mask_available()) and _production_fa_version() == 4
+
+
+@contextlib.contextmanager
+def _fa4_pin():
+    """``_flash_attn_version(4)`` where FA4 can serve, a no-op where it cannot.
+
+    The full-causal phases have exactly one backend, and
+    ``MQALatentAttention._assert_dense_fa4`` raises when the process flags do not
+    resolve to FA4, so a module running such a forward has to reproduce the
+    production flag value. Those cases are all ``_GPU``-gated to the SM100 boxes,
+    where ``_fa4_can_serve()`` is True -- and the same modules also hold ``mha``
+    cases that do run without FA4, which is why the pin has to stand down rather
+    than force a value the box cannot honour.
+    """
+    if not _fa4_can_serve():
+        yield
+        return
+    with _flash_attn_version(4):
+        yield
+
+
+def _fa4_module_hooks():
+    """``(setUpModule, tearDownModule)`` wrapping the module in ``_fa4_pin()``.
+
+    Doing it once per module beats repeating the pin at every call site, and the
+    restore keeps it from leaking into modules that assert on the refusal.
+    """
+    pin = _fa4_pin()
+
+    def setUpModule():
+        pin.__enter__()
+
+    def tearDownModule():
+        pin.__exit__(None, None, None)
+
+    return setUpModule, tearDownModule
+
+
 def _production_fa_version():
     """The ``fa_version`` the production trainer would pick on this box."""
     major, minor = paddle.device.cuda.get_device_capability()
@@ -606,6 +840,24 @@ def _production_fa_version():
     if (major, minor) == (9, 0):
         return 3
     return 2
+
+
+@contextlib.contextmanager
+def _cudnn_deterministic(value):
+    """Temporarily pin the process-global ``FLAGS_cudnn_deterministic``.
+
+    Set by the accuracy-diff harnesses (``script/test_aadiff/check_aadiff.sh``,
+    ``script/run_compare_fleet_ec.sh``), and read by
+    ``paddlefleet_ops.flash_mask_facade.get_fa_version``, so it takes part in
+    backend selection rather than only in kernel behaviour.
+    """
+    key = "FLAGS_cudnn_deterministic"
+    previous = paddle.get_flags([key])[key]
+    paddle.set_flags({key: value})
+    try:
+        yield
+    finally:
+        paddle.set_flags({key: previous})
 
 
 def _load_provider(name):

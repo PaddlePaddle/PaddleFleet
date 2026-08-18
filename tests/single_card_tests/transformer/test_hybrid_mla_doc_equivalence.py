@@ -63,14 +63,19 @@ from .hybrid_mla_utils import (
     V_HEAD_DIM,
     WINDOW,
     H,
+    _assert_agrees_to_bf16_ulps,
+    _assert_isolation_is_observable,
     _build_module,
     _check_index_invariants,
     _create_mqa_config,
     _dense_reference,
     _doc_meta,
+    _fa4_module_hooks,
     _make_inputs,
     _row_end,
 )
+
+setUpModule, tearDownModule = _fa4_module_hooks()
 
 
 def _doc_segments(layout, seqlen):
@@ -492,73 +497,90 @@ def _run_mqa(module, query, key, w_v, row_end, upstream, **extra):
 @_GPU
 class TestMQAKernelPackedVsSingle(unittest.TestCase):
     """Task 1, ``mqa`` mode: the absorbed-MQA kernel packed run equals the
-    per-document runs, elementwise on the output AND on every gradient, with
-    the sink both OFF and ON. Also equals the fp32 dense reference."""
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
+    per-document runs, on the output AND on every gradient, with the sink both
+    OFF and ON. Also equals the fp32 dense reference."""
 
     def _module(self, sink=None):
-        return _build_module(_create_mqa_config("mqa"), sink=sink)
+        # bf16 throughout: the full-causal phase hands the sink to dense FA4 as
+        # ``learnable_sink``, which asserts bf16 on it
+        # (``flash_mask/cute/interface.py:598``), and that is what production's
+        # ``build_softmax_offset`` gives via ``params_dtype``.
+        return _build_module(_create_mqa_config("mqa"), bf16=True, sink=sink)
 
-    def _fwd_stats(self, sink):
-        """Forward: packed vs single (bit-exact) + vs dense reference."""
+    def _fp32(self, tensor):
+        return tensor.cast("float32").numpy()
+
+    def _check_forward(self, sink, label):
+        """Forward: packed vs single, to a few ULPs, + vs the fp32 dense reference.
+
+        Not bit equality: dense FA4 derives its accumulation order from the
+        flashmask row bounds, which repacking changes
+        (``hybrid_mla_utils._assert_agrees_to_bf16_ulps``). Each multi-document
+        layout also measures a deliberately non-isolated forward, so the
+        tolerance is demonstrably too tight to hide cross-document attention.
+        """
         module = self._module(sink=sink)
-        stats = []
         for layout, seqlen in _LAYOUTS:
-            query, key, w_v = _make_inputs(seqlen, seed=1)
-            row_end = _row_end(layout, seqlen)
-            packed = (
-                module(query, key, None, None, row_end, v_b_proj_weight=w_v)
-                .cast("float32")
-                .numpy()
-            )
-            worst = 0.0
-            for start, length in _doc_segments(layout, seqlen):
-                piece = (
+            with self.subTest(layout=layout):
+                query, key, w_v = _make_inputs(seqlen, seed=1)
+                row_end = _row_end(layout, seqlen)
+                packed = self._fp32(
+                    module(query, key, None, None, row_end, v_b_proj_weight=w_v)
+                )
+                # Control: the same inputs with every document boundary gone.
+                no_isolation = self._fp32(
                     module(
-                        query[:, start : start + length].contiguous(),
-                        key[:, start : start + length].contiguous(),
+                        query,
+                        key,
                         None,
                         None,
-                        _row_end([length], length),
+                        _row_end([seqlen], seqlen),
                         v_b_proj_weight=w_v,
                     )
-                    .cast("float32")
-                    .numpy()
                 )
-                _, max_abs, _ = _relerr_maxmean(
-                    packed[:, start : start + length], piece
-                )
-                worst = max(worst, max_abs)
-            ref = _dense_reference(
-                query,
-                key,
-                w_v,
-                row_end,
-                module.softmax_scale,
-                sink=(None if sink is None else np.asarray(sink)),
-            ).numpy()
-            ref_rel, _, _ = _relerr_maxmean(packed, ref)
-            stats.append((layout, worst, ref_rel))
-        return stats
+                for start, length in _doc_segments(layout, seqlen):
+                    sl = slice(start, start + length)
+                    piece = self._fp32(
+                        module(
+                            query[:, sl].contiguous(),
+                            key[:, sl].contiguous(),
+                            None,
+                            None,
+                            _row_end([length], length),
+                            v_b_proj_weight=w_v,
+                        )
+                    )
+                    worst = _assert_agrees_to_bf16_ulps(
+                        self,
+                        packed[:, sl],
+                        piece,
+                        f"packed!=single (fwd, {label}) doc@{start}",
+                    )
+                    # Row 0's causal set is the same either way, so the
+                    # control is informative from the second document on.
+                    if start > 0:
+                        _assert_isolation_is_observable(
+                            self,
+                            worst,
+                            float(np.abs(no_isolation[:, sl] - piece).max()),
+                            packed[:, sl],
+                        )
+                ref = _dense_reference(
+                    query,
+                    key,
+                    w_v,
+                    row_end,
+                    module.softmax_scale,
+                    sink=(None if sink is None else np.asarray(sink)),
+                ).numpy()
+                ref_rel, _, _ = _relerr_maxmean(packed, ref)
+                self.assertLess(ref_rel, 5e-3, "kernel != dense reference")
 
     def test_forward_sinkless(self):
-        for layout, worst, ref_rel in self._fwd_stats(None):
-            with self.subTest(layout=layout):
-                self.assertEqual(worst, 0.0, "packed!=single (fwd)")
-                self.assertLess(ref_rel, 5e-3, "kernel != dense reference")
+        self._check_forward(None, "sinkless")
 
     def test_forward_with_sink(self):
-        sink = np.linspace(1.0, 3.0, H)
-        for layout, worst, ref_rel in self._fwd_stats(sink):
-            with self.subTest(layout=layout):
-                self.assertEqual(worst, 0.0, "packed!=single (fwd, sink)")
-                self.assertLess(ref_rel, 5e-3, "kernel != dense reference")
+        self._check_forward(np.linspace(1.0, 3.0, H), "sink")
 
     def _bwd_check(self, sink):
         module = self._module(sink=sink)
@@ -637,13 +659,6 @@ class TestMQADSAKernelPackedVsSingle(unittest.TestCase):
     the dense reference and the per-document runs exactly (up to bf16); sink
     ON/OFF. Genuinely-sparse soundness is covered by the capture class below.
     """
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     def setUp(self):
         _CAPTURED.clear()
@@ -784,13 +799,6 @@ class TestForcedWindowAndSuperset(unittest.TestCase):
     whose available column count fits the budget.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
-
     def setUp(self):
         _CAPTURED.clear()
         self.module = _build_module(
@@ -906,17 +914,16 @@ class TestSinkNormalizationFP64(unittest.TestCase):
     that the sink is present for the first token of every document, and that it
     is applied exactly once (not duplicated per document)."""
 
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
-
     def test_mqa_sink_matches_fp64_oracle(self):
         seqlen, layout = 256, [40, 88, 128]
         sink = np.linspace(1.0, 3.0, H)
-        module = _build_module(_create_mqa_config("mqa"), sink=sink)
+        # bf16 sink: dense FA4 asserts that dtype on ``learnable_sink``
+        # (``flash_mask/cute/interface.py:598``), matching production's
+        # ``params_dtype``. The oracle is then fed the rounded values the kernel
+        # actually saw, so the comparison isolates the softmax arithmetic rather
+        # than re-measuring bf16 storage of the sink.
+        module = _build_module(_create_mqa_config("mqa"), bf16=True, sink=sink)
+        sink = module.softmax_offset.cast("float64").numpy()
         query, key, w_v = _make_inputs(seqlen, seed=6)
         row_end = _row_end(layout, seqlen)
         out = (
@@ -943,7 +950,7 @@ class TestSinkNormalizationFP64(unittest.TestCase):
         duplication would scale the sink mass by the document index."""
         seqlen, layout = 256, [50, 50, 50, 106]
         sink = np.full(H, 20.0)  # dominant -> first-token output ~ 0
-        module = _build_module(_create_mqa_config("mqa"), sink=sink)
+        module = _build_module(_create_mqa_config("mqa"), bf16=True, sink=sink)
         query, key, w_v = _make_inputs(seqlen, seed=6)
         row_end = _row_end(layout, seqlen)
         out = (
@@ -974,13 +981,6 @@ class TestMTPDocumentMaskShift(unittest.TestCase):
     with the shrunk, re-expressed layout and require packed==single and
     in-document-only selection on both the dense and the DSA path.
     """
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     _BASE = [40, 88, 128]
     _SEQ = 256
@@ -1031,9 +1031,10 @@ class TestMTPDocumentMaskShift(unittest.TestCase):
                         .cast("float32")
                         .numpy()
                     )
-                    self.assertEqual(
-                        float(np.abs(packed[:, sl] - piece).max()),
-                        0.0,
+                    _assert_agrees_to_bf16_ulps(
+                        self,
+                        packed[:, sl],
+                        piece,
                         f"depth {depth} shifted doc@{start} not isolated",
                     )
 

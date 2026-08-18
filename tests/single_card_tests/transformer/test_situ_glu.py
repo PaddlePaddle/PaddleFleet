@@ -17,6 +17,7 @@ import subprocess
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import paddle
 import paddle.nn.functional as F
@@ -44,6 +45,30 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class TestSituGLU(unittest.TestCase):
+    def test_default_fused_falls_back_without_triton(self):
+        x = paddle.randn([3, 8], dtype="float32")
+        probs = paddle.rand([3], dtype="float32")
+        out_grad = paddle.randn([3, 4], dtype="float32")
+        expected_forward = situ_glu_scale_forward(
+            x, probs, situ_glu_fusion=False
+        )
+        expected_backward = situ_glu_scale_backward(
+            x, probs, out_grad, situ_glu_fusion=False
+        )
+
+        with mock.patch(
+            "paddlefleet.triton_ops.utils.is_triton_available",
+            return_value=False,
+        ):
+            actual_forward = situ_glu_scale_forward(x, probs)
+            actual_backward = situ_glu_scale_backward(x, probs, out_grad)
+
+        self.assertTrue(paddle.equal_all(actual_forward, expected_forward))
+        for actual, expected in zip(
+            actual_backward, expected_backward, strict=True
+        ):
+            self.assertTrue(paddle.equal_all(actual, expected))
+
     def test_config_resolves_situ_name(self):
         config = TransformerConfig.from_config(
             SimpleNamespace(
@@ -54,6 +79,17 @@ class TestSituGLU(unittest.TestCase):
         )
 
         self.assertIs(config.hidden_act, situ)
+        self.assertTrue(config.situ_glu_fusion)
+
+        disabled_config = TransformerConfig.from_config(
+            SimpleNamespace(
+                hidden_size=8,
+                num_attention_heads=2,
+                hidden_act="situ",
+                situ_glu_fusion=False,
+            )
+        )
+        self.assertFalse(disabled_config.situ_glu_fusion)
 
     def test_matches_official_formula(self):
         x = paddle.linspace(-8.0, 8.0, 32).reshape([2, 16])
@@ -430,7 +466,12 @@ class TestSituGLU(unittest.TestCase):
         probs = paddle.rand([256], dtype="float32")
         out_grad = paddle.randn([256, hidden_size], dtype="bfloat16")
 
-        def run(deep_gemm, use_accuracy_compatible=False):
+        def run(
+            deep_gemm,
+            use_accuracy_compatible=False,
+            situ_glu_fusion=True,
+        ):
+            config.situ_glu_fusion = situ_glu_fusion
             expert = GroupedMLPExpert(
                 num_local_experts=2,
                 config=config,
@@ -470,6 +511,7 @@ class TestSituGLU(unittest.TestCase):
         grouped = run(False)
         deep_gemm = run(True)
         accuracy_compatible = run(False, use_accuracy_compatible=True)
+        unfused_situ_glu = run(False, situ_glu_fusion=False)
         tolerances = (
             (1e-3, 1e-3),
             (1e-3, 1e-3),
@@ -480,6 +522,7 @@ class TestSituGLU(unittest.TestCase):
         for path, actuals in (
             ("deep_gemm", deep_gemm),
             ("accuracy_compatible", accuracy_compatible),
+            ("unfused_situ_glu", unfused_situ_glu),
         ):
             for name, expected, actual, (atol, rtol) in zip(
                 (

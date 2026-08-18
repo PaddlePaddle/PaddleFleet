@@ -100,10 +100,14 @@ from .hybrid_mla_utils import (
     _check_index_invariants,
     _create_mqa_config,
     _dense_reference,
+    _fa4_module_hooks,
+    _full_causal_indices,
     _make_inputs,
     _rel,
     _row_end,
 )
+
+setUpModule, tearDownModule = _fa4_module_hooks()
 
 # Adversarial document layouts: shorter than / equal to / longer than the
 # forced window, single-token documents, and a document overrunning the buffer.
@@ -122,14 +126,16 @@ _LAYOUTS = [
 
 
 def _full_causal_table(layout, seqlen):
-    """The per-document full-causal ``[1, s, s]`` table, from the production
-    builder itself -- it is a pure integer function of the document bounds.
+    """The per-document full-causal ``[1, s, s]`` table.
+
+    A pure integer function of the document bounds, shared with the CP suites
+    (``hybrid_mla_utils._full_causal_indices``). Production never materialises
+    it -- the dense FA4 backend gets the same column set as an ``O(s)`` row
+    bound -- so this is an independent derivation of what that mask must be.
     """
     row_end = _row_end(layout, seqlen)
     doc_start, _, is_valid, _, _ = _derive_csa_doc_boundaries(row_end, seqlen)
-    table = MQALatentAttention._build_full_causal_indices(
-        1, seqlen, doc_start, is_valid
-    )
+    table = _full_causal_indices(1, seqlen, doc_start, is_valid)
     return table.numpy()
 
 
@@ -774,13 +780,6 @@ class TestHybridMLAConfig(unittest.TestCase):
 class TestMQAEquivalence(unittest.TestCase):
     """The indexer-less full-causal path is mathematically identical to MHA."""
 
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
-
     def setUp(self):
         _CAPTURED.clear()
         self.module = _build_module(_create_mqa_config("mqa"))
@@ -825,8 +824,12 @@ class TestMQAEquivalence(unittest.TestCase):
         """The learnable sink is one extra value-less softmax column."""
         seqlen, layout = 256, [40, 88, 128]
         sink = np.linspace(1.0, 3.0, H)
-        module = _build_module(_create_mqa_config("mqa"), sink=sink)
-        self.assertEqual(module.softmax_offset.dtype, paddle.float32)
+        module = _build_module(_create_mqa_config("mqa"), bf16=True, sink=sink)
+        # The dense FA4 backend takes the sink as ``learnable_sink`` and asserts
+        # bf16 on it (``flash_mask/cute/interface.py:598``), which is what
+        # ``build_softmax_offset``'s ``params_dtype`` gives in production. An
+        # fp32 sink here would be testing a configuration the phase cannot run.
+        self.assertEqual(module.softmax_offset.dtype, paddle.bfloat16)
         self.assertEqual(list(module.softmax_offset.shape), [H])
         query, key, w_v = _make_inputs(seqlen)
         row_end = _row_end(layout, seqlen)
@@ -850,13 +853,6 @@ class TestMQAEquivalence(unittest.TestCase):
 @_GPU
 class TestMQADSA(unittest.TestCase):
     """The DSA (indexer) path: forced window + Lightning-indexer top-k."""
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     def setUp(self):
         _CAPTURED.clear()
@@ -1041,10 +1037,13 @@ class TestMQADSA(unittest.TestCase):
           ``window + index_topk`` and the KL is restricted to that same set, so
           ``_attn_target`` is called once per step at exactly ``index_topk``.
 
-        Both column sets are asserted. The ``False`` attention table is *exactly*
-        assertable: it is ``_build_full_causal_indices``, a pure integer function
-        of the document bounds with no floating-point scoring in it, so it is
-        reproducible and equal to the builder's own output element for element.
+        Both column sets are asserted. The ``False`` branch has no column table
+        of its own -- dense FA4 is its only backend and carries the mask as an
+        ``O(s)`` row bound -- so ``RecordingMQA`` writes that bound out as the
+        ``[b, s, s]`` set it denotes (``_row_end_column_table``). That decoding is
+        a pure integer function of the document bounds with no floating-point
+        scoring in it, so it is reproducible and *exactly* assertable, element for
+        element, against ``_full_causal_table``.
 
         The ``True`` path stays statistical, which is the pre-existing measured
         fact this test still records: on a single full-length document neither
@@ -1301,13 +1300,6 @@ class TestMQADSAWarmupPhase(unittest.TestCase):
     # candidate range is non-empty on the late rows yet still excludes them.
     LAYOUT = [40, 216]
 
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
-
     def setUp(self):
         _CAPTURED.clear()
         DSAIndexerLossLoggingHelper.tracker.clear()
@@ -1347,13 +1339,15 @@ class TestMQADSAWarmupPhase(unittest.TestCase):
     def test_attention_output_equals_the_indexer_less_full_causal_path(self):
         """The core invariant: the indexer's *existence* must not move a bit.
 
-        Both paths call the same ``_build_full_causal_indices`` and then the
-        same sparse kernel, so the outputs must be bit-identical, not merely
-        close. Nothing needs weight copying: on this path attention consumes no
-        module parameter at all -- the query/key/``v_b_proj_weight`` are inputs
-        and ``softmax_offset`` is ``None`` in both -- so the only thing that
-        could differ is the index table. Asserted in both modes, so the
-        ``:495`` early exit and the full ``:600`` branch are each covered.
+        Both paths reach the same ``_forward_full_causal`` -- phase 1 directly
+        (``:500``), the warmup through it (``:629``) -- and so the same dense FA4
+        kernel with the same caller row bound, so the outputs must be
+        bit-identical, not merely close. Nothing needs weight copying: on this
+        path attention consumes no module parameter at all -- the
+        query/key/``v_b_proj_weight`` are inputs and ``softmax_offset`` is
+        ``None`` in both -- so the only thing that could differ is the mask.
+        Asserted in both modes, so the warmup's ``:636`` eval early exit and its
+        full indexer-loss branch are each covered.
         """
         query, key, w_v, x, qr = self._inputs()
         reference = _build_module(_create_mqa_config("mqa"), bf16=True)
@@ -1721,13 +1715,6 @@ class TestMQADSACudnnTarget(unittest.TestCase):
 
     TOPK = 512
     SEQLEN = 768  # > WINDOW + TOPK, so the table stays genuinely sparse
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     def _build(self, topk):
         config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
