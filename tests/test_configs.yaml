@@ -28,6 +28,10 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp_with_overlap.py]
     products:
       - num_gpus: 8
+  # separate_mtp_headloss PP layout regression: PP=4 * MP=2 -> 8 GPUs (EP=2 orthogonal)
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_separate_mtp_headloss_pp.py]
+    products:
+      - num_gpus: 8
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_recompute.py]
     products:
       - num_gpus: 8

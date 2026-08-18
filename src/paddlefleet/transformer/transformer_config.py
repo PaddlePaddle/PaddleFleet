@@ -2434,3 +2434,88 @@ class TransformerConfig(ModelParallelConfig):
             # The two-chunks-per-rank split needs an even per-rank row count.
             # ``TransformerConfig`` does not carry the sequence length, so that
             # is checked at the swap itself (``cp_utils.dualchunk_swap``).
+
+        # separate_mtp_headloss validation.
+        if self.separate_mtp_headloss:
+            import warnings as _warnings
+
+            # Resolve the effective number of MTP layers, following the same
+            # logic used elsewhere in __post_init__ (see the csa branch above).
+            mtp_num_layers = self.num_nextn_predict_layers
+            mtp_enabled = mtp_num_layers > 0
+            pp_enabled = self.pipeline_model_parallel_size > 1
+
+            # 1. separate_mtp_headloss is only meaningful when both MTP and PP
+            #    are enabled; otherwise warn and force-disable it.
+            if not mtp_enabled or not pp_enabled:
+                _warnings.warn(
+                    "separate_mtp_headloss=True requires both MTP and pipeline "
+                    "parallel to be enabled "
+                    f"(mtp_num_layers={mtp_num_layers}, "
+                    f"pipeline_model_parallel_size={self.pipeline_model_parallel_size}). "
+                    "Forcing separate_mtp_headloss=False."
+                )
+                self.separate_mtp_headloss = False
+            else:
+                # Once MTP and PP are both enabled:
+                # 2. Layer-count vs pp*vpp guard.
+                #    The framework-enforced constraint is DIVISIBILITY: Paddle's
+                #    interleave segmentation (SegmentLayers.do_segment) asserts
+                #    the number of seg-weight-bearing layers is divisible by
+                #    pp*vpp, so an indivisible layout fails at build time.
+                #    Verified empirically on 8xH800 (pp=4, vpp=2): a divisible
+                #    layout with quotient > 1 (multiple layers per stage) builds
+                #    and constructs shared comm fine, so "exactly 1 layer per
+                #    stage" is stricter than the framework needs. We keep the
+                #    quotient==1 form as a conservative guard because the full
+                #    fwd/bwd path for separate_mtp_headloss under pp>1 is not yet
+                #    covered by any regression test; see
+                #    tests/multi_card_tests/pipeline_parallel/test_separate_mtp_headloss_pp.py
+                #    which asserts the build/segmentation/shared-layer-stage
+                #    contract.
+                pp_degree = self.pipeline_model_parallel_size
+                vpp_degree = self.virtual_pipeline_model_parallel_size
+                # When vpp is not enabled, vpp_degree may be None or a
+                # sentinel like -1. Normalize it to 1 before computing
+                # pp_degree*vpp_degree, otherwise the product would be wrong
+                # (e.g. negative).
+                if vpp_degree is None or vpp_degree <= 1:
+                    print(
+                        "[separate_mtp_headloss] vpp is not enabled "
+                        f"(virtual_pipeline_model_parallel_size={vpp_degree}); "
+                        "using vpp_degree=1 for the pp_degree*vpp_degree check."
+                    )
+                    vpp_degree = 1
+
+                num_empty_layers = self.num_empty_layers_add_in_head + max(
+                    0, self.num_empty_layers_add_in_tail - 1
+                )
+                total_layers = (
+                    self.num_hidden_layers + mtp_num_layers + num_empty_layers
+                )
+                denom = pp_degree * vpp_degree
+                if total_layers % denom != 0 or total_layers // denom != 1:
+                    _warnings.warn(
+                        "separate_mtp_headloss=True requires "
+                        "(num_hidden_layers + num_mtp_layers + num_empty_layers) "
+                        f"({self.num_hidden_layers} + {mtp_num_layers} + "
+                        f"{num_empty_layers} = {total_layers}) to be divisible "
+                        f"by pp_degree*vpp_degree ({pp_degree}*{vpp_degree} = "
+                        f"{denom}) and the quotient to equal 1 (exactly one "
+                        f"layer per pp*vpp stage), but got {total_layers} / "
+                        f"{denom} = {total_layers / denom}. "
+                        "Forcing separate_mtp_headloss=False."
+                    )
+                    self.separate_mtp_headloss = False
+
+                # 3. separate_mtp_headloss reserves tail EmptyLayer slots for the
+                #    separated MTP LMHead/Loss and main LMHead, so it needs at
+                #    least 3 tail empty layers.
+                if self.num_empty_layers_add_in_tail < 3:
+                    _warnings.warn(
+                        "separate_mtp_headloss=True requires "
+                        "num_empty_layers_add_in_tail >= 3 "
+                        f"(got {self.num_empty_layers_add_in_tail}). "
+                        "Forcing separate_mtp_headloss=False."
+                    )
+                    self.separate_mtp_headloss = False
