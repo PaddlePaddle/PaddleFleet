@@ -2310,6 +2310,9 @@ class CompressedSparseAttention(FleetLayer):
                     startend_row_indices=startend_row_indices,
                     doc_lens=doc_lens_list,
                     return_topk_scores=need_indexer_loss,
+                    topk_backend=getattr(
+                        self.config, "dsa_indexer_topk_backend", "unfused"
+                    ),
                 )
 
             topk_indices_compressed = topk_indices
@@ -3143,6 +3146,11 @@ class CompressedSparseAttention(FleetLayer):
                                     else None,
                                     seq_offset=position_offset,
                                     return_topk_scores=use_fused_indexer_loss_path,
+                                    topk_backend=getattr(
+                                        self.config,
+                                        "dsa_indexer_topk_backend",
+                                        "unfused",
+                                    ),
                                 )
                             )
 

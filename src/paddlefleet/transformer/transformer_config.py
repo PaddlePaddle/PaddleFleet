@@ -1363,6 +1363,18 @@ class TransformerConfig(ModelParallelConfig):
       * "cudnn": cuDNN indexer top-k/forward path.
     """
 
+    dsa_indexer_topk_backend: str = "unfused"
+    """Top-k implementation used after production DSA indexer scores.
+
+    One of {"unfused", "cutedsl"}:
+      * "unfused" (default): Paddle ``topk`` reference implementation.
+      * "cutedsl": standalone Paddle CuTe DSL prefill top-k implementation.
+
+    This switch only changes the top-k stage after the indexer score forward.
+    It does not change warmup/full-candidate selection, TileLang score paths,
+    sparse attention backends, or indexer-loss autograd.
+    """
+
     csa_sparse_attn_backend: str = "tilelang"
     """CSA sparse attention backend. Single switch selecting one of three
     implementations of the final sparse MQA attention.
@@ -1919,6 +1931,12 @@ class TransformerConfig(ModelParallelConfig):
                     "train_indexer_only=True; the sparse training phase pairs "
                     "dsa_indexer_use_sparse_loss=True with a trainable backbone."
                 )
+
+        if self.dsa_indexer_topk_backend not in {"unfused", "cutedsl"}:
+            raise ValueError(
+                f"dsa_indexer_topk_backend={self.dsa_indexer_topk_backend!r} "
+                "is invalid. Must be one of {'unfused', 'cutedsl'}."
+            )
 
         # Hyper-connection (mHC) validation
         if self.use_fused_mhc:

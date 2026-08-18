@@ -2127,7 +2127,10 @@ class MQALatentAttention(FleetLayer):
                     doc_lens=doc_lens_arg,
                     seq_offset=position_offset,
                     return_topk_scores=need_loss,
-                )
+                    topk_backend=getattr(
+                    self.config, "dsa_indexer_topk_backend", "unfused"
+                ),
+            )
             topk_indices = paddle.where(
                 row_empty, paddle.full_like(selected, -1), selected
             )
