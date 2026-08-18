@@ -119,7 +119,7 @@ done
 echo "======================================"
 echo -e "\033[34mTests executed: $run_count\033[0m"
 echo -e "\033[34mMulti-card test time ranking (high to low):\033[0m"
-printf '%s\n' "${test_times[@]}" | sort -t'|' -k1,1nr | while IFS='|' read -r test_time test_file; do
+printf '%s\n' "${test_times[@]}" | sort -t'|' -k1,1nr | head -20 | while IFS='|' read -r test_time test_file; do
     echo "${test_time}s  $test_file"
 done
 echo "======================================"
