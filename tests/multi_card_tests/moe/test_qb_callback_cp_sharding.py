@@ -239,25 +239,54 @@ class TestHistogramReduceCorrectness(_QBCommTestBase):
         )
         np.testing.assert_array_equal(got, self._reference_bias(global_once))
 
-    def test_cp_double_counting_would_change_the_result(self):
-        """Negative control: an extra CP reduce yields a different bias.
+    def test_extra_cp_reduce_inflates_the_merged_histogram(self):
+        """Negative control, asserted on the histogram via real collectives.
 
-        This is what makes the previous test a real check of "CP is not
-        double-counted" rather than a tautology.
+        The merged histogram -- not the recovered bias -- is where CP
+        double-counting is observable. Because CP is a contiguous slice that
+        partitions the sharding group, an extra CP all-reduce inflates the
+        merged counts by exactly ``cp_nranks`` whatever the per-rank data is
+        (before the sharding reduce each ``h_j`` is counted once per rank of
+        its CP block; after it, every sharding rank already holds the same
+        value). And the QB recovery is invariant under a uniform scaling of
+        the histogram: ``q_target``, ``c`` and ``h`` all scale together, so
+        ``beta`` and ``fraction`` are unchanged. The only leak is the floor in
+        ``q_target = floor(total * k / n)``, which bites only when some expert
+        total is odd -- with every total even the bias is bit-identical. So an
+        assertion on the bias would be luck, and both of the reduces below are
+        checked against exact expected counts instead.
         """
-        global_once = sum(
+        local = _local_histogram(self.rank)
+
+        # The production reduce sequence under SP + EP: tp, then sharding.
+        merged = paddle.to_tensor(local, dtype=paddle.int64)
+        dist.all_reduce(merged, group=self.tp_group)
+        dist.all_reduce(merged, group=self.sd_group)
+
+        # tp x sharding spans the world (asserted in TestCommGroupTopology),
+        # so every rank must be counted exactly once.
+        expected = sum(
             _local_histogram(r).astype(np.int64) for r in range(self.world_size)
         )
-        # An extra all_reduce over CP after the sharding reduce adds the
-        # already-merged histogram once per extra CP rank.
-        global_doubled = global_once * self.cp_group.nranks
+        np.testing.assert_array_equal(
+            merged.numpy(),
+            expected,
+            err_msg="tp+sharding reduce did not count every rank exactly once",
+        )
 
-        bias_once = self._reference_bias(global_once)
-        bias_doubled = self._reference_bias(global_doubled)
-        self.assertFalse(
-            np.array_equal(bias_once, bias_doubled),
-            "CP double-counting is undetectable with this histogram; the "
-            "positive test above would be vacuous",
+        # The removed CP reduce would have run on top of that.
+        cp_nranks = self.cp_group.nranks
+        self.assertGreater(cp_nranks, 1, "cp_degree>1 expected")
+        doubled = merged.clone()
+        dist.all_reduce(doubled, group=self.cp_group)
+        np.testing.assert_array_equal(
+            doubled.numpy(),
+            expected * cp_nranks,
+            err_msg=(
+                "an extra CP all_reduce must inflate the merged counts by "
+                "exactly cp_nranks; if it does not, CP is not nested in "
+                "sharding the way this test assumes"
+            ),
         )
 
     def test_sharding_only_reduce_matches_its_group(self):
