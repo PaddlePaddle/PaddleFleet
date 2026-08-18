@@ -123,7 +123,3 @@ class TestSeparateMtpHeadlossValidation(unittest.TestCase):
         self.assertTrue(
             any("num_empty_layers_add_in_tail >= 3" in m for m in messages)
         )
-
-
-if __name__ == "__main__":
-    unittest.main()
