@@ -136,7 +136,8 @@ setup_paddle_venv() {
     # can compile paddlefleet-ops against the paddle installed above.
     uv pip install --python "${paddle_py}" \
         "setuptools>=66.1.0" pip wheel packaging "ninja==1.11.1.1" \
-        "pybind11[global]>=2.13,<3" "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5"
+        "pybind11[global]>=2.13,<3" "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" \
+        "tensor-spec-worker"
 
     # PaddleFleet. --no-deps is intentionally dropped: the wheel's pinned
     # paddlepaddle-gpu dependency must be installed here, otherwise
@@ -158,11 +159,9 @@ setup_paddle_venv() {
     #     -e ./PaddleFleet/packages/paddlefleet_ops
 
     # PaddleFormers
-    uv pip install --python "${paddle_py}" --force-reinstall \
+    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
         "${PADDLEFORMERS_WHEEL}"
     # uv pip install --python "${paddle_py}" -v -e ./PaddleFormers
-
-    uv pip install --python "${paddle_py}" tensor-spec-worker
 }
 
 main() {
@@ -184,7 +183,7 @@ main() {
     ensure_venv "venv/torch"
     ensure_venv "venv/paddle"
 
-    # setup_torch_venv "${WORKSPACE_DIR}/venv/torch/bin/python"
+    setup_torch_venv "${WORKSPACE_DIR}/venv/torch/bin/python"
     setup_paddle_venv "${WORKSPACE_DIR}/venv/paddle/bin/python"
 }
 
