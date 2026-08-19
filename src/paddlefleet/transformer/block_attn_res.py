@@ -366,7 +366,7 @@ class BlockAttnRes(FleetLayer):
         self._use_fused = (
             HAVE_FUSED_ATTNRES
             and self._use_pylayer
-            and getattr(config, "use_fused_attnres", True)
+            and getattr(config, "attn_res_fusion", True)
             and not getattr(config, "deterministic_mode", False)
         )
 
