@@ -963,6 +963,14 @@ class MultiLatentAttention(Attention):
         core_attn_extra = {}
         if self.mqa_latent and kwargs.get("input_ids") is not None:
             core_attn_extra["input_ids"] = kwargs["input_ids"]
+        # Micro-batch slot for the shared document-mask metadata. Decided in
+        # ``TransformerLayer.forward`` (outside every recompute wrapper) and only
+        # read downstream, so it survives both the recompute below and the
+        # layer-level one. It has to be a declared parameter of the core
+        # attention's ``forward``, because ``recompute`` flattens non-empty kwargs
+        # against the callee's signature.
+        if self.mqa_latent and kwargs.get("docmask_mb_idx") is not None:
+            core_attn_extra["docmask_mb_idx"] = kwargs["docmask_mb_idx"]
 
         if self.mqa_latent:
             # Query is already absorbed; the core attention only needs the V-side

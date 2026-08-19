@@ -28,6 +28,10 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp_with_overlap.py]
     products:
       - num_gpus: 8
+  # separate_mtp_headloss PP layout regression: PP=4 * MP=2 -> 8 GPUs (EP=2 orthogonal)
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_separate_mtp_headloss_pp.py]
+    products:
+      - num_gpus: 8
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_recompute.py]
     products:
       - num_gpus: 8
@@ -151,6 +155,10 @@ tests:
       - num_gpus: 2
   # transformer: FlashMask Ulysses a2a context-parallel, plain + RR (CP=2)
   - test_case: [tests/multi_card_tests/transformer/test_flash_mask_cp_a2a.py]
+    products:
+      - num_gpus: 2
+  # transformer: latent-MQA indexer dual-chunk row rebalance (CP=2)
+  - test_case: [tests/multi_card_tests/transformer/test_mqa_indexer_dualchunk_cp.py]
     products:
       - num_gpus: 2
   # transformer: CSA context-parallel, including cuDNN indexer docmask path (CP=2)

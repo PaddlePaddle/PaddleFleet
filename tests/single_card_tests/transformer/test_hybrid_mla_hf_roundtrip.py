@@ -25,7 +25,7 @@ runs the statements through the real engine: it drives
 real ``csa_compress_ratios == -2`` layer built from the production
 ``model_config.json``.
 
-What is proven here, and why each one matters for the phase-1 -> phase-2/3/4
+What is proven here, and why each one matters for the phase-1 -> phase-2/3
 continuation story:
 
 1. **Save is complete.** Every tensor of the built module reaches disk exactly
@@ -345,45 +345,50 @@ class TestHFSaveCoverage(unittest.TestCase):
             tuple(module["core_attention.softmax_offset"].shape),
         )
 
-    def test_documented_bug_gate_proj_is_saved_untransposed(self):
-        """``self_attn.gate_proj`` has no AOA statement in either direction
-        (the generators test ``use_gated_attn`` while the production JSON says
-        ``gated_attention``), already pinned at the statement level by
-        ``test_hybrid_mla_config_pipeline.py::
-        test_documented_bug_attention_gate_proj_dropped_from_aoa``.
+    def test_gate_proj_is_saved_transposed_like_every_other_2d_weight(self):
+        """``self_attn.gate_proj`` takes the normal transposing path.
 
-        The consequence on disk: the save path builds its engine with
+        WAS a documented bug, pinned here as "saved untransposed": the AOA
+        statements gated on ``config.use_gated_attn`` while the production JSON
+        spells the switch ``gated_attention``, so no statement mentioned
+        ``gate_proj`` in either direction. The save path builds its engine with
         ``destination_state_shard_info=None`` (``full_param.py:103-126``), so
-        ``aoa_engine.py:697-710`` passes every unconsumed input through under
-        its own name. The tensor is therefore not lost -- it is written with
-        Fleet orientation while every other 2-D weight is transposed, i.e. it
-        would be wrong for a genuine torch-produced checkpoint but round trips
-        inside this codebase.
+        ``aoa_engine.py:697-710`` passed the tensor through under its own name --
+        not lost, but written in Fleet orientation while every other 2-D weight
+        was transposed, i.e. wrong for a genuine torch-produced checkpoint.
+
+        Fixed in erniebot's ``fleet_model/ernie5_v2/modeling.py``, which now ORs
+        the two spellings and widens the guard to the whole dsv4-hybrid family,
+        emitting ``self_attn.gate_proj.weight^T ->
+        self_attn.gate_proj.weight``. So the contrast this test used to assert is
+        gone and the pin is inverted: the statement must exist and the tensor
+        must land transposed, exactly like ``q_a_proj``. The statement-level
+        counterpart is
+        ``test_hybrid_mla_config_pipeline.py::test_attention_gate_proj_is_in_aoa``,
+        which counts one per gated layer.
         """
         attn = _attn(_DSA, seed=11)
         module_keys = {PREFIX + k for k in attn.state_dict()}
         _, inverse = _aoa(_DSA, indexer_init_from_scratch=True)
         inv = _filter(inverse, module_keys, fleet_on_left=True)
         gate = PREFIX + "gate_proj.weight"
-        self.assertNotIn(
-            gate, [s.split("->")[1].strip() for s in inv], "bug fixed?"
+        self.assertIn(
+            gate,
+            [s.split("->")[1].strip() for s in inv],
+            "gate_proj lost its AOA statement again",
         )
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "hf"
             _save_hf(attn, inv, path)
             disk = _on_disk(path)
-        self.assertIn(gate, disk, "pass-through must still write the tensor")
-        self.assertEqual(
-            tuple(disk[gate]),
-            tuple(attn.state_dict()["gate_proj.weight"].shape),
-            "gate_proj is expected to be saved untransposed",
-        )
-        other = PREFIX + "q_a_proj.weight"
-        self.assertEqual(
-            tuple(disk[other]),
-            tuple(attn.state_dict()["q_a_proj.weight"].shape)[::-1],
-            "every mapped 2-D weight is transposed, so the contrast is real",
-        )
+        self.assertIn(gate, disk)
+        for key in ("gate_proj.weight", "q_a_proj.weight"):
+            with self.subTest(key=key):
+                self.assertEqual(
+                    tuple(disk[PREFIX + key]),
+                    tuple(attn.state_dict()[key].shape)[::-1],
+                    "every mapped 2-D weight is stored transposed",
+                )
 
 
 @_requires_cuda
