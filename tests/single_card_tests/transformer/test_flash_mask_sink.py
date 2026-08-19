@@ -692,9 +692,9 @@ class TestRefinedRecomputeFlashMaskSink(unittest.TestCase):
     def test_rr_fixed_sink_no_grad(self):
         self._run(causal=True, use_sink=True, sink_trainable=False)
 
-    def test_rr_non_fa4_sink_raises(self):
-        # Sink is only supported on the fa_version==4 cute backend; forcing v3
-        # must make the rr entry point reject a non-None sink.
+    def test_rr_fa2_sink_raises(self):
+        # Sink needs the cutedsl backend (fa3/fa4); forcing fa2 must make the
+        # rr entry point reject a non-None sink.
         from paddlefleet.refined_recompute.flash_attn import (
             RefinedRcomputeFlashMaskAttention,
         )
@@ -709,7 +709,7 @@ class TestRefinedRecomputeFlashMaskSink(unittest.TestCase):
         old = paddle.get_flags(["FLAGS_flash_attn_version"])[
             "FLAGS_flash_attn_version"
         ]
-        paddle.set_flags({"FLAGS_flash_attn_version": 3})
+        paddle.set_flags({"FLAGS_flash_attn_version": 2})
         try:
             with self.assertRaises(NotImplementedError):
                 rr_attn.forward(q, q, q, idx, learnable_sink=sink)

@@ -184,17 +184,20 @@ class TestRefinedRcomputeFlashAttentionFirstFwd(unittest.TestCase):
         "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
     )
-    @patch("paddlefleet.refined_recompute.flash_attn._C_ops.flash_attn_v3")
+    @patch(
+        "paddlefleet.refined_recompute.flash_attn._flash_attn_fwd",
+        create=True,
+    )
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
     def test_first_fwd_version_3(
-        self, mock_tracer, mock_flash_v3, mock_version
+        self, mock_tracer, mock_flash_fwd, mock_version
     ):
         """Test _first_fwd with version 3 puts tensors in queue."""
         mock_tracer_obj = MagicMock()
         mock_tracer_obj._has_grad = False
         mock_tracer.return_value = mock_tracer_obj
 
-        mock_flash_v3.return_value = (
+        mock_flash_fwd.return_value = (
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             paddle.randn([2, 4], dtype=paddle.float32),
         )
@@ -303,20 +306,19 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV3(unittest.TestCase):
         return_value=3,
     )
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._C_ops.flashmask_attention_v2"
+        "paddlefleet.refined_recompute.flash_attn._flash_attn_fwd",
+        create=True,
     )
-    @patch("paddlefleet.refined_recompute.flash_attn.inspect.signature")
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
-    def test_first_fwd_v3_with_block_mask(
-        self, mock_tracer, mock_sig, mock_flash_v2, mock_version
+    def test_first_fwd_v3_uses_cutedsl(
+        self, mock_tracer, mock_flash_fwd, mock_version
     ):
-        """Test _first_fwd with v3 and block_mask parameter."""
+        """Test _first_fwd with v3 dispatches to the cutedsl kernel."""
         mock_tracer_obj = MagicMock()
         mock_tracer_obj._has_grad = False
         mock_tracer.return_value = mock_tracer_obj
-        mock_sig.return_value.parameters = {"block_mask": MagicMock()}
 
-        mock_flash_v2.return_value = (
+        mock_flash_fwd.return_value = (
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             paddle.randn([2, 4], dtype=paddle.float32),
         )
@@ -329,6 +331,7 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV3(unittest.TestCase):
 
         result = attn.forward(q, k, v, startend, causal=False)
         self.assertTrue(result is not None)
+        mock_flash_fwd.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ Coverage map (see validation_reports/A7_recompute_mtp_ckpt.md for the analysis):
      re-derived bit-identically on the recompute forward (a mismatch would
      silently differentiate a different sparsity pattern).
   2. Refined recompute guard: ``RefinedRcomputeFlashMaskAttention`` raises for a
-     learnable sink unless ``fa_version==4``; production dims are not fa4.
+     learnable sink unless the cutedsl backend (fa3/fa4) is active.
   3. MTP tracker slot arithmetic: MTP ``layer_number==0`` -> ``values[-1]`` is
      only accidentally correct for a 44-entry tracker; two MTP layers collide.
   4. Checkpoint key-set compat: MHA <-> MQA byte-identical; mqa_dsa adds the
@@ -79,9 +79,9 @@ _add_repo_root_to_sys_path()
 # ===========================================================================
 class TestRefinedRecomputeSinkGuard(unittest.TestCase):
     """``RefinedRcomputeFlashMaskAttention.forward`` refuses a learnable sink
-    unless the fa cute backend (version 4) is active. The guard sits at the top
-    of ``forward`` (flash_attn.py:665-674), before any kernel call, so it can be
-    exercised on tiny CPU tensors by forcing ``get_fa_version``'s return.
+    unless the fa cute backend (version 3 or 4) is active. The guard sits at the
+    top of ``forward``, before any kernel call, so it can be exercised on tiny
+    CPU tensors by forcing ``get_fa_version``'s return.
     """
 
     def _forward_module(self):
@@ -91,7 +91,7 @@ class TestRefinedRecomputeSinkGuard(unittest.TestCase):
 
         return RefinedRcomputeFlashMaskAttention()
 
-    def test_guard_raises_for_non_fa4_versions(self):
+    def test_guard_raises_for_non_cutedsl_versions(self):
         import paddlefleet.refined_recompute.flash_attn as fa_mod
 
         mod = self._forward_module()
@@ -101,11 +101,12 @@ class TestRefinedRecomputeSinkGuard(unittest.TestCase):
         sink = paddle.zeros([2])
         orig = fa_mod.get_fa_version
         try:
-            for version in (2, 3):
-                fa_mod.get_fa_version = lambda *a, **k_: version
-                with self.assertRaises(NotImplementedError) as ctx:
-                    mod.forward(q, k, v, None, learnable_sink=sink)
-                self.assertIn("fa_version==4", str(ctx.exception))
+            # fa3 now shares FA4's cutedsl backend and supports the sink, so
+            # fa2 is the only version left for the guard to reject.
+            fa_mod.get_fa_version = lambda *a, **k_: 2
+            with self.assertRaises(NotImplementedError) as ctx:
+                mod.forward(q, k, v, None, learnable_sink=sink)
+            self.assertIn("fa3 or fa4", str(ctx.exception))
         finally:
             fa_mod.get_fa_version = orig
 

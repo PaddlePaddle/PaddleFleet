@@ -173,14 +173,14 @@ class TestRefinedRcomputeFlashMaskAttention(unittest.TestCase):
         return_value=3,
     )
     @patch(
-        "paddlefleet.refined_recompute.flash_attn._C_ops.flashmask_attention_v2"
+        "paddlefleet.refined_recompute.flash_attn._flash_attn_fwd",
+        create=True,
     )
-    @patch("paddlefleet.refined_recompute.flash_attn.inspect.signature")
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
-    def test_first_fwd_version_3_with_block_mask(
-        self, mock_tracer, mock_sig, mock_flashmask_v2, mock_version
+    def test_first_fwd_version_3_uses_cutedsl(
+        self, mock_tracer, mock_flash_fwd, mock_version
     ):
-        """Test _first_fwd v3 with block_mask parameter in signature."""
+        """Test _first_fwd v3 dispatches to the cutedsl _flash_attn_fwd."""
         from paddlefleet.refined_recompute.flash_attn import (
             RefinedRcomputeFlashMaskAttention,
         )
@@ -189,16 +189,13 @@ class TestRefinedRcomputeFlashMaskAttention(unittest.TestCase):
         mock_tracer_obj._has_grad = False
         mock_tracer.return_value = mock_tracer_obj
 
-        # flashmask_attention has block_mask in its signature
-        mock_sig.return_value.parameters = {"block_mask": MagicMock()}
-
         q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
         startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
         out = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
 
-        mock_flashmask_v2.return_value = (
+        mock_flash_fwd.return_value = (
             out,
             paddle.randn([2, 4], dtype=paddle.float32),
         )
@@ -206,45 +203,8 @@ class TestRefinedRcomputeFlashMaskAttention(unittest.TestCase):
         attn = RefinedRcomputeFlashMaskAttention()
         result = attn.forward(q, k, v, startend, causal=False)
         self.assertTrue(result is not None)
-
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-        return_value=3,
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn._C_ops.flashmask_attention_v2"
-    )
-    @patch("paddlefleet.refined_recompute.flash_attn.inspect.signature")
-    @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
-    def test_first_fwd_version_3_without_block_mask(
-        self, mock_tracer, mock_sig, mock_flashmask_v2, mock_version
-    ):
-        """Test _first_fwd v3 without block_mask parameter in signature."""
-        from paddlefleet.refined_recompute.flash_attn import (
-            RefinedRcomputeFlashMaskAttention,
-        )
-
-        mock_tracer_obj = MagicMock()
-        mock_tracer_obj._has_grad = False
-        mock_tracer.return_value = mock_tracer_obj
-
-        # flashmask_attention does NOT have block_mask in its signature
-        mock_sig.return_value.parameters = {"q": MagicMock()}
-
-        q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
-        out = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-
-        mock_flashmask_v2.return_value = (
-            out,
-            paddle.randn([2, 4], dtype=paddle.float32),
-        )
-
-        attn = RefinedRcomputeFlashMaskAttention()
-        result = attn.forward(q, k, v, startend, causal=False)
-        self.assertTrue(result is not None)
+        mock_flash_fwd.assert_called_once()
+        self.assertTrue(mock_flash_fwd.call_args.kwargs["return_lse"])
 
 
 class TestFlashMaskAttnCpFunctor(unittest.TestCase):

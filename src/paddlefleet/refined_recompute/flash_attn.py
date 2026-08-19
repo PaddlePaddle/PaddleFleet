@@ -1051,9 +1051,9 @@ def ulysses_local_flashmask_first_fwd(
     fa_version = get_fa_version(
         query_states.shape[-1], value_states.shape[-1], startend_row_indices
     )
-    if learnable_sink is not None and fa_version != 4:
+    if learnable_sink is not None and fa_version not in (3, 4):
         raise NotImplementedError(
-            "learnable_sink only supported on fa_version==4 cute backend"
+            "learnable_sink only supported on fa3 or fa4 cute backend"
         )
     if fa_version == 2:
         if softmax_scale is not None:

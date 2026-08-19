@@ -19,14 +19,16 @@ from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
+from paddlefleet_ops import is_flash_mask_available
 from paddlefleet_ops.flash_mask_facade import get_fa_version
 
 _flash_mask_available = False
 try:
-    if (
-        paddle.cuda.is_available()
-        and paddle.cuda.get_device_capability()[0] >= 9
-    ):
+    # Ask paddlefleet_ops rather than re-deriving the capability threshold: the
+    # blocker installed for an unavailable flash_mask raises RuntimeError (not
+    # ImportError) from its meta-path finder, so guessing wrong here takes the
+    # whole module import down instead of degrading to FA2.
+    if is_flash_mask_available():
         from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
             FlashMaskInfoPaddle,
         )
@@ -37,7 +39,7 @@ try:
         from paddlefleet_ops.flash_mask.utils import bshd_slice_contiguous_kv
 
         _flash_mask_available = True
-except (ImportError, AttributeError):
+except (ImportError, AttributeError, RuntimeError):
     _flash_mask_available = False
 
 

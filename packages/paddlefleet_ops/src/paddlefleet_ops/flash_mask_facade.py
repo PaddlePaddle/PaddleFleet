@@ -46,6 +46,7 @@ def get_fa_version(
     Dispatch rules:
       * XPU device -> FA2.
       * Otherwise, respect ``FLAGS_flash_attn_version`` by default.
+      * FA3/FA4 need the cutedsl backend; without it -> FA2.
       * FA3 and FA4 both require ``hdim_ok``; FA4 additionally requires
         ``mask_ok``:
 
@@ -86,6 +87,13 @@ def get_fa_version(
     ]
 
     if fa_version in (3, 4):
+        # FA3/FA4 both run on the cutedsl backend. When ``paddlefleet_ops.
+        # flash_mask`` is not loadable (capability below 9.0, a mismatched
+        # paddlefleet_ops build, or a broken cute import) the kernels do not
+        # exist, so degrade here rather than letting call sites reference an
+        # undefined ``_flash_attn_fwd`` / ``_flash_attn_bwd``.
+        if not is_flash_mask_available():
+            return 2
         _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
         cutedsl_hdim_ok = (
             (head_dim <= 128 and _head_dim_v <= 128)

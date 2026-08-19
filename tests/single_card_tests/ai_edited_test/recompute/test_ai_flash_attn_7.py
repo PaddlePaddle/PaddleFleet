@@ -101,7 +101,9 @@ class TestGetFAVersionGPU(unittest.TestCase):
 class TestGetFAVersionDeterministic(unittest.TestCase):
     """Tests for get_fa_version with deterministic mode (FA3).
 
-    FA3 only falls back to FA2 under deterministic mode when head_dim > 128.
+    Since FA3 moved to the cutedsl backend it shares FA4's head-dim table and
+    no longer degrades on ``deterministic`` alone -- it degrades to FA2 only
+    when the (head_dim, head_dim_v) pair is unsupported.
     """
 
     @patch(
@@ -113,12 +115,46 @@ class TestGetFAVersionDeterministic(unittest.TestCase):
         "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": True},
     )
-    def test_deterministic_large_hdim_returns_2(
+    def test_deterministic_native_pair_keeps_3(
         self, mock_get_flags, mock_base_flags, mock_device
     ):
-        """Deterministic FA3 with hdim>128 falls back to version 2."""
+        """Deterministic FA3 keeps version 3 for the native 256/256 pair."""
         mock_base_flags.return_value = {"FLAGS_flash_attn_version": 3}
         result = get_fa_version(256)
+        self.assertEqual(result, 3)
+
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
+        return_value="gpu:0",
+    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": True},
+    )
+    def test_unsupported_hdim_returns_2(
+        self, mock_get_flags, mock_base_flags, mock_device
+    ):
+        """FA3 falls back to version 2 for an unsupported head_dim."""
+        mock_base_flags.return_value = {"FLAGS_flash_attn_version": 3}
+        result = get_fa_version(160)
+        self.assertEqual(result, 2)
+
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
+        return_value="gpu:0",
+    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": True},
+    )
+    def test_deterministic_big_hdim_returns_2(
+        self, mock_get_flags, mock_base_flags, mock_device
+    ):
+        """The 512/512 big-head-dim pair stays FA4-only, so FA3 degrades."""
+        mock_base_flags.return_value = {"FLAGS_flash_attn_version": 3}
+        result = get_fa_version(512, 512)
         self.assertEqual(result, 2)
 
     @patch(
@@ -137,6 +173,35 @@ class TestGetFAVersionDeterministic(unittest.TestCase):
         mock_base_flags.return_value = {"FLAGS_flash_attn_version": 3}
         result = get_fa_version(128)
         self.assertEqual(result, 3)
+
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        return_value=False,
+    )
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
+        return_value="gpu:0",
+    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": False},
+    )
+    def test_cutedsl_unavailable_degrades_to_2(
+        self, mock_get_flags, mock_base_flags, mock_device, mock_available
+    ):
+        """Without the cutedsl backend, FA3/FA4 must degrade to FA2.
+
+        Otherwise the CP / refined-recompute call sites would reference an
+        undefined ``_flash_attn_fwd`` -- the kernels are never imported when
+        ``paddlefleet_ops.flash_mask`` is unavailable.
+        """
+        for flag_version in (3, 4):
+            with self.subTest(flag_version=flag_version):
+                mock_base_flags.return_value = {
+                    "FLAGS_flash_attn_version": flag_version
+                }
+                self.assertEqual(get_fa_version(128), 2)
 
     @patch(
         "paddlefleet_ops.flash_mask_facade.paddle.get_device",

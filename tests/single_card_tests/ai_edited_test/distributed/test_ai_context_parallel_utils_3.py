@@ -351,16 +351,18 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
     cp_flashmask_allgatherkv_balance_forward, which now delegates to
     ``flash_mask_facade.get_fa_version``.
 
-    Under FA3, deterministic mode only falls back to FA2 when head_dim > 128;
-    the ``block_mask`` signature no longer affects the decision.
+    Since FA3 moved to the cutedsl backend it shares FA4's head-dim table, so
+    the fallback to FA2 is driven by the (head_dim, head_dim_v) pair rather
+    than by ``deterministic``; the ``block_mask`` signature no longer affects
+    the decision either.
 
-      A) deterministic + hdim>128 -> override to 2
+      A) unsupported hdim pair -> override to 2
       B) deterministic + hdim<=128 -> no override (stays 3)
       C) deterministic + small hdim -> no override (stays 3)
       D) no deterministic -> no override (stays 3)
     """
 
-    def _run_forward(self, *, has_block_mask, deterministic, hdim, fa_flag=3):
+    def _run_forward(self, *, deterministic, hdim, fa_flag=3):
         from paddlefleet import context_parallel_utils as cpu
 
         group = mock.MagicMock()
@@ -372,41 +374,31 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
         value = paddle.randn([1, 4, 1, hdim])
         indices = paddle.randint(0, 4, [4, 2])
 
-        # Build a fake flashmask_attention whose inspect.signature carries or
-        # omits the `block_mask` parameter.
-        if has_block_mask:
+        # Used by the fa2 fallback branch.
+        def fake_flashmask(
+            q,
+            k,
+            v,
+            startend_row_indices=None,
+            causal=False,
+            return_softmax_lse=False,
+            training=False,
+            softmax_scale=None,
+        ):
+            return paddle.zeros_like(q), paddle.zeros([1, 1, 4])
 
-            def fake_flashmask(
-                q,
-                k,
-                v,
-                startend_row_indices=None,
-                causal=False,
-                return_softmax_lse=False,
-                training=False,
-                block_mask=None,
-                softmax_scale=None,
-            ):
-                return paddle.zeros_like(q), paddle.zeros([1, 1, 4])
-        else:
-
-            def fake_flashmask(
-                q,
-                k,
-                v,
-                startend_row_indices=None,
-                causal=False,
-                return_softmax_lse=False,
-                training=False,
-                softmax_scale=None,
-            ):
-                return paddle.zeros_like(q), paddle.zeros([1, 1, 4])
+        # Used by the shared fa3/fa4 cutedsl branch.
+        def fake_flash_attn_fwd(q, k, v, **kwargs):
+            return paddle.zeros_like(q), paddle.zeros([1, 1, 4])
 
         flags_base = {"FLAGS_flash_attn_version": fa_flag}
         flags_det = {"FLAGS_cudnn_deterministic": deterministic}
 
         with (
             mock.patch.object(cpu, "flashmask_attention", fake_flashmask),
+            mock.patch.object(
+                cpu, "_flash_attn_fwd", fake_flash_attn_fwd, create=True
+            ),
             mock.patch.object(
                 cpu, "all_gather_balance", side_effect=lambda t, axis, group: t
             ),
@@ -425,32 +417,24 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
             )
         return out[-1]  # fa_version
 
-    def test_branch_a_block_mask_det_hdim_gt_128(self):
-        """A) deterministic + hdim>128 -> 2."""
-        fa = self._run_forward(
-            has_block_mask=True, deterministic=True, hdim=192, fa_flag=3
-        )
+    def test_branch_a_unsupported_hdim_pair(self):
+        """A) 192/192 is not a cutedsl-supported pair -> 2."""
+        fa = self._run_forward(deterministic=True, hdim=192, fa_flag=3)
         self.assertEqual(fa, 2)
 
     def test_branch_b_block_mask_det_hdim_le_128(self):
         """B) deterministic but hdim<=128 -> no override."""
-        fa = self._run_forward(
-            has_block_mask=True, deterministic=True, hdim=128, fa_flag=3
-        )
+        fa = self._run_forward(deterministic=True, hdim=128, fa_flag=3)
         self.assertEqual(fa, 3)
 
     def test_branch_c_no_block_mask_deterministic(self):
         """C) deterministic + small hdim -> no override (stays 3)."""
-        fa = self._run_forward(
-            has_block_mask=False, deterministic=True, hdim=64, fa_flag=3
-        )
+        fa = self._run_forward(deterministic=True, hdim=64, fa_flag=3)
         self.assertEqual(fa, 3)
 
     def test_branch_d_no_block_mask_no_deterministic(self):
         """D) no deterministic -> no override."""
-        fa = self._run_forward(
-            has_block_mask=False, deterministic=False, hdim=64, fa_flag=3
-        )
+        fa = self._run_forward(deterministic=False, hdim=64, fa_flag=3)
         self.assertEqual(fa, 3)
 
 
