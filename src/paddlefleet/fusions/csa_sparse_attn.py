@@ -175,7 +175,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         # placeholder gradients.
         ctx.has_topk_length = topk_length is not None
         # Paddle PyLayer requires None for stop_gradient inputs; record here.
-        # In phase 2 (``csa_train_indexer_only``) attn_sink is a frozen backbone
+        # In phase 2 (``train_indexer_only``) attn_sink is a frozen backbone
         # parameter while query/kv_full still carry activation gradients.
         ctx.query_needs_grad = not query.stop_gradient
         ctx.kv_full_needs_grad = not kv_full.stop_gradient

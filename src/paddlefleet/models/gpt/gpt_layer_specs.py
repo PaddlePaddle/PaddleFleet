@@ -87,6 +87,10 @@ from paddlefleet.transformer.kimi_delta_attention import (
     KimiDeltaAttentionSublayersSpec,
 )
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
+from paddlefleet.transformer.mqa_latent_attention import (
+    MQALatentAttention,
+    MQALatentAttentionSublayersSpec,
+)
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
@@ -353,27 +357,53 @@ def get_attention_spec(
         # Gated attention
         gated_attention = getattr(config, "gated_attention", False)
 
+        # ``dsv4_hybrid`` puts these MLA layers next to CSA/HCA layers that
+        # already read the model-wide ``index_*`` fields, so field presence
+        # cannot decide anything here: the hybrid MLA layers are dense MHA
+        # unless ``hybrid_mla_attention`` explicitly turns them into latent MQA.
         is_hybrid_mla_indexer = (
             getattr(config, "experimental_attention_variant", None)
             == "dsv4_hybrid"
         )
-        if is_hybrid_mla_indexer:
-            use_dsa = all(
-                getattr(config, name, None) is not None
-                for name in (
-                    "hybrid_index_n_heads",
-                    "hybrid_index_head_dim",
-                    "hybrid_index_topk",
-                )
-            )
-        else:
-            # Decide core_attention: DSAttention if dsa_index_n_heads is configured, else standard
-            use_dsa = (
-                config is not None
-                and getattr(config, "dsa_index_n_heads", None) is not None
-            )
+        hybrid_mla_attention = (
+            getattr(config, "hybrid_mla_attention", "mha")
+            if is_hybrid_mla_indexer
+            else "mha"
+        )
+        use_dsa = (
+            not is_hybrid_mla_indexer
+            and config is not None
+            and getattr(config, "dsa_index_n_heads", None) is not None
+        )
 
-        if use_dsa:
+        if hybrid_mla_attention in ("mqa_dsa", "mqa_full_causal"):
+            # Latent MQA core attention on the KV latent; parameters stay
+            # byte-identical to MHA so an MHA checkpoint loads unchanged. The
+            # DSA indexer is what makes this mode worth running, so it is only
+            # dropped by ``mqa_full_causal``, which attends to the full
+            # per-document causal set instead -- mathematically identical to the
+            # dense MHA phase, for isolating absorption from sparsity.
+            dense_mqa = hybrid_mla_attention == "mqa_full_causal"
+            core_attention = LayerSpec(
+                layer=MQALatentAttention,
+                sublayers_spec=MQALatentAttentionSublayersSpec(
+                    indexer=(
+                        None
+                        if dense_mqa
+                        else LayerSpec(
+                            layer=DSAIndexer,
+                            sublayers_spec=DSAIndexerSublayersSpec(
+                                linear_wq_b=backend.linear(),
+                                linear_wk=backend.linear(),
+                                k_norm=paddle.nn.LayerNorm,
+                                linear_weights_proj=backend.linear(),
+                            ),
+                            extra_kwargs={"is_hybrid_mla_indexer": True},
+                        )
+                    ),
+                ),
+            )
+        elif use_dsa:
             # DSA Indexer sublayers spec (duplicated linear, NOT tensor-parallel)
             dsa_indexer_sublayers = DSAIndexerSublayersSpec(
                 linear_wq_b=backend.linear(),

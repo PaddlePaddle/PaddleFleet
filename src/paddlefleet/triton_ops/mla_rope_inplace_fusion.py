@@ -390,3 +390,708 @@ def fused_apply_mla_rope_inplace(
     return RoPEMLAInplaceFusion.apply(
         t, cos, sin, nope_dim, pe_dim, clone_input
     )
+
+
+# ---------------------------------------------------------------------------
+# rope + concat, absorbed-MQA key  (multi_latent_attention.py)
+# ---------------------------------------------------------------------------
+#
+# The absorbed-MQA key is built as
+#
+#     k_pos_emb = <rotate_half rope>(k_pos_emb)          # [b, s, 1, pe]
+#     key = paddle.cat([kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1)
+#
+# i.e. an ``[b, s, 1, latent + pe]`` buffer whose leading ``latent`` channels
+# are the (absorbed) value and whose trailing ``pe`` channels are the rotated
+# positional part.  Fusing the two writes the buffer once instead of rotating
+# into a temporary and then copying both pieces.
+#
+# Like ``fused_apply_rope_half`` below this does NOT work in place, which is
+# the point: ``k_pos_emb`` is an *argument* of
+# ``qkv_up_proj_and_rope_apply``, created outside it, so a closure replayed by
+# ``recompute_qkv_up_porj_and_rope`` would rotate an already-rotated tensor a
+# second time.  Writing to a fresh buffer is replay-safe.
+
+
+@triton.jit
+def _rope_cat_key_fwd_kernel(
+    KV,
+    KPE,
+    OUT,
+    PE_OUT,
+    COS,
+    SIN,
+    latent_dim: tl.constexpr,
+    pe_dim: tl.constexpr,
+    stride_kv,
+    stride_kpe,
+    stride_out,
+    stride_pe_out,
+    BLOCK_L: tl.constexpr,
+):
+    """Forward: OUT[:latent] = KV, OUT[latent:] = PE_OUT = rotate_half(KPE)."""
+    pid = tl.program_id(axis=0).to(tl.int64)
+    half: tl.constexpr = pe_dim // 2
+
+    # ---- latent block: straight copy ----
+    offs = tl.arange(0, BLOCK_L)
+    lat_mask = offs < latent_dim
+    v = tl.load(KV + pid * stride_kv + offs, mask=lat_mask)
+    tl.store(OUT + pid * stride_out + offs, v, mask=lat_mask)
+
+    # ---- pe block: same 2x2 rotation as _rope_half_out_fwd_kernel ----
+    cos_left = tl.load(COS + pid * pe_dim + tl.arange(0, half))
+    sin_left = tl.load(SIN + pid * pe_dim + tl.arange(0, half))
+    cos_right = tl.load(COS + pid * pe_dim + half + tl.arange(0, half))
+    sin_right = tl.load(SIN + pid * pe_dim + half + tl.arange(0, half))
+
+    h = tl.arange(0, half)
+    x_1 = tl.load(KPE + pid * stride_kpe + h)
+    x_2 = tl.load(KPE + pid * stride_kpe + half + h)
+
+    y_left = _mul_round_bf16(x_1, cos_left).to(tl.float32) - _mul_round_bf16(
+        x_2, sin_left
+    ).to(tl.float32)
+    y_right = _mul_round_bf16(x_2, cos_right).to(tl.float32) + _mul_round_bf16(
+        x_1, sin_right
+    ).to(tl.float32)
+
+    tl.store(OUT + pid * stride_out + latent_dim + h, y_left)
+    tl.store(OUT + pid * stride_out + latent_dim + half + h, y_right)
+    # The rotated pe is already in registers, so handing it back as its own
+    # contiguous tensor costs one extra store and no extra read. The caller
+    # needs it (as ``k_pe``) and slicing it back out of OUT afterwards would be
+    # a non-contiguous read plus a copy, and would put a second consumer on
+    # OUT's gradient.
+    tl.store(PE_OUT + pid * stride_pe_out + h, y_left)
+    tl.store(PE_OUT + pid * stride_pe_out + half + h, y_right)
+
+
+@triton.jit
+def _rope_cat_key_bwd_kernel(
+    DOUT,
+    DPE_OUT,
+    DKV,
+    DKPE,
+    COS,
+    SIN,
+    latent_dim: tl.constexpr,
+    pe_dim: tl.constexpr,
+    stride_kv,
+    stride_kpe,
+    stride_out,
+    stride_pe_out,
+    HAS_DPE_OUT: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    """Backward: split DOUT, passing the latent part through unchanged."""
+    pid = tl.program_id(axis=0).to(tl.int64)
+    half: tl.constexpr = pe_dim // 2
+
+    offs = tl.arange(0, BLOCK_L)
+    lat_mask = offs < latent_dim
+    g = tl.load(DOUT + pid * stride_out + offs, mask=lat_mask)
+    tl.store(DKV + pid * stride_kv + offs, g, mask=lat_mask)
+
+    cos_left = tl.load(COS + pid * pe_dim + tl.arange(0, half))
+    sin_left = tl.load(SIN + pid * pe_dim + tl.arange(0, half))
+    cos_right = tl.load(COS + pid * pe_dim + half + tl.arange(0, half))
+    sin_right = tl.load(SIN + pid * pe_dim + half + tl.arange(0, half))
+
+    h = tl.arange(0, half)
+    g1 = tl.load(DOUT + pid * stride_out + latent_dim + h)
+    g2 = tl.load(DOUT + pid * stride_out + latent_dim + half + h)
+    if HAS_DPE_OUT:
+        # The pe block feeds two outputs, so its incoming gradients add. Round
+        # the sum back to bf16 first: that is what paddle's own accumulation
+        # would do for a tensor with two consumers, and the rotation below is
+        # written to match eager op-by-op rounding.
+        g1 = (
+            g1.to(tl.float32)
+            + tl.load(DPE_OUT + pid * stride_pe_out + h).to(tl.float32)
+        ).to(g1.dtype)
+        g2 = (
+            g2.to(tl.float32)
+            + tl.load(DPE_OUT + pid * stride_pe_out + half + h).to(tl.float32)
+        ).to(g2.dtype)
+
+    dx_1 = _mul_round_bf16(g1, cos_left).to(tl.float32) + _mul_round_bf16(
+        g2, sin_right
+    ).to(tl.float32)
+    dx_2 = _mul_round_bf16(g2, cos_right).to(tl.float32) - _mul_round_bf16(
+        g1, sin_left
+    ).to(tl.float32)
+
+    tl.store(DKPE + pid * stride_kpe + h, dx_1)
+    tl.store(DKPE + pid * stride_kpe + half + h, dx_2)
+
+
+class RoPECatKeyFusion(paddle.autograd.PyLayer):
+    """PyLayer wrapping the rope+concat absorbed-key kernels."""
+
+    @staticmethod
+    def forward(ctx, kv, kpe, cos, sin, latent_dim, pe_dim):
+        # Input validation via explicit exceptions (not ``assert``): this is the
+        # PyLayer behind the public ``fused_rope_cat_key`` entry, so under
+        # ``python -O`` a stripped assert would let a wrong shape / non-contiguous
+        # buffer into the Triton kernel.
+        if not (kv.stride(-1) == 1 and kpe.stride(-1) == 1):
+            raise ValueError(
+                "RoPECatKeyFusion needs kv/kpe last dim contiguous, got "
+                f"kv.strides={kv.strides}, kpe.strides={kpe.strides}"
+            )
+        if not (cos.is_contiguous() and sin.is_contiguous()):
+            raise ValueError("RoPECatKeyFusion needs cos/sin contiguous")
+        n = kv.shape[0] * kv.shape[1]
+        if kpe.shape[0] * kpe.shape[1] != n:
+            raise ValueError(
+                f"kpe leading dims {kpe.shape[:2]} do not flatten to kv's n={n}"
+            )
+        if kv.shape[-1] != latent_dim:
+            raise ValueError(
+                f"kv last dim {kv.shape[-1]} != latent_dim {latent_dim}"
+            )
+        if kpe.shape[-1] != pe_dim:
+            raise ValueError(f"kpe last dim {kpe.shape[-1]} != pe_dim {pe_dim}")
+        if pe_dim % 4 != 0:
+            raise ValueError(f"pe_dim {pe_dim} must be a multiple of 4")
+        if not (cos.shape[-1] == pe_dim and sin.shape[-1] == pe_dim):
+            raise ValueError(
+                f"cos/sin last dim {cos.shape[-1]}/{sin.shape[-1]} != "
+                f"pe_dim {pe_dim}"
+            )
+
+        kv_flat = kv.reshape([n, latent_dim])
+        kpe_flat = kpe.reshape([n, pe_dim])
+        out = paddle.empty([n, latent_dim + pe_dim], dtype=kv.dtype)
+        pe_out = paddle.empty([n, pe_dim], dtype=kv.dtype)
+
+        BLOCK_L = triton.next_power_of_2(latent_dim)
+        _rope_cat_key_fwd_kernel[(n,)](
+            kv_flat,
+            kpe_flat,
+            out,
+            pe_out,
+            cos,
+            sin,
+            latent_dim,
+            pe_dim,
+            kv_flat.stride(0),
+            kpe_flat.stride(0),
+            out.stride(0),
+            pe_out.stride(0),
+            BLOCK_L,
+        )
+
+        ctx.save_for_backward(cos, sin)
+        ctx.dims = (latent_dim, pe_dim, BLOCK_L)
+        ctx.kv_shape = kv.shape
+        ctx.kpe_shape = kpe.shape
+        b, s = kv.shape[0], kv.shape[1]
+        return (
+            out.reshape([b, s, 1, latent_dim + pe_dim]),
+            pe_out.reshape([b, s, 1, pe_dim]),
+        )
+
+    @staticmethod
+    def backward(ctx, dout, dpe_out=None):
+        cos, sin = ctx.saved_tensors
+        latent_dim, pe_dim, BLOCK_L = ctx.dims
+        n = ctx.kv_shape[0] * ctx.kv_shape[1]
+        dout_flat = dout.contiguous().reshape([n, latent_dim + pe_dim])
+        # ``k_pe`` may have no consumer at all (``MQALatentAttention`` takes it
+        # and never reads it), in which case paddle hands back nothing for it and
+        # the extra load is compiled away rather than reading a zero buffer.
+        has_dpe = dpe_out is not None
+        if has_dpe:
+            dpe_flat = dpe_out.contiguous().reshape([n, pe_dim])
+        else:
+            dpe_flat = dout_flat  # unused; kernel needs a valid pointer
+        dkv = paddle.empty([n, latent_dim], dtype=dout.dtype)
+        dkpe = paddle.empty([n, pe_dim], dtype=dout.dtype)
+
+        _rope_cat_key_bwd_kernel[(n,)](
+            dout_flat,
+            dpe_flat,
+            dkv,
+            dkpe,
+            cos,
+            sin,
+            latent_dim,
+            pe_dim,
+            dkv.stride(0),
+            dkpe.stride(0),
+            dout_flat.stride(0),
+            dpe_flat.stride(0),
+            has_dpe,
+            BLOCK_L,
+        )
+        return (
+            dkv.reshape(ctx.kv_shape),
+            dkpe.reshape(ctx.kpe_shape),
+            None,
+            None,
+        )
+
+
+def fused_rope_cat_key(
+    kv_compressed: paddle.Tensor,
+    k_pos_emb: paddle.Tensor,
+    freqs: paddle.Tensor,
+    latent_dim: int,
+    pe_dim: int,
+    mscale: float = 1.0,
+) -> tuple[paddle.Tensor, paddle.Tensor]:
+    """Build the absorbed-MQA key: rotate ``k_pos_emb`` and concat, in one pass.
+
+    Replaces, for the ``mqa_latent`` branch of
+    ``MLASelfAttention.get_query_key_value_tensors``::
+
+        k_pos_emb = <rotate_half rope>(k_pos_emb)
+        key = paddle.cat([kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1)
+
+    Both of that snippet's results are returned, because the caller needs both:
+    ``key`` for the attention and the rotated pe on its own as ``k_pe``. The
+    second one is a separate contiguous tensor rather than a view into ``key``'s
+    tail -- the rotated values are already in registers, so it costs one store
+    and no extra read, while slicing it back out afterwards would cost a
+    non-contiguous read plus a copy, put a second consumer on ``key``'s
+    gradient, and produce a non-contiguous tensor that
+    ``RecomputeWithoutOutput(share_grad_holder=True)`` refuses.
+
+    Same ``rotate_half`` convention (and the same bf16 rounding) as
+    ``fused_apply_rope_half``, so it is bit-exact with that pair. Writes
+    fresh buffers rather than rotating in place, which keeps it safe when
+    ``recompute_qkv_up_porj_and_rope`` replays the closure that owns
+    ``k_pos_emb``.
+
+    Args:
+        kv_compressed: [b, s, latent_dim], last-dim-contiguous, bf16. Already
+            normalised; copied through unchanged.
+        k_pos_emb: [b, s, pe_dim] or [b, s, 1, pe_dim], last-dim-contiguous,
+            bf16. NOT yet rotated.
+        freqs: [b or 1, s, 1, pe_dim] angle tensor, fp32 or bf16.
+        latent_dim: width of the value/nope block that leads the key.
+        pe_dim: width of the rope block that trails it.
+        mscale: scaling factor; must be 1.0 when ``freqs`` is not fp32.
+
+    Returns:
+        (key, k_pe) where key is [b, s, 1, latent_dim + pe_dim] with the
+        absorbed value in its leading ``latent_dim`` channels, and k_pe is
+        [b, s, 1, pe_dim] holding the same rotated pe as key's tail.
+    """
+    # Production input validation: these guard user/config-facing dtype, shape
+    # and mscale before the values reach the Triton kernel, so they must be
+    # explicit exceptions rather than ``assert`` -- ``python -O`` strips
+    # asserts, which would let fp16 into the bf16-rounding path or a wrong
+    # shape into Triton address arithmetic and silently corrupt results.
+    if kv_compressed.dtype != paddle.bfloat16:
+        raise ValueError(
+            f"fused_rope_cat_key is designed for bf16, got {kv_compressed.dtype}"
+        )
+    if k_pos_emb.dtype != kv_compressed.dtype:
+        raise ValueError(
+            "fused_rope_cat_key needs k_pos_emb and kv_compressed to share a "
+            f"dtype; got {k_pos_emb.dtype} vs {kv_compressed.dtype}"
+        )
+    b, s = kv_compressed.shape[0], kv_compressed.shape[1]
+
+    if not (freqs.dim() == 4 and freqs.shape[2] == 1):
+        raise ValueError(f"freqs must be [B,S,1,D]; got {freqs.shape}")
+    B_f, S_f, _, D_f = freqs.shape
+    if not (S_f == s and D_f == pe_dim):
+        raise ValueError(
+            f"freqs {freqs.shape} mismatches [b,s]=[{b},{s}], pe_dim={pe_dim}"
+        )
+    if not (B_f == 1 or B_f == b):
+        raise ValueError(f"freqs B {B_f} must be 1 or {b}")
+    if B_f < b:
+        freqs = freqs.broadcast_to([b, s, 1, pe_dim])
+
+    # Same upcast rule as ``fused_apply_rope_half``; see the note there.
+    if freqs.dtype != paddle.float32:
+        if mscale != 1.0:
+            raise ValueError(
+                "fused_rope_cat_key needs fp32 freqs when mscale != 1 "
+                f"(got freqs.dtype={freqs.dtype}, mscale={mscale})"
+            )
+        freqs = freqs.astype(paddle.float32)
+
+    cos, sin = _fused_cos_sin(freqs, mscale, False, kv_compressed.dtype)
+    return RoPECatKeyFusion.apply(
+        kv_compressed, k_pos_emb, cos, sin, latent_dim, pe_dim
+    )
+
+
+# ---------------------------------------------------------------------------
+# rotate_half layout  (DSA indexer, MLA q / k_pos_emb)
+# ---------------------------------------------------------------------------
+#
+# A second convention, used by the DSA indexer and by MLA's eager RoPE branch
+# (both run with ``multi_latent_attention=False``):
+#
+#   x_pe   = x[..., :rope_head_dim]          # DSA: pe FIRST, nope trails
+#   x_nope = x[..., rope_head_dim:]          # MLA q: the other way round
+#   x_pe   = _apply_rotary_pos_emb_bshd(x_pe, freqs,
+#                rotary_interleaved=False, multi_latent_attention=False)
+#   return paddle.concat([x_pe, x_nope], axis=-1)
+#
+# ``multi_latent_attention=False`` means no 0::2/1::2 de-interleaving: the
+# rotated pair is (first half, second half) of the pe slice, and the output
+# stays in those same halves.  So the arithmetic is identical to the MLA
+# kernels above -- only the load/store index mapping differs, and it is
+# strictly simpler (two contiguous half-width accesses, no register shuffle).
+#
+# The whole three-step sequence collapses into one kernel: rotate the pe block
+# and copy the other channels across, writing the destination once.  Two
+# properties worth stating explicitly, because both are load-bearing:
+#
+# 1. It does not work in place.  ``qkv_up_proj_and_rope_apply``
+#    (multi_latent_attention.py:1692) can be replayed by
+#    ``recompute_qkv_up_porj_and_rope``, and ``k_pos_emb`` is one of its
+#    *arguments* -- created outside, so rotating it in place would be applied
+#    twice on replay.  ``q`` happens to be created inside (:1710) and would
+#    survive that, but that is a property of where a line sits rather than of
+#    the code doing the rotating, and it breaks silently if either moves.
+#
+# 2. Copying the other channels is what removes the concat.  The DSA indexer's
+#    ``_apply_rope`` ends in ``paddle.concat([x_pe, x_nope], axis=-1)``, which
+#    rebuilds the whole [b,s,h,128] tensor to update 64 channels; the kernel's
+#    output already *is* that tensor, so one read + write replaces a pe-sized
+#    rope followed by a full-width concat.
+#
+# When ``pe_dim == head_dim`` (MLA k_pos_emb) there are no other channels and
+# ``COPY_OTHER`` compiles away, leaving a plain out-of-place rope.
+
+
+def _get_block_h_tiled(nheads: int, block_d: int) -> int:
+    """``_get_block_h`` capped so one tile stays around 2K elements.
+
+    The copy path materialises a [BLOCK_H, BLOCK_D] tile, which for the MLA q
+    shape (D = 256) would be 8K elements at BLOCK_H = 32.
+    """
+    block_h = _get_block_h(nheads)
+    while block_h > 1 and block_h * block_d > 2048:
+        block_h //= 2
+    return block_h
+
+
+@triton.jit
+def _rope_half_out_fwd_kernel(
+    X,
+    OUT,
+    COS,
+    SIN,
+    pe_offset,
+    pe_dim: tl.constexpr,
+    head_dim: tl.constexpr,
+    head_num: tl.constexpr,
+    stride_x_seq,
+    stride_x_nheads,
+    stride_o_seq,
+    stride_o_nheads,
+    COPY_OTHER: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """out = x with [pe_offset, pe_offset + pe_dim) rotated, rest copied."""
+    pid_m = tl.program_id(axis=0).to(tl.int64)
+    pid_head = tl.program_id(axis=1).to(tl.int64)
+
+    half: tl.constexpr = pe_dim // 2
+
+    cos_left = tl.load(COS + pid_m * pe_dim + tl.arange(0, half))
+    sin_left = tl.load(SIN + pid_m * pe_dim + tl.arange(0, half))
+    cos_right = tl.load(COS + pid_m * pe_dim + half + tl.arange(0, half))
+    sin_right = tl.load(SIN + pid_m * pe_dim + half + tl.arange(0, half))
+    cos_left = cos_left.expand_dims(0).broadcast_to(BLOCK_H, half)
+    sin_left = sin_left.expand_dims(0).broadcast_to(BLOCK_H, half)
+    cos_right = cos_right.expand_dims(0).broadcast_to(BLOCK_H, half)
+    sin_right = sin_right.expand_dims(0).broadcast_to(BLOCK_H, half)
+
+    X = X + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
+    OUT = OUT + pid_m * stride_o_seq + pid_head * BLOCK_H * stride_o_nheads
+
+    hrow = tl.arange(0, BLOCK_H)[:, None]
+    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
+    xs = hrow * stride_x_nheads.to(tl.int64)
+    os = hrow * stride_o_nheads.to(tl.int64)
+
+    if COPY_OTHER:
+        # Everything outside the rope block moves across untouched. Masking one
+        # full-width tile is cheaper than two separate lead/trail windows and
+        # handles pe_offset == 0 (trail only) and pe_offset + pe_dim == head_dim
+        # (lead only) without a special case.
+        d = tl.arange(0, BLOCK_D)[None, :]
+        other = (
+            (d < head_dim)
+            & ((d < pe_offset) | (d >= pe_offset + pe_dim))
+            & head_mask
+        )
+        tl.store(OUT + os + d, tl.load(X + xs + d, mask=other), mask=other)
+
+    off_l = xs + pe_offset + tl.arange(0, half)[None, :]
+    off_r = off_l + half
+    out_l = os + pe_offset + tl.arange(0, half)[None, :]
+    out_r = out_l + half
+
+    x_1 = tl.load(X + off_l, mask=head_mask)
+    x_2 = tl.load(X + off_r, mask=head_mask)
+
+    # Same rounding discipline as the MLA kernels above; see
+    # ``_mul_round_bf16`` for why each product is rounded independently.
+    y_left = _mul_round_bf16(x_1, cos_left).to(tl.float32) - _mul_round_bf16(
+        x_2, sin_left
+    ).to(tl.float32)
+    y_right = _mul_round_bf16(x_2, cos_right).to(tl.float32) + _mul_round_bf16(
+        x_1, sin_right
+    ).to(tl.float32)
+
+    tl.store(OUT + out_l, y_left, mask=head_mask)
+    tl.store(OUT + out_r, y_right, mask=head_mask)
+
+
+@triton.jit
+def _rope_half_out_bwd_kernel(
+    DO,
+    DX,
+    COS,
+    SIN,
+    pe_offset,
+    pe_dim: tl.constexpr,
+    head_dim: tl.constexpr,
+    head_num: tl.constexpr,
+    stride_o_seq,
+    stride_o_nheads,
+    stride_x_seq,
+    stride_x_nheads,
+    COPY_OTHER: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """dx = do with the rope block transformed by the forward 2x2 transpose."""
+    pid_m = tl.program_id(axis=0).to(tl.int64)
+    pid_head = tl.program_id(axis=1).to(tl.int64)
+
+    half: tl.constexpr = pe_dim // 2
+
+    cos_left = tl.load(COS + pid_m * pe_dim + tl.arange(0, half))
+    sin_left = tl.load(SIN + pid_m * pe_dim + tl.arange(0, half))
+    cos_right = tl.load(COS + pid_m * pe_dim + half + tl.arange(0, half))
+    sin_right = tl.load(SIN + pid_m * pe_dim + half + tl.arange(0, half))
+    cos_left = cos_left.expand_dims(0).broadcast_to(BLOCK_H, half)
+    sin_left = sin_left.expand_dims(0).broadcast_to(BLOCK_H, half)
+    cos_right = cos_right.expand_dims(0).broadcast_to(BLOCK_H, half)
+    sin_right = sin_right.expand_dims(0).broadcast_to(BLOCK_H, half)
+
+    DO = DO + pid_m * stride_o_seq + pid_head * BLOCK_H * stride_o_nheads
+    DX = DX + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
+
+    hrow = tl.arange(0, BLOCK_H)[:, None]
+    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
+    os = hrow * stride_o_nheads.to(tl.int64)
+    xs = hrow * stride_x_nheads.to(tl.int64)
+
+    if COPY_OTHER:
+        # The forward copied these channels, so the VJP copies the gradient.
+        d = tl.arange(0, BLOCK_D)[None, :]
+        other = (
+            (d < head_dim)
+            & ((d < pe_offset) | (d >= pe_offset + pe_dim))
+            & head_mask
+        )
+        tl.store(DX + xs + d, tl.load(DO + os + d, mask=other), mask=other)
+
+    off_l = os + pe_offset + tl.arange(0, half)[None, :]
+    off_r = off_l + half
+    dx_l = xs + pe_offset + tl.arange(0, half)[None, :]
+    dx_r = dx_l + half
+
+    g1 = tl.load(DO + off_l, mask=head_mask)
+    g2 = tl.load(DO + off_r, mask=head_mask)
+
+    dx_1 = _mul_round_bf16(g1, cos_left).to(tl.float32) + _mul_round_bf16(
+        g2, sin_right
+    ).to(tl.float32)
+    dx_2 = _mul_round_bf16(g2, cos_right).to(tl.float32) - _mul_round_bf16(
+        g1, sin_left
+    ).to(tl.float32)
+
+    tl.store(DX + dx_l, dx_1, mask=head_mask)
+    tl.store(DX + dx_r, dx_2, mask=head_mask)
+
+
+class RoPEHalfOutFusion(paddle.autograd.PyLayer):
+    """PyLayer wrapping the out-of-place rotate_half fwd/bwd kernels."""
+
+    @staticmethod
+    def forward(ctx, t, cos, sin, pe_dim, pe_offset):
+        # Input validation via explicit exceptions (not ``assert``): this is the
+        # PyLayer behind the public ``fused_apply_rope_half`` entry, so under
+        # ``python -O`` a stripped assert would let a wrong shape / non-contiguous
+        # buffer into the Triton kernel.
+        if t.stride(-1) != 1:
+            raise ValueError(
+                f"RoPEHalfOutFusion needs t last dim contiguous, got "
+                f"strides={t.strides}"
+            )
+        if not cos.is_contiguous():
+            raise ValueError("RoPEHalfOutFusion needs cos contiguous")
+        if not sin.is_contiguous():
+            raise ValueError("RoPEHalfOutFusion needs sin contiguous")
+        B, S, H, D = t.shape
+        if D < pe_offset + pe_dim:
+            raise ValueError(
+                f"rope block [{pe_offset}, {pe_offset + pe_dim}) does not fit "
+                f"in t's last dim {D}"
+            )
+        if pe_dim % 4 != 0:
+            raise ValueError(f"pe_dim {pe_dim} must be a multiple of 4")
+        if cos.shape[-1] != pe_dim:
+            raise ValueError(f"cos last dim {cos.shape[-1]} != pe_dim {pe_dim}")
+        if sin.shape[-1] != pe_dim:
+            raise ValueError(f"sin last dim {sin.shape[-1]} != pe_dim {pe_dim}")
+
+        out = paddle.empty([B, S, H, D], dtype=t.dtype)
+        t_flat = t.reshape([B * S, H, D])
+        o_flat = out.reshape([B * S, H, D])
+
+        copy_other = pe_dim < D
+        block_d = triton.next_power_of_2(D)
+        BLOCK_H = (
+            _get_block_h_tiled(H, block_d) if copy_other else _get_block_h(H)
+        )
+        grid = (B * S, triton.cdiv(H, BLOCK_H))
+        _rope_half_out_fwd_kernel[grid](
+            t_flat,
+            o_flat,
+            cos,
+            sin,
+            pe_offset,
+            pe_dim,
+            D,
+            H,
+            t_flat.stride(0),
+            t_flat.stride(1),
+            o_flat.stride(0),
+            o_flat.stride(1),
+            copy_other,
+            block_d,
+            BLOCK_H,
+        )
+
+        ctx.save_for_backward(cos, sin)
+        ctx.pe_dim = pe_dim
+        ctx.pe_offset = pe_offset
+        ctx.block_h = BLOCK_H
+        ctx.block_d = block_d
+        ctx.copy_other = copy_other
+        ctx.shape = (B, S, H, D)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        cos, sin = ctx.saved_tensors
+        B, S, H, D = ctx.shape
+        grad_flat = grad.contiguous().reshape([B * S, H, D])
+        dx = paddle.empty([B * S, H, D], dtype=grad.dtype)
+        BLOCK_H = ctx.block_h
+        grid = (B * S, triton.cdiv(H, BLOCK_H))
+        _rope_half_out_bwd_kernel[grid](
+            grad_flat,
+            dx,
+            cos,
+            sin,
+            ctx.pe_offset,
+            ctx.pe_dim,
+            D,
+            H,
+            grad_flat.stride(0),
+            grad_flat.stride(1),
+            dx.stride(0),
+            dx.stride(1),
+            ctx.copy_other,
+            ctx.block_d,
+            BLOCK_H,
+        )
+        return dx.reshape([B, S, H, D]), None, None  # (t, cos, sin)
+
+
+def fused_apply_rope_half(
+    t: paddle.Tensor,
+    freqs: paddle.Tensor,
+    pe_dim: int,
+    mscale: float = 1.0,
+    pe_offset: int = 0,
+) -> paddle.Tensor:
+    """Out-of-place RoPE on a contiguous rope block, rotate_half convention.
+
+    Bit-identical to the eager slice + rotate_half + concat it replaces.
+    ``t`` is left untouched: the rotated pe block and a verbatim copy of
+    every other channel land in a fresh buffer, so the result is the
+    assembled tensor and no concat is needed afterwards.  See the section
+    comment above for why nothing here works in place.
+
+    Args:
+        t: [B, S, H, D] with D >= pe_offset + pe_dim, last-dim-contiguous,
+            bf16. Not modified.
+        freqs: [B or 1, S, 1, pe_dim] angle tensor, fp32 or bf16. May be
+            non-contiguous.
+        pe_dim: width of the rope block.
+        mscale: rotary scaling factor. Must be 1.0 when ``freqs`` is not fp32:
+            ``tl.cos``/``tl.sin`` need fp32, and while upcasting bf16 freqs is
+            bit-exact for the transcendental itself (paddle also evaluates it
+            in fp32 and rounds once), the eager prelude then multiplies the
+            *already rounded* bf16 cosine by mscale while this kernel scales
+            in fp32.  Those agree only at mscale == 1.0.
+        pe_offset: channel offset of the rope block inside each head.
+
+    Returns:
+        A new [B, S, H, D] tensor: [..., pe_offset : pe_offset + pe_dim] is
+        rotated, every other channel is a verbatim copy of ``t``.
+    """
+    # Production input validation -- explicit exceptions, not ``assert``: under
+    # ``python -O`` a stripped assert would let fp16 into the bf16-rounding path
+    # or a wrong shape into Triton address arithmetic and silently corrupt
+    # results. dsa_attention.py:465 explicitly relies on these checks.
+    if t.stride(-1) != 1:
+        raise ValueError(
+            "fused_apply_rope_half requires t's last dim to be contiguous, got "
+            f"shape={t.shape} strides={t.strides}"
+        )
+    B, S, H, D = t.shape
+    if not (pe_offset >= 0 and D >= pe_offset + pe_dim):
+        raise ValueError(
+            f"rope block [{pe_offset}, {pe_offset + pe_dim}) does not fit in t's "
+            f"last dim {D}"
+        )
+    if t.dtype != paddle.bfloat16:
+        raise ValueError(
+            f"fused_apply_rope_half is designed for bf16, got {t.dtype}"
+        )
+
+    if not (freqs.dim() == 4 and freqs.shape[2] == 1):
+        raise ValueError(f"freqs must be [B,S,1,D]; got {freqs.shape}")
+    B_f, S_f, _, D_f = freqs.shape
+    if not (S_f == S and D_f == pe_dim):
+        raise ValueError(
+            f"freqs [B,S,1,D]={freqs.shape} mismatches t [B,S]=[{B},{S}], "
+            f"pe_dim={pe_dim}"
+        )
+    if not (B_f == 1 or B_f == B):
+        raise ValueError(f"freqs B {B_f} must be 1 or {B}")
+    if B_f < B:
+        freqs = freqs.broadcast_to([B, S, 1, pe_dim])
+
+    if freqs.dtype != paddle.float32:
+        if mscale != 1.0:
+            raise ValueError(
+                "fused_apply_rope_half needs fp32 freqs when mscale != 1 (got "
+                f"freqs.dtype={freqs.dtype}, mscale={mscale}): the eager path "
+                "rounds cos/sin to bf16 before applying mscale."
+            )
+        freqs = freqs.astype(paddle.float32)
+
+    cos, sin = _fused_cos_sin(freqs, mscale, False, t.dtype)
+
+    return RoPEHalfOutFusion.apply(t, cos, sin, pe_dim, pe_offset)

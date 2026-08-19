@@ -14,6 +14,9 @@
 
 """Tests for MTP Magic Send feature."""
 
+import os
+import subprocess
+import sys
 import unittest
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
@@ -325,6 +328,70 @@ class TestTransformerConfig(unittest.TestCase):
                 pipeline_model_parallel_size=2,
                 mtp_shared_last_layer=True,
             )
+
+    def test_magic_send_rejects_multimodal_embedding(self):
+        """Magic send does not produce mtp_emb_res, which the multimodal
+        branch of GPTEmbedding relies on to decide whether to scatter and to
+        truncate visual_pos_masks. Reject the combination up front."""
+        with self.assertRaises(ValueError):
+            TransformerConfig(
+                enable_mtp_magic_send=True,
+                num_nextn_predict_layers=1,
+                pipeline_model_parallel_size=2,
+                multimodal_embedding=True,
+            )
+        # each flag on its own stays valid
+        self.assertTrue(
+            TransformerConfig(
+                enable_mtp_magic_send=True,
+                num_nextn_predict_layers=1,
+                pipeline_model_parallel_size=2,
+            ).enable_mtp_magic_send
+        )
+        self.assertTrue(
+            TransformerConfig(
+                num_nextn_predict_layers=1,
+                pipeline_model_parallel_size=2,
+                multimodal_embedding=True,
+            ).multimodal_embedding
+        )
+
+    def test_multimodal_rejection_survives_optimized_mode(self):
+        """``python -O`` strips asserts, so this check must be a real raise."""
+        script = (
+            "from paddlefleet.transformer.transformer_config import (\n"
+            "    TransformerConfig,\n"
+            ")\n"
+            "try:\n"
+            "    TransformerConfig(\n"
+            "        enable_mtp_magic_send=True,\n"
+            "        num_nextn_predict_layers=1,\n"
+            "        pipeline_model_parallel_size=2,\n"
+            "        multimodal_embedding=True,\n"
+            "    )\n"
+            "except ValueError:\n"
+            "    print('GUARD_FIRED')\n"
+            "else:\n"
+            "    raise SystemExit('guard was stripped by -O')\n"
+        )
+        repo_root = os.path.abspath(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), *[".."] * 3
+            )
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [os.path.join(repo_root, "src"), env.get("PYTHONPATH", "")]
+        )
+        proc = subprocess.run(
+            [sys.executable, "-O", "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("GUARD_FIRED", proc.stdout)
 
 
 class TestMagicInstance(unittest.TestCase):
