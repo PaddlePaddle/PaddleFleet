@@ -113,6 +113,33 @@ def get_fa_version(
     return fa_version
 
 
+def is_value_padding_needed(
+    fa_version: int,
+    head_dim: int,
+    head_dim_v: int,
+) -> bool:
+    """Whether ``value`` must be zero-padded from ``head_dim_v`` to ``head_dim``.
+
+    Kernels generally require ``head_dim_v == head_dim``, so a mismatched
+    ``value`` is padded before the call and the output truncated back after it.
+    FA4 handles a few mismatched pairs natively (``(192, 128)`` and
+    ``(576, 512)``) and needs no padding for them.
+
+    Args:
+        fa_version: The version returned by :func:`get_fa_version`.
+        head_dim: Query/Key head dim.
+        head_dim_v: Value head dim.
+
+    Returns:
+        ``True`` when ``value`` needs padding.
+    """
+    fa4_native_pair = fa_version == 4 and (
+        (head_dim == 192 and head_dim_v == 128)
+        or (head_dim == 576 and head_dim_v == 512)
+    )
+    return head_dim != head_dim_v and not fa4_native_pair
+
+
 def flashmask_attention(
     query: paddle.Tensor,
     key: paddle.Tensor,
@@ -155,19 +182,13 @@ def flashmask_attention(
 
     fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
 
-    need_value_padding = (
-        not (
-            fa_version == 4
-            and (
-                (q_head_dim == 192 and v_head_dim == 128)
-                or (q_head_dim == 576 and v_head_dim == 512)
-            )
-        )
-    ) and q_head_dim != v_head_dim
+    need_value_padding = is_value_padding_needed(
+        fa_version, q_head_dim, v_head_dim
+    )
 
     if need_value_padding:
         value_padding = paddle.zeros(
-            [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+            [*value.shape[:-1], q_head_dim - v_head_dim],
             dtype=value.dtype,
         )
         value = paddle.concat([value, value_padding], axis=-1)
@@ -237,19 +258,13 @@ def flash_attention(
     # startend_row_indices is None
     fa_version = get_fa_version(q_head_dim, v_head_dim)
 
-    need_value_padding = (
-        not (
-            fa_version == 4
-            and (
-                (q_head_dim == 192 and v_head_dim == 128)
-                or (q_head_dim == 576 and v_head_dim == 512)
-            )
-        )
-    ) and q_head_dim != v_head_dim
+    need_value_padding = is_value_padding_needed(
+        fa_version, q_head_dim, v_head_dim
+    )
 
     if need_value_padding:
         value_padding = paddle.zeros(
-            [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+            [*value.shape[:-1], q_head_dim - v_head_dim],
             dtype=value.dtype,
         )
         value = paddle.concat([value, value_padding], axis=-1)
@@ -280,4 +295,5 @@ __all__ = [
     "flashmask_attention",
     "flash_attention",
     "get_fa_version",
+    "is_value_padding_needed",
 ]
