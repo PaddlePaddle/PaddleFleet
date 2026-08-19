@@ -58,6 +58,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
 from paddlefleet.transformer.kimi_delta_attention import (
+    HAVE_FLA,
     KimiDeltaAttention,
     KimiDeltaAttentionSublayersSpec,
 )
@@ -145,7 +146,9 @@ def _gather_by_sections(local_tensor, sections, tp_group, tp_size, dim):
     )
 
 
-def _build_config(tp_size: int = 1, sp: bool = False) -> TransformerConfig:
+def _build_config(
+    tp_size: int = 1, sp: bool = False, fused: bool = False
+) -> TransformerConfig:
     return TransformerConfig(
         hidden_size=HIDDEN_SIZE,
         num_attention_heads=NUM_VALUE_HEADS,
@@ -156,7 +159,9 @@ def _build_config(tp_size: int = 1, sp: bool = False) -> TransformerConfig:
         use_cpu_initialization=True,
         tensor_model_parallel_size=tp_size,
         sequence_parallel=sp,
-        deterministic_mode=True,
+        # deterministic_mode keeps the paddle native fallback; turning it off
+        # selects the fused triton kernels.
+        deterministic_mode=not fused,
     )
 
 
@@ -264,12 +269,15 @@ def _make_input():
     return paddle.randn([MICRO_BATCH_SIZE, SEQ_LENGTH, HIDDEN_SIZE])
 
 
-def _run_baseline(seed: int, use_full_rank_gate: bool):
+def _run_baseline(seed: int, use_full_rank_gate: bool, fused: bool = False):
     """TP=1 reference: returns output, input grad and the module (for weights)."""
     _set_random_seed(seed)
-    config = _build_config(tp_size=1, sp=False)
+    config = _build_config(tp_size=1, sp=False, fused=fused)
     tp1_group = dist.new_group([dist.get_rank()])
     kda = _build_kda(config, use_full_rank_gate, tp_group=tp1_group)
+    assert kda.use_fused_kernels == fused, (
+        f"expected use_fused_kernels={fused}, got {kda.use_fused_kernels}"
+    )
 
     hidden_states = _make_input()
     hidden_states.stop_gradient = False
@@ -287,12 +295,13 @@ def _run_distributed(
     output_baseline,
     input_grad_baseline,
     kda_baseline,
+    fused: bool = False,
 ):
     """Run KDA under TP(/SP) with the baseline weights and compare everything."""
     _set_random_seed(seed)
     model_parallel_cuda_manual_seed(seed)
 
-    config = _build_config(tp_size=tp_size, sp=sp)
+    config = _build_config(tp_size=tp_size, sp=sp, fused=fused)
     tp_group = ps.get_tensor_model_parallel_group()
     tp_rank = ps.get_tensor_model_parallel_rank()
     sp_size = tp_size if sp else 1
@@ -335,8 +344,13 @@ def _run_distributed(
     output_dist, _ = kda_dist(hidden_states, attention_mask=None)
     output_dist.sum().backward()
 
-    atol = rtol = 5e-4
-    tag = f"TP={tp_size}, SP={sp}, full_rank_gate={use_full_rank_gate}"
+    # Sharding changes the per-rank tile shapes fed to the triton kernels, so the
+    # fused path only agrees to the TF32 matmul floor rather than to round-off.
+    atol = rtol = 5e-3 if fused else 5e-4
+    tag = (
+        f"TP={tp_size}, SP={sp}, full_rank_gate={use_full_rank_gate}, "
+        f"fused={fused}"
+    )
 
     # --- sharded_state_dict declares the right global shapes ---
     sharded_sd = kda_dist.sharded_state_dict("self_attn.")
@@ -468,9 +482,11 @@ class TestKimiDeltaAttentionDistributed(unittest.TestCase):
         self.assertEqual(output.dtype, hidden_states.dtype)
         self.assertTrue(paddle.all(paddle.isfinite(output)).item())
 
-    def _check_precision(self, sp: bool, use_full_rank_gate: bool):
+    def _check_precision(
+        self, sp: bool, use_full_rank_gate: bool, fused: bool = False
+    ):
         out_ref, grad_ref, kda_ref = _run_baseline(
-            self.seed, use_full_rank_gate
+            self.seed, use_full_rank_gate, fused=fused
         )
         _run_distributed(
             self.seed,
@@ -480,6 +496,7 @@ class TestKimiDeltaAttentionDistributed(unittest.TestCase):
             output_baseline=out_ref,
             input_grad_baseline=grad_ref,
             kda_baseline=kda_ref,
+            fused=fused,
         )
 
     def test_all_cases(self):
@@ -489,6 +506,12 @@ class TestKimiDeltaAttentionDistributed(unittest.TestCase):
             for sp in (False, True):
                 self._check_forward_shape(sp, use_full_rank_gate)
                 self._check_precision(sp, use_full_rank_gate)
+
+    @unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels not available")
+    def test_fused_kernels(self):
+        """Same TP/SP wiring, but with the fused triton kernels."""
+        for sp in (False, True):
+            self._check_precision(sp, use_full_rank_gate=True, fused=True)
 
 
 if __name__ == "__main__":

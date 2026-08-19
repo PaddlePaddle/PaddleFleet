@@ -107,6 +107,14 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         ctx.save_for_backward(H_res_logits)
         ctx.num_iterations = num_iterations
         ctx.eps = eps
+        # Paddle requires backward to return None at every position whose
+        # forward input had stop_gradient=True. With a frozen backbone
+        # (``train_indexer_only``) the whole mHC block runs on detached inputs
+        # and frozen parameters, yet its recompute segment still gets a backward
+        # because the Indexer loss is attached downstream. ``stop_gradient`` is
+        # only trustworthy on a PyLayer's forward inputs, so record it here.
+        # Same guard as the cuTile twin, ``FusedSinkhornKnopp``.
+        ctx.H_res_logits_stop_gradient = H_res_logits.stop_gradient
         return M
 
     @staticmethod
@@ -114,6 +122,8 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         """
         Backward through Sinkhorn-Knopp iterations using recomputation.
         """
+        if ctx.H_res_logits_stop_gradient:
+            return None
         (input_logits,) = ctx.saved_tensor()
         num_iterations = ctx.num_iterations
         eps = ctx.eps
@@ -643,6 +653,31 @@ class HyperConnectionModule(nn.Layer):
         return y.astype(dtype)
 
     # ==================== Fused kernel placeholder ====================
+
+    def bda_span_pays_off(self, dropout_prob: float, training: bool) -> bool:
+        """Whether wrapping ``fused_h_res_h_post_bda`` in a recompute span saves.
+
+        Two things are worth hiding from the live set:
+
+        * the dropout mask the sequential path keeps whenever dropout is active
+          -- one byte per element of the ``[..., n*C]`` output, independent of
+          ``high_precision_mhc`` and of the accuracy-compatible kernel, since
+          all three of those configurations take the same sequential path;
+        * the fp32 up-casts the fast path pins through ``save_for_backward`` --
+          only under ``high_precision_mhc``, and only while the
+          accuracy-compatible kernel is off, since that switch keeps the mHC
+          input in the incoming dtype.
+
+        With neither, the call saves only tensors that are live anyway and a
+        span would cost a replay plus the caller's ``h_res``/``h_post`` clones.
+        An already-fp32 residual makes the fast-path up-cast a no-op, i.e. a
+        wash rather than a loss, and is not special-cased here.
+        """
+        if dropout_prob > 0.0 and training:
+            return True
+        if not self.config.high_precision_mhc:
+            return False
+        return not _use_accuracy_compatible_kernel()
 
     def fused_h_res_h_post_bda(
         self,

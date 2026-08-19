@@ -74,6 +74,7 @@ class TestGptBuilder(unittest.TestCase):
 
         mock_config = MagicMock()
         mock_config.n_routed_experts = None
+        mock_config.layer_types = None
         mock_config.num_hidden_layers = 2
         mock_config.num_empty_layers_add_in_head = 0
         mock_config.num_empty_layers_add_in_tail = 0
@@ -107,6 +108,44 @@ class TestGptBuilder(unittest.TestCase):
             result = gpt_builder(mock_config, loss_fn=mock_loss)
             mock_build.assert_called_once()
             self.assertIsNotNone(result)
+
+    def test_gpt_builder_dense_with_aliased_layer_types_builds_specs(self):
+        """Dense public layer aliases must build canonical attention specs."""
+        from paddlefleet.gpt_builders import gpt_builder
+        from paddlefleet.models.gpt.gpt_config import GPTConfig
+        from paddlefleet.transformer.attention import SelfAttention
+        from paddlefleet.transformer.gated_delta_net import GatedDeltaNet
+
+        config = GPTConfig(
+            hidden_size=64,
+            num_attention_heads=4,
+            num_hidden_layers=2,
+            intermediate_size=128,
+            layer_types=["full_attention", "linear_attention"],
+            gated_attention=True,
+            normalization="RMSNorm",
+        )
+        mock_loss = MagicMock()
+
+        with (
+            patch("paddlefleet.gpt_builders.get_gpt_spec") as mock_get_spec,
+            patch("paddlefleet.gpt_builders.build_spec_layer") as mock_build,
+            patch(
+                "paddlefleet.gpt_builders._get_transformer_layer_spec_func"
+            ) as mock_dense_layer,
+        ):
+            mock_build.return_value = MagicMock()
+
+            gpt_builder(config, loss_fn=mock_loss)
+
+        mock_dense_layer.assert_not_called()
+        decoder_specs = mock_get_spec.call_args.kwargs[
+            "transformer_layers_spec"
+        ]
+        self.assertEqual(
+            [spec.sublayers_spec.self_attn.layer for spec in decoder_specs],
+            [SelfAttention, GatedDeltaNet],
+        )
 
     def test_gpt_builder_with_routed_experts(self):
         """Test gpt_builder path when n_routed_experts is set."""
@@ -149,6 +188,7 @@ class TestGptBuilder(unittest.TestCase):
 
         mock_config = MagicMock()
         mock_config.n_routed_experts = None
+        mock_config.layer_types = None
         mock_config.num_hidden_layers = 1
         mock_config.num_empty_layers_add_in_head = 0
         mock_config.num_empty_layers_add_in_tail = 0

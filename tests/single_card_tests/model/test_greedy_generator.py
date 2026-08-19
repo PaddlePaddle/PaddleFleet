@@ -24,10 +24,16 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 import unittest
+from types import SimpleNamespace
 
 import paddle
 
-from paddlefleet.generation.greedy_generator import DynamicKVCache
+from paddlefleet.generation.csa_cache import CSADynamicCache
+from paddlefleet.generation.greedy_generator import (
+    DynamicKVCache,
+    GreedyGenerator,
+    _uses_dsv4_hybrid_attention,
+)
 
 
 class TestDynamicKVCache(unittest.TestCase):
@@ -147,6 +153,109 @@ class TestDynamicKVCache(unittest.TestCase):
         self.assertEqual(cache.get_seq_len(3), 3)
 
 
+class TestCSADynamicCacheProtocol(unittest.TestCase):
+    """CSADynamicCache must also satisfy the standard ``update`` protocol.
+
+    A model that interleaves CSA/HCA layers with standard-attention layers
+    shares one cache object; the standard layers still call
+    ``update(k, v, layer_idx)`` / ``get_seq_len``.
+    """
+
+    def test_standard_update_and_seq_len(self):
+        cache = CSADynamicCache(num_layers=3)
+        self.assertEqual(cache.get_seq_len(0), 0)
+
+        k1 = paddle.randn([1, 4, 8, 64], dtype="bfloat16")
+        v1 = paddle.randn([1, 4, 8, 64], dtype="bfloat16")
+        k, v = cache.update(k1, v1, 0)
+        self.assertEqual(k.shape[1], 4)
+        self.assertEqual(cache.get_seq_len(0), 4)
+
+        k2 = paddle.randn([1, 2, 8, 64], dtype="bfloat16")
+        v2 = paddle.randn([1, 2, 8, 64], dtype="bfloat16")
+        k, v = cache.update(k2, v2, 0)
+        self.assertEqual(k.shape[1], 6)
+        self.assertEqual(v.shape[1], 6)
+
+    def test_csa_state_is_per_layer(self):
+        cache = CSADynamicCache(num_layers=4)
+        s0 = cache.get_csa_state(0)
+        s1 = cache.get_csa_state(1)
+        self.assertIsNot(s0, s1)
+        self.assertEqual(s0.raw_seq_len(), 0)
+        self.assertEqual(s0.n_compressed, 0)
+
+    def test_reset(self):
+        cache = CSADynamicCache(num_layers=2)
+        k = paddle.randn([1, 3, 8, 64], dtype="bfloat16")
+        cache.update(k, k, 0)
+        cache.get_csa_state(1).append_raw(
+            paddle.randn([1, 1, 32], dtype="bfloat16")
+        )
+        cache.reset()
+        self.assertEqual(cache.get_seq_len(0), 0)
+        self.assertEqual(cache.get_csa_state(1).raw_seq_len(), 0)
+
+
+class TestGeneratorCacheSelection(unittest.TestCase):
+    """GreedyGenerator picks the cache class from the model config."""
+
+    @staticmethod
+    def _fake_model(cfg_kwargs):
+        base = {
+            "num_hidden_layers": 4,
+            "sequence_parallel": False,
+            "apply_rope_fusion": False,
+            "recompute_granularity": None,
+            "num_empty_layers_add_in_head": 0,
+            "num_empty_layers_add_in_tail": 0,
+        }
+        base.update(cfg_kwargs)
+        cfg = SimpleNamespace(**base)
+        return SimpleNamespace(config=cfg)
+
+    def test_detects_dsv4_variant(self):
+        cfg = SimpleNamespace(
+            experimental_attention_variant="dsv4_hybrid",
+            csa_compress_ratios=None,
+        )
+        self.assertTrue(_uses_dsv4_hybrid_attention(cfg))
+
+    def test_detects_via_compress_ratios(self):
+        cfg = SimpleNamespace(
+            experimental_attention_variant=None,
+            csa_compress_ratios=[0, 4, 128, 4],
+        )
+        self.assertTrue(_uses_dsv4_hybrid_attention(cfg))
+
+    def test_standard_config_not_detected(self):
+        cfg = SimpleNamespace(
+            experimental_attention_variant=None,
+            csa_compress_ratios=None,
+        )
+        self.assertFalse(_uses_dsv4_hybrid_attention(cfg))
+
+    def test_generator_selects_csa_cache(self):
+        model = self._fake_model(
+            {
+                "experimental_attention_variant": "dsv4_hybrid",
+                "csa_compress_ratios": [0, 4, 128, 4],
+            }
+        )
+        gen = GreedyGenerator(model)
+        self.assertIsInstance(gen.cache, CSADynamicCache)
+
+    def test_generator_selects_standard_cache(self):
+        model = self._fake_model(
+            {
+                "experimental_attention_variant": None,
+                "csa_compress_ratios": None,
+            }
+        )
+        gen = GreedyGenerator(model)
+        self.assertIsInstance(gen.cache, DynamicKVCache)
+
+
 class TestSWACacheInit(unittest.TestCase):
     """Test SWA layer detection and DynamicKVCache initialization in GreedyGenerator."""
 
@@ -173,6 +282,10 @@ class TestSWACacheInit(unittest.TestCase):
         cfg.num_empty_layers_add_in_head = num_empty_layers_add_in_head
         cfg.num_empty_layers_add_in_tail = num_empty_layers_add_in_tail
         cfg.head_wise_swa_ratio = 0.0  # Ensure this doesn't interfere
+        # MagicMock auto-creates truthy attributes, which would make the
+        # DSv4-Hybrid (CSA/HCA) detection fire and select CSADynamicCache.
+        cfg.experimental_attention_variant = None
+        cfg.csa_compress_ratios = None
         model.config = cfg
         return GreedyGenerator(model)
 
@@ -242,6 +355,10 @@ class TestSWACacheInit(unittest.TestCase):
         cfg.num_empty_layers_add_in_head = 0
         cfg.num_empty_layers_add_in_tail = 0
         cfg.head_wise_swa_ratio = head_wise_swa_ratio
+        # MagicMock auto-creates truthy attributes, which would make the
+        # DSv4-Hybrid (CSA/HCA) detection fire and select CSADynamicCache.
+        cfg.experimental_attention_variant = None
+        cfg.csa_compress_ratios = None
         model.config = cfg
         return GreedyGenerator(model)
 
@@ -488,6 +605,93 @@ class TestGreedyGeneratorDebugMode(unittest.TestCase):
             self.assertEqual(generated, [5, 5, 3])
         finally:
             _installed._DEBUG = orig
+
+
+class TestNoCacheDebugLogSteps(unittest.TestCase):
+    """Cover the _log_this_step debug-logging branches in _generate_no_cache
+    (reached via generate(..., no_cache=True)) by forcing _DEBUG=True.
+
+    The default _DEBUG is False, so the input/logits logging blocks guarded by
+    `_log_this_step` are otherwise never executed by the test suite.
+    """
+
+    def _make_debug_generator(
+        self, token_sequence, batch_size=1, vocab_size=100
+    ):
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        self._call_idx = 0
+        seq = token_sequence
+        bsz = batch_size
+
+        def fake_forward(inputs):
+            logits = paddle.zeros([bsz, 1, vocab_size], dtype="float32")
+            tok_id = seq[min(self._call_idx, len(seq) - 1)]
+            logits[:, 0, tok_id] = 10.0
+            self._call_idx += 1
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    def test_no_cache_debug_covers_prefill_and_decode_logging(self):
+        """_DEBUG=True + no_cache: prefill (step 0) and decode (step>0) logging
+        branches run without error. max_new_tokens=5 => steps 0..4, so both the
+        prefill and decode `_tag` values and both sides of the `step < 4` gate
+        (True for steps 0-3, False for step 4) are exercised.
+        """
+        import paddlefleet.generation.greedy_generator as _m
+
+        orig = _m._DEBUG
+        try:
+            _m._DEBUG = True
+            gen = self._make_debug_generator([5, 6, 7, 8, 9])
+            input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+            out = gen.generate(input_ids, max_new_tokens=5, no_cache=True)
+            self.assertEqual(out.shape[0], 1)
+            self.assertEqual(out.shape[1], 2 + 5)
+        finally:
+            _m._DEBUG = orig
+
+    def test_no_cache_debug_with_log_probs_and_eos(self):
+        """_DEBUG=True + no_cache still returns correct log-probs and honors eos
+        while running the logits-logging branch (shape/min-max-mean/top-5)."""
+        import paddlefleet.generation.greedy_generator as _m
+
+        orig = _m._DEBUG
+        try:
+            _m._DEBUG = True
+            gen = self._make_debug_generator([5, 6, 3, 7])
+            input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+            generated, log_probs = gen.generate(
+                input_ids,
+                max_new_tokens=10,
+                eos_token_id=3,
+                no_cache=True,
+                return_log_probs=True,
+            )
+            num_new = generated.shape[1] - input_ids.shape[1]
+            self.assertEqual(num_new, 3)
+            self.assertEqual(len(log_probs[0]), 3)
+        finally:
+            _m._DEBUG = orig
 
 
 class TestReturnLogProbs(unittest.TestCase):

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import functools
 import os
 from contextlib import nullcontext
 from copy import deepcopy
@@ -31,6 +32,7 @@ from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
 )
+from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -131,24 +133,31 @@ class DeepGEMMBMMFunction(paddle.autograd.PyLayer):
             paddle.arange(batch_sizes.shape[0]), batch_sizes
         ).cast("int32")
 
-        dx = paddle.zeros_like(x)
-        paddlefleet_deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
-            grad,
-            y,
-            dx,
-            tokens_per_expert_indices,
-        )
-        dx = paddle.cast(dx, paddle.float)
+        dx = None
+        if not x.stop_gradient:
+            dx = paddle.zeros_like(x)
+            paddlefleet_deep_gemm.m_grouped_bf16_gemm_nt_contiguous(
+                grad,
+                y,
+                dx,
+                tokens_per_expert_indices,
+            )
+            dx = paddle.cast(dx, paddle.float)
 
-        dy = paddle.zeros_like(y, dtype=paddle.float)
-        k_grouped_bf16_gemm_tn_contiguous_aligned(
-            a=x,
-            b=grad,
-            d=dy,
-            ks=paddle.tolist(batch_sizes),
-            ks_tensor=batch_sizes.cast("int32"),
-            c=paddle.zeros_like(y, dtype=paddle.float),
-        )
+        # Frozen experts (DSv4 phase 2) must get None here: Paddle's PyLayer
+        # contract rejects a gradient for a stop_gradient input, and the wgrad
+        # GEMM would be wasted work.
+        dy = None
+        if not y.stop_gradient:
+            dy = paddle.zeros_like(y, dtype=paddle.float)
+            k_grouped_bf16_gemm_tn_contiguous_aligned(
+                a=x,
+                b=grad,
+                d=dy,
+                ks=paddle.tolist(batch_sizes),
+                ks_tensor=batch_sizes.cast("int32"),
+                c=paddle.zeros_like(y, dtype=paddle.float),
+            )
 
         del tokens_per_expert_indices
         return dx, dy
@@ -170,7 +179,6 @@ class GroupedMLPExpert(FleetLayer):
     ):
         super().__init__(config=config)
         self.config: TransformerConfig = config
-        self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
         # Intermediate size for the local shard of every expert. When using the
@@ -192,14 +200,31 @@ class GroupedMLPExpert(FleetLayer):
         )
 
         if self.config.gated_linear_unit:
-            if self.config.hidden_act not in [F.silu, F.gelu]:
-                raise ValueError(
-                    "Activation function must be silu or gelu when using GroupedMLP."
-                )
+            hidden_act = self.config.hidden_act
+            is_gelu = hidden_act is F.gelu or (
+                isinstance(hidden_act, functools.partial)
+                and hidden_act.func is F.gelu
+            )
+            if hidden_act is F.silu or is_gelu:
 
-            def glu(x):
-                x = paddle.chunk(x, 2, dim=-1)
-                return self.config.hidden_act(x[0]) * x[1]
+                def glu(x):
+                    x = paddle.chunk(x, 2, dim=-1)
+                    return self.config.hidden_act(x[0]) * x[1]
+
+            elif self.config.hidden_act == situ:
+
+                def glu(x):
+                    return situ_glu(
+                        x,
+                        beta=self.config.activation_situ_beta,
+                        linear_beta=self.config.activation_situ_linear_beta,
+                    )
+
+            else:
+                raise ValueError(
+                    "Activation function must be silu, gelu, or situ when "
+                    "using GroupedMLP."
+                )
 
             self.activation_func = glu
         else:
@@ -259,22 +284,61 @@ class GroupedMLPExpert(FleetLayer):
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
+    @property
+    def intermediate_ep_sharded(self):
+        """Whether this rank owns all experts but only ``I // EP`` of each.
+
+        The 'allgather' dispatcher shards the experts along their intermediate
+        dim instead of along the expert dim, so a rank holds every expert.
+        ``sharded_state_dict`` keys off the same condition; keep the two in sync.
+        """
+        return (
+            getattr(self.config, "moe_token_dispatcher_type", None)
+            == "allgather"
+            and self.expert_parallel
+        )
+
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice specs for fused grouped-gemm expert weights.
 
         weight1 (fused gate/up) is split by shape when ``muon_ffn_split`` is on;
         weight2 (down) is always orthogonalised per-expert (grouped gemm is
         inherently a fused 3D expert tensor).
+
+        When this rank only holds a slice of every expert's intermediate dim
+        (allgather dispatcher with EP > 1) both weights must first be
+        redistributed to the traditional EP layout, otherwise Newton-Schulz runs
+        on a slab instead of the real matrix. ``muon_ffn_split`` keeps
+        controlling whether gate and up are orthogonalised independently.
         """
         from paddlefleet.transformer.muon_utils import (
+            ortho_ep_full_intermediate,
             ortho_gate_up,
             ortho_stacked,
         )
 
+        gate_up_fused = self.config.gated_linear_unit
+        ffn_split = muon_configs.get("muon_ffn_split", False)
+
+        if self.intermediate_ep_sharded:
+            return {
+                "weight1": (
+                    ortho_ep_full_intermediate,
+                    {
+                        "ep_group": self.ep_group,
+                        "shard_axis": -1,
+                        "gate_up": gate_up_fused,
+                        "split_gate_up": ffn_split,
+                    },
+                ),
+                "weight2": (
+                    ortho_ep_full_intermediate,
+                    {"ep_group": self.ep_group, "shard_axis": -2},
+                ),
+            }
+
         specs = {}
-        if self.config.gated_linear_unit and muon_configs.get(
-            "muon_ffn_split", False
-        ):
+        if gate_up_fused and ffn_split:
             specs["weight1"] = (ortho_gate_up, {})
         specs["weight2"] = (ortho_stacked, {})
         return specs
@@ -350,15 +414,9 @@ class GroupedMLPExpert(FleetLayer):
         # allgather: shard on intermediate dim, each rank owns all experts.
         # Cross-topology reshard is handled by the DCP resharder.
         # See _get_intermediate_sharded_state_dict for allgather details.
-        is_intermediate_sharded = (
-            getattr(self.config, "moe_token_dispatcher_type", None)
-            == "allgather"
-            and self.expert_parallel
-        )
-
         state_dict = self.state_dict(structured_name_prefix="")
 
-        if is_intermediate_sharded:
+        if self.intermediate_ep_sharded:
             return self._get_intermediate_sharded_state_dict(
                 state_dict, structured_name_prefix
             )
@@ -565,9 +623,13 @@ class SonicMoEExpert(GroupedMLPExpert):
         pg_collection: ProcessGroupCollection | None = None,
         intermediate_size_per_partition: int | None = None,
     ):
-        assert config.gated_linear_unit is True, (
-            "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
-        )
+        if config.hidden_act != F.silu or not config.gated_linear_unit:
+            raise ValueError(
+                "SonicMoE only supports SwiGLU (hidden_act=F.silu and "
+                "gated_linear_unit=True), but got "
+                f"hidden_act={config.hidden_act} and "
+                f"gated_linear_unit={config.gated_linear_unit}."
+            )
         super().__init__(
             num_local_experts=num_local_experts,
             config=config,

@@ -32,6 +32,7 @@ from ..utils import (
     scaled_init_method_normal,
     truncated_init_method_normal,
 )
+from .activations import situ
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -191,6 +192,15 @@ class TransformerConfig(ModelParallelConfig):
     hidden_act: Callable = F.gelu
     """Activation function to use for the non-linearity in the MLP."""
 
+    activation_situ_beta: float = 1.0
+    """Scale of the tanh term in the SiTU gate activation."""
+
+    activation_situ_linear_beta: float | None = None
+    """Optional tanh scale applied to the linear branch of SiTU-GLU."""
+
+    situ_glu_fusion: bool = True
+    """Use fused Triton SiTU-GLU in FusionMoe BF16 routed experts."""
+
     use_bias: bool = False
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
     MLP layer)."""
@@ -218,6 +228,25 @@ class TransformerConfig(ModelParallelConfig):
 
     vha_postmix_rank: int | None = None
     """Rank of the VHA postmix low-rank head mixing matrices."""
+
+    vha_postmix_grouped: bool = False
+    """Postmix head-mixing topology (DSv4 hybrid only). False (default): ungrouped
+    full cross-head mixing over all num_attention_heads (the earlier VHA design).
+    True: within-group block-diagonal mixing that only recombines heads inside each
+    o_group (mixing stays within a group)."""
+
+    use_vha_premix: bool = False
+    """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
+    (linear_q_up_proj) with a structured VHA premix: the compressed Q is reshaped into
+    vha_premix_groups groups of dim d_q = q_lora_rank // vha_premix_groups, and each group is
+    expanded into k = num_attention_heads // vha_premix_groups heads via a per-group weight.
+    Requires q_lora_rank % vha_premix_groups == 0 and num_attention_heads % vha_premix_groups
+    == 0. DSv4 hybrid attention only; postmix is unaffected (still keyed on use_vha_attention)."""
+
+    vha_premix_groups: int | None = None
+    """Number of groups g_q the compressed Q is split into for the VHA premix. Per-group latent
+    dim is q_lora_rank // vha_premix_groups; per-group head expansion is num_attention_heads //
+    vha_premix_groups. Only used when use_vha_premix is True."""
 
     vha_q_lora_rank: int | None = None
     """Rank of the VHA Q low-rank projection. When set, Q projects to this rank per head before premix expansion."""
@@ -385,6 +414,9 @@ class TransformerConfig(ModelParallelConfig):
     use_qk_norm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
 
+    qk_norm_eps: float | None = None
+    """Epsilon for query/key normalization. If None, falls back to rms_norm_eps."""
+
     qk_norm_fusion: bool = False
     """If True, use Triton fused RMSNorm kernel for QK norm."""
 
@@ -407,12 +439,63 @@ class TransformerConfig(ModelParallelConfig):
     apply_rope_fusion: bool = False
     """If True, use fused RoPE kernel."""
 
+    mqa_latent_rope_fusion: bool = False
+    """If True, use the Triton rotate_half kernel for absorbed MQA's RoPE.
+
+    Independent of ``apply_rope_fusion``, which selects
+    ``fused_apply_mla_rope_for_q`` / ``_for_kv``. Those two de-interleave
+    (``mla_output_remove_interleaving=False``) and ``_for_kv`` needs the
+    per-head K/V that absorbed MQA never materialises, so they cannot serve the
+    ``non_absorbed_mqa`` layers. This flag covers exactly those layers: it routes
+    the *eager* branch's q RoPE through ``fused_apply_rope_half`` and its k RoPE
+    plus the key concat through ``fused_rope_cat_key``, both bit-exact with that
+    branch. Neither writes in place, so they stay correct when
+    ``recompute_qkv_up_porj_and_rope`` replays the closure that owns
+    ``k_pos_emb``.
+
+    Silently falls back to eager on any layer that is not absorbed MQA
+    (``mqa_latent``) -- an unabsorbed MLA layer has its own fused path via
+    ``apply_rope_fusion``. Every other incompatibility is asserted rather than
+    downgraded, matching how ``apply_rope_fusion`` handles its own
+    (multi_latent_attention.py:1723): ``multi_latent_attention``,
+    ``rotary_interleaved``, ``high_precision_rope``, ``sequence_parallel`` and
+    THD ``cu_seqlens`` each select a rotation the kernel does not implement, and
+    so are bf16 activations and fp32 freqs when mscale != 1, which the kernel
+    asserts itself.
+    """
+
     sigmoid_gate_fusion: bool = False
     """If True, use Triton fused sigmoid gate kernel."""
 
     dsv4_q_rms_norm_fusion: bool = False
     """If True, use the Triton weight-free fused kernel for query RMS norm in the
     DSV4 hybrid attention path. Only takes effect when swa_high_precision_norm=False."""
+
+    dsa_sink_grad_fusion: bool = False
+    """Whether to use the fused Triton attention-sink gradient epilogue.
+
+    Scope: ``MQALatentAttention`` (``non_absorbed_mqa``) only. It is read in
+    ``MQALatentAttention.__init__`` and forwarded from ``_sparse_attn``. HySparse's
+    DSA gather (``paddlefleet.cudnn_ops.block_sparse_mqa_attention_dsa``) shares
+    the same ``mqa_sparse_attn`` entry and can also carry a learnable sink, but it
+    deliberately does not forward this flag: it stays on the eager epilogue no
+    matter how this field is set.
+
+    The sparse-attention backward computes ``d_sink`` analytically because the
+    SM100 cuDNN DSA backward returns an all-zero ``d_sink``. The eager
+    implementation materialises three ``[b, s, h, d_v]`` fp32 temporaries to
+    produce ``[h]`` numbers; the kernel reads ``out``/``do`` once in their native
+    dtype. Measured at b=1/s=8192/h=64/d_v=512: 2.664 ms -> 0.423 ms, transient
+    3.0 GiB -> ~0.
+
+    No effect on layers without a learnable sink (``add_full_attention_sink_bias``
+    off), which have no sink gradient to compute.
+
+    Not bitwise identical to the eager path: 1.9e-7 relative to the gradient
+    vector's own scale (~1.6 fp32 ulp), entirely from the fp32 summation order of
+    ``Delta = sum_dv(out * do)``. Both paths are deterministic run-to-run.
+    """
+
     dsv4_yarn_rope_fusion: bool = False
     """If True, use the Triton fused kernel to build the YaRN RoPE frequency table
     in the DSV4 hybrid attention path. Only the DSV4 hybrid attention path reads this
@@ -492,7 +575,7 @@ class TransformerConfig(ModelParallelConfig):
     """MoE Feed-Forward Network hidden size"""
 
     topk_method: str = "greedy"
-    """Options are greedy, group_limited_greedy, no_auxtc"""
+    """Options are greedy, group_limited_greedy, noaux_tc, quantile_balancing"""
 
     moe_token_dispatcher_type: str = "deepep"
     """The type of token dispatcher to use. The default is 'deepep'.
@@ -507,7 +590,9 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use fusion node for MoE layer. Default is True"""
 
     moe_router_load_balancing_type: str = "aux_loss"
-    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn"""
+    """"Options are aux_loss, seq_aux_loss, global_aux_loss, sinkhorn, none.
+    Use 'none' together with router_aux_loss_coef=0 when the router balances
+    load on its own (required by topk_method='quantile_balancing')."""
 
     moe_layer_freq: int | list[int] | None = None
     """Frequency between MoE layers and Dense layers. Accepts either:
@@ -598,6 +683,11 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_force_load_balancing: bool = False
     """Force load balancing with random logits for MoE router."""
 
+    qb_n_bins: int = 1000
+    """Number of histogram bins for Quantile Balancing. Only used when
+    topk_method='quantile_balancing'. Higher values give more precise
+    quantile estimation at the cost of slightly more communication."""
+
     moe_split_feature_routing: bool = False
     """Enable multi-view (split-feature) MoE routing. When True, the router
     scores each expert with the sum of two independent views: the existing
@@ -635,6 +725,10 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_latent_size: int | None = None
     """The latent dimension size for latent MoE. Positive values enable latent MoE."""
+
+    latent_moe_use_norm: bool = False
+    """Apply RMSNorm to routed latent-MoE output before projecting it back to
+    the model hidden size."""
 
     ##################
     # Context Parallel
@@ -678,6 +772,9 @@ class TransformerConfig(ModelParallelConfig):
 
     use_w4a8: bool = False
     """Whether to use w4a8 for mlp gemm."""
+
+    use_w4a8_fused_quant: bool = False
+    """Whether to use fused CUDA operators for W4A8 online quantization."""
 
     full_fp8_computation: bool = False
     """Master switch for FP8 on Linear / ColumnParallelLinear / RowParallelLinear
@@ -797,6 +894,10 @@ class TransformerConfig(ModelParallelConfig):
     qk_rope_head_dim: int = 64
     """Dimension of the position embedding in the QK projection. Original qk_pos_emb_head_dim."""
 
+    mla_use_nope: bool = False
+    """Whether to bypass rotary position embeddings in MLA and use the
+    projected query and key channels directly."""
+
     hybrid_mla_q_lora_rank: int | None = None
     """Layer-local query low-rank width for MLA entries in a DSV4 hybrid model."""
 
@@ -818,14 +919,114 @@ class TransformerConfig(ModelParallelConfig):
     hybrid_mla_num_key_value_heads: int | None = None
     """Layer-local KV-head count for hybrid MLA entries."""
 
-    hybrid_index_n_heads: int | None = None
-    """Layer-local DSA indexer head count for hybrid MLA entries."""
+    hybrid_mla_attention: str = "mha"
+    """How the hybrid MLA layers (``csa_compress_ratios == -2``) run.
 
-    hybrid_index_head_dim: int | None = None
-    """Layer-local DSA indexer head dimension for hybrid MLA entries."""
+    Only ``-2`` layers are affected; window / CSA / HCA / CSA-full-causal-MQA
+    layers ignore this field entirely.
 
-    hybrid_index_topk: int | None = None
-    """Layer-local DSA indexer top-k for hybrid MLA entries."""
+    - ``"mha"`` (default): ``kv_b_proj`` materialises per-head K/V and dense flash
+      attention runs on them. Leaving the field unset keeps this behaviour.
+    - ``"mqa_dsa"``: latent MQA -- attention runs on the single shared
+      ``kv_lora_rank + qk_rope_head_dim`` latent head and a DSA (Lightning)
+      indexer selects the attended columns (forced local window + top-k).
+    - ``"mqa_full_causal"``: latent MQA with no indexer -- attend to the full
+      per-document causal set.
+
+    Both ``mqa_*`` modes absorb the query against ``kv_b_proj.weight`` at
+    *runtime* (activation level, not weight level), so the parameter layout stays
+    byte-identical to ``"mha"`` and an MHA checkpoint loads unchanged. The only
+    new weights are the DSA indexer's; ``"mqa_full_causal"`` adds none at all.
+
+    ``"mqa_dsa"`` reuses the model-wide ``index_n_heads`` / ``index_head_dim`` /
+    ``index_topk`` (``dsa_index_*`` internally), i.e. the same fields the CSA
+    layers already read; a learnable per-head sink comes from the model-wide
+    ``add_full_attention_sink_bias``. No hybrid-specific duplicates.
+
+    ``"mqa_full_causal"`` isolates absorption from sparsity: absorption is
+    activation-level and exact, so latent MQA over the *full* causal set is
+    mathematically identical to ``"mha"`` and a warm-started run must track the
+    MHA run to within kernel noise. Any drift is then attributable to the
+    absorption or the softmax scale rather than to the top-k selection. Its index
+    table is ``[b, s, s]`` int32, so memory grows with the square of the sequence
+    length (268 MB per layer at ``s=8192``).
+
+    Terminology: the ``mqa_*`` modes above are *latent MQA* (class
+    ``MQALatentAttention``, ``-2`` layers). A ``csa_compress_ratios`` entry of
+    ``-1`` is *CSA full-causal MQA* (class ``CompressedSparseAttention``) -- a
+    different layer kind that this field does not touch.
+    """
+
+    mqa_split_kv_b_proj: bool = False
+    """Split ``kv_b_proj`` into standalone ``k_b_proj`` / ``v_b_proj``
+    absorption parameters instead of slicing it on every forward. Requires a
+    latent MQA mode, i.e. ``hybrid_mla_attention`` in ``{"mqa_dsa",
+    "mqa_full_causal"}`` -- the split only concerns absorption, so it is
+    independent of whether an indexer runs.
+
+    ``False``: both absorption weights are sliced out of ``kv_b_proj.weight`` on
+    every forward and applied with an ``einsum``.
+
+    ``True``: they are separate parameters. Each is logically the ``[G, R, D]``
+    weight ``fused_grouped_matmul`` wants --
+    ``k_b_proj``: ``[heads, kv_lora_rank, qk_nope_head_dim]`` (query absorption),
+    ``v_b_proj``: ``[heads, v_head_dim, kv_lora_rank]`` (V de-absorption) -- but
+    *stored* with the leading two dims folded, i.e. as 2-D
+    ``[heads * kv_lora_rank, qk_nope_head_dim]`` and
+    ``[heads * v_head_dim, kv_lora_rank]``; the 3-D form is recovered per forward
+    with a zero-copy reshape. The fold exists because the AOA engine cannot
+    change a tensor's rank, so the checkpoint side has to be 2-D. Each side is
+    then one grouped Triton GEMM with no slice, no einsum and no transpose.
+    ``kv_b_proj`` is not built at all in this mode -- the two parameters hold
+    exactly its elements, so the resident parameter bytes and the checkpoint
+    size are unchanged -- and the parameter set is no longer byte-compatible
+    with a dense MHA phase: the checkpoint must already contain ``k_b_proj`` /
+    ``v_b_proj``. Converting an older ``kv_b_proj.weight``-only checkpoint needs
+    AOA statements that split it; those are not wired up yet, so such a
+    checkpoint cannot be resumed with this flag on.
+
+    Incompatible with ``enable_hy_sparse_attention``, whose ``MQASelfAttention``
+    layer still absorbs against ``kv_b_proj.weight``.
+    """
+
+    hybrid_mla_cp_mode: str | None = None
+    """Context parallel mode for the MLA layers only, overriding ``cp_balance_mode``.
+
+    ``None`` (default) inherits ``cp_balance_mode``. Set to ``contiguous_a2a``
+    to run Ulysses on the MLA layers of a DSV4 MLA+HCA hybrid while the HCA
+    layers keep ``contiguous_allgather``; both modes share one global token
+    layout, which is what makes mixing them safe.
+    """
+
+    mqa_indexer_cp_mode: str | None = None
+    """Row layout the latent-MQA indexer's forward runs on, under context parallel.
+
+    ``None`` (default) inherits ``cp_balance_mode``: the indexer scores this
+    rank's own contiguous row slice, so under a causal mask its cost grows with
+    the rank index. Measured at 256k/cp16: 2.2ms on cp0 vs 66.8ms on cp15 per
+    layer per pass, i.e. the slowest rank does 1.94x the average and every other
+    rank waits for it at the next collective.
+
+    ``"dualchunk_p2p"`` splits the global sequence into ``2 * cp_size`` chunks
+    and has rank ``r`` score chunks ``(2r, 2*cp_size-1-2r)`` instead of its own
+    ``(2r, 2r+1)``. The ids sum to ``2*cp_size-1`` on every rank, and a causal
+    row's candidate count grows linearly with its global position, so the work is
+    equal everywhere. Only the indexer's rows move -- attention is already
+    balanced at a fixed ``index_topk + window`` columns per row, so ``query`` and
+    the layer output never travel. Rank ``r`` keeps the chunk it already owns and
+    swaps the other with rank ``cp_size-1-r``, which reduces the exchange to a
+    single point-to-point sendrecv rather than an all-to-all.
+
+    The global token layout is untouched: this is a layer-local permutation,
+    undone before the layer returns, so the HCA layers of the same model are
+    unaffected and ``cp_balance_mode`` must stay contiguous.
+
+    Only the sparse training phase honours this, i.e. ``hybrid_mla_attention=
+    "mqa_dsa"`` with ``dsa_indexer_use_sparse_loss=True``. That is the only
+    phase whose indexer runs a top-k over per-rank rows; the warmup phase scores
+    the whole causal set through a different code path that does not permute
+    rows, so the other combinations are rejected rather than accepted-and-inert.
+    """
 
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
@@ -1024,6 +1225,23 @@ class TransformerConfig(ModelParallelConfig):
     by TransformerConfig.transform_rules.
     """
 
+    dsa_indexer_rope_fusion: bool = False
+    """Whether to use the fused Triton RoPE for the DSA indexer's q/k.
+
+    Independent of the model-wide ``apply_rope_fusion``, which selects the MLA
+    and HCA/CSA fused kernels. The indexer uses a third convention -- rope
+    channels first, ``rotate_half`` instead of MLA's de-interleave -- so it has
+    its own kernel (``fused_apply_rope_half``) and its own switch.
+
+    Silently falls back to the eager path when
+    ``dsa_indexer_rotary_interleaved`` or ``high_precision_rope`` is set (both
+    select a different rotation the kernel does not implement). The remaining
+    requirements are asserted by the kernel rather than silently skipped:
+    bf16 activations, and fp32 freqs when mscale != 1 (i.e. YaRN).
+
+    Bit-exact with the eager path, so it is safe to toggle mid-run.
+    """
+
     dsa_indexer_rotary_interleaved: bool = False
     """
     Whether Indexer uses interleaved Rotary Position Embeddings.
@@ -1060,6 +1278,11 @@ class TransformerConfig(ModelParallelConfig):
     """Per-layer attention-kind assignment for the DSv4 hybrid attention stack.
     Length must equal num_hidden_layers (+ mtp_num_layers if present).
     Each entry encodes the layer kind via its integer ratio value:
+      - -2: MLA layer — multi-head latent attention. How it actually runs is
+        chosen by ``hybrid_mla_attention`` (``"mha"`` / ``"mqa_dsa"`` /
+        ``"mqa_full_causal"``); this is the only ratio that field affects.
+      - -1: CSA full-causal MQA layer — no window, no compressor, no indexer.
+        A different layer kind from the latent MQA modes of ``-2``.
       - 0: window-only attention (no compression)
       - 2..127: CSA layer — overlapping compression (coff=2) with learned
         Lightning Indexer. The compression rate is a free parameter of CSA;
@@ -1079,6 +1302,55 @@ class TransformerConfig(ModelParallelConfig):
     csa_dense_mode: bool = False
     """If True, skip CSAIndexer for CSA layers (1 < ratio < 128) and attend to all
     compressed positions.
+    """
+
+    indexer_init_from_scratch: bool | None = None
+    """Whether the Indexer weights are initialized instead of loaded.
+
+    Covers both indexer flavours of a dsv4-hybrid model: the ``CSAIndexer`` of
+    the CSA layers (``1 < csa_compress_ratios[i] < 128``) and the ``DSAIndexer``
+    of the latent MQA layers (``== -2`` with ``hybrid_mla_attention="mqa_dsa"``).
+
+    This is about the *checkpoint*, not the training strategy, and is therefore
+    separate from ``train_indexer_only``:
+
+    * ``True`` -- resuming a phase-1 checkpoint: it has no Indexer tensors at all
+      (phase 1 runs with ``csa_dense_mode=true`` /
+      ``hybrid_mla_attention="mha"`` or ``"mqa_full_causal"``),
+      so they must be initialized from scratch. Leaving it ``False`` makes the AOA
+      engine abort with ``... indexer.linear_wq_b.weight should be assigned before!``.
+    * ``False`` -- resuming a phase-2/3 checkpoint (e.g. a fault-tolerant restart):
+      it does contain Indexer weights, and re-initializing them would
+      **silently** throw away all Indexer training done so far.
+
+    Because ``True`` is the destructive direction, it is rejected outright for
+    the sparse phase (``dsa_indexer_use_sparse_loss=True``, i.e. phase 3/4) of
+    *either* flavour: that phase always continues a warmup checkpoint, which
+    does hold trained Indexer weights, and the add primitive would drop them.
+    ``__post_init__`` raises rather than letting the run start.
+
+    The flag is only read by the model's ``_gen_aoa_config``, which only runs on the
+    HF-loading path. There it is **mandatory**: leaving it ``None`` raises, because
+    which checkpoint a run starts from is a deliberate decision and must not be
+    guessed. Non-HF paths (flex/DCP resume, fresh start) never read it at all.
+    """
+
+    train_indexer_only: bool = False
+    """Phase 2 training strategy: train only the Indexer parameters.
+
+    Requires that the model actually builds an Indexer -- either a ``CSAIndexer``
+    (``csa_dense_mode=False`` plus a layer with ``1 < ratio < 128``) or a
+    ``DSAIndexer`` (``hybrid_mla_attention="mqa_dsa"`` plus a ``-2`` layer) --
+    and a positive ``dsa_indexer_loss_coeff`` so it receives a
+    training signal. The backbone is frozen by the trainer before the optimizer is
+    created; this flag additionally keeps the recompute segments differentiable so
+    the attached indexer loss still gets a backward pass. It does not change any
+    attention value, the KL candidate range, or the main attention sparsity.
+
+    Only the base ``TransformerLayer`` keeps its recompute segment differentiable,
+    so ``enable_hy_sparse_attention=True`` (which swaps in
+    ``HySparseTransformerLayer``) is rejected rather than silently producing a
+    gradient-free Indexer.
     """
 
     csa_indexer_backend: str = "tilelang"
@@ -1103,6 +1375,46 @@ class TransformerConfig(ModelParallelConfig):
         kernel.
     """
 
+    mqa_sparse_attn_backward_backend: str = "cudnn"
+    """Backward kernel for the absorbed-MQA latent sparse attention (dkv).
+
+    One of {"cudnn", "tilelang"}:
+      * "cudnn" (default): cuDNN DSA backward. Fast, but ``dkv`` accumulates
+        with atomics and is **not** run-to-run reproducible; the drift is
+        bounded by ``test_block_sparse_dsa_gradcheck.py::TestDeterminism``.
+      * "tilelang": deterministic backward via
+        ``tilelang_ops.attn.mqa_latent_sparse_bwd``. ~14x slower on SM100 and
+        bitwise stable for identical inputs, independent of
+        ``FLAGS_cudnn_deterministic`` -- it always runs the atomic-free kernel
+        rather than selecting one from that flag.
+    The forward is always FlashMLA regardless of this switch; the tilelang
+    forward kernel cannot accept ``d_qk=576`` (not a power of two).
+    """
+
+    csa_share_docmask_meta: bool = False
+    """Share one ``CSADocMaskMetadata`` per (micro-batch, ratio, mask group).
+
+    ``CSADocMaskMetadata`` is a pure function of the document mask, the compress
+    ratio and the sequence length, so all DSv4-hybrid layers of a micro-batch
+    that agree on those inputs can reuse a single instance instead of each
+    rebuilding its own (see ``doc_mask_meta_registry.DocMaskMetaRegistry``). When
+    ``False`` every layer builds its own metadata exactly as before.
+
+    The trainer builds the whole step's metadata before
+    ``forward_backward_pipeline`` and audits the per-layer forward counters at
+    each step boundary (see ``PretrainingTrainer.training_pipeline_step``).
+    """
+
+    mqa_share_docmask_meta: bool = False
+    """Same sharing for the latent-MQA (``csa_compress_ratios == -2``) layers.
+
+    Separate from ``csa_share_docmask_meta`` because the two cover different
+    layer kinds with different metadata classes (``MQADocMeta`` vs
+    ``CSADocMaskMetadata``), so they can be enabled and measured independently.
+    Requires the layers to actually run latent MQA -- ``__post_init__`` rejects
+    the switch otherwise rather than let it be a silent no-op.
+    """
+
     stage1_overlap: bool = False
     """
     overlap backward with sharding gradient reduce for non-pipeline parallelism
@@ -1123,6 +1435,18 @@ class TransformerConfig(ModelParallelConfig):
     """Dimension of positional embedding portion in each QK head for DSv4 Hybrid.
     When set, the total head dim is split as: v_head_dim = qk_nope_dim + qk_pos_emb_head_dim.
     The positional embedding (RoPE) is applied only to the last qk_pos_emb_head_dim dims.
+    """
+
+    hca_rope_type: str | None = None
+    """Per-attention-type RoPE variant for HCA layers (csa_compress_ratios == 128).
+    Options: "rope" (plain RoPE) or "yarn" (YaRN). When None, keeps the historical
+    default (compressed layers use YaRN). The RoPE width stays qk_pos_emb_head_dim.
+    """
+
+    csa_rope_type: str | None = None
+    """Per-attention-type RoPE variant for CSA layers (2 <= csa_compress_ratios < 128).
+    Options: "rope" (plain RoPE) or "yarn" (YaRN). When None, keeps the historical
+    default (compressed layers use YaRN). The RoPE width stays qk_pos_emb_head_dim.
     """
 
     gpt_model_use_experimental_version: bool = False
@@ -1179,9 +1503,36 @@ class TransformerConfig(ModelParallelConfig):
         "csa_dense_mode": "csa_dense_mode",
         "csa_indexer_backend": "csa_indexer_backend",
         "csa_sparse_attn_backend": "csa_sparse_attn_backend",
+        "csa_share_docmask_meta": "csa_share_docmask_meta",
+        "mqa_share_docmask_meta": "mqa_share_docmask_meta",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
+        "hca_rope_type": "hca_rope_type",
+        "csa_rope_type": "csa_rope_type",
+        "mqa_sparse_attn_backward_backend": "mqa_sparse_attn_backward_backend",
+    }
+
+    # Config keys that were renamed and deliberately left without a silent
+    # alias: value -> the migration hint shown when a stale key is supplied.
+    # ``_process_attribute``'s fallback is ``setattr``, so without this table a
+    # stale key would be absorbed as a dead attribute and the feature it used to
+    # switch on would silently stay off. Same intent as the
+    # ``sonicmoe_quant_format`` guard below.
+    renamed_config_keys = {
+        "non_absorbed_mqa": (
+            "Use hybrid_mla_attention instead: non_absorbed_mqa=True becomes "
+            "hybrid_mla_attention='mqa_dsa', non_absorbed_mqa=False becomes "
+            "hybrid_mla_attention='mha' (the default)."
+        ),
+        "non_absorbed_mqa_dense": (
+            "Use hybrid_mla_attention instead: non_absorbed_mqa_dense=True "
+            "becomes hybrid_mla_attention='mqa_full_causal', "
+            "non_absorbed_mqa_dense=False becomes hybrid_mla_attention='mha' "
+            "(the default)."
+        ),
+        "csa_train_indexer_only": "Use train_indexer_only instead.",
+        "csa_indexer_init_from_scratch": "Use indexer_init_from_scratch instead.",
     }
 
     @classmethod
@@ -1212,6 +1563,8 @@ class TransformerConfig(ModelParallelConfig):
             if isinstance(value, str):
                 if value == "gelu_pytorch_tanh":
                     func = functools.partial(F.gelu, approximate=True)
+                elif value == "situ":
+                    func = situ
                 else:
                     func = getattr(F, value)
                 setattr(self, key, func)
@@ -1226,6 +1579,12 @@ class TransformerConfig(ModelParallelConfig):
         elif key == "sonicmoe_quant_format":
             raise ValueError(
                 "sonicmoe_quant_format is deprecated. Use fp8_weight_quant_format instead."
+            )
+        elif key in self.renamed_config_keys:
+            raise ValueError(
+                f"{key} was renamed and is no longer supported. "
+                f"{self.renamed_config_keys[key]} Update the config that still "
+                f"sets {key}; it would otherwise be silently ignored."
             )
         else:
             setattr(self, key, value)
@@ -1266,6 +1625,19 @@ class TransformerConfig(ModelParallelConfig):
             assert self.pipeline_model_parallel_size > 1, (
                 "enable_mtp_magic_send requires pipeline_model_parallel_size > 1"
             )
+            # Raise instead of assert: with ``python -O`` an assertion would be
+            # stripped and the run would silently enter a branch that is known
+            # to be wrong (double sequence-parallel scatter of the embedding and
+            # an untruncated visual mask).
+            if self.multimodal_embedding:
+                raise ValueError(
+                    "enable_mtp_magic_send with multimodal_embedding=True is "
+                    "not supported: GPTEmbedding's magic-send branch truncates "
+                    "(and, under sequence_parallel, already scatters) "
+                    "decoder_input without producing mtp_emb_res, so the "
+                    "multimodal branch would scatter a second time and leave "
+                    "visual_pos_masks at full length."
+                )
             if (
                 self.virtual_pipeline_model_parallel_size is not None
                 and self.virtual_pipeline_model_parallel_size > 1
@@ -1465,6 +1837,160 @@ class TransformerConfig(ModelParallelConfig):
                     "use_fused_mhc requires enable_hyper_connections=True."
                 )
 
+        # ``hybrid_mla_attention`` is validated unconditionally, i.e. outside the
+        # ``dsv4_hybrid`` / ``-2 in csa_compress_ratios`` guards below. A mode that
+        # no layer can honour is a configuration mistake and must fail at startup
+        # rather than be silently ignored.
+        hybrid_mla_modes = ("mha", "mqa_dsa", "mqa_full_causal")
+        if self.hybrid_mla_attention not in hybrid_mla_modes:
+            raise ValueError(
+                f"hybrid_mla_attention={self.hybrid_mla_attention!r} is invalid. "
+                "It must be one of: 'mha' (per-head K/V materialised, dense flash "
+                "attention -- the default), 'mqa_dsa' (latent MQA + DSA indexer "
+                "selecting window + top-k columns), or 'mqa_full_causal' (latent "
+                "MQA with no indexer, full per-document causal set)."
+            )
+        if self.hybrid_mla_attention != "mha":
+            ratios = self.csa_compress_ratios or []
+            ratio_counts: dict = {}
+            for r in ratios:
+                key = int(r) if hasattr(r, "__index__") else r
+                ratio_counts[key] = ratio_counts.get(key, 0) + 1
+            if (
+                self.experimental_attention_variant != "dsv4_hybrid"
+                or -2 not in ratio_counts
+            ):
+                raise ValueError(
+                    f"hybrid_mla_attention={self.hybrid_mla_attention!r} only "
+                    "applies to MLA layers, i.e. csa_compress_ratios entries "
+                    "equal to -2, but this config has none: "
+                    "experimental_attention_variant="
+                    f"{self.experimental_attention_variant!r}, ratio value "
+                    f"counts={ratio_counts or 'csa_compress_ratios unset'}. "
+                    "Either mark the target layers with -2, or set "
+                    "hybrid_mla_attention='mha' (the default). Note that ratio "
+                    "-1 is CSA full-causal MQA, a different layer kind that "
+                    "hybrid_mla_attention does not control."
+                )
+        if self.hybrid_mla_attention == "mqa_full_causal":
+            logger.warning(
+                "hybrid_mla_attention='mqa_full_causal' attends over the whole "
+                "per-document causal span on every MLA layer. It exists to "
+                "isolate absorption from sparsity, not to save memory. FA4 "
+                "dense flashmask is its only backend -- context parallelism "
+                "included -- so it needs an SM100+ box (as the sparse phases "
+                "do) with FLAGS_cudnn_deterministic off; anything else raises "
+                "in the first forward. See "
+                "MQALatentAttention._assert_dense_fa4."
+            )
+        if self.hybrid_mla_attention == "mqa_dsa":
+            # On the ``-2`` layers ``dsa_indexer_use_sparse_loss`` decides both
+            # the indexer-loss candidate set and the attention candidate set,
+            # because they are one decision: while the indexer is still being
+            # learned attention must not consume its ranking, so the warmup phase
+            # runs full-causal attention and a KL over the whole causal set --
+            # no top-k on either side. The two training phases are therefore
+            # fixed pairs, and the two mixed combinations are configuration
+            # mistakes rather than modes.
+            if self.train_indexer_only and self.dsa_indexer_use_sparse_loss:
+                raise ValueError(
+                    "train_indexer_only=True with "
+                    "dsa_indexer_use_sparse_loss=True is not a valid phase. "
+                    "Training only the Indexer is the warmup phase, whose KL "
+                    "spans the whole per-document causal set "
+                    "(dsa_indexer_use_sparse_loss=False) so the freshly "
+                    "initialised Indexer is supervised on columns it did not "
+                    "pick; the sparse loss only scores the columns it already "
+                    "selected and lets it reinforce its own initial ranking. "
+                    "Set dsa_indexer_use_sparse_loss=False in the model config, "
+                    "or drop train_indexer_only."
+                )
+            if (
+                not self.train_indexer_only
+                and not self.dsa_indexer_use_sparse_loss
+            ):
+                logger.warning(
+                    "hybrid_mla_attention='mqa_dsa' with "
+                    "dsa_indexer_use_sparse_loss=False runs the warmup shape "
+                    "(full per-document causal attention plus a KL over the "
+                    "whole causal set, no top-k anywhere) while every backbone "
+                    "parameter still trains. The "
+                    "production warmup phase pairs it with "
+                    "train_indexer_only=True; the sparse training phase pairs "
+                    "dsa_indexer_use_sparse_loss=True with a trainable backbone."
+                )
+
+        # Hyper-connection (mHC) validation
+        if self.use_fused_mhc:
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "use_fused_mhc requires enable_hyper_connections=True."
+                )
+
+        # Shared document-mask metadata validation. Both switches only mean
+        # something on a DSv4-hybrid model, and the MQA one additionally needs the
+        # -2 layers to actually run latent MQA. A switch that no layer can honour
+        # is a configuration mistake and must fail at startup rather than be
+        # silently ignored -- same rule as hybrid_mla_attention above.
+        #
+        # ``experimental_dataflow`` is checked by the trainer instead, not here:
+        # it is not a model_config.json field, so a partial construction (the
+        # startup ``[plan]`` probe builds one from the JSON alone) would see the
+        # ``False`` default and fail on a config that is actually fine.
+        if self.csa_share_docmask_meta or self.mqa_share_docmask_meta:
+            if self.experimental_attention_variant != "dsv4_hybrid":
+                raise ValueError(
+                    "csa_share_docmask_meta / mqa_share_docmask_meta share the "
+                    "per-micro-batch document-mask metadata of the DSv4-hybrid "
+                    "layers, but experimental_attention_variant="
+                    f"{self.experimental_attention_variant!r}, so no layer would "
+                    "ever read it. Set experimental_attention_variant="
+                    "'dsv4_hybrid' or drop the switch."
+                )
+            if not self.enable_hyper_connections:
+                raise ValueError(
+                    "csa_share_docmask_meta / mqa_share_docmask_meta require "
+                    "enable_hyper_connections=True. The per-micro-batch slot "
+                    "index is handed to the attention modules by "
+                    "HyperConnectionTransformerLayer's _docmask_meta_kwargs "
+                    "override; the base TransformerLayer opts out, so with "
+                    "enable_hyper_connections=False every layer would fall back "
+                    "to building its own metadata and the switch would do "
+                    "nothing at all."
+                )
+        if self.csa_share_docmask_meta:
+            csa_kinds = [
+                int(r)
+                for r in (self.csa_compress_ratios or [])
+                if int(r) in (-1, 0, 128) or 2 <= int(r) < 128
+            ]
+            if not csa_kinds:
+                raise ValueError(
+                    "csa_share_docmask_meta applies to the DSv4-hybrid layers, "
+                    "i.e. csa_compress_ratios entries in {-1, 0, 128} or "
+                    "2 <= r < 128, but this config has none: "
+                    f"csa_compress_ratios={self.csa_compress_ratios!r}. Only -2 "
+                    "layers are present, which are MLA -- use "
+                    "mqa_share_docmask_meta for those."
+                )
+        if self.mqa_share_docmask_meta:
+            has_latent_mqa = self.hybrid_mla_attention in (
+                "mqa_dsa",
+                "mqa_full_causal",
+            ) and -2 in [int(r) for r in (self.csa_compress_ratios or [])]
+            if not has_latent_mqa:
+                raise ValueError(
+                    "mqa_share_docmask_meta applies to the latent-MQA layers, "
+                    "i.e. csa_compress_ratios entries equal to -2 under "
+                    "hybrid_mla_attention='mqa_dsa' or 'mqa_full_causal', but "
+                    f"this config has hybrid_mla_attention="
+                    f"{self.hybrid_mla_attention!r} and "
+                    f"{'no' if -2 not in [int(r) for r in (self.csa_compress_ratios or [])] else 'some'}"
+                    " -2 layers. Under the default 'mha' those layers are dense "
+                    "MLA and build no MQADocMeta, so the switch would be a silent "
+                    "no-op. Use csa_share_docmask_meta for the HCA/CSA layers."
+                )
+
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
             if self.csa_compress_ratios is None:
@@ -1508,6 +2034,47 @@ class TransformerConfig(ModelParallelConfig):
                         f"0 (window), an integer in [2, 127] "
                         f"(CSA, overlap + Lightning Indexer), or 128 (HCA)."
                     )
+            # There are two Indexer flavours, one per attention family, and both
+            # are configured by the same two fields. ``csa_dense_mode`` drops the
+            # CSAIndexer and only ``hybrid_mla_attention='mqa_dsa'`` builds the
+            # DSAIndexer, exactly as ``gpt_layer_specs.py`` decides.
+            has_csa_indexer = not self.csa_dense_mode and any(
+                1 < int(ratio) < 128 for ratio in self.csa_compress_ratios
+            )
+            has_mqa_indexer = self.hybrid_mla_attention == "mqa_dsa" and any(
+                int(ratio) == -2 for ratio in self.csa_compress_ratios
+            )
+            if (
+                (has_csa_indexer or has_mqa_indexer)
+                and self.dsa_indexer_use_sparse_loss
+                and self.indexer_init_from_scratch
+            ):
+                # The sparse phase always continues a warmup checkpoint, which
+                # does contain trained Indexer tensors. Asking for a
+                # from-scratch Indexer there makes the caller's AOA config emit
+                # the ``_ -> key`` add primitive, and that primitive *ignores* a
+                # checkpoint tensor of the same name instead of preferring it,
+                # so the whole warmup phase is thrown away with nothing louder
+                # than an "Unexpected keys" warning. Starting the sparse phase
+                # from a checkpoint that has no Indexer at all is not a
+                # supported configuration either: attention consumes the
+                # Indexer's ranking there (CSA through
+                # ``_resolve_topk_effective``, latent MQA through the window +
+                # top-k index table), so a random Indexer means attending to
+                # random columns -- precisely what the warmup phase exists to
+                # prevent. Fail here, before any weight is loaded.
+                raise ValueError(
+                    "indexer_init_from_scratch=True with "
+                    "dsa_indexer_use_sparse_loss=True is not a valid phase. "
+                    "This config builds an Indexer (CSAIndexer="
+                    f"{has_csa_indexer}, DSAIndexer={has_mqa_indexer}) and the "
+                    "sparse phase resumes the warmup checkpoint, which already "
+                    "holds trained Indexer weights that the HF-loading add "
+                    "primitive would silently discard. Set "
+                    "indexer_init_from_scratch=False; only the warmup phase "
+                    "(dsa_indexer_use_sparse_loss=False), which starts from a "
+                    "checkpoint with no Indexer at all, may set it True."
+                )
             if -2 in self.csa_compress_ratios:
                 hybrid_mla_fields = (
                     "hybrid_mla_q_lora_rank",
@@ -1530,29 +2097,89 @@ class TransformerConfig(ModelParallelConfig):
                         "hybrid MLA dimensions must be explicit positive integers; "
                         f"invalid fields: {', '.join(invalid)}"
                     )
-                hybrid_index_fields = (
-                    "hybrid_index_n_heads",
-                    "hybrid_index_head_dim",
-                    "hybrid_index_topk",
-                )
-                configured_index_fields = [
-                    name
-                    for name in hybrid_index_fields
-                    if getattr(self, name, None) is not None
-                ]
-                if configured_index_fields:
+                if self.mqa_split_kv_b_proj and (
+                    self.hybrid_mla_attention
+                    not in ("mqa_dsa", "mqa_full_causal")
+                ):
+                    raise ValueError(
+                        "mqa_split_kv_b_proj=True only means "
+                        "anything for latent MQA, i.e. "
+                        "hybrid_mla_attention='mqa_dsa' or 'mqa_full_causal'; "
+                        "it splits those modes' kv_b_proj into standalone "
+                        "k_b_proj / v_b_proj absorption parameters."
+                    )
+                if self.mqa_split_kv_b_proj and getattr(
+                    self, "enable_hy_sparse_attention", False
+                ):
+                    # The split replaces ``kv_b_proj`` entirely, but HySparse
+                    # swaps the layer class for ``MQASelfAttention``, whose
+                    # forward and decode paths still read
+                    # ``kv_b_proj.weight``. Allowing the combination would
+                    # either resurrect the duplicate parameter or fail on a
+                    # ``None`` attribute deep in the forward.
+                    raise ValueError(
+                        "mqa_split_kv_b_proj=True is incompatible with "
+                        "enable_hy_sparse_attention: the HySparse MQA layer "
+                        "still absorbs against kv_b_proj.weight, which the "
+                        "split removes."
+                    )
+                if self.hybrid_mla_attention == "mqa_dsa":
+                    # The -2 layers' indexer reuses the CSA indexer fields.
+                    # ``index_n_heads`` / ``index_head_dim`` set the indexer's
+                    # parameter shapes and are needed in both DSA phases; the
+                    # cuDNN indexer forward requires D_i=128.
+                    index_fields = [
+                        "dsa_index_n_heads",
+                        "dsa_index_head_dim",
+                    ]
+                    # ``index_topk`` is phase 3 only: the warmup phase
+                    # (``dsa_indexer_use_sparse_loss=False``) runs no top-k at
+                    # all -- its KL spans the whole per-document causal set -- so
+                    # it must not be required to carry a top-k budget.
+                    if self.dsa_indexer_use_sparse_loss:
+                        index_fields.append("dsa_index_topk")
                     invalid_index = [
                         name
-                        for name in hybrid_index_fields
+                        for name in index_fields
                         if not isinstance(getattr(self, name, None), int)
                         or isinstance(getattr(self, name, None), bool)
                         or getattr(self, name) <= 0
                     ]
                     if invalid_index:
                         raise ValueError(
-                            "hybrid MLA indexer dimensions must either all be unset "
-                            "or all be explicit positive integers; "
+                            "hybrid_mla_attention='mqa_dsa' runs a DSA indexer on "
+                            "the hybrid MLA layers and needs "
+                            f"{' / '.join(index_fields)} as positive integers; "
                             f"invalid fields: {', '.join(invalid_index)}"
+                        )
+                    if self.dsa_index_head_dim != 128:
+                        raise ValueError(
+                            "hybrid_mla_attention='mqa_dsa' uses the cuDNN "
+                            "indexer, which requires index_head_dim=128, got "
+                            f"{self.dsa_index_head_dim}."
+                        )
+                    # ``index_n_heads`` is deliberately *not* pinned to 64 here.
+                    # The warmup phase's tilelang indexer does need exactly 64
+                    # (measured: 8 dies inside the kernel with a bare
+                    # "Check failed: (m_warp * n_warp == num_warps)"), but
+                    # enforcing it at config time would make every small-geometry
+                    # unit fixture unrepresentable. The check lives at the first
+                    # use instead --
+                    # ``MQALatentAttention._check_tilelang_full_candidate_support``
+                    # -- which still raises before any kernel launch.
+                    if self.dsa_indexer_use_sparse_loss and (
+                        self.dsa_index_topk % 128 != 0
+                        or self.dsa_index_topk > 2048
+                    ):
+                        # The cuDNN indexer backward asserts
+                        # ``topk % block_I == 0`` with ``block_I=128`` and
+                        # ``indexer_top_k/api.py:92`` rejects ``topk > 2048``
+                        # outright. Fail here instead of minutes later at the
+                        # first forward.
+                        raise ValueError(
+                            "index_topk must be a multiple of 128 and at most "
+                            "2048 (cuDNN indexer backward block size / top-k "
+                            f"limit), got {self.dsa_index_topk}."
                         )
 
             if (
@@ -1594,6 +2221,69 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+            if self.mqa_sparse_attn_backward_backend not in {
+                "cudnn",
+                "tilelang",
+            }:
+                raise ValueError(
+                    f"mqa_sparse_attn_backward_backend="
+                    f"{self.mqa_sparse_attn_backward_backend!r} is invalid. "
+                    "Must be one of {'cudnn', 'tilelang'}."
+                )
+
+            # Per-attention-type RoPE variant validation (HCA / CSA).
+            valid_rope_types = {"rope", "yarn"}
+            for name in ("hca_rope_type", "csa_rope_type"):
+                val = getattr(self, name, None)
+                if val is not None and val not in valid_rope_types:
+                    raise ValueError(
+                        f"{name}={val!r} is invalid. Must be one of "
+                        "{'rope', 'yarn'} or None (keep default)."
+                    )
+            if self.train_indexer_only:
+                loss_coeff = getattr(self, "dsa_indexer_loss_coeff", None)
+                if not loss_coeff or float(loss_coeff) <= 0:
+                    raise ValueError(
+                        "train_indexer_only=True requires a positive "
+                        f"dsa_indexer_loss_coeff, got {loss_coeff!r}; otherwise the "
+                        "Indexer receives no training signal."
+                    )
+                # Either Indexer flavour is enough to have something to train
+                # (``has_csa_indexer`` / ``has_mqa_indexer`` computed above).
+                if not (has_csa_indexer or has_mqa_indexer):
+                    raise ValueError(
+                        "train_indexer_only=True requires the model to build at "
+                        "least one Indexer, and this config builds none, so there "
+                        "would be no trainable parameter left. Either a CSA layer "
+                        "(csa_dense_mode=False plus some 1 < csa_compress_ratios[i] "
+                        "< 128) or a latent MQA layer with a DSA indexer "
+                        "(hybrid_mla_attention='mqa_dsa' plus some "
+                        "csa_compress_ratios[i] == -2). Got "
+                        f"csa_dense_mode={self.csa_dense_mode}, "
+                        f"hybrid_mla_attention={self.hybrid_mla_attention!r}, "
+                        f"csa_compress_ratios={self.csa_compress_ratios}."
+                    )
+                if getattr(self, "enable_hy_sparse_attention", False):
+                    # enable_hy_sparse_attention swaps the layer class for
+                    # HySparseTransformerLayer, whose recompute call does not go
+                    # through keep_indexer_grad_path(). With a frozen backbone the
+                    # recompute segment output would stay stop_gradient=True and the
+                    # attached indexer loss would *silently* never get a backward
+                    # pass. HySparse also feeds a ``shared_kv`` kwarg that the CSA
+                    # attention forward swallows via **kwargs without using it, so
+                    # this combination is untested anyway. Fail loudly instead.
+                    raise ValueError(
+                        "train_indexer_only=True is incompatible with "
+                        "enable_hy_sparse_attention=True: HySparseTransformerLayer "
+                        "does not keep its recompute segment differentiable, so the "
+                        "Indexer would silently receive no gradient."
+                    )
+        elif getattr(self, "train_indexer_only", False):
+            raise ValueError(
+                "train_indexer_only=True is only supported with "
+                "experimental_attention_variant='dsv4_hybrid', got "
+                f"{self.experimental_attention_variant!r}."
+            )
 
         # swa_high_precision_norm is only supported for DSv4 models.
         if (
@@ -1811,3 +2501,176 @@ class TransformerConfig(ModelParallelConfig):
                 f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
                 "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
             )
+
+        # only support hybrid_mla_cp_mode == contiguous_a2a if not None
+        if self.hybrid_mla_cp_mode is not None:
+            if (
+                self.hybrid_mla_cp_mode != "contiguous_a2a"
+                or not self.cp_balance_mode.startswith("contiguous")
+            ):
+                raise ValueError(
+                    f"hybrid_mla_cp_mode={self.hybrid_mla_cp_mode!r} with "
+                    f"cp_balance_mode={self.cp_balance_mode!r} is invalid: "
+                    "hybrid_mla_cp_mode must be None or 'contiguous_a2a' "
+                    "(other paths are simply not currently supported yet), "
+                    "and cp_balance_mode must be in the same token layout."
+                )
+            # ``csa_compress_ratios`` defaults to None off a dsv4_hybrid, so
+            # ``or ()`` keeps the membership test total instead of relying on
+            # the left operand short-circuiting it.
+            if self.experimental_attention_variant != "dsv4_hybrid" or (
+                -2 not in (self.csa_compress_ratios or ())
+            ):
+                raise ValueError(
+                    "hybrid_mla_cp_mode can only be set in dsv4_hybrid with "
+                    "-2 in csa_compress_ratios."
+                )
+
+        # only support mqa_indexer_cp_mode == dualchunk_p2p if not None
+        if self.mqa_indexer_cp_mode is not None:
+            if self.mqa_indexer_cp_mode != "dualchunk_p2p":
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} is "
+                    "invalid. Must be None or 'dualchunk_p2p'."
+                )
+            # The permutation is layer-local: the rows are swapped inside the
+            # MQA layer and swapped back before it returns, which is only sound
+            # while the *global* layout is the contiguous one the index tables
+            # are built against ("build over the global sequence, then take this
+            # rank's rows"). A dualchunk global layout would double-permute.
+            #
+            # Exact value rather than ``startswith("contiguous")``: under a real
+            # CP group ``MQALatentAttention.__init__`` accepts only
+            # ``contiguous_allgather``, so admitting ``contiguous_a2a`` here
+            # would pass config validation and then raise NotImplementedError at
+            # module construction -- a contract split between two layers.
+            if self.cp_balance_mode != "contiguous_allgather":
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} needs "
+                    "cp_balance_mode='contiguous_allgather' (the only mode the "
+                    "latent-MQA layer supports under context parallel), got "
+                    f"{self.cp_balance_mode!r}."
+                )
+            # Same membership test as hybrid_mla_cp_mode above: no latent-MQA
+            # layer means no indexer to rebalance.
+            if self.experimental_attention_variant != "dsv4_hybrid" or (
+                -2 not in (self.csa_compress_ratios or ())
+            ):
+                raise ValueError(
+                    "mqa_indexer_cp_mode can only be set in dsv4_hybrid with "
+                    "-2 in csa_compress_ratios."
+                )
+            # ``MQALatentAttention`` reads the switch in ``_forward_sparse``
+            # only. The other two phases reach a different indexer path that
+            # does not permute rows -- ``hybrid_mla_attention="mha"`` builds no
+            # latent-MQA layer at all, and ``"mqa_dsa"`` with
+            # ``dsa_indexer_use_sparse_loss=False`` is the warmup phase, whose
+            # KL spans the whole per-document causal set with no top-k anywhere.
+            # Accepting those would start successfully and silently deliver none
+            # of the rebalance this switch advertises.
+            if (
+                self.hybrid_mla_attention != "mqa_dsa"
+                or not self.dsa_indexer_use_sparse_loss
+            ):
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} only "
+                    "takes effect in the sparse training phase, which is "
+                    "hybrid_mla_attention='mqa_dsa' together with "
+                    "dsa_indexer_use_sparse_loss=True. This config has "
+                    f"hybrid_mla_attention={self.hybrid_mla_attention!r} and "
+                    "dsa_indexer_use_sparse_loss="
+                    f"{self.dsa_indexer_use_sparse_loss!r}, which runs an "
+                    "indexer path that scores the full causal set and never "
+                    "permutes rows, so the rebalance would be silently inert. "
+                    "Drop mqa_indexer_cp_mode, or move to the sparse phase. "
+                    "Note that train_indexer_only=True is the warmup phase by "
+                    "definition and so cannot carry it either."
+                )
+            # The two-chunks-per-rank split needs an even per-rank row count.
+            # ``TransformerConfig`` does not carry the sequence length, so that
+            # is checked at the swap itself (``cp_utils.dualchunk_swap``).
+
+        # separate_mtp_headloss validation.
+        if self.separate_mtp_headloss:
+            import warnings as _warnings
+
+            # Resolve the effective number of MTP layers, following the same
+            # logic used elsewhere in __post_init__ (see the csa branch above).
+            mtp_num_layers = self.num_nextn_predict_layers
+            mtp_enabled = mtp_num_layers > 0
+            pp_enabled = self.pipeline_model_parallel_size > 1
+
+            # 1. separate_mtp_headloss is only meaningful when both MTP and PP
+            #    are enabled; otherwise warn and force-disable it.
+            if not mtp_enabled or not pp_enabled:
+                _warnings.warn(
+                    "separate_mtp_headloss=True requires both MTP and pipeline "
+                    "parallel to be enabled "
+                    f"(mtp_num_layers={mtp_num_layers}, "
+                    f"pipeline_model_parallel_size={self.pipeline_model_parallel_size}). "
+                    "Forcing separate_mtp_headloss=False."
+                )
+                self.separate_mtp_headloss = False
+            else:
+                # Once MTP and PP are both enabled:
+                # 2. Layer-count vs pp*vpp guard.
+                #    The framework-enforced constraint is DIVISIBILITY: Paddle's
+                #    interleave segmentation (SegmentLayers.do_segment) asserts
+                #    the number of seg-weight-bearing layers is divisible by
+                #    pp*vpp, so an indivisible layout fails at build time.
+                #    Verified empirically on 8xH800 (pp=4, vpp=2): a divisible
+                #    layout with quotient > 1 (multiple layers per stage) builds
+                #    and constructs shared comm fine, so "exactly 1 layer per
+                #    stage" is stricter than the framework needs. We keep the
+                #    quotient==1 form as a conservative guard because the full
+                #    fwd/bwd path for separate_mtp_headloss under pp>1 is not yet
+                #    covered by any regression test; see
+                #    tests/multi_card_tests/pipeline_parallel/test_separate_mtp_headloss_pp.py
+                #    which asserts the build/segmentation/shared-layer-stage
+                #    contract.
+                pp_degree = self.pipeline_model_parallel_size
+                vpp_degree = self.virtual_pipeline_model_parallel_size
+                # When vpp is not enabled, vpp_degree may be None or a
+                # sentinel like -1. Normalize it to 1 before computing
+                # pp_degree*vpp_degree, otherwise the product would be wrong
+                # (e.g. negative).
+                if vpp_degree is None or vpp_degree <= 1:
+                    print(
+                        "[separate_mtp_headloss] vpp is not enabled "
+                        f"(virtual_pipeline_model_parallel_size={vpp_degree}); "
+                        "using vpp_degree=1 for the pp_degree*vpp_degree check."
+                    )
+                    vpp_degree = 1
+
+                num_empty_layers = self.num_empty_layers_add_in_head + max(
+                    0, self.num_empty_layers_add_in_tail - 1
+                )
+                total_layers = (
+                    self.num_hidden_layers + mtp_num_layers + num_empty_layers
+                )
+                denom = pp_degree * vpp_degree
+                if total_layers % denom != 0 or total_layers // denom != 1:
+                    _warnings.warn(
+                        "separate_mtp_headloss=True requires "
+                        "(num_hidden_layers + num_mtp_layers + num_empty_layers) "
+                        f"({self.num_hidden_layers} + {mtp_num_layers} + "
+                        f"{num_empty_layers} = {total_layers}) to be divisible "
+                        f"by pp_degree*vpp_degree ({pp_degree}*{vpp_degree} = "
+                        f"{denom}) and the quotient to equal 1 (exactly one "
+                        f"layer per pp*vpp stage), but got {total_layers} / "
+                        f"{denom} = {total_layers / denom}. "
+                        "Forcing separate_mtp_headloss=False."
+                    )
+                    self.separate_mtp_headloss = False
+
+                # 3. separate_mtp_headloss reserves tail EmptyLayer slots for the
+                #    separated MTP LMHead/Loss and main LMHead, so it needs at
+                #    least 3 tail empty layers.
+                if self.num_empty_layers_add_in_tail < 3:
+                    _warnings.warn(
+                        "separate_mtp_headloss=True requires "
+                        "num_empty_layers_add_in_tail >= 3 "
+                        f"(got {self.num_empty_layers_add_in_tail}). "
+                        "Forcing separate_mtp_headloss=False."
+                    )
+                    self.separate_mtp_headloss = False

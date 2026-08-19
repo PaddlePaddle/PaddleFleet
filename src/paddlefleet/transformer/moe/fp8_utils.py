@@ -18,6 +18,7 @@
 import numpy
 import paddle
 import paddle.nn.functional as F
+from paddle.base.framework import EagerParamBase
 
 from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
@@ -35,6 +36,18 @@ try:
     )
 except (ImportError, RuntimeError):
     pass
+
+try:
+    from paddlefleet_ops import (
+        w4a8_dequantize_1x32,
+        w4a8_quantize_1x32,
+        w4a8_stack_quantize_1x32,
+        w4a8_weighted_swiglu_quantize_1x32,
+    )
+
+    HAS_W4A8_FUSED_QUANT = True
+except (ImportError, AttributeError, RuntimeError):
+    HAS_W4A8_FUSED_QUANT = False
 
 # 优先从 paddlefleet_ops 导入（算子已重命名为 paddlefleet_fused_swiglu_probs_bwd 避免冲突），
 # 仅在 paddlefleet_ops 中不存在时回退到旧的 FusedQuantOps。
@@ -94,6 +107,11 @@ from functools import partial
 
 from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
+)
+
+from paddlefleet.transformer.activations import (
+    situ_glu_scale_backward,
+    situ_glu_scale_forward,
 )
 
 __all__ = [
@@ -248,6 +266,15 @@ def tilewise_quant(x):
 # ---------------------------------------------------------------------------
 
 W4A8_QUANT_BLOCK = 32
+
+
+def _use_w4a8_fused_quant(enabled):
+    if enabled and not HAS_W4A8_FUSED_QUANT:
+        raise RuntimeError(
+            "use_w4a8_fused_quant=True requires paddlefleet_ops "
+            "built with the W4A8 1x32 CUDA custom ops"
+        )
+    return enabled
 
 
 def ceil_to_ue8m0(x):
@@ -497,6 +524,46 @@ def fused_act_dequant_python(x_fp8, sf):
     return (x_fp8.astype("float32") * sf_expanded).astype("bfloat16")
 
 
+def _w4a8_quant(x, quant_dtype, use_w4a8_fused_quant=False):
+    if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        return w4a8_quantize_1x32(x, 0 if quant_dtype == "fp8" else 1)
+    return quant_blockwize(x, quant_dtype=quant_dtype)
+
+
+def _w4a8_stack_quant(weights, transpose, use_w4a8_fused_quant=False):
+    if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        weights = _stack_expert_weights(weights)
+        return w4a8_stack_quantize_1x32(weights, transpose)
+    fn = (
+        fuse_stack_transpose_fp8_quant_python
+        if transpose
+        else fuse_stack_fp8_quant_python
+    )
+    return fn(weights, quant_dtype="fp4")
+
+
+def _w4a8_weighted_swiglu_quant(
+    o1, probs, clamp_value=None, use_w4a8_fused_quant=False
+):
+    if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        return w4a8_weighted_swiglu_quantize_1x32(
+            o1,
+            probs,
+            0.0 if clamp_value is None else float(clamp_value),
+        )
+    if clamp_value is not None and clamp_value > 0:
+        return fuse_weighted_swiglu_fp8_quant_clamp_python(
+            o1, probs, clamp_value
+        )
+    return fuse_weighted_swiglu_fp8_quant_python(o1, probs)
+
+
+def _w4a8_dequant(x_fp8, sf, use_w4a8_fused_quant=False):
+    if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        return w4a8_dequantize_1x32(x_fp8, sf)
+    return fused_act_dequant_python(x_fp8, sf)
+
+
 def split_group_gemm(
     x_fp8, x_scale, w_fp8, w_scale, tokens_per_expert, gemm_out, use_ue8m0=False
 ):
@@ -556,6 +623,34 @@ def has_config(config_map, key):
     )
 
 
+def expert_weights_all_frozen(weights):
+    """True when every expert weight in ``weights`` is a frozen parameter.
+
+    The MoE expert backward writes weight gradients straight into
+    ``main_grad`` / ``grad`` instead of returning them through autograd, so
+    ``stop_gradient`` is not honored automatically. Callers use this to skip the
+    wgrad GEMMs and their fp32 buffers when the experts are frozen (for example
+    DSv4 phase 2, ``train_indexer_only``).
+
+    ``weights`` is a stacked parameter (grouped path), a list of per-expert
+    parameters (split path), or a **per-expert view** of a stacked parameter
+    (subbatch / sliced deep_gemm path). A view's own ``stop_gradient`` is always
+    True even when its parent parameter is trainable, so each entry is first
+    dereferenced through ``_parent`` -- stamped by :func:`slice_expert_weight` and
+    stored by :class:`_PerExpertWeightView`. Only an ``EagerParamBase`` then
+    counts as frozen; anything else keeps the original behavior so no gradient is
+    silently dropped. Mixed groups are treated as not frozen.
+    """
+    if weights is None:
+        return False
+    if not isinstance(weights, (list, tuple)):
+        weights = [weights]
+    entries = [getattr(w, "_parent", w) for w in weights if w is not None]
+    return bool(entries) and all(
+        isinstance(w, EagerParamBase) and w.stop_gradient for w in entries
+    )
+
+
 def kitchen_gemm(
     x_fp8,
     x_scale,
@@ -599,6 +694,20 @@ def kitchen_gemm(
             return out
 
     return y
+
+
+def slice_expert_weight(parent_weight, local_id):
+    """Per-expert view ``[1, K, N]`` of a stacked expert weight.
+
+    ``_slice`` returns a raw view whose ``stop_gradient`` is always True, even when
+    the parent parameter is trainable, so keep a pointer to the parameter it came
+    from. :func:`expert_weights_all_frozen` dereferences that ``_parent`` to decide
+    whether the expert is frozen. Every per-expert slicing site must go through
+    here, otherwise that path silently loses the frozen-expert wgrad skip.
+    """
+    view = parent_weight._slice(local_id, local_id + 1)
+    view._parent = parent_weight
+    return view
 
 
 class _PerExpertWeightView:
@@ -729,6 +838,7 @@ class ExpertsGroupGemmContiguousNode:
         activation_type="swiglu",
         use_accuracy_compatible=False,
         use_w4a8=False,
+        use_w4a8_fused_quant=False,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -738,7 +848,7 @@ class ExpertsGroupGemmContiguousNode:
             recompute_moe_gate_up (bool, optional): Whether to recompute forward gate up. Defaults to False.
             dequant_input (bool, optional): Whether to dequantize input. Defaults to False.
             name (str, optional): Name of the node. Defaults to "experts_group_gemm_contiguous_node".
-            activation_type (str, optional): Activation function type. "swiglu" or "geglu". Defaults to "swiglu".
+            activation_type (str, optional): Activation function type. "swiglu", "geglu", or "situ". Defaults to "swiglu".
         """
         if moe_deep_gemm and expert_id is not None:
             # Per-expert node for deep_gemm: slice stacked weight to [1, K, N]
@@ -756,8 +866,8 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 # Normal: bf16 weight is valid, slice directly
                 sliced = type("_SlicedGroupedExpert", (), {})()
-                sliced.weight1 = parent.weight1._slice(local_id, local_id + 1)
-                sliced.weight2 = parent.weight2._slice(local_id, local_id + 1)
+                sliced.weight1 = slice_expert_weight(parent.weight1, local_id)
+                sliced.weight2 = slice_expert_weight(parent.weight2, local_id)
                 sliced._parent = parent
                 sliced._local_id = local_id
                 self.grouped_gemm_experts = sliced
@@ -798,6 +908,12 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_expert_fusion = moe_expert_fusion
         self.clamp_value = clamp_value
         self.activation_type = activation_type
+        config = getattr(custom_map, "config", None)
+        self.activation_situ_beta = getattr(config, "activation_situ_beta", 1.0)
+        self.activation_situ_linear_beta = getattr(
+            config, "activation_situ_linear_beta", None
+        )
+        self.situ_glu_fusion = getattr(config, "situ_glu_fusion", True)
         self.use_accuracy_compatible = use_accuracy_compatible
         self.token_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
@@ -805,6 +921,7 @@ class ExpertsGroupGemmContiguousNode:
             use_accuracy_compatible=use_accuracy_compatible,
         )
         self.use_w4a8 = use_w4a8
+        self.use_w4a8_fused_quant = use_w4a8_fused_quant
         if use_w4a8:
             assert moe_expert_fusion and moe_deep_gemm and use_fp8_mlp, (
                 "use_w4a8 需要 moe_expert_fusion + moe_deep_gemm + use_fp8_mlp"
@@ -1088,12 +1205,18 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 assert self.input is not None
                 x = self.input
-        # 在线量化权重（无 quant_weight_cache）：[E, K, N] -> [E, N, K/2]
-        w1_fp4, w1_sf = fuse_stack_transpose_fp8_quant_python(
-            expert_w1, quant_dtype="fp4"
+        # [E, K, N] -> [E, N, K/2]
+        w1_fp4, w1_sf = _w4a8_stack_quant(
+            expert_w1,
+            transpose=True,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
         )
         if x_fp8 is None:
-            x_fp8, x_sf = quant_blockwize(x, quant_dtype="fp8")
+            x_fp8, x_sf = _w4a8_quant(
+                x,
+                quant_dtype="fp8",
+                use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+            )
         # 给反向存储：dequant_input 存 fp8 1x32 量化结果（省显存，
         # 反向 bf16 wgrad 用 fused_act_dequant_python 反量化），否则存 bf16
         if self.dequant_input:
@@ -1116,17 +1239,17 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         """
         # 在线量化权重：[E, H, K] -> [E, K, H/2]
-        w2_fp4, w2_sf = fuse_stack_transpose_fp8_quant_python(
-            expert_w2, quant_dtype="fp4"
+        w2_fp4, w2_sf = _w4a8_stack_quant(
+            expert_w2,
+            transpose=True,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
         )
-        if self.clamp_value is not None and self.clamp_value > 0:
-            o2_fp8, o2_sf = fuse_weighted_swiglu_fp8_quant_clamp_python(
-                o1, unzipped_probs, self.clamp_value
-            )
-        else:
-            o2_fp8, o2_sf = fuse_weighted_swiglu_fp8_quant_python(
-                o1, unzipped_probs
-            )
+        o2_fp8, o2_sf = _w4a8_weighted_swiglu_quant(
+            o1,
+            unzipped_probs,
+            self.clamp_value,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
         if clear_o1:
             o1._clear_to_zero_allocation()
 
@@ -1148,10 +1271,16 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, n] = [m_sum, k] * [num_groups, k, n]
         w2 [E, N, K] 不转置，收缩维为 K（do3 的列维）。
         """
-        w2_fp4, w2_sf = fuse_stack_fp8_quant_python(
-            expert_w2, quant_dtype="fp4"
+        w2_fp4, w2_sf = _w4a8_stack_quant(
+            expert_w2,
+            transpose=False,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
         )
-        grad_fp8, grad_sf = quant_blockwize(unzipped_grad, quant_dtype="fp8")
+        grad_fp8, grad_sf = _w4a8_quant(
+            unzipped_grad,
+            quant_dtype="fp8",
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
 
         do2_s = paddle.empty(
             [grad_fp8.shape[0], w2_fp4.shape[1]], dtype=unzipped_grad.dtype
@@ -1187,10 +1316,16 @@ class ExpertsGroupGemmContiguousNode:
         [m_sum, k] = [m_sum, n] * [num_groups, n, k]
         w1 [E, K, N] 不转置，收缩维为 N（do1 的列维）。
         """
-        w1_fp4, w1_sf = fuse_stack_fp8_quant_python(
-            expert_w1, quant_dtype="fp4"
+        w1_fp4, w1_sf = _w4a8_stack_quant(
+            expert_w1,
+            transpose=False,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
         )
-        do1_fp8, do1_sf = quant_blockwize(do1, quant_dtype="fp8")
+        do1_fp8, do1_sf = _w4a8_quant(
+            do1,
+            quant_dtype="fp8",
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+        )
 
         dx_shape = [do1_fp8.shape[0], w1_fp4.shape[1]]
         if dx is None:
@@ -1232,8 +1367,10 @@ class ExpertsGroupGemmContiguousNode:
         #   forward is gelu on both paths and pairs with the analytic GeGLU
         #   backward, which is not gated on is_split_group_gemm.
         # ==================================================================
-        if self.use_accuracy_compatible and (
-            self.activation_type == "geglu" or self.is_split_group_gemm
+        if (
+            self.use_accuracy_compatible
+            and self.activation_type != "situ"
+            and (self.activation_type == "geglu" or self.is_split_group_gemm)
         ):
             x_glu, x_linear = paddle.chunk(o1, chunks=2, axis=-1)
             probs = unzipped_probs
@@ -1262,7 +1399,15 @@ class ExpertsGroupGemmContiguousNode:
                     o1.dtype
                 )
         else:
-            if self.activation_type == "geglu":
+            if self.activation_type == "situ":
+                o2 = situ_glu_scale_forward(
+                    o1,
+                    unzipped_probs,
+                    self.activation_situ_beta,
+                    self.activation_situ_linear_beta,
+                    situ_glu_fusion=self.situ_glu_fusion,
+                )
+            elif self.activation_type == "geglu":
                 # GeGLU: gelu_tanh(gate) * up, then scale by probs
                 # F.gelu promotes bf16 to float32, cast back to bf16 for downstream ops
                 gate, up = paddle.chunk(o1, 2, dim=-1)
@@ -1325,12 +1470,13 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
-            assert self.activation_type != "geglu", (
-                "FP8 MoE path does not support activation_type='geglu' yet. "
-                "The fwd_down_fp8 branch uses fused SwiGLU FP8 kernels which are "
-                "incompatible with GeGLU. Please disable fp8 for Gemma4 MoE or "
-                "implement a GeGLU FP8 kernel."
-            )
+            if self.activation_type in ("geglu", "situ"):
+                raise ValueError(
+                    "FP8 MoE path only supports activation_type='swiglu' "
+                    f"yet, but got {self.activation_type!r}. Please disable "
+                    "fp8 or implement the corresponding FP8 activation "
+                    "kernel."
+                )
             return self.fwd_down_fp8(
                 o1, unzipped_probs, expert_w2, num_expert, o3, clear_o1
             )
@@ -1498,7 +1644,7 @@ class ExpertsGroupGemmContiguousNode:
         # ==================================================================
         if (
             self.use_accuracy_compatible
-            and self.activation_type != "geglu"
+            and self.activation_type not in ("geglu", "situ")
             and self.is_split_group_gemm
             and numpy.prod(unzipped_grad.shape) != 0
         ):
@@ -1552,6 +1698,16 @@ class ExpertsGroupGemmContiguousNode:
             o2_s = o2_f32.detach().astype(o1.dtype)
             probs_grad = d_scale_f32.astype(unzipped_probs.dtype)
             return do1, o2_s, probs_grad
+
+        if self.activation_type == "situ":
+            return situ_glu_scale_backward(
+                o1,
+                unzipped_probs,
+                do2_s,
+                self.activation_situ_beta,
+                self.activation_situ_linear_beta,
+                situ_glu_fusion=self.situ_glu_fusion,
+            )
 
         if self.activation_type == "geglu":
             # GeGLU forward recompute (needed for backward weight computation)
@@ -1913,6 +2069,8 @@ class ExpertsGroupGemmContiguousNode:
         dw2 = do2_t * do3
         [n, k] = [n, m_sum] * [m_sum, k] (m_sum = sum(tokens_per_expert))
         """
+        if expert_weights_all_frozen(expert_w2):
+            return
         o2_t_fp8, o2_t_scale = self.fused_transpose_split_quant(
             o2, None, self.tokens_per_expert, True
         )
@@ -1978,6 +2136,12 @@ class ExpertsGroupGemmContiguousNode:
         dw1 = dx_t * do1
         [k, n] = [k, m_sum] * [m_sum, n] (m_sum = sum(tokens_per_expert))
         """
+        if expert_weights_all_frozen(expert_w1):
+            if clear_input:
+                self.input = None
+                self.input_fp8 = None
+                self.input_scale = None
+            return
 
         if input_x is None:
             if self.dequant_input:
@@ -2161,6 +2325,11 @@ class ExpertsGroupGemmContiguousNode:
                     if expert is None:
                         continue
 
+                    if expert_weights_all_frozen(
+                        [expert.down_proj.weight, expert.up_gate_proj.weight]
+                    ):
+                        continue
+
                     if hasattr(expert.down_proj.weight, "main_grad"):
                         if expert.down_proj.weight.main_grad is None:
                             expert.down_proj.weight.main_grad = paddle.zeros(
@@ -2187,34 +2356,24 @@ class ExpertsGroupGemmContiguousNode:
                                 dtype=paddle.float32,
                             )
             else:
-                if hasattr(self.grouped_gemm_experts.weight1, "main_grad"):
-                    if self.grouped_gemm_experts.weight1.main_grad is None:
-                        self.grouped_gemm_experts.weight1.main_grad = (
-                            paddle.zeros(
-                                shape=self.grouped_gemm_experts.weight1.shape,
-                                dtype=paddle.float32,
+                for weight in (
+                    self.grouped_gemm_experts.weight1,
+                    self.grouped_gemm_experts.weight2,
+                ):
+                    # `weight` may be a per-expert view; the predicate resolves it
+                    # to the parent parameter. Skipping matters most for the
+                    # offline-fp8 view: its main_grad setter allocates an fp32
+                    # buffer for the whole parent, not just this expert's slice.
+                    if expert_weights_all_frozen(weight):
+                        continue
+                    if hasattr(weight, "main_grad"):
+                        if weight.main_grad is None:
+                            weight.main_grad = paddle.zeros(
+                                shape=weight.shape, dtype=paddle.float32
                             )
-                        )
-                else:
-                    if self.grouped_gemm_experts.weight1.grad is None:
-                        self.grouped_gemm_experts.weight1.grad = paddle.zeros(
-                            shape=self.grouped_gemm_experts.weight1.shape,
-                            dtype=paddle.float32,
-                        )
-
-                if hasattr(self.grouped_gemm_experts.weight2, "main_grad"):
-                    if self.grouped_gemm_experts.weight2.main_grad is None:
-                        self.grouped_gemm_experts.weight2.main_grad = (
-                            paddle.zeros(
-                                shape=self.grouped_gemm_experts.weight2.shape,
-                                dtype=paddle.float32,
-                            )
-                        )
-                else:
-                    if self.grouped_gemm_experts.weight2.grad is None:
-                        self.grouped_gemm_experts.weight2.grad = paddle.zeros(
-                            shape=self.grouped_gemm_experts.weight2.shape,
-                            dtype=paddle.float32,
+                    elif weight.grad is None:
+                        weight.grad = paddle.zeros(
+                            shape=weight.shape, dtype=paddle.float32
                         )
 
             if a2a_async_fn:
@@ -2560,12 +2719,18 @@ class ExpertsGroupGemmContiguousNode:
         """
         BF16 GEMM for weight grad
         """
+        # `weights` may be a per-expert view; the predicate resolves it to the
+        # parent parameter. The GEMM below still uses the per-expert `weights`.
+        if expert_weights_all_frozen(weights):
+            return
         if x is None:
             if self.dequant_input:
                 if self.use_w4a8:
                     # w4a8 输入是 fp8 1x32 量化（fused_act_dequant 仅支持 1x128）
-                    x = fused_act_dequant_python(
-                        self.input_fp8, self.input_scale
+                    x = _w4a8_dequant(
+                        self.input_fp8,
+                        self.input_scale,
+                        use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                     )
                 else:
                     x = paddle.incubate.nn.functional.fused_act_dequant(

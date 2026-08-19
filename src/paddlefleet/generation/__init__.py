@@ -15,6 +15,7 @@
 """Generation module for Fleet models."""
 
 from .config import GenerationConfig
+from .csa_cache import CSADynamicCache
 from .greedy_generator import DynamicKVCache, GreedyGenerator
 from .inference_utils import init_inference_fleet
 from .utils import (
@@ -24,6 +25,7 @@ from .utils import (
 )
 
 __all__ = [
+    "CSADynamicCache",
     "DynamicKVCache",
     "GenerationConfig",
     "GreedyGenerator",

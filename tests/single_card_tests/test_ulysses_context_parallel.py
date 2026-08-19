@@ -405,8 +405,8 @@ class TestFlashmaskAttentionUlysses(unittest.TestCase):
         mock_hcg.get_context_parallel_group.return_value = mock_cp_group
         return mock_hcg, mock_cp_group
 
-    def test_learnable_sink_raises(self):
-        """Should raise NotImplementedError if learnable_sink is provided."""
+    def test_learnable_sink_wrong_shape_raises(self):
+        """Should assert if learnable_sink has no entry per query head."""
         from paddlefleet.context_parallel_utils import (
             flashmask_attention_ulysses,
         )
@@ -416,7 +416,7 @@ class TestFlashmaskAttentionUlysses(unittest.TestCase):
             "paddle.distributed.fleet.get_hybrid_communicate_group",
             return_value=mock_hcg,
         ):
-            with self.assertRaises(NotImplementedError) as ctx:
+            with self.assertRaises(ValueError) as ctx:
                 flashmask_attention_ulysses(
                     query=paddle.randn([2, 4, 4, 8]),
                     key=paddle.randn([2, 4, 4, 8]),
@@ -426,7 +426,7 @@ class TestFlashmaskAttentionUlysses(unittest.TestCase):
                     ),
                     learnable_sink=paddle.randn([1]),
                 )
-            self.assertIn("learnable_sink", str(ctx.exception))
+            self.assertIn("one entry per query head", str(ctx.exception))
 
     def test_softmax_scale_raises(self):
         """Should raise NotImplementedError if softmax_scale is provided."""
@@ -598,6 +598,78 @@ class TestFlashmaskAttentionUlysses(unittest.TestCase):
             else fm_call_kwargs[0][3]
         )
         self.assertEqual(used_mask.shape[1], 2)  # sliced from 4 to 2
+
+    @patch("paddlefleet_ops.flash_mask_facade.flashmask_attention")
+    @patch("paddlefleet.context_parallel_utils.UlyssesAlltoAll.apply")
+    def test_learnable_sink_sliced_to_rank_head_group(
+        self, mock_a2a_apply, mock_fm_attn
+    ):
+        """learnable_sink must be sliced to this rank's head group."""
+        from paddlefleet.context_parallel_utils import (
+            flashmask_attention_ulysses,
+        )
+
+        mock_hcg, _ = self._mock_fleet_context(cp_size=2, cp_rank=1)
+
+        def a2a_side_effect(inp, scatter_idx, gather_idx, batch_dim_idx, group):
+            if scatter_idx == 2:
+                return paddle.randn([2, 8, 2, 8])
+            return paddle.randn([2, 4, 4, 8])
+
+        mock_a2a_apply.side_effect = a2a_side_effect
+        mock_fm_attn.return_value = paddle.randn([2, 8, 2, 8])
+
+        sink = paddle.arange(4, dtype="float32")
+
+        with patch(
+            "paddle.distributed.fleet.get_hybrid_communicate_group",
+            return_value=mock_hcg,
+        ):
+            flashmask_attention_ulysses(
+                query=paddle.randn([2, 4, 4, 8]),
+                key=paddle.randn([2, 4, 4, 8]),
+                value=paddle.randn([2, 4, 4, 8]),
+                startend_row_indices=paddle.zeros([2, 1, 8, 2], dtype="int32"),
+                learnable_sink=sink,
+            )
+
+        # rank=1, heads_per_rank=2 -> global heads [2, 4)
+        used_sink = mock_fm_attn.call_args[1]["learnable_sink"]
+        self.assertEqual(used_sink.shape, [2])
+        self.assertEqual(used_sink.tolist(), [2.0, 3.0])
+
+    @patch("paddlefleet_ops.flash_mask_facade.flashmask_attention")
+    @patch("paddlefleet.context_parallel_utils.UlyssesAlltoAll.apply")
+    def test_learnable_sink_none_forwarded_as_none(
+        self, mock_a2a_apply, mock_fm_attn
+    ):
+        """Without a sink, None must reach the kernel unchanged."""
+        from paddlefleet.context_parallel_utils import (
+            flashmask_attention_ulysses,
+        )
+
+        mock_hcg, _ = self._mock_fleet_context(cp_size=2, cp_rank=0)
+
+        def a2a_side_effect(inp, scatter_idx, gather_idx, batch_dim_idx, group):
+            if scatter_idx == 2:
+                return paddle.randn([2, 8, 2, 8])
+            return paddle.randn([2, 4, 4, 8])
+
+        mock_a2a_apply.side_effect = a2a_side_effect
+        mock_fm_attn.return_value = paddle.randn([2, 8, 2, 8])
+
+        with patch(
+            "paddle.distributed.fleet.get_hybrid_communicate_group",
+            return_value=mock_hcg,
+        ):
+            flashmask_attention_ulysses(
+                query=paddle.randn([2, 4, 4, 8]),
+                key=paddle.randn([2, 4, 4, 8]),
+                value=paddle.randn([2, 4, 4, 8]),
+                startend_row_indices=paddle.zeros([2, 1, 8, 2], dtype="int32"),
+            )
+
+        self.assertIsNone(mock_fm_attn.call_args[1]["learnable_sink"])
 
 
 # PLACEHOLDER_SECTION_5
@@ -1109,37 +1181,6 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         call_kwargs = mock_rr_cp.call_args.kwargs
         self.assertEqual(call_kwargs.get("mode"), "contiguous_a2a")
 
-    def test_forward_contiguous_a2a_without_mla_raises(self):
-        """contiguous_a2a without multi_latent_attention should raise."""
-        config = self._make_config(
-            cp_balance_mode="contiguous_a2a", multi_latent_attention=False
-        )
-        attn = self._make_attn_instance(config)
-        attn.eval()
-
-        q = paddle.randn([2, 4, 4, 32], dtype="bfloat16")
-        k = paddle.randn([2, 4, 4, 32], dtype="bfloat16")
-        v = paddle.randn([2, 4, 4, 32], dtype="bfloat16")
-        mask = paddle.zeros([2, 1, 4, 2], dtype="int32")
-
-        with (
-            patch(
-                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
-                return_value=2,
-            ),
-            self.assertRaises(NotImplementedError) as ctx,
-        ):
-            attn(
-                q,
-                k,
-                v,
-                None,
-                attn_mask_startend_row_indices=mask,
-                use_rr_flash_attention=False,
-            )
-
-        self.assertIn("only supports mla", str(ctx.exception))
-
     @patch(
         "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
     )
@@ -1221,6 +1262,91 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
         call_kwargs = mock_cp_attn.call_args[1]
         self.assertFalse(call_kwargs.get("causal", True))
+
+    @patch(
+        "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
+    )
+    def test_hybrid_mla_cp_mode_overrides_model_wide_mode(self, mock_cp_attn):
+        """hybrid_mla_cp_mode wins over cp_balance_mode, and non-MLA is allowed.
+
+        This is the DSV4 MLA+HCA hybrid setup: the model stays on
+        contiguous_allgather (which the HCA layers require) while this layer
+        runs Ulysses. multi_latent_attention is False because in a hybrid that
+        flag is model-wide, which is exactly why the old "a2a only supports
+        mla" restriction had to go.
+        """
+        from paddlefleet.transformer.enums import AttnMaskType
+
+        config = self._make_config(
+            cp_balance_mode="contiguous_allgather",
+            multi_latent_attention=False,
+        )
+        # Set past __post_init__ on purpose: whether this field may be set at
+        # all is a config-level concern (it needs a dsv4_hybrid with a -2
+        # layer), while this test only covers how DPA dispatches on it.
+        config.hybrid_mla_cp_mode = "contiguous_a2a"
+        attn = self._make_attn_instance(config)
+        attn.eval()
+
+        mock_cp_attn.return_value = paddle.randn(
+            [2, 4, 4, 32], dtype="bfloat16"
+        )
+        mask = paddle.zeros([2, 1, 4, 1], dtype="int32")
+
+        with (
+            patch(
+                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+                return_value=2,
+            ),
+            patch.object(
+                attn,
+                "expand_attn_mask_startend_row_indices_for_cp",
+                side_effect=AssertionError("Should not be called"),
+            ) as mock_expand,
+        ):
+            attn(
+                paddle.randn([2, 4, 4, 32], dtype="bfloat16"),
+                paddle.randn([2, 4, 4, 32], dtype="bfloat16"),
+                paddle.randn([2, 4, 4, 32], dtype="bfloat16"),
+                None,
+                attn_mask_startend_row_indices=mask,
+                # dsv4_hybrid layer specs hardcode a causal mask type
+                attn_mask_type=AttnMaskType.causal,
+                use_rr_flash_attention=False,
+            )
+
+        mock_expand.assert_not_called()
+        call_kwargs = mock_cp_attn.call_args[1]
+        self.assertEqual(call_kwargs.get("mode"), "contiguous_a2a")
+        # The global-length mask must reach Ulysses unexpanded and causal must
+        # stay True: that pair is what makes a2a equivalent to CP=1 flashmask.
+        self.assertIs(call_kwargs.get("startend_row_indices"), mask)
+        self.assertTrue(call_kwargs.get("causal"))
+
+    def test_hybrid_mla_cp_mode_rejects_swa_layer(self):
+        """An SWA layer would silently miss the swap2p rewrite, so reject it."""
+        from paddlefleet.transformer.dot_product_attention import (
+            DotProductAttention,
+        )
+        from paddlefleet.transformer.enums import AttnMaskType
+
+        config = self._make_config(cp_balance_mode="contiguous_allgather")
+        config.hybrid_mla_cp_mode = "contiguous_a2a"
+        with (
+            patch(
+                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+                return_value=2,
+            ),
+            self.assertRaises(ValueError) as ctx,
+        ):
+            DotProductAttention(
+                config=config,
+                layer_number=1,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type="self",
+                is_swa=True,
+            )
+        self.assertIn("hybrid_mla_cp_mode", str(ctx.exception))
 
 
 # =============================================================================

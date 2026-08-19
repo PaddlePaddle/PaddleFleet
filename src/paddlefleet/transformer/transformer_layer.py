@@ -38,6 +38,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     has_recovered,
+    keep_indexer_grad_path,
     need_full_recompute,
     need_recompute_in_block,
     need_recompute_in_first_n,
@@ -45,6 +46,7 @@ from paddlefleet.recompute_utils import (
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
+from paddlefleet.transformer.kimi_delta_attention import KimiDeltaAttention
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.multi_latent_attention import MultiLatentAttention
@@ -444,18 +446,33 @@ class TransformerLayer(nn.Layer):
         # [Layer 10: Block Attention Residuals] Optional
         self.attn_res_block_size = None
         if self.config.block_attention_residuals:
-            assert self.full_recompute is False, (
-                "block_attention_residuals cannot use full_recompute, set full_recompute to False."
-            )
             assert self.recompute_mlp is False, (
                 "block_attention_residuals cannot use selective recompute mlp."
             )
-            self.block_attn_res_before_attention = build_spec_layer(
-                sublayers_spec.block_attn_res, config=self.config
-            )
-            self.block_attn_res_before_mlp = build_spec_layer(
-                sublayers_spec.block_attn_res, config=self.config
-            )
+            if self.full_recompute:
+                offload_settings = getattr(
+                    self.config,
+                    "decoderlayer_act_offload_settings",
+                    {"type": "", "value": ""},
+                ) or {"type": "", "value": ""}
+                if offload_settings.get("type", ""):
+                    raise ValueError(
+                        "block_attention_residuals with full_recompute does not "
+                        "support decoderlayer_act_offload_settings. Please "
+                        "disable activation offload or block_attention_residuals."
+                    )
+            if self._should_skip_block_attn_res():
+                # MTP layers do not use attention residual — use IdentityOp
+                # to avoid creating params.
+                self.block_attn_res_before_attention = IdentityOp()
+                self.block_attn_res_before_mlp = IdentityOp()
+            else:
+                self.block_attn_res_before_attention = build_spec_layer(
+                    sublayers_spec.block_attn_res, config=self.config
+                )
+                self.block_attn_res_before_mlp = build_spec_layer(
+                    sublayers_spec.block_attn_res, config=self.config
+                )
             self.attn_res_block_size = self.config.attn_res_block_size
 
         if hasattr(self.mlp, "rr_recompute_update"):
@@ -518,6 +535,184 @@ class TransformerLayer(nn.Layer):
                 continue
             p.color = {"color": "dense_weight_no_hook"}
 
+    def _should_skip_block_attn_res(self):
+        """Determine if this layer should skip block attention residuals.
+
+        MTP layers should NOT do attention residual — they use standard
+        residual connections instead.
+        """
+        if self.is_mtp_layer:
+            return True
+        return False
+
+    def _is_block_boundary(self):
+        """Determine if this layer is a block boundary for attention residuals.
+
+        Each block spans ``attn_res_block_size`` transformer layers, and the
+        layer whose index is a multiple of that span closes the previous
+        block. This matches Kimi K3's ``layer_idx % attn_res_block_size == 0``.
+
+        ``self.layer_number`` is the *physical* index, which the spec builders
+        shift by ``num_empty_layers_add_in_head`` so the empty head layers
+        occupy the leading slots (see
+        ``gpt_layer_specs.get_gpt_decoder_layers_spec``). The schedule is
+        defined on the logical decoder index, so undo that shift here --
+        otherwise the whole block layout slides by the offset and logical
+        layer 0 never opens a block.
+        """
+        block_span = self.attn_res_block_size
+        if block_span <= 0:
+            raise ValueError(
+                "attn_res_block_size must be at least 1 when "
+                "block_attention_residuals is enabled."
+            )
+        head_offset = (
+            getattr(self.config, "num_empty_layers_add_in_head", 0) or 0
+        )
+        return (self.layer_number - head_offset) % block_span == 0
+
+    def _forward_impl_block_attn_res_split_recompute(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor | None = None,
+        attn_mask_startend_row_indices: Tensor | None = None,
+        context: Tensor | None = None,
+        context_mask: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
+        rotary_pos_cos: Tensor | None = None,
+        rotary_pos_sin: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
+        position_ids: Tensor | None = None,
+        attention_bias: Tensor | None = None,
+        packed_seq_params: PackedSeqParams | None = None,
+        input_ids: Tensor | None = None,
+        origin_input_ids: Tensor | None = None,
+        blocks: list | None = None,
+        cu_seqlens: Tensor | None = None,
+    ):
+        """Forward with block_attention_residuals + full_recompute.
+
+        block_attn_res runs outside recompute (PyLayer handles its own
+        gradient checkpointing internally); attention and MLP each get
+        their own recompute wrapper.
+        """
+        if blocks is None:
+            blocks = []
+        partial_block = hidden_states
+
+        # --- block_attn_res_before_attention (NOT recomputed) ---
+        hidden_states = self.block_attn_res_before_attention(
+            partial_block, blocks
+        )
+
+        # Block boundary check
+        if self._is_block_boundary():
+            blocks.append(partial_block)
+            partial_block = None
+
+        # --- Attention (recomputed) ---
+        # Clone tensors that may be modified in-place during attention
+        _attn_mask_clone = (
+            attn_mask_startend_row_indices.clone()
+            if attn_mask_startend_row_indices is not None
+            else None
+        )
+        _rotary_pos_emb_clone = (
+            rotary_pos_emb.clone() if rotary_pos_emb is not None else None
+        )
+        _rotary_pos_cos_clone = (
+            rotary_pos_cos.clone() if rotary_pos_cos is not None else None
+        )
+        _rotary_pos_sin_clone = (
+            rotary_pos_sin.clone() if rotary_pos_sin is not None else None
+        )
+        _swa_rotary_pos_emb_clone = (
+            swa_rotary_pos_emb.clone()
+            if swa_rotary_pos_emb is not None
+            else None
+        )
+        _swa_rotary_pos_cos_clone = (
+            swa_rotary_pos_cos.clone()
+            if swa_rotary_pos_cos is not None
+            else None
+        )
+        _swa_rotary_pos_sin_clone = (
+            swa_rotary_pos_sin.clone()
+            if swa_rotary_pos_sin is not None
+            else None
+        )
+        _position_ids_clone = (
+            position_ids.clone() if position_ids is not None else None
+        )
+
+        def _recompute_attention(hidden_states):
+            hs, ctx = self._forward_attention(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                attn_mask_startend_row_indices=_attn_mask_clone,
+                context=context,
+                context_mask=context_mask,
+                rotary_pos_emb=_rotary_pos_emb_clone,
+                rotary_pos_cos=_rotary_pos_cos_clone,
+                rotary_pos_sin=_rotary_pos_sin_clone,
+                swa_rotary_pos_emb=_swa_rotary_pos_emb_clone,
+                swa_rotary_pos_cos=_swa_rotary_pos_cos_clone,
+                swa_rotary_pos_sin=_swa_rotary_pos_sin_clone,
+                position_ids=_position_ids_clone,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                block_attention_residuals=True,
+                in_recompute=True,
+                input_ids=input_ids,
+                cu_seqlens=cu_seqlens,
+            )
+            if ctx is None:
+                return hs
+            return hs, ctx
+
+        attn_result = recompute(_recompute_attention, hidden_states)
+
+        if isinstance(attn_result, tuple):
+            hidden_states, context = attn_result
+        else:
+            hidden_states = attn_result
+            context = None
+
+        # Accumulate attn output into partial_block
+        if (
+            partial_block is not None
+            and partial_block.dtype != hidden_states.dtype
+        ):
+            partial_block = partial_block.to(hidden_states.dtype)
+        partial_block = (
+            partial_block + hidden_states
+            if partial_block is not None
+            else hidden_states
+        )
+
+        # --- block_attn_res_before_mlp (NOT recomputed) ---
+        hidden_states = self.block_attn_res_before_mlp(partial_block, blocks)
+
+        # --- MLP (recomputed) ---
+        def _recompute_mlp(hidden_states):
+            return self._forward_mlp(
+                hidden_states,
+                block_attention_residuals=True,
+                input_ids=input_ids,
+                origin_input_ids=origin_input_ids,
+            )
+
+        mlp_out = recompute(_recompute_mlp, hidden_states)
+
+        # Accumulate mlp output into partial_block
+        output = partial_block + mlp_out
+
+        if context is not None:
+            return output, context
+        return output
+
     def build_schedule_node(self):
         return TransformerLayerNode(
             self,
@@ -529,6 +724,16 @@ class TransformerLayer(nn.Layer):
     @property
     def transformer_layer_weights(self):
         return self.named_parameters()
+
+    def _docmask_meta_kwargs(self):
+        """Hook for the shared CSA document-mask metadata; opted out by default.
+
+        Overridden by ``HyperConnectionTransformerLayer``, which is the layer
+        class the DSv4-hybrid models use. Returning ``{}`` means ``_forward_impl``
+        is called with exactly the arguments it was called with before, so every
+        other layer class keeps building its own ``CSADocMaskMetadata``.
+        """
+        return {}
 
     def forward(
         self,
@@ -573,11 +778,13 @@ class TransformerLayer(nn.Layer):
             if not self.config.gpt_model_use_experimental_version:
                 if "position_ids" in dict_args.keys():
                     position_ids = dict_args["position_ids"]
+                    # Slice the sequence axis, which is the last one for both
+                    # [B, S] and mRoPE's [3, B, S].
                     decoder_ids = position_ids[
-                        :, : -self.config.num_nextn_predict_layers
+                        ..., : -self.config.num_nextn_predict_layers
                     ]
                     mtp_ids = position_ids[
-                        :, -self.config.num_nextn_predict_layers :
+                        ..., -self.config.num_nextn_predict_layers :
                     ]
                     dict_args["position_ids"] = decoder_ids
 
@@ -679,8 +886,28 @@ class TransformerLayer(nn.Layer):
         if self.config.block_attention_residuals and "blocks" not in dict_args:
             dict_args["blocks"] = []
 
+        # For block_attention_residuals: handle boundary logic OUTSIDE
+        # recompute so that blocks list mutation doesn't happen twice
+        # during backward re-execution.
+        skip_block_attn_res = (
+            self._should_skip_block_attn_res()
+            if self.config.block_attention_residuals
+            else True
+        )
+        if self.config.block_attention_residuals and skip_block_attn_res:
+            # Remove blocks from dict_args so that _forward_impl does not
+            # receive unused tensors that cause backward errors.
+            dict_args.pop("blocks", None)
+        # Shared CSA document-mask metadata (see _docmask_meta_kwargs). Taken HERE,
+        # outside the recompute wrapper below: `forward` runs exactly once per
+        # (layer, micro-batch) whatever the recompute granularity is, while
+        # `_forward_impl` may be replayed. Empty dict for every layer class that
+        # does not opt in.
+        docmask_meta_kwargs = self._docmask_meta_kwargs()
+
         if self.full_recompute or (not has_recovered()):
             hidden_states = dict_args["hidden_states"]
+            hidden_states = keep_indexer_grad_path(hidden_states, self.config)
             attention_mask = dict_args.get("attention_mask", None)
             attn_mask_startend_row_indices = dict_args.get(
                 "attn_mask_startend_row_indices", None
@@ -699,45 +926,85 @@ class TransformerLayer(nn.Layer):
             input_ids = dict_args.get("input_ids", None)
             offload_kwargs = self._compute_act_offload_kwargs()
             origin_input_ids = dict_args.get("origin_input_ids", None)
-
-            outputs = recompute(
-                self._forward_impl,
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                attn_mask_startend_row_indices=attn_mask_startend_row_indices.clone()  # Clone is necessary!
-                if attn_mask_startend_row_indices is not None
-                else None,
-                context=context,
-                context_mask=context_mask,
-                rotary_pos_emb=rotary_pos_emb.clone()  # Clone is necessary!
-                if rotary_pos_emb is not None
-                else None,
-                rotary_pos_cos=rotary_pos_cos.clone()  # Clone is necessary!
-                if rotary_pos_cos is not None
-                else None,
-                rotary_pos_sin=rotary_pos_sin.clone()  # Clone is necessary!
-                if rotary_pos_sin is not None
-                else None,
-                swa_rotary_pos_emb=swa_rotary_pos_emb.clone()  # Clone is necessary!
-                if swa_rotary_pos_emb is not None
-                else None,
-                swa_rotary_pos_cos=swa_rotary_pos_cos.clone()  # Clone is necessary!
-                if swa_rotary_pos_cos is not None
-                else None,
-                swa_rotary_pos_sin=swa_rotary_pos_sin.clone()  # Clone is necessary!
-                if swa_rotary_pos_sin is not None
-                else None,
-                position_ids=position_ids.clone()  # Clone is necessary!
-                if position_ids is not None
-                else None,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-                input_ids=input_ids,
-                origin_input_ids=origin_input_ids,
-                **offload_kwargs,
+            # Only forward this when the embedding actually produced one:
+            # recompute(use_reentrant=True) flattens kwargs into positional args,
+            # so an unexpected key would overflow a _forward_impl override that
+            # only takes it through **kwargs.
+            cu_seqlens_kwargs = (
+                {"cu_seqlens": dict_args["cu_seqlens"]}
+                if "cu_seqlens" in dict_args
+                else {}
             )
+
+            if (
+                self.config.block_attention_residuals
+                and not skip_block_attn_res
+            ):
+                # block_attention_residuals + full_recompute:
+                # attn_res runs outside recompute (PyLayer handles its own
+                # gradient checkpointing); attention and MLP each get their
+                # own recompute wrapper.
+                outputs = self._forward_impl_block_attn_res_split_recompute(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                    context=context,
+                    context_mask=context_mask,
+                    rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
+                    swa_rotary_pos_emb=swa_rotary_pos_emb,
+                    swa_rotary_pos_cos=swa_rotary_pos_cos,
+                    swa_rotary_pos_sin=swa_rotary_pos_sin,
+                    position_ids=position_ids,
+                    attention_bias=attention_bias,
+                    packed_seq_params=packed_seq_params,
+                    input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
+                    blocks=dict_args.get("blocks", []),
+                    **cu_seqlens_kwargs,
+                )
+            else:
+                outputs = recompute(
+                    self._forward_impl,
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    attn_mask_startend_row_indices=attn_mask_startend_row_indices.clone()
+                    if attn_mask_startend_row_indices is not None
+                    else None,
+                    context=context,
+                    context_mask=context_mask,
+                    rotary_pos_emb=rotary_pos_emb.clone()
+                    if rotary_pos_emb is not None
+                    else None,
+                    rotary_pos_cos=rotary_pos_cos.clone()
+                    if rotary_pos_cos is not None
+                    else None,
+                    rotary_pos_sin=rotary_pos_sin.clone()
+                    if rotary_pos_sin is not None
+                    else None,
+                    swa_rotary_pos_emb=swa_rotary_pos_emb.clone()
+                    if swa_rotary_pos_emb is not None
+                    else None,
+                    swa_rotary_pos_cos=swa_rotary_pos_cos.clone()
+                    if swa_rotary_pos_cos is not None
+                    else None,
+                    swa_rotary_pos_sin=swa_rotary_pos_sin.clone()
+                    if swa_rotary_pos_sin is not None
+                    else None,
+                    position_ids=position_ids.clone()
+                    if position_ids is not None
+                    else None,
+                    attention_bias=attention_bias,
+                    packed_seq_params=packed_seq_params,
+                    input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
+                    **cu_seqlens_kwargs,
+                    **docmask_meta_kwargs,
+                    **offload_kwargs,
+                )
         else:
-            outputs = self._forward_impl(**dict_args)
+            outputs = self._forward_impl(**dict_args, **docmask_meta_kwargs)
 
         if isinstance(outputs, tuple):
             output, context = outputs[0], outputs[1]
@@ -758,7 +1025,7 @@ class TransformerLayer(nn.Layer):
             if not self.config.gpt_model_use_experimental_version:
                 if "position_ids" in dict_args.keys():
                     position_ids = paddle.concat(
-                        [dict_args["position_ids"], mtp_ids], axis=1
+                        [dict_args["position_ids"], mtp_ids], axis=-1
                     )
                     dict_args["position_ids"] = position_ids
 
@@ -822,6 +1089,9 @@ class TransformerLayer(nn.Layer):
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
         origin_input_ids: Tensor | None = None,
+        blocks: list | tuple | None = None,
+        cu_seqlens: Tensor | None = None,
+        docmask_mb_idx: int = -1,
         **kwargs,
     ):
         def need_do_attention():
@@ -851,8 +1121,14 @@ class TransformerLayer(nn.Layer):
                 return True
 
         timer_name = "moe-mlp" if isinstance(self.mlp, MoELayer) else "mlp"
-        if self.config.block_attention_residuals:
-            blocks = kwargs.get("blocks", [])
+        if (
+            self.config.block_attention_residuals
+            and not self._should_skip_block_attn_res()
+        ):
+            if blocks is None:
+                blocks = []
+            elif isinstance(blocks, tuple):
+                blocks = list(blocks)
             partial_block = hidden_states
 
             # Before attention: block attnres
@@ -860,8 +1136,8 @@ class TransformerLayer(nn.Layer):
                 partial_block, blocks
             )
 
-            # Block boundary check
-            if self.layer_number % (self.attn_res_block_size // 2) == 0:
+            # Block boundary: append current repr and reset partial_block
+            if self._is_block_boundary():
                 blocks.append(partial_block)
                 partial_block = None
 
@@ -886,6 +1162,8 @@ class TransformerLayer(nn.Layer):
                         block_attention_residuals=True,
                         in_recompute=self.full_recompute,
                         input_ids=input_ids,
+                        cu_seqlens=cu_seqlens,
+                        docmask_mb_idx=docmask_mb_idx,
                         **kwargs,
                     )
 
@@ -938,6 +1216,8 @@ class TransformerLayer(nn.Layer):
                         packed_seq_params=packed_seq_params,
                         in_recompute=self.full_recompute,
                         input_ids=input_ids,
+                        cu_seqlens=cu_seqlens,
+                        docmask_mb_idx=docmask_mb_idx,
                         **kwargs,
                     )
             self._log_md5(
@@ -975,6 +1255,7 @@ class TransformerLayer(nn.Layer):
         is_first_fwd: bool = False,
         block_attention_residuals: bool = False,
         input_ids: Tensor | None = None,
+        cu_seqlens: Tensor | None = None,
         **kwargs,
     ):
         """
@@ -1020,10 +1301,20 @@ class TransformerLayer(nn.Layer):
         )
 
         extra_kwargs = {}
+        # Both indexer-bearing attentions need ``input_ids`` to build the
+        # indexer-loss row mask: ``attn_mask_startend_row_indices`` cannot
+        # express the trailing padding of a packed sequence, so only
+        # ``input_ids != pad_token_id`` identifies the pad rows. The MLA branch
+        # forwards it on to its core attention only when that core is the
+        # non-absorbed-MQA one.
         if input_ids is not None and isinstance(
-            self.self_attn, DSv4HybridAttention
+            self.self_attn,
+            (DSv4HybridAttention, MultiLatentAttention, KimiDeltaAttention),
         ):
             extra_kwargs["input_ids"] = input_ids
+        if isinstance(self.self_attn, KimiDeltaAttention):
+            # Built once per step by the embedding; None makes KDA build its own.
+            extra_kwargs["cu_seqlens"] = cu_seqlens
         if "shared_kv" in kwargs:
             extra_kwargs["shared_kv"] = kwargs["shared_kv"]
 
@@ -1372,6 +1663,19 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # idempotent: already-colored base params are skipped.
         self._mark_shared_no_hook_params()
 
+        # Consumer identity for the shared CSA document-mask metadata
+        # (config.csa_share_docmask_meta): one forward counter per consumer, so
+        # virtual-pipeline interleaving across chunks cannot mix them up.
+        self._docmask_meta_key = (int(layer_number), bool(is_mtp_layer))
+        if getattr(config, "csa_share_docmask_meta", False) or getattr(
+            config, "mqa_share_docmask_meta", False
+        ):
+            from paddlefleet.transformer.doc_mask_meta_registry import (
+                doc_mask_meta_registry,
+            )
+
+            doc_mask_meta_registry.register(self._docmask_meta_key)
+
         # mHC forward recompute config
         self.recompute_mhc_forward = False
         if (
@@ -1414,6 +1718,147 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                         )
                     )
 
+    def _fused_h_res_h_post_bda(
+        self,
+        hyper_connection,
+        h_res,
+        original_residual,
+        h_post,
+        layer_output_with_bias,
+        enable_recompute,
+    ):
+        """Run fused_h_res_h_post_bda, optionally in a RecomputeWithoutOutput span.
+
+        On the fp32 fast path the span keeps the up-casts that
+        ``FusedHPostBDA.save_for_backward`` would otherwise pin -- the [..., n, C]
+        residual and the [..., C] layer output, i.e. two more activation-sized
+        buffers per half-layer -- out of the live set. On the sequential path
+        (active dropout) it hides that path's dropout mask instead, which is a
+        byte per element of the [..., n*C] output. Either way the span body runs
+        under ``no_grad``, where an inner PyLayer's ``save_for_backward`` retains
+        nothing, and backward re-runs the kernel from the low-precision inputs.
+
+        ``hyper_connection.bda_span_pays_off`` vetoes the configurations where
+        neither applies; ``enable_recompute`` is the caller's own switch on top
+        of that.
+
+        Returns ``(output, span)``. ``output`` is the [..., n*C] result; when
+        ``span`` is not None the caller MUST hand it to
+        ``_cast_and_discard_fused_bda`` -- see there for why the discard is not
+        optional.
+        """
+        bda_kwargs = {
+            "dropout_prob": self.hidden_dropout_prob,
+            "training": self.training,
+            "fused": self.config.bias_dropout_fusion,
+        }
+        # Only wrap when the call actually retains something the span can hide;
+        # ``bda_span_pays_off`` owns that predicate because it depends on which
+        # path ``fused_h_res_h_post_bda`` takes.
+        if not hyper_connection.bda_span_pays_off(
+            self.hidden_dropout_prob, self.training
+        ):
+            enable_recompute = False
+        if not enable_recompute:
+            output = hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=layer_output_with_bias,
+                **bda_kwargs,
+            )
+            return output, None
+
+        x, bias = layer_output_with_bias
+
+        def _fused(h_res, original_residual, h_post, x, bias):
+            return hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=(x, bias),
+                **bda_kwargs,
+            )
+
+        span = RecomputeWithoutOutput()
+        output = span.recompute(
+            _fused,
+            # h_res/h_post are outputs of the mHC-aggregate span, which clears
+            # them with Tensor._clear_data(). detach() shares the holder, so the
+            # alias that save_for_backward keeps would be emptied too and the
+            # replay would read a dangling tensor. They are [..., n, n] and
+            # [..., n], i.e. smaller than the residual by a factor of C, so clone
+            # instead of depending on the hook registration order of the two
+            # spans.
+            h_res.clone(),
+            original_residual,
+            h_post.clone(),
+            x,
+            bias,
+            # No dropout on the fast path, so the replay is deterministic
+            # without paying for an RNG-state snapshot.
+            preserve_rng_state=self.hidden_dropout_prob > 0.0 and self.training,
+            share_grad_holder=True,
+        )
+        return output, span
+
+    @staticmethod
+    def _cast_and_discard_fused_bda(output, ori_dtype, span):
+        """Cast the BDA result back to ``ori_dtype`` and close ``span``.
+
+        The fp32 [..., n*C] BDA result is dead the moment it is cast: cast
+        backward only needs the grad, not the input data. But the span pins it
+        through ``self.outputs``, so without the discard the span would trade the
+        two ``save_for_backward`` up-casts for a retained fp32 output and give
+        most of the saving back. The discard is also what registers
+        ``_recompute``, and ``_recompute`` is the only place that sets
+        ``ctx.inputs``/``ctx.outputs`` for
+        ``RecomputeWithoutOutputFunction.backward`` -- so it is mandatory, not an
+        optimization. The hook goes on the cast result because that is the first
+        tensor whose grad is produced after the fp32 data is dead; the cast
+        result itself must stay live for the whole half-layer, so the span cannot
+        be extended to swallow the cast.
+        """
+        casted = output.to(ori_dtype)
+        if span is None:
+            return casted
+        if casted is output:
+            # Tensor.to() is an identity when the dtype already matches, so the
+            # span output and the tensor the rest of the layer holds would be the
+            # same object and the discard would clear live data. Reachable when
+            # the residual is already fp32 (fp32 training); give the caller its
+            # own copy so the span still owns something discardable.
+            casted = output.clone()
+        span.discard_output_and_register_recompute(casted)
+        return casted
+
+    def _docmask_meta_kwargs(self):
+        """Micro-batch slot for the shared CSA document-mask metadata, or ``{}``.
+
+        Overrides the base opt-out hook: the DSv4-hybrid models run on this layer
+        class, so this is where the sharing is enabled. Returns ``{}`` when
+        ``config.csa_share_docmask_meta`` is off, so the switched-off path calls
+        ``_forward_impl`` with exactly the arguments it did before.
+
+        Called from ``TransformerLayer.forward``, i.e. outside the recompute
+        wrapper: the counter must advance exactly once per (layer, micro-batch),
+        whereas ``_forward_impl`` may be replayed by recompute.
+        """
+        if not (
+            getattr(self.config, "csa_share_docmask_meta", False)
+            or getattr(self.config, "mqa_share_docmask_meta", False)
+        ):
+            return {}
+        from paddlefleet.transformer.doc_mask_meta_registry import (
+            doc_mask_meta_registry,
+        )
+
+        return {
+            "docmask_mb_idx": doc_mask_meta_registry.advance(
+                self._docmask_meta_key, self.training
+            )
+        }
+
     def _forward_attention(
         self,
         hidden_states: Tensor,
@@ -1425,6 +1870,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         rotary_pos_cos: Tensor | None = None,
         rotary_pos_sin: Tensor | None = None,
         rope_freqs_cis: Tensor | None = None,
+        swa_rotary_pos_emb: Tensor | None = None,
+        swa_rotary_pos_cos: Tensor | None = None,
+        swa_rotary_pos_sin: Tensor | None = None,
         position_ids: Tensor | None = None,
         attention_bias: Tensor | None = None,
         packed_seq_params: PackedSeqParams | None = None,
@@ -1465,9 +1913,22 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # Self-attention
         extra_kwargs = {}
         if kwargs.get("input_ids") is not None and isinstance(
-            self.self_attn, DSv4HybridAttention
+            self.self_attn, (DSv4HybridAttention, KimiDeltaAttention)
         ):
             extra_kwargs["input_ids"] = kwargs["input_ids"]
+        if isinstance(self.self_attn, KimiDeltaAttention):
+            # Built once per step by the embedding; None makes KDA build its own.
+            extra_kwargs["cu_seqlens"] = kwargs.get("cu_seqlens")
+        # Micro-batch slot for the shared document-mask metadata, decided in
+        # ``forward`` (outside recompute) and only read here. This override is
+        # the ``_forward_attention`` that runs whenever enable_hyper_connections
+        # is set, which is the case for the DSv4-hybrid models. Both attention
+        # classes derive their own mask group, so an MTP layer simply misses the
+        # lookup (the trainer prebuilds no MTP group) and builds privately.
+        if isinstance(
+            self.self_attn, (DSv4HybridAttention, MultiLatentAttention)
+        ):
+            extra_kwargs["docmask_mb_idx"] = kwargs.get("docmask_mb_idx", -1)
 
         if isinstance(self.self_attn, MultiLatentAttention):
             attention_output_with_bias = self.self_attn(
@@ -1492,6 +1953,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
         else:
@@ -1502,24 +1966,27 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 rotary_pos_emb=rotary_pos_emb,
                 rotary_pos_cos=rotary_pos_cos,
                 rotary_pos_sin=rotary_pos_sin,
+                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                swa_rotary_pos_sin=swa_rotary_pos_sin,
                 position_ids=position_ids,
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 in_recompute=in_recompute,
+                past_key_values=kwargs.get("past_key_values"),
+                layer_idx=self.layer_number,
+                use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        hidden_states = (
-            self.self_attention_hyper_connection.fused_h_res_h_post_bda(
-                h_res=h_res,
-                original_residual=original_residual,
-                h_post=h_post,
-                layer_output_with_bias=attention_output_with_bias,
-                dropout_prob=self.hidden_dropout_prob,
-                training=self.training,
-                fused=self.config.bias_dropout_fusion,
-            )
+        hidden_states, fused_span = self._fused_h_res_h_post_bda(
+            self.self_attention_hyper_connection,
+            h_res,
+            original_residual,
+            h_post,
+            attention_output_with_bias,
+            self.recompute_mhc_forward and self.training,
         )
         # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
         if self.recompute_mhc_forward and self.training:
@@ -1527,7 +1994,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 hidden_states
             )
             self._attn_mhc_recompute = None
-        hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = self._cast_and_discard_fused_bda(
+            hidden_states, ori_dtype, fused_span
+        )
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -1633,14 +2102,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
-            h_res=h_res,
-            original_residual=original_residual,
-            h_post=h_post,
-            layer_output_with_bias=mlp_output_with_bias,
-            dropout_prob=self.hidden_dropout_prob,
-            training=self.training,
-            fused=self.config.bias_dropout_fusion,
+        hidden_states, fused_span = self._fused_h_res_h_post_bda(
+            self.mlp_hyper_connection,
+            h_res,
+            original_residual,
+            h_post,
+            mlp_output_with_bias,
+            self.recompute_mhc_forward and self.training,
         )
         # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
         if self.recompute_mhc_forward and self.training:
@@ -1648,7 +2116,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 hidden_states
             )
             self._mlp_mhc_recompute = None
-        hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = self._cast_and_discard_fused_bda(
+            hidden_states, ori_dtype, fused_span
+        )
 
         if is_first_fwd:
             hidden_states.stop_gradient = False

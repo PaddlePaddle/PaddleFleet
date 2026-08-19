@@ -25,10 +25,11 @@ Components:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import paddle
 import paddle.nn.functional as F
@@ -796,6 +797,66 @@ def get_window_topk_idxs(
     return docmask_meta.get_window_topk_idxs(window_size)
 
 
+def get_window_topk_idxs_decode(
+    window_size: int,
+    batch_size: int,
+    position: int,
+) -> Tensor:
+    """Sliding-window indices for a single decode query at absolute ``position``.
+
+    Simple-causal decode counterpart of :func:`get_window_topk_idxs`. Returns
+    ``[batch_size, 1, window_size]``; the query at absolute position ``t``
+    attends raw positions ``[max(0, t - w + 1), t]``. Slots that would exceed
+    ``t`` (only possible when ``t < window_size - 1``) are ``-1``.
+    """
+    t = position
+    start = max(0, t - window_size + 1)
+    offsets = paddle.arange(window_size)
+    idxs = start + offsets
+    idxs = paddle.where(idxs > t, paddle.full_like(idxs, -1), idxs)
+    return idxs.reshape([1, 1, window_size]).expand(
+        [batch_size, 1, window_size]
+    )
+
+
+def get_compress_topk_idxs_decode(
+    batch_size: int,
+    offset: int,
+    n_compressed: int,
+) -> Tensor:
+    """HCA attend-all compressed indices for a single decode query.
+
+    During decode a compressed token for group ``g`` only becomes available
+    after raw position ``(g + 1) * ratio - 1``; by construction every
+    compressed token already emitted is causally valid for the current query
+    (``n_compressed == (t + 1) // ratio``). So the query attends all
+    ``n_compressed`` compressed blocks, offset into ``kv_full`` by ``offset``
+    (the current raw KV length). Returns ``[batch_size, 1, n_compressed]``.
+    """
+    idxs = paddle.arange(n_compressed) + offset
+    return idxs.reshape([1, 1, n_compressed]).expand(
+        [batch_size, 1, n_compressed]
+    )
+
+
+def get_mqa_causal_topk_idxs_decode(
+    batch_size: int,
+    position: int,
+) -> Tensor:
+    """Full-causal MQA indices for a single decode query at ``position``.
+
+    Decode counterpart of :func:`get_mqa_causal_topk_idxs`. An MQA layer has no
+    sliding window and no compressor, so the query at absolute position ``t``
+    attends every cached raw position ``[0, t]``. All ``t + 1`` slots are valid,
+    so no ``-1`` padding and no ``topk_length`` are needed.
+    Returns ``[batch_size, 1, position + 1]``.
+    """
+    idxs = paddle.arange(position + 1)
+    return idxs.reshape([1, 1, position + 1]).expand(
+        [batch_size, 1, position + 1]
+    )
+
+
 def get_mqa_causal_topk_idxs(
     batch_size: int,
     seqlen: int,
@@ -1088,34 +1149,6 @@ def _apply_rope(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_csa_indexer_loss_topk_effective(
-    config, index_topk: int, n_compressed: int
-) -> int:
-    """Return the TileLang CSA indexer top-k width used by indexer loss.
-
-    Phase semantics (driven by ``dsa_indexer_use_sparse_loss``, **not** by the
-    new TileLang switches):
-
-    * Phase 3 (``dsa_indexer_use_sparse_loss=True``): ``min(index_topk,
-      n_compressed)`` — selected-topk semantics, same as the existing
-      ``FusedDSAIndexerLoss`` / ``CSAIndexer.forward`` choice.
-    * Phase 2 (``dsa_indexer_use_sparse_loss=False``): ``n_compressed`` — the
-      selected set covers the full compressed candidate range and is later
-      consumed as full-range KL by the indexer loss path.
-    """
-    use_sparse_loss = bool(getattr(config, "dsa_indexer_use_sparse_loss", True))
-    if use_sparse_loss:
-        return min(int(index_topk), int(n_compressed))
-    return int(n_compressed)
-
-
-def _resolve_csa_indexer_attn_topk_effective(
-    index_topk: int, n_compressed: int
-) -> int:
-    """Return the compressed top-k width consumed by main CSA attention."""
-    return min(int(index_topk), int(n_compressed))
-
-
 def _map_compressed_topk_to_kv_full(
     topk_indices_compressed: Tensor,
     sq: int,
@@ -1215,96 +1248,9 @@ def _compute_attn_target_on_selected_set(
     return target
 
 
-def _compute_fused_csa_indexer_loss_forward(
-    index_q: Tensor,
-    weights: Tensor,
-    index_k_comp: Tensor,
-    query_mla: Tensor,
-    key_comp_mla: Tensor,
-    valid_range: Tensor,
-    ratio: int,
-    topk_effective: int,
-    softmax_scale: float,
-    loss_coeff: float,
-    tp_group=None,
-    seq_offset: int = 0,
-    indexer_backend: str = "tilelang",
-    loss_mask: Tensor | None = None,
-    global_valid_count: float | None = None,
-    startend_row_indices: Tensor | None = None,
-    docmask_meta: CSADocMaskMetadata | None = None,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    from paddlefleet.tilelang_ops import (
-        csa_attn_target_reducesum,
-        csa_indexer_topk_fwd,
-    )
-
-    if indexer_backend == "cudnn":
-        from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
-            cudnn_indexer_topk_fwd,
-        )
-
-        topk_indices, _, topk_scores = cudnn_indexer_topk_fwd(
-            index_q,
-            index_k_comp,
-            weights,
-            ratio=int(ratio),
-            topk_effective=int(topk_effective),
-            valid_range=valid_range,
-            startend_row_indices=(
-                docmask_meta.startend_row_indices
-                if docmask_meta is not None
-                else startend_row_indices
-            ),
-            doc_lens=docmask_meta.doc_lens_list
-            if docmask_meta is not None
-            else None,
-            seq_offset=int(seq_offset),
-            return_topk_scores=True,
-        )
-        invalid_mask = topk_indices < 0
-        # Avoid NaN from softmax on all-(-inf) rows: zero them before softmax.
-        row_valid = (~invalid_mask).any(axis=-1, keepdim=True)  # [B, Sq, 1]
-        topk_scores = paddle.where(
-            row_valid, topk_scores, paddle.zeros_like(topk_scores)
-        )
-        topk_probs = paddle.nn.functional.softmax(topk_scores, axis=-1)
-        topk_probs = topk_probs * row_valid.cast(topk_probs.dtype)
-    else:
-        topk_indices, topk_probs = csa_indexer_topk_fwd(
-            index_q,
-            index_k_comp,
-            weights,
-            ratio=int(ratio),
-            topk_effective=int(topk_effective),
-            seq_offset=int(seq_offset),
-            valid_range=valid_range,
-        )
-
-    if tp_group is not None and getattr(tp_group, "nranks", 1) > 1:
-        target = _compute_attn_target_on_selected_set(
-            query_mla, key_comp_mla, topk_indices, softmax_scale, tp_group
-        )
-    else:
-        target = csa_attn_target_reducesum(
-            query_mla,
-            key_comp_mla,
-            topk_indices,
-            softmax_scale,
-        )
-
-    eps = 1e-10
-    kl_per_elem = target * (
-        paddle.log(target + eps) - paddle.log(topk_probs + eps)
-    )
-    # kl_per_elem: [B, Sq, topk] -> sum over topk -> [B, Sq]
-    kl_per_pos = kl_per_elem.sum(axis=-1)
-    if loss_mask is not None:
-        lm = loss_mask.reshape(kl_per_pos.shape).astype(kl_per_pos.dtype)
-        loss = (kl_per_pos * lm).sum() / global_valid_count * float(loss_coeff)
-    else:
-        loss = kl_per_pos.mean() * float(loss_coeff)
-    return loss, topk_indices, topk_probs, target
+# ---------------------------------------------------------------------------
+# Utilities for index computation
+# ---------------------------------------------------------------------------
 
 
 class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
@@ -1319,12 +1265,12 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
     def forward(
         ctx,
         output: Tensor,
+        target: Tensor,
         index_q: Tensor,
         weights: Tensor,
         index_k_comp: Tensor,
         topk_indices: Tensor,
         topk_probs: Tensor,
-        target: Tensor,
         loss_coeff: float,
         indexer_backend: str = "tilelang",
         num_rows_override: float | None = None,
@@ -1341,11 +1287,16 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         ctx.loss_coeff = float(loss_coeff)
         ctx.indexer_backend = str(indexer_backend)
         ctx.loss_mask = loss_mask
+        # When the backbone is frozen (phase 2), ``output`` is a leaf tensor with
+        # ``stop_gradient=True``. Returning it unchanged would be treated as an
+        # inplace alias, which Paddle rejects for leaf tensors on a grad-enabled
+        # node, so return a fresh tensor and skip its gradient in backward.
+        ctx.output_needs_grad = not output.stop_gradient
         if num_rows_override is not None:
             ctx.num_rows = num_rows_override
         else:
             ctx.num_rows = float(target.shape[0] * target.shape[1])
-        return output
+        return output if ctx.output_needs_grad else output.clone()
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
@@ -1441,10 +1392,50 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         if grad_k.dtype != index_k_comp.dtype:
             grad_k = grad_k.cast(index_k_comp.dtype)
 
-        grads = (grad_output, grad_q, grad_weights, grad_k, None, None, None)
+        grad_main = grad_output if ctx.output_needs_grad else None
+        grads = (grad_main, None, grad_q, grad_weights, grad_k, None, None)
         if getattr(ctx, "loss_mask", None) is not None:
             grads += (None,)
         return grads
+
+
+def _row_masked_softmax(scores: Tensor, indices: Tensor) -> Tensor:
+    """
+    Comppute row-wise softmax on scores.
+    Only the rows with at least one valid index are processed. Invalid rows
+    (i.e. all -inf scores) get zeros values after softmax.
+    """
+    valid_mask = indices >= 0
+    row_valid = valid_mask.any(axis=-1, keepdim=True)  # [B, Sq, 1]
+    scores = paddle.where(row_valid, scores, paddle.zeros_like(scores))
+    scores = paddle.nn.functional.softmax(scores, axis=-1)
+    scores = scores * row_valid.cast(scores.dtype)
+    return scores
+
+
+class HashableTensor(paddle.Tensor):
+    """Helper class with hashable shape/stride() method."""
+
+    @property
+    def shape(self):
+        return tuple(super().shape)
+
+    def stride(self, dim=None):
+        if dim is None:
+            return tuple(super().stride())
+        return super().stride(dim)
+
+
+class TilelangIndexerLossState(NamedTuple):
+    index_q: Tensor
+    weights: Tensor
+    index_k_comp: Tensor
+    topk_indices: Tensor
+    topk_probs: Tensor
+    indexer_loss_coeff: float
+    indexer_backend: str
+    global_valid_count: Tensor | None
+    loss_mask: Tensor | None
 
 
 # ---------------------------------------------------------------------------
@@ -1805,6 +1796,91 @@ class Compressor(nn.Layer):
                 kv[..., :nope_dim] = fp8_simulate_qat(kv[..., :nope_dim], 64)
         return kv  # [b, n_compressed, head_dim]
 
+    def forward_group(
+        self,
+        x_cur: Tensor,
+        x_prev: Tensor | None,
+        group_index: int,
+    ) -> Tensor:
+        """Incrementally emit a single compressed token for one group (decode).
+
+        Reproduces the simple-causal ``forward`` math for exactly one
+        compressed position ``group_index`` (absolute compressed-token index
+        ``g``). The emitted token's RoPE position is ``g * compress_ratio``,
+        matching the subsampled positions used by prefill.
+
+        Args:
+            x_cur: [b, compress_ratio, hidden_size] hidden states of the just
+                completed group ``g``.
+            x_prev: [b, compress_ratio, hidden_size] hidden states of the
+                previous group ``g-1``, or None when ``g == 0``. Only used for
+                the overlapping (ratio==4) path; ignored otherwise.
+            group_index: absolute compressed-token index ``g``.
+
+        Returns:
+            compressed_kv: [b, 1, head_dim].
+        """
+        b, ratio, _ = x_cur.shape
+        assert ratio == self.compress_ratio, (
+            f"forward_group expects a full group of {self.compress_ratio} "
+            f"tokens, got {ratio}"
+        )
+        d = self.head_dim
+
+        kv_cur, _ = self.linear_wkv(x_cur)  # [b, ratio, coff * head_dim]
+        score_cur, _ = self.linear_wgate(x_cur)  # [b, ratio, coff * head_dim]
+
+        kv_cur = kv_cur.reshape([b, 1, ratio, -1])
+        score_cur = score_cur.reshape([b, 1, ratio, -1])
+
+        ape = self.ape.reshape([1, 1, ratio, -1])
+        ape = ape.cast(score_cur.dtype) if _ACCURACY_COMPATIBLE_KERNEL else ape
+        score_cur = score_cur + ape
+
+        if self.overlap:
+            # Build the single-group overlap tensors [b, 1, 2*ratio, d].
+            # Current group's second half -> positions [ratio:]; previous
+            # group's first half -> positions [:ratio] (fill when g == 0).
+            kv = paddle.full([b, 1, 2 * ratio, d], 0.0, dtype=kv_cur.dtype)
+            score = paddle.full(
+                [b, 1, 2 * ratio, d], float("-inf"), dtype=score_cur.dtype
+            )
+            kv[:, :, ratio:, :] = kv_cur[:, :, :, d:]
+            score[:, :, ratio:, :] = score_cur[:, :, :, d:]
+            if x_prev is not None:
+                kv_prev, _ = self.linear_wkv(x_prev)
+                score_prev, _ = self.linear_wgate(x_prev)
+                kv_prev = kv_prev.reshape([b, 1, ratio, -1])
+                score_prev = score_prev.reshape([b, 1, ratio, -1])
+                score_prev = score_prev + ape
+                kv[:, :, :ratio, :] = kv_prev[:, :, :, :d]
+                score[:, :, :ratio, :] = score_prev[:, :, :, :d]
+        else:
+            kv = kv_cur
+            score = score_cur
+
+        # Gated pooling over the pool dim (axis=2), identical to prefill.
+        kv = (kv * F.softmax(score, axis=2)).sum(axis=2)  # [b, 1, head_dim]
+
+        kv = self.norm(kv.cast(x_cur.dtype))
+
+        if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
+            kv = _apply_rope(
+                kv,
+                self.head_dim - self.qk_pos_emb_head_dim,
+                self.qk_pos_emb_head_dim,
+                self.rotary_pos_emb,
+                self.config,
+                1,  # rotary_seq_len (single compressed token)
+                ratio=ratio,
+                position_offset=group_index,
+            )
+
+        if self.rotate:
+            kv = rotate_activation(kv)
+
+        return kv  # [b, 1, head_dim]
+
 
 # ---------------------------------------------------------------------------
 # CSAIndexer
@@ -2121,6 +2197,31 @@ class CompressedSparseAttention(FleetLayer):
         else:
             self.indexer = None
 
+        self.sparse_attn_backend = getattr(
+            config, "csa_sparse_attn_backend", "tilelang"
+        )
+        self.indexer_backend = getattr(
+            config, "csa_indexer_backend", "tilelang"
+        )
+        self.indexer_loss_coeff = getattr(config, "dsa_indexer_loss_coeff", 0.0)
+
+    def _resolve_topk_effective(self, n_compressed: int):
+        """Return the CSA indexer top-k width for current phase.
+
+        Phase semantics (driven by `dsa_indexer_use_sparse_loss`):
+        * Phase 3 (`dsa_indexer_use_sparse_loss=True`): select topk, same as the
+          existing `FusedDSAIndexerLoss` / `CSAIndexer.forward` choice.
+        * Phase 2 (`dsa_indexer_use_sparse_loss=False`): `n_compressed` - select
+          full compressed candidate range and is later consumed as full-range KL
+          by the indexer loss path.
+        """
+        use_sparse_loss = getattr(
+            self.config, "dsa_indexer_use_sparse_loss", True
+        )
+        if use_sparse_loss:
+            return min(self.indexer.index_topk, n_compressed)
+        return n_compressed
+
     def _compute_indexer_compressed_topk_idxs(
         self,
         query: Tensor,
@@ -2144,10 +2245,13 @@ class CompressedSparseAttention(FleetLayer):
             x_det.stop_gradient = False
             qr_det.stop_gradient = False
 
-        # Loss and main attention intentionally use different top-k widths
-        # during phase 2. ``dsa_indexer_use_sparse_loss=False`` expands only
-        # the indexer loss to the full compressed range; the main CSA attention
-        # remains sparse and consumes ``min(index_topk, n_compressed)``.
+        # Phase 2 (``dsa_indexer_use_sparse_loss=False``) widens *both* the main
+        # attention and the indexer loss to the full compressed range: an
+        # indexer that is still being learned must not steer attention, so
+        # ``_resolve_topk_effective`` returns ``n_compressed`` and the single
+        # ``topk_effective`` below feeds the attention selection and
+        # ``FusedDSAIndexerLoss`` alike. Phase 3 narrows both to
+        # ``min(index_topk, n_compressed)``.
         indexer_backend = getattr(
             self.config, "csa_indexer_backend", "tilelang"
         )
@@ -2156,15 +2260,7 @@ class CompressedSparseAttention(FleetLayer):
         # only materialize main-attention indices. The backend branch remains
         # fixed across both forwards.
         need_indexer_loss = self.training and paddle.is_grad_enabled()
-        loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
-            self.config,
-            self.indexer.index_topk,
-            n_compressed,
-        )
-        attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
-            self.indexer.index_topk,
-            n_compressed,
-        )
+        topk_effective = self._resolve_topk_effective(n_compressed)
 
         causal_mask = _build_compressed_causal_mask(
             self.compress_ratio,
@@ -2179,136 +2275,72 @@ class CompressedSparseAttention(FleetLayer):
             sq,
             docmask_meta=docmask_meta,
         )
+        startend_row_indices = (
+            docmask_meta.startend_row_indices
+            if docmask_meta is not None
+            else None
+        )
+        doc_lens_list = (
+            docmask_meta.doc_lens_list if docmask_meta is not None else None
+        )
+        grad_ctx = (
+            contextlib.nullcontext if need_indexer_loss else paddle.no_grad
+        )
 
-        def compute_fused_indexer_loss(backend: str):
-            # Training grad-enabled forward with TileLang/cuDNN backend.
-            # The same backend's top-k-only kernel is used during recompute's
-            # first no-grad forward below.
-            indexer_loss_coeff = getattr(
-                self.config, "dsa_indexer_loss_coeff", 0.0
+        if indexer_backend == "cudnn":
+            from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+                cudnn_indexer_topk_fwd,
             )
-            q_indexer_bf, k_indexer_bf, weights_indexer_bf = (
-                self.indexer.forward_before_topk(
-                    x_det,
-                    qr_det,
-                    docmask_meta=docmask_meta,
-                )
-            )
-            key_comp_mla = compressed_kv.detach()
-            (
-                loss,
-                topk_indices,
-                topk_probs,
-                target,
-            ) = _compute_fused_csa_indexer_loss_forward(
-                q_indexer_bf,
-                weights_indexer_bf,
-                k_indexer_bf,
-                query.detach(),
-                key_comp_mla,
-                valid_range,
-                int(self.compress_ratio),
-                int(loss_topk_effective),
-                float(self.softmax_scale),
-                float(indexer_loss_coeff),
-                self.tp_group,
-                indexer_backend=backend,
-                loss_mask=loss_mask,
-                global_valid_count=global_valid_count,
-                startend_row_indices=docmask_meta.startend_row_indices
-                if docmask_meta is not None
-                else None,
-                docmask_meta=docmask_meta,
-            )
-            loss_state = (
-                q_indexer_bf,
-                weights_indexer_bf,
-                k_indexer_bf,
-                topk_indices,
-                topk_probs,
-                target,
-                float(indexer_loss_coeff),
-                backend,
-                global_valid_count if loss_mask is not None else None,
-                loss_mask,
-            )
-            if indexer_loss_coeff > 0:
-                DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                    loss=loss,
-                    layer_number=self.layer_number,
-                    num_layers=DSAIndexerLossLoggingHelper.get_total_num_layers(
-                        self.config
-                    ),
-                )
-            return loss, topk_indices, loss_state
 
-        if (
-            indexer_backend == "cudnn"
-        ):  # cuDNN branch for both recompute forwards; inner condition decides whether to compute loss.
-            if need_indexer_loss:  # Grad-enabled recompute forward; compute cuDNN fused selected-set loss and top-k.
-                (
-                    indexer_loss,
-                    topk_indices_compressed,
-                    tilelang_indexer_loss_state,
-                ) = compute_fused_indexer_loss("cudnn")
-            else:  # First recompute no-grad forward; only materialize cuDNN top-k for attention.
-                from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
-                    cudnn_indexer_topk_fwd,
+            with grad_ctx():
+                index_q, index_k_comp, weights = (
+                    self.indexer.forward_before_topk(
+                        x_det,
+                        qr_det,
+                        docmask_meta=docmask_meta,
+                    )
+                )
+                topk_indices, _, *topk_scores = cudnn_indexer_topk_fwd(
+                    index_q,
+                    index_k_comp,
+                    weights,
+                    ratio=self.compress_ratio,
+                    topk_effective=topk_effective,
+                    valid_range=valid_range,
+                    startend_row_indices=startend_row_indices,
+                    doc_lens=doc_lens_list,
+                    return_topk_scores=need_indexer_loss,
                 )
 
-                with paddle.no_grad():
-                    q_indexer_cu, k_indexer_cu, weights_indexer_cu = (
-                        self.indexer.forward_before_topk(
-                            x_det,
-                            qr_det,
-                            docmask_meta=docmask_meta,
-                        )
-                    )
-                    cu_topk_indices, _cu_topk_length = cudnn_indexer_topk_fwd(
-                        q_indexer_cu,
-                        k_indexer_cu,
-                        weights_indexer_cu,
-                        ratio=self.compress_ratio,
-                        topk_effective=attn_topk_effective,
-                        valid_range=valid_range,
-                        startend_row_indices=docmask_meta.startend_row_indices
-                        if docmask_meta is not None
-                        else None,
-                        doc_lens=docmask_meta.doc_lens_list
-                        if docmask_meta is not None
-                        else None,
-                    )
-                topk_indices_compressed = cu_topk_indices
+            topk_indices_compressed = topk_indices
+            if need_indexer_loss:
+                (topk_scores,) = topk_scores
+                # Cudnn outputs pre-softmax scores, We need to do softmax ourself.
+                topk_probs = _row_masked_softmax(topk_scores, topk_indices)
 
-        elif (
-            indexer_backend == "tilelang"
-        ):  # TileLang branch for both recompute forwards; inner condition decides whether to compute loss.
-            if need_indexer_loss:  # Grad-enabled recompute forward; compute TileLang fused selected-set loss and top-k.
-                (
-                    indexer_loss,
-                    topk_indices_compressed,
-                    tilelang_indexer_loss_state,
-                ) = compute_fused_indexer_loss("tilelang")
-            else:  # First recompute no-grad forward; only materialize TileLang top-k for attention.
-                from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
+        elif indexer_backend == "tilelang":
+            from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
 
-                with paddle.no_grad():
-                    q_indexer_tl, k_indexer_tl, weights_indexer_tl = (
-                        self.indexer.forward_before_topk(
-                            x_det,
-                            qr_det,
-                            docmask_meta=docmask_meta,
-                        )
+            with grad_ctx():
+                index_q, index_k_comp, weights = (
+                    self.indexer.forward_before_topk(
+                        x_det,
+                        qr_det,
+                        docmask_meta=docmask_meta,
                     )
-                    tl_topk_indices, _tl_topk_scores = csa_indexer_topk_fwd(
-                        q_indexer_tl,
-                        k_indexer_tl,
-                        weights_indexer_tl,
-                        ratio=self.compress_ratio,
-                        topk_effective=attn_topk_effective,
-                        valid_range=valid_range,
-                    )
-                topk_indices_compressed = tl_topk_indices
+                )
+                topk_indices, topk_scores = csa_indexer_topk_fwd(
+                    index_q,
+                    index_k_comp,
+                    weights,
+                    ratio=self.compress_ratio,
+                    topk_effective=topk_effective,
+                    valid_range=valid_range,
+                )
+
+            topk_indices_compressed = topk_indices
+            if need_indexer_loss:
+                topk_probs = topk_scores
 
         elif (
             indexer_backend == "unfused"
@@ -2337,7 +2369,7 @@ class CompressedSparseAttention(FleetLayer):
                     query.detach(),
                     key_for_loss.detach(),
                     self.softmax_scale,
-                    min(self.indexer.index_topk, n_compressed),
+                    topk_effective,
                     indexer_loss_coeff,
                     mask_for_loss,
                     getattr(self.config, "dsa_indexer_use_sparse_loss", True),
@@ -2364,11 +2396,24 @@ class CompressedSparseAttention(FleetLayer):
                     docmask_meta=docmask_meta,
                 )
 
+        if indexer_backend in ("cudnn", "tilelang") and need_indexer_loss:
+            tilelang_indexer_loss_state = TilelangIndexerLossState(
+                index_q,
+                weights,
+                index_k_comp,
+                topk_indices,
+                topk_probs,
+                self.indexer_loss_coeff,
+                indexer_backend,
+                global_valid_count if loss_mask is not None else None,
+                loss_mask,
+            )
+
         if (
-            topk_indices_compressed.shape[-1] > attn_topk_effective
+            topk_indices_compressed.shape[-1] > topk_effective
         ):  # Loss path may return wider top-k than attention consumes.
             topk_indices_compressed = topk_indices_compressed[
-                ..., :attn_topk_effective
+                ..., :topk_effective
             ].contiguous()
 
         compress_topk_idxs = _map_compressed_topk_to_kv_full(
@@ -2380,6 +2425,136 @@ class CompressedSparseAttention(FleetLayer):
 
         return compress_topk_idxs, indexer_loss, tilelang_indexer_loss_state
 
+    def _compute_indexer_compressed_topk_idxs_decode(
+        self,
+        query: Tensor,
+        qr: Tensor,
+        x_tok: Tensor,
+        state,
+        t: int,
+        offset: int,
+        n_comp: int,
+    ) -> Tensor:
+        """Indexer top-k over the cached compressed keys for one decode token.
+
+        Replicates the eval-time indexer selection (``CSAIndexer.forward``) for
+        a single query at absolute position ``t``. The compressed keys are the
+        incrementally accumulated ``state.idx_compressed_k`` ([b, n_comp,
+        index_head_dim]); the query and per-head weights are recomputed from the
+        current token (``x_tok`` = [b, 1, hidden_size]). All ``n_comp``
+        compressed blocks are causally valid at a decode step
+        (``n_comp == (t + 1) // ratio``), so no mask is needed.
+
+        Returns:
+            [b, 1, effective_topk] int indices into ``kv_full`` (>= offset),
+            with ``-1`` for any invalid slot.
+        """
+        indexer = self.indexer
+        b = query.shape[0]
+
+        # Q path: mirror CSAIndexer.forward_before_topk for a single token.
+        q, _ = indexer.linear_wq_b(qr)  # [b, 1, n_heads * index_head_dim]
+        q = q.reshape([b, 1, indexer.index_n_heads, indexer.index_head_dim])
+        if (
+            indexer.rotary_pos_emb is not None
+            and indexer.qk_pos_emb_head_dim > 0
+        ):
+            q = _apply_rope(
+                q,
+                indexer.index_head_dim - indexer.qk_pos_emb_head_dim,
+                indexer.qk_pos_emb_head_dim,
+                indexer.rotary_pos_emb,
+                indexer.config,
+                1,  # rotary_seq_len (single query token)
+                ratio=1,
+                position_offset=t,
+            )
+        q = rotate_activation(q)
+
+        # Weights: [b, 1, n_heads], pre-scaled exactly as forward_before_topk
+        # and then by softmax_scale exactly as CSAIndexer.forward does.
+        weights, _ = indexer.linear_weights_proj(x_tok)
+        weights = weights * (indexer.index_n_heads**-0.5)
+        weights = weights * indexer.softmax_scale
+
+        k = state.idx_compressed_k  # [b, n_comp, index_head_dim]
+        effective_topk = min(indexer.index_topk, n_comp)
+        _, topk_indices_compressed = fused_qk_topk_naive(
+            q, k, weights, effective_topk, None
+        )  # [b, 1, effective_topk], compressed-space ids (or -1)
+
+        # Every emitted compressed block is causally valid at a decode step, so
+        # offset the valid slots into kv_full and keep -1 for empty slots.
+        valid = topk_indices_compressed >= 0
+        return paddle.where(
+            valid,
+            topk_indices_compressed + offset,
+            paddle.full_like(topk_indices_compressed, -1),
+        )
+
+    def _compute_fused_indexer_target(
+        self,
+        query_mla: Tensor,
+        key_comp_mla: Tensor,
+        topk_indices: Tensor,
+        topk_probs: Tensor,
+        lse_indexer: Tensor | None = None,
+        loss_mask: Tensor | None = None,
+        global_valid_count: float | None = None,
+    ) -> Tensor:
+        """
+        Compute indexer target and track indexer loss for cudnn/tilelang
+        backend. The cudnn target kernel is used only when both indexer
+        and sparse_attn use cudnn backend.
+        """
+
+        if self.indexer_backend == "cudnn" and lse_indexer is not None:
+            from paddlefleet_ops.cudnn.deepseek_sparse_attention import (
+                sparse_attn_score_recompute_wrapper,
+            )
+
+            target = sparse_attn_score_recompute_wrapper(
+                HashableTensor(query_mla),
+                HashableTensor(key_comp_mla),
+                HashableTensor(lse_indexer),
+                HashableTensor(topk_indices),
+                self.softmax_scale,
+            )["target"]
+        else:
+            from paddlefleet.tilelang_ops import csa_attn_target_reducesum
+
+            target = csa_attn_target_reducesum(
+                query_mla,
+                key_comp_mla,
+                topk_indices,
+                self.softmax_scale,
+            )
+
+        # Compute KL-loss between topk_probs and target
+        eps = 1e-10
+        kl_per_elem = target * (
+            paddle.log(target + eps) - paddle.log(topk_probs + eps)
+        )
+        # kl_per_elem: [B, Sq, topk] -> sum over topk -> [B, Sq]
+        kl_per_pos = kl_per_elem.sum(axis=-1)
+        loss_coeff = self.indexer_loss_coeff
+        if loss_mask is not None:
+            lm = loss_mask.reshape(kl_per_pos.shape).astype(kl_per_pos.dtype)
+            loss = (kl_per_pos * lm).sum() / global_valid_count * loss_coeff
+        else:
+            loss = kl_per_pos.mean() * loss_coeff
+
+        # Track indexer loss globally (not returned)
+        if loss_coeff > 0:
+            DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+                loss=loss,
+                layer_number=self.layer_number,
+                num_layers=DSAIndexerLossLoggingHelper.get_total_num_layers(
+                    self.config
+                ),
+            )
+        return target
+
     def forward(
         self,
         query: Tensor,
@@ -2390,6 +2565,9 @@ class CompressedSparseAttention(FleetLayer):
         qr: Tensor = None,
         input_ids: Tensor | None = None,
         docmask_meta: CSADocMaskMetadata | None = None,
+        past_key_values=None,
+        layer_idx: int | None = None,
+        use_cache: bool = False,
     ) -> Tensor:
         """Forward pass for CompressedSparseAttention.
 
@@ -2400,11 +2578,33 @@ class CompressedSparseAttention(FleetLayer):
             attention_mask: unused (causal is implicit)
             x:     [b, sq, hidden_size] original hidden states
             qr:    [b, sq, q_lora_rank] compressed query representation
+            past_key_values: optional ``CSADynamicCache`` (duck-typed) driving
+                incremental decode; when provided with ``use_cache`` it holds
+                a per-layer ``_CSALayerState`` accessed via
+                ``get_csa_state(layer_idx)``.
+            layer_idx: this layer's index into ``past_key_values``.
+            use_cache: enable KV-cache prefill priming / incremental decode.
 
         Returns:
             output: [b, sq, np * v_head_dim]
         """
         b, sq, np_heads, hn = query.shape
+
+        # Incremental decode: single-token step against the cached state.
+        if use_cache and past_key_values is not None and sq == 1:
+            assert not self.cp_enabled, (
+                "CSA incremental decode does not support context parallel."
+            )
+            assert attention_mask is None, (
+                "CSA incremental decode does not support attention_mask."
+            )
+            assert docmask_meta is None, (
+                "CSA incremental decode does not support packed documents; "
+                "pass attn_mask_startend_row_indices=None when decoding with "
+                "a cache."
+            )
+            state = past_key_values.get_csa_state(layer_idx)
+            return self._forward_decode(query, key, x, qr, state)
 
         if docmask_meta is not None:
             assert b == 1, (
@@ -2467,7 +2667,18 @@ class CompressedSparseAttention(FleetLayer):
             )
 
         if self.is_mqa_layer:
-            return self._forward_mqa(query, key, docmask_meta=docmask_meta)
+            output = self._forward_mqa(query, key, docmask_meta=docmask_meta)
+            # MQA has no compressor and no window: the raw KV stream is the
+            # whole cache, so prime it directly instead of going through
+            # _prime_cache_prefill's group bookkeeping.
+            if use_cache and past_key_values is not None:
+                state = past_key_values.get_csa_state(layer_idx)
+                state.raw_kv = key.squeeze(2)  # [b, sq, v_head_dim]
+                state.compressed_kv = None
+                state.idx_compressed_k = None
+                state.x_prev = None
+                state.x_cur = None
+            return output
 
         if docmask_meta is not None and self.compress_ratio > 1:
             actual_n_compressed = docmask_meta.actual_n_compressed
@@ -2508,10 +2719,13 @@ class CompressedSparseAttention(FleetLayer):
             sq,
             docmask_meta=docmask_meta,
         )
+        window_idxs = window_idxs.astype("int32").contiguous()
 
         # Step 4: Compressed indices
         indexer_loss = None
         tilelang_indexer_loss_state = None
+        indexer_topk = 0
+        lse_indexer = None
 
         if (
             self.compress_ratio > 1
@@ -2543,16 +2757,25 @@ class CompressedSparseAttention(FleetLayer):
                     offset,
                     docmask_meta=docmask_meta,
                 )
+            compress_topk_idxs = compress_topk_idxs.astype("int32")
 
-            if compress_topk_idxs.dtype != window_idxs.dtype:
-                compress_topk_idxs = compress_topk_idxs.cast(window_idxs.dtype)
-            topk_idxs = paddle.concat(
-                [window_idxs, compress_topk_idxs], axis=-1
-            )
+            # For cudnn's second forward (both indexer and SA should be cudnn),
+            # use [compress, window] order to generate lse_indexer. Otherwise,
+            # use [window, compress] order.
+            if (
+                self.indexer is not None
+                and self.indexer_backend == "cudnn"
+                and self.sparse_attn_backend == "cudnn"
+                and tilelang_indexer_loss_state is not None
+                and self.training
+            ):
+                topk_idxs = [compress_topk_idxs, window_idxs]
+                indexer_topk = compress_topk_idxs.shape[-1]
+            else:
+                topk_idxs = [window_idxs, compress_topk_idxs]
+            topk_idxs = paddle.concat(topk_idxs, axis=-1)
         else:
             topk_idxs = window_idxs
-
-        topk_idxs = topk_idxs.cast("int32")
 
         # Step 5: Sparse attention
         output = self.compressed_sparse_attn(
@@ -2561,18 +2784,159 @@ class CompressedSparseAttention(FleetLayer):
             self.attn_sink,
             topk_idxs,
             self.softmax_scale,
+            indexer_topk=indexer_topk,
         )
+        if indexer_topk > 0:
+            output, lse_indexer = output
 
         # Step 6: Attach indexer loss
         if tilelang_indexer_loss_state is not None and self.training:
+            target = self._compute_fused_indexer_target(
+                query,
+                kv_full,
+                compress_topk_idxs,
+                tilelang_indexer_loss_state.topk_probs,
+                lse_indexer,
+                loss_mask,
+                global_valid_count,
+            )
             output = TileLangCSAIndexerLossAutoScaler.apply(
-                output,
-                *tilelang_indexer_loss_state,
+                output, target, *tilelang_indexer_loss_state
             )
         elif indexer_loss is not None and self.training:
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
 
+        # KV-cache prefill priming: populate the per-layer decode state so the
+        # first decode step continues seamlessly from this prefill.
+        if use_cache and past_key_values is not None:
+            state = past_key_values.get_csa_state(layer_idx)
+            self._prime_cache_prefill(state, kv, kv_full, n_compressed, x, sq)
+
         return output
+
+    def _prime_cache_prefill(
+        self,
+        state,
+        kv: Tensor,
+        kv_full: Tensor,
+        n_compressed: int,
+        x: Tensor,
+        sq: int,
+    ) -> None:
+        """Fill a ``_CSALayerState`` from a completed simple-causal prefill.
+
+        Stores the raw single-head KV, the compressed KV emitted during
+        prefill, and the hidden-state group buffers (``x_prev`` = last closed
+        group, ``x_cur`` = partial open group) so that the first decode step
+        resumes exactly where prefill left off.
+        """
+        ratio = self.compress_ratio
+        state.raw_kv = kv  # [b, sq, v_head_dim]
+
+        if n_compressed > 0:
+            # kv_full == concat([raw(sq), compressed]); recover the tail.
+            state.compressed_kv = kv_full[:, sq:, :]  # [b, n_comp, v_head_dim]
+            cutoff = n_compressed * ratio
+            state.x_prev = x[:, cutoff - ratio : cutoff, :]
+            state.x_cur = x[:, cutoff:, :] if cutoff < sq else None
+            # Indexer compressed keys (ratio==4): recompute over the prefill
+            # sequence so the first decode top-k has the full cached key set.
+            if self.indexer is not None:
+                with paddle.no_grad():
+                    state.idx_compressed_k = self.indexer.compressor(x)
+        else:
+            state.compressed_kv = None
+            state.x_prev = None
+            state.idx_compressed_k = None
+            # No group has closed yet; the whole prefix is the open group.
+            state.x_cur = (
+                x if (self.compressor is not None and ratio > 1) else None
+            )
+
+    def _forward_decode(
+        self,
+        query: Tensor,
+        key: Tensor,
+        x: Tensor,
+        qr: Tensor,
+        state,
+    ) -> Tensor:
+        """Single-token incremental decode step against the cached state.
+
+        Mirrors the simple-causal prefill ``forward`` for one query at absolute
+        position ``t`` (= current raw KV length before appending). Emits a new
+        compressed token whenever the current group of ``ratio`` hidden-state
+        tokens closes, then runs sparse attention over the sliding window plus
+        every causally-valid compressed block.
+        """
+        b, sq, np_heads, hn = query.shape  # sq == 1
+        ratio = self.compress_ratio
+
+        # 1. Append the raw single-head KV token; t is the query's absolute pos.
+        k_tok = key.squeeze(2)  # [b, 1, v_head_dim]
+        state.append_raw(k_tok)
+        t = state.raw_kv.shape[1] - 1
+
+        # 2. Accumulate hidden states; emit compressed token when a group closes.
+        if self.compressor is not None and ratio > 1:
+            state.append_x(x)
+            if state.x_cur.shape[1] == ratio:
+                g = t // ratio  # absolute compressed-token index
+                comp_tok = self.compressor.forward_group(
+                    state.x_cur, state.x_prev, g
+                )
+                state.append_compressed(comp_tok)
+                if self.indexer is not None:
+                    idx_tok = self.indexer.compressor.forward_group(
+                        state.x_cur, state.x_prev, g
+                    )
+                    state.append_idx_compressed(idx_tok)
+                state.roll_group()
+
+        # 3. Build kv_full = raw ++ compressed.
+        n_comp = state.n_compressed
+        if n_comp > 0:
+            kv_full = paddle.concat([state.raw_kv, state.compressed_kv], axis=1)
+        else:
+            kv_full = state.raw_kv
+        offset = state.raw_kv.shape[1]  # == t + 1
+
+        # 4. Index table for the single query at absolute pos t.
+        if self.is_mqa_layer:
+            # Full-causal MQA: no window, no compressor -> attend every cached
+            # raw position [0, t]. n_comp is 0, so kv_full == state.raw_kv.
+            topk_idxs = get_mqa_causal_topk_idxs_decode(b, t)
+        else:
+            window_idxs = get_window_topk_idxs_decode(self.window_size, b, t)
+
+            # 5. Compressed indices.
+            if ratio > 1 and n_comp > 0:
+                if self.indexer is not None:
+                    compress_idxs = (
+                        self._compute_indexer_compressed_topk_idxs_decode(
+                            query, qr, x, state, t, offset, n_comp
+                        )
+                    )
+                else:
+                    compress_idxs = get_compress_topk_idxs_decode(
+                        b, offset, n_comp
+                    )
+                if compress_idxs.dtype != window_idxs.dtype:
+                    compress_idxs = compress_idxs.cast(window_idxs.dtype)
+                topk_idxs = paddle.concat([window_idxs, compress_idxs], axis=-1)
+            else:
+                topk_idxs = window_idxs
+
+        topk_idxs = topk_idxs.cast("int32")
+
+        # 6. Sparse attention.
+        return self.compressed_sparse_attn(
+            query,
+            kv_full,
+            self.attn_sink,
+            topk_idxs,
+            self.softmax_scale,
+        )
 
     def _forward_mqa(
         self,
@@ -2649,6 +3013,7 @@ class CompressedSparseAttention(FleetLayer):
             window_idxs = full_window_idxs[
                 :, position_offset : position_offset + sq, ...
             ]
+        window_idxs = window_idxs.astype("int32").contiguous()
 
         # Step 2: All-gather KV + compress
         kv_local = key.squeeze(2)  # [b, sq, hn]
@@ -2696,6 +3061,8 @@ class CompressedSparseAttention(FleetLayer):
         # Step 3: Compressed topk + optional fused indexer loss
         indexer_loss = None
         tilelang_indexer_loss_state = None
+        indexer_topk = 0
+        lse_indexer = None
 
         if (
             self.compress_ratio > 1
@@ -2719,11 +3086,8 @@ class CompressedSparseAttention(FleetLayer):
                     and self.training
                     and paddle.is_grad_enabled()
                 )
-                loss_topk_effective = _resolve_csa_indexer_loss_topk_effective(
-                    self.config, self.indexer.index_topk, n_compressed_global
-                )
-                attn_topk_effective = _resolve_csa_indexer_attn_topk_effective(
-                    self.indexer.index_topk, n_compressed_global
+                topk_effective = self._resolve_topk_effective(
+                    n_compressed_global
                 )
 
                 # valid_range for varlen: [b, sq_local, 2] or None
@@ -2748,64 +3112,79 @@ class CompressedSparseAttention(FleetLayer):
                     self.config, "dsa_indexer_loss_coeff", 0.0
                 )
 
-                if use_fused_indexer_loss_path:
-                    # CP training grad-enabled forward with TileLang/cuDNN
-                    # indexer backend.
-                    # Fused TileLang/cuDNN: single path produces topk + loss.
-                    # key_comp_mla is 3D [b, n_comp_global, hn] (shared across heads).
-                    key_comp_mla = compressed_kv_global.detach()
-                    (
-                        indexer_loss,
-                        topk_indices_compressed,
-                        topk_probs,
-                        target,
-                    ) = _compute_fused_csa_indexer_loss_forward(
-                        q_indexer_bf,
-                        weights_indexer_bf,
-                        k_indexer_global,
-                        query.detach(),
-                        key_comp_mla,
-                        valid_range,
-                        int(self.compress_ratio),
-                        int(loss_topk_effective),
-                        float(self.softmax_scale),
-                        float(indexer_loss_coeff),
-                        self.tp_group,
-                        seq_offset=position_offset,
-                        loss_mask=loss_mask,
-                        global_valid_count=global_valid_count,
-                        startend_row_indices=docmask_meta.startend_row_indices
-                        if docmask_meta is not None
-                        else None,
-                        docmask_meta=docmask_meta,
-                        indexer_backend=indexer_backend,
+                if use_tilelang_indexer or use_cudnn_indexer:
+                    # CP indexer forward with TileLang/cuDNN indexer backend.
+                    # This branch is for both grad-enabled and no-grad.
+                    grad_ctx = (
+                        contextlib.nullcontext
+                        if use_fused_indexer_loss_path
+                        else paddle.no_grad
                     )
-                    tilelang_indexer_loss_state = (
-                        q_indexer_bf,
-                        weights_indexer_bf,
-                        k_indexer_global,
-                        topk_indices_compressed,
-                        topk_probs,
-                        target,
-                        float(indexer_loss_coeff)
-                        if loss_mask is not None
-                        else float(indexer_loss_coeff) / self.cp_size,
-                        getattr(self.config, "csa_indexer_backend", "tilelang"),
-                        global_valid_count if loss_mask is not None else None,
-                        loss_mask,
-                    )
-                    if indexer_loss_coeff > 0:
-                        # CP fused training path logs only when indexer loss is
-                        # enabled.
-                        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
-                            loss=indexer_loss,
-                            layer_number=self.layer_number,
-                            num_layers=self.config.num_hidden_layers,
+
+                    with grad_ctx():
+                        if use_cudnn_indexer:
+                            from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
+                                cudnn_indexer_topk_fwd,
+                            )
+
+                            topk_indices_compressed, _, *topk_probs = (
+                                cudnn_indexer_topk_fwd(
+                                    q_indexer_bf,
+                                    k_indexer_global,
+                                    weights_indexer_bf,
+                                    ratio=self.compress_ratio,
+                                    topk_effective=topk_effective,
+                                    valid_range=valid_range,
+                                    startend_row_indices=docmask_meta.startend_row_indices
+                                    if docmask_meta is not None
+                                    else None,
+                                    doc_lens=docmask_meta.doc_lens_list
+                                    if docmask_meta is not None
+                                    else None,
+                                    seq_offset=position_offset,
+                                    return_topk_scores=use_fused_indexer_loss_path,
+                                )
+                            )
+
+                            if use_fused_indexer_loss_path:
+                                (topk_probs,) = topk_probs
+                                topk_probs = _row_masked_softmax(
+                                    topk_probs, topk_indices_compressed
+                                )
+
+                        else:
+                            from paddlefleet.tilelang_ops import (
+                                csa_indexer_topk_fwd,
+                            )
+
+                            topk_indices_compressed, topk_probs = (
+                                csa_indexer_topk_fwd(
+                                    q_indexer_bf,
+                                    k_indexer_global,
+                                    weights_indexer_bf,
+                                    ratio=self.compress_ratio,
+                                    topk_effective=topk_effective,
+                                    seq_offset=position_offset,
+                                    valid_range=valid_range,
+                                )
+                            )
+
+                    if use_fused_indexer_loss_path:
+                        tilelang_indexer_loss_state = TilelangIndexerLossState(
+                            q_indexer_bf,
+                            weights_indexer_bf,
+                            k_indexer_global,
+                            topk_indices_compressed,
+                            topk_probs,
+                            float(indexer_loss_coeff)
+                            if loss_mask is not None
+                            else float(indexer_loss_coeff) / self.cp_size,
+                            indexer_backend,
+                            global_valid_count
+                            if loss_mask is not None
+                            else None,
+                            loss_mask,
                         )
-                    # Scale: each rank's loss is mean over sq_local;
-                    # global loss is mean over sq_global = sq_local * cp_size.
-                    if loss_mask is None:
-                        indexer_loss = indexer_loss / self.cp_size
 
                 elif (
                     self.training
@@ -2847,7 +3226,7 @@ class CompressedSparseAttention(FleetLayer):
                         query.detach(),
                         key_for_loss.detach(),
                         self.softmax_scale,
-                        min(self.indexer.index_topk, n_compressed_global),
+                        topk_effective,
                         indexer_loss_coeff,
                         mask_for_loss,
                         getattr(
@@ -2894,56 +3273,15 @@ class CompressedSparseAttention(FleetLayer):
                         q_indexer_bf,
                         k_indexer_global,
                         weights_indexer_bf,
-                        attn_topk_effective,
+                        topk_effective,
                         causal_mask,
                     )
 
-                # TileLang/cuDNN fwd-only topk (no loss, or loss already produced above)
                 if (
-                    (use_tilelang_indexer or use_cudnn_indexer)
-                    and not use_fused_indexer_loss_path
-                ):  # CP eval/no-grad or recompute first forward with TileLang/cuDNN backend.
-                    with paddle.no_grad():
-                        if use_cudnn_indexer:
-                            from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
-                                cudnn_indexer_topk_fwd,
-                            )
-
-                            topk_indices_compressed, _ = cudnn_indexer_topk_fwd(
-                                q_indexer_bf,
-                                k_indexer_global,
-                                weights_indexer_bf,
-                                ratio=self.compress_ratio,
-                                topk_effective=attn_topk_effective,
-                                valid_range=valid_range,
-                                startend_row_indices=docmask_meta.startend_row_indices
-                                if docmask_meta is not None
-                                else None,
-                                doc_lens=docmask_meta.doc_lens_list
-                                if docmask_meta is not None
-                                else None,
-                                seq_offset=position_offset,
-                            )
-                        else:
-                            from paddlefleet.tilelang_ops import (
-                                csa_indexer_topk_fwd,
-                            )
-
-                            topk_indices_compressed, _ = csa_indexer_topk_fwd(
-                                q_indexer_bf,
-                                k_indexer_global,
-                                weights_indexer_bf,
-                                ratio=self.compress_ratio,
-                                topk_effective=attn_topk_effective,
-                                seq_offset=position_offset,
-                                valid_range=valid_range,
-                            )
-
-                if (
-                    topk_indices_compressed.shape[-1] > attn_topk_effective
+                    topk_indices_compressed.shape[-1] > topk_effective
                 ):  # CP loss path may return wider top-k than attention consumes.
                     topk_indices_compressed = topk_indices_compressed[
-                        ..., :attn_topk_effective
+                        ..., :topk_effective
                     ].contiguous()
 
                 compress_topk_idxs = map_compressed_topk_to_kv_full_cp(
@@ -2970,25 +3308,48 @@ class CompressedSparseAttention(FleetLayer):
                         :, position_offset : position_offset + sq, ...
                     ]
 
-            if compress_topk_idxs.dtype != window_idxs.dtype:
-                compress_topk_idxs = compress_topk_idxs.cast(window_idxs.dtype)
-            topk_idxs = paddle.concat(
-                [window_idxs, compress_topk_idxs], axis=-1
-            )
+            compress_topk_idxs = compress_topk_idxs.astype("int32")
+
+            if (
+                self.indexer is not None
+                and self.indexer_backend == "cudnn"
+                and self.sparse_attn_backend == "cudnn"
+                and tilelang_indexer_loss_state is not None
+                and self.training
+            ):
+                topk_idxs = [compress_topk_idxs, window_idxs]
+                indexer_topk = compress_topk_idxs.shape[-1]
+            else:
+                topk_idxs = [window_idxs, compress_topk_idxs]
+            topk_idxs = paddle.concat(topk_idxs, axis=-1)
         else:
             topk_idxs = window_idxs
 
-        topk_idxs = topk_idxs.cast("int32")
-
         # Step 4: Sparse attention (same dispatch as non-CP)
         output = self.compressed_sparse_attn(
-            query, kv_full, self.attn_sink, topk_idxs, self.softmax_scale
+            query,
+            kv_full,
+            self.attn_sink,
+            topk_idxs,
+            self.softmax_scale,
+            indexer_topk=indexer_topk,
         )
+        if indexer_topk > 0:
+            output, lse_indexer = output
 
         # Step 5: Attach indexer loss
         if tilelang_indexer_loss_state is not None and self.training:
+            target = self._compute_fused_indexer_target(
+                query,
+                kv_full,
+                compress_topk_idxs,
+                tilelang_indexer_loss_state.topk_probs,
+                lse_indexer,
+                loss_mask,
+                global_valid_count,
+            )
             output = TileLangCSAIndexerLossAutoScaler.apply(
-                output, *tilelang_indexer_loss_state
+                output, target, *tilelang_indexer_loss_state
             )
         elif indexer_loss is not None and self.training:
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
@@ -3003,6 +3364,7 @@ class CompressedSparseAttention(FleetLayer):
         topk_idxs: Tensor,
         softmax_scale: float,
         topk_length: Tensor | None = None,
+        indexer_topk: int = 0,
     ):
         from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
 
@@ -3022,4 +3384,5 @@ class CompressedSparseAttention(FleetLayer):
             softmax_scale,
             backend=sparse_attn_backend,
             topk_length=topk_length,
+            indexer_topk=indexer_topk,
         )

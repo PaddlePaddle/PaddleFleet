@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from paddlefleet.parallel_state import (
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
+    keep_indexer_grad_path,
     need_recompute_in_block,
     need_recompute_in_first_n,
 )
@@ -60,6 +62,23 @@ from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
+
+logger = logging.getLogger(__name__)
+
+
+def _is_incremental_decode(past_key_values, layer_idx, use_cache) -> bool:
+    """Whether this call is an incremental decode step for ``layer_idx``.
+
+    True once the layer has already written its prefill KV into the cache. Based
+    on the cache state rather than the query length so that a one-token prompt
+    is still treated as a prefill.
+    """
+    if not use_cache or past_key_values is None or layer_idx is None:
+        return False
+    has_layer_cache = getattr(past_key_values, "has_layer_cache", None)
+    if has_layer_cache is None:
+        return False
+    return bool(has_layer_cache(layer_idx))
 
 
 def build_hysparse_valid_range(
@@ -369,17 +388,17 @@ class MultiLatentAttention(Attention):
             is_mtp_layer=is_mtp_layer,
         )
         self.config: TransformerConfig
-        if (
+        is_dsv4_hybrid = (
             getattr(config, "experimental_attention_variant", None)
             == "dsv4_hybrid"
-        ):
+        )
+        if is_dsv4_hybrid:
             self.q_lora_rank = config.hybrid_mla_q_lora_rank
             self.kv_lora_rank = config.hybrid_mla_kv_lora_rank
             self.qk_nope_head_dim = config.hybrid_mla_qk_nope_head_dim
             self.qk_rope_head_dim = config.hybrid_mla_qk_rope_head_dim
             self.v_head_dim = config.hybrid_mla_v_head_dim
             self.num_attention_heads = config.hybrid_mla_num_attention_heads
-            self.num_key_value_heads = config.hybrid_mla_num_key_value_heads
         else:
             self.q_lora_rank = config.q_lora_rank
             self.kv_lora_rank = config.kv_lora_rank
@@ -387,14 +406,30 @@ class MultiLatentAttention(Attention):
             self.qk_rope_head_dim = config.qk_rope_head_dim
             self.v_head_dim = config.v_head_dim
             self.num_attention_heads = config.num_attention_heads
-            self.num_key_value_heads = config.num_key_value_heads
-        if self.num_key_value_heads != self.num_attention_heads:
-            raise ValueError(
-                "MLA currently supports MHA only; num_key_value_heads must equal "
-                "num_attention_heads. For DSV4 hybrid MLA, set "
-                "hybrid_mla_num_key_value_heads equal to "
-                "hybrid_mla_num_attention_heads."
-            )
+        # MLA has no GQA: K/V are always re-materialized from the shared latent
+        # with ``num_attention_heads`` heads -- ``kv_b_proj`` is sized
+        # ``num_attention_heads * (qk_nope_head_dim + v_head_dim)`` and the core
+        # attention is built with ``num_key_value_heads=1`` below -- so the
+        # config field never reaches a kernel here.
+        #
+        # For ``dsv4_hybrid`` the ``hybrid_mla_*`` dims are new and required to
+        # be explicit (transformer_config.py:1450), so a mismatch there is a real
+        # misconfiguration and is rejected. The plain ``num_key_value_heads``
+        # field is shared with the model's dense/GQA layers and 25 in-tree MLA
+        # configs legitimately disagree with ``num_attention_heads``
+        # (DeepSeek-V4 ``dsv4_flash*`` uses 1 for "one latent"; the
+        # eb5/ernielite ones inherit 4/8 from their dense siblings), so on that
+        # path pin the layer-local count to what is actually materialized rather
+        # than refusing to build.
+        if is_dsv4_hybrid:
+            kv_heads = config.hybrid_mla_num_key_value_heads
+            if kv_heads != self.num_attention_heads:
+                raise ValueError(
+                    "MLA supports MHA only: hybrid_mla_num_key_value_heads "
+                    f"({kv_heads}) must equal hybrid_mla_num_attention_heads "
+                    f"({self.num_attention_heads})."
+                )
+        self.num_key_value_heads = self.num_attention_heads
         tp_size = get_pg_size(self.pg_collection.tp)
         assert self.num_attention_heads % tp_size == 0
         assert self.num_key_value_heads % tp_size == 0
@@ -434,6 +469,66 @@ class MultiLatentAttention(Attention):
         self.softmax_scale = mscale * mscale / math.sqrt(self.q_head_dim)
         # mscale == 1.0 means softmax_scale equals default 1/sqrt(d), no need to pass explicitly
         self._softmax_scale_arg = None if mscale == 1.0 else self.softmax_scale
+
+        # Hybrid MLA layers may run attention on the shared KV latent instead of
+        # the per-head K/V produced by ``kv_b_proj`` ("runtime absorption").  This
+        # keeps every parameter byte-identical to the MHA layout -- only the
+        # activations change -- so an MHA checkpoint loads into an MQA run.
+        self.mqa_latent = getattr(
+            config, "experimental_attention_variant", None
+        ) == "dsv4_hybrid" and getattr(
+            config, "hybrid_mla_attention", "mha"
+        ) in ("mqa_dsa", "mqa_full_causal")
+        # ``mqa_split_kv_b_proj`` trades that property for speed:
+        # ``kv_b_proj`` is replaced by standalone ``k_b_proj`` / ``v_b_proj``
+        # absorption parameters, pre-laid-out so each side is one grouped GEMM
+        # instead of a slice + ``einsum``. The two together hold exactly the
+        # elements of ``kv_b_proj.weight``, which is therefore not built at all;
+        # a checkpoint that predates them cannot be resumed in this mode until
+        # the AOA statements that split it exist. Applies to both latent MQA
+        # modes -- the split only concerns absorption, not the indexer.
+        self.mqa_latent_split_kv_b = self.mqa_latent and getattr(
+            config, "mqa_split_kv_b_proj", False
+        )
+
+        # ``apply_rope_fusion`` is a model-wide flag, but the fused MLA RoPE is
+        # only applicable per (q, k) pair.  Latent MQA cannot use it because
+        # ``fused_apply_mla_rope_for_kv`` consumes the per-head K/V that
+        # absorption never materialises (``kv is None`` below).  The eager RoPE
+        # is used for that layer instead of failing the whole run, so the
+        # HCA/CSA layers -- which own an independent q/k pair and already route
+        # through ``fused_apply_mla_rope_inplace``
+        # (dsv4_hybrid_attention.py:1191, csa_attention.py:1063) -- still get
+        # the fusion.  Mixing layouts is only unsafe *within* one q/k pair.
+        #
+        # This ``config.apply_rope_fusion and not self.mqa_latent`` test is
+        # evaluated at each use site rather than cached here, so that toggling
+        # ``config.apply_rope_fusion`` on an already-constructed model (e.g. the
+        # KV-cache warning in generation/greedy_generator.py) still takes
+        # effect.
+        if self.mqa_latent:
+            if self.config.apply_rope_fusion and not getattr(
+                self.config, "mqa_latent_rope_fusion", False
+            ):
+                logger.warning(
+                    "apply_rope_fusion has no effect on the RoPE of this "
+                    "latent-MQA layer (layer_number=%s): the fused kernel it "
+                    "selects needs the per-head K/V that absorption never "
+                    "materialises, so this layer keeps the eager RoPE. Set "
+                    "mqa_latent_rope_fusion=True to fuse it.",
+                    getattr(self, "layer_number", -1),
+                )
+            if self.config.sequence_parallel:
+                raise ValueError(
+                    "latent MQA (hybrid_mla_attention='mqa_dsa' / "
+                    "'mqa_full_causal') does not support sequence_parallel yet."
+                )
+            if get_pg_size(self.pg_collection.tp) != 1:
+                raise ValueError(
+                    "latent MQA (hybrid_mla_attention='mqa_dsa' / "
+                    "'mqa_full_causal') does not support tensor parallel "
+                    "(kv_b_proj is absorbed locally)."
+                )
 
         if self.config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
@@ -484,6 +579,63 @@ class MultiLatentAttention(Attention):
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
         )
+
+        # Attention sink. Both sink-aware core attentions create their own
+        # ``softmax_offset`` from ``add_full_attention_sink_bias`` /
+        # ``softmax_type`` via ``build_softmax_offset``, so the parameter name is
+        # ``self_attn.core_attention.softmax_offset`` in the dense and in the
+        # non-absorbed-MQA phase alike and an MHA checkpoint stays loadable.
+        #
+        # The dense path feeds it to ``flashmask_attention_func(...,
+        # learnable_sink=...)`` (dot_product_attention.py:653), which only exists
+        # on the FA4 (cute) kernel: gated on ``FLAGS_flash_attn_version in
+        # (3, 4)`` and asserting a bf16 sink (flash_mask/cute/interface.py).
+        # With the default flag value of 2 the run dies at the *first forward*
+        # with no hint about the cause, so fail at construction time. We
+        # deliberately do NOT set the flag ourselves: it is process-global and
+        # would switch every other (HCA / CSA) layer's kernel too.
+        # Latent MQA needs neither check -- its block-sparse kernel
+        # supports the sink natively and up-casts it internally. Neither do the
+        # HySparse absorbed-MQA layers: ``gpt_layer_specs.py:318`` builds every
+        # MLA layer as ``MQASelfAttention`` when ``enable_hy_sparse_attention``
+        # is on, and for an SWA layer (``is_mqa``, :1919) that subclass runs the
+        # TileLang / cuDNN MQA kernels directly with its own ``swa_attn_sink`` /
+        # ``sparse_attn_sink``, dropping this redundant ``softmax_offset``
+        # (:1942) as soon as the present ``__init__`` returns. Non-SWA HySparse
+        # layers do fall back to the dense MLA forward, but they only get a
+        # ``softmax_offset`` from ``add_full_attention_sink_bias``
+        # (dot_product_attention.py:98), which the check below still covers.
+        hysparse_absorbed_mqa = (
+            self.config.enable_hy_sparse_attention and self.is_swa
+        )
+        if (
+            not self.mqa_latent
+            and not hysparse_absorbed_mqa
+            and getattr(self.core_attention, "softmax_offset", None) is not None
+        ):
+            fa_version = int(
+                paddle.get_flags(["FLAGS_flash_attn_version"])[
+                    "FLAGS_flash_attn_version"
+                ]
+            )
+            if fa_version not in (3, 4):
+                raise RuntimeError(
+                    "an MLA attention sink (add_full_attention_sink_bias / "
+                    "softmax_type) needs the flashmask v4 (cute) kernel, but "
+                    f"FLAGS_flash_attn_version={fa_version} (only 3 or 4 reach "
+                    "that path). Either export FLAGS_flash_attn_version=4 "
+                    "(NOTE: process-global -- it changes the HCA/CSA layers' "
+                    "kernel as well), or run the hybrid MLA layers with "
+                    "hybrid_mla_attention='mqa_dsa' / 'mqa_full_causal', whose "
+                    "block-sparse kernel supports the sink natively."
+                )
+            if "bfloat16" not in str(self.config.params_dtype):
+                raise RuntimeError(
+                    "an MLA attention sink requires params_dtype='bfloat16', "
+                    f"got {self.config.params_dtype!r}: the sink is created with "
+                    "params_dtype and the flashmask v4 (cute) kernel asserts it "
+                    "is bf16."
+                )
 
         # Output.
         self.o_proj = build_spec_layer(
@@ -581,6 +733,89 @@ class MultiLatentAttention(Attention):
                         self.layer_number, self.config, num_layers
                     )
                 )
+
+        # VHA postmix: ungrouped low-rank cross-head mixing (I + U Vᵀ) on the head
+        # axis, applied to the attention output (head space) before the output
+        # projection. Reuses use_vha_attention / vha_postmix_rank. Ungrouped only:
+        # MLA/MQA have no grouped o_proj to fold a block-diagonal mixer into.
+        self.use_vha_postmix = getattr(config, "use_vha_attention", False)
+        if self.use_vha_postmix:
+            # Use an explicit ValueError (not assert): assertions are stripped
+            # under `python -O`, which would silently let TP>1 mix only the
+            # local heads of each rank and deviate from the declared full-head
+            # postmix semantics.
+            if get_pg_size(self.pg_collection.tp) != 1:
+                raise ValueError(
+                    "VHA postmix currently supports tensor parallel size 1 "
+                    f"only, got tp={get_pg_size(self.pg_collection.tp)}."
+                )
+            nh = (
+                self.num_attention_heads_per_partition
+            )  # == num_attention_heads (TP=1)
+            rank = getattr(config, "vha_postmix_rank", None)
+            if rank is None:
+                rank = nh // 4
+            rank = max(1, min(rank, nh))
+            self.vha_postmix_rank = rank
+            self.vha_postmix_U = self.create_parameter(
+                shape=[nh, rank],
+                default_initializer=paddle.nn.initializer.Normal(
+                    mean=0.0, std=0.01
+                ),
+            )
+            self.vha_postmix_V = self.create_parameter(
+                shape=[nh, rank],
+                default_initializer=paddle.nn.initializer.Constant(
+                    0.0
+                ),  # identity at init
+            )
+        # Selective recompute for the VHA postmix. Only list configuration is
+        # supported; honours recompute_num_layers + recompute_method
+        # (first_n / block) like the other selective modules.
+        modules = self.config.recompute_modules
+        self.recompute_vha_postmix = False
+        if (
+            self.config.recompute_granularity == "selective"
+            and modules is not None
+        ):
+            if isinstance(modules, dict) and "vha_postmix" in modules:
+                raise ValueError(
+                    "recompute_modules['vha_postmix'] only supports list "
+                    "configuration"
+                )
+            if isinstance(modules, list) and "vha_postmix" in modules:
+                n = self.config.recompute_num_layers
+                if n is None:
+                    self.recompute_vha_postmix = True
+                elif self.config.recompute_method == "block":
+                    self.recompute_vha_postmix = need_recompute_in_block(
+                        self.layer_number, self.config, n
+                    )
+                elif self.config.recompute_method == "first_n":
+                    self.recompute_vha_postmix = need_recompute_in_first_n(
+                        self.layer_number, self.config, n
+                    )
+                else:
+                    raise ValueError(
+                        "recompute_method must be 'first_n' or 'block'"
+                    )
+
+    def _apply_vha_postmix(self, attn_out, U=None, V=None):
+        # attn_out: [b, sq, nh_pp * v_head_dim] (head space, pre-gate / pre output proj).
+        # Fused dense M = I + V @ U^T, then a single [nh,nh] GEMM on the head
+        # axis: rank-independent and faster than the split low-rank form; differs
+        # from the two-matmul path only by bf16 contraction order.
+        if U is None:
+            U = self.vha_postmix_U
+        if V is None:
+            V = self.vha_postmix_V
+        b, sq = attn_out.shape[0], attn_out.shape[1]
+        nh, d = self.num_attention_heads_per_partition, self.v_head_dim
+        mixed = attn_out.reshape([b * sq, nh, d])
+        M = paddle.matmul(V, U, transpose_y=True)  # [nh,r]@[r,nh]->[nh,nh]
+        M = M + paddle.eye(nh, dtype=M.dtype)
+        out = paddle.matmul(M, mixed)  # [nh,nh]@[B,nh,d]->[B,nh,d]
+        return out.reshape([b, sq, nh * d])
 
     def _compute_absorbed_q(self, query):
         """
@@ -717,8 +952,52 @@ class MultiLatentAttention(Attention):
         past_key_values = kwargs.get("past_key_values")
         layer_idx = kwargs.get("layer_idx")
         use_cache = kwargs.get("use_cache", False)
+        is_decode = _is_incremental_decode(
+            past_key_values, layer_idx, use_cache
+        )
 
-        if hasattr(self.core_attention.config, "forward_meta"):  # decode mode
+        # The indexer-loss row mask needs ``input_ids``: the packed sequence's
+        # trailing padding is invisible to ``attn_mask_startend_row_indices``.
+        # Only the non-absorbed-MQA core attention accepts it (and only that one
+        # owns an indexer), so keep the kwarg off every other core attention.
+        core_attn_extra = {}
+        if self.mqa_latent and kwargs.get("input_ids") is not None:
+            core_attn_extra["input_ids"] = kwargs["input_ids"]
+        # Micro-batch slot for the shared document-mask metadata. Decided in
+        # ``TransformerLayer.forward`` (outside every recompute wrapper) and only
+        # read downstream, so it survives both the recompute below and the
+        # layer-level one. It has to be a declared parameter of the core
+        # attention's ``forward``, because ``recompute`` flattens non-empty kwargs
+        # against the callee's signature.
+        if self.mqa_latent and kwargs.get("docmask_mb_idx") is not None:
+            core_attn_extra["docmask_mb_idx"] = kwargs["docmask_mb_idx"]
+
+        if self.mqa_latent:
+            # Query is already absorbed; the core attention only needs the V-side
+            # de-absorption weight.
+            q_absorbed = None
+            if self.mqa_latent_split_kv_b:
+                # Standalone parameter; fold back to the core attention's
+                # grouped-matmul layout [n, v_head_dim, kv_lora_rank]. The
+                # reshape is a zero-copy view of the 2-D parameter.
+                wv_b = self.v_b_proj.reshape(
+                    [
+                        self.num_attention_heads_per_partition,
+                        self.v_head_dim,
+                        self.kv_lora_rank,
+                    ]
+                )
+            else:
+                # View of ``kv_b_proj.weight`` laid out for
+                # ``einsum("bshl,lhv->bshv", out, w_v_b)``.
+                wv_b = self.kv_b_proj.weight.reshape(
+                    [
+                        self.kv_lora_rank,
+                        self.num_attention_heads_per_partition,
+                        -1,
+                    ]
+                )[:, :, self.qk_nope_head_dim :]
+        elif hasattr(self.core_attention.config, "forward_meta"):  # decode mode
             # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
             # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
             # wv_b: [heads, kv_lora_rank, v_head_dim]
@@ -726,7 +1005,12 @@ class MultiLatentAttention(Attention):
         else:
             q_absorbed, wv_b = None, None
 
-        if self.config.enable_hy_sparse_attention and shared_kv is not None:
+        hy_sparse_full = (
+            self.config.enable_hy_sparse_attention and shared_kv is not None
+        )
+        block_indices = None
+
+        if hy_sparse_full and not is_decode:
             if get_context_parallel_world_size() > 1:
                 cp_mode = getattr(
                     self.config, "cp_balance_mode", "dualchunk_allgather"
@@ -748,12 +1032,23 @@ class MultiLatentAttention(Attention):
             # also failing to emit the top-k blocks. Activation recompute for
             # HySparse full layers is handled at the layer level
             # (HySparseTransformerLayer.full_recompute).
+            #
+            # Incremental decode (``is_decode``) skips this branch: the fused
+            # block-score kernels score a whole query row against the keys of
+            # the same forward, which a one-token step cannot provide. Decode
+            # instead runs the generic core_attention path (which maintains the
+            # KV cache) and re-derives the block scores from the cache in
+            # ``_hy_sparse_decode_block_indices`` below.
             core_attn_out, block_indices = self._hy_sparse_full_attention(
                 query,
                 key,
                 value,
                 attn_mask_startend_row_indices,
             )
+            if use_cache and past_key_values is not None:
+                # This branch bypasses core_attention, so the layer's own KV
+                # cache has to be seeded here for the later decode steps.
+                past_key_values.update(key, value, layer_idx)
         elif self.recompute_core_attention and self.training:
             core_attn_out = recompute(
                 self.core_attention,
@@ -768,14 +1063,21 @@ class MultiLatentAttention(Attention):
                 attention_bias=attention_bias,
                 packed_seq_params=packed_seq_params,
                 use_rr_flash_attention=self.use_rr_flash_attention,
-                # DSA-specific parameters
-                x=hidden_states,
+                # DSA-specific parameters. ``recompute`` is a PyLayer, so with a
+                # frozen backbone (``train_indexer_only``) every input here would
+                # be detached, the segment output would inherit that, and the
+                # indexer loss attached *inside* the segment would silently never
+                # get a backward pass. This is the third segment that can hold an
+                # indexer, next to the layer-level one (transformer_layer.py) and
+                # ``DSv4HybridAttention``'s ``full_attn`` one.
+                x=keep_indexer_grad_path(hidden_states, self.config),
                 qr=q_compressed,
                 # fastdeploy support
                 kv_compressed=kv_compressed,
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
+                **core_attn_extra,
             )
         else:
             # Static batching attention kernel.
@@ -801,6 +1103,7 @@ class MultiLatentAttention(Attention):
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
+                **core_attn_extra,
             )
 
         if self.recompute_qkv_up_porj_and_rope and self.training:
@@ -812,14 +1115,29 @@ class MultiLatentAttention(Attention):
 
         _log(core_attn_out, "core_attn_out", layer_num)
 
-        if self.config.enable_hy_sparse_attention and shared_kv is not None:
+        if hy_sparse_full:
             # Compressed KV latent shared with block-sparse attention in SWA
             # layers (single MQA head): [B, S, 1, kv_lora_rank + qk_rope_head_dim].
             shared_key = paddle.concat(
                 [kv_compressed.unsqueeze(2), k_pos_emb], axis=-1
             )
+            if use_cache and past_key_values is not None:
+                # Inference: accumulate across decode steps and hand the SWA
+                # layers the whole history instead of the current token only.
+                shared_key = past_key_values.update_shared(
+                    shared_key, layer_idx
+                )
+            if is_decode:
+                # The decode attention kernel carries no block-scoring epilogue,
+                # so score the single new query row against the cached keys
+                # here. This keeps the SWA layers' sparse branch -- and hence
+                # the model's output -- the same as a cache-less forward.
+                block_indices = self._hy_sparse_decode_block_indices(
+                    query, past_key_values, layer_idx
+                )
             shared_kv.append(shared_key)
-            # block_indices produced by the MHA block-score path above.
+            # block_indices from the prefill block-score kernel above, or from
+            # the decode-time scoring pass.
             shared_kv.append(block_indices)
 
         # =================
@@ -827,6 +1145,21 @@ class MultiLatentAttention(Attention):
         # =================
         if self.config.sequence_parallel:
             core_attn_out = core_attn_out.transpose([1, 0, 2]).contiguous()
+
+        # VHA postmix: low-rank cross-head mixing in head space, before the gate
+        # (mix-then-gate). Skip the nested selective recompute when already
+        # inside a layer-level recompute.
+        if self.use_vha_postmix:
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                core_attn_out = recompute(
+                    self._apply_vha_postmix, core_attn_out
+                )
+            else:
+                core_attn_out = self._apply_vha_postmix(core_attn_out)
 
         # Apply gated attention
         if self.gated_attention:
@@ -1027,6 +1360,59 @@ class MultiLatentAttention(Attention):
         core_attn_out = out.reshape([b, q_s, h * _dv])
         return core_attn_out, block_indices
 
+    def _hy_sparse_decode_block_indices(
+        self, query, past_key_values, layer_idx
+    ):
+        """Select top-k key blocks for one incremental-decode query token.
+
+        Prefill gets the block scores for free from the fused block-score kernel
+        (:meth:`_hy_sparse_full_attention`); the decode kernel has no such
+        epilogue, so the scoring row is recomputed from this layer's cached keys.
+        Without it the downstream SWA layers would have to drop their
+        block-sparse branch and quietly stop matching a cache-less forward.
+
+        Args:
+            query: [B, 1, H, Dk] this step's query (post-RoPE, decompressed).
+            past_key_values: cache exposing ``get_layer_kv``.
+            layer_idx: this layer's cache slot.
+
+        Returns:
+            [B, 1, topk] int32 document-relative block ids (-1 padding).
+        """
+        from paddlefleet.tilelang_ops.hysparse import (
+            decode_block_logit,
+            select_topk_blocks,
+        )
+
+        cached_key, _ = past_key_values.get_layer_kv(layer_idx)
+        kv_len = cached_key.shape[1]
+        block_B = self.config.hy_sparse_block_size
+        # Generation feeds one document per batch row, so the block grid is
+        # anchored at column 0 -- the same document layout the prefill
+        # valid_range describes (``attn_mask_startend_row_indices`` filled with
+        # the prompt length).
+        valid_range = paddle.concat(
+            [
+                paddle.zeros([query.shape[0], 1, 1], dtype="int32"),
+                paddle.full([query.shape[0], 1, 1], kv_len, dtype="int32"),
+            ],
+            axis=-1,
+        )
+        block_logit, lse = decode_block_logit(
+            query,
+            cached_key,
+            valid_range,
+            sm_scale=self.softmax_scale,
+            block_B=block_B,
+        )
+        return select_topk_blocks(
+            block_logit,
+            lse,
+            valid_range,
+            self.config.hy_sparse_topk,
+            block_B,
+        )
+
 
 class MLASelfAttention(MultiLatentAttention):
     """MLA Self-attention layer class
@@ -1119,34 +1505,90 @@ class MLASelfAttention(MultiLatentAttention):
             tp_group=pg_collection.tp,
         )
 
-        self.kv_b_proj = build_spec_layer(
-            sublayers_spec.kv_b_proj,
-            kv_lora_rank,
-            self.num_attention_heads
-            * (self.qk_nope_head_dim + self.v_head_dim),
-            config=self.config,
-            init_method=self.config.init_method,
-            gather_output=False,
-            bias=False,
-            skip_bias_add=False,
-            is_expert=False,
-            tp_comm_buffer_name="kv_b_proj",
-            tp_group=pg_collection.tp,
+        # In split mode ``k_b_proj`` / ``v_b_proj`` below *replace* this
+        # projection: together they hold exactly its elements, nothing in the
+        # forward reads it, and it would never receive a gradient. Building it
+        # anyway would double both the resident parameter bytes and the
+        # checkpoint size for this projection, so it is not built at all.
+        self.kv_b_proj = (
+            None
+            if self.mqa_latent_split_kv_b
+            else build_spec_layer(
+                sublayers_spec.kv_b_proj,
+                kv_lora_rank,
+                self.num_attention_heads
+                * (self.qk_nope_head_dim + self.v_head_dim),
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="kv_b_proj",
+                tp_group=pg_collection.tp,
+            )
         )
+
+        qk_norm_eps = getattr(self.config, "qk_norm_eps", None)
+        if qk_norm_eps is None:
+            qk_norm_eps = self.config.rms_norm_eps
+
+        if self.mqa_latent_split_kv_b:
+            # K absorption half of ``kv_b_proj``, which this mode replaces.
+            # Logically [heads, kv_lora_rank, qk_nope_head_dim] --
+            # ``fused_grouped_matmul``'s ``[G, R, D]`` contract, which lets the
+            # kernel walk the head dim through strides -- but *stored* with the
+            # leading two dims folded so the parameter itself is 2-D.
+            #
+            # The fold is what the checkpoint needs: AOA statements have only
+            # split / concat / permute and no reshape primitive
+            # (``flex_checkpoint/aoa/aoa_engine.py:519``), so a conversion from
+            # an unsplit ``kv_b_proj.weight`` cannot produce a 3-D tensor.
+            # Exposing a reshaped *view* from ``sharded_state_dict`` instead is
+            # not safe: DCP reshapes the ``ShardedWeight.local_tensor`` in place
+            # (``reshape_`` /``flatten_`` at
+            # ``dcp/load_state_dict.py:557,741,998``), which on a view that
+            # aliases the parameter corrupts the parameter's own shape.
+            #
+            # The 3-D form is recovered per forward with a zero-copy reshape.
+            # TP is forced to 1 in this mode, so ``num_attention_heads_per_partition``
+            # is the full head count and the parameter needs no TP attributes.
+            params_dtype = self.config.params_dtype
+            self.k_b_proj = self.create_parameter(
+                shape=[
+                    self.num_attention_heads_per_partition * kv_lora_rank,
+                    self.qk_nope_head_dim,
+                ],
+                dtype=params_dtype,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+            self.config.init_method(self.k_b_proj)
+
+            # V de-absorption half, same contract and same fold: logically
+            # [heads, v_head_dim, kv_lora_rank], stored as 2-D.
+            self.v_b_proj = self.create_parameter(
+                shape=[
+                    self.num_attention_heads_per_partition * self.v_head_dim,
+                    kv_lora_rank,
+                ],
+                dtype=params_dtype,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+            self.config.init_method(self.v_b_proj)
 
         if q_lora_rank is not None:
             self.q_a_layernorm = build_spec_layer(
                 sublayers_spec.q_a_layernorm,
                 hidden_size=q_lora_rank,
                 config=self.config,
-                eps=self.config.rms_norm_eps,
+                eps=qk_norm_eps,
             )
 
         self.kv_a_layernorm = build_spec_layer(
             sublayers_spec.kv_a_layernorm,
             hidden_size=kv_lora_rank,
             config=self.config,
-            eps=self.config.rms_norm_eps,
+            eps=qk_norm_eps,
         )
 
     def muon_slice_specs(self, muon_configs):
@@ -1174,12 +1616,50 @@ class MLASelfAttention(MultiLatentAttention):
             ortho_per_head,
             {"head_sizes": [kv_lora, qk_rope]},
         )
-        specs["kv_b_proj.weight"] = (
-            ortho_per_head,
-            {"heads": num_heads, "head_sizes": [qk_nope, self.v_head_dim]},
-        )
+        if self.mqa_latent_split_kv_b:
+            # ``kv_b_proj`` is split into the standalone ``k_b_proj`` /
+            # ``v_b_proj`` absorption parameters, so the per-head blocks Muon
+            # must orthogonalise moved with them. Both are 2-D with the head dim
+            # folded into the leading axis, so a head is one equal block along
+            # ``axis=-2`` (``-2`` rather than ``0`` so a 3-D input -- Muon
+            # batching several same-shape parameters -- still splits the head
+            # axis and not the batch axis):
+            #   k_b_proj -> [kv_lora_rank, qk_nope_head_dim] per head, the same
+            #               block as the K half of the unsplit weight
+            #   v_b_proj -> [v_head_dim, kv_lora_rank] per head, i.e. the
+            #               transpose of the V half
+            # The V side is therefore orthogonalised in its transpose, which
+            # puts the block back in the unsplit weight's orientation before
+            # Muon sees it. Newton-Schulz alone would not care (it transposes
+            # any block with rows > cols and back), but ``_scaling_fn`` does:
+            # only ``muon_version=3``'s ``max(dout, din) ** 0.5`` is symmetric
+            # in the two dims, while versions 1/2 scale with ``dout / din`` and
+            # would apply the reciprocal ratio to a transposed block.
+            specs["k_b_proj"] = (
+                ortho_per_head,
+                {"heads": num_heads, "axis": -2},
+            )
+            specs["v_b_proj"] = (
+                ortho_per_head,
+                {"heads": num_heads, "axis": -2, "transposed": True},
+            )
+            # ``kv_b_proj`` gets no gradient in this mode -- orthogonalising it
+            # would only burn a per-head Newton-Schulz every step.
+        else:
+            specs["kv_b_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_heads, "head_sizes": [qk_nope, self.v_head_dim]},
+            )
         if getattr(self, "gate_proj", None) is not None:
             specs["gate_proj.weight"] = (ortho_per_head, {"heads": num_heads})
+        # MQA (subclass) runs a second gated branch for block-sparse attention.
+        # sparse_gate_proj is built from gate_proj's in/out sizes, so it shares
+        # the head-major column layout and needs the same per-head slicing.
+        if getattr(self, "sparse_gate_proj", None) is not None:
+            specs["sparse_gate_proj.weight"] = (
+                ortho_per_head,
+                {"heads": num_heads},
+            )
         return specs
 
     def _is_cudagraph_active(self) -> bool:
@@ -1220,46 +1700,48 @@ class MLASelfAttention(MultiLatentAttention):
         mscale = 1.0
         rotary_pos_cos = None
         rotary_pos_sin = None
+        rotary_pos_emb = None
         packed_seq = (
             packed_seq_params is not None
             and packed_seq_params.qkv_format == "thd"
         )
-        if self.config.rope_type == "rope":
-            rotary_pos_emb = self.rotary_pos_emb(
-                rotary_seq_len,
-                packed_seq=packed_seq,
-                position_ids=None if self.training else position_ids,
-            )
-        else:
-            if self.config.apply_rope_fusion:
-                rotary_pos_cos, rotary_pos_sin = (
-                    self.rotary_pos_emb.get_cached_cos_sin(
-                        rotary_seq_len,
-                        dtype=hidden_states.dtype,
-                        packed_seq=packed_seq,
-                    )
-                )
-                rotary_pos_emb = None
-                from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
-                    fused_apply_mla_rope_for_kv,
-                    fused_apply_mla_rope_for_q,
-                )
-
-                assert (
-                    fused_apply_mla_rope_for_q is not None
-                    and fused_apply_mla_rope_for_kv is not None
-                ), "Fused MLA RoPE apply is not imported successfully"
-            else:
-                rotary_pos_emb, mscale = self.rotary_pos_emb(
+        if not getattr(self.config, "mla_use_nope", False):
+            if self.config.rope_type == "rope":
+                rotary_pos_emb = self.rotary_pos_emb(
                     rotary_seq_len,
                     packed_seq=packed_seq,
                     position_ids=None if self.training else position_ids,
                 )
-                # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
-                # mscale = 1.0
+            else:
+                if bool(self.config.apply_rope_fusion) and not self.mqa_latent:
+                    rotary_pos_cos, rotary_pos_sin = (
+                        self.rotary_pos_emb.get_cached_cos_sin(
+                            rotary_seq_len,
+                            dtype=hidden_states.dtype,
+                            packed_seq=packed_seq,
+                        )
+                    )
+                    rotary_pos_emb = None
+                    from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
+                        fused_apply_mla_rope_for_kv,
+                        fused_apply_mla_rope_for_q,
+                    )
+
+                    assert (
+                        fused_apply_mla_rope_for_q is not None
+                        and fused_apply_mla_rope_for_kv is not None
+                    ), "Fused MLA RoPE apply is not imported successfully"
+                else:
+                    rotary_pos_emb, mscale = self.rotary_pos_emb(
+                        rotary_seq_len,
+                        packed_seq=packed_seq,
+                        position_ids=None if self.training else position_ids,
+                    )
+                    # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
+                    # mscale = 1.0
 
         cp_size = get_context_parallel_world_size()
-        if cp_size > 1:
+        if cp_size > 1 and not getattr(self.config, "mla_use_nope", False):
             # Keep RoPE inputs local to the current CP rank before the fused
             # and non-fused apply paths consume them.
             if packed_seq_params is not None:
@@ -1452,18 +1934,23 @@ class MLASelfAttention(MultiLatentAttention):
             )
 
             # kv: [num_tokens, n * (qk_nope_head_dim + v_head_dim)]
-            kv, _ = self.kv_b_proj(kv_compressed)
+            # Absorbed MQA never materialises the per-head K/V: ``kv_b_proj`` is
+            # folded into q (K side) and into the attention output (V side).
+            if self.mqa_latent:
+                kv = None
+            else:
+                kv, _ = self.kv_b_proj(kv_compressed)
 
-            # Debug: print kv shape
-            # if self.layer_number == 0:
-            #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after kv_b_proj: {kv.shape}", flush=True)
+                # Debug: print kv shape
+                # if self.layer_number == 0:
+                #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after kv_b_proj: {kv.shape}", flush=True)
 
-            # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
-            kv = kv.view(
-                *kv.size()[:-1],
-                self.num_attention_heads_per_partition,
-                self.qk_nope_head_dim + self.v_head_dim,
-            )
+                # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
+                kv = kv.view(
+                    *kv.size()[:-1],
+                    self.num_attention_heads_per_partition,
+                    self.qk_nope_head_dim + self.v_head_dim,
+                )
 
             # if self.layer_number == 0:
             #     print(f"[DEBUG MLA layer {self.layer_number}] kv shape after view: {kv.shape}", flush=True)
@@ -1471,7 +1958,23 @@ class MLASelfAttention(MultiLatentAttention):
             # [num_tokens, qk_rope_head_dim] -> [num_tokens, 1, qk_rope_head_dim]
             k_pos_emb = paddle.unsqueeze(k_pos_emb, -2)
 
-            if self.config.apply_rope_fusion:
+            if getattr(self.config, "mla_use_nope", False):
+                q_no_pe = q[..., : self.qk_nope_head_dim]
+                q_pos_emb = q[..., self.qk_nope_head_dim :]
+                k_no_pe, value = paddle.split(
+                    kv,
+                    [self.qk_nope_head_dim, self.v_head_dim],
+                    axis=-1,
+                )
+                k_pe = k_pos_emb
+                query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
+                k_pos_emb = k_pos_emb.expand(
+                    *k_pos_emb.shape[:-2],
+                    self.num_attention_heads_per_partition,
+                    k_pos_emb.shape[-1],
+                )
+                key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
+            elif bool(self.config.apply_rope_fusion) and not self.mqa_latent:
                 from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,
@@ -1616,11 +2119,14 @@ class MLASelfAttention(MultiLatentAttention):
 
                 # k_no_pe: [num_tokens, n, qk_nope_head_dim]
                 # value: [num_tokens, n, v_head_dim]
-                k_no_pe, value = paddle.split(
-                    kv,
-                    [self.qk_nope_head_dim, self.v_head_dim],
-                    axis=-1,
-                )
+                if self.mqa_latent:
+                    k_no_pe, value = None, None
+                else:
+                    k_no_pe, value = paddle.split(
+                        kv,
+                        [self.qk_nope_head_dim, self.v_head_dim],
+                        axis=-1,
+                    )
 
                 # When sequence_parallel is enabled and not packed,
                 # q/k are seq-first [s, b, n, d] but rotary_pos_emb is
@@ -1629,6 +2135,7 @@ class MLASelfAttention(MultiLatentAttention):
                 if self.config.sequence_parallel and rotary_pos_emb.ndim == 4:
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
+                k_rope_fused_with_cat = False
                 if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
@@ -1649,6 +2156,98 @@ class MLASelfAttention(MultiLatentAttention):
                     )
                     _log(q_pos_emb, "mla_q_pe_after_rope", self.layer_number)
                     _log(k_pos_emb, "mla_k_pe_after_rope", self.layer_number)
+                elif (
+                    getattr(self.config, "mqa_latent_rope_fusion", False)
+                    # Only the absorbed-MQA layers, and this one does gate rather
+                    # than assert: an unabsorbed MLA layer is a legitimate
+                    # configuration that has its own fused path via
+                    # ``apply_rope_fusion``, so it belongs on the eager branch
+                    # here, not in an error. Absorbed layers are the ones that
+                    # path cannot serve, because ``fused_apply_mla_rope_for_kv``
+                    # needs the per-head K/V that absorption never materialises
+                    # (:1895), which is why this kernel exists.
+                    and self.mqa_latent
+                ):
+                    # Fused rotate_half path, bit-exact with the eager branch
+                    # below (which it mirrors exactly: rotate_half, no
+                    # de-interleaving, no inverse, mscale folded into cos/sin).
+                    #
+                    # Anything that would make that branch compute a different
+                    # rotation must stop the run, not silently feed the kernel a
+                    # layout it does not implement. These are production
+                    # forward-time checks on user config / input, so they raise
+                    # ValueError explicitly rather than assert: ``python -O``
+                    # strips ``assert`` and would let the wrong layout reach
+                    # ``fused_apply_rope_half`` and silently corrupt results.
+                    # Matches the shape guards elsewhere in this file.
+                    if self.config.multi_latent_attention:
+                        raise ValueError(
+                            "mqa_latent_rope_fusion does not implement the "
+                            "multi_latent_attention de-interleave (0::2 / 1::2)"
+                        )
+                    if self.config.rotary_interleaved:
+                        raise ValueError(
+                            "mqa_latent_rope_fusion pairs the two halves of the "
+                            "rope block, not alternating channels"
+                        )
+                    if getattr(self.config, "high_precision_rope", False):
+                        raise ValueError(
+                            "high_precision_rope for mqa_latent_rope_fusion is "
+                            "not supported yet"
+                        )
+                    if self.config.sequence_parallel:
+                        raise ValueError(
+                            "sequence_parallel for mqa_latent_rope_fusion is not "
+                            "supported yet: k_pos_emb needs the per-rank freqs "
+                            "slice that apply_rotary_pos_emb does internally via "
+                            "sp_group (rope_utils.py:221)"
+                        )
+                    if rotary_pos_emb is None:  # pragma: no cover
+                        # Unreachable in practice: for a latent-MQA layer
+                        # rotary_pos_emb is always a real tensor (the ``= None``
+                        # at :1509 is gated on ``not mqa_latent``), and :1874
+                        # already dereferences ``rotary_pos_emb.shape`` above.
+                        # Kept as a defensive guard so a future caller that
+                        # wires the cached cos/sin path in here fails loudly
+                        # rather than feeding the kernel a missing angle tensor;
+                        # excluded from coverage because it cannot fire.
+                        raise ValueError(
+                            "mqa_latent_rope_fusion needs the angle tensor, but "
+                            "the caller prepared cached cos/sin instead"
+                        )
+                    if (  # pragma: no cover
+                        cu_seqlens_q is not None or cu_seqlens_kv is not None
+                    ):
+                        # Unreachable in practice: cu_seqlens_q/kv are only set
+                        # from packed_seq_params (:1576), but packed_seq_params
+                        # is refused earlier at :1850. Kept as a defensive guard
+                        # so a future caller wiring thd in here fails loudly
+                        # instead of feeding an unimplemented layout to the
+                        # kernel; excluded from coverage because it cannot fire.
+                        raise ValueError(
+                            "thd for mqa_latent_rope_fusion is not supported yet"
+                        )
+
+                    # Neither call works in place. This closure is replayed by
+                    # ``recompute_qkv_up_porj_and_rope`` and ``k_pos_emb`` is one
+                    # of its arguments, created outside, so an in-place rotation
+                    # would be applied a second time on replay. ``q`` is created
+                    # inside (:1710) and would survive that, but relying on where
+                    # a line happens to sit is not a property worth depending on.
+                    #
+                    # ``q_no_pe`` feeds the absorption GEMM unrotated, so only
+                    # the pe view is rotated: one pe-sized read and write.
+                    from paddlefleet.triton_ops import fused_apply_rope_half
+
+                    q_pos_emb = fused_apply_rope_half(
+                        q_pos_emb,
+                        rotary_pos_emb,
+                        self.qk_rope_head_dim,
+                        mscale,
+                    )
+                    # Defer k's rope to ``fused_rope_cat_key`` below, which
+                    # rotates and concatenates in one pass.
+                    k_rope_fused_with_cat = True
                 else:
                     # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
                     q_pos_emb = apply_rotary_pos_emb(
@@ -1660,6 +2259,8 @@ class MLASelfAttention(MultiLatentAttention):
                         cu_seqlens=cu_seqlens_q,
                         mscale=mscale,
                         cp_group=self.pg_collection.cp,
+                        apply_rope_fusion=bool(self.config.apply_rope_fusion)
+                        and not self.mqa_latent,
                     )
                     # k_pos_emb:[num_tokens, 1, qk_rope_head_dim]
                     k_pos_emb = apply_rotary_pos_emb(
@@ -1674,30 +2275,107 @@ class MLASelfAttention(MultiLatentAttention):
                         sp_group=self.pg_collection.tp
                         if self.config.sequence_parallel
                         else None,
+                        apply_rope_fusion=bool(self.config.apply_rope_fusion)
+                        and not self.mqa_latent,
                     )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
                 k_pe = k_pos_emb
-                query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
+                if self.mqa_latent:
+                    # Runtime absorption.  ``kv_b_proj.weight`` is
+                    # [kv_lora_rank, n * (qk_nope_head_dim + v_head_dim)]; its
+                    # leading qk_nope_head_dim slice per head is W_k_b.  Because
+                    #     q_nope . k_nope == (q_nope W_k_b) . kv_compressed
+                    # the absorbed scores equal the MHA scores exactly, so the
+                    # softmax scale must stay the MHA one (mscale^2/sqrt(256)),
+                    # NOT 1/sqrt(576).
+                    # ``getattr``: this closure also runs against the
+                    # lightweight namespace the RoPE-fusion tests build in place
+                    # of a real layer, which carries only the fields it touches.
+                    if getattr(self, "mqa_latent_split_kv_b", False):
+                        # ``k_b_proj`` holds W_k_b as the grouped-matmul weight
+                        # [n, kv_lora_rank, qk_nope_head_dim], stored 2-D; the
+                        # reshape is a zero-copy view. The Triton kernel walks
+                        # q_no_pe's head dim through strides, so there is no
+                        # slice, no einsum and no transpose here.
+                        from paddlefleet.triton_ops import (
+                            fused_grouped_matmul,
+                        )
 
-                # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
-                if k_pos_emb.ndim == 4:
-                    k_pos_emb = k_pos_emb.expand(
-                        -1, -1, self.num_attention_heads_per_partition, -1
+                        # [num_tokens, n, kv_lora_rank]
+                        q_no_pe_absorbed = fused_grouped_matmul(
+                            q_no_pe,
+                            self.k_b_proj.reshape(
+                                [
+                                    self.num_attention_heads_per_partition,
+                                    self.kv_lora_rank,
+                                    self.qk_nope_head_dim,
+                                ]
+                            ),
+                        )
+                    else:
+                        w_k_b = self.kv_b_proj.weight.reshape(
+                            [
+                                self.kv_lora_rank,
+                                self.num_attention_heads_per_partition,
+                                -1,
+                            ]
+                        )[:, :, : self.qk_nope_head_dim]
+                        q_no_pe_absorbed = paddle.einsum(
+                            "bshd,lhd->bshl", q_no_pe, w_k_b
+                        )
+                    # query: [num_tokens, n, kv_lora_rank + qk_rope_head_dim]
+                    query = paddle.cat(
+                        [q_no_pe_absorbed, q_pos_emb],
+                        axis=-1,
                     )
+                    # key: [num_tokens, 1, kv_lora_rank + qk_rope_head_dim].
+                    # Its leading kv_lora_rank channels are the (absorbed) value.
+                    if k_rope_fused_with_cat:
+                        from paddlefleet.triton_ops import fused_rope_cat_key
+
+                        # The kernel hands back both of the things the eager
+                        # snippet produced: the concatenated key and the rotated
+                        # pe on its own. Taking the latter as a slice of the
+                        # former instead would be a non-contiguous read plus a
+                        # copy, and a non-contiguous return value is rejected by
+                        # ``RecomputeWithoutOutput(share_grad_holder=True)``
+                        # below, which calls ``share_buffer_to`` on each of them.
+                        key, k_pe = fused_rope_cat_key(
+                            kv_compressed,
+                            k_pos_emb,
+                            rotary_pos_emb,
+                            self.kv_lora_rank,
+                            self.qk_rope_head_dim,
+                            mscale,
+                        )
+                    else:
+                        key = paddle.cat(
+                            [kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1
+                        )
+                    value = None
                 else:
-                    assert k_pos_emb.ndim == 3
-                    k_pos_emb = k_pos_emb.expand(
-                        -1, self.num_attention_heads_per_partition, -1
-                    )
-                key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
+                    query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
+
+                    # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
+                    if k_pos_emb.ndim == 4:
+                        k_pos_emb = k_pos_emb.expand(
+                            -1, -1, self.num_attention_heads_per_partition, -1
+                        )
+                    else:
+                        assert k_pos_emb.ndim == 3
+                        k_pos_emb = k_pos_emb.expand(
+                            -1, self.num_attention_heads_per_partition, -1
+                        )
+                    key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
 
             # if self.layer_number == 0:
             #     print(f"[DEBUG MLA layer {self.layer_number}] key final shape: {key.shape}, head_dim={key.shape[-1]}", flush=True)
 
             query = query.contiguous()
             key = key.contiguous()
-            value = value.contiguous()
+            if value is not None:
+                value = value.contiguous()
 
             return query, key, value, k_pe
 
@@ -1737,7 +2415,10 @@ class MLASelfAttention(MultiLatentAttention):
 
     def _backward_kv_proj(self):
         """Computes weight gradients of KV projection layers"""
-        self.kv_b_proj.backward_dw()
+        # ``kv_b_proj`` does not exist in the split-absorption mode; the two
+        # parameters that replace it are plain tensors with no delayed dw pass.
+        if self.kv_b_proj is not None:
+            self.kv_b_proj.backward_dw()
         self.kv_a_proj_with_mqa.backward_dw()
 
     def _backward_q_proj(self):
@@ -1852,6 +2533,24 @@ class MQASelfAttention(MLASelfAttention):
                 self.swa_attn_sink = None
                 self.sparse_attn_sink = None
 
+            # VHA postmix for the block-sparse branch. The MQA path has two
+            # independent gated branches (sliding-window main + block-sparse),
+            # so each gets its own postmix params: the base vha_postmix_U/V
+            # serve the main branch, this set serves the sparse branch.
+            if self.use_vha_postmix:
+                nh = self.num_attention_heads_per_partition  # TP==1 for MQA
+                rank = self.vha_postmix_rank
+                self.sparse_vha_postmix_U = self.create_parameter(
+                    shape=[nh, rank],
+                    default_initializer=paddle.nn.initializer.Normal(
+                        mean=0.0, std=0.01
+                    ),
+                )
+                self.sparse_vha_postmix_V = self.create_parameter(
+                    shape=[nh, rank],
+                    default_initializer=paddle.nn.initializer.Constant(0.0),
+                )
+
     def forward(
         self,
         hidden_states,
@@ -1898,6 +2597,15 @@ class MQASelfAttention(MLASelfAttention):
                 **kwargs,
             )
 
+        # Inference (native KV cache path) state. ``is_decode`` is False during
+        # training and during the prefill pass.
+        past_key_values = kwargs.get("past_key_values")
+        layer_idx = kwargs.get("layer_idx")
+        use_cache = kwargs.get("use_cache", False)
+        is_decode = _is_incremental_decode(
+            past_key_values, layer_idx, use_cache
+        )
+
         # =====================
         # Query, Key, and Value
         # =====================
@@ -1940,7 +2648,6 @@ class MQASelfAttention(MLASelfAttention):
         )
 
         b, s = query.shape[0], query.shape[1]
-        kv_s = key.shape[1]
         block_B = self.config.hy_sparse_block_size
         sm_scale = self.softmax_scale
         window_size = self.config.sliding_window[0]
@@ -1951,25 +2658,58 @@ class MQASelfAttention(MLASelfAttention):
         shared_k = key.squeeze(2).contiguous()
         shared_v = value.squeeze(2).contiguous()
 
-        # Windowed valid_range for the sliding-window main path; document-anchored
-        # valid_range (no window clamp) for the block-sparse branch so its blocks
-        # match the full layer's block scoring / selected indices.
-        window_valid_range = build_hysparse_valid_range(
-            attn_mask_startend_row_indices, kv_s, b, window_size=window_size
-        )
-        doc_valid_range = build_hysparse_valid_range(
-            attn_mask_startend_row_indices, kv_s, b
-        )
-        if get_context_parallel_world_size() > 1:
-            cp_mode = getattr(
-                self.config, "cp_balance_mode", "dualchunk_allgather"
+        if use_cache and past_key_values is not None:
+            # Own (absorbed) KV cache. DynamicKVCache truncates SWA layers to
+            # window_size after every update, so the returned history holds at
+            # most window_size + 1 tokens during decode.
+            shared_k, shared_v = past_key_values.update(
+                shared_k, shared_v, layer_idx
             )
-            window_valid_range = ContextParallelScatterOp.apply(
-                window_valid_range, 1, cp_mode
+        kv_s = shared_k.shape[1]
+
+        if is_decode:
+            if s != 1:
+                raise ValueError(
+                    "HySparse MQA decode expects a single query token, got "
+                    f"seq_len={s}. Chunked prefill is not supported."
+                )
+            # The cache holds the most recent ``kv_s`` tokens and the query is
+            # the last of them, so the sliding window is the trailing
+            # ``window_size`` columns in cache-local coordinates.
+            bos = max(0, kv_s - window_size)
+            window_valid_range = paddle.concat(
+                [
+                    paddle.full([b, 1, 1], bos, dtype="int32"),
+                    paddle.full([b, 1, 1], kv_s, dtype="int32"),
+                ],
+                axis=-1,
             )
-            doc_valid_range = ContextParallelScatterOp.apply(
-                doc_valid_range, 1, cp_mode
+            # The block-sparse branch runs against the (untruncated) shared
+            # latent, so its range is built from that length further below.
+        else:
+            # Windowed valid_range for the sliding-window main path;
+            # document-anchored valid_range (no window clamp) for the
+            # block-sparse branch so its blocks match the full layer's block
+            # scoring / selected indices.
+            window_valid_range = build_hysparse_valid_range(
+                attn_mask_startend_row_indices,
+                kv_s,
+                b,
+                window_size=window_size,
             )
+            doc_valid_range = build_hysparse_valid_range(
+                attn_mask_startend_row_indices, kv_s, b
+            )
+            if get_context_parallel_world_size() > 1:
+                cp_mode = getattr(
+                    self.config, "cp_balance_mode", "dualchunk_allgather"
+                )
+                window_valid_range = ContextParallelScatterOp.apply(
+                    window_valid_range, 1, cp_mode
+                )
+                doc_valid_range = ContextParallelScatterOp.apply(
+                    doc_valid_range, 1, cp_mode
+                )
 
         # Sliding-window main path over the absorbed MQA dimensions.
         core_attn_out, _ = sliding_window_mqa_attention(
@@ -2017,11 +2757,43 @@ class MQASelfAttention(MLASelfAttention):
 
         core_attn_out = compute_absorbed_v(core_attn_out)
 
+        # VHA postmix (main branch): mix in head space before the gate.
+        if self.use_vha_postmix:
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                core_attn_out = recompute(
+                    self._apply_vha_postmix, core_attn_out
+                )
+            else:
+                core_attn_out = self._apply_vha_postmix(core_attn_out)
+
         # =================
         # Sparse attention computation
         # =================
-
         shared_key, shared_block_indices = shared_kv
+        if shared_block_indices is None:
+            raise ValueError(
+                "HySparse MQA layer "
+                f"(layer_number={getattr(self, 'layer_number', -1)}) needs "
+                "top-k block indices from its full-attention layer, but none "
+                "were provided."
+            )
+        if is_decode:
+            # The shared latent is never window-truncated, so its length is the
+            # whole KV history; the decode query's document range covers all of
+            # it (generation runs one document per batch row).
+            if get_context_parallel_world_size() != 1:
+                raise ValueError("doc_valid_range is not built for CP > 1")
+            doc_valid_range = paddle.concat(
+                [
+                    paddle.zeros([b, 1, 1], dtype="int32"),
+                    paddle.full([b, 1, 1], shared_key.shape[1], dtype="int32"),
+                ],
+                axis=-1,
+            )
         if get_context_parallel_world_size() > 1:
             cp_mode = getattr(
                 self.config, "cp_balance_mode", "dualchunk_allgather"
@@ -2064,8 +2836,8 @@ class MQASelfAttention(MLASelfAttention):
             if not is_dsa_available():
                 raise RuntimeError(
                     "HySparse block-sparse attention requires the DSA backend "
-                    "(FlashMLA sparse fwd + cuDNN DSA bwd), unavailable here: it "
-                    "needs SM100 + FlashMLA + the cuDNN frontend."
+                    "(FlashMLA sparse fwd + cuDNN DSA bwd), unavailable here: "
+                    "it needs SM100 + FlashMLA + the cuDNN frontend."
                 )
             sparse_core_attn_out, _ = block_sparse_mqa_attention_dsa(
                 query,
@@ -2087,6 +2859,22 @@ class MQASelfAttention(MLASelfAttention):
         )
 
         sparse_core_attn_out = compute_absorbed_v(sparse_core_attn_out)
+
+        # VHA postmix (sparse branch): own param set, mix before the sparse gate.
+        if self.use_vha_postmix:
+            U, V = self.sparse_vha_postmix_U, self.sparse_vha_postmix_V
+            if (
+                self.recompute_vha_postmix
+                and self.training
+                and not in_recompute
+            ):
+                sparse_core_attn_out = recompute(
+                    self._apply_vha_postmix, sparse_core_attn_out, U, V
+                )
+            else:
+                sparse_core_attn_out = self._apply_vha_postmix(
+                    sparse_core_attn_out, U, V
+                )
 
         # =================
         # Output. [b, sq, h]

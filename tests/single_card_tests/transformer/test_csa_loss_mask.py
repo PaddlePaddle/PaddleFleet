@@ -49,21 +49,19 @@ class TestComputeTileLangLossMask(unittest.TestCase):
         _skip_no_cuda(self)
         paddle.set_device("gpu")
 
-    @patch("paddlefleet.tilelang_ops.csa_indexer_topk_fwd")
     @patch("paddlefleet.tilelang_ops.csa_attn_target_reducesum")
-    def test_loss_mask_reduces_loss(self, mock_target, mock_topk):
-        """Call _compute_fused_csa_indexer_loss_forward with loss_mask."""
+    def test_loss_mask_reduces_loss(self, mock_target):
+        """Call _compute_fused_indexer_target with loss_mask."""
         from paddlefleet.transformer.csa_attention import (
-            _compute_fused_csa_indexer_loss_forward,
+            CompressedSparseAttention as CSA,
+            DSAIndexerLossLoggingHelper as Logging,
         )
 
         b, sq, topk, d = 2, 8, 4, 16
-        # Mock topk_fwd to return indices and probs
         topk_indices = paddle.randint(0, 2, [b, sq, topk]).cast("int64")
         topk_probs = paddle.nn.functional.softmax(
             paddle.randn([b, sq, topk], dtype="float32"), axis=-1
         )
-        mock_topk.return_value = (topk_indices, topk_probs)
 
         # Mock target computation
         target = paddle.nn.functional.softmax(
@@ -82,32 +80,35 @@ class TestComputeTileLangLossMask(unittest.TestCase):
         loss_mask[:, sq // 2 :] = 0.0
         global_valid_count = max(float(loss_mask.sum()), 1.0)
 
-        loss_with, _, _, _ = _compute_fused_csa_indexer_loss_forward(
-            index_q,
-            weights,
-            index_k,
-            query_mla,
-            key_mla,
-            valid_range,
-            4,
-            topk,
-            0.125,
-            1.0,
-            loss_mask=loss_mask,
-            global_valid_count=global_valid_count,
+        ctx = MagicMock(
+            indexer_backend="tilelang",
+            indexer_loss_coeff=0.5,
         )
-        loss_without, _, _, _ = _compute_fused_csa_indexer_loss_forward(
-            index_q,
-            weights,
-            index_k,
-            query_mla,
-            key_mla,
-            valid_range,
-            4,
-            topk,
-            0.125,
-            1.0,
-        )
+
+        with (
+            patch.object(Logging, "save_loss_to_tracker") as mock_save,
+            patch.object(Logging, "get_total_num_layers"),
+        ):
+            CSA._compute_fused_indexer_target(
+                ctx,
+                index_q,
+                index_k,
+                topk_indices,
+                topk_probs,
+                loss_mask=loss_mask,
+                global_valid_count=global_valid_count,
+            )
+            loss_with = mock_save.call_args.kwargs["loss"]
+
+            CSA._compute_fused_indexer_target(
+                ctx,
+                index_q,
+                index_k,
+                topk_indices,
+                topk_probs,
+            )
+            loss_without = mock_save.call_args.kwargs["loss"]
+
         self.assertFalse(paddle.allclose(loss_with, loss_without).item())
 
 
@@ -160,12 +161,12 @@ class TestAutoScalerBackwardLossMask(unittest.TestCase):
 
         result = TileLangCSAIndexerLossAutoScaler.apply(
             output,
+            target,
             index_q,
             weights,
             index_k,
             topk_indices,
             topk_probs,
-            target,
             1.0,
             "tilelang",
             10.0,
@@ -343,12 +344,12 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         self.assertIsNone(loss_mask)
         self.assertIsNone(global_valid_count)
 
-    @patch(
-        "paddlefleet.transformer.csa_attention._compute_fused_csa_indexer_loss_forward"
-    )
     @patch("paddlefleet.fusions.csa_sparse_attn.csa_sparse_attn")
-    def test_csa_forward_with_input_ids(self, mock_sparse_attn, mock_loss_fwd):
-        """Call CompressedSparseAttention.forward with input_ids to cover lines 1784-1805."""
+    def test_csa_forward_with_input_ids(self, mock_sparse_attn):
+        """
+        Call CompressedSparseAttention.forward with input_ids to cover
+        loss_mask & global_valid_count generation.
+        """
         from paddlefleet.transformer.csa_attention import (
             CompressedSparseAttention,
             CompressedSparseAttentionSublayersSpec,
@@ -377,6 +378,7 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
             attention_type="self",
             compress_ratio=0,
         )
+        csa.indexer = nn.Identity()  # mock indexer existence (never called)
 
         query = paddle.randn([b, sq, np_heads, hn], dtype="float32")
         key = paddle.randn([b, sq, 1, hn], dtype="float32")

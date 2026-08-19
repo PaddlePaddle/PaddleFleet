@@ -19,8 +19,9 @@ description = "Fleet Core - Core Functional Library for Large Scale Distributed 
 requires-python = ">=3.10"
 dependencies = [
     "colorlog>=6.10.1",
-    "paddlepaddle-gpu==3.4.0.post20260731+3cc38fddf4b",
-    "tilelang-paddle",
+    "paddlepaddle-gpu==3.4.0.post20260812+a136cd3594a",
+    "ruamel.yaml>=0.17",
+    "tilelang-paddle==0.1.12",
 ]
 license = { text = "Apache 2.0" }
 authors = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.comm" }]

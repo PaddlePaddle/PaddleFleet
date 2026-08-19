@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 import paddle
@@ -57,6 +56,7 @@ from paddlefleet.transformer.attention import (
 from paddlefleet.transformer.block_attn_res import (
     BlockAttnRes,
     BlockAttnResSublayersSpec,
+    OutputBlockAttnResPipe,
 )
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
@@ -87,6 +87,10 @@ from paddlefleet.transformer.kimi_delta_attention import (
     KimiDeltaAttentionSublayersSpec,
 )
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
+from paddlefleet.transformer.mqa_latent_attention import (
+    MQALatentAttention,
+    MQALatentAttentionSublayersSpec,
+)
 from paddlefleet.transformer.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
@@ -209,6 +213,10 @@ def get_attention_spec(
         LayerSpec for the attention sublayer inside a TransformerLayer.
     """
     assert config is not None, "config must be specified."
+    attention_layer_type = {
+        "full_attention": "self_attention",
+        "linear_attention": "gated_delta_net",
+    }.get(attention_layer_type, attention_layer_type)
     backend = LocalSpecProvider()
 
     # Standard RMSNorm for general use (MLA, etc.)
@@ -349,27 +357,53 @@ def get_attention_spec(
         # Gated attention
         gated_attention = getattr(config, "gated_attention", False)
 
+        # ``dsv4_hybrid`` puts these MLA layers next to CSA/HCA layers that
+        # already read the model-wide ``index_*`` fields, so field presence
+        # cannot decide anything here: the hybrid MLA layers are dense MHA
+        # unless ``hybrid_mla_attention`` explicitly turns them into latent MQA.
         is_hybrid_mla_indexer = (
             getattr(config, "experimental_attention_variant", None)
             == "dsv4_hybrid"
         )
-        if is_hybrid_mla_indexer:
-            use_dsa = all(
-                getattr(config, name, None) is not None
-                for name in (
-                    "hybrid_index_n_heads",
-                    "hybrid_index_head_dim",
-                    "hybrid_index_topk",
-                )
-            )
-        else:
-            # Decide core_attention: DSAttention if dsa_index_n_heads is configured, else standard
-            use_dsa = (
-                config is not None
-                and getattr(config, "dsa_index_n_heads", None) is not None
-            )
+        hybrid_mla_attention = (
+            getattr(config, "hybrid_mla_attention", "mha")
+            if is_hybrid_mla_indexer
+            else "mha"
+        )
+        use_dsa = (
+            not is_hybrid_mla_indexer
+            and config is not None
+            and getattr(config, "dsa_index_n_heads", None) is not None
+        )
 
-        if use_dsa:
+        if hybrid_mla_attention in ("mqa_dsa", "mqa_full_causal"):
+            # Latent MQA core attention on the KV latent; parameters stay
+            # byte-identical to MHA so an MHA checkpoint loads unchanged. The
+            # DSA indexer is what makes this mode worth running, so it is only
+            # dropped by ``mqa_full_causal``, which attends to the full
+            # per-document causal set instead -- mathematically identical to the
+            # dense MHA phase, for isolating absorption from sparsity.
+            dense_mqa = hybrid_mla_attention == "mqa_full_causal"
+            core_attention = LayerSpec(
+                layer=MQALatentAttention,
+                sublayers_spec=MQALatentAttentionSublayersSpec(
+                    indexer=(
+                        None
+                        if dense_mqa
+                        else LayerSpec(
+                            layer=DSAIndexer,
+                            sublayers_spec=DSAIndexerSublayersSpec(
+                                linear_wq_b=backend.linear(),
+                                linear_wk=backend.linear(),
+                                k_norm=paddle.nn.LayerNorm,
+                                linear_weights_proj=backend.linear(),
+                            ),
+                            extra_kwargs={"is_hybrid_mla_indexer": True},
+                        )
+                    ),
+                ),
+            )
+        elif use_dsa:
             # DSA Indexer sublayers spec (duplicated linear, NOT tensor-parallel)
             dsa_indexer_sublayers = DSAIndexerSublayersSpec(
                 linear_wq_b=backend.linear(),
@@ -726,7 +760,8 @@ def get_mlp_layer_spec_for_backend(
     down_proj = backend.row_parallel_linear()
     hidden_act = None
 
-    if num_experts is None:
+    # num_experts may be 0 or None
+    if not num_experts:
         # Dense MLP w/ or w/o TE layers.
         layer = MLP
         if backend.fuse_layernorm_and_linear():
@@ -756,27 +791,22 @@ def get_gpt_decoder_layers_spec(
     qk_l2_norm: bool | None = False,
 ) -> list[LayerSpec]:
     """GPT block spec."""
-    dense_layer_spec_func = partial(
-        get_gpt_layer_local_spec,
-        config=config,
-        num_experts=None,
-        moe_expert_fusion=False,
-        use_qk_norm=config.use_qk_norm,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=normalization,
-        qk_l2_norm=qk_l2_norm,
-    )
 
-    moe_layer_spec_func = partial(
-        get_gpt_layer_local_spec,
-        config=config,
-        num_experts=config.n_routed_experts,
-        moe_expert_fusion=config.moe_expert_fusion,
-        use_qk_norm=config.use_qk_norm,
-        multi_latent_attention=config.multi_latent_attention,
-        normalization=normalization,
-        qk_l2_norm=qk_l2_norm,
-    )
+    # Per-layer attention types; falls back to a homogeneous model
+    # (driven by config.multi_latent_attention) when config.layer_types is unset.
+    layer_types = getattr(config, "layer_types", None)
+    if layer_types is None:
+        attention_layer_type = (
+            "multi_latent_attention"
+            if config.multi_latent_attention
+            else "self_attention"
+        )
+        layer_types = [attention_layer_type] * config.num_hidden_layers
+    if len(layer_types) != config.num_hidden_layers:
+        raise ValueError(
+            f"layer_types must contain {config.num_hidden_layers} entries, "
+            f"but got {len(layer_types)}."
+        )
 
     # Parse config.moe_layer_freq to determine the pattern of expert/dense layers.
     # 0 stands for dense layers, 1 stands for expert layers.
@@ -801,19 +831,25 @@ def get_gpt_decoder_layers_spec(
 
     # Create the layer specs for the model.
     layer_specs = []
-    for layer_number in range(config.num_hidden_layers):
+    for layer_number, attention_layer_type in enumerate(layer_types):
         real_layer_number = layer_number + config.num_empty_layers_add_in_head
-        if moe_layer_pattern[layer_number] == 1:
-            layer_specs.append(
-                moe_layer_spec_func(layer_number=real_layer_number)
-            )
-        elif moe_layer_pattern[layer_number] == 0:
-            layer_specs.append(
-                dense_layer_spec_func(layer_number=real_layer_number)
-            )
-        else:
+        is_moe_layer = moe_layer_pattern[layer_number]
+        if is_moe_layer not in (0, 1):
             raise ValueError(f"Invalid layer pattern: {moe_layer_pattern}")
-
+        layer_specs.append(
+            get_gpt_layer_local_spec(
+                config=config,
+                num_experts=config.n_routed_experts if is_moe_layer else None,
+                moe_expert_fusion=config.moe_expert_fusion
+                if is_moe_layer
+                else False,
+                use_qk_norm=config.use_qk_norm,
+                normalization=normalization,
+                qk_l2_norm=qk_l2_norm,
+                layer_number=real_layer_number,
+                attention_layer_type=attention_layer_type,
+            )
+        )
     return layer_specs
 
 
@@ -949,20 +985,27 @@ def get_gpt_spec(
         rope_embedding=rope_embedding_spec,
     )
 
-    # Build block_attn_res spec for GPTLMHead
-    lm_head_block_attn_res = IdentityOp
+    # Build output_block_attn_res spec: a pipeline layer placed BEFORE the
+    # final RMSNorm (K3 alignment).
+    # LM heads no longer own the block_attn_res module.
+    output_block_attn_res_spec = None
     if config.block_attention_residuals:
         backend = LocalSpecProvider()
-        lm_head_norm = backend.layer_norm(
+        output_attn_res_norm = backend.layer_norm(
             rms_norm=(config.normalization == "RMSNorm"),
             for_qk=False,
         )
-        lm_head_block_attn_res = LayerSpec(
-            layer=BlockAttnRes,
-            sublayers_spec=BlockAttnResSublayersSpec(
-                norm=lm_head_norm,
-            ),
+        output_block_attn_res_spec = LayerSpec(
+            layer=OutputBlockAttnResPipe,
+            extra_kwargs={
+                "config": config,
+                "sublayers_spec": BlockAttnResSublayersSpec(
+                    norm=output_attn_res_norm,
+                ),
+            },
         )
+    # LM heads no longer own attn-res; pass IdentityOp for backward-compat kwargs.
+    lm_head_block_attn_res = IdentityOp
 
     # separate mtp head & loss
     mtp_lm_head_spec = None
@@ -1065,6 +1108,7 @@ def get_gpt_spec(
             mtp=mtp_layers_spec,
             mtp_lm_head=mtp_lm_head_spec,
             mtp_loss=mtp_loss_spec,
+            output_block_attn_res=output_block_attn_res_spec,
             layer_norm=LayerSpec(
                 layer=WrappedPaddleNormPipe,
                 extra_kwargs={

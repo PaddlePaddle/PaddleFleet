@@ -21,6 +21,7 @@ import unittest
 
 import numpy as np
 import paddle
+import paddle.nn.functional as F
 from paddle.distributed import fleet
 
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -125,6 +126,7 @@ class TestGPTModel(unittest.TestCase):
             output_layer_init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
+            hidden_act=F.silu,
             use_qk_norm=True,
             moe_expert_fusion=True,
             moe_deep_gemm=False,

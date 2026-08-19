@@ -15,7 +15,7 @@
 import sys
 import unittest
 from functools import wraps
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import paddle
@@ -68,6 +68,7 @@ from paddlefleet.fusions.csa_sparse_attn import (
     csa_sparse_attn,
     unfused_compressed_sparse_attn,
 )
+from paddlefleet.generation.csa_cache import CSADynamicCache
 from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
     YarnRotaryEmbedding,
 )
@@ -84,8 +85,6 @@ from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
     _apply_rope,
     _build_compressed_causal_mask,
-    _resolve_csa_indexer_attn_topk_effective,
-    _resolve_csa_indexer_loss_topk_effective,
     get_compress_topk_idxs,
     get_mqa_causal_topk_idxs,
     get_valid_range,
@@ -100,11 +99,22 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
     build_document_rope_freqs,
 )
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.mqa_latent_attention import (
+    MQALatentAttention,
+)
 from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.triton_ops import fused_grouped_matmul
+from paddlefleet.triton_ops import (
+    fused_grouped_matmul,
+    grouped_matmul_fusion as _gmf,
+)
+from paddlefleet.triton_ops.grouped_matmul_fusion import _grouped_3d_strides
 
 _SEED = 42
+# An index_topk larger than any n_compressed reached in the decode-alignment
+# tests, so ``min(index_topk, n_compressed)`` always selects every valid block
+# and no tie-break at the top-k boundary can occur.
+_SATURATING_TOPK = 4096
 
 
 class _FakeGroup:
@@ -153,6 +163,7 @@ def _make_config(
     num_nextn_predict_layers=0,
     csa_indexer_backend="unfused",
     csa_sparse_attn_backend="unfused",
+    mqa_sparse_attn_backward_backend="cudnn",
     tensor_model_parallel_size=1,
     context_parallel_size=1,
     csa_dense_mode=False,
@@ -166,9 +177,9 @@ def _make_config(
     hybrid_mla_v_head_dim=256,
     hybrid_mla_num_attention_heads=64,
     hybrid_mla_num_key_value_heads=64,
-    hybrid_index_n_heads=4,
-    hybrid_index_head_dim=128,
-    hybrid_index_topk=8,
+    hybrid_mla_attention="mha",
+    dsa_indexer_use_sparse_loss=False,
+    add_full_attention_sink_bias=False,
 ):
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
@@ -196,9 +207,8 @@ def _make_config(
         hybrid_mla_v_head_dim=hybrid_mla_v_head_dim,
         hybrid_mla_num_attention_heads=hybrid_mla_num_attention_heads,
         hybrid_mla_num_key_value_heads=hybrid_mla_num_key_value_heads,
-        hybrid_index_n_heads=hybrid_index_n_heads,
-        hybrid_index_head_dim=hybrid_index_head_dim,
-        hybrid_index_topk=hybrid_index_topk,
+        hybrid_mla_attention=hybrid_mla_attention,
+        add_full_attention_sink_bias=add_full_attention_sink_bias,
         o_groups=o_groups,
         o_lora_rank=o_lora_rank,
         rope_type=rope_type,
@@ -212,7 +222,7 @@ def _make_config(
         dsa_index_head_dim=dsa_index_head_dim,
         dsa_index_topk=dsa_index_topk,
         dsa_indexer_loss_coeff=dsa_indexer_loss_coeff,
-        dsa_indexer_use_sparse_loss=False,
+        dsa_indexer_use_sparse_loss=dsa_indexer_use_sparse_loss,
         dsa_indexer_rotary_interleaved=False,
         apply_rope_fusion=apply_rope_fusion,
         attention_dropout=0.0,
@@ -221,6 +231,7 @@ def _make_config(
         softmax_type="vanilla",
         csa_indexer_backend=csa_indexer_backend,
         csa_sparse_attn_backend=csa_sparse_attn_backend,
+        mqa_sparse_attn_backward_backend=mqa_sparse_attn_backward_backend,
         tensor_model_parallel_size=tensor_model_parallel_size,
         context_parallel_size=context_parallel_size,
         csa_dense_mode=csa_dense_mode,
@@ -302,8 +313,10 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             hidden_size=256,
             q_lora_rank=1024,
             csa_compress_ratios=[-2],
+            hybrid_mla_attention="mqa_dsa",
             dsa_index_n_heads=4,
             dsa_index_head_dim=128,
+            dsa_index_topk=128,
             params_dtype=paddle.float32,
             bf16=False,
         )
@@ -327,13 +340,18 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
         self.assertEqual(list(indexer.wk.weight.shape), [256, 128])
         self.assertEqual(list(indexer.weights_proj.weight.shape), [256, 4])
 
-    def test_hybrid_mla_without_hybrid_index_uses_standard_attention(self):
+    def test_hybrid_mla_with_mha_mode_uses_standard_attention(self):
+        # A ``dsv4_hybrid`` model's ``-2`` layer is dense MHA
+        # (``DotProductAttention``) unless ``hybrid_mla_attention`` turns it into
+        # latent MQA (+ DSA indexer). Field presence of the model-wide
+        # ``dsa_index_*`` no longer selects ``DSAttention`` for these layers
+        # (``gpt_layer_specs.py`` forces ``use_dsa=False`` for the hybrid
+        # variant), so the core attention must never be ``DSAttention`` and,
+        # with ``hybrid_mla_attention="mha"``, never ``MQALatentAttention`` either.
         config = _make_config(
             num_layers=1,
             csa_compress_ratios=[-2],
-            hybrid_index_n_heads=None,
-            hybrid_index_head_dim=None,
-            hybrid_index_topk=None,
+            hybrid_mla_attention="mha",
         )
         mla_spec = get_gpt_layer_local_spec(
             config=config,
@@ -341,10 +359,11 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             layer_number=0,
         ).sublayers_spec.self_attn
 
-        self.assertIsNot(
-            getattr(mla_spec.sublayers_spec.core_attention, "layer", None),
-            DSAttention,
+        core_attention_layer = getattr(
+            mla_spec.sublayers_spec.core_attention, "layer", None
         )
+        self.assertIsNot(core_attention_layer, DSAttention)
+        self.assertIsNot(core_attention_layer, MQALatentAttention)
 
     def test_legacy_all_mla_constructs_with_local_dimensions(self):
         model_parallel_cuda_manual_seed(_SEED)
@@ -403,12 +422,82 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 hybrid_mla_v_head_dim=None,
             )
 
-        with self.assertRaisesRegex(ValueError, "hybrid_index_head_dim"):
+        # hybrid_mla_attention="mqa_dsa" runs a DSA indexer on the -2 layers, so
+        # the model-wide dsa_index_* fields must be legal for the cuDNN indexer:
+        # positive ints, head_dim == 128, topk a multiple of 128 and <= 2048.
+        # With "mha" (dense MHA) these constraints do not
+        # apply, so the same otherwise-illegal values must round-trip.
+        with self.assertRaisesRegex(ValueError, "index_n_heads"):
             _make_config(
                 num_layers=1,
                 csa_compress_ratios=[-2],
-                hybrid_index_head_dim=None,
+                hybrid_mla_attention="mqa_dsa",
+                dsa_index_n_heads=None,
+                dsa_index_head_dim=128,
+                dsa_index_topk=128,
             )
+
+        with self.assertRaisesRegex(ValueError, "index_head_dim=128"):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_mla_attention="mqa_dsa",
+                dsa_index_n_heads=4,
+                dsa_index_head_dim=32,
+                dsa_index_topk=128,
+            )
+
+        # ``index_topk`` is checked in the sparse phase only -- the warmup phase
+        # runs no top-k at all, so it must not be forced to carry a legal budget.
+        with self.assertRaisesRegex(
+            ValueError, "index_topk must be a multiple"
+        ):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_mla_attention="mqa_dsa",
+                dsa_indexer_use_sparse_loss=True,
+                dsa_index_n_heads=4,
+                dsa_index_head_dim=128,
+                dsa_index_topk=8,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError, "index_topk must be a multiple"
+        ):
+            _make_config(
+                num_layers=1,
+                csa_compress_ratios=[-2],
+                hybrid_mla_attention="mqa_dsa",
+                dsa_indexer_use_sparse_loss=True,
+                dsa_index_n_heads=4,
+                dsa_index_head_dim=128,
+                dsa_index_topk=2176,
+            )
+
+        # Same values, warmup phase: accepted, because nothing reads them.
+        cfg_warmup = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-2],
+            hybrid_mla_attention="mqa_dsa",
+            dsa_indexer_use_sparse_loss=False,
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=128,
+            dsa_index_topk=2176,
+        )
+        self.assertEqual(cfg_warmup.hybrid_mla_attention, "mqa_dsa")
+
+        # Dense MHA (hybrid_mla_attention="mha") skips the indexer constraints
+        # entirely: head_dim 32 and topk 8 are fine because no indexer is built.
+        cfg = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-2],
+            hybrid_mla_attention="mha",
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=32,
+            dsa_index_topk=8,
+        )
+        self.assertEqual(cfg.hybrid_mla_attention, "mha")
 
     def test_csa_compress_ratios_accepts_general_set(self):
         # full-causal MQA (-1), window (0), CSA over the full [2, 127] range
@@ -437,6 +526,25 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             ValueError, "csa_sparse_attn_backend='paddle' is invalid"
         ):
             _make_config(csa_sparse_attn_backend="paddle")
+
+    def test_mqa_sparse_attn_backward_backend_validation(self):
+        # Only the absorbed-MQA *backward* is switchable (the forward is always
+        # FlashMLA sparse), so this list is deliberately shorter than the two
+        # above -- there is no "unfused" backward for the Dk != Dv layout.
+        for backend in ("cudnn", "tilelang"):
+            cfg = _make_config(mqa_sparse_attn_backward_backend=backend)
+            self.assertEqual(cfg.mqa_sparse_attn_backward_backend, backend)
+
+        with self.assertRaisesRegex(
+            ValueError, "mqa_sparse_attn_backward_backend='unfused' is invalid"
+        ):
+            _make_config(mqa_sparse_attn_backward_backend="unfused")
+
+    def test_mqa_sparse_attn_backward_backend_defaults_to_cudnn(self):
+        # The deterministic backward is ~14x slower, so it must stay opt-in.
+        self.assertEqual(
+            _make_config().mqa_sparse_attn_backward_backend, "cudnn"
+        )
 
     def test_csa_cudnn_indexer_allows_config_with_cp(self):
         cfg = _make_config(csa_indexer_backend="cudnn", context_parallel_size=2)
@@ -512,29 +620,30 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
                 compress_ratio=4,
             )
 
-    def test_phase2_loss_topk_does_not_expand_attention_topk(self):
+    def test_topk_effective_in_phase2_and_phase3(self):
         config = _make_config(
             dsa_index_topk=2,
         )
         n_compressed = 8
 
+        ctx = MagicMock(
+            config=config,
+            indexer=MagicMock(index_topk=config.dsa_index_topk),
+        )
+
+        # phase2 uses full range
         self.assertEqual(
-            _resolve_csa_indexer_loss_topk_effective(
-                config, config.dsa_index_topk, n_compressed
+            CompressedSparseAttention._resolve_topk_effective(
+                ctx, n_compressed
             ),
             n_compressed,
         )
-        self.assertEqual(
-            _resolve_csa_indexer_attn_topk_effective(
-                config.dsa_index_topk, n_compressed
-            ),
-            config.dsa_index_topk,
-        )
 
+        # phase 3 uses the configured topk
         config.dsa_indexer_use_sparse_loss = True
         self.assertEqual(
-            _resolve_csa_indexer_loss_topk_effective(
-                config, config.dsa_index_topk, n_compressed
+            CompressedSparseAttention._resolve_topk_effective(
+                ctx, n_compressed
             ),
             config.dsa_index_topk,
         )
@@ -1486,6 +1595,89 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             "cuDNN-indexer docmask: packed doc1 != doc1 alone",
         )
 
+    def test_cudnn_indexer_with_cudnn_sparse_attn(self):
+        """Test the path where both indexer and sparse_attn use cudnn."""
+        import paddlefleet_ops.cudnn.deepseek_sparse_attention as DSA
+
+        import paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn as SA
+        import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as IND
+
+        paddle.seed(_SEED)
+        ratio = 4
+        config = _make_config(
+            csa_compress_ratios=[ratio],
+            num_layers=1,
+            csa_indexer_backend="cudnn",
+            csa_sparse_attn_backend="cudnn",
+        )
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(config, layer_number=0)
+        attn.train()
+
+        seq_len = 128
+        seq_len_comp = seq_len // ratio
+        hidden_states = paddle.randn(
+            [1, seq_len, config.hidden_size], dtype="bfloat16"
+        )
+        startend_row_indices = paddle.full(
+            [1, 1, seq_len, 1], seq_len, dtype="int32"
+        )
+
+        # Mock cudnn kernel outputs
+        valid_mask = paddle.arange(1, seq_len + 1).unsqueeze(
+            1
+        ) >= paddle.arange(ratio, seq_len + ratio, ratio)
+        topk_indices = paddle.arange(seq_len_comp, dtype="int32").broadcast_to(
+            [1, seq_len, seq_len_comp]
+        )
+        topk_indices = paddle.where(
+            valid_mask, topk_indices, paddle.to_tensor(-1, dtype="int32")
+        )
+
+        topk_scores = paddle.randn([1, seq_len, seq_len_comp], dtype="float32")
+        topk_scores = paddle.where(
+            valid_mask,
+            topk_scores,
+            paddle.to_tensor(float("-inf"), dtype="float32"),
+        )
+
+        def _mock_indexer_topk(index_q, index_k_comp, weights, **kwargs):
+            self.assertEqual(kwargs.get("topk_effective"), seq_len_comp)
+            self.assertTrue(kwargs.get("return_topk_scores"))
+            return topk_indices, None, topk_scores
+
+        def _mock_flash_mla(q, kv, attn_sink, topk_idxs, **kwargs):
+            self.assertEqual(kwargs.get("indexer_topk"), seq_len_comp)
+            output = paddle.randn(
+                [*q.shape[:3], kv.shape[-1]], dtype="bfloat16"
+            )
+            lse = paddle.randn(q.shape[:3], dtype="float32")
+            return output, lse, lse
+
+        def _mock_target(
+            q_attn, k_attn, lse, topk_indices, softmax_scale, **kwargs
+        ):
+            self.assertEqual(type(q_attn.shape), tuple)
+            self.assertEqual(type(q_attn.stride()), tuple)
+            self.assertEqual(type(q_attn.stride(0)), int)
+            target = paddle.randn([1, seq_len, seq_len_comp], dtype="float32")
+            return {"target": target}
+
+        with (
+            patch.object(IND, "cudnn_indexer_topk_fwd", _mock_indexer_topk),
+            patch.object(SA, "flash_mla_sparse_attn", _mock_flash_mla),
+            patch.object(
+                DSA, "sparse_attn_score_recompute_wrapper", _mock_target
+            ),
+        ):
+            output, _ = attn(
+                hidden_states,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
+
+        self.assertTrue(output.isfinite().all().item())
+
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):
     def test_basic_construction(self):
@@ -2259,6 +2451,521 @@ class TestDSv4HybridQKV(unittest.TestCase):
 
 
 @_REQUIRES_USABLE_CUDA
+class TestDSv4HybridDecodeAlignment(unittest.TestCase):
+    """Prefill-vs-decode numerical alignment for the incremental KV cache.
+
+    Phase A covers HCA (ratio=128): no indexer, no overlap. The full-sequence
+    prefill output at every position must match the token-by-token decode
+    output produced through ``CSADynamicCache``.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        # Prime the model-parallel RNG tracker so RowParallelLinear can fork
+        # its rng state during layer construction (needed when this class runs
+        # standalone; the full-file run relies on an earlier class doing this).
+        model_parallel_cuda_manual_seed(_SEED)
+        # csa_compress_ratios=[0, 4, 128, 4] -> layer 2 is HCA (ratio=128).
+        self.config = _make_config(dsa_indexer_loss_coeff=0.0)
+        self.hca_layer = 2
+
+    def _decode_all(self, attn, hidden, layer_idx):
+        """Run token-by-token decode; return [b, N, hidden] stacked output."""
+        b, n, _ = hidden.shape
+        cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+        outs = []
+        with paddle.no_grad():
+            for t in range(n):
+                tok = hidden[:, t : t + 1, :]
+                out_t, _ = attn(
+                    hidden_states=tok,
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=layer_idx,
+                    use_cache=True,
+                )
+                outs.append(out_t)
+        return paddle.concat(outs, axis=1)
+
+    def _assert_close(self, ref, got, tol=1e-4):
+        diff = (
+            paddle.abs(ref.cast("float32") - got.cast("float32")).max().item()
+        )
+        self.assertLess(diff, tol, f"max abs diff {diff} exceeds tol {tol}")
+
+    def test_hca_decode_matches_prefill(self):
+        attn = _build_attention(self.config, layer_number=self.hca_layer)
+        attn.eval()
+        for n in (256, 512):
+            paddle.seed(_SEED + n)
+            hidden = paddle.randn(
+                [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+            )
+            with paddle.no_grad():
+                prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+            decode_out = self._decode_all(attn, hidden, self.hca_layer)
+            self.assertEqual(list(decode_out.shape), list(prefill_out.shape))
+            self._assert_close(prefill_out, decode_out)
+
+    def test_hca_non_multiple_of_ratio_length(self):
+        """Lengths that are not multiples of ratio leave a partial tail group."""
+        attn = _build_attention(self.config, layer_number=self.hca_layer)
+        attn.eval()
+        for n in (300, 500):
+            paddle.seed(_SEED + n)
+            hidden = paddle.randn(
+                [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+            )
+            with paddle.no_grad():
+                prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+            decode_out = self._decode_all(attn, hidden, self.hca_layer)
+            self._assert_close(prefill_out, decode_out)
+
+    def test_hca_prefill_prime_then_decode(self):
+        """Prefill a prefix (partial group), then decode the remaining tokens.
+
+        Exercises ``_prime_cache_prefill``: the decode outputs for positions
+        after the prefill prefix must match the corresponding positions of a
+        full-sequence prefill.
+        """
+        attn = _build_attention(self.config, layer_number=self.hca_layer)
+        attn.eval()
+        n = 512
+        prefix = 200  # not a multiple of ratio=128 -> partial open group
+        paddle.seed(_SEED + 7)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        with paddle.no_grad():
+            full_out, _ = attn(hidden_states=hidden, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            # Prefill prime on the prefix.
+            prime_out, _ = attn(
+                hidden_states=hidden[:, :prefix, :],
+                attention_mask=None,
+                past_key_values=cache,
+                layer_idx=self.hca_layer,
+                use_cache=True,
+            )
+            self._assert_close(full_out[:, :prefix, :], prime_out)
+
+            # Decode the remaining tokens one at a time.
+            decode_outs = []
+            for t in range(prefix, n):
+                tok = hidden[:, t : t + 1, :]
+                out_t, _ = attn(
+                    hidden_states=tok,
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.hca_layer,
+                    use_cache=True,
+                )
+                decode_outs.append(out_t)
+            decode_out = paddle.concat(decode_outs, axis=1)
+        self._assert_close(full_out[:, prefix:, :], decode_out)
+
+
+class TestCSAHybridDecodeAlignment(unittest.TestCase):
+    """Prefill-vs-decode alignment for CSA (ratio=4): overlap + indexer.
+
+    Layer 1 (``csa_compress_ratios=[0, 4, 128, 4]``) is CSA with overlapping
+    compression and a learned indexer top-k. The full-sequence prefill output
+    at every position must match the token-by-token decode output produced
+    through ``CSADynamicCache`` (which drives the overlapping incremental
+    compressor and the indexer's own incremental compressor + top-k).
+
+    ``dsa_index_topk`` is saturated (>= any n_compressed reached here) on
+    purpose. With a selective top-k, bf16 indexer scores produce exact ties at
+    the k-th boundary (dozens of query positions per sequence), and which of two
+    equal-scoring blocks wins is decided by the kernel's tie-break order. Prefill
+    scores all queries in one batched call while decode scores one query at a
+    time, so the two can legitimately pick different blocks -- swapping one of
+    ~24 attended keys shifts that row's output by ~10%, which is not a decode
+    bug and is not reproducible across hardware. Saturating the top-k forces both
+    paths onto the same block set, leaving only benign rounding, so this test
+    isolates what it is meant to check: the compressor / overlap / window / RoPE
+    / cache bookkeeping. Score-level agreement of the indexer itself is covered
+    by :class:`TestCSAHybridDecodeIndexerScores`.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        self.config = _make_config(
+            dsa_indexer_loss_coeff=0.0, dsa_index_topk=_SATURATING_TOPK
+        )
+        self.csa_layer = 1  # ratio=4
+
+    def _decode_all(self, attn, hidden, layer_idx):
+        b, n, _ = hidden.shape
+        cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+        outs = []
+        with paddle.no_grad():
+            for t in range(n):
+                tok = hidden[:, t : t + 1, :]
+                out_t, _ = attn(
+                    hidden_states=tok,
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=layer_idx,
+                    use_cache=True,
+                )
+                outs.append(out_t)
+        return paddle.concat(outs, axis=1)
+
+    def _assert_close(self, ref, got, tol=1e-4):
+        diff = (
+            paddle.abs(ref.cast("float32") - got.cast("float32")).max().item()
+        )
+        self.assertLess(diff, tol, f"max abs diff {diff} exceeds tol {tol}")
+
+    def test_csa_decode_matches_prefill(self):
+        attn = _build_attention(self.config, layer_number=self.csa_layer)
+        attn.eval()
+        for n in (256, 512):
+            paddle.seed(_SEED + n)
+            hidden = paddle.randn(
+                [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+            )
+            with paddle.no_grad():
+                prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+            decode_out = self._decode_all(attn, hidden, self.csa_layer)
+            self.assertEqual(list(decode_out.shape), list(prefill_out.shape))
+            self._assert_close(prefill_out, decode_out)
+
+    def test_csa_non_multiple_of_ratio_length(self):
+        """Lengths not divisible by ratio=4 leave a partial tail group."""
+        attn = _build_attention(self.config, layer_number=self.csa_layer)
+        attn.eval()
+        for n in (250, 511):
+            paddle.seed(_SEED + n)
+            hidden = paddle.randn(
+                [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+            )
+            with paddle.no_grad():
+                prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+            decode_out = self._decode_all(attn, hidden, self.csa_layer)
+            self._assert_close(prefill_out, decode_out)
+
+    def test_csa_prefill_prime_then_decode(self):
+        """Prime a prefix (partial group), then decode the remaining tokens."""
+        attn = _build_attention(self.config, layer_number=self.csa_layer)
+        attn.eval()
+        n = 256
+        prefix = 100  # not a multiple of ratio=4 -> partial open group
+        paddle.seed(_SEED + 13)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        with paddle.no_grad():
+            full_out, _ = attn(hidden_states=hidden, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            prime_out, _ = attn(
+                hidden_states=hidden[:, :prefix, :],
+                attention_mask=None,
+                past_key_values=cache,
+                layer_idx=self.csa_layer,
+                use_cache=True,
+            )
+            self._assert_close(full_out[:, :prefix, :], prime_out)
+
+            decode_outs = []
+            for t in range(prefix, n):
+                tok = hidden[:, t : t + 1, :]
+                out_t, _ = attn(
+                    hidden_states=tok,
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.csa_layer,
+                    use_cache=True,
+                )
+                decode_outs.append(out_t)
+            decode_out = paddle.concat(decode_outs, axis=1)
+        self._assert_close(full_out[:, prefix:, :], decode_out)
+
+
+class TestCSAHybridDecodeIndexerScores(unittest.TestCase):
+    """The decode indexer must reproduce prefill's indexer scores.
+
+    :class:`TestCSAHybridDecodeAlignment` saturates ``dsa_index_topk`` to keep
+    block selection deterministic, which means it cannot see a drift in the
+    indexer's own score computation -- a uniform rescale, for instance, leaves a
+    saturated selection unchanged. This test compares the raw scores instead, so
+    a divergence between ``CSAIndexer.forward`` and
+    ``_compute_indexer_compressed_topk_idxs_decode`` (weight scalings, query RoPE
+    position, Hadamard rotation) shows up directly and independently of any
+    tie-break.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        self.config = _make_config(dsa_indexer_loss_coeff=0.0)
+        self.csa_layer = 1  # ratio=4
+
+    def test_decode_indexer_scores_match_prefill(self):
+        import paddlefleet.transformer.csa_attention as csa_mod
+
+        n = 64
+        ratio = 4
+        attn = _build_attention(self.config, layer_number=self.csa_layer)
+        attn.eval()
+        paddle.seed(_SEED + n)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+
+        captured = []
+        original = csa_mod.fused_qk_topk_naive
+
+        def _spy(q, k, weights, topk, mask):
+            scores, idxs = original(q, k, weights, topk, mask)
+            captured.append(scores)
+            return scores, idxs
+
+        csa_mod.fused_qk_topk_naive = _spy
+        try:
+            with paddle.no_grad():
+                captured.clear()
+                attn(hidden_states=hidden, attention_mask=None)
+                prefill_scores = captured[-1]  # [1, n, n_compressed]
+
+                decode_rows = {}
+                cache = CSADynamicCache(
+                    num_layers=self.config.num_hidden_layers
+                )
+                for t in range(n):
+                    before = len(captured)
+                    attn(
+                        hidden_states=hidden[:, t : t + 1, :],
+                        attention_mask=None,
+                        past_key_values=cache,
+                        layer_idx=self.csa_layer,
+                        use_cache=True,
+                    )
+                    if len(captured) > before:
+                        decode_rows[t] = captured[-1]  # [1, 1, n_comp]
+        finally:
+            csa_mod.fused_qk_topk_naive = original
+
+        self.assertEqual(prefill_scores.shape[1], n)
+        self.assertGreater(len(decode_rows), 0)
+        for t, row in decode_rows.items():
+            n_comp = (t + 1) // ratio
+            self.assertEqual(row.shape[-1], n_comp)
+            ref = prefill_scores[0, t, :n_comp].cast("float32")
+            got = row[0, 0, :n_comp].cast("float32")
+            diff = float(paddle.abs(ref - got).max())
+            self.assertLess(
+                diff,
+                1e-4,
+                f"indexer score mismatch at t={t}: max abs diff {diff}",
+            )
+
+
+class TestCSAHybridSharedCacheDispatch(unittest.TestCase):
+    """One ``CSADynamicCache`` dispatched across mixed CSA + HCA layers.
+
+    A real model steps every token through all layers before advancing; the
+    shared cache must keep independent per-``layer_idx`` state. Here layer 1
+    (CSA, ratio=4) and layer 2 (HCA, ratio=128) share one cache. Interleaved
+    token-by-token decode of both layers must match each layer's full prefill.
+
+    ``dsa_index_topk`` is saturated for the same reason as in
+    :class:`TestCSAHybridDecodeAlignment`: a selective top-k over bf16 scores has
+    exact ties whose resolution is kernel- and shape-dependent.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        self.config = _make_config(
+            dsa_indexer_loss_coeff=0.0, dsa_index_topk=_SATURATING_TOPK
+        )
+        self.csa_layer = 1  # ratio=4
+        self.hca_layer = 2  # ratio=128
+
+    def _assert_close(self, ref, got, tol=1e-4):
+        diff = (
+            paddle.abs(ref.cast("float32") - got.cast("float32")).max().item()
+        )
+        self.assertLess(diff, tol, f"max abs diff {diff} exceeds tol {tol}")
+
+    def test_shared_cache_mixed_layers(self):
+        csa = _build_attention(self.config, layer_number=self.csa_layer)
+        hca = _build_attention(self.config, layer_number=self.hca_layer)
+        csa.eval()
+        hca.eval()
+
+        n = 300  # not a multiple of 128; layer 2 keeps a partial open group
+        paddle.seed(_SEED + 99)
+        h_csa = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        h_hca = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+
+        with paddle.no_grad():
+            csa_prefill, _ = csa(hidden_states=h_csa, attention_mask=None)
+            hca_prefill, _ = hca(hidden_states=h_hca, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            csa_dec, hca_dec = [], []
+            for t in range(n):
+                # Both layers advance for the same token, as in a real model.
+                o_csa, _ = csa(
+                    hidden_states=h_csa[:, t : t + 1, :],
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.csa_layer,
+                    use_cache=True,
+                )
+                o_hca, _ = hca(
+                    hidden_states=h_hca[:, t : t + 1, :],
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.hca_layer,
+                    use_cache=True,
+                )
+                csa_dec.append(o_csa)
+                hca_dec.append(o_hca)
+
+        self._assert_close(csa_prefill, paddle.concat(csa_dec, axis=1))
+        self._assert_close(hca_prefill, paddle.concat(hca_dec, axis=1))
+
+
+@_REQUIRES_USABLE_CUDA
+class TestMQADecodeAlignment(unittest.TestCase):
+    """Prefill-vs-decode alignment for a full-causal MQA layer (ratio=-1).
+
+    An MQA layer has no sliding window and no compressor, so its decode step
+    must attend every cached raw position instead of taking the windowed CSA
+    path. Reusing the window index table here would silently truncate the
+    context to ``csa_window_size`` keys, so ``csa_window_size`` is deliberately
+    much smaller than the sequence length to make that failure visible.
+    """
+
+    def setUp(self):
+        paddle.seed(_SEED)
+        model_parallel_cuda_manual_seed(_SEED)
+        self.config = _make_config(
+            num_layers=1,
+            csa_compress_ratios=[-1],
+            csa_window_size=8,
+            dsa_indexer_loss_coeff=0.0,
+        )
+        self.mqa_layer = 0
+
+    def _assert_close(self, ref, got, tol=1e-4):
+        diff = (
+            paddle.abs(ref.cast("float32") - got.cast("float32")).max().item()
+        )
+        self.assertLess(diff, tol, f"max abs diff {diff} exceeds tol {tol}")
+
+    def test_mqa_decode_matches_prefill(self):
+        attn = _build_attention(self.config, layer_number=self.mqa_layer)
+        attn.eval()
+        self.assertTrue(attn.core_attention.is_mqa_layer)
+        n = 48  # > csa_window_size=8, so a windowed decode would diverge
+        paddle.seed(_SEED + n)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        with paddle.no_grad():
+            prefill_out, _ = attn(hidden_states=hidden, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            outs = []
+            for t in range(n):
+                out_t, _ = attn(
+                    hidden_states=hidden[:, t : t + 1, :],
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.mqa_layer,
+                    use_cache=True,
+                )
+                outs.append(out_t)
+            decode_out = paddle.concat(outs, axis=1)
+        self.assertEqual(list(decode_out.shape), list(prefill_out.shape))
+        self._assert_close(prefill_out, decode_out)
+
+    def test_mqa_prefill_prime_then_decode(self):
+        """MQA prefill must populate the cache so decode keeps the history."""
+        attn = _build_attention(self.config, layer_number=self.mqa_layer)
+        attn.eval()
+        n, prefix = 48, 20
+        paddle.seed(_SEED + 21)
+        hidden = paddle.randn(
+            [1, n, self.config.hidden_size], dtype=paddle.bfloat16
+        )
+        with paddle.no_grad():
+            full_out, _ = attn(hidden_states=hidden, attention_mask=None)
+
+            cache = CSADynamicCache(num_layers=self.config.num_hidden_layers)
+            prime_out, _ = attn(
+                hidden_states=hidden[:, :prefix, :],
+                attention_mask=None,
+                past_key_values=cache,
+                layer_idx=self.mqa_layer,
+                use_cache=True,
+            )
+            self._assert_close(full_out[:, :prefix, :], prime_out)
+            # The prefill must have handed the whole raw KV prefix to the cache.
+            self.assertEqual(
+                cache.get_csa_state(self.mqa_layer).raw_seq_len(), prefix
+            )
+
+            decode_outs = []
+            for t in range(prefix, n):
+                out_t, _ = attn(
+                    hidden_states=hidden[:, t : t + 1, :],
+                    attention_mask=None,
+                    past_key_values=cache,
+                    layer_idx=self.mqa_layer,
+                    use_cache=True,
+                )
+                decode_outs.append(out_t)
+            decode_out = paddle.concat(decode_outs, axis=1)
+        self._assert_close(full_out[:, prefix:, :], decode_out)
+
+
+@_REQUIRES_USABLE_CUDA
+class TestYarnRopeFusionConstructionTime(unittest.TestCase):
+    """Fusion must not run at construction, but must still run in forward."""
+
+    def test_fusion_not_invoked_during_construction(self):
+        from paddlefleet import triton_ops
+
+        real_fn = triton_ops.fused_yarn_rope_freqs
+        with patch.object(
+            triton_ops, "fused_yarn_rope_freqs", side_effect=real_fn
+        ) as mock_fused:
+            rope = YarnRotaryEmbedding(
+                head_dim=64,
+                scaling_factor=40.0,
+                original_max_position_embeddings=128,
+                yarn_rope_fusion=True,
+            )
+            # Contract 1: the __init__ cache build must take the unfused path,
+            # so no Triton JIT (and no ptxas fork/exec) happens while every
+            # rank is in lockstep during model construction.
+            mock_fused.assert_not_called()
+
+            # Contract 2: an explicit forward still honors yarn_rope_fusion.
+            rope.forward(64)
+            self.assertEqual(mock_fused.call_count, 1)
+
+            # Contract 3: seq_len <= original_max_position_embeddings hits the
+            # cache, so nothing is rebuilt and the kernel is not called again.
+            # This is the production case: 8192 <= 65536.
+            rope.get_cached_cos_sin(64)
+            self.assertEqual(mock_fused.call_count, 1)
+
+
+@_REQUIRES_USABLE_CUDA
 class TestDSv4PackedForwardBackwardEquivalence(unittest.TestCase):
     """Verify packed B=2 forward/backward matches two independent B=1 runs.
 
@@ -2784,6 +3491,399 @@ class TestFusedGroupedMatmul(unittest.TestCase):
         w = paddle.randn([self._G, self._R, self._D], dtype="float16")
         with self.assertRaises(ValueError):
             fused_grouped_matmul(x, w)
+
+    def test_shape_mismatch_raises(self):
+        # G and D reach the kernel from w while x is read through its own
+        # strides, so a mismatching x would be read past its group (or out of
+        # bounds) rather than rejected. The dense path got this from
+        # ``x.reshape([M, G, D])``; the zero-copy view path never reshapes.
+        w = paddle.randn([self._G, self._R, self._D], dtype="bfloat16")
+        for shape in (
+            [1, 4, self._G, self._D - 1],  # wrong D
+            [1, 4, self._G + 1, self._D],  # wrong G
+            [self._G * self._D],  # not even 2-D
+        ):
+            with self.subTest(x_shape=shape):
+                x = paddle.randn(shape, dtype="bfloat16")
+                with self.assertRaises(ValueError):
+                    fused_grouped_matmul(x, w)
+        # A strided view of the right trailing shape still goes through.
+        wide = paddle.randn([1, 4, self._G, self._D + 5], dtype="bfloat16")
+        out = fused_grouped_matmul(wide[..., : self._D], w)
+        self.assertEqual(list(out.shape), [1, 4, self._G, self._R])
+        with self.assertRaises(ValueError):
+            fused_grouped_matmul(
+                wide[..., : self._D], w.reshape([self._G * self._R, self._D])
+            )
+
+    def _run_with_frozen(self, x_trainable, w_trainable):
+        """Phase 2 shape: the o_groups weight is frozen while x stays live.
+
+        Paddle rejects a gradient for a stop_gradient input, so backward has to
+        return None at that position; skipping the matching Triton kernel is free
+        work saved.
+        """
+        model_parallel_cuda_manual_seed(_SEED)
+        x = paddle.randn(
+            [self._B, self._SQ, self._G, self._D], dtype="bfloat16"
+        )
+        x.stop_gradient = not x_trainable
+        # Mirror DSv4HybridAttention: the weight passed in is a reshape of
+        # linear_o_group_proj. reshape is a normal op and propagates
+        # stop_gradient from the parameter.
+        param = paddle.base.framework.EagerParamBase.from_tensor(
+            paddle.create_parameter(
+                [self._G * self._R, self._D], dtype="float32"
+            ).astype("bfloat16")
+        )
+        param.stop_gradient = not w_trainable
+        out = fused_grouped_matmul(
+            x, param.reshape([self._G, self._R, self._D])
+        )
+        if not out.stop_gradient:
+            out.astype("float32").sum().backward()
+        return x, param, out
+
+    def test_frozen_weight_gets_no_wgrad(self):
+        x, param, out = self._run_with_frozen(
+            x_trainable=True, w_trainable=False
+        )
+        self.assertFalse(out.stop_gradient)
+        self.assertIsNotNone(x.grad)
+        self.assertIsNone(param.grad)
+
+    def test_copy_fallback_matches_the_zero_copy_view(self):
+        """The dense-copy fallback and the zero-copy view must agree bit-exactly.
+
+        A rejected layout falls back to ``x.reshape([M, G, D]).contiguous()``
+        (and the same for ``dy`` in backward). Forcing that fallback on a view
+        the guard *would* accept is what makes the zero-copy path safe to take:
+        same values, same order, same kernel, so the results are identical bit
+        for bit rather than merely close.
+        """
+        wide = paddle.randn(
+            [1, 7, self._G, self._D + 5], dtype="float32"
+        ).astype("bfloat16")
+        w0 = paddle.randn([self._G, self._R, self._D], dtype="float32").astype(
+            "bfloat16"
+        )
+        grad_out = paddle.randn([1, 7, self._G, self._R], dtype="float32")
+
+        def run(force_copy):
+            x = wide[..., : self._D].detach()
+            x.stop_gradient = False
+            wi = w0.detach()
+            wi.stop_gradient = False
+            if force_copy:
+                with patch.object(
+                    _gmf, "_grouped_3d_strides", return_value=None
+                ):
+                    out = fused_grouped_matmul(x, wi)
+                    (out.astype("float32") * grad_out).sum().backward()
+            else:
+                out = fused_grouped_matmul(x, wi)
+                (out.astype("float32") * grad_out).sum().backward()
+            return (
+                out.astype("float32").numpy(),
+                x.grad.astype("float32").numpy(),
+                wi.grad.astype("float32").numpy(),
+            )
+
+        # The unpatched run must actually be on the zero-copy path, otherwise
+        # this compares the fallback against itself.
+        self.assertIsNotNone(_grouped_3d_strides(wide[..., : self._D]))
+        for view, copied, name in zip(
+            run(force_copy=False), run(force_copy=True), ("out", "dx", "dw")
+        ):
+            self.assertTrue(
+                np.array_equal(view, copied), f"{name} is not bit-identical"
+            )
+
+    def test_frozen_input_gets_no_dgrad(self):
+        x, param, out = self._run_with_frozen(
+            x_trainable=False, w_trainable=True
+        )
+        self.assertFalse(out.stop_gradient)
+        self.assertIsNone(x.grad)
+        self.assertIsNotNone(param.grad)
+
+    def test_both_frozen_output_is_detached(self):
+        x, param, out = self._run_with_frozen(
+            x_trainable=False, w_trainable=False
+        )
+        self.assertTrue(out.stop_gradient)
+        self.assertIsNone(x.grad)
+        self.assertIsNone(param.grad)
+
+
+class TestGroupedMatmulLayoutGuard(unittest.TestCase):
+    """``_grouped_3d_strides`` gates the zero-copy path.
+
+    It must accept only layouts a dense copy would linearize element for
+    element; everything else has to fall back to ``.contiguous()``. The guard
+    is pure stride arithmetic, so it needs no device.
+    """
+
+    def test_accepts_a_foldable_strided_view(self):
+        # ``q[..., :qk_nope_head_dim]``-shaped view: group stride is the full
+        # head dim rather than D, which the kernels handle via strides.
+        x = paddle.randn([2, 3, 4, 10])[..., :6]
+        self.assertEqual(_grouped_3d_strides(x), tuple(x.strides[-3:]))
+
+    def test_accepts_size_one_leading_dims(self):
+        # A size-1 dim contributes nothing to M, so its stride is irrelevant.
+        x = paddle.randn([1, 1, 3, 4, 10])[..., :6]
+        self.assertEqual(_grouped_3d_strides(x), tuple(x.strides[-3:]))
+
+    def test_rejects_fewer_than_three_dims(self):
+        self.assertIsNone(_grouped_3d_strides(paddle.randn([4, 6])))
+
+    def test_rejects_non_unit_innermost_stride(self):
+        x = paddle.randn([2, 6, 3]).transpose([0, 2, 1])
+        self.assertNotEqual(x.strides[-1], 1)
+        self.assertIsNone(_grouped_3d_strides(x))
+
+    def test_rejects_degenerate_group_strides(self):
+        # A broadcast (stride 0) or self-overlapping group step reads the same
+        # element from several groups, which no dense copy would reproduce.
+        flat = paddle.randn([2, 30])
+        for stride_g in (0, 3):
+            with self.subTest(stride_g=stride_g):
+                x = paddle.as_strided(flat, [2, 3, 6], [30, stride_g, 1])
+                self.assertIsNone(_grouped_3d_strides(x))
+        # Same for a row step that overlaps the groups below it.
+        x = paddle.as_strided(flat, [2, 3, 6], [6, 6, 1])
+        self.assertIsNone(_grouped_3d_strides(x))
+
+    def test_rejects_unfoldable_leading_dims(self):
+        # Sliced on a middle axis: the leading stride no longer equals
+        # shape[1] * strides[1], so the leading dims cannot collapse into M.
+        x = paddle.randn([4, 3, 2, 5])[:, :2]
+        self.assertNotEqual(x.strides[0], x.shape[1] * x.strides[1])
+        self.assertIsNone(_grouped_3d_strides(x))
+
+    def test_rejects_unfoldable_dims_hidden_behind_a_singleton(self):
+        # A size-1 dim in the middle must not launder an outer stride: its own
+        # stride is arbitrary, so comparing the outer one against
+        # shape[i + 1] * strides[i + 1] would always hold. Here the six M rows
+        # start at 0, 24, 48, 100, 124, 148 -- not at multiples of stride_m=24 --
+        # so the kernel would read six wrong rows if this were accepted.
+        flat = paddle.randn([200])
+        x = paddle.as_strided(flat, [2, 1, 3, 4, 6], [100, 100, 24, 6, 1])
+        self.assertIsNone(_grouped_3d_strides(x))
+        # The same shape *is* foldable once the outer dim spans exactly the
+        # 3 * 24 elements below it.
+        packed = paddle.as_strided(flat, [2, 1, 3, 4, 6], [72, 72, 24, 6, 1])
+        self.assertEqual(_grouped_3d_strides(packed), (24, 6, 1))
+
+
+class TestHybridMLAAttentionSinkParameter(unittest.TestCase):
+    """``add_full_attention_sink_bias`` must give the same parameter in both
+    hybrid MLA phases.
+
+    The sink is created by ``build_softmax_offset`` *on the core attention*, so
+    its state_dict name is ``core_attention.softmax_offset`` for the dense MHA
+    phase (``hybrid_mla_attention="mha"``, where ``DotProductAttention`` consumes
+    it as the FA4 ``learnable_sink``) as well as for the latent MQA + DSA
+    indexer phase (``hybrid_mla_attention="mqa_dsa"``, where
+    ``MQALatentAttention`` feeds it to the block-sparse kernel). Keeping one
+    name, one shape and one dtype is what lets an MHA checkpoint load into a
+    latent-MQA run unchanged.
+    """
+
+    def _build(self, hybrid_mla_attention, sink):
+        # ``MultiLatentAttention.__init__`` refuses to create the sink for the
+        # dense MHA phase unless ``FLAGS_flash_attn_version in (3, 4)``: that
+        # phase consumes it as ``flashmask_attention_func(learnable_sink=...)``,
+        # which only exists on the cute path. The image default is 2, so flip
+        # the flag for the construction and restore it -- these tests only
+        # inspect the parameter, and the process-global default must stay
+        # untouched for the other suites in this file. The absorbed phase owns
+        # its sink inside the block-sparse kernel and needs no flag.
+        needs_fa4 = sink and hybrid_mla_attention == "mha"
+        previous = paddle.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        if needs_fa4:
+            paddle.set_flags({"FLAGS_flash_attn_version": 4})
+        try:
+            return self._build_raw(hybrid_mla_attention, sink)
+        finally:
+            if needs_fa4:
+                paddle.set_flags({"FLAGS_flash_attn_version": previous})
+
+    def _build_raw(
+        self, hybrid_mla_attention, sink, params_dtype=paddle.bfloat16
+    ):
+        """Build without touching ``FLAGS_flash_attn_version``."""
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=2,
+            hidden_size=256,
+            params_dtype=params_dtype,
+            csa_compress_ratios=[-2, 128],
+            hybrid_mla_attention=hybrid_mla_attention,
+            add_full_attention_sink_bias=sink,
+            # The -2 layer's DSA indexer (built only for
+            # hybrid_mla_attention="mqa_dsa") reads these model-wide fields; the
+            # cuDNN indexer needs head_dim 128 and a topk that is a multiple of
+            # 128. They are inert for the dense MHA phase (use_dsa is forced
+            # False for dsv4_hybrid), so the same config drives both phases.
+            dsa_index_n_heads=4,
+            dsa_index_head_dim=128,
+            dsa_index_topk=128,
+        )
+        spec = get_gpt_layer_local_spec(
+            config=config,
+            normalization=config.normalization,
+            layer_number=0,
+        ).sublayers_spec.self_attn
+        return build_spec_layer(
+            spec,
+            config=config,
+            layer_number=0,
+            pg_collection=_FakePGCollection(),
+        )
+
+    @staticmethod
+    def _sink_keys(module):
+        return sorted(
+            name
+            for name in module.state_dict().keys()
+            if name.endswith("softmax_offset")
+        )
+
+    # The two hybrid MLA phases: dense MHA (``"mha"``) and latent MQA + DSA
+    # indexer (``"mqa_dsa"``). The indexer-less latent MQA mode
+    # (``"mqa_full_causal"``) exists only for equivalence experiments and shares
+    # the ``"mqa_dsa"`` sink layout, so it is not a separate phase here.
+    _PHASES = ("mha", "mqa_dsa")
+
+    def test_disabled_creates_no_parameter(self):
+        for hybrid_mla_attention in self._PHASES:
+            with self.subTest(hybrid_mla_attention=hybrid_mla_attention):
+                mla = self._build(hybrid_mla_attention, sink=False)
+                self.assertIsNone(mla.core_attention.softmax_offset)
+                self.assertEqual(self._sink_keys(mla), [])
+
+    def test_enabled_creates_one_zero_initialised_per_head_parameter(self):
+        for hybrid_mla_attention in self._PHASES:
+            with self.subTest(hybrid_mla_attention=hybrid_mla_attention):
+                mla = self._build(hybrid_mla_attention, sink=True)
+                sink = mla.core_attention.softmax_offset
+                self.assertIsNotNone(sink)
+                # One logit per local head of the hybrid MLA layer.
+                self.assertEqual(list(sink.shape), [64])
+                # bf16 == params_dtype: the FA4 cute kernel of the dense MHA
+                # phase asserts learnable_sink.dtype == bfloat16.
+                self.assertEqual(sink.dtype, paddle.bfloat16)
+                # The shared ``build_softmax_offset`` helper initialises the
+                # learnable sink with ``config.init_method`` (normal, std=0.02)
+                # when ``perform_initialization`` is set -- NOT the neutral zero
+                # of the old hybrid-specific injection block. Assert a finite,
+                # init_method-scaled parameter rather than exact zeros.
+                self.assertTrue(bool(paddle.isfinite(sink).all()))
+                self.assertLess(float(sink.astype("float32").abs().max()), 1.0)
+                self.assertFalse(sink.stop_gradient)
+                self.assertEqual(
+                    self._sink_keys(mla), ["core_attention.softmax_offset"]
+                )
+
+    def test_state_dict_name_is_identical_across_phases(self):
+        # The valuable "an MHA checkpoint stays loadable into a latent-MQA
+        # run" guarantee: same name, shape and dtype in both phases.
+        mha = self._build(hybrid_mla_attention="mha", sink=True)
+        mqa = self._build(hybrid_mla_attention="mqa_dsa", sink=True)
+        self.assertEqual(self._sink_keys(mha), self._sink_keys(mqa))
+        self.assertEqual(
+            mha.core_attention.softmax_offset.shape,
+            mqa.core_attention.softmax_offset.shape,
+        )
+        self.assertEqual(
+            mha.core_attention.softmax_offset.dtype,
+            mqa.core_attention.softmax_offset.dtype,
+        )
+
+    def test_mha_sink_without_fa4_is_rejected_at_construction(self):
+        # The dense MHA phase reaches the sink only through the flashmask cute
+        # kernel, which is gated on FLAGS_flash_attn_version in (3, 4). With the
+        # image default of 2 the run used to die at the *first forward* on an
+        # opaque ``learnable_sink is only supported on the flashmask v4 (cute)
+        # path`` assertion; ``MultiLatentAttention.__init__`` now refuses up
+        # front.
+        previous = paddle.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        paddle.set_flags({"FLAGS_flash_attn_version": 2})
+        try:
+            with self.assertRaisesRegex(
+                RuntimeError, "FLAGS_flash_attn_version"
+            ):
+                self._build_raw(hybrid_mla_attention="mha", sink=True)
+            # The absorbed phase owns its sink inside the block-sparse kernel,
+            # so the flag must NOT gate it.
+            self.assertIsNotNone(
+                self._build_raw(
+                    hybrid_mla_attention="mqa_dsa", sink=True
+                ).core_attention.softmax_offset
+            )
+        finally:
+            paddle.set_flags({"FLAGS_flash_attn_version": previous})
+
+    def test_mha_sink_with_non_bf16_params_dtype_is_rejected(self):
+        # Second requirement of the same cute kernel: it asserts the learnable
+        # sink is bf16, and the sink is created with ``params_dtype``. An fp32
+        # run therefore used to pass construction and die on the first forward
+        # with a terse ``learnable_sink must be bfloat16`` that names no config
+        # knob. The guard now names ``params_dtype`` at construction time.
+        previous = paddle.get_flags(["FLAGS_flash_attn_version"])[
+            "FLAGS_flash_attn_version"
+        ]
+        paddle.set_flags({"FLAGS_flash_attn_version": 4})
+        try:
+            with self.assertRaisesRegex(RuntimeError, "params_dtype"):
+                self._build_raw(
+                    hybrid_mla_attention="mha",
+                    sink=True,
+                    params_dtype=paddle.float32,
+                )
+            # The block-sparse kernel up-casts the sink itself, so the absorbed
+            # phase must stay dtype agnostic.
+            mqa = self._build_raw(
+                hybrid_mla_attention="mqa_dsa",
+                sink=True,
+                params_dtype=paddle.float32,
+            )
+            self.assertEqual(
+                mqa.core_attention.softmax_offset.dtype, paddle.float32
+            )
+        finally:
+            paddle.set_flags({"FLAGS_flash_attn_version": previous})
+
+    def test_sink_is_not_created_on_the_non_hybrid_layers(self):
+        # The HCA (``128``) layer owns its own sink; the model-wide
+        # ``add_full_attention_sink_bias`` must not add a ``softmax_offset``
+        # there.
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(
+            num_layers=2,
+            hidden_size=256,
+            csa_compress_ratios=[-2, 128],
+            add_full_attention_sink_bias=True,
+            dsa_index_n_heads=None,
+        )
+        hca = build_spec_layer(
+            get_gpt_layer_local_spec(
+                config=config,
+                normalization=config.normalization,
+                layer_number=1,
+            ).sublayers_spec.self_attn,
+            config=config,
+            layer_number=1,
+            pg_collection=_FakePGCollection(),
+        )
+        self.assertIsInstance(hca, DSv4HybridSelfAttention)
+        self.assertEqual(self._sink_keys(hca), [])
 
 
 if __name__ == "__main__":

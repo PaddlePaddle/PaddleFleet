@@ -68,6 +68,70 @@ def _valid_block_mask(valid_range, num_blocks, block_B):
     return start < eos  # [B, S, num_blocks]
 
 
+def decode_block_logit(query, key, valid_range, sm_scale=None, block_B=64):
+    """Block-max logits + lse for a single incremental-decode query token.
+
+    Eager counterpart of the softmax epilogue that the fused block-score
+    forwards (:mod:`block_score_fa4` / :mod:`block_score_mha`) emit during
+    prefill: those kernels compute the full-attention output *and* the scaled
+    per-block max logits in one pass, but decode has no such pass -- the new
+    token attends to a KV cache through the plain decode kernel. This recomputes
+    just the scoring part (one ``q.k`` row against the cached keys), so decode
+    selects blocks exactly the way prefill does instead of silently dropping the
+    sparse branch.
+
+    Args:
+        query:       [B, 1, H, D] the decode step's query (H independent heads).
+        key:         [B, S_kv, H, D] cached keys of the same layer.
+        valid_range: [B, 1, 2] int per-query ``[bos, eos)`` valid key columns.
+        sm_scale:    softmax scale; defaults to ``D ** -0.5``.
+        block_B:     key block size.
+
+    Returns:
+        block_logit: [B, H, 1, num_blocks] scaled per-block max logit (``-inf``
+                     for blocks holding no valid key), document-relative blocks.
+        lse:         [B, 1, H] natural log-sum-exp of the scaled masked logits.
+
+        Both feed :func:`select_topk_blocks` unchanged.
+    """
+    b, s, h, d = query.shape
+    if s != 1:
+        raise ValueError(
+            f"decode_block_logit expects a single query token, got S={s}."
+        )
+    s_kv = key.shape[1]
+    if sm_scale is None:
+        sm_scale = d**-0.5
+
+    q = query.astype("float32").transpose([0, 2, 1, 3])  # [B, H, 1, D]
+    k = key.astype("float32").transpose([0, 2, 1, 3])  # [B, H, S_kv, D]
+    logits = paddle.matmul(q, k, transpose_y=True) * sm_scale  # [B,H,1,S_kv]
+
+    bos = valid_range[..., 0:1].astype("int64").unsqueeze(1)  # [B,1,1,1]
+    eos = valid_range[..., 1:2].astype("int64").unsqueeze(1)  # [B,1,1,1]
+    col = paddle.arange(s_kv, dtype="int64").reshape([1, 1, 1, s_kv])
+    mask = (col >= bos) & (col < eos)  # [B,1,1,S_kv]
+    neg_inf = paddle.full_like(logits, float("-inf"))
+    logits = paddle.where(mask, logits, neg_inf)
+
+    lse = paddle.logsumexp(logits, axis=-1).transpose([0, 2, 1])  # [B, 1, H]
+
+    # Scatter-max the scaled logits into document-relative blocks: block j spans
+    # key columns [bos + j*block_B, bos + (j+1)*block_B). Masked columns keep
+    # their -inf value, so they never win the max.
+    rel = col - bos  # [B,1,1,S_kv]
+    num_blocks = (s_kv + block_B - 1) // block_B
+    block_id = paddle.where(
+        rel >= 0, rel // block_B, paddle.zeros_like(rel)
+    ).clip(max=num_blocks - 1)
+    block_id = block_id.expand([b, h, 1, s_kv])
+    block_logit = paddle.full([b, h, 1, num_blocks], float("-inf"), "float32")
+    block_logit = paddle.put_along_axis(
+        block_logit, block_id, logits, axis=-1, reduce="amax"
+    )
+    return block_logit, lse
+
+
 def select_topk_blocks(
     block_logit, lse, valid_range, topk, block_B, head_agg="max"
 ):
