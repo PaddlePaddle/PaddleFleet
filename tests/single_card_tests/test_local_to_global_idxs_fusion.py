@@ -384,7 +384,12 @@ class TestConfigSwitch(unittest.TestCase):
                 backward_backend=backend,
             )
             out.backward(paddle.to_tensor(go_np, dtype=out.dtype))
-            return dict(out=out, dq=q.grad, dkv=kv.grad, d_sink=sink.grad)
+            return {
+                "out": out,
+                "dq": q.grad,
+                "dkv": kv.grad,
+                "d_sink": sink.grad,
+            }
 
         for backend in ("cudnn", "tilelang"):
             names = ("out", "dq", "d_sink")
