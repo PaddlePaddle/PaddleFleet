@@ -102,6 +102,11 @@ from paddlefleet.tilelang_ops.attn.sparse_mqa_bwd import (
 
 _LOG2E = 1.4426950408889634
 
+# Sink logit for pad heads: ``exp2(sink * log2e - lse)`` underflows to 0, so a
+# padded head can contribute nothing to ``d_sink``. Same value the sinkless
+# contract uses in ``fusions/mqa_sparse_attn.py``.
+_NEG_SINK = -1e30
+
 # ``bwd_det`` requires ``topk % _BLOCK_SIZE == 0`` (sparse_mqa_bwd.py:336) and
 # ``preprocess`` tiles S by 32, so every chunk length must be a multiple of this.
 _BLOCK_SIZE = 32
@@ -141,20 +146,40 @@ def _pick_chunk(b, s, topk, dk, budget_bytes):
 
 
 def _pick_block_h(h):
-    """Largest power-of-two head-group width that divides ``h``, capped at 32.
+    """Head-group width for ``bwd_det``: 32 when it divides ``h``, else 16.
 
-    ``bwd_det`` needs ``block_h == padded_H`` (its ``dKV_buf`` store is a plain
-    write, so its head-group grid dim must stay 1) and shared memory caps that
-    at 32 for ``Dk = 576``. Smaller widths are legal and measured just as
-    accurate, so a head count the cuDNN backward accepts (anything
-    ``h <= 64``) must not become a hard error here only because 32 does not
-    divide it: per-rank counts of 8 or 16 are what the hybrid-MLA fixtures and
-    any TP > 2 split produce.
+    ``bwd_det`` derives its own tile from the ``H`` it is given --
+    ``padded_H = max(next_power_of_2(H), 16)`` and ``block_H = min(64,
+    padded_H)`` (``sparse_mqa_bwd.py:352``) -- and then copies
+    ``Q[b, s, 0:block_H, :]`` / stores ``dQ[b, s, 0:block_H, :]``. So a group
+    width below 16 does **not** make the kernel read fewer heads: at
+    ``block_h = 8`` it still moves 16 heads, i.e. it reads and *writes* 8 heads
+    past the end of an 8-head tensor. Only 16 and 32 satisfy
+    ``block_h == padded_H``; head counts that are not a multiple of the chosen
+    width are zero-padded by the caller instead (see ``_pad_heads``), which is
+    how ``h = 8`` -- the per-rank count the hybrid-MLA fixtures and any TP > 4
+    split produce -- stays supported.
+
+    32 is preferred where it fits because it halves the number of launches and
+    the score recomputation; the docstring's timings were measured with it.
     """
-    for cand in (32, 16, 8, 4, 2):
-        if h % cand == 0:
-            return cand
-    return 1
+    return 32 if h % 32 == 0 else 16
+
+
+def _pad_heads(x, h_pad, fill=0):
+    """``fill``-pad ``x`` along its head axis (the last or second-to-last).
+
+    ``[b, s, h, d]`` and ``[b, s, h]`` both pad on ``h``; ``[h]`` (the sink)
+    pads on its only axis.
+    """
+    axis = 2 if x.ndim == 4 else (x.ndim - 1)
+    pad_shape = list(x.shape)
+    pad_shape[axis] = h_pad - x.shape[axis]
+    if pad_shape[axis] == 0:
+        return x
+    return paddle.concat(
+        [x, paddle.full(pad_shape, fill, dtype=x.dtype)], axis=axis
+    )
 
 
 def _reduce_threads(dk):
@@ -205,11 +230,15 @@ def mqa_latent_sparse_bwd(
         token_indices: ``[B, S, L]`` int32 per-batch-local key columns, ``-1``
                        for invalid. Width is padded to a multiple of 32 here.
         sm_scale:      softmax scale applied to the raw ``q.k`` logits.
-        block_h:       query heads per kernel launch. Must divide ``H``. Bounded
-                       by shared memory: three ``[block_h, Dk]`` bf16 buffers
-                       plus ``[32, Dk]`` for the gathered latent must fit, which
-                       at ``Dk=576`` rules out 64. ``None`` (default) picks the
-                       largest power of two that divides ``H``, capped at 32.
+        block_h:       query heads per kernel launch, 16 or 32 -- the two widths
+                       for which ``bwd_det``'s own
+                       ``padded_H = max(next_power_of_2(H), 16)`` equals what it
+                       is handed (32 is the upper bound: three
+                       ``[block_h, Dk]`` bf16 buffers plus ``[32, Dk]`` for the
+                       gathered latent must fit shared memory, which at
+                       ``Dk=576`` rules out 64). ``H`` need not be a multiple of
+                       it -- the head axis is zero-padded here. ``None``
+                       (default) picks 32 when it divides ``H``, else 16.
         dkv_buf_bytes: byte budget for the per-slot fp32 gradient buffer, which
                        sets the query-row chunk length.
 
@@ -244,8 +273,12 @@ def mqa_latent_sparse_bwd(
         raise ValueError(
             f"token_indices {token_indices.shape} != [{b}, {s}, L]"
         )
-    if h % block_h:
-        raise ValueError(f"H ({h}) must be divisible by block_h ({block_h})")
+    if block_h not in (16, 32):
+        raise ValueError(
+            f"block_h must be 16 or 32, got {block_h}: ``bwd_det`` rounds its "
+            "tile up to max(next_power_of_2(H), 16), so any other width makes "
+            "the kernel move more heads than the tensors hold"
+        )
     # The reused kernels are JIT-specialised on bf16 and assert it internally
     # (``sparse_mqa_bwd.py:33,86,129,337``), so a caller in an fp16 run would
     # otherwise land on a bf16 kernel reading fp16 memory -- silently wrong, or
@@ -298,7 +331,22 @@ def mqa_latent_sparse_bwd(
     sc = _pick_chunk(b, s, topk, dk, dkv_buf_bytes)
     n_chunks = (s + sc - 1) // sc
     s_pad = n_chunks * sc
-    n_hg = h // block_h
+    # Pad the head axis to a whole number of groups. ``bwd_det`` moves
+    # ``block_h`` heads per launch whatever the tensors hold (see
+    # ``_pick_block_h``), so a head count below the group width -- ``h = 8`` on
+    # the fixtures, anything from a TP split -- must be padded here rather than
+    # left for the kernel to read past. The pad heads are inert: q and dO are
+    # zero, so ``dP`` and both ``dKV`` terms vanish, and ``Delta`` is zero, so
+    # ``d_sink`` is too; only their ``dq`` rows are garbage and those are sliced
+    # off before returning.
+    h_pad = (h + block_h - 1) // block_h * block_h
+    n_hg = h_pad // block_h
+    if h_pad != h:
+        query = _pad_heads(query, h_pad)
+        grad_out = _pad_heads(grad_out, h_pad)
+        delta = _pad_heads(delta, h_pad)
+        lse_tl = _pad_heads(lse_tl, h_pad)
+        sink32 = _pad_heads(sink32, h_pad, fill=_NEG_SINK)
 
     # Pad the query axis up to a whole number of chunks once, so the loop body is
     # uniform (one JIT variant, one reusable buffer) and the tail needs no
@@ -335,7 +383,7 @@ def mqa_latent_sparse_bwd(
     dkv_buf = paddle.empty([b, sc, topk, dk], dtype="float32")
     dsink_buf = paddle.empty([sc, b, block_h], dtype="float32")
 
-    dq = paddle.empty([b, s, h, dk], dtype=query.dtype)
+    dq = paddle.empty([b, s, h_pad, dk], dtype=query.dtype)
     dkv_f32 = paddle.zeros([b, s_kv, dk], dtype="float32")
     dsink_parts = [None] * n_hg
 
@@ -366,4 +414,10 @@ def mqa_latent_sparse_bwd(
                 part if dsink_parts[g] is None else dsink_parts[g] + part
             )
 
-    return dq, cast_kernel(dkv_f32), paddle.concat(dsink_parts).contiguous()
+    # Slice the pad heads back off: their ``dq`` rows are zeros the caller must
+    # not see, and ``d_sink`` carries one entry per real head.
+    d_sink = paddle.concat(dsink_parts)
+    if h_pad != h:
+        dq = dq[:, :, :h, :]
+        d_sink = d_sink[:h]
+    return dq.contiguous(), cast_kernel(dkv_f32), d_sink.contiguous()
