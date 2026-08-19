@@ -443,10 +443,34 @@ class TestKernelTiling(_Base):
                     q_t, kv_t, o_t, do_t, lse, sink, ti_t, float(SM)
                 )
 
-    def test_block_h_must_divide_the_head_count(self):
+    def test_only_the_kernels_own_tile_widths_are_accepted(self):
+        # 8 is the dangerous one: ``bwd_det`` would round its tile up to 16 and
+        # move 16 heads through 8-head tensors, i.e. an out-of-bounds ``dQ``
+        # store. 48 is simply not a tile width. Both must be refused rather than
+        # silently corrupting memory.
         q, kv, ti, dO = _inputs(H_SMALL, 32, 32, 530)
-        with self.assertRaisesRegex(ValueError, "divisible by block_h"):
-            _kernel_run(q, kv, ti, dO, 0.25, block_h=48)
+        for bad in (8, 48, 64):
+            with (
+                self.subTest(block_h=bad),
+                self.assertRaisesRegex(ValueError, "block_h must be 16 or 32"),
+            ):
+                _kernel_run(q, kv, ti, dO, 0.25, block_h=bad)
+
+    def test_head_count_below_the_tile_is_padded_not_truncated(self):
+        # h=8 (the fixture / TP-split count) and h=24 both need padding up to a
+        # multiple of the 16-wide tile. The pad heads must be inert -- q and dO
+        # are zero there, so they add nothing to dkv or d_sink -- and must not
+        # leak into the returned shapes.
+        for h in (8, 24):
+            with self.subTest(h=h):
+                q, kv, ti, dO = _inputs(h, 64, 64, 560 + h)
+                dq, dkv, dsink = _kernel_run(q, kv, ti, dO, 0.25)
+                self.assertEqual(dq.shape, (64, h, DK))
+                self.assertEqual(dkv.shape, (64, DK))
+                self.assertEqual(dsink.shape, (h,))
+                self._assert_matches_reference(
+                    (dq, dkv, dsink), q, kv, ti, dO, 0.25
+                )
 
     def test_shape_guards_raise_valueerror_not_assert(self):
         # ``python -O`` strips ``assert``, and these guard a TileLang JIT
@@ -570,21 +594,24 @@ class TestHostHelpers(unittest.TestCase):
         self.assertEqual(sc, 32)
         self.assertNotEqual(100 % sc, 0)
 
-    def test_pick_block_h_divides_every_legal_head_count(self):
-        # The cuDNN backward takes any ``h <= 64``; the group width must too,
-        # and stay within the 32 the shared-memory budget allows.
+    def test_pick_block_h_never_goes_below_the_kernel_tile(self):
+        # ``bwd_det`` rounds its own tile up to ``max(next_power_of_2(H), 16)``
+        # and then moves that many heads whatever the tensors hold, so a group
+        # width below 16 would read -- and store ``dQ`` -- past the end of the
+        # buffers. Only 16 and 32 are safe; head counts that are not a multiple
+        # of the width get zero-padded by the caller instead.
         for h in range(1, _DSA_HEADS + 1):
             bh = _pick_block_h(h)
             with self.subTest(h=h):
-                self.assertEqual(h % bh, 0)
-                self.assertLessEqual(bh, 32)
-                self.assertGreaterEqual(bh, 1)
+                self.assertIn(bh, (16, 32))
+                if bh == 32:
+                    self.assertEqual(h % 32, 0)
         self.assertEqual(_pick_block_h(64), 32)
+        self.assertEqual(_pick_block_h(32), 32)
         self.assertEqual(_pick_block_h(48), 16)
-        self.assertEqual(_pick_block_h(24), 8)
-        self.assertEqual(_pick_block_h(8), 8)
-        # Odd head counts fall back to one head per launch rather than raising.
-        self.assertEqual(_pick_block_h(7), 1)
+        self.assertEqual(_pick_block_h(24), 16)
+        self.assertEqual(_pick_block_h(8), 16)
+        self.assertEqual(_pick_block_h(7), 16)
 
     def test_reduce_threads_divides_dk(self):
         # ``dkv_reduce`` maps ``T.Parallel(Dk)`` onto threads and its layout
