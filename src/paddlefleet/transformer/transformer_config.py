@@ -730,6 +730,29 @@ class TransformerConfig(ModelParallelConfig):
     """Apply RMSNorm to routed latent-MoE output before projecting it back to
     the model hidden size."""
 
+    moe_config_check: str = "off"
+    """MoE 配置检查模式, 取值 off / report / strict。
+
+    MoE 会按路由决策(EP size、dispatcher 类型、expert 组合、精度、设备算力)只读取
+    配置字段的一个子集, 归属于其他路径的字段配了也不会被读取, 目前没有任何提示。
+
+    - ``off``(默认): 不检查, 行为与开启此功能前完全一致。
+    - ``report``: 启动时打印一次执行计划, 以及"配了但当前路径不读"的字段。
+    - ``strict``: 存在必须修复的问题时直接报错, 一次性列出全部问题。
+
+    字段级诊断需要 ``user_specified_keys``; 没有它时只打印执行计划。
+    """
+
+    user_specified_keys: tuple[str, ...] | None = None
+    """上游真正显式配置过的字段名集合(对 ERNIEBot 而言是 YAML 键 ∪
+    model_config.json 键)。
+
+    不能靠 config 自己反推: 上游 ``PretrainedConfig`` 会把自身默认值一并写入
+    ``__dict__``, 实测 47 个 MoE 字段里有 13 个会被误判成用户显式设置(其中包含
+    ``moe_token_dispatcher_type``、``moe_expert_fusion`` 这些最关键的开关)。因此
+    严格模式必须由上游把这个集合传进来, 拿不到时诊断自动降级为只打印执行计划。
+    """
+
     ##################
     # Context Parallel
     ##################
@@ -2674,3 +2697,9 @@ class TransformerConfig(ModelParallelConfig):
                         "Forcing separate_mtp_headloss=False."
                     )
                     self.separate_mtp_headloss = False
+
+        # MoE 配置检查。默认 moe_config_check="off", 此时该调用直接返回, 不改变任何
+        # 现有行为; 设为 report/strict 才会生效。放在 __post_init__ 末尾是为了让检查
+        # 看到的是完整推导后的配置。延迟 import 避免 import 期的循环依赖。
+        from .moe.moe_config_check import run_moe_config_check
+        run_moe_config_check(self)
