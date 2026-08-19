@@ -361,6 +361,10 @@ def _make_bwd_case(
         attn_sink_dtype=paddle.empty([0], dtype=attn_sink_dtype).dtype,
         learnable_sink=learnable_sink,
         sink_grad_fusion=fusion,
+        # The sink-gradient epilogue under test lives on the cuDNN branch only:
+        # the tilelang backward takes ``d_sink`` from its own kernel and never
+        # reaches ``fused_sink_grad`` (see ``mqa_sparse_attn.backward``).
+        backward_backend="cudnn",
         needs_grad=(True, True, learnable_sink),
     )
     grad_output = (paddle.randn([b, s, h * d_v]) * 0.5).cast(dtype)

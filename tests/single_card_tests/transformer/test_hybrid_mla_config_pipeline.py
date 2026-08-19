@@ -912,7 +912,7 @@ class TestConfigDeltas(unittest.TestCase):
             # (``modeling.py`` hard-errors on ``None``), so both mqa_dsa phases
             # set it -- with opposite values, which is the point: phase 2
             # resumes a phase-1 checkpoint that has no indexer tensors, phase
-            # 3/4 resumes a phase-2 checkpoint that does.
+            # 3 resumes a phase-2 checkpoint that does.
             allowed["indexer_init_from_scratch"] = (
                 self._MISSING,
                 name == _DSA,

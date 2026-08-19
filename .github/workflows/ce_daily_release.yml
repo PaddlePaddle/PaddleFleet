@@ -146,7 +146,7 @@ jobs:
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda init bash
+          conda init bash > /dev/null
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           paddle_url=${PADDLE_URL}
@@ -166,6 +166,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
@@ -293,7 +294,7 @@ jobs:
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda init bash
+          conda init bash > /dev/null
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           paddle_url=${PADDLE_URL}
@@ -310,6 +311,7 @@ jobs:
           git config pull.rebase false
           git submodule update --init --recursive
           git fetch --all
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
@@ -456,7 +458,7 @@ jobs:
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda init bash
+          conda init bash > /dev/null
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
 
@@ -468,6 +470,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           git fetch --all
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
@@ -501,6 +504,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
+          python -m pip install setuptools
           formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
@@ -696,7 +700,7 @@ jobs:
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda init bash
+          conda init bash > /dev/null
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
 
@@ -707,6 +711,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
           pip install colorlog>=6.10.1
@@ -743,6 +748,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
+          python -m pip install setuptools
           formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
@@ -1155,7 +1161,7 @@ jobs:
           wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
           bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda init bash
+          conda init bash > /dev/null
           conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
 
@@ -1166,13 +1172,13 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
+          python -m pip install setuptools
           fleet_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | sort -V | tail -1)
           git checkout ${fleet_branch}
 
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.cdn.bcebos.com/PaddleFleet/${fleet_branch}/latest/${CUDA_VERSION}/paddle-release/${fleet_ops_wheel}" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install colorlog>=6.10.1
           wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -1201,6 +1207,7 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git fetch --all
+          python -m pip install setuptools
           formers_branch=release/$(git for-each-ref --format="%(refname:short)" "refs/remotes/origin/release/*" | awk -F/ "{print \$NF}" | grep -E "^[0-9]+\.[0-9]+$" | sort -V | tail -1)
           git checkout ${formers_branch}
           git log -1
