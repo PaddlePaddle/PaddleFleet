@@ -1399,7 +1399,7 @@ jobs:
 
   coverage_check:
     name: Coverage Upload And Check
-    needs: [multi-card_test, single_card_test, integration-test-a100, integration-test-H20-single-card, check-bypass]
+    needs: [multi-card_test, single_card_test, integration-test-H20-multi-card,integration-test-a100, integration-test-H20-single-card, check-bypass]
     if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' && needs.single_card_test.result != 'skipped' }}
     runs-on:
       group: APPROVAL
