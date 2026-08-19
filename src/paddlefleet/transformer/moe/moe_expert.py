@@ -15,8 +15,10 @@
 
 import functools
 import os
+from collections.abc import Callable
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import dataclass
 
 import paddle
 import paddle.nn.functional as F
@@ -74,12 +76,34 @@ g_shard_bypass_dygraph_optimizer = int(
 )
 
 
+@dataclass(frozen=True)
+class RuntimeExpertWeights:
+    """Expert weights with hooks that restore mutable storage for backward."""
+
+    tensors: tuple[paddle.Tensor, paddle.Tensor]
+    restore_before_backward: tuple[
+        Callable[[], None] | None,
+        Callable[[], None] | None,
+    ] = (None, None)
+
+    def __iter__(self):
+        return iter(self.tensors)
+
+
 class BMMFunction(paddle.autograd.PyLayer):
     @staticmethod
-    def forward(ctx, x, y, batch_sizes, trans_y=False):
+    def forward(
+        ctx,
+        x,
+        y,
+        batch_sizes,
+        trans_y=False,
+        restore_weight=None,
+    ):
         ctx.save_for_backward(x, y)
         ctx.batch_sizes = batch_sizes
         ctx.trans_y = trans_y
+        ctx.restore_weight = restore_weight
         return paddle.incubate.nn.functional.batched_gemm(
             x, y, batch_sizes, trans_rhs=trans_y
         )
@@ -87,6 +111,10 @@ class BMMFunction(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, grad):
         x, y = ctx.saved_tensor()
+        if ctx.restore_weight is not None:
+            # Restore and consume the weight in one autograd node so another
+            # microbatch cannot replace MoonEP's redundant slots in between.
+            ctx.restore_weight()
         batch_sizes = ctx.batch_sizes
         trans_y = ctx.trans_y
 
@@ -347,15 +375,22 @@ class GroupedMLPExpert(FleetLayer):
         self,
         permuted_local_hidden_states: paddle.Tensor,
         tokens_per_expert: paddle.Tensor,
-        expert_weights: tuple[paddle.Tensor, paddle.Tensor] | None = None,
+        expert_weights: (
+            RuntimeExpertWeights | tuple[paddle.Tensor, paddle.Tensor] | None
+        ) = None,
     ):
         """Forward step of the GroupedMLP without TP/DP."""
 
-        weight1, weight2 = (
-            expert_weights
-            if expert_weights is not None
-            else (self.weight1, self.weight2)
-        )
+        restore_weight1 = restore_weight2 = None
+        if isinstance(expert_weights, RuntimeExpertWeights):
+            weight1, weight2 = expert_weights.tensors
+            restore_weight1, restore_weight2 = (
+                expert_weights.restore_before_backward
+            )
+        elif expert_weights is not None:
+            weight1, weight2 = expert_weights
+        else:
+            weight1, weight2 = self.weight1, self.weight2
 
         if permuted_local_hidden_states.numel() != 0:
             tokens_per_expert = tokens_per_expert.cpu().tolist()
@@ -372,6 +407,8 @@ class GroupedMLPExpert(FleetLayer):
                     permuted_local_hidden_states,
                     weight1,
                     tokens_per_expert,
+                    False,
+                    restore_weight1,
                 )
             if self.activation_recompute:
                 raise NotImplementedError(
@@ -387,7 +424,11 @@ class GroupedMLPExpert(FleetLayer):
                     )
                 else:
                     fc2_output = BMMFunction.apply(
-                        intermediate_parallel, weight2, tokens_per_expert
+                        intermediate_parallel,
+                        weight2,
+                        tokens_per_expert,
+                        False,
+                        restore_weight2,
                     )
         else:
             # No token is allocated for local experts.

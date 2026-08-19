@@ -354,6 +354,9 @@ class TestMoonEPDispatcher(unittest.TestCase):
                 ):
                     runtime.copy_(local)
 
+            def prefetch(self, _plan, projection_index=None):
+                del projection_index
+
             def reduce_grads(self, plan, grad_weight1, grad_weight2):
                 self.plan = plan
                 return grad_weight1 * 5, grad_weight2 * 7
@@ -389,6 +392,79 @@ class TestMoonEPDispatcher(unittest.TestCase):
                 )
             )
         )
+
+    def test_runtime_weights_are_restored_per_bmm_backward(self):
+        class _Bridge:
+            def __init__(self):
+                self.full_weights = (
+                    paddle.zeros([1, 2, 2], dtype="float32"),
+                    paddle.zeros([1, 2, 2], dtype="float32"),
+                )
+
+            @paddle.no_grad()
+            def prepare(self, weight1, weight2, plan):
+                for runtime, local in zip(
+                    self.full_weights, (weight1, weight2)
+                ):
+                    runtime.copy_(local)
+                self.prefetch(plan)
+
+            @paddle.no_grad()
+            def prefetch(self, plan, projection_index=None):
+                indices = (
+                    range(len(self.full_weights))
+                    if projection_index is None
+                    else (projection_index,)
+                )
+                for index in indices:
+                    self.full_weights[index].copy_(plan.weights[index])
+
+            def reduce_grads(self, _plan, grad_weight1, grad_weight2):
+                return grad_weight1, grad_weight2
+
+        grouped_experts = types.SimpleNamespace(
+            weight1=paddle.ones([1, 2, 2], dtype="float32"),
+            weight2=paddle.ones([1, 2, 2], dtype="float32"),
+        )
+        for weight in (grouped_experts.weight1, grouped_experts.weight2):
+            weight.stop_gradient = False
+        expert = types.SimpleNamespace(
+            moe_deep_gemm=False,
+            activation_recompute=False,
+            activation_func=lambda hidden: hidden,
+        )
+        plans = [
+            types.SimpleNamespace(
+                weights=(
+                    paddle.to_tensor([[[value, 0.0], [0.0, value + 1]]]),
+                    paddle.eye(2).reshape([1, 2, 2]),
+                )
+            )
+            for value in (2.0, 5.0)
+        ]
+        bridge = _Bridge()
+        tokens_per_expert = paddle.to_tensor([1], dtype="int64")
+        inputs = [
+            paddle.to_tensor([[1.0, 1.0]], stop_gradient=False) for _ in plans
+        ]
+
+        outputs = []
+        for hidden, plan in zip(inputs, plans):
+            runtime_weights = moonep.moonep_runtime_weights(
+                grouped_experts, bridge, plan
+            )
+            output, _ = GroupedMLPExpert.forward(
+                expert,
+                hidden,
+                tokens_per_expert,
+                expert_weights=runtime_weights,
+            )
+            outputs.append(output)
+
+        (outputs[0].sum() + outputs[1].sum()).backward()
+
+        self.assertEqual(inputs[0].grad.tolist(), [[2.0, 3.0]])
+        self.assertEqual(inputs[1].grad.tolist(), [[5.0, 6.0]])
 
 
 class TestMoonEPBufferCache(unittest.TestCase):
@@ -449,6 +525,36 @@ class TestMoonEPBufferCache(unittest.TestCase):
 
 
 class TestMoonEPWeightBridge(unittest.TestCase):
+    def test_prefetch_can_restore_one_projection(self):
+        bridge = object.__new__(moonep.MoonEPWeightBridge)
+        bridge.buffer = mock.Mock()
+        bridge.buffer._require_ctx.return_value = {"num_sms": 8}
+        bridge.rank = 0
+        bridge.num_experts = 1
+        bridge.projections = [
+            types.SimpleNamespace(
+                full_weight=paddle.zeros([2, 1, 1], dtype="bfloat16")
+            )
+            for _ in range(2)
+        ]
+        plan = types.SimpleNamespace(
+            experts_to_copy=paddle.zeros([1, 1], dtype="int32")
+        )
+
+        with mock.patch.object(
+            moonep, "launch_prefetch", create=True
+        ) as launch:
+            bridge.prefetch(plan)
+            self.assertEqual(launch.call_count, 2)
+            launch.reset_mock()
+            bridge.prefetch(plan, projection_index=1)
+
+        launch.assert_called_once()
+        self.assertEqual(
+            launch.call_args.args[1].data_ptr(),
+            bridge.projections[1].full_weight[bridge.num_experts :].data_ptr(),
+        )
+
     def test_unavailable_runtime_and_unaligned_storage_are_rejected(self):
         with (
             mock.patch.object(moonep, "_MOONEP_AVAILABLE", False),

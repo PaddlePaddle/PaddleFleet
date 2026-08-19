@@ -17,8 +17,11 @@ from __future__ import annotations
 import os
 import weakref
 from dataclasses import dataclass
+from functools import partial
 
 import paddle
+
+from .moe_expert import RuntimeExpertWeights
 
 try:
     from paddlefleet_ops import is_moonep_available as _is_moonep_available
@@ -357,10 +360,15 @@ class MoonEPWeightBridge:
         self.prefetch(plan)
 
     @paddle.no_grad()
-    def prefetch(self, plan) -> None:
+    def prefetch(self, plan, projection_index=None) -> None:
         ctx = self.buffer._require_ctx()
         experts_to_copy = plan.experts_to_copy[self.rank].contiguous()
-        for projection in self.projections:
+        projections = (
+            self.projections
+            if projection_index is None
+            else (self.projections[projection_index],)
+        )
+        for projection in projections:
             launch_prefetch(
                 projection.full_weight[: self.num_experts],
                 projection.full_weight[self.num_experts :],
@@ -454,19 +462,16 @@ class MoonEPCombine(paddle.autograd.PyLayer):
     """Combine expert output and re-dispatch its gradient with the saved plan."""
 
     @staticmethod
-    def forward(ctx, expert_output, buffer, plan, bridge):
+    def forward(ctx, expert_output, buffer, plan, _bridge):
         combined, _, _ = buffer.combine(
             plan=plan, hidden_nvsh=expert_output.contiguous()
         )
         ctx.buffer = buffer
         ctx.plan = plan
-        ctx.bridge = bridge
         return combined
 
     @staticmethod
     def backward(ctx, grad_output):
-        # A later microbatch may have reused the redundant slots.
-        ctx.bridge.prefetch(ctx.plan)
         grad_expert_output, _, _, _ = ctx.buffer.dispatch(
             grad_output.contiguous(), plan=ctx.plan
         )
@@ -522,6 +527,13 @@ def moonep_combine(expert_output, buffer, plan, bridge):
 
 
 def moonep_runtime_weights(grouped_experts, bridge, plan):
-    return MoonEPRuntimeWeights.apply(
+    tensors = MoonEPRuntimeWeights.apply(
         grouped_experts.weight1, grouped_experts.weight2, bridge, plan
+    )
+    return RuntimeExpertWeights(
+        tensors=tensors,
+        restore_before_backward=tuple(
+            partial(bridge.prefetch, plan, projection_index=index)
+            for index in range(len(tensors))
+        ),
     )
