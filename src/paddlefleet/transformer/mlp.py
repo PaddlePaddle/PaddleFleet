@@ -156,8 +156,16 @@ class MLP(FleetLayer):
             disable_fp8=disable_fp8,
         )
 
-        # Ensure hidden_act is a callable function, not a bound method
-        hidden_act_value = self.config.hidden_act
+        # Ensure hidden_act is a callable function, not a bound method.
+        # A spec-level ``hidden_act`` wins over ``config.hidden_act``: modules
+        # such as the Qwen3-VL / Qwen3.5 patch merger and the Kimi-K2.5 tpool
+        # merge declare their own activation in ``MLPSublayersSpec`` because it
+        # differs from the model-wide ``config.hidden_act``.
+        hidden_act_value = (
+            sublayers_spec.hidden_act
+            if sublayers_spec.hidden_act is not None
+            else self.config.hidden_act
+        )
         if hasattr(hidden_act_value, "__self__") and hasattr(
             hidden_act_value, "__func__"
         ):

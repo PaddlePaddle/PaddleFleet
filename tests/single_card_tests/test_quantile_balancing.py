@@ -289,7 +289,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer = self._make_mock_layer(E, B, k, n, histogram_np, b_min, b_max)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         actual = layer._bias_value.numpy()
@@ -313,7 +313,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
 
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         # set_value should NOT have been called since histogram is all-zero
@@ -330,7 +330,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer = self._make_mock_layer(E, B, k, n, histogram_np)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         actual = layer._bias_value.numpy()
@@ -345,7 +345,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer = self._make_mock_layer(E, B, k, n, histogram_np)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         b_new = layer._bias_value.numpy()
@@ -367,7 +367,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer.qb_histogram.zero_ = MagicMock()
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         layer.qb_histogram.zero_.assert_called_once()
@@ -392,7 +392,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
 
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         self.assertEqual(list(stored["val"].shape), [1, E])
@@ -406,7 +406,7 @@ class TestUpdateSingleLayerPaddle(unittest.TestCase):
         layer = self._make_mock_layer(E, B, k, n, histogram_np)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         actual = layer._bias_value.numpy()
@@ -529,15 +529,16 @@ def _fake_fleet_module(hcg):
 
 
 @contextlib.contextmanager
-def _initialized_fleet(hcg, cp_group=None):
-    """Pretend distributed is up with `hcg` as the hybrid group and `cp_group` as CP."""
+def _initialized_fleet(hcg):
+    """Pretend distributed is up with `hcg` as the hybrid group.
+
+    CP is intentionally not mocked: the QB histogram is no longer reduced over a
+    separate CP group (CP is a sub-slice of the sharding group, so the sharding
+    all-reduce already covers it).
+    """
     with (
         patch("paddle.distributed.is_initialized", return_value=True),
         patch("paddle.distributed.fleet", _fake_fleet_module(hcg)),
-        patch(
-            "paddlefleet.parallel_state.get_context_parallel_group",
-            return_value=cp_group,
-        ),
     ):
         yield
 
@@ -546,12 +547,11 @@ class TestTryGetCommGroups(unittest.TestCase):
     """Test the communication group retrieval function."""
 
     def test_no_fleet_returns_none(self):
-        """Without fleet initialized, should return four Nones."""
-        tp, cp, dp, sd = _try_get_comm_groups()
+        """Without fleet initialized, should return three Nones."""
+        tp, dp, sd = _try_get_comm_groups()
         # In single-process tests fleet.init() may have run, but every group
         # holds a single rank, so nothing needs reducing.
         self.assertIsNone(tp)
-        self.assertIsNone(cp)
         self.assertIsNone(dp)
         self.assertIsNone(sd)
 
@@ -568,7 +568,7 @@ class TestTryGetCommGroups(unittest.TestCase):
                 _fake_fleet_module(_FakeHCG(tp=2, dp=8, sd=4)),
             ),
         ):
-            self.assertEqual(_try_get_comm_groups(), (None, None, None, None))
+            self.assertEqual(_try_get_comm_groups(), (None, None, None))
 
     def test_initialized_multi_rank_groups_are_returned(self):
         """Regression guard: groups must be found on a realistically shaped fleet.
@@ -578,9 +578,8 @@ class TestTryGetCommGroups(unittest.TestCase):
         came back None and the histogram was never merged across ranks.
         """
         with _initialized_fleet(_FakeHCG(tp=2, dp=8, sd=4)):
-            tp, cp, dp, sd = _try_get_comm_groups()
+            tp, dp, sd = _try_get_comm_groups()
         self.assertEqual((tp.nranks, dp.nranks, sd.nranks), (2, 8, 4))
-        self.assertIsNone(cp)  # CP is not enabled in this test process
 
 
 # =============================================================================
@@ -639,7 +638,7 @@ class TestOnOptimizerEnd(unittest.TestCase):
         # Directly test _update_single_layer (bypasses isinstance in on_optimizer_end)
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         # Verify histogram was reset (zero_() was called on the tensor)
@@ -801,7 +800,7 @@ class TestEndToEnd(unittest.TestCase):
 
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         # Step 3: Verify result — bias should be non-zero and zero-mean
@@ -936,7 +935,7 @@ class TestDegenerateRange(unittest.TestCase):
 
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
-            layer, tp_group=None, cp_group=None, dp_group=None, sd_group=None
+            layer, tp_group=None, dp_group=None, sd_group=None
         )
 
         # Should still produce valid result (not crash or NaN)
@@ -1019,30 +1018,13 @@ class TestCommGroupsHappyPath(unittest.TestCase):
     def test_all_groups_available(self):
         """When all groups are available and have nranks > 1, return them."""
         with _initialized_fleet(_FakeHCG(tp=4, dp=8, sd=2)):
-            tp, cp, dp, sd = _try_get_comm_groups()
+            tp, dp, sd = _try_get_comm_groups()
         self.assertEqual((tp.nranks, dp.nranks, sd.nranks), (4, 8, 2))
-        self.assertIsNone(cp)
-
-    def test_cp_group_picked_up(self):
-        """A multi-rank CP group must be returned so its histogram is merged."""
-        cp_group = _FakeGroup(4)
-        with _initialized_fleet(_FakeHCG(), cp_group=cp_group):
-            tp, cp, dp, sd = _try_get_comm_groups()
-        self.assertIs(cp, cp_group)
-        self.assertIsNone(tp)
-        self.assertIsNone(dp)
-        self.assertIsNone(sd)
-
-    def test_single_rank_cp_group_filtered(self):
-        """CP=1 needs no reduction, so the group is filtered out."""
-        with _initialized_fleet(_FakeHCG(), cp_group=_FakeGroup(1)):
-            _, cp, _, _ = _try_get_comm_groups()
-        self.assertIsNone(cp)
 
     def test_single_rank_groups_filtered(self):
         """Groups with nranks <= 1 should be filtered to None."""
         with _initialized_fleet(_FakeHCG(tp=1, dp=4, sd=1)):
-            tp, cp, dp, sd = _try_get_comm_groups()
+            tp, dp, sd = _try_get_comm_groups()
         self.assertIsNone(tp)
         self.assertEqual(dp.nranks, 4)
         self.assertIsNone(sd)
@@ -1056,7 +1038,7 @@ class TestCommGroupsHappyPath(unittest.TestCase):
             get_sharding_parallel_group = staticmethod(lambda: None)
 
         with _initialized_fleet(_NoneHCG()):
-            tp, cp, dp, sd = _try_get_comm_groups()
+            tp, dp, sd = _try_get_comm_groups()
         self.assertIsNone(tp)
         self.assertIsNone(dp)
         self.assertIsNone(sd)
@@ -1101,7 +1083,6 @@ class TestTPAllReduceCondition(unittest.TestCase):
         callback._update_single_layer(
             layer,
             tp_group=tp_group,
-            cp_group=None,
             dp_group=None,
             sd_group=None,
         )
@@ -1125,7 +1106,6 @@ class TestTPAllReduceCondition(unittest.TestCase):
         callback._update_single_layer(
             layer,
             tp_group=tp_group,
-            cp_group=None,
             dp_group=None,
             sd_group=None,
         )
@@ -1149,7 +1129,6 @@ class TestTPAllReduceCondition(unittest.TestCase):
         callback._update_single_layer(
             layer,
             tp_group=tp_group,
-            cp_group=None,
             dp_group=None,
             sd_group=None,
         )
@@ -1174,7 +1153,6 @@ class TestTPAllReduceCondition(unittest.TestCase):
         callback._update_single_layer(
             layer,
             tp_group=None,
-            cp_group=None,
             dp_group=dp_group,
             sd_group=sd_group,
         )
@@ -1183,34 +1161,13 @@ class TestTPAllReduceCondition(unittest.TestCase):
         self.assertEqual(mock_dist.all_reduce.call_count, 2)
 
     @patch("paddlefleet.transformer.moe.qb_callback.dist")
-    def test_cp_reduce_called_unconditionally(self, mock_dist):
-        """CP always splits the sequence, so its reduce is not gated on SP/EP."""
-        np.random.seed(42)
-        E, B, k, n = 4, 50, 2, 4
-        histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
+    def test_all_groups_reduce(self, mock_dist):
+        """TP+DP+Sharding together produce exactly three all-reduces.
 
-        cp_group = MagicMock()
-        callback = MoEQuantileBalancingCallback()
-        # SP=False and EP=1 disable the TP reduce; CP must still fire.
-        for sp, ep_size in ((False, 1), (True, 1), (False, 4)):
-            mock_dist.reset_mock()
-            layer = self._make_layer_with_config(
-                E, B, k, n, histogram_np, sp=sp, ep_size=ep_size
-            )
-            callback._update_single_layer(
-                layer,
-                tp_group=None,
-                cp_group=cp_group,
-                dp_group=None,
-                sd_group=None,
-            )
-            mock_dist.all_reduce.assert_called_once_with(
-                mock_dist.all_reduce.call_args.args[0], group=cp_group
-            )
-
-    @patch("paddlefleet.transformer.moe.qb_callback.dist")
-    def test_all_four_groups_reduce(self, mock_dist):
-        """TP+CP+DP+Sharding together produce exactly four all-reduces."""
+        CP is deliberately absent: it is a sub-slice of the sharding group, so
+        the sharding all-reduce already covers it. Reducing CP separately would
+        double-count the histogram.
+        """
         np.random.seed(42)
         E, B, k, n = 4, 50, 2, 4
         histogram_np = np.random.randint(5, 20, (E, B)).astype(np.int32)
@@ -1218,29 +1175,28 @@ class TestTPAllReduceCondition(unittest.TestCase):
         layer = self._make_layer_with_config(
             E, B, k, n, histogram_np, sp=True, ep_size=4
         )
-        groups = [MagicMock() for _ in range(4)]
+        groups = [MagicMock() for _ in range(3)]
         callback = MoEQuantileBalancingCallback()
         callback._update_single_layer(
             layer,
             tp_group=groups[0],
-            cp_group=groups[1],
-            dp_group=groups[2],
-            sd_group=groups[3],
+            dp_group=groups[1],
+            sd_group=groups[2],
         )
 
-        self.assertEqual(mock_dist.all_reduce.call_count, 4)
+        self.assertEqual(mock_dist.all_reduce.call_count, 3)
         reduced_groups = [
             call.kwargs["group"] for call in mock_dist.all_reduce.call_args_list
         ]
         self.assertEqual(reduced_groups, groups)
 
     @patch("paddlefleet.transformer.moe.qb_callback.dist")
-    def test_cp_histograms_merge_to_global_quantile(self, mock_dist):
-        """A CP-sharded histogram pair must recover the same bias as the pooled one.
+    def test_sharded_histograms_merge_to_global_quantile(self, mock_dist):
+        """A sharded histogram pair must recover the same bias as the pooled one.
 
-        Each CP rank's router only sees S/CP tokens, so without the CP reduce the
-        recovered quantile is a local one. Summing the shards must reproduce the
-        result of running on the full sequence.
+        Each sharding rank's router only sees part of the global batch, so
+        without the sharding reduce the recovered quantile is a local one.
+        Summing the shards must reproduce the full-batch result.
         """
         np.random.seed(11)
         E, B, k, n = 4, 60, 2, 4
@@ -1248,10 +1204,10 @@ class TestTPAllReduceCondition(unittest.TestCase):
         shard_b = np.random.randint(0, 15, (E, B)).astype(np.int32)
         pooled = shard_a + shard_b
 
-        cp_group = MagicMock()
+        sd_group = MagicMock()
 
         def _fake_all_reduce(tensor, group=None):
-            # Emulate summing shard_a (local) with shard_b (the peer CP rank).
+            # Emulate summing shard_a (local) with shard_b (the peer rank).
             tensor.add_(paddle.to_tensor(shard_b, dtype=tensor.dtype))
 
         mock_dist.all_reduce.side_effect = _fake_all_reduce
@@ -1263,9 +1219,8 @@ class TestTPAllReduceCondition(unittest.TestCase):
         callback._update_single_layer(
             layer,
             tp_group=None,
-            cp_group=cp_group,
             dp_group=None,
-            sd_group=None,
+            sd_group=sd_group,
         )
         merged_bias = layer._bias_value.numpy()
 
@@ -1605,7 +1560,7 @@ class TestCommGroupsExceptionPath(unittest.TestCase):
                 side_effect=RuntimeError("hcg unavailable"),
             ),
         ):
-            tp, cp, dp, sd = _try_get_comm_groups()
+            tp, dp, sd = _try_get_comm_groups()
         self.assertIsNone(tp)
         self.assertIsNone(dp)
         self.assertIsNone(sd)
@@ -1701,7 +1656,7 @@ class TestQBPaddingExclusion(unittest.TestCase):
         hist = router.qb_histogram.numpy().copy()
         usage = router.expert_usage.numpy().copy()
         MoEQuantileBalancingCallback()._update_single_layer(
-            router, None, None, None, None
+            router, None, None, None
         )
         return hist, usage, router.e_score_correction_bias.numpy().copy()
 
@@ -1781,7 +1736,7 @@ class TestQBPaddingExclusion(unittest.TestCase):
 
         # An empty histogram must leave the bias untouched.
         MoEQuantileBalancingCallback()._update_single_layer(
-            router, None, None, None, None
+            router, None, None, None
         )
         np.testing.assert_array_equal(
             router.e_score_correction_bias.numpy(), bias_before

@@ -886,6 +886,16 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         input_needs_grad = not ctx.input_stop_gradient
 
+        # AMP casts the activation to the weight dtype inside the forward gemm,
+        # but this PyLayer differentiates the gemms by hand and the backward
+        # runs with AMP disabled (activation recompute explicitly turns it off),
+        # so the cast has to be reproduced here. Otherwise a fp32 activation
+        # feeding a bf16 weight (e.g. the fp32 embedding output produced by
+        # ``fp32_residual_connection``) makes the wgrad gemm fail on mixed
+        # dtypes. The dgrad is cast back to the original input dtype below.
+        if input is not None and input.dtype != weight.dtype:
+            input = input.astype(weight.dtype)
+
         if ctx.gradient_accumulation_fusion:
             weight.main_grad = main_grad
 
@@ -1100,6 +1110,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
+            if sub_grad_input is not None and (
+                sub_grad_input.dtype != ctx.input_dtype
+            ):
+                sub_grad_input = sub_grad_input.astype(ctx.input_dtype)
             if use_bias:
                 return sub_grad_input, grad_weight, grad_bias
             else:
@@ -1107,6 +1121,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         if ctx.allreduce_dgrad and input_needs_grad:
             handle.wait()
+
+        if grad_input is not None and grad_input.dtype != ctx.input_dtype:
+            grad_input = grad_input.astype(ctx.input_dtype)
 
         # PyLayer requires the number of output in backward
         # function matches the number of Tensors in forward's

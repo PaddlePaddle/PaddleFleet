@@ -16,9 +16,14 @@ from .fused_mla_yarn_rope_apply import (
     fused_apply_mla_rope_for_kv,
     fused_apply_mla_rope_for_q,
 )
+from .fused_sink_grad import fused_sink_grad
 from .fused_yarn_rope_freqs import fused_yarn_rope_freqs
 from .grouped_matmul_fusion import GroupedMatmulTriton, fused_grouped_matmul
-from .mla_rope_inplace_fusion import fused_apply_mla_rope_inplace
+from .mla_rope_inplace_fusion import (
+    fused_apply_mla_rope_inplace,
+    fused_apply_rope_half,
+    fused_rope_cat_key,
+)
 from .moe_topk_fusion import MoETopkFusion, routing_map_fusion_forward
 from .q_rms_norm_fusion import fused_q_rms_norm
 from .rms_norm_fusion import RMSNormFusionTriton
@@ -34,6 +39,7 @@ from .ulysses_alltoall_fused import (
 
 __all__ = [
     "fused_q_rms_norm",
+    "fused_sink_grad",
     "fused_yarn_rope_freqs",
     "GroupedMatmulTriton",
     "fused_grouped_matmul",
@@ -46,6 +52,8 @@ __all__ = [
     "fused_apply_mla_rope_for_kv",
     "fused_apply_mla_rope_for_q",
     "fused_apply_mla_rope_inplace",
+    "fused_apply_rope_half",
+    "fused_rope_cat_key",
     "ulysses_alltoall_fused_supported",
     "ulysses_single_all_to_all_fused",
 ]

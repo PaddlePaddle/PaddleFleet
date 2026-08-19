@@ -103,23 +103,21 @@ class TestBlockAttnResFunc(unittest.TestCase):
     def _reference_forward(
         self, partial_block, proj_weight, norm_weight, blocks
     ):
-        """Reference implementation without PyLayer."""
-        all_repr = [*blocks, partial_block]
-        logits_list = []
-        for repr_i in all_repr:
-            variance = (
-                repr_i.astype("float32").pow(2).mean(axis=-1, keepdim=True)
+        """Official FP32 batched reduction without calling the product helper."""
+        with paddle.amp.auto_cast(enable=False):
+            values = paddle.stack([*blocks, partial_block], axis=-2).astype(
+                "float32"
             )
-            rms = paddle.sqrt(variance + self.norm_eps)
-            k_i = repr_i / rms * norm_weight
-            logit_i = (k_i * proj_weight).sum(axis=-1)
-            logits_list.append(logit_i)
-        logits = paddle.stack(logits_list, axis=0)
-        weights = paddle.nn.functional.softmax(logits, axis=0)
-        h = weights[0].unsqueeze(-1) * all_repr[0]
-        for i in range(1, len(all_repr)):
-            h = h + weights[i].unsqueeze(-1) * all_repr[i]
-        return h
+            variance = values.pow(2).mean(axis=-1, keepdim=True)
+            normalized = values * paddle.rsqrt(variance + self.norm_eps)
+            score_weight = norm_weight.astype("float32") * proj_weight.astype(
+                "float32"
+            ).reshape([-1])
+            scores = (normalized * score_weight).sum(axis=-1)
+            probabilities = paddle.nn.functional.softmax(
+                scores, axis=-1
+            ).unsqueeze(-2)
+            return paddle.matmul(probabilities, values).squeeze(-2)
 
     def test_forward_matches_reference(self):
         """BlockAttnResFunc.forward output matches naive implementation."""
@@ -256,6 +254,71 @@ class TestBlockAttnResFunc(unittest.TestCase):
         self.assertIsNotNone(norm_weight.grad)
         self.assertIsNotNone(blocks[1].grad)
 
+    def test_backward_releases_saved_context(self):
+        """First-order backward must release the saved distributed tensors."""
+
+        class _Context:
+            def save_for_backward(self, *tensors):
+                self.container = tensors
+
+            def saved_tensor(self):
+                return self.container
+
+        partial_block, proj_weight, norm_weight, blocks = self._make_inputs(
+            num_blocks=2, requires_grad=True
+        )
+        ctx = _Context()
+        output = BlockAttnResFunc.forward(
+            ctx,
+            partial_block,
+            proj_weight,
+            norm_weight,
+            self.norm_eps,
+            *blocks,
+        )
+        self.assertEqual(len(ctx.container), 5)
+
+        grads = BlockAttnResFunc.backward(ctx, paddle.ones_like(output))
+
+        self.assertEqual(len(grads), 5)
+        self.assertEqual(ctx.container, ())
+        for grad in grads:
+            self.assertTrue(paddle.isfinite(grad).all().item())
+
+    @unittest.skipUnless(paddle.is_compiled_with_cuda(), "requires CUDA AMP")
+    def test_bf16_amp_forward_matches_fp32_batched_reference(self):
+        """BF16 O2 must not downcast the official FP32 reduction."""
+        original_device = paddle.device.get_device()
+        try:
+            paddle.set_device("gpu")
+            paddle.manual_seed(2026)
+            partial_block = paddle.randn([1, 4, self.H], dtype="bfloat16")
+            blocks = [
+                paddle.randn([1, 4, self.H], dtype="bfloat16"),
+                paddle.randn([1, 4, self.H], dtype="bfloat16"),
+            ]
+            proj_weight = paddle.randn([1, self.H], dtype="bfloat16")
+            norm_weight = paddle.randn([self.H], dtype="bfloat16")
+
+            expected = self._reference_forward(
+                partial_block, proj_weight, norm_weight, blocks
+            )
+            with paddle.amp.auto_cast(
+                enable=True, dtype="bfloat16", level="O2"
+            ):
+                actual = BlockAttnResFunc.apply(
+                    partial_block,
+                    proj_weight,
+                    norm_weight,
+                    self.norm_eps,
+                    *blocks,
+                )
+
+            self.assertEqual(actual.dtype, paddle.float32)
+            self.assertTrue(paddle.equal_all(actual, expected).item())
+        finally:
+            paddle.set_device(original_device)
+
 
 # ---------------------------------------------------------------------------
 # Test 2: BlockAttnRes module training vs eval path
@@ -381,7 +444,9 @@ class TestTransformerLayerHelpers(unittest.TestCase):
     def setUp(self):
         self.strategy = _init_fleet()
 
-    def _make_config(self, block_size=4, num_layers=4):
+    def _make_config(
+        self, block_size=4, num_layers=4, num_empty_layers_add_in_head=0
+    ):
         return GPTConfig(
             num_hidden_layers=num_layers,
             hidden_size=64,
@@ -406,7 +471,19 @@ class TestTransformerLayerHelpers(unittest.TestCase):
             use_qk_norm=True,
             block_attention_residuals=True,
             attn_res_block_size=block_size,
+            num_empty_layers_add_in_head=num_empty_layers_add_in_head,
         )
+
+    def _boundary_layer_numbers(self, config):
+        """Physical ``layer_number`` of every layer that opens a block."""
+        model = gpt_builder(config, num_stages=1)
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        return [
+            m.layer_number
+            for m in model.sublayers()
+            if isinstance(m, TransformerLayer) and m._is_block_boundary()
+        ]
 
     def test_should_skip_for_normal_layer(self):
         """Normal (non-MTP) layers should NOT skip block attn res."""
@@ -422,36 +499,51 @@ class TestTransformerLayerHelpers(unittest.TestCase):
     def test_is_block_boundary(self):
         """_is_block_boundary correct for block_size=4 (span=4, K3 semantics)."""
         config = self._make_config(block_size=4, num_layers=6)
-        model = gpt_builder(config, num_stages=1)
-        from paddlefleet.transformer.transformer_layer import TransformerLayer
-
-        boundaries = []
-        for m in model.sublayers():
-            if isinstance(m, TransformerLayer):
-                if m._is_block_boundary():
-                    boundaries.append(m.layer_number)
+        boundaries = self._boundary_layer_numbers(config)
         # block_span == attn_res_block_size == 4 (matches K3's
         # `layer_idx % attn_res_block_size == 0`), so layers 0 and 4 are
         # boundaries.
-        self.assertTrue(len(boundaries) > 0)
-        for b in boundaries:
-            self.assertEqual(b % 4, 0)
+        self.assertEqual(boundaries, [0, 4])
 
     def test_is_block_boundary_block_size_2(self):
         """block_size=2 => span=2, every other layer is a boundary."""
         config = self._make_config(block_size=2, num_layers=4)
+        boundaries = self._boundary_layer_numbers(config)
+        self.assertEqual(boundaries, [0, 2])
+
+    def test_is_block_boundary_ignores_head_empty_layers(self):
+        """The schedule follows the logical index, not the physical one.
+
+        ``get_gpt_decoder_layers_spec`` shifts ``layer_number`` by
+        ``num_empty_layers_add_in_head``, so without undoing that shift the
+        whole block layout slides by the offset and logical layer 0 stops
+        opening a block -- which silently changes the residual topology of
+        every layer for a K3 warm start.
+        """
+        for head_offset in (0, 1, 2):
+            with self.subTest(num_empty_layers_add_in_head=head_offset):
+                config = self._make_config(
+                    block_size=4,
+                    num_layers=6,
+                    num_empty_layers_add_in_head=head_offset,
+                )
+                boundaries = self._boundary_layer_numbers(config)
+                # Logical decoder indices 0 and 4 close a block; the physical
+                # layer_number of those layers is shifted by head_offset.
+                self.assertEqual(boundaries, [head_offset, head_offset + 4])
+
+    def test_is_block_boundary_rejects_non_positive_span(self):
+        """A non-positive span is a config error, not a silent no-op."""
+        config = self._make_config(block_size=4, num_layers=2)
         model = gpt_builder(config, num_stages=1)
         from paddlefleet.transformer.transformer_layer import TransformerLayer
 
-        checked = 0
         for m in model.sublayers():
             if isinstance(m, TransformerLayer):
-                if hasattr(m, "attn_res_block_size") and m.attn_res_block_size:
-                    self.assertEqual(
-                        m._is_block_boundary(), m.layer_number % 2 == 0
-                    )
-                    checked += 1
-        self.assertTrue(checked > 0)
+                m.attn_res_block_size = 0
+                with self.assertRaises(ValueError):
+                    m._is_block_boundary()
+                break
 
 
 # ---------------------------------------------------------------------------
