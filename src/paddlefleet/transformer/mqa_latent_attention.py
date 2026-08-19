@@ -796,6 +796,9 @@ class MQALatentAttention(FleetLayer):
         # (``core_attention.softmax_offset``) and the switch are shared with the
         # dense MHA phase. ``None`` keeps the kernel on its sinkless ``-1e30``
         # path, bit-for-bit unchanged.
+        self.indexer_topk_backend = str(
+            getattr(self.config, "dsa_indexer_topk_backend", "unfused")
+        )
         self.softmax_offset = build_softmax_offset(
             self,
             config,
@@ -928,6 +931,7 @@ class MQALatentAttention(FleetLayer):
                 doc_lens=doc_lens_arg,
                 seq_offset=chunk_id * m,
                 return_topk_scores=need_loss,
+                topk_backend=self.indexer_topk_backend,
             )
 
         r_lo = _chunk(slice(0, m), lo)
@@ -2142,10 +2146,8 @@ class MQALatentAttention(FleetLayer):
                     doc_lens=doc_lens_arg,
                     seq_offset=position_offset,
                     return_topk_scores=need_loss,
-                    topk_backend=getattr(
-                    self.config, "dsa_indexer_topk_backend", "unfused"
-                ),
-            )
+                    topk_backend=self.indexer_topk_backend,
+                )
             topk_indices = paddle.where(
                 row_empty, paddle.full_like(selected, -1), selected
             )
