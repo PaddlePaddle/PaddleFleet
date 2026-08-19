@@ -229,11 +229,16 @@ class MoELayer(nn.Layer):
                 ]
             )
         if self.using_teramoe:
-            assert paddlefleet_ops.is_teramoe_available(), (
-                paddlefleet_ops.blocked_import_messages[
-                    "paddlefleet_ops.teramoe"
-                ]
-            )
+            # Explicit runtime check (not `assert`, which `python -O` strips):
+            # an unavailable/blocked TeraMoE must fail loudly at construction
+            # instead of silently building and blowing up inside the kernel.
+            if not paddlefleet_ops.is_teramoe_available():
+                raise ValueError(
+                    paddlefleet_ops.blocked_import_messages.get(
+                        "paddlefleet_ops.teramoe",
+                        "TeraMoE is not available in this environment.",
+                    )
+                )
             self.teramoe_dispatch_sms = getattr(
                 config, "teramoe_dispatch_sms", 48
             )
@@ -311,6 +316,20 @@ class MoELayer(nn.Layer):
         )
         # MoE-Related Configs
         self._init_expert_parallel()
+
+        if self.using_teramoe and self.expert_model_parallel_size <= 1:
+            # TeraMoE fuses dispatch+compute+combine into one NVSHMEM-backed
+            # persistent kernel, which needs a real expert-parallel process
+            # group. With expert_model_parallel_size<=1, _init_expert_parallel
+            # sets moe_group=None, and teramoe.Buffer(None, ...) would fail at
+            # the first forward. Reject the unsupported single-card layout at
+            # construction instead of masking it.
+            raise ValueError(
+                "TeraMoE requires expert_model_parallel_size > 1 (a real "
+                "expert-parallel process group); got "
+                f"expert_model_parallel_size={self.expert_model_parallel_size}. "
+                "Single-card / EP<=1 TeraMoE is not supported."
+            )
 
         self.gate = TopKRouter(config=config, pg_collection=pg_collection)
 

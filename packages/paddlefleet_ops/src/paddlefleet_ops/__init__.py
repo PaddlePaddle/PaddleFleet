@@ -409,10 +409,24 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet_ops.sonicmoe"] = error
 
     if is_teramoe_available():
-        with paddle.use_compat_guard(
-            enable=True, scope={"teramoe"}, silent=True
-        ):
-            _safe_load_ecosystem_lib("teramoe", ops_dir, globals())
+        try:
+            with paddle.use_compat_guard(
+                enable=True, scope={"teramoe"}, silent=True
+            ):
+                _safe_load_ecosystem_lib("teramoe", ops_dir, globals())
+        except ImportError as e:
+            # The hardware/toolchain qualifies for TeraMoE, but the TeraMoE
+            # build artifact is not installed/packaged in this environment.
+            # Degrade to a queryable "blocked" state instead of aborting the
+            # whole `import paddlefleet_ops` (which would break every consumer,
+            # even those with using_teramoe=False).
+            _TERAMOE_AVAILABLE = False
+            warning = (
+                "paddlefleet_ops.teramoe: hardware/toolchain qualifies but the "
+                f"TeraMoE library could not be loaded ({e}); disabling TeraMoE."
+            )
+            logger.warning(warning)
+            blocked_import_messages["paddlefleet_ops.teramoe"] = str(e)
     else:
         warning, error = _sonic_moe_requirement(
             "paddlefleet_ops.teramoe",

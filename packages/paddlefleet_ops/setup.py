@@ -38,9 +38,9 @@ def get_special_setup_deps():
         deps = [
             "triton",  # for deep_gemm, flashmask
             "einops",  # for flash-linear-attention
-            "nvidia-cutlass-dsl[cu13]==4.4.1",  # for sonic_moe and flash_attention
-            "filelock",  # for sonic_moe
-            "apache-tvm-ffi>=0.1.3,<0.1.12",  # for supersonic_moe
+            "nvidia-cutlass-dsl[cu13]==4.4.1",  # for sonic_moe, teramoe and flash_attention
+            "filelock",  # for sonic_moe, teramoe
+            "apache-tvm-ffi>=0.1.3,<0.1.12",  # for supersonic_moe, teramoe
         ]
         return deps
     elif backends.IS_XPU:
