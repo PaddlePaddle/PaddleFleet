@@ -157,6 +157,35 @@ class TestMQAGuards(unittest.TestCase):
         w_v = paddle.zeros([DV, H, V_HEAD_DIM], dtype="bfloat16")
         return query, key, w_v
 
+    def test_cutedsl_backend_precompiles_by_default_on_gpu(self):
+        config = _create_mqa_config("mqa_dsa")
+        config.dsa_indexer_topk_backend = "cutedsl"
+        with (
+            mock.patch("paddle.get_device", return_value="gpu:0"),
+            mock.patch(
+                "paddlefleet.cutedsl_ops.precompile_indexer_topk_clc"
+            ) as precompile,
+        ):
+            _build_module(config)
+
+        precompile.assert_called_once_with(
+            max_num_cols=16 * 1024,
+            top_k=INDEX_TOPK,
+        )
+
+    def test_cutedsl_backend_skips_precompile_without_gpu(self):
+        config = _create_mqa_config("mqa_dsa")
+        config.dsa_indexer_topk_backend = "cutedsl"
+        with (
+            mock.patch("paddle.get_device", return_value="cpu"),
+            mock.patch(
+                "paddlefleet.cutedsl_ops.precompile_indexer_topk_clc"
+            ) as precompile,
+        ):
+            _build_module(config)
+
+        precompile.assert_not_called()
+
     def test_packed_seq_params_rejected(self):
         query, key, w_v = self._args()
         with self.assertRaises(NotImplementedError):

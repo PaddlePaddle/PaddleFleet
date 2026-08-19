@@ -190,6 +190,25 @@ class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
         self.assertEqual(config.moe_n_hash_layers, 0)
 
 
+class TestDsaIndexerTopKBackendConfig(unittest.TestCase):
+    """Tests for the DSA indexer top-k backend configuration."""
+
+    def test_default_value(self):
+        config = TransformerConfig()
+        self.assertEqual(config.dsa_indexer_topk_backend, "unfused")
+
+    def test_valid_cutedsl_value(self):
+        config = TransformerConfig(dsa_indexer_topk_backend="cutedsl")
+        self.assertEqual(config.dsa_indexer_topk_backend, "cutedsl")
+
+    def test_invalid_value_raises(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "dsa_indexer_topk_backend='invalid_backend' is invalid",
+        ):
+            TransformerConfig(dsa_indexer_topk_backend="invalid_backend")
+
+
 class TestRoutedScalingFactorConfig(unittest.TestCase):
     """Tests for the routed_scaling_factor and routed_scaling_factor_learnable fields
     in TransformerConfig."""

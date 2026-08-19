@@ -57,6 +57,48 @@ def setUpModule():
 class TestIndexerTopKCoverage(unittest.TestCase):
     """Exercise host-side helpers without requiring a CUDA device."""
 
+    def test_cutedsl_backend_dispatch(self):
+        input_values = MagicMock()
+        contiguous_values = input_values.contiguous.return_value
+        seq_lens = MagicMock()
+        int32_lengths = seq_lens.cast.return_value
+        contiguous_lengths = int32_lengths.contiguous.return_value
+        indices = object()
+        values = object()
+
+        with patch.object(
+            topk_mod,
+            "indexer_topk_prefill",
+            return_value=(indices, values),
+        ) as topk:
+            result = _indexer_top_k_unfused(
+                input_values,
+                seq_lens,
+                64,
+                return_val=False,
+                topk_backend="cutedsl",
+            )
+
+        self.assertEqual(result, {"indices": indices, "values": values})
+        seq_lens.cast.assert_called_once_with("int32")
+        topk.assert_called_once_with(
+            contiguous_values,
+            contiguous_lengths,
+            64,
+            return_val=False,
+        )
+
+    def test_invalid_topk_backend_raises(self):
+        with self.assertRaisesRegex(
+            ValueError, "topk_backend='invalid_backend' is invalid"
+        ):
+            _indexer_top_k_unfused(
+                MagicMock(),
+                MagicMock(),
+                64,
+                topk_backend="invalid_backend",
+            )
+
     def test_lazy_public_wrappers(self):
         package = importlib.reload(cutedsl_ops)
         index_result = object()
@@ -281,6 +323,8 @@ class TestIndexerTopKCoverage(unittest.TestCase):
 
         tensor = Tensor()
         adapter = _PaddleDLPackAdapter(tensor)
+        self.assertIs(adapter.__dlpack__(), sentinel)
+        self.assertIsNone(tensor.stream)
         self.assertIs(adapter.__dlpack__(stream=12345), sentinel)
         self.assertEqual(tensor.stream, 12345)
         self.assertEqual(adapter.__dlpack_device__(), (2, 0))
