@@ -1363,6 +1363,22 @@ class TransformerConfig(ModelParallelConfig):
         kernel.
     """
 
+    mqa_sparse_attn_backward_backend: str = "cudnn"
+    """Backward kernel for the absorbed-MQA latent sparse attention (dkv).
+
+    One of {"cudnn", "tilelang"}:
+      * "cudnn" (default): cuDNN DSA backward. Fast, but ``dkv`` accumulates
+        with atomics and is **not** run-to-run reproducible; the drift is
+        bounded by ``test_block_sparse_dsa_gradcheck.py::TestDeterminism``.
+      * "tilelang": deterministic backward via
+        ``tilelang_ops.attn.mqa_latent_sparse_bwd``. ~14x slower on SM100 and
+        bitwise stable for identical inputs, independent of
+        ``FLAGS_cudnn_deterministic`` -- it always runs the atomic-free kernel
+        rather than selecting one from that flag.
+    The forward is always FlashMLA regardless of this switch; the tilelang
+    forward kernel cannot accept ``d_qk=576`` (not a power of two).
+    """
+
     csa_share_docmask_meta: bool = False
     """Share one ``CSADocMaskMetadata`` per (micro-batch, ratio, mask group).
 
@@ -1407,7 +1423,9 @@ class TransformerConfig(ModelParallelConfig):
     ``1 < ratio < 128`` layers) and ``MQALatentAttention``. No effect on the
     ``"tilelang"`` / ``"unfused"`` backends, which never build the flat global
     index table, nor on ``block_sparse_mqa_attention_dsa``, which leaves it at
-    the default.
+    the default. ``MQALatentAttention``'s forward is always FlashMLA, so it
+    remaps regardless of ``mqa_sparse_attn_backward_backend``; only its
+    backward follows that switch.
     """
 
     stage1_overlap: bool = False
@@ -1505,6 +1523,7 @@ class TransformerConfig(ModelParallelConfig):
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
         "hca_rope_type": "hca_rope_type",
         "csa_rope_type": "csa_rope_type",
+        "mqa_sparse_attn_backward_backend": "mqa_sparse_attn_backward_backend",
     }
 
     # Config keys that were renamed and deliberately left without a silent
@@ -2215,6 +2234,15 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+            if self.mqa_sparse_attn_backward_backend not in {
+                "cudnn",
+                "tilelang",
+            }:
+                raise ValueError(
+                    f"mqa_sparse_attn_backward_backend="
+                    f"{self.mqa_sparse_attn_backward_backend!r} is invalid. "
+                    "Must be one of {'cudnn', 'tilelang'}."
+                )
 
             # Per-attention-type RoPE variant validation (HCA / CSA).
             valid_rope_types = {"rope", "yarn"}
@@ -2510,3 +2538,88 @@ class TransformerConfig(ModelParallelConfig):
                     "hybrid_mla_cp_mode can only be set in dsv4_hybrid with "
                     "-2 in csa_compress_ratios."
                 )
+
+        # separate_mtp_headloss validation.
+        if self.separate_mtp_headloss:
+            import warnings as _warnings
+
+            # Resolve the effective number of MTP layers, following the same
+            # logic used elsewhere in __post_init__ (see the csa branch above).
+            mtp_num_layers = self.num_nextn_predict_layers
+            mtp_enabled = mtp_num_layers > 0
+            pp_enabled = self.pipeline_model_parallel_size > 1
+
+            # 1. separate_mtp_headloss is only meaningful when both MTP and PP
+            #    are enabled; otherwise warn and force-disable it.
+            if not mtp_enabled or not pp_enabled:
+                _warnings.warn(
+                    "separate_mtp_headloss=True requires both MTP and pipeline "
+                    "parallel to be enabled "
+                    f"(mtp_num_layers={mtp_num_layers}, "
+                    f"pipeline_model_parallel_size={self.pipeline_model_parallel_size}). "
+                    "Forcing separate_mtp_headloss=False."
+                )
+                self.separate_mtp_headloss = False
+            else:
+                # Once MTP and PP are both enabled:
+                # 2. Layer-count vs pp*vpp guard.
+                #    The framework-enforced constraint is DIVISIBILITY: Paddle's
+                #    interleave segmentation (SegmentLayers.do_segment) asserts
+                #    the number of seg-weight-bearing layers is divisible by
+                #    pp*vpp, so an indivisible layout fails at build time.
+                #    Verified empirically on 8xH800 (pp=4, vpp=2): a divisible
+                #    layout with quotient > 1 (multiple layers per stage) builds
+                #    and constructs shared comm fine, so "exactly 1 layer per
+                #    stage" is stricter than the framework needs. We keep the
+                #    quotient==1 form as a conservative guard because the full
+                #    fwd/bwd path for separate_mtp_headloss under pp>1 is not yet
+                #    covered by any regression test; see
+                #    tests/multi_card_tests/pipeline_parallel/test_separate_mtp_headloss_pp.py
+                #    which asserts the build/segmentation/shared-layer-stage
+                #    contract.
+                pp_degree = self.pipeline_model_parallel_size
+                vpp_degree = self.virtual_pipeline_model_parallel_size
+                # When vpp is not enabled, vpp_degree may be None or a
+                # sentinel like -1. Normalize it to 1 before computing
+                # pp_degree*vpp_degree, otherwise the product would be wrong
+                # (e.g. negative).
+                if vpp_degree is None or vpp_degree <= 1:
+                    print(
+                        "[separate_mtp_headloss] vpp is not enabled "
+                        f"(virtual_pipeline_model_parallel_size={vpp_degree}); "
+                        "using vpp_degree=1 for the pp_degree*vpp_degree check."
+                    )
+                    vpp_degree = 1
+
+                num_empty_layers = self.num_empty_layers_add_in_head + max(
+                    0, self.num_empty_layers_add_in_tail - 1
+                )
+                total_layers = (
+                    self.num_hidden_layers + mtp_num_layers + num_empty_layers
+                )
+                denom = pp_degree * vpp_degree
+                if total_layers % denom != 0 or total_layers // denom != 1:
+                    _warnings.warn(
+                        "separate_mtp_headloss=True requires "
+                        "(num_hidden_layers + num_mtp_layers + num_empty_layers) "
+                        f"({self.num_hidden_layers} + {mtp_num_layers} + "
+                        f"{num_empty_layers} = {total_layers}) to be divisible "
+                        f"by pp_degree*vpp_degree ({pp_degree}*{vpp_degree} = "
+                        f"{denom}) and the quotient to equal 1 (exactly one "
+                        f"layer per pp*vpp stage), but got {total_layers} / "
+                        f"{denom} = {total_layers / denom}. "
+                        "Forcing separate_mtp_headloss=False."
+                    )
+                    self.separate_mtp_headloss = False
+
+                # 3. separate_mtp_headloss reserves tail EmptyLayer slots for the
+                #    separated MTP LMHead/Loss and main LMHead, so it needs at
+                #    least 3 tail empty layers.
+                if self.num_empty_layers_add_in_tail < 3:
+                    _warnings.warn(
+                        "separate_mtp_headloss=True requires "
+                        "num_empty_layers_add_in_tail >= 3 "
+                        f"(got {self.num_empty_layers_add_in_tail}). "
+                        "Forcing separate_mtp_headloss=False."
+                    )
+                    self.separate_mtp_headloss = False

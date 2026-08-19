@@ -86,9 +86,23 @@ python -m paddlefleet.config_adapter --input config.yaml \
   `model_config.json` 必须显式写 `json:KEY=VALUE`。
 
 取值类型自动推断（整数→int、`true/false`→bool、`null/none`→None、其余→字符串）。
-被 `--set` 指定的字段是**受保护**的：后续任何自动规则都不会再覆盖它。当某个模型
+被 `--set` 指定的字段是**受保护**的：后续任何自动规则都不会再覆盖它。但由适配器
+统一计算的字段（TP/PP/EP/CP/SEP、VPP、`num_empty_layers_add_in_tail`、
+`sharding_parallel_size`、`data_parallel_size`、`model_name_or_path`）**不允许**
+用 `--set` 锁定（带不带前缀都一样），否则生成的文件会与报告里的并行度对不上 ——
+遇到这种组合会直接报错。`model_name_or_path` 即使在 `--in-place` 下也不允许锁定：
+改它会决定「到底加载/缩容/快照哪一份 `model_config.json`」。当某个模型
 结构字段在 `model_config.json` 里读不到（不同模型家族命名不一致）时，也用
 `--set <字段>=<值>` 兜底。
+
+源作业卡数按两条证据推断并交叉校验：通信组
+（`DP × sharding × TP × SEP × PP`）与 batch 字段
+（`GBS / (micro_bs × acc) × TP × SEP × PP × CP`）。两者都能算且不一致时，取「没漏因子」
+的那个 —— 源 YAML 声明了 `data_parallel_size` 就用通信组，没声明则用 batch 字段
+（未声明的 DP 正是通信组公式缺的那一项）—— 并在报告里给出 WARNING。
+
+C3/C5 只取决于并行度本身，与卡数无关：这两项冲突时不会再列出「合法节点数」，而是
+直接说明必须先改 TP/SEP/EP/CP 的组合。
 
 `model_config.json` 的位置永远从 YAML 的 `model_name_or_path` 推断：绝对路径直接
 用，相对路径先按 YAML 所在目录、再按当前工作目录（Fleet 的解析方式）尝试。
@@ -131,8 +145,7 @@ python -m paddlefleet.config_adapter --input config.yaml \
 
 写盘时机：所有规划与校验都在内存里完成后才落盘，中途任何一步失败都不改动源文件；
 写文件走临时文件 + 原子替换，`--in-place` 下若 YAML 写失败会回滚已写的
-`model_config.json`。另外需要另存 `model_config.json` 时，`model_name_or_path`
-必须指向新目录，因此不允许同时用 `--set` 锁定它（会直接报错并提示改用 `--in-place`）。
+`model_config.json`。
 
 ### 约束体系
 
@@ -140,8 +153,9 @@ python -m paddlefleet.config_adapter --input config.yaml \
 |---|---|---|
 | C1 | `N % (TP·SEP·PP) == 0` | sharding 为正整数 |
 | C2 | `N % (PP·EP) == 0`（EP>1） | moe_sharding 为正整数 |
-| C3 | `EP % TP == 0`（EP>1） | dense_sharding 为正整数 |
+| C3 | `EP % (TP·SEP) == 0`（EP>1） | dense_sharding = EP/(TP·SEP) 为正整数 |
 | C4 | `sharding % CP == 0` | cp_sharding 为正整数 |
+| C5 | 不允许 SEP>1 且 CP>1 | 框架禁止 sep 与 context 并行同时使用 |
 | E1 | 跨机必须整节点分配 | Fleet 的 rank 映射要求各机对称 |
 | E2 | `TP·SEP` 放得进单机 | TP/SEP 不缩，缩了有 OOM 风险 |
 | E3 | 所有并行度是 ≥1 的整数 | — |
@@ -159,6 +173,7 @@ C/E/M 全部不通过时，报错会给出候选淘汰明细和最近的合法�
 |---|---|---|---|
 | yaml | `csa_sparse_attn_backend` | `tilelang` | HCA/CSA 的 cudnn 后端（FlashMLA 前向 + cuDNN 反向）与 tilelang 结果不一致 |
 | yaml | `csa_indexer_backend` | `tilelang` | indexer 的 cudnn top-k 与 tilelang 有差异，与上一项取齐 |
+| yaml | `mqa_sparse_attn_backward_backend` | `tilelang` | absorbed-MQA（`csa_compress_ratios=-2`）层的 dKV 反向默认走 cuDNN，原子累加不可逐位复现 |
 | json | `multimax_modules` | `null` | multimax 的可学习 range/ts 引入非确定性 |
 
 新增开关只需在 `precision.py` 的 `PRECISION_SWITCHES` 里加一行，报告与日志会自动

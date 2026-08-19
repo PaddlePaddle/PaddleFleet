@@ -725,6 +725,52 @@ class MQALatentAttention(FleetLayer):
         self.indexer_use_sparse_loss = bool(
             getattr(config, "dsa_indexer_use_sparse_loss", False)
         )
+        # ``dsa_indexer_use_sparse_loss=False`` is the phase-2 (warmup) mode:
+        # the indexer is still being learned, so attention must not consume its
+        # ranking yet -- it attends to the full per-document causal set, exactly
+        # like ``hybrid_mla_attention="mqa_full_causal"``, while the indexer is
+        # trained on the widest candidate table the kernel allows. Consuming a
+        # freshly initialised indexer's top-k here would feed the (frozen)
+        # backbone an essentially random sparse pattern for the whole phase.
+        # ``True`` is the phase-3/4 mode: attention consumes window + top-k and
+        # the KL is restricted to that same set.
+        # ``transformer_config.__post_init__`` pins this to ``train_indexer_only``
+        # so the two cannot disagree. Deliberately *not* cached as a second
+        # attribute: ``_forward_dsa`` reads ``self.indexer_use_sparse_loss``
+        # directly at both use sites, so a test (or anything else) flipping it on
+        # a live module cannot desynchronise the loss width from the attention
+        # set.
+        # Backward kernel for the indexer loss scaler, same switch the CSA layers
+        # read (csa_attention.py:2054). cuDNN's ``d_index_k`` scatters each query
+        # row's gradient to arbitrary key positions with atomics and is not
+        # run-to-run reproducible; "tilelang" has an atomic-free path gated on
+        # ``FLAGS_cudnn_deterministic``. Both apply the same
+        # ``sm_scale = dim**-0.5``, so switching does not change the forward or
+        # the scale. Default matches csa_attention.py's default ("tilelang").
+        #
+        # ``"unfused"`` -- the third value the config accepts -- is served by
+        # tilelang here, and must be: the scaler
+        # (``TileLangCSAIndexerLossAutoScaler.backward``) implements only
+        # "cudnn" and "tilelang" and raises ``NotImplementedError`` otherwise,
+        # so forwarding the name verbatim would turn a configuration the
+        # validation accepts into a crash at the *first sparse backward*, long
+        # after construction. This is the same substitution the warmup KL
+        # already makes for the same reason (see ``_forward_warmup``:
+        # ``unfused`` has no full-candidate implementation to offer either), so
+        # one config value now means one kernel across both phases of the layer.
+        backend = str(getattr(config, "csa_indexer_backend", "tilelang"))
+        self.indexer_backend = "tilelang" if backend == "unfused" else backend
+        # Backward kernel for the sparse MQA attention (dkv). cuDNN accumulates
+        # dkv with atomics and is not run-to-run reproducible (bounded by
+        # ``test_block_sparse_dsa_gradcheck.py::TestDeterminism``); "tilelang"
+        # (mqa_latent_sparse_bwd) is bitwise stable for identical inputs -- by
+        # construction, not via ``FLAGS_cudnn_deterministic`` -- but ~14x slower
+        # on SM100. The forward is always FlashMLA regardless of this switch
+        # (the tilelang forward cannot accept d_qk=576, which is not a power of
+        # two). Default "cudnn" preserves the previous behaviour.
+        self.sparse_attn_backward_backend = str(
+            getattr(config, "mqa_sparse_attn_backward_backend", "cudnn")
+        )
         # Learnable per-head attention-sink logit, from the model-wide
         # ``add_full_attention_sink_bias`` / ``softmax_type``. Built by the same
         # helper ``DotProductAttention`` uses, so the state_dict name
@@ -1618,6 +1664,9 @@ class MQALatentAttention(FleetLayer):
         off, which the backend turns into a sinkless softmax. Query-head padding
         to the DSA-fixed ``h_q == 64`` is the backend's job.
 
+        The forward is always FlashMLA sparse; the backward kernel is selected
+        by ``mqa_sparse_attn_backward_backend`` (see ``__init__``).
+
         ``indexer_topk > 0`` additionally returns the LSE over the first
         ``indexer_topk`` columns, which is the indexer-loss target's normalizer.
         """
@@ -1633,6 +1682,7 @@ class MQALatentAttention(FleetLayer):
             indexer_topk=indexer_topk,
             sink_grad_fusion=self.sink_grad_fusion,
             global_kv_idx_remap_fusion=self.global_kv_idx_remap_fusion,
+            backward_backend=self.sparse_attn_backward_backend,
         )
 
     @staticmethod
@@ -2061,7 +2111,7 @@ class MQALatentAttention(FleetLayer):
             topk_indices,
             topk_probs,
             loss_coeff,
-            "cudnn",
+            self.indexer_backend,
             # ``num_rows_override`` + ``loss_mask``: the backward zeroes the pad
             # rows and rescales the cuDNN kernel's built-in ``1/(B*Sq)`` into
             # ``1/valid_rows``, matching the forward reduction above. Both

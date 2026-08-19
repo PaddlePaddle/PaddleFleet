@@ -341,7 +341,15 @@ class TestConfigSwitch(unittest.TestCase):
     def test_mqa_sparse_attn_end_to_end(self):
         """The switch is also wired into the absorbed-MQA path; pin that too.
 
-        Same exclusions as the CSA case: ``dkv`` uses the atomic epilogue, and
+        Swept over ``mqa_sparse_attn_backward_backend``, because the remap has a
+        different reach on each branch: the FlashMLA forward always builds the
+        flat-global table, while only the ``"cudnn"`` backward consumes one --
+        the ``"tilelang"`` backward indexes ``token_indices`` per batch itself.
+
+        ``dkv`` is only checked on ``"tilelang"``. On ``"cudnn"`` it comes from
+        the atomic epilogue and is not reproducible even against itself, which
+        is the same exclusion the CSA case makes; the deterministic kernel is
+        what lets this test pin the one output that branch has to leave out.
         ``s`` stays within one ``sum_dSink`` block so ``d_sink`` is exact.
         """
         _require_sm100_sparse_kernels(self)
@@ -359,7 +367,7 @@ class TestConfigSwitch(unittest.TestCase):
         sink_np = rng.standard_normal((h,)).astype(np.float32)
         go_np = rng.standard_normal((b, s, h * d_v)).astype(np.float32)
 
-        def run(fused):
+        def run(fused, backend):
             q = paddle.to_tensor(q_np, dtype="bfloat16")
             kv = paddle.to_tensor(kv_np, dtype="bfloat16")
             sink = paddle.to_tensor(sink_np, dtype="float32")
@@ -373,13 +381,21 @@ class TestConfigSwitch(unittest.TestCase):
                 d_v,
                 attn_sink=sink,
                 global_kv_idx_remap_fusion=fused,
+                backward_backend=backend,
             )
             out.backward(paddle.to_tensor(go_np, dtype=out.dtype))
-            return out, q.grad, sink.grad
+            return dict(out=out, dq=q.grad, dkv=kv.grad, d_sink=sink.grad)
 
-        ref, got = run(False), run(True)
-        for name, a, c in zip(("out", "dq", "d_sink"), ref, got):
-            _assert_bitwise(f"mqa[{name}]", a, c)
+        for backend in ("cudnn", "tilelang"):
+            names = ("out", "dq", "d_sink")
+            if backend == "tilelang":
+                names += ("dkv",)
+            with self.subTest(backward_backend=backend):
+                ref, got = run(False, backend), run(True, backend)
+                for name in names:
+                    _assert_bitwise(
+                        f"mqa[{backend}][{name}]", ref[name], got[name]
+                    )
 
 
 class TestBitwiseAgainstOracle(unittest.TestCase):

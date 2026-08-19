@@ -64,13 +64,14 @@ def floor_dims(tp, pp, ep, cp, sep):
     return tp, shrink_floor(pp), shrink_floor(ep), cp, sep
 
 
-def ep_candidates(ep_orig, tp):
+def ep_candidates(ep_orig, tp, sep=1):
     """EP-shrink candidates, largest first.
 
     Set: ``({powers of 2} | {multiples of 8})`` restricted to
-    ``[MIN_PARALLEL_DEGREE, ep_orig)`` and filtered by ``ep_new % tp == 0``
-    (C3).  Real deployments only ever pick EP from those two families, which
-    keeps the search space small and avoids exotic values like EP=3.
+    ``[MIN_PARALLEL_DEGREE, ep_orig)`` and filtered by
+    ``ep_new % (tp * sep) == 0`` (C3: dense_sharding = EP / (TP * SEP)).
+    Real deployments only ever pick EP from those two families, which keeps
+    the search space small and avoids exotic values like EP=3.
     """
     if ep_orig <= MIN_PARALLEL_DEGREE:
         return []
@@ -79,8 +80,9 @@ def ep_candidates(ep_orig, tp):
     pool = (powers_of_2 | multiples_of_8) & set(
         range(MIN_PARALLEL_DEGREE, ep_orig)
     )
+    dense_factor = tp * sep
     return sorted(
-        (c for c in pool if tp == 1 or c % tp == 0),
+        (c for c in pool if dense_factor == 1 or c % dense_factor == 0),
         reverse=True,
     )
 
@@ -120,9 +122,14 @@ def align_layers(layers_new, head, tail_orig, pp_new, vpp_orig):
 
 
 def min_shrink_cards(tp, pp, ep, cp, sep, cards_per_node):
-    """Smallest GPU count reachable without collapsing any degree to 1."""
+    """Smallest GPU count reachable without collapsing any degree to 1.
+
+    ``None`` when the dims break a card-count-independent rule (C3 or C5), so
+    no scale exists and callers must talk about the dims instead.
+    """
     validator = TopologyValidator(cards_per_node, cards_per_node)
-    return validator.suggest_valid_cards(*floor_dims(tp, pp, ep, cp, sep))[0]
+    cards = validator.suggest_valid_cards(*floor_dims(tp, pp, ep, cp, sep))
+    return cards[0] if cards else None
 
 
 def check_hardware(target_cards, cards_per_node, tp, pp, ep, cp, sep):
@@ -154,6 +161,13 @@ def check_hardware(target_cards, cards_per_node, tp, pp, ep, cp, sep):
     max_intra = min(cards_per_node, target_cards)
     if tp * sep > max_intra:
         min_cards = min_shrink_cards(tp, pp, ep, cp, sep, cards_per_node)
+        if min_cards is None:
+            return False, (
+                f"E2 不满足：TP={tp} × SEP={sep} 需要单机内 {tp * sep} 张卡，"
+                f"但目标只有 {target_cards} 张卡；而且当前维度组合本身就不合法"
+                f"（C3 要求 EP % (TP×SEP) == 0，C5 禁止 SEP 与 CP 同时 >1），"
+                f"任何卡数都无法适配，必须先修改 TP/SEP/EP/CP"
+            )
         return False, (
             f"E2 不满足：TP={tp} × SEP={sep} 需要单机内 {tp * sep} 张卡，"
             f"但目标只有 {target_cards} 张卡。\n"

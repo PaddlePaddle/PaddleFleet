@@ -80,7 +80,7 @@ num_empty_layers_add_in_head: 0
 num_empty_layers_add_in_tail: 0
 separate_mtp_headloss: false
 fa_version: 3
-global_batch_size: 1536
+global_batch_size: 192
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 2
 sharding_parallel_size: 96
@@ -201,8 +201,9 @@ class TestCandidates(unittest.TestCase):
         self.assertEqual(pp_candidates(2), [])
 
     def test_ep_candidates_respect_tp(self):
-        # C3 requires ep_new % tp == 0.
+        # C3 requires ep_new % (tp * sep) == 0.
         self.assertTrue(all(c % 4 == 0 for c in ep_candidates(64, tp=4)))
+        self.assertTrue(all(c % 8 == 0 for c in ep_candidates(64, tp=2, sep=4)))
 
 
 class TestPrecisionSwitches(unittest.TestCase):
@@ -228,6 +229,27 @@ class TestPrecisionSwitches(unittest.TestCase):
     def test_json_switch_skipped_without_model_config(self):
         _applied, skipped = plan_precision_switches({}, None)
         self.assertTrue(any("multimax_modules" in note for note in skipped))
+
+    def test_mqa_backward_backend_is_pinned_even_when_absent(self):
+        # The absorbed-MQA dKV backward defaults to cuDNN, whose atomic
+        # accumulation is not bit-reproducible, so accuracy runs must pin it
+        # like the two CSA backends -- including when no document declares it
+        # yet, which is the common case for existing YAMLs.
+        applied, skipped = plan_precision_switches({}, {})
+        self.assertIn(
+            ("yaml", "mqa_sparse_attn_backward_backend", "tilelang"),
+            [(t, k, v) for t, k, v, _r in applied],
+        )
+        self.assertEqual(skipped, [])
+
+    def test_mqa_backward_backend_follows_the_declaring_document(self):
+        applied, _skipped = plan_precision_switches(
+            {"mqa_sparse_attn_backward_backend": "cudnn"},
+            {"mqa_sparse_attn_backward_backend": "cudnn"},
+        )
+        targets = {(t, k) for t, k, _v, _r in applied}
+        self.assertIn(("yaml", "mqa_sparse_attn_backward_backend"), targets)
+        self.assertIn(("json", "mqa_sparse_attn_backward_backend"), targets)
 
 
 class TestOverrideParsing(unittest.TestCase):
@@ -353,6 +375,26 @@ class TestTopologyConstraints(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("C4", msg)
 
+    def test_c3_accounts_for_sep(self):
+        # dense_sharding = EP / (TP * SEP) = 2 / 4 is not a positive integer.
+        ok, msg, _d = TopologyValidator(8, 8).validate(1, 1, 2, 1, 4)
+        self.assertFalse(ok)
+        self.assertIn("C3", msg)
+
+    def test_c5_forbids_sep_and_cp_together(self):
+        ok, msg, _d = TopologyValidator(8, 8).validate(1, 1, 1, 2, 2)
+        self.assertFalse(ok)
+        self.assertIn("C5", msg)
+
+    def test_no_suggestions_for_dim_only_conflicts(self):
+        validator = TopologyValidator(8, 8)
+        # C3 and C5 depend only on the dims, so no card count can help.
+        self.assertEqual(validator.suggest_valid_cards(1, 1, 2, 1, 4), [])
+        self.assertEqual(validator.suggest_valid_cards(1, 1, 1, 2, 2), [])
+        _ok, msg, _d = validator.validate(1, 1, 2, 1, 4)
+        self.assertIn("没有任何卡数能满足", msg)
+        self.assertNotIn("合法节点数", msg)
+
     def test_suggestions_are_multiples_of_the_minimum_unit(self):
         cards = TopologyValidator(8, 8).suggest_valid_cards(1, 2, 8, 1, 1)
         self.assertTrue(all(c % 16 == 0 for c in cards), cards)
@@ -379,6 +421,18 @@ class TestHardwareAndModelConstraints(unittest.TestCase):
     def test_hardware_prereqs_pass(self):
         ok, why = check_hardware(8, 8, 1, 8, 64, 1, 1)
         self.assertTrue(ok, why)
+
+    def test_min_shrink_cards_is_none_for_dim_only_conflicts(self):
+        # C3 can never be satisfied here, so there is no minimum scale.
+        self.assertIsNone(min_shrink_cards(1, 1, 2, 1, 4, 8))
+
+    def test_e2_reports_dim_conflicts_instead_of_crashing(self):
+        # TP*SEP exceeds the target, and the dims themselves are illegal:
+        # the E2 diagnostic used to raise IndexError here.
+        ok, why = check_hardware(2, 8, 1, 1, 2, 1, 4)
+        self.assertFalse(ok)
+        self.assertIn("E2", why)
+        self.assertIn("任何卡数都无法适配", why)
 
     def test_min_shrink_cards_respects_the_floor(self):
         # PP and EP may only shrink to 2, so 2*2 = 4 cards is the floor here.
@@ -429,6 +483,100 @@ class TestHardwareAndModelConstraints(unittest.TestCase):
 
     def test_align_layers_refuses_pp_below_the_floor(self):
         self.assertEqual(align_layers(16, 0, 0, 1, 2), (None, None))
+
+
+class TestSourceScaleInference(unittest.TestCase):
+    """The source world size, and how the two estimates are combined."""
+
+    def _source(self, **overrides):
+        base = {
+            "sharding_parallel_size": 96,
+            "data_parallel_size": 1,
+            "global_batch_size": 192,
+            "per_device_train_batch_size": 1,
+            "gradient_accumulation_steps": 2,
+        }
+        base.update(overrides)
+        return base
+
+    def test_consistent_estimates_agree_without_a_warning(self):
+        cards, warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(), (1, 8, 64, 1, 1)
+        )
+        self.assertIsNone(err)
+        self.assertIsNone(warning)
+        self.assertEqual(cards, 768)
+
+    def test_data_parallel_size_multiplies_the_group_estimate(self):
+        # 8 cards with sharding=4 and DP=2: sharding alone would say 4.
+        cards, _warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(
+                sharding_parallel_size=4,
+                data_parallel_size=2,
+                global_batch_size=8,
+                gradient_accumulation_steps=1,
+            ),
+            (1, 1, 1, 1, 1),
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 8)
+
+    def test_batch_evidence_wins_when_dp_is_not_declared(self):
+        # sharding=4 without data_parallel_size, but the batch fields say 8:
+        # the comm-group formula is the one missing a factor.
+        cards, warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(
+                sharding_parallel_size=4,
+                data_parallel_size=None,
+                global_batch_size=8,
+                gradient_accumulation_steps=1,
+            ),
+            (1, 1, 1, 1, 1),
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 8)
+        self.assertIn("未声明 data_parallel_size", warning)
+
+    def test_mismatch_is_surfaced_as_a_warning(self):
+        cards, warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(global_batch_size=8, gradient_accumulation_steps=1),
+            (1, 1, 1, 1, 1),
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 96)
+        self.assertIn("两种推断不一致", warning)
+
+    def test_batch_evidence_includes_sep(self):
+        # dataset_world_size = DP * sharding, so SEP multiplies back in:
+        # 8 / (1*1) * TP1 * SEP4 * PP1 * CP1 = 32.
+        cards, _warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(
+                sharding_parallel_size=None,
+                global_batch_size=8,
+                gradient_accumulation_steps=1,
+            ),
+            (1, 1, 1, 1, 4),
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 32)
+
+    def test_batch_only_source(self):
+        cards, _warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(sharding_parallel_size=None), (1, 8, 1, 1, 1)
+        )
+        self.assertIsNone(err)
+        self.assertEqual(cards, 768)
+
+    def test_nothing_to_infer_from(self):
+        cards, _warning, err = ConfigAdapter._infer_orig_cards(
+            self._source(
+                sharding_parallel_size=None,
+                gradient_accumulation_steps=None,
+            ),
+            (1, 1, 1, 1, 1),
+        )
+        self.assertIsNone(cards)
+        self.assertIn("无法推断源作业的卡数", err)
 
 
 class TestFieldSpec(unittest.TestCase):
@@ -672,7 +820,7 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertEqual(model_config["n_routed_experts"], 16)
         self.assertEqual(model_config["num_hidden_layers"], 16)
         # Default batch strategy shrinks GBS and leaves acc alone.
-        self.assertEqual(config["global_batch_size"], 16)
+        self.assertEqual(config["global_batch_size"], 2)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
         # No determinism switches unless --test-accuracy is given.
         self.assertEqual(config["csa_sparse_attn_backend"], "cudnn")
@@ -707,7 +855,7 @@ class TestPerformanceSwitch(ConfigAdapterTestBase):
         ok, message = self.adapt(target_nodes=64, test_performance=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(512)
-        self.assertEqual(config["global_batch_size"], 1024)
+        self.assertEqual(config["global_batch_size"], 128)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
         self.assertEqual(config["sharding_parallel_size"], 64)
         self.assertEqual(config["expert_model_parallel_size"], 64)
@@ -735,9 +883,12 @@ class TestAccuracySwitch(ConfigAdapterTestBase):
         ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(8)
-        self.assertEqual(config["global_batch_size"], 1536)
+        self.assertEqual(config["global_batch_size"], 192)
         self.assertEqual(config["gradient_accumulation_steps"], 192)
         self.assertEqual(config["csa_sparse_attn_backend"], "tilelang")
+        # Written even though the source YAML never declared it: the field's
+        # own default is the non-deterministic cuDNN backward.
+        self.assertEqual(config["mqa_sparse_attn_backward_backend"], "tilelang")
         self.assertIsNone(self.load_output_json(8)["multimax_modules"])
         self.assertIn("精度对齐", message)
 
@@ -750,7 +901,7 @@ class TestAccuracySwitch(ConfigAdapterTestBase):
         # Frozen dims and acc, but the determinism switches still land.
         self.assertEqual(config["expert_model_parallel_size"], 64)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
-        self.assertEqual(config["global_batch_size"], 1024)
+        self.assertEqual(config["global_batch_size"], 128)
         self.assertEqual(config["csa_sparse_attn_backend"], "tilelang")
         self.assertIsNone(self.load_output_json(512)["multimax_modules"])
 
@@ -915,6 +1066,70 @@ class TestErrorPaths(ConfigAdapterTestBase):
         self.assertIn("num_hidden_layers", message)
 
 
+class TestPinnedFieldRejection(ConfigAdapterTestBase):
+    """Adapter-controlled fields may not be pinned with --set."""
+
+    def test_pinning_a_parallel_dim_without_a_prefix_is_refused(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            auto_overrides={"expert_model_parallel_size": 64},
+        )
+        self.assertFalse(ok)
+        self.assertIn("expert_model_parallel_size", message)
+        self.assertIn("不能用 --set 锁定", message)
+
+    def test_pinning_a_parallel_dim_with_a_json_prefix_is_refused(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            json_overrides={"expert_model_parallel_size": 64},
+        )
+        self.assertFalse(ok)
+        self.assertIn("expert_model_parallel_size", message)
+        self.assertIn("不能用 --set 锁定", message)
+
+    def test_pinning_a_parallel_dim_is_refused(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            yaml_overrides={"expert_model_parallel_size": 64},
+        )
+        self.assertFalse(ok)
+        self.assertIn("expert_model_parallel_size", message)
+        self.assertIn("不能用 --set 锁定", message)
+
+    def test_pinning_sharding_is_refused(self):
+        ok, message = self.adapt(
+            target_nodes=1, yaml_overrides={"sharding_parallel_size": 3}
+        )
+        self.assertFalse(ok)
+        self.assertIn("sharding_parallel_size", message)
+
+    def test_in_place_still_refuses_parallel_dims(self):
+        ok, message = self.adapt(
+            target_nodes=1,
+            in_place=True,
+            yaml_overrides={"pipeline_model_parallel_size": 8},
+        )
+        self.assertFalse(ok)
+        self.assertIn("pipeline_model_parallel_size", message)
+
+    def test_prefix_less_fa_version_pin_is_kept(self):
+        ok, message = self.adapt(
+            target_nodes=1, auto_overrides={"fa_version": 4}
+        )
+        self.assertTrue(ok, message)
+        self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
+        self.assertNotIn("DELETE field=fa_version", message)
+
+    def test_pinned_fa_version_is_kept(self):
+        ok, message = self.adapt(
+            target_nodes=1, yaml_overrides={"fa_version": 4}
+        )
+        self.assertTrue(ok, message)
+        # The pin wins: the field is neither deleted nor reported as deleted.
+        self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
+        self.assertNotIn("DELETE field=fa_version", message)
+
+
 class TestCliErrorPaths(ConfigAdapterTestBase):
     """Argument validation, straight through main()."""
 
@@ -1068,7 +1283,7 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
         # the model structure has been planned.
         self.write_yaml(
             SOURCE_YAML.replace(
-                "global_batch_size: 1536", "global_batch_size: 1537"
+                "global_batch_size: 192", "global_batch_size: 193"
             )
         )
         ok, message = self.adapt(target_nodes=1, in_place=True)
@@ -1086,7 +1301,7 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
     def test_no_adapted_dir_is_created_on_failure(self):
         self.write_yaml(
             SOURCE_YAML.replace(
-                "global_batch_size: 1536", "global_batch_size: 1537"
+                "global_batch_size: 192", "global_batch_size: 193"
             )
         )
         ok, _message = self.adapt(target_nodes=1)
@@ -1104,20 +1319,18 @@ class TestPinnedModelPathConflict(ConfigAdapterTestBase):
         )
         self.assertFalse(ok)
         self.assertIn("model_name_or_path", message)
-        self.assertIn("--in-place", message)
+        self.assertIn("--set", message)
 
-    def test_in_place_accepts_a_pinned_path(self):
-        ok, message = self.adapt(
-            target_nodes=1,
-            in_place=True,
-            yaml_overrides={"model_name_or_path": "./model_dir"},
-        )
-        self.assertTrue(ok, message)
-        config = YamlWriter().load(self.yaml_path)
-        self.assertEqual(config["model_name_or_path"], "./model_dir")
-        self.assertEqual(
-            JsonWriter().load(self.json_path)["num_hidden_layers"], 16
-        )
+    def test_in_place_also_refuses_a_pinned_path(self):
+        # Repointing the model dir would decide which model_config.json gets
+        # loaded, shrunk and snapshotted for the patch.
+        for overrides in (
+            {"yaml_overrides": {"model_name_or_path": "./other_model"}},
+            {"auto_overrides": {"model_name_or_path": "./other_model"}},
+        ):
+            ok, message = self.adapt(target_nodes=1, in_place=True, **overrides)
+            self.assertFalse(ok)
+            self.assertIn("model_name_or_path", message)
 
 
 class TestInPlace(ConfigAdapterTestBase):

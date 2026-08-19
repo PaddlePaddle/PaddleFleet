@@ -444,7 +444,9 @@ class TestTransformerLayerHelpers(unittest.TestCase):
     def setUp(self):
         self.strategy = _init_fleet()
 
-    def _make_config(self, block_size=4, num_layers=4):
+    def _make_config(
+        self, block_size=4, num_layers=4, num_empty_layers_add_in_head=0
+    ):
         return GPTConfig(
             num_hidden_layers=num_layers,
             hidden_size=64,
@@ -469,7 +471,19 @@ class TestTransformerLayerHelpers(unittest.TestCase):
             use_qk_norm=True,
             block_attention_residuals=True,
             attn_res_block_size=block_size,
+            num_empty_layers_add_in_head=num_empty_layers_add_in_head,
         )
+
+    def _boundary_layer_numbers(self, config):
+        """Physical ``layer_number`` of every layer that opens a block."""
+        model = gpt_builder(config, num_stages=1)
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        return [
+            m.layer_number
+            for m in model.sublayers()
+            if isinstance(m, TransformerLayer) and m._is_block_boundary()
+        ]
 
     def test_should_skip_for_normal_layer(self):
         """Normal (non-MTP) layers should NOT skip block attn res."""
@@ -485,36 +499,51 @@ class TestTransformerLayerHelpers(unittest.TestCase):
     def test_is_block_boundary(self):
         """_is_block_boundary correct for block_size=4 (span=4, K3 semantics)."""
         config = self._make_config(block_size=4, num_layers=6)
-        model = gpt_builder(config, num_stages=1)
-        from paddlefleet.transformer.transformer_layer import TransformerLayer
-
-        boundaries = []
-        for m in model.sublayers():
-            if isinstance(m, TransformerLayer):
-                if m._is_block_boundary():
-                    boundaries.append(m.layer_number)
+        boundaries = self._boundary_layer_numbers(config)
         # block_span == attn_res_block_size == 4 (matches K3's
         # `layer_idx % attn_res_block_size == 0`), so layers 0 and 4 are
         # boundaries.
-        self.assertTrue(len(boundaries) > 0)
-        for b in boundaries:
-            self.assertEqual(b % 4, 0)
+        self.assertEqual(boundaries, [0, 4])
 
     def test_is_block_boundary_block_size_2(self):
         """block_size=2 => span=2, every other layer is a boundary."""
         config = self._make_config(block_size=2, num_layers=4)
+        boundaries = self._boundary_layer_numbers(config)
+        self.assertEqual(boundaries, [0, 2])
+
+    def test_is_block_boundary_ignores_head_empty_layers(self):
+        """The schedule follows the logical index, not the physical one.
+
+        ``get_gpt_decoder_layers_spec`` shifts ``layer_number`` by
+        ``num_empty_layers_add_in_head``, so without undoing that shift the
+        whole block layout slides by the offset and logical layer 0 stops
+        opening a block -- which silently changes the residual topology of
+        every layer for a K3 warm start.
+        """
+        for head_offset in (0, 1, 2):
+            with self.subTest(num_empty_layers_add_in_head=head_offset):
+                config = self._make_config(
+                    block_size=4,
+                    num_layers=6,
+                    num_empty_layers_add_in_head=head_offset,
+                )
+                boundaries = self._boundary_layer_numbers(config)
+                # Logical decoder indices 0 and 4 close a block; the physical
+                # layer_number of those layers is shifted by head_offset.
+                self.assertEqual(boundaries, [head_offset, head_offset + 4])
+
+    def test_is_block_boundary_rejects_non_positive_span(self):
+        """A non-positive span is a config error, not a silent no-op."""
+        config = self._make_config(block_size=4, num_layers=2)
         model = gpt_builder(config, num_stages=1)
         from paddlefleet.transformer.transformer_layer import TransformerLayer
 
-        checked = 0
         for m in model.sublayers():
             if isinstance(m, TransformerLayer):
-                if hasattr(m, "attn_res_block_size") and m.attn_res_block_size:
-                    self.assertEqual(
-                        m._is_block_boundary(), m.layer_number % 2 == 0
-                    )
-                    checked += 1
-        self.assertTrue(checked > 0)
+                m.attn_res_block_size = 0
+                with self.assertRaises(ValueError):
+                    m._is_block_boundary()
+                break
 
 
 # ---------------------------------------------------------------------------
