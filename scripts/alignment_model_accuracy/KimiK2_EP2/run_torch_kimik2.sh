@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Kimi-K2 (ms-swift + Megatron-LM) 单机 8 卡精度对齐用例 —— torch 侧
-# 对标 MinimaxV2.5_EP2/run_torch_minimax.sh（TP=8/EP=8/PP=1）
+# Kimi-K2 (ms-swift + Megatron-LM) 单机 2 卡精度对齐用例 —— torch 侧
+# 对标 MinimaxV2.5_EP2/run_torch_minimax.sh（TP=1/EP=2/PP=1）
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 # 资产路径（可用环境变量覆盖；默认放在 torch 侧缓存目录）
-KIMIK2_MODEL="${KIMIK2_MODEL:-/home/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8}"
-KIMIK2_DATASET="${KIMIK2_DATASET:-/home/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8/alignment_torch.jsonl}"
+KIMIK2_MODEL="${KIMIK2_MODEL:-/home/.cache/PaddleFormers/Kimi-K2-bf16_2EP}"
+KIMIK2_DATASET="${KIMIK2_DATASET:-/home/.cache/PaddleFormers/Kimi-K2-bf16_2EP/alignment_torch.jsonl}"
 
 # ---- 环境 ----
 # shellcheck disable=SC1091
@@ -19,9 +19,9 @@ cd "${WORKSPACE_DIR}"
 export KIMIK2_MEGATRON_LM_PATH="${KIMIK2_MEGATRON_LM_PATH:-${WORKSPACE_DIR}/Megatron-LM}"
 export MEGATRON_LM_PATH="${KIMIK2_MEGATRON_LM_PATH}"
 
-# 单机 8 卡：TP=8 / EP=8 / PP=1
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export NPROC_PER_NODE=8
+# 单机 2 卡：TP=1 / EP=2 / PP=1
+export CUDA_VISIBLE_DEVICES=0,1
+export NPROC_PER_NODE=2
 export NNODES="${NNODES:-1}"
 export NODE_RANK="${NODE_RANK:-0}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
@@ -81,10 +81,10 @@ ARGS=(
     --output_dir ./logs/torch/default/trainer
 
     ### parallel
-    --tensor_model_parallel_size 8
+    --tensor_model_parallel_size 1
     --pipeline_model_parallel_size 1
-    --expert_model_parallel_size 8
-    --sequence_parallel True
+    --expert_model_parallel_size 2
+    --sequence_parallel False
 
     ### MoE
     --moe_aux_loss_coeff 0

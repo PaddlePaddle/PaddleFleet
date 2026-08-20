@@ -15,7 +15,7 @@ dataloader_num_workers: 1
 dataset_num_proc: 1
 
 ### model
-model_name_or_path: /root/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8
+model_name_or_path: /root/.cache/PaddleFormers/Kimi-K2-bf16_2EP
 _attn_implementation: flashmask
 high_precision_rope: true
 
@@ -28,15 +28,16 @@ do_eval: false
 per_device_eval_batch_size: 1
 per_device_train_batch_size: 1
 num_train_epochs: 1
-# 单 step md5 对齐：Kimi-K2 已验证 step1 loss bit-exact；step2+ 的 0.0066% 为 bf16 极限，
-# 会被 compare_loss.py 的严格 md5 判定判为不一致，故监控用例固定单 step。
+# 单 step md5 对齐：监控用例固定单 step（step1 前向 loss），只校验首个 step；
+# 多 step 反向的 bf16 累加差异（bf16 精度极限）会被严格 md5 判为不一致。
+# 注：2 卡 EP2 配置的 step1 md5 基线需首次 smoke 后确立（此前 bit-exact 结论来自 8 卡 TP8/EP8）。
 max_steps: 1
 eval_steps: 200
 evaluation_strategy: steps
 save_steps: 300
 save_strategy: steps
 logging_steps: 1
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 1
 logging_dir: ./logs/paddle/default/vdl
 output_dir: ./logs/paddle/default/trainer
 disable_tqdm: true
@@ -46,11 +47,11 @@ eval_accumulation_steps: 16
 warmup_steps: 0
 learning_rate: 1.0e-5
 
-# performance - 单机 8 卡 TP=8 / EP=8 / PP=1 与 MG 对齐
-tensor_model_parallel_size: 8
-sequence_parallel: true
+# performance - 单机 2 卡 TP=1 / EP=2 / PP=1 与 MG 对齐
+tensor_model_parallel_size: 1
+sequence_parallel: false
 pipeline_model_parallel_size: 1
-expert_model_parallel_size: 8
+expert_model_parallel_size: 2
 use_expert_parallel: true
 sharding: stage1
 recompute_granularity: "full"

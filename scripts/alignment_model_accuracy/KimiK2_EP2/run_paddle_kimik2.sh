@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Kimi-K2 (PaddleFormers + PaddleFleet) 单机 8 卡精度对齐用例 —— paddle 侧
-# 对标 MinimaxV2.5_EP2/run_paddle_minimax.sh（TP=8/EP=8/PP=1）
+# Kimi-K2 (PaddleFormers + PaddleFleet) 单机 2 卡精度对齐用例 —— paddle 侧
+# 对标 MinimaxV2.5_EP2/run_paddle_minimax.sh（TP=1/EP=2/PP=1）
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -36,17 +36,17 @@ unset NPROC_PER_NODE
 unset LOCAL_RANK
 unset LOCAL_WORLD_SIZE
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1
 export MASTER_ADDR="127.0.0.1"
 export MASTER_PORT="${MASTER_PORT:-29501}"
 
-# 单机 8 卡：TP=8 / EP=8 / PP=1
+# 单机 2 卡：TP=1 / EP=2 / PP=1
 export NNODES="1"
 export RANK="0"
 export NODE_RANK="0"
-export NPROC_PER_NODE="8"
-export WORLD_SIZE="8"
-export LOCAL_WORLD_SIZE="8"
+export NPROC_PER_NODE="2"
+export WORLD_SIZE="2"
+export LOCAL_WORLD_SIZE="2"
 
 # Match canonical Paddle alignment runtime knobs from scripts/run_paddle.sh.
 export FLAGS_use_accuracy_compatible_kernel="1"
