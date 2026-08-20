@@ -51,7 +51,7 @@ def _make_dsv4_instance(
     """Create a SimpleNamespace that behaves like DSv4HybridAttention for forward().
 
     Uses SimpleNamespace to avoid paddle.nn.Layer.__setattr__ restrictions.
-    Binds the real forward / _full_attn_forward / _gate methods from DSv4HybridAttention.
+    Binds the real forward / _all_stages_forward / _gate methods from DSv4HybridAttention.
     """
     import types
 
@@ -98,8 +98,23 @@ def _make_dsv4_instance(
         and recompute_modules is not None
         and "full_attn" in recompute_modules
     )
-    inst._full_attn_recompute = None
+    inst._stage_recompute = None
     inst._gate_recompute = None
+    inst.recompute_pre_csa = (
+        recompute_granularity == "selective"
+        and recompute_modules is not None
+        and "hca_pre_csa" in recompute_modules
+    )
+    inst.recompute_csa = (
+        recompute_granularity == "selective"
+        and recompute_modules is not None
+        and "hca_csa" in recompute_modules
+    )
+    inst.recompute_post_csa = (
+        recompute_granularity == "selective"
+        and recompute_modules is not None
+        and "hca_post_csa" in recompute_modules
+    )
 
     # VHA postmix disabled for these recompute-path tests (forward() reads
     # these flags; the real module sets them in __init__).
@@ -177,8 +192,21 @@ def _make_dsv4_instance(
 
     # Bind the real methods from DSv4HybridAttention
     inst.forward = types.MethodType(DSv4HybridAttention.forward, inst)
-    inst._full_attn_forward = types.MethodType(
-        DSv4HybridAttention._full_attn_forward, inst
+    inst._all_stages_forward = types.MethodType(
+        DSv4HybridAttention._all_stages_forward, inst
+    )
+    inst._attn_forward = types.MethodType(
+        DSv4HybridAttention._attn_forward, inst
+    )
+    inst._pre_csa_forward = types.MethodType(
+        DSv4HybridAttention._pre_csa_forward, inst
+    )
+    inst._csa_forward = types.MethodType(DSv4HybridAttention._csa_forward, inst)
+    inst._post_csa_forward = types.MethodType(
+        DSv4HybridAttention._post_csa_forward, inst
+    )
+    inst._csa_post_forward = types.MethodType(
+        DSv4HybridAttention._csa_post_forward, inst
     )
     inst._gate = types.MethodType(DSv4HybridAttention._gate, inst)
 
@@ -235,7 +263,7 @@ class TestDSv4FullAttnRecompute(unittest.TestCase):
     def setUp(self):
         paddle.seed(42)
 
-    def test_full_attn_recompute_uses_RecomputeWithoutOutput(self):
+    def test_stage_recompute_uses_RecomputeWithoutOutput(self):
         """Verify full_attn branch instantiates RecomputeWithoutOutput."""
         inst = _make_dsv4_instance(recompute_modules=["full_attn"])
 
@@ -267,7 +295,7 @@ class TestDSv4FullAttnRecompute(unittest.TestCase):
         self.assertEqual(output.shape, [1, 8, 64])
         self.assertIsNone(bias)
 
-    def test_full_attn_recompute_output_matches_else_branch(self):
+    def test_stage_recompute_output_matches_else_branch(self):
         """full_attn path and else path should produce same shape output."""
         paddle.seed(123)
         inst_full = _make_dsv4_instance(recompute_modules=["full_attn"])
@@ -298,7 +326,7 @@ class TestDSv4FullAttnRecompute(unittest.TestCase):
         self.assertEqual(out_full.shape, out_else.shape)
 
     def test_full_attn_sets_and_clears_recompute_attr(self):
-        """_full_attn_recompute is set during forward and cleared after."""
+        """_stage_recompute is set during forward and cleared after."""
         inst = _make_dsv4_instance(recompute_modules=["full_attn"])
 
         from paddlefleet.transformer import dsv4_hybrid_attention as mod
@@ -325,8 +353,8 @@ class TestDSv4FullAttnRecompute(unittest.TestCase):
         with patch.object(mod, "RecomputeWithoutOutput", _TrackingRecompute):
             inst.forward(hidden, attention_mask=None)
 
-        # After forward, _full_attn_recompute should be None
-        self.assertIsNone(inst._full_attn_recompute)
+        # After forward, _stage_recompute should be None
+        self.assertIsNone(inst._stage_recompute)
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +422,7 @@ class TestDSv4GatedAttnRecompute(unittest.TestCase):
                 preserve_rng_state=True,
                 share_grad_holder=False,
             ):
-                # Distinguish: _full_attn_forward has 6 args (with _in_full_recompute), _gate has 2
+                # Distinguish: _all_stages_forward has 6 args (with _in_full_recompute), _gate has 2
                 if len(args) >= 5:
                     full_recompute_count[0] += 1
                 else:
@@ -472,28 +500,28 @@ class TestDSv4DirectPath(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Test: _full_attn_forward method
+# Test: _all_stages_forward method
 # ---------------------------------------------------------------------------
 
 
 class TestDSv4FullAttnForwardMethod(unittest.TestCase):
-    """Tests for the _full_attn_forward helper method."""
+    """Tests for the _all_stages_forward helper method."""
 
     def setUp(self):
         paddle.seed(42)
 
-    def test_full_attn_forward_returns_correct_shape(self):
-        """_full_attn_forward should return [b, sq, o_groups * o_lora_rank]."""
+    def test_all_stages_forward_returns_correct_shape(self):
+        """_all_stages_forward should return [b, sq, o_groups * o_lora_rank]."""
         inst = _make_dsv4_instance(
             recompute_modules=["full_attn"], gated_attention=True
         )
         hidden = paddle.randn([1, 8, 64])
-        result = inst._full_attn_forward(hidden, None, 0, None, None)
+        result = inst._all_stages_forward(hidden, None, 0, None, None)
         # o_groups=2, o_lora_rank=8 => 16
         self.assertEqual(result.shape, [1, 8, 16])
 
-    def test_full_attn_forward_includes_gate(self):
-        """_full_attn_forward should call _gate when gated_attention=True."""
+    def test_all_stages_forward_includes_gate(self):
+        """_all_stages_forward should call _gate when gated_attention=True."""
         inst = _make_dsv4_instance(
             recompute_modules=["full_attn"], gated_attention=True
         )
@@ -507,12 +535,12 @@ class TestDSv4FullAttnForwardMethod(unittest.TestCase):
         inst._gate = _tracking_gate
 
         hidden = paddle.randn([1, 8, 64])
-        inst._full_attn_forward(hidden, None, 0, None, None)
+        inst._all_stages_forward(hidden, None, 0, None, None)
 
         self.assertTrue(gate_called[0])
 
-    def test_full_attn_forward_skips_gate_when_disabled(self):
-        """_full_attn_forward should not call _gate when gated_attention=False."""
+    def test_all_stages_forward_skips_gate_when_disabled(self):
+        """_all_stages_forward should not call _gate when gated_attention=False."""
         inst = _make_dsv4_instance(
             recompute_modules=["full_attn"], gated_attention=False
         )
@@ -525,7 +553,7 @@ class TestDSv4FullAttnForwardMethod(unittest.TestCase):
         inst._gate = _tracking_gate
 
         hidden = paddle.randn([1, 8, 64])
-        inst._full_attn_forward(hidden, None, 0, None, None)
+        inst._all_stages_forward(hidden, None, 0, None, None)
 
         self.assertFalse(gate_called[0])
 
@@ -670,7 +698,7 @@ class TestDSv4RecomputeBackwardGradients(unittest.TestCase):
     def _make_startend(self, batch_size, seq_len):
         return paddle.full([batch_size, 1, seq_len, 1], seq_len, dtype="int32")
 
-    def test_full_attn_recompute_backward_gradient_flow(self):
+    def test_stage_recompute_backward_gradient_flow(self):
         """full_attn recompute produces finite, non-None gradients on backward."""
         paddle.seed(_SEED)
         model_parallel_cuda_manual_seed(_SEED)
@@ -939,7 +967,7 @@ class TestDSv4RecomputeBackwardGradients(unittest.TestCase):
                     f"Grad mismatch for param {name}",
                 )
 
-    def test_full_attn_recompute_gradient_matches_no_recompute(self):
+    def test_stage_recompute_gradient_matches_no_recompute(self):
         """Gradients with full_attn recompute (no gated) match those without recompute."""
         paddle.seed(_SEED)
         model_parallel_cuda_manual_seed(_SEED)

@@ -336,6 +336,41 @@ class GroupedOutputFP8(paddle.autograd.PyLayer):
         )
 
 
+def _resolve_selective_recompute_flag(
+    config: TransformerConfig,
+    layer_number: int,
+    module_name: str,
+) -> bool:
+    """Resolve a per-layer selective-recompute flag for ``module_name``.
+
+    Honours ``recompute_num_layers`` together with ``recompute_method``
+    (``first_n`` / ``block``) the same way the other selective modules do.
+    Only list configuration of ``recompute_modules`` is supported; a dict entry
+    is rejected explicitly rather than silently ignored.
+    """
+    if config.recompute_granularity != "selective":
+        return False
+    modules = config.recompute_modules
+    if modules is None:
+        return False
+    if isinstance(modules, dict):
+        if module_name in modules:
+            raise ValueError(
+                f"recompute_modules['{module_name}'] only supports list "
+                "configuration"
+            )
+        return False
+    if module_name not in modules:
+        return False
+    num_layers = config.recompute_num_layers
+    if num_layers is None:
+        return True
+    if config.recompute_method == "block":
+        return need_recompute_in_block(layer_number, config, num_layers)
+    # TransformerConfig already asserts block/first_n for selective granularity.
+    return need_recompute_in_first_n(layer_number, config, num_layers)
+
+
 def _validate_dsv4_boundary_values(
     startend_row_indices: Tensor,
     upper_bound: int,
@@ -779,8 +814,38 @@ class DSv4HybridAttention(Attention):
             and config.recompute_modules is not None
             and "full_attn" in config.recompute_modules
         )
-        self._full_attn_recompute = None
+        # Stage-level selective recompute. The three stages partition exactly
+        # what "full_attn" covers, so they can be enabled independently:
+        #   hca_pre_csa  -> _pre_csa_forward  (q/kv projections, qk norm, RoPE)
+        #   hca_csa      -> _csa_forward      (Compressor + Indexer + sparse attn)
+        #   hca_post_csa -> _post_csa_forward (inverse RoPE, VHA postmix,
+        #                                     grouped o_group_proj, gated_attn)
+        # Unlike "full_attn"/"gated_attn" (plain membership tests kept for
+        # backward compatibility), these honour recompute_num_layers +
+        # recompute_method, like "vha_postmix".
+        self.recompute_pre_csa = _resolve_selective_recompute_flag(
+            config, layer_number, "hca_pre_csa"
+        )
+        self.recompute_csa = _resolve_selective_recompute_flag(
+            config, layer_number, "hca_csa"
+        )
+        self.recompute_post_csa = _resolve_selective_recompute_flag(
+            config, layer_number, "hca_post_csa"
+        )
+        if self.recompute_full_attn and (
+            self.recompute_pre_csa
+            or self.recompute_csa
+            or self.recompute_post_csa
+        ):
+            raise ValueError(
+                "recompute_modules cannot combine 'full_attn' with the "
+                "stage-level entries 'hca_pre_csa'/'hca_csa'/'hca_post_csa'; "
+                "'full_attn' already covers all three stages"
+            )
         self._gate_recompute = None
+        # Holder for the segment that ends right before o_proj (csa+post, or
+        # post alone), whose output can be discarded instead of kept.
+        self._stage_recompute = None
 
         # VHA postmix: low-rank cross-head mixing of the attention output, applied
         # after inverse RoPE (head space) and before the grouped output projection.
@@ -960,105 +1025,316 @@ class DSv4HybridAttention(Attention):
                     dense_mode=self.config.csa_dense_mode,
                 )
 
-        # Full attention recompute: wrap qkv + core_attn + inv_rope + o_group_proj + gated_attn
-        # into one RecomputeWithoutOutput block. All intermediates (query, key, value, etc.)
-        # are freed after forward (no_grad), and the output is discarded after o_proj.
+        # The block runs as pre-CSA -> CSA -> post-CSA; which of those stages
+        # sit inside a recompute segment is decided in _attn_forward.
         input_ids = kwargs.get("input_ids", None)
-        if self.recompute_full_attn and self.training:
-            self._full_attn_recompute = RecomputeWithoutOutput()
-            core_attn_out = self._full_attn_recompute.recompute(
-                self._full_attn_forward,
-                # This segment contains core_attention, i.e. the CSA Indexer and its
-                # side-attached loss. RecomputeWithoutOutput is a PyLayer whose
-                # output is differentiable only if some input is, and with a frozen
-                # backbone (train_indexer_only) hidden_states is detached. It
-                # would then skip registering its recompute hook altogether
-                # (tensor_parallel/random.py:590 checks stop_gradient) and the
-                # Indexer would get no gradient, with no error and no warning.
-                keep_indexer_grad_path(hidden_states, self.config),
-                attention_mask,
-                position_offset,
-                docmask_meta,
-                input_ids,
-                True,  # _in_full_recompute (last positional; see signature)
-                preserve_rng_state=False,
-                share_grad_holder=True,
-            )
+        if self.training and (
+            self.recompute_full_attn
+            or self.recompute_pre_csa
+            or self.recompute_csa
+            or self.recompute_post_csa
+        ):
+            # A segment can contain core_attention, i.e. the CSA Indexer and its
+            # side-attached loss. Every recompute wrapper is a PyLayer whose
+            # output is differentiable only if some input is, and with a frozen
+            # backbone (train_indexer_only) hidden_states is detached. The
+            # wrapper would then skip registering its recompute hook altogether
+            # (tensor_parallel/random.py:590 checks stop_gradient) and the
+            # Indexer would get no gradient, with no error and no warning.
+            # Anchor once here: the first segment's output inherits it, so the
+            # later ones short-circuit.
+            hidden_states = keep_indexer_grad_path(hidden_states, self.config)
 
-            # Output projection
-            output, bias = self.o_proj(core_attn_out)
+        core_attn_out = self._attn_forward(
+            hidden_states,
+            attention_mask,
+            position_offset,
+            docmask_meta,
+            input_ids,
+            past_key_values=past_key_values,
+            layer_idx=layer_idx,
+            use_cache=use_cache,
+        )
 
-            # Discard full_attn output (core_attn_out) — frees ~512 MB
-            self._full_attn_recompute.discard_output_and_register_recompute(
-                output
-            )
-            self._full_attn_recompute = None
-        else:
-            core_attn_out = self._full_attn_forward(
-                hidden_states,
-                attention_mask,
-                position_offset,
-                docmask_meta,
-                input_ids,
-                past_key_values=past_key_values,
-                layer_idx=layer_idx,
-                use_cache=use_cache,
-            )
+        # Output projection
+        output, bias = self.o_proj(core_attn_out)
 
-            # Output projection
-            output, bias = self.o_proj(core_attn_out)
+        # A segment ending right before o_proj had its output discarded (frees
+        # ~512 MB for the full_attn span); it is re-materialized from o_proj's
+        # output during backward.
+        if self._stage_recompute is not None:
+            self._stage_recompute.discard_output_and_register_recompute(output)
+            self._stage_recompute = None
 
-            # Discard gated_attn output if it was independently recomputed
-            if (
-                hasattr(self, "_gate_recompute")
-                and self._gate_recompute is not None
-            ):
-                self._gate_recompute.discard_output_and_register_recompute(
-                    output
-                )
-                self._gate_recompute = None
+        # Discard gated_attn output if it was independently recomputed
+        if self._gate_recompute is not None:
+            self._gate_recompute.discard_output_and_register_recompute(output)
+            self._gate_recompute = None
 
         if original_b > 1:
             output = _unpack_dsv4_logical_batch(output, original_b, original_sq)
 
         return output, bias
 
-    def _full_attn_forward(
+    def _attn_forward(
         self,
         hidden_states: Tensor,
         attention_mask,
         position_offset: int,
         docmask_meta,
         input_ids,
-        _in_full_recompute: bool = False,
         *,
         past_key_values=None,
         layer_idx=None,
         use_cache=False,
     ) -> Tensor:
-        """Full attention forward: qkv_proj + core_attn + inv_rope + o_group_proj + gated_attn.
+        """The attention block: pre-CSA -> CSA -> post-CSA.
 
-        Factored out so that paddle.distributed.fleet.utils.recompute can wrap it.
-        The large intermediate tensors (query, key, value) are internal to this function
-        and will be freed after this function returns during forward, then recomputed
-        during backward.
+        The stage order lives here; the selective-recompute flags only move the
+        segment boundaries. How a stage is wrapped follows from what stays alive
+        after it:
 
-        ``RecomputeWithoutOutput.recompute()`` forwards only ``*args`` to the
-        wrapped function, so ``_in_full_recompute`` must stay the *last*
-        positional parameter. The KV-cache parameters after it are keyword-only
-        to keep that invariant: they are never used from the recompute path
-        (recompute only runs under ``self.training``).
+        - a segment that ends right before ``o_proj`` (the ``full_attn`` span,
+          csa+post, or post alone) uses ``RecomputeWithoutOutput``: its output is
+          dead once ``o_proj`` consumed it, so ``forward`` discards it.
+        - ``hca_pre_csa`` keeps ``query``/``key``/``value`` -- they are segment
+          outputs consumed by the CSA stage -- so a plain ``recompute`` only
+          frees the projection/norm/RoPE intermediates.
+        - ``hca_csa`` alone is a plain ``recompute``; its output feeds post-CSA.
+
+        csa+post are fused into one segment rather than nested: discarding the
+        CSA output would invalidate the input a separate post-CSA segment saved
+        for its own replay.
+
+        The KV-cache parameters are keyword-only: they are never used from a
+        recompute path (recompute only runs under ``self.training``).
         """
-        query, key, value, q_compressed, kv_compressed = (
-            self.get_query_key_value_tensors(
-                hidden_states=hidden_states,
-                position_offset=position_offset,
-                docmask_meta=docmask_meta,
+        training = self.training
+        rc_full = self.recompute_full_attn and training
+        rc_pre = self.recompute_pre_csa and training
+        rc_csa = self.recompute_csa and training
+        rc_post = self.recompute_post_csa and training
+
+        # All three stages in one segment. Mutually exclusive with the per-stage
+        # entries (rejected in __init__) and the only span that also frees
+        # query/key/value.
+        if rc_full:
+            self._stage_recompute = RecomputeWithoutOutput()
+            return self._stage_recompute.recompute(
+                self._all_stages_forward,
+                hidden_states,
+                attention_mask,
+                position_offset,
+                docmask_meta,
+                input_ids,
+                True,  # in_outer_recompute
+                preserve_rng_state=False,
+                share_grad_holder=True,
             )
+
+        # Stage 1: pre-CSA
+        if rc_pre:
+            # _pre_csa_deduped_forward drops the key/value alias; see there.
+            pre_outputs = recompute(
+                self._pre_csa_deduped_forward,
+                hidden_states,
+                position_offset,
+                docmask_meta,
+                preserve_rng_state=False,
+            )
+            if len(pre_outputs) == 4:
+                query, key, q_compressed, kv_compressed = pre_outputs
+                value = key
+            else:
+                query, key, value, q_compressed, kv_compressed = pre_outputs
+        else:
+            query, key, value, q_compressed, kv_compressed = (
+                self._pre_csa_forward(
+                    hidden_states, position_offset, docmask_meta
+                )
+            )
+
+        csa_args = (
+            query,
+            key,
+            value,
+            attention_mask,
+            hidden_states,
+            q_compressed,
+            input_ids,
+            docmask_meta,
         )
 
-        # Core attention (CompressedSparseAttention)
-        core_attn_out = self.core_attention(
+        # Stages 2 and 3
+        if rc_csa and rc_post:
+            self._stage_recompute = RecomputeWithoutOutput()
+            return self._stage_recompute.recompute(
+                self._csa_post_forward,
+                *csa_args,
+                position_offset,
+                True,  # in_outer_recompute
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+
+        if rc_csa:
+            core_attn_out = recompute(
+                self._csa_forward, *csa_args, preserve_rng_state=False
+            )
+        else:
+            core_attn_out = self._csa_forward(
+                *csa_args,
+                past_key_values=past_key_values,
+                layer_idx=layer_idx,
+                use_cache=use_cache,
+            )
+
+        if rc_post:
+            self._stage_recompute = RecomputeWithoutOutput()
+            return self._stage_recompute.recompute(
+                self._post_csa_forward,
+                core_attn_out,
+                hidden_states,
+                q_compressed,
+                position_offset,
+                docmask_meta,
+                True,  # in_outer_recompute
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+
+        return self._post_csa_forward(
+            core_attn_out,
+            hidden_states,
+            q_compressed,
+            position_offset,
+            docmask_meta,
+        )
+
+    def _csa_post_forward(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attention_mask,
+        hidden_states: Tensor,
+        q_compressed: Tensor,
+        input_ids,
+        docmask_meta,
+        position_offset: int,
+        in_outer_recompute: bool = False,
+    ) -> Tensor:
+        """Stages 2 and 3 back to back (the csa+post span)."""
+        core_attn_out = self._csa_forward(
+            query,
+            key,
+            value,
+            attention_mask,
+            hidden_states,
+            q_compressed,
+            input_ids,
+            docmask_meta,
+        )
+        return self._post_csa_forward(
+            core_attn_out,
+            hidden_states,
+            q_compressed,
+            position_offset,
+            docmask_meta,
+            in_outer_recompute,
+        )
+
+    def _all_stages_forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask,
+        position_offset: int,
+        docmask_meta,
+        input_ids,
+        in_outer_recompute: bool = False,
+    ) -> Tensor:
+        """All three stages back to back (the ``full_attn`` span).
+
+        query/key/value are internal to this call, so wrapping it in a single
+        recompute segment frees them for the whole forward.
+        """
+        query, key, value, q_compressed, _ = self._pre_csa_forward(
+            hidden_states, position_offset, docmask_meta
+        )
+        return self._csa_post_forward(
+            query,
+            key,
+            value,
+            attention_mask,
+            hidden_states,
+            q_compressed,
+            input_ids,
+            docmask_meta,
+            position_offset,
+            in_outer_recompute,
+        )
+
+    def _pre_csa_forward(
+        self,
+        hidden_states: Tensor,
+        position_offset: int,
+        docmask_meta,
+    ):
+        """Stage 1: everything before the CSA core attention.
+
+        q_down/q_up projections, qk norm, kv projection and RoPE.
+        Returns (query, key, value, q_compressed, kv_compressed).
+        """
+        return self.get_query_key_value_tensors(
+            hidden_states=hidden_states,
+            position_offset=position_offset,
+            docmask_meta=docmask_meta,
+        )
+
+    def _pre_csa_deduped_forward(
+        self,
+        hidden_states: Tensor,
+        position_offset: int,
+        docmask_meta,
+    ):
+        """:meth:`_pre_csa_forward` with the key/value alias removed.
+
+        ``DSv4HybridSelfAttention`` produces a single-head KV and returns the
+        same tensor object as both key and value. A recompute segment that
+        returns one object twice makes ``paddle.autograd.backward`` fail with
+        "contains duplicate paddle.Tensor object", so the duplicate is dropped
+        here and restored by the caller (4 outputs => value is key).
+        """
+        query, key, value, q_compressed, kv_compressed = self._pre_csa_forward(
+            hidden_states, position_offset, docmask_meta
+        )
+        if value is key:
+            return query, key, q_compressed, kv_compressed
+        return query, key, value, q_compressed, kv_compressed
+
+    def _csa_forward(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attention_mask,
+        hidden_states: Tensor,
+        q_compressed: Tensor,
+        input_ids,
+        docmask_meta,
+        *,
+        past_key_values=None,
+        layer_idx=None,
+        use_cache=False,
+    ) -> Tensor:
+        """Stage 2: the CSA core attention (Compressor + Indexer + sparse attn).
+
+        Returns core_attn_out [b, sq, np * v_head_dim].
+
+        The KV-cache parameters are keyword-only: they are never used from a
+        recompute path (recompute only runs under ``self.training``).
+        """
+        return self.core_attention(
             query,
             key,
             value,
@@ -1071,8 +1347,22 @@ class DSv4HybridAttention(Attention):
             layer_idx=layer_idx,
             use_cache=use_cache,
         )
-        # core_attn_out: [b, sq, np * v_head_dim]
 
+    def _post_csa_forward(
+        self,
+        core_attn_out: Tensor,
+        hidden_states: Tensor,
+        q_compressed: Tensor,
+        position_offset: int,
+        docmask_meta,
+        in_outer_recompute: bool = False,
+    ) -> Tensor:
+        """Stage 3: everything after the CSA core attention.
+
+        Inverse RoPE, VHA postmix, grouped output projection and gated attention.
+        ``in_outer_recompute`` suppresses the nested per-submodule recompute of
+        vha_postmix / gated_attn when an enclosing segment already frees them.
+        """
         # Inverse RoPE on last qk_pos_emb_head_dim of each head
         b, sq, _ = core_attn_out.shape
         pos_dim = self.qk_pos_emb_head_dim
@@ -1124,14 +1414,15 @@ class DSv4HybridAttention(Attention):
 
         # VHA postmix: low-rank cross-head mixing while still in head space
         # ([b, sq, nh, v_head_dim]), after inverse RoPE and before the grouped
-        # output projection. When the whole block is already wrapped in a
-        # full_attn RecomputeWithoutOutput, skip the nested selective recompute
-        # (the full block recompute already frees these activations).
+        # output projection. When an enclosing segment (full_attn, or the
+        # staged csa+post / post-only segment) already wraps this block, skip
+        # the nested selective recompute — the outer segment already frees
+        # these activations.
         if self.use_vha_postmix:
             if (
                 self.recompute_vha_postmix
                 and self.training
-                and not _in_full_recompute
+                and not in_outer_recompute
             ):
                 core_attn_out = recompute(
                     self._apply_vha_postmix, core_attn_out
@@ -1167,12 +1458,13 @@ class DSv4HybridAttention(Attention):
             gate_source = (
                 q_compressed if self.gated_attn_use_q_lora else hidden_states
             )
-            # When NOT inside full_attn recompute, gated_attn can have its own
-            # independent RecomputeWithoutOutput wrapper for lighter memory saving.
+            # When NOT inside an enclosing recompute segment, gated_attn can
+            # have its own independent RecomputeWithoutOutput wrapper for
+            # lighter memory saving.
             if (
                 self.recompute_gated_attn
                 and self.training
-                and not _in_full_recompute
+                and not in_outer_recompute
             ):
                 self._gate_recompute = RecomputeWithoutOutput()
                 core_attn_out = self._gate_recompute.recompute(
