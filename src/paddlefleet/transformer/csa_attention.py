@@ -128,18 +128,32 @@ def _derive_csa_doc_boundaries(
     mask = startend_row_indices.flatten().cast("int64")
     positions = paddle.arange(seqlen, dtype="int64")
 
-    is_boundary = paddle.zeros([seqlen], dtype="bool")
-    is_boundary[0] = True
-    is_boundary[1:] = (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+    # Concat rather than ``is_boundary[0] = True``: assigning a Python bool into
+    # a device tensor issues a 1-byte pageable ``cudaMemcpy``, which blocks the
+    # host until the device queue drains. On the layer43 config that lands behind
+    # a DeepEP combine and costs ~2.9 ms per ``-2`` layer.
+    is_boundary = paddle.concat(
+        [
+            paddle.ones([1], dtype="bool"),
+            (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1]),
+        ]
+    )
 
-    doc_start_per_pos = paddle.cummax(
-        is_boundary.cast("int64") * positions, axis=0
-    ).values
+    # ``doc_start_per_pos`` is the most recent boundary at or before t. Boundary
+    # positions increase, so the running max of ``is_boundary * positions`` is a
+    # forward fill; once the boundaries are materialised -- which this function
+    # needs anyway for ``doc_lens`` / ``doc_starts`` -- a forward fill is cumsum
+    # + gather. ``paddle.cummax`` over a single long row falls into a one-block
+    # scan (``KernelScanInnerWithIndices``): 2.3 ms at seqlen 65536 and 5.3 ms at
+    # 131072, versus ~0.04 ms for cumsum + gather at either length.
+    doc_starts_i64 = paddle.nonzero(is_boundary).flatten()
+    doc_id = paddle.cumsum(is_boundary.cast("int32"), axis=0) - 1
+    doc_start_per_pos = paddle.gather(doc_starts_i64, doc_id, axis=0)
+
     pos_in_doc = positions - doc_start_per_pos
     doc_len_per_pos = mask - doc_start_per_pos
     is_valid = pos_in_doc < doc_len_per_pos
 
-    doc_starts_i64 = paddle.nonzero(is_boundary).flatten()
     doc_lens = (mask[doc_starts_i64] - doc_starts_i64).cast("int32")
     doc_starts = doc_starts_i64
 
@@ -2130,6 +2144,9 @@ class CompressedSparseAttention(FleetLayer):
             config, "csa_indexer_backend", "tilelang"
         )
         self.indexer_loss_coeff = getattr(config, "dsa_indexer_loss_coeff", 0.0)
+        self.global_kv_idx_remap_fusion = getattr(
+            config, "sparse_attn_global_kv_idx_remap_fusion", False
+        )
 
     def _resolve_topk_effective(self, n_compressed: int):
         """Return the CSA indexer top-k width for current phase.
@@ -3121,4 +3138,5 @@ class CompressedSparseAttention(FleetLayer):
             backend=sparse_attn_backend,
             topk_length=topk_length,
             indexer_topk=indexer_topk,
+            global_kv_idx_remap_fusion=self.global_kv_idx_remap_fusion,
         )

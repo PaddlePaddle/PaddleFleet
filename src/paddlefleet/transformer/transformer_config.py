@@ -248,6 +248,24 @@ class TransformerConfig(ModelParallelConfig):
     True: within-group block-diagonal mixing that only recombines heads inside each
     o_group (mixing stays within a group)."""
 
+    fuse_inv_rope_into_vha_postmix: bool = False
+    """Fuse the HCA inverse RoPE into the ungrouped VHA postmix GEMM (DSv4 hybrid).
+
+    The unfused path materialises ``inv_rope(O)`` as a full-width tensor and feeds
+    it to the postmix ``[nh,nh]`` GEMM, which costs one extra read+write of the
+    whole attention output plus a second live copy of it. Because RoPE only
+    touches the trailing ``qk_pos_emb_head_dim`` channels while the GEMM
+    contracts the head axis, the same result can be assembled from a full-width
+    GEMM on the *unrotated* output plus a narrow GEMM on the rotated pe channels,
+    which never needs the wide intermediate.
+
+    Bitwise identical to the unfused path -- forward, activation gradient and the
+    postmix U/V gradients -- and asserted as such in
+    ``tests/single_card_tests/test_inv_rope_vha_postmix_fusion.py``. Requires
+    ``use_vha_attention`` and ``apply_rope_fusion``, and is skipped for
+    ``vha_postmix_grouped``, ``high_precision_rope`` and when the postmix has its
+    own selective recompute wrapper."""
+
     use_vha_premix: bool = False
     """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
     (linear_q_up_proj) with a structured VHA premix: the compressed Q is reshaped into
@@ -1342,6 +1360,31 @@ class TransformerConfig(ModelParallelConfig):
     ``CSADocMaskMetadata``), so they can be enabled and measured independently.
     Requires the layers to actually run latent MQA -- ``__post_init__`` rejects
     the switch otherwise rather than let it be a silent no-op.
+    """
+
+    sparse_attn_global_kv_idx_remap_fusion: bool = False
+    """Whether to fuse the per-batch-local -> flat-global KV column index remap
+    (``idx + b * seqlen_kv``) consumed by the cuDNN / FlashMLA sparse-attention
+    kernels (``csa_sparse_attn_utils._local_to_global_flat``).
+
+    Not about MoE routing: these are KV *column* indices of the sparse-attention
+    support (window + compressed slots), not expert top-k ids.
+
+    The eager version spends seven elementwise kernels on the full
+    ``[b * sq, topk]`` table (``full`` + ``greater_equal`` + ``arange`` +
+    ``expand`` + ``scale`` + ``add`` + ``where``) to express a single pass; the
+    Triton kernel does it in one. The result is bit-identical, so this only
+    trades kernel count for a Triton dependency and can be flipped freely.
+
+    Scope: every ``_local_to_global_flat`` call site -- the ``"cudnn"``
+    sparse-attention forward and backward of both
+    ``CompressedSparseAttention`` (HCA ``ratio=128`` and CSA/DSA
+    ``1 < ratio < 128`` layers) and ``MQALatentAttention``. No effect on the
+    ``"tilelang"`` / ``"unfused"`` backends, which never build the flat global
+    index table, nor on ``block_sparse_mqa_attention_dsa``, which leaves it at
+    the default. ``MQALatentAttention``'s forward is always FlashMLA, so it
+    remaps regardless of ``mqa_sparse_attn_backward_backend``; only its
+    backward follows that switch.
     """
 
     stage1_overlap: bool = False

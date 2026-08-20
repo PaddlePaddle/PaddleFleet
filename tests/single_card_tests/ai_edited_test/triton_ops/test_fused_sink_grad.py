@@ -354,6 +354,7 @@ def _make_bwd_case(
         kv_dtype=kv.dtype,
         learnable_sink=learnable_sink,
         sink_grad_fusion=fusion,
+        global_kv_idx_remap_fusion=False,
         # The sink-gradient epilogue under test lives on the cuDNN branch only:
         # the tilelang backward takes ``d_sink`` from its own kernel and never
         # reaches ``fused_sink_grad`` (see ``mqa_sparse_attn.backward``).
