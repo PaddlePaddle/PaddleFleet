@@ -201,10 +201,9 @@ def dense_indexer_kl_bwd(
 
     if grad_loss is None:
         grad_loss = paddle.ones([], dtype=paddle.float32)
-    if (
-        isinstance(grad_loss, paddle.Tensor)
-        and grad_loss.dtype != paddle.float32
-    ):
+    elif not isinstance(grad_loss, paddle.Tensor):
+        grad_loss = paddle.to_tensor(float(grad_loss), dtype=paddle.float32)
+    elif grad_loss.dtype != paddle.float32:
         grad_loss = grad_loss.cast(paddle.float32)
 
     out = dense_indexer_backward_wrapper(
