@@ -22,6 +22,7 @@ cd "${SCRIPT_DIR}"
 # 新增用例列表: "用例名 paddle脚本 torch脚本"
 CASES=(
     "MinimaxV2.5_EP2 ./MinimaxV2.5_EP2/run_paddle_minimax.sh ./MinimaxV2.5_EP2/run_torch_minimax.sh"
+    "KimiK2_TP8EP8 ./KimiK2_TP8EP8/run_paddle_kimik2.sh ./KimiK2_TP8EP8/run_torch_kimik2.sh"
     # "transformer ./paddlepaddle_transformer/run_paddle_minimax.sh ./pytorch_transformer/run_torch_minimax.sh"
 )
 
