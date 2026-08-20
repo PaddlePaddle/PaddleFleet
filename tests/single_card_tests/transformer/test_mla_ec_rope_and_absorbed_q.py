@@ -1025,7 +1025,7 @@ class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
             )
 
         self.assertIn(
-            "apply_rope_fusion does not support dynamic inference yet",
+            "apply_rope_fusion does not support incremental decode in MLA yet.",
             str(ctx.exception),
         )
 
