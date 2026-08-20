@@ -77,7 +77,9 @@ class _AccuracyCompatibleQKMatmul(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, query: Tensor, key: Tensor) -> Tensor:
         batch_size, num_heads, sequence_length, head_dim = query.shape
-        expanded_key = key.expand([batch_size, num_heads, head_dim, sequence_length])
+        expanded_key = key.expand(
+            [batch_size, num_heads, head_dim, sequence_length]
+        )
         scores = paddle.bmm(
             query.reshape([batch_size * num_heads, sequence_length, head_dim]),
             expanded_key.reshape(
@@ -91,7 +93,9 @@ class _AccuracyCompatibleQKMatmul(paddle.autograd.PyLayer):
     def backward(ctx, grad_output: Tensor) -> tuple[Tensor, Tensor]:
         query, key = ctx.saved_tensor()
         batch_size, num_heads, sequence_length, head_dim = query.shape
-        expanded_key = key.expand([batch_size, num_heads, head_dim, sequence_length])
+        expanded_key = key.expand(
+            [batch_size, num_heads, head_dim, sequence_length]
+        )
         grad_query = paddle.bmm(
             grad_output.reshape(
                 [batch_size * num_heads, sequence_length, sequence_length]
@@ -292,7 +296,9 @@ def _unfused_absorbed_dsa_attention(
     q = query.transpose([0, 2, 1, 3])
     k = key.transpose([0, 2, 3, 1])
     if _ACCURACY_COMPATIBLE_KERNEL:
-        scores = _AccuracyCompatibleQKMatmul.apply(q.cast("float32"), k.cast("float32"))
+        scores = _AccuracyCompatibleQKMatmul.apply(
+            q.cast("float32"), k.cast("float32")
+        )
     else:
         scores = paddle.matmul(q.cast("float32"), k.cast("float32"))
     scores = scores * softmax_scale
@@ -304,10 +310,10 @@ def _unfused_absorbed_dsa_attention(
         else F.softmax(scores, axis=-1)
     )
     latent_value = value.transpose([0, 2, 1, 3])
-    latent_context = paddle.matmul(probabilities.cast(value.dtype), latent_value)
-    projected = paddle.einsum(
-        "bhsr,hrd->bshd", latent_context, v_up_weight
+    latent_context = paddle.matmul(
+        probabilities.cast(value.dtype), latent_value
     )
+    projected = paddle.einsum("bhsr,hrd->bshd", latent_context, v_up_weight)
     return projected.reshape([b, s, num_heads * v_up_weight.shape[-1]])
 
 
@@ -1589,7 +1595,9 @@ class DSAttention(FleetLayer):
             if indexer_types is not None:
                 full_layers = [
                     index
-                    for index, layer_type in enumerate(indexer_types[:layer_number])
+                    for index, layer_type in enumerate(
+                        indexer_types[:layer_number]
+                    )
                     if layer_type == "full"
                 ]
                 if not full_layers:
@@ -1598,11 +1606,14 @@ class DSAttention(FleetLayer):
                     )
                 self.source_layer = full_layers[-1]
             else:
-                self.source_layer = source_dsa_compute_layer(
-                    layer_number + 1,
-                    self.index_skip_topk_offset,
-                    self.index_topk_freq,
-                ) - 1
+                self.source_layer = (
+                    source_dsa_compute_layer(
+                        layer_number + 1,
+                        self.index_skip_topk_offset,
+                        self.index_topk_freq,
+                    )
+                    - 1
+                )
         else:
             self.source_layer = layer_number
 
@@ -1635,7 +1646,9 @@ class DSAttention(FleetLayer):
             config, "dsa_indexer_use_sparse_loss", False
         )
 
-    def _get_index_share_topk_holder(self, attention_mask: Tensor | None) -> dict:
+    def _get_index_share_topk_holder(
+        self, attention_mask: Tensor | None
+    ) -> dict:
         carrier = attention_mask if attention_mask is not None else self.config
         holder = getattr(carrier, self._HOLDER_ATTR, None)
         if holder is None:

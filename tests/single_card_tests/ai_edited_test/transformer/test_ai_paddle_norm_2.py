@@ -101,7 +101,9 @@ class TestRMSNormForwardDetailed(unittest.TestCase):
         ).cast("bfloat16")
 
         self.assertTrue(
-            paddle.equal_all(out.cast("float32"), expected.cast("float32")).item()
+            paddle.equal_all(
+                out.cast("float32"), expected.cast("float32")
+            ).item()
         )
 
     @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "1"})

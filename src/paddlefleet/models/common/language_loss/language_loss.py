@@ -61,7 +61,9 @@ def _accuracy_compatible_cross_entropy(
     """Run Megatron-style CE while preserving its masked sentinel gradient."""
     from paddlefleet.tensor_parallel import vocab_parallel_cross_entropy
 
-    labels = paddle.where(labels == ignored_index, paddle.zeros_like(labels), labels)
+    labels = paddle.where(
+        labels == ignored_index, paddle.zeros_like(labels), labels
+    )
     return vocab_parallel_cross_entropy(logits, labels)
 
 

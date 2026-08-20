@@ -104,7 +104,11 @@ class _AccuracyCompatibleMoEInputBranches(PyLayer):
 
     @staticmethod
     def forward(ctx, hidden_states):
-        return hidden_states.clone(), hidden_states.clone(), hidden_states.clone()
+        return (
+            hidden_states.clone(),
+            hidden_states.clone(),
+            hidden_states.clone(),
+        )
 
     @staticmethod
     def backward(ctx, routed_grad, router_grad, shared_grad):
@@ -791,7 +795,9 @@ class MoELayer(nn.Layer):
                 expert_output = expert(
                     chunk,
                     per_token_scale=scale_chunks[i],
-                    accuracy_compatible_router_reduction_rows=dispatched_input.shape[0],
+                    accuracy_compatible_router_reduction_rows=dispatched_input.shape[
+                        0
+                    ],
                 )[0]
             outputs += [expert_output]
 

@@ -54,14 +54,9 @@ class _AccuracyCompatibleRMSNormFunction(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, grad_output: paddle.Tensor):
         hidden_states, inv_rms = ctx.saved_tensor()
-        dot = paddle.sum(
-            grad_output * hidden_states, axis=-1, keepdim=True
-        )
+        dot = paddle.sum(grad_output * hidden_states, axis=-1, keepdim=True)
         correction_scale = (
-            dot
-            * (-0.5)
-            * paddle.pow(inv_rms, 3)
-            / hidden_states.shape[-1]
+            dot * (-0.5) * paddle.pow(inv_rms, 3) / hidden_states.shape[-1]
         )
         correction = (correction_scale * hidden_states) * 2.0
         grad_input = grad_output * inv_rms + correction

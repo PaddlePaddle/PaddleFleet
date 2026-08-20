@@ -81,7 +81,9 @@ class _AccuracyCompatibleLinearInputGrad(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, grad_output):
         (weight,) = ctx.saved_tensor()
-        grad_input = paddle.matmul(grad_output, weight.transpose([1, 0]).contiguous())
+        grad_input = paddle.matmul(
+            grad_output, weight.transpose([1, 0]).contiguous()
+        )
         return grad_input, None
 
 
@@ -128,9 +130,9 @@ def _accuracy_compatible_mla_rope_apply(
         tensor = paddle.concat((tensor[..., 0::2], tensor[..., 1::2]), axis=-1)
         x1, x2 = paddle.chunk(tensor, 2, axis=-1)
         rotated = paddle.concat((-x2, x1), axis=-1)
-        return tensor * paddle.cos(freqs).cast(tensor.dtype) + rotated * paddle.sin(
-            freqs
-        ).cast(tensor.dtype)
+        return tensor * paddle.cos(freqs).cast(
+            tensor.dtype
+        ) + rotated * paddle.sin(freqs).cast(tensor.dtype)
 
     return rotate(q_pe), rotate(k_pe)
 
@@ -1273,7 +1275,10 @@ class MultiLatentAttention(Attention):
             output = FP8OverlapProj.apply(core_attn_out, self.o_proj.weight)
             bias = None
         else:
-            if _ACCURACY_COMPATIBLE_KERNEL and get_pg_size(self.pg_collection.tp) == 1:
+            if (
+                _ACCURACY_COMPATIBLE_KERNEL
+                and get_pg_size(self.pg_collection.tp) == 1
+            ):
                 output, bias = _accuracy_compatible_projection(
                     self.o_proj, core_attn_out
                 )

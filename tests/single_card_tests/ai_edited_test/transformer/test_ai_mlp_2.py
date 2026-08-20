@@ -72,7 +72,9 @@ class TestMLPWithSwigluPath(unittest.TestCase):
 
         paddle.testing.assert_close(output, F.silu(gate) * linear)
 
-    def test_accuracy_compatible_router_scale_preserves_forward_and_dgrads(self):
+    def test_accuracy_compatible_router_scale_preserves_forward_and_dgrads(
+        self,
+    ):
         activation = paddle.randn([3, 2048], dtype="bfloat16")
         activation.stop_gradient = False
         scale = paddle.randn([3], dtype="float32")
@@ -82,8 +84,12 @@ class TestMLPWithSwigluPath(unittest.TestCase):
         output = mlp_module._accuracy_compatible_router_scale(
             activation, scale, reduction_rows=8
         )
-        expected_output = (activation * scale.unsqueeze(-1)).cast(activation.dtype)
-        self.assertEqual(output.numpy().tobytes(), expected_output.numpy().tobytes())
+        expected_output = (activation * scale.unsqueeze(-1)).cast(
+            activation.dtype
+        )
+        self.assertEqual(
+            output.numpy().tobytes(), expected_output.numpy().tobytes()
+        )
 
         output.backward(grad_output)
 
@@ -94,7 +100,9 @@ class TestMLPWithSwigluPath(unittest.TestCase):
             activation.grad.numpy().tobytes(),
             expected_activation_grad.numpy().tobytes(),
         )
-        products = activation.detach().cast("float32") * grad_output.cast("float32")
+        products = activation.detach().cast("float32") * grad_output.cast(
+            "float32"
+        )
         padded_products = paddle.concat(
             [products, paddle.zeros([5, 2048], dtype="float32")], axis=0
         )
@@ -104,18 +112,23 @@ class TestMLPWithSwigluPath(unittest.TestCase):
         )
 
     def _run_with_accuracy_gate(self, enabled):
-        config = _make_config(gated_linear_unit=True, bias_activation_fusion=True)
+        config = _make_config(
+            gated_linear_unit=True, bias_activation_fusion=True
+        )
         spec = _make_mlp_spec(config)
         mlp = MLP(config=config, sublayers_spec=spec)
         hidden_states = paddle.randn([2, 4, 64])
 
-        with mock.patch.object(
-            mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", enabled
-        ), mock.patch.object(
-            mlp_module,
-            "_accuracy_compatible_swiglu",
-            wraps=mlp_module._accuracy_compatible_swiglu,
-        ) as compatible_swiglu:
+        with (
+            mock.patch.object(
+                mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", enabled
+            ),
+            mock.patch.object(
+                mlp_module,
+                "_accuracy_compatible_swiglu",
+                wraps=mlp_module._accuracy_compatible_swiglu,
+            ) as compatible_swiglu,
+        ):
             output, _ = mlp(hidden_states)
 
         self.assertEqual(output.shape, [2, 4, 64])
@@ -153,11 +166,15 @@ class TestMLPWithSwigluPath(unittest.TestCase):
         )
         self.assertTrue(paddle.equal_all(hidden_states.grad, expected).item())
         expected_weight_grad = paddle.matmul(
-            hidden_states.detach().reshape([-1, hidden_states.shape[-1]]).transpose([1, 0]),
+            hidden_states.detach()
+            .reshape([-1, hidden_states.shape[-1]])
+            .transpose([1, 0]),
             grad_output.reshape([-1, grad_output.shape[-1]]),
         )
         self.assertTrue(
-            paddle.equal_all(mlp.down_proj.weight.grad, expected_weight_grad).item()
+            paddle.equal_all(
+                mlp.down_proj.weight.grad, expected_weight_grad
+            ).item()
         )
 
     def test_accuracy_gate_selects_both_projections(self):
@@ -166,13 +183,14 @@ class TestMLPWithSwigluPath(unittest.TestCase):
         mlp = MLP(config=config, sublayers_spec=spec)
         hidden_states = paddle.randn([2, 4, 64])
 
-        with mock.patch.object(
-            mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", True
-        ), mock.patch.object(
-            mlp_module,
-            "_accuracy_compatible_projection",
-            wraps=mlp_module._accuracy_compatible_projection,
-        ) as compatible_projection:
+        with (
+            mock.patch.object(mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", True),
+            mock.patch.object(
+                mlp_module,
+                "_accuracy_compatible_projection",
+                wraps=mlp_module._accuracy_compatible_projection,
+            ) as compatible_projection,
+        ):
             output, _ = mlp(hidden_states)
 
         self.assertEqual(output.shape, [2, 4, 64])

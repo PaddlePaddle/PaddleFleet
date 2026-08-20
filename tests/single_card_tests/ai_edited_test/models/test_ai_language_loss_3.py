@@ -43,7 +43,9 @@ class TestAccuracyCompatibleCrossEntropy(unittest.TestCase):
         logits.stop_gradient = False
         labels = paddle.full([1, 1], -100, dtype="int64")
 
-        loss = _accuracy_compatible_cross_entropy(logits, labels, ignored_index=-100)
+        loss = _accuracy_compatible_cross_entropy(
+            logits, labels, ignored_index=-100
+        )
         (loss * paddle.zeros_like(loss)).sum().backward()
 
         bits = logits.grad.numpy().view("uint32")

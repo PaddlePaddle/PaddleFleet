@@ -83,7 +83,9 @@ class TestAccuracyCompatibleProjection(unittest.TestCase):
         bias = paddle.randn([6])
         projection = MagicMock(weight=weight, bias=bias, skip_bias_add=True)
 
-        output, output_bias = _accuracy_compatible_projection(projection, hidden)
+        output, output_bias = _accuracy_compatible_projection(
+            projection, hidden
+        )
 
         expected = paddle.nn.functional.linear(hidden, weight)
         self.assertTrue(paddle.equal_all(output, expected).item())
@@ -97,7 +99,9 @@ class TestAccuracyCompatibleProjection(unittest.TestCase):
         bias = paddle.randn([6])
         projection = MagicMock(weight=weight, bias=bias, skip_bias_add=False)
 
-        output, output_bias = _accuracy_compatible_projection(projection, hidden)
+        output, output_bias = _accuracy_compatible_projection(
+            projection, hidden
+        )
 
         expected = paddle.nn.functional.linear(hidden, weight, bias)
         self.assertTrue(paddle.equal_all(output, expected).item())
@@ -132,7 +136,9 @@ class TestAccuracyCompatibleQUpProjection(unittest.TestCase):
         )
 
         self.assertTrue(
-            paddle.equal_all(output.detach(), paddle.nn.functional.linear(hidden, weight))
+            paddle.equal_all(
+                output.detach(), paddle.nn.functional.linear(hidden, weight)
+            )
         )
         self.assertTrue(paddle.equal_all(hidden.grad, expected_input_grad))
         self.assertTrue(paddle.equal_all(weight.grad, expected_weight_grad))

@@ -101,7 +101,9 @@ class TestAccuracyCompatibleSoftmax(unittest.TestCase):
                 grad_output * probabilities.detach(), axis=-1, keepdim=True
             )
         )
-        expected = paddle.where(valid_mask, expected, paddle.zeros_like(expected))
+        expected = paddle.where(
+            valid_mask, expected, paddle.zeros_like(expected)
+        )
 
         self.assertTrue(paddle.equal_all(logits.grad, expected))
         masked_bits = logits.grad[~valid_mask].numpy().view("uint32")
@@ -126,9 +128,10 @@ class TestAbsorbedDSAAttention(unittest.TestCase):
 
         expected_scores = paddle.bmm(
             query.transpose([0, 2, 1, 3]).cast("float32").reshape([2, 3, 8]),
-            key.transpose([0, 2, 3, 1]).expand([1, 2, 8, 3]).cast("float32").reshape(
-                [2, 8, 3]
-            ),
+            key.transpose([0, 2, 3, 1])
+            .expand([1, 2, 8, 3])
+            .cast("float32")
+            .reshape([2, 8, 3]),
         ).reshape([1, 2, 3, 3])
         expected_probabilities = paddle.nn.functional.softmax(
             expected_scores + mask, axis=-1
@@ -137,10 +140,12 @@ class TestAbsorbedDSAAttention(unittest.TestCase):
             expected_probabilities.cast(value.dtype),
             value.transpose([0, 2, 1, 3]),
         )
-        expected = paddle.einsum("bhsr,hrd->bshd", expected_context, weight).reshape(
-            [1, 3, 16]
+        expected = paddle.einsum(
+            "bhsr,hrd->bshd", expected_context, weight
+        ).reshape([1, 3, 16])
+        self.assertTrue(
+            paddle.equal_all(output.cast("float32"), expected.cast("float32"))
         )
-        self.assertTrue(paddle.equal_all(output.cast("float32"), expected.cast("float32")))
 
 
 class TestHadamardTransform(unittest.TestCase):

@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -83,7 +82,9 @@ def _mtp_shift_position_ids(
     if position_ids is None:
         if sequence_parallel:
             return None
-        position_ids = paddle.arange(hidden_states.shape[1], dtype="int64").unsqueeze(0)
+        position_ids = paddle.arange(
+            hidden_states.shape[1], dtype="int64"
+        ).unsqueeze(0)
     shifted = paddle.roll(position_ids, shifts=-(layer_number + 1), axis=-1)
     if shifted.ndim == 2 and shifted.shape[0] == 1:
         shifted = shifted.squeeze(0)

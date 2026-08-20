@@ -315,10 +315,10 @@ class TestAccuracyCompatibleMoEInputBranches(unittest.TestCase):
     def test_backward_uses_routed_router_shared_order(self):
         hidden = paddle.zeros([1, 4], dtype="bfloat16")
         hidden.stop_gradient = False
-        routed, router, shared = _AccuracyCompatibleMoEInputBranches.apply(hidden)
-        routed_grad = paddle.to_tensor(
-            [[1.0, 1.0, 1.0, 1.0]], dtype="bfloat16"
+        routed, router, shared = _AccuracyCompatibleMoEInputBranches.apply(
+            hidden
         )
+        routed_grad = paddle.to_tensor([[1.0, 1.0, 1.0, 1.0]], dtype="bfloat16")
         router_grad = paddle.to_tensor(
             [[0.00390625, 0.0078125, 0.015625, 0.03125]], dtype="bfloat16"
         )
@@ -333,8 +333,12 @@ class TestAccuracyCompatibleMoEInputBranches(unittest.TestCase):
 
         expected = (routed_grad + router_grad) + shared_grad
         alternative = (router_grad + shared_grad) + routed_grad
-        self.assertEqual(hidden.grad.numpy().tobytes(), expected.numpy().tobytes())
-        self.assertNotEqual(expected.numpy().tobytes(), alternative.numpy().tobytes())
+        self.assertEqual(
+            hidden.grad.numpy().tobytes(), expected.numpy().tobytes()
+        )
+        self.assertNotEqual(
+            expected.numpy().tobytes(), alternative.numpy().tobytes()
+        )
 
 
 class TestAccuracyCompatibleExpertInputGather(unittest.TestCase):
@@ -369,8 +373,12 @@ class TestAccuracyCompatibleExpertInputGather(unittest.TestCase):
             ],
             dtype="bfloat16",
         )
-        self.assertEqual(hidden.grad.numpy().tobytes(), expected.numpy().tobytes())
-        expected_parameter_grad = paddle.sum(gathered.detach() * expert_grads, axis=0)
+        self.assertEqual(
+            hidden.grad.numpy().tobytes(), expected.numpy().tobytes()
+        )
+        expected_parameter_grad = paddle.sum(
+            gathered.detach() * expert_grads, axis=0
+        )
         self.assertEqual(
             parameter.grad.numpy().tobytes(),
             expected_parameter_grad.numpy().tobytes(),
@@ -380,7 +388,9 @@ class TestAccuracyCompatibleExpertInputGather(unittest.TestCase):
 class TestMoELayerSingleCardAccuracy(unittest.TestCase):
     """Test accuracy-compatible routing-weight placement."""
 
-    @patch("paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel")
+    @patch(
+        "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel"
+    )
     def test_accuracy_gate_applies_weight_inside_expert(self, accuracy_gate):
         accuracy_gate.return_value = True
         layer = MoELayer.__new__(MoELayer)
@@ -401,10 +411,15 @@ class TestMoELayerSingleCardAccuracy(unittest.TestCase):
             expert.call_args.kwargs["per_token_scale"], paddle.to_tensor([0.25])
         )
         self.assertEqual(
-            expert.call_args.kwargs["accuracy_compatible_router_reduction_rows"], 1
+            expert.call_args.kwargs[
+                "accuracy_compatible_router_reduction_rows"
+            ],
+            1,
         )
 
-    @patch("paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel")
+    @patch(
+        "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel"
+    )
     def test_default_path_applies_weight_after_expert(self, accuracy_gate):
         accuracy_gate.return_value = False
         layer = MoELayer.__new__(MoELayer)
