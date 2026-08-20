@@ -174,6 +174,15 @@ def dense_indexer_kl_bwd(
     divided by something else (a valid-token count, say) has to pre-multiply
     ``loss_coeff`` by ``total_q / its_own_denominator``.
 
+    ``grad_loss`` is normalised to a single-element fp32 tensor here, Python
+    scalars included: the kernel validates it with ``torch.is_tensor``
+    (``indexer_backward/api.py`` ``_validate_grad_loss_tensor``, which sees
+    Paddle tensors through ``paddle.enable_compat``) and raises
+    ``TypeError: grad_loss must be a torch.Tensor`` for anything else. A float
+    therefore never survived the call, which is what the ``None`` default used
+    to build and what ``DenseWarmupIndexerLossAutoScaler.backward`` passes
+    whenever ``DSAIndexerLossAutoScaler`` has no main-loss scale set.
+
     ``attn_score`` and ``index_score`` are consumed **in place** by the
     score-gradient stage and are *not* copied here: at 64k/cp=8 one of them is
     2 GiB, so cloning both would double the backward's width-proportional
@@ -200,11 +209,10 @@ def dense_indexer_kl_bwd(
     )
 
     if grad_loss is None:
-        grad_loss = 1.0
-    if (
-        isinstance(grad_loss, paddle.Tensor)
-        and grad_loss.dtype != paddle.float32
-    ):
+        grad_loss = paddle.ones([], dtype=paddle.float32)
+    elif not isinstance(grad_loss, paddle.Tensor):
+        grad_loss = paddle.to_tensor(float(grad_loss), dtype=paddle.float32)
+    elif grad_loss.dtype != paddle.float32:
         grad_loss = grad_loss.cast(paddle.float32)
 
     out = dense_indexer_backward_wrapper(

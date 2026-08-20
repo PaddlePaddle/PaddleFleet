@@ -16,6 +16,7 @@
 
 Covers:
 - csa_indexer_bwd_cudnn.py (wrapper + _to_bf16 helper)
+- dense_indexer_kl_cudnn.py (grad_loss normalisation, wrapper stubbed)
 - cudnn_ops/__init__.py (lazy __getattr__)
 - csa_attention.py (TileLangCSAIndexerLossAutoScaler cudnn backward branch)
 - transformer_config.py (csa_indexer_backend field + validation)
@@ -903,6 +904,114 @@ class TestIndexerSubpackageInit(unittest.TestCase):
         import paddlefleet.cudnn_ops.indexer as indexer_mod
 
         self.assertIn("csa_indexer_bwd", indexer_mod.__all__)
+
+
+# ---------------------------------------------------------------------------
+# Tests: dense_indexer_kl_cudnn.py grad_loss normalisation
+# ---------------------------------------------------------------------------
+
+
+class TestDenseIndexerKlGradLoss(unittest.TestCase):
+    """``dense_indexer_kl_bwd`` hands the kernel an fp32 *tensor* grad_loss.
+
+    The kernel's ``_validate_grad_loss_tensor`` rejects a non-tensor with
+    ``TypeError: grad_loss must be a torch.Tensor``, so the Python ``1.0``
+    that ``DenseWarmupIndexerLossAutoScaler.backward`` passes whenever
+    ``DSAIndexerLossAutoScaler`` has no main-loss scale set never reached it.
+    The wrapper is stubbed here, so this runs without a Blackwell GPU or the
+    cuDNN frontend -- the conversion is pure Python and that is the part the
+    hardware tests could not reach.
+    """
+
+    def _captured_grad_loss(self, grad_loss):
+        import sys
+        import types
+        from unittest import mock
+
+        import paddlefleet.cudnn_ops.indexer.dense_indexer_kl_cudnn as mod
+
+        captured = {}
+
+        def fake_wrapper(
+            index_q,
+            weights,
+            index_k,
+            attn_score,
+            attn_l1norm,
+            index_score,
+            index_lse,
+            **kwargs,
+        ):
+            captured["grad_loss"] = kwargs["grad_loss"]
+            return {
+                "d_index_q": paddle.zeros_like(index_q),
+                "d_weights": paddle.zeros_like(weights),
+                "d_index_k": kwargs["d_index_k"],
+            }
+
+        api = types.ModuleType("api")
+        api.dense_indexer_backward_wrapper = fake_wrapper
+        api_path = (
+            "paddlefleet_ops.cudnn.deepseek_sparse_attention"
+            ".indexer_backward.api"
+        )
+
+        s, h, d, width = 4, 64, 128, 4
+        index_q = paddle.zeros([s, h, d], dtype="bfloat16")
+        weights = paddle.zeros([s, h], dtype="bfloat16")
+        index_k = paddle.zeros([s, d], dtype="bfloat16")
+        attn_score = paddle.zeros([s, width], dtype="float32")
+        index_score = paddle.zeros([s, width], dtype="float32")
+        attn_l1norm = paddle.ones([s], dtype="float32")
+        index_lse = paddle.zeros([s], dtype="float32")
+        cu_seqlens = paddle.to_tensor([0, s], dtype="int32")
+
+        with (
+            mock.patch.dict(sys.modules, {api_path: api}),
+            mock.patch.object(mod, "is_cudnn_frontend_available", lambda: True),
+        ):
+            mod.dense_indexer_kl_bwd(
+                index_q,
+                weights,
+                index_k,
+                attn_score,
+                attn_l1norm,
+                index_score,
+                index_lse,
+                loss_coeff=0.01,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=s,
+                max_seqlen_k=s,
+                grad_loss=grad_loss,
+            )
+        return captured["grad_loss"]
+
+    def _assert_fp32_scalar(self, got, expected):
+        self.assertIsInstance(got, paddle.Tensor)
+        self.assertEqual(got.dtype, paddle.float32)
+        self.assertEqual(got.numel().item(), 1)
+        self.assertAlmostEqual(
+            float(got.astype("float32").flatten()[0]), expected, places=6
+        )
+
+    def test_none_becomes_a_one_tensor(self):
+        self._assert_fp32_scalar(self._captured_grad_loss(None), 1.0)
+
+    def test_python_float_becomes_a_tensor(self):
+        """The regression: ``1.0`` used to be forwarded as a Python float."""
+        self._assert_fp32_scalar(self._captured_grad_loss(1.0), 1.0)
+
+    def test_python_int_becomes_a_tensor(self):
+        self._assert_fp32_scalar(self._captured_grad_loss(3), 3.0)
+
+    def test_non_fp32_tensor_is_cast(self):
+        scale = paddle.full([1], 2.5, dtype="bfloat16")
+        self._assert_fp32_scalar(self._captured_grad_loss(scale), 2.5)
+
+    def test_fp32_tensor_is_forwarded_unchanged(self):
+        scale = paddle.full([1], 2.5, dtype="float32")
+        self.assertIs(self._captured_grad_loss(scale), scale)
 
 
 if __name__ == "__main__":
