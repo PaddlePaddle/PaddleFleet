@@ -1980,7 +1980,7 @@ class MLASelfAttention(MultiLatentAttention):
             elif bool(self.config.apply_rope_fusion) and not self.mqa_latent:
                 if is_decode:
                     raise NotImplementedError(
-                        "fused MLA YaRN RoPE does not support incremental decode yet."
+                        "apply_rope_fusion does not support dynamic inference yet."
                     )
                 from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
