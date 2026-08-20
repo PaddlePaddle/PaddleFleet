@@ -59,6 +59,234 @@ SUPPORTED_ATTN_MASK = [
 ]
 
 
+# ============================================================================
+# roll_tensor (Paddle port of MCore multi_token_prediction.roll_tensor, `8c4df6b07`)
+#
+# Semantics:
+#   * shifts=-1 → left-shift by one along `dims`; new-in position filled with 0.
+#   * cu_seqlens_q is None → standard paddle.roll (single sequence).
+#   * cu_seqlens_q provided → per-document roll respecting doc boundaries;
+#     the last token of every packed document is zeroed out and cannot leak
+#     into the next document as an MTP target.
+#   * cp_group is None or size==1 → non-CP path.
+#   * cp_group.nranks > 1 with cu_seqlens_q → NotImplementedError; the
+#     mirror-chunk (DualChunkSwap) CP variant is not implemented on this path
+#     (CP is instead handled by extract_local_zigzag_chunks at the call site).
+#
+# Note: we consciously do NOT wrap cu_seqlens_q in an MCore-style
+# PackedSeqParams dataclass. ernie5's model backend consumes doc boundaries
+# via startend_row_indices (int32 tensor) throughout — introducing
+# PackedSeqParams would (a) create a new data structure alien to ernie5,
+# and (b) risk flipping attention kernels onto the THD path
+# (qkv_format="thd") which is not what the ernie5 flashmask attention
+# expects.
+#
+# Return contract mirrors MCore: (rolled_tensor, rolled_tensor.sum()). The
+# second element is consumed by MultiTokenPredictionBlock.forward as
+# `num_tokens` for per-token-loss averaging.
+# ============================================================================
+
+
+def _roll_tensor_packed_seq(tensor, shifts, dims, cu_seqlens_q, cp_group=None):
+    """Per-doc left-shift using cu_seqlens_q.
+
+    Only supports ``shifts=-1``. ``dims`` may be any single axis of ``tensor``
+    (the seq axis — dim=1 for a [B, L, H] embedding, dim=-1 for a [B, L]
+    tokens tensor, etc.). The boundary position of each packed document is
+    filled with 0 to prevent cross-doc leakage.
+
+    CP support is intentionally omitted here; see the outer `roll_tensor`
+    guard which routes CP-enabled calls to `_roll_tensor_packed_seq_cp`.
+
+    Args:
+        tensor: input tensor to roll along the sequence dimension.
+        shifts: must be -1 (single-token left shift).
+        dims: axis along which cu_seqlens_q indexes; any single axis of
+            ``tensor``.
+        cu_seqlens_q: int32 tensor of shape ``[num_docs + 1]``; cumulative
+            document lengths so that ``cu_seqlens_q[-1] == tensor.shape[dims]``.
+        cp_group: paddle process group for context parallelism; unused in
+            this non-CP branch.
+    """
+    if shifts != -1:
+        raise ValueError(
+            f"Packed sequence roll only supports single-token left shift (shifts=-1), "
+            f"got shifts={shifts}."
+        )
+    ndim = tensor.dim()
+    dim = dims if dims >= 0 else ndim + dims
+    if not (0 <= dim < ndim):
+        raise ValueError(f"dims={dims} out of range for tensor of ndim={ndim}.")
+    if cu_seqlens_q is None:
+        raise ValueError("cu_seqlens_q must not be None.")
+
+    if isinstance(cu_seqlens_q, paddle.Tensor):
+        cu_seqlens_np = cu_seqlens_q.numpy().tolist()
+    else:
+        cu_seqlens_np = list(cu_seqlens_q)
+
+    def _select(t, s, e):
+        idx = [slice(None)] * ndim
+        idx[dim] = slice(s, e)
+        return t[tuple(idx)]
+
+    rolled = tensor.clone()
+    num_docs = len(cu_seqlens_np) - 1
+    for i in range(num_docs):
+        s = int(cu_seqlens_np[i])
+        e = int(cu_seqlens_np[i + 1])
+        if e - s <= 0:
+            continue
+        seg = _select(tensor, s, e)
+        rolled_seg = paddle.roll(seg, shifts=shifts, axis=dim)
+        # Zero out the last position that would otherwise cross the doc boundary.
+        seg_len = e - s
+        if seg_len >= 1:
+            keep_shape = [1] * ndim
+            keep_shape[dim] = seg_len
+            keep_mask = paddle.ones(keep_shape, dtype=rolled_seg.dtype)
+            last_idx = [slice(None)] * ndim
+            last_idx[dim] = slice(seg_len - 1, seg_len)
+            keep_mask[tuple(last_idx)] = 0
+            rolled_seg = rolled_seg * keep_mask
+        # Assign back along the seq dim.
+        target_idx = [slice(None)] * ndim
+        target_idx[dim] = slice(s, e)
+        rolled[tuple(target_idx)] = rolled_seg
+
+    return rolled, rolled.sum()
+
+
+def roll_tensor(
+    tensor,
+    shifts=-1,
+    dims=-1,
+    cp_group=None,
+    cu_seqlens_q=None,
+):
+    """Roll the tensor input along the given dimension(s).
+
+    Paddle port of MCore ``multi_token_prediction.roll_tensor``. Used by the
+    Megatron-style MTP path (config.mtp_data_style="megatron") to shift
+    input_ids / position_ids / labels / loss_mask by one token at each MTP
+    depth, while respecting packed-document boundaries.
+
+    CP handling deliberately differs from MCore. Under PaddleFleet's data
+    layout, dist_data_loader.py broadcasts ``input_ids`` / ``labels`` /
+    ``loss_mask`` via the ``cp_mp_parallel_group`` (see
+    ``ernie5/src/datasets/dist_data_loader.py:133-135``), so every CP rank
+    already holds a full-length ``[B, L]`` copy — no zigzag scatter happens
+    before the model. Consequently rolling reduces to standard CP=1
+    semantics on the full-length tensor, and callers should invoke
+    ``extract_local_zigzag_chunks`` after ``roll_tensor`` to obtain their
+    local slice before embedding / loss.
+
+    Args:
+        tensor: input tensor.
+        shifts: currently only -1 (single-token left shift).
+        dims: currently only the last dimension.
+        cp_group: paddle process group for context parallelism. Accepted for
+            API compatibility with MCore's signature but not used: under
+            PaddleFleet's full-length CP layout, per-rank ``paddle.roll``
+            already yields globally-correct output.
+        cu_seqlens_q: int32 tensor of shape ``[num_docs + 1]`` describing
+            packed-document boundaries. If provided, per-doc shift is
+            applied. If ``None``, a single-sequence roll is done.
+
+    Returns:
+        (rolled_tensor, rolled_tensor.sum()). The second value mirrors MCore's
+        contract for downstream num_tokens accumulation.
+    """
+    # cp_group is intentionally unused (see docstring); reference it to keep
+    # linters quiet without altering behavior.
+    del cp_group
+
+    # Packed sequence path — per-doc roll, boundary zero-filled by
+    # `_roll_tensor_packed_seq`. Correct on full-length tensors regardless
+    # of CP size because doc boundaries are described globally.
+    if cu_seqlens_q is not None:
+        return _roll_tensor_packed_seq(
+            tensor, shifts, dims, cu_seqlens_q, cp_group=None
+        )
+
+    # Standard (non-packed) path — matches paddle.roll semantics plus zero-fill
+    # at the new-in position.
+    if shifts != -1:
+        raise ValueError(
+            f"roll_tensor currently only supports shifts=-1, got shifts={shifts}."
+        )
+    ndim = tensor.dim()
+    dim = dims if dims >= 0 else ndim + dims
+    rolled = paddle.roll(tensor, shifts=shifts, axis=dims)
+    seq_len = tensor.shape[dim]
+    if seq_len >= 1:
+        keep_mask_shape = [1] * ndim
+        keep_mask_shape[dim] = seq_len
+        keep_mask = paddle.ones(keep_mask_shape, dtype=rolled.dtype)
+        idx = [slice(None)] * ndim
+        idx[dim] = slice(seq_len - 1, seq_len)
+        keep_mask[tuple(idx)] = 0
+        rolled = rolled * keep_mask
+    return rolled, rolled.sum()
+
+
+def extract_local_zigzag_chunks(tensor_full, cp_rank, cp_size, axis=1):
+    """Extract this CP rank's zigzag chunks from a full-length tensor.
+
+    Mirrors PaddleFleet's ``scatter_balance`` layout
+    (``context_parallel_utils.py:97-153``): each rank owns two chunks —
+
+    * ``chunk_start = tensor_full[..., interval*r : interval*(r+1), ...]``
+    * ``chunk_end   = tensor_full[..., L-interval*(r+1) : L-interval*r, ...]``
+
+    concatenated along the seq axis.
+
+    Extraction only — no CP communication. Use to obtain the local slice
+    without invoking ``ContextParallelScatterOp``, which avoids the
+    ``cp_size`` × embedding-lookup redundancy that would otherwise result
+    from doing embedding on the full-length ``input_ids``.
+
+    Callers under ``mtp_data_style="megatron"`` typically:
+
+    1. Roll the full-length int tensor with ``roll_tensor(cu_seqlens_q=...)``.
+    2. Extract this rank's local slice via this helper.
+    3. Feed the local slice to embedding / loss.
+
+    Args:
+        tensor_full: ``[..., L, ...]`` full-length tensor available on every rank.
+        cp_rank: this rank's index within the CP group.
+        cp_size: CP world size. ``cp_size == 1`` returns ``tensor_full`` unchanged.
+        axis: sequence axis (default 1 for ``[B, L, ...]``).
+
+    Returns:
+        ``[..., L / cp_size, ...]`` tensor holding this rank's zigzag chunks.
+    """
+    if cp_size == 1:
+        return tensor_full
+    ndim = tensor_full.dim()
+    dim = axis if axis >= 0 else ndim + axis
+    seq_len = tensor_full.shape[dim]
+    if seq_len % (cp_size * 2) != 0:
+        raise ValueError(
+            f"extract_local_zigzag_chunks: seq_len={seq_len} on axis={axis} "
+            f"is not divisible by 2*cp_size={2 * cp_size}."
+        )
+    interval = seq_len // cp_size // 2
+    chunk_start = paddle.slice(
+        tensor_full,
+        axes=[dim],
+        starts=[interval * cp_rank],
+        ends=[interval * (cp_rank + 1)],
+    )
+    chunk_end = paddle.slice(
+        tensor_full,
+        axes=[dim],
+        starts=[seq_len - interval * (cp_rank + 1)],
+        ends=[seq_len - interval * cp_rank],
+    )
+    return paddle.concat([chunk_start, chunk_end], axis=dim)
+
+
 class MTPLossLoggingHelper:
     """Helper class for logging MTP losses."""
 
@@ -796,6 +1024,15 @@ class MultiTokenPredictionLayer(FleetLayer):
         return outputs
 
     def forward(self, dict_args: dict):
+        # Dispatch by config.mtp_data_style. Under "megatron" the data pipeline
+        # emits no mtp_startend_row_indices_all / mtp_hidden_inputs_mask_all
+        # and no L+K token concatenation; instead we shift input_ids /
+        # position_ids / labels / loss_mask inside this layer via
+        # roll_tensor(packed_seq_params=...).
+        style = getattr(self.config, "mtp_data_style", "ernie5")
+        if style == "megatron":
+            return self._forward_megatron_style(dict_args)
+
         if "context" in dict_args:
             assert dict_args["context"] is None, (
                 "multi token prediction + cross attention is not yet supported."
@@ -1303,6 +1540,162 @@ class MultiTokenPredictionLayer(FleetLayer):
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="MultiTokenPredictionLayer")
+
+    # ------------------------------------------------------------------ #
+    # Megatron-style MTP forward (config.mtp_data_style == "megatron").
+    #
+    # Contract vs. the historical ernie5 path:
+    #   * The data pipeline emits ONLY the main L-length tensors plus
+    #     packed_seq_params (with cu_seqlens_q). It does NOT emit
+    #     mtp_startend_row_indices_all or mtp_hidden_inputs_mask_all,
+    #     and it does NOT append K MTP tokens to input_ids / labels.
+    #   * The shifted MTP embeddings for each depth are still prepared upstream
+    #     by GPTEmbedding, but using roll_tensor(packed_seq_params=...) — i.e.
+    #     per-doc left-shift with boundary zero-fill — rather than the L+K
+    #     index-slice used by ernie5. GPTEmbedding.forward has a mirrored
+    #     mtp_data_style branch that produces the same
+    #     ``hidden_states_concat`` shape (concatenation of the main slice and
+    #     K per-depth shifted slices), so the pipeline plumbing stays intact.
+    #   * The MTP LMHead / loss layer downstream is responsible for rolling
+    #     labels / loss_mask via roll_tensor before computing MTP loss (M2/M3
+    #     will exercise this end-to-end).
+    #
+    # Behaviour inside this method for a given self.layer_number (=depth k):
+    #   1. Split hidden_states_concat (shape [(K+1)*S, B, ...] under SP or
+    #      [B, (K+1)*S, ...] otherwise) into (K+1) chunks along the sequence
+    #      dim.
+    #   2. Take chunk[k] as hidden_states (previous stage's output at this
+    #      depth) and chunk[k+1] as decoder_input (upstream-computed shifted
+    #      embedding at this depth).
+    #   3. Run _proj_and_transformer_layer with:
+    #        - mtp_hidden_inputs_mask=None (no per-doc EOS-derived hidden
+    #          mask; per-doc boundary is expressed via packed_seq_params);
+    #        - attn_mask_startend_row_indices=<main mask> (packed attn still
+    #          consumes the main startend_row_indices — MTP layers inherit
+    #          the same doc boundaries because they share cu_seqlens_q).
+    #   4. Write the resulting hidden_states back into the chunk list at
+    #      position k+1 and re-concat. Return the updated dict_args so the
+    #      next MTP depth can consume its slice.
+    #
+    # Constraints: experimental_dataflow=False and enable_mtp_magic_send
+    # disabled (both enforced at TransformerConfig.__post_init__). Context
+    # parallelism is handled at the embedding / loss call sites via
+    # extract_local_zigzag_chunks rather than inside roll_tensor.
+    # ------------------------------------------------------------------ #
+
+    def _forward_megatron_style(self, dict_args: dict) -> dict:
+        # Cross-attention is still unsupported (identical constraint as
+        # upstream MCore 8c4df6b07). Packed sequences ARE now supported —
+        # that is the whole point of this branch — but they are represented
+        # by a raw cu_seqlens_q int32 tensor in dict_args, NOT wrapped in
+        # an MCore PackedSeqParams object (see the module-level docstring
+        # for the rationale).
+        if dict_args.get("context") is not None:
+            raise NotImplementedError(
+                "multi token prediction + cross attention is not yet supported "
+                "under mtp_data_style='megatron'."
+            )
+        if (
+            dict_args.get("mtp_input_embeds") is not None
+            or self.config.enable_mtp_magic_send
+        ):
+            # Config validation in TransformerConfig.__post_init__ should have
+            # caught this, but keep a hard guard here for defence in depth.
+            raise ValueError(
+                "mtp_data_style='megatron' is incompatible with enable_mtp_magic_send."
+            )
+
+        num_nextn = self.config.num_nextn_predict_layers
+
+        hidden_states_concat = dict_args["hidden_states"]
+        tensor_list = paddle.split(hidden_states_concat, num_nextn + 1)
+
+        # Use previous-stage slices for this depth.
+        dict_args["hidden_states"] = tensor_list[self.layer_number]
+        dict_args["decoder_input"] = tensor_list[self.layer_number + 1]
+
+        # Drop any leftover ernie5-path fields from dict_args so
+        # _proj_and_transformer_layer sees the Megatron contract: no per-depth
+        # hidden mask.
+        dict_args.pop("mtp_hidden_inputs_mask", None)
+        # If ernie5 upstream still smuggled these in, ignore them defensively.
+        dict_args.pop("mtp_startend_row_indices_all", None)
+        dict_args.pop("mtp_hidden_inputs_mask_all", None)
+        dict_args.pop("mtp_input_ids_for_moe_mask", None)
+        # input_ids: keep the main [B, L] slice for MoE routing mask etc.,
+        # but do NOT slice it per-depth (there is only one canonical L now).
+        input_ids = dict_args.get("input_ids")
+        if input_ids is not None and input_ids.ndim > 2:
+            # Defensive: some ernie5 codepaths stash [B, K, L] here.
+            raise RuntimeError(
+                f"Under mtp_data_style='megatron', input_ids must be [B, L], got shape {input_ids.shape}."
+            )
+
+        # Derive per-depth attn_mask_startend_row_indices from cu_seqlens_q.
+        # Doc boundaries are the SAME at every MTP depth (per-doc roll does
+        # not wrap across doc boundaries), so a single derivation is enough
+        # per depth; we still recompute on each call in case the pipeline
+        # dict has been mutated by an earlier depth.
+        cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
+        if cu_seqlens_q is not None:
+            # cu_seqlens_q lives on GPU (GPTEmbedding ensured that); pull to
+            # host for the small O(num_docs) derivation loop.
+            import numpy as _np
+
+            cu_np = (
+                cu_seqlens_q.numpy()
+                if isinstance(cu_seqlens_q, paddle.Tensor)
+                else _np.asarray(cu_seqlens_q)
+            )
+            seqlen = int(cu_np[-1])
+
+            # experimental_dataflow: 2-col [B, 1, S, 2]; fleet-mode: 1-col [B, 1, S, 1].
+            # ernie5 flashmask & SWA helpers require a 4D layout [B, heads, S, num_vec]
+            # (see startend_row_indices_add_sliding_window in utils.py).
+            include_pos = bool(
+                getattr(
+                    self.config, "gpt_model_use_experimental_version", False
+                )
+            )
+
+            # Inline derivation (mirrors _mtp_utils.build_startend_row_indices_from_cu_seqlens
+            # but self-contained so this module has no import dependency on
+            # ernie5.src.datasets — those in turn import torchvision which is
+            # not required by this training path).
+            _end = _np.zeros(seqlen, dtype=_np.int32)
+            for _j in range(len(cu_np) - 1):
+                _s, _e = int(cu_np[_j]), int(cu_np[_j + 1])
+                _end[_s:_e] = _e
+            if include_pos:
+                _pos = _np.arange(seqlen, dtype=_np.int32)
+                # [S, 2] -> [1, 1, S, 2]
+                startend_np = _np.stack([_end, _pos], axis=-1)[None, None, ...]
+            else:
+                # [S] -> [1, 1, S, 1]
+                startend_np = _end[None, None, :, None]
+
+            # Attention expects a batch axis. Broadcast [1, S, ...] to
+            # [B, S, ...] via paddle.expand (zero-copy).
+            batch_size = (
+                dict_args["hidden_states"].shape[1]
+                if getattr(self.config, "sequence_parallel", False)
+                else dict_args["hidden_states"].shape[0]
+            )
+            attn_mask_startend = paddle.to_tensor(startend_np).cuda()
+            if batch_size > 1:
+                attn_mask_startend = attn_mask_startend.expand(
+                    [batch_size, *attn_mask_startend.shape[1:]]
+                )
+            dict_args["attn_mask_startend_row_indices"] = attn_mask_startend
+
+        # Run transformer layer.
+        hidden_states = self._proj_and_transformer_layer(**dict_args)
+
+        # Store back into the pipeline concat tensor at slot k+1.
+        tensor_list[self.layer_number + 1] = hidden_states
+        dict_args["hidden_states"] = paddle.concat(tensor_list)
+        dict_args.pop("decoder_input", None)
+        return dict_args
 
 
 class WeightOnlyMTPLayer(MultiTokenPredictionLayer):

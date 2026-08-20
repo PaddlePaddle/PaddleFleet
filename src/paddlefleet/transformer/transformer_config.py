@@ -95,6 +95,22 @@ class TransformerConfig(ModelParallelConfig):
     The new dataflow requires: input_ids, labels, startend_row_indices (last dim=1, main seq only),
     mtp_startend_row_indices_all ([B, num_nextn, S, 1]), position_ids."""
 
+    mtp_data_style: str = "ernie5"
+    """MTP data-flow style.
+
+    - "ernie5"  : the historical PaddleFleet MTP path — the data pipeline
+      constructs mtp_startend_row_indices_all, mtp_hidden_inputs_mask_all and
+      appends K MTP tokens to input_ids/labels/loss_mask (see
+      ``ernie5/src/datasets/pretrain_online_task.py:get_mtp_inputs_info`` and
+      ``pretrain_task.py:__getitem__``). MultiTokenPredictionLayer.forward
+      consumes those pre-computed masks per depth.
+
+    - "megatron": the MCore-8c4df6b07 style. The data pipeline emits only the
+      main [L]-length tensors plus ``packed_seq_params.cu_seqlens_q`` for
+      packed doc boundaries; MTP shifting happens inside
+      MultiTokenPredictionLayer.forward via ``roll_tensor(packed_seq_params=...)``.
+    """
+
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.
     num_empty_layers_add_in_head=2 Example:
@@ -1651,6 +1667,56 @@ class TransformerConfig(ModelParallelConfig):
                 assert self.variable_seq_lengths, (
                     "enable_mtp_magic_send with vpp requires variable_seq_lengths=True"
                 )
+
+        if self.mtp_data_style not in {"ernie5", "megatron"}:
+            raise ValueError(
+                f"mtp_data_style={self.mtp_data_style!r} is invalid. "
+                "Must be one of {'ernie5', 'megatron'}."
+            )
+        if self.mtp_data_style == "megatron":
+            _mtp_k = (
+                self.mtp_num_layers
+                if self.mtp_num_layers > 0
+                else self.num_nextn_predict_layers
+            )
+            if _mtp_k <= 0:
+                raise ValueError(
+                    "mtp_data_style='megatron' requires "
+                    "num_nextn_predict_layers > 0 or mtp_num_layers > 0."
+                )
+            if self.enable_mtp_magic_send:
+                raise ValueError(
+                    "mtp_data_style='megatron' is incompatible with "
+                    "enable_mtp_magic_send=True."
+                )
+            if self.experimental_dataflow:
+                # experimental_dataflow specifically produces
+                # mtp_startend_row_indices_all as a separate input. Under the
+                # Megatron path we do not produce that field.
+                raise ValueError(
+                    "mtp_data_style='megatron' is incompatible with "
+                    "experimental_dataflow=True (which expects the ernie5-style "
+                    "mtp_startend_row_indices_all payload)."
+                )
+            # PaddleFleet's `dualchunk_allgather` scatter layout is the only
+            # mode equivalent to MCore's zigzag balancing; the other two
+            # (`contiguous_allgather`, `contiguous_a2a`) are not covered by
+            # the megatron path's MTP roll semantics.
+            if self.context_parallel_size > 1:
+                if self.cp_balance_mode != "dualchunk_allgather":
+                    raise ValueError(
+                        f"mtp_data_style='megatron' + context_parallel_size>1 "
+                        f"requires cp_balance_mode='dualchunk_allgather', got "
+                        f"{self.cp_balance_mode!r}."
+                    )
+            # PP>1 is supported: cu_seqlens_q is threaded through
+            # all three `broadcast_data_obj` tuples in
+            # ernie5/src/datasets/dist_data_loader.py (shuffle / main / pp_data)
+            # and the dataloader stashes it onto
+            # `LanguageLoss._cu_seqlens_q_stash` on every rank after broadcast
+            # completes, so the loss stage on the last PP rank drives strict
+            # per-doc rolls with the same cu_seqlens_q as the embedding stage.
+            # No further guard needed here.
 
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
