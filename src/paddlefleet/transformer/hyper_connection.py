@@ -292,33 +292,49 @@ class HyperConnectionModule(nn.Layer):
         # - H_pre: n values
         # - H_post: n values
         # - H_res: n^2 values (before Sinkhorn projection)
-        self.mapping_proj = nn.Linear(
-            self.n * self.hidden_size,
-            self.n * self.n + 2 * self.n,
-            bias_attr=False,
+        # The mHC mapping parameters are stored in FP32 (mirrors Megatron
+        # hyper_connection.py mark_keep_in_fp32 on mapping_proj.weight /
+        # alpha_* / bias, and the MoE gate fp32 storage in moe_router.py):
+        # they are tiny, and keeping them out of BF16 removes the parameter
+        # rounding error from the mHC gating computation.
+        param_dtype = (
+            self.config.params_dtype
+            if _use_accuracy_compatible_kernel()
+            else "float32"
         )
+        default_dtype = paddle.get_default_dtype()
+        try:
+            paddle.set_default_dtype(param_dtype)
+            self.mapping_proj = nn.Linear(
+                self.n * self.hidden_size,
+                self.n * self.n + 2 * self.n,
+                bias_attr=False,
+            )
+        finally:
+            paddle.set_default_dtype(default_dtype)
 
         init_alpha = config.mhc_init_gating_factor
         # Learnable scaling factors (Eq. 5 in paper)
         self.alpha_pre = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
         self.alpha_post = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
         self.alpha_res = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
 
         # Static bias terms
         self.bias = self.create_parameter(
             shape=[self.n * self.n + 2 * self.n],
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(0.0),
         )
 
@@ -440,13 +456,25 @@ class HyperConnectionModule(nn.Layer):
             h_post: [..., n] - expansion weights
             h_res: [..., n^2] - residual mixing logits
         """
+        alpha_pre = self.alpha_pre
+        alpha_post = self.alpha_post
+        alpha_res = self.alpha_res
+        bias = self.bias
+        # The gating params are stored in fp32 (see __init__); the mapping head
+        # follows the activation dtype so the low-precision path keeps its
+        # original compute dtype.
+        if alpha_pre.dtype != proj.dtype:
+            alpha_pre = alpha_pre.astype(proj.dtype)
+            alpha_post = alpha_post.astype(proj.dtype)
+            alpha_res = alpha_res.astype(proj.dtype)
+            bias = bias.astype(proj.dtype)
         h_pre, h_post, h_res = self._compute_h_op(
             proj,
             r,
-            self.alpha_pre,
-            self.alpha_post,
-            self.alpha_res,
-            self.bias,
+            alpha_pre,
+            alpha_post,
+            alpha_res,
+            bias,
             self.n,
             self.compute_h_eps,
         )
@@ -903,19 +931,26 @@ class HyperConnectionContractLayer(FleetLayer):
         # Learned contraction parameters (DSv4 style, always used)
         n = self.n
         hc_dim = config.hidden_size * n
+        # learned_output_contract() computes in fp32; store the parameters in
+        # fp32 as well (Megatron transformer_block.py marks hc_head_* keep_in_fp32).
+        hc_param_dtype = (
+            self.config.params_dtype
+            if _use_accuracy_compatible_kernel()
+            else "float32"
+        )
         self.hc_head_fn = self.create_parameter(
             shape=[hc_dim, n],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.XavierUniform(),
         )
         self.hc_head_base = self.create_parameter(
             shape=[n],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.Constant(0.0),
         )
         self.hc_head_scale = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.Constant(1.0),
         )
 

@@ -357,9 +357,20 @@ class MultiTokenPredictionLayer(FleetLayer):
             # Learned contraction parameters for MTP output
             n = config.num_residual_streams
             hc_dim = config.hidden_size * n
+            # learned_output_contract() computes in fp32; store the parameters
+            # in fp32 too (Megatron marks hc_head_* keep_in_fp32).
+            from paddlefleet.transformer.hyper_connection import (
+                _use_accuracy_compatible_kernel,
+            )
+
+            hc_param_dtype = (
+                self.config.params_dtype
+                if _use_accuracy_compatible_kernel()
+                else "float32"
+            )
             self.hc_head_fn = self.create_parameter(
                 shape=[hc_dim, n],
-                dtype=self.config.params_dtype,
+                dtype=hc_param_dtype,
                 default_initializer=nn.initializer.Constant(0.0),
             )
             # Use model-parallel RNG tracker for Xavier init so that the
@@ -371,12 +382,12 @@ class MultiTokenPredictionLayer(FleetLayer):
                     nn.initializer.XavierUniform()(self.hc_head_fn)
             self.hc_head_base = self.create_parameter(
                 shape=[n],
-                dtype=self.config.params_dtype,
+                dtype=hc_param_dtype,
                 default_initializer=nn.initializer.Constant(0.0),
             )
             self.hc_head_scale = self.create_parameter(
                 shape=[1],
-                dtype=self.config.params_dtype,
+                dtype=hc_param_dtype,
                 default_initializer=nn.initializer.Constant(1.0),
             )
             if self.sequence_parallel:
