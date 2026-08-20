@@ -82,6 +82,7 @@ class TestFusionBF16ExpertParallel(unittest.TestCase):
             n_shared_experts=0,
             hidden_act=F.silu,
             moe_expert_fusion=True,
+            moe_token_dispatcher_type="deepep",
             bias_activation_fusion=True,
         )
 

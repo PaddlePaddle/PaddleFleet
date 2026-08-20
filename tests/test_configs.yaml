@@ -22,6 +22,9 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe.py]
     products:
       - num_gpus: 8
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp_alltoall.py]
+    products:
+      - num_gpus: 8
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp.py]
     products:
       - num_gpus: 8

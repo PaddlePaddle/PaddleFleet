@@ -82,9 +82,11 @@ class TestMoETopkFusionWrappers(unittest.TestCase):
         self.assertIs(recorder.args[0], gate_probs)
         self.assertIs(recorder.args[1], probs_for_choice)
         self.assertIs(recorder.args[4], topk_probs)
-        self.assertEqual(recorder.args[12:16], (2, False, 1, 1))
-        self.assertEqual(recorder.args[16], False)
-        self.assertEqual(recorder.args[17], 32)
+        self.assertEqual(recorder.args[12], 5)
+        self.assertEqual(recorder.args[13:17], (2, False, 1, 1))
+        self.assertEqual(recorder.args[17], False)
+        self.assertFalse(recorder.args[18])
+        self.assertEqual(recorder.args[19], 32)
         self.assertEqual(topk_probs.shape, [2, 2])
         self.assertEqual(topk_indices.dtype, paddle.int64)
         saved_indices, saved_probs, saved_sum = ctx.saved
@@ -115,9 +117,11 @@ class TestMoETopkFusionWrappers(unittest.TestCase):
         finally:
             moe_topk_fusion._fwd_kernel = old_kernel
 
-        self.assertEqual(recorder.args[12:16], (3, True, 8, 2))
-        self.assertTrue(recorder.args[16])
-        self.assertEqual(recorder.args[17], 64)
+        self.assertEqual(recorder.args[12], 64)
+        self.assertEqual(recorder.args[13:17], (3, True, 8, 2))
+        self.assertTrue(recorder.args[17])
+        self.assertFalse(recorder.args[18])
+        self.assertEqual(recorder.args[19], 64)
         self.assertEqual(ctx.saved[2].shape, [1])
         self.assertEqual(topk_probs.shape, [1, 3])
         self.assertEqual(topk_indices.shape, [1, 3])

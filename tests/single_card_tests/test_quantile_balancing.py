@@ -1332,10 +1332,10 @@ class TestQBRouterInit(unittest.TestCase):
         self.assertEqual(float(restored.qb_bin_min.item()), -1.75)
         self.assertEqual(float(restored.qb_bin_max.item()), 2.25)
 
-    def test_moe_topk_fusion_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            _build_qb_router(moe_topk_fusion=True)
-        self.assertIn("incompatible with moe_topk_fusion", str(ctx.exception))
+    def test_moe_topk_fusion_is_accepted(self):
+        """QB + moe_topk_fusion is now supported (Plan A fusion)."""
+        router = _build_qb_router(moe_topk_fusion=True)
+        self.assertEqual(router.topk_method, "quantile_balancing")
 
     def test_non_qb_router_has_no_qb_state(self):
         router = _build_qb_router(topk_method="greedy")
@@ -1814,14 +1814,379 @@ class TestQBRejectsAuxLossBalancing(unittest.TestCase):
         self.assertEqual(router.topk_method, "quantile_balancing")
         self.assertEqual(router.qb_histogram.shape, [8, 1000])
 
-    def test_topk_fusion_is_rejected(self):
-        with self.assertRaises(ValueError) as ctx:
-            self._build_router(
-                moe_router_load_balancing_type="none",
-                router_aux_loss_coef=0.0,
-                moe_topk_fusion=True,
+    def test_topk_fusion_is_accepted(self):
+        """QB + moe_topk_fusion is now supported (Plan A fusion)."""
+        router = self._build_router(
+            moe_router_load_balancing_type="none",
+            router_aux_loss_coef=0.0,
+            moe_topk_fusion=True,
+        )
+        self.assertEqual(router.topk_method, "quantile_balancing")
+
+
+# =============================================================================
+# Test: MoETopkFusion return_alpha functionality
+# =============================================================================
+
+
+class TestMoETopkFusionAlpha(unittest.TestCase):
+    """Test that the MoETopkFusion kernel correctly returns the cutoff alpha."""
+
+    def _get_fusion_class(self):
+        from paddlefleet.triton_ops.moe_topk_fusion import MoETopkFusion
+
+        return MoETopkFusion
+
+    def test_return_alpha_matches_eager_topk(self):
+        """Alpha from kernel must match the (k+1)-th largest value from paddle.topk."""
+        paddle.seed(42)
+        N, E, k = 32, 16, 4
+
+        gate_probs = paddle.rand([N, E], dtype="float32")
+        probs_for_choice = gate_probs + paddle.randn([E]) * 0.1
+
+        MoETopkFusion = self._get_fusion_class()
+        topk_probs, topk_idx, alpha = MoETopkFusion.apply(
+            gate_probs,
+            probs_for_choice,
+            k,
+            False,  # use_node_limit
+            1,  # n_group
+            1,  # topk_group
+            False,  # norm_gate_logits
+            True,  # return_alpha
+        )
+
+        # Eager reference: (k+1)-th largest of probs_for_choice
+        topk_val = min(k + 1, E)
+        eager_alpha = paddle.topk(
+            probs_for_choice, k=topk_val, axis=-1, sorted=True
+        )[0][:, -1]  # [N]
+
+        np.testing.assert_array_equal(
+            alpha.numpy(),
+            eager_alpha.numpy(),
+            err_msg="Kernel alpha must be bit-exact with eager topk cutoff",
+        )
+
+    def test_return_alpha_no_regression_on_topk_probs(self):
+        """return_alpha=True must not change topk_probs or topk_indices."""
+        paddle.seed(123)
+        N, E, k = 64, 32, 8
+
+        gate_probs = paddle.rand([N, E], dtype="float32")
+        probs_for_choice = gate_probs + paddle.randn([E]) * 0.05
+
+        MoETopkFusion = self._get_fusion_class()
+
+        # Without alpha
+        probs_no_alpha, idx_no_alpha = MoETopkFusion.apply(
+            gate_probs,
+            probs_for_choice,
+            k,
+            False,
+            1,
+            1,
+            False,
+            False,
+        )
+
+        # With alpha
+        probs_with_alpha, idx_with_alpha, _ = MoETopkFusion.apply(
+            gate_probs,
+            probs_for_choice,
+            k,
+            False,
+            1,
+            1,
+            False,
+            True,
+        )
+
+        np.testing.assert_array_equal(
+            probs_no_alpha.numpy(),
+            probs_with_alpha.numpy(),
+            err_msg="topk_probs must be identical with or without return_alpha",
+        )
+        np.testing.assert_array_equal(
+            idx_no_alpha.numpy(),
+            idx_with_alpha.numpy(),
+            err_msg="topk_indices must be identical with or without return_alpha",
+        )
+
+    def test_qb_fusion_vs_eager_histogram(self):
+        """QB via fusion path must produce identical histogram as eager path."""
+        paddle.seed(7)
+        N, E, k = 128, 16, 4
+        B = 256
+
+        scores = paddle.sigmoid(paddle.randn([N, E], dtype="float32"))
+        bias = paddle.randn([E], dtype="float32") * 0.1
+        biased_scores = scores + bias.unsqueeze(0)
+        b_min = bias.min() - 1.0
+        b_max = bias.max() + 1.0
+
+        # --- Eager path: compute alpha via paddle.topk ---
+        topk_val = min(k + 1, E)
+        eager_alpha = paddle.topk(
+            biased_scores, k=topk_val, axis=-1, sorted=True
+        )[0][:, -1:]  # [N, 1]
+
+        # --- Fusion path: compute alpha via kernel ---
+        MoETopkFusion = self._get_fusion_class()
+        _, _, fusion_alpha = MoETopkFusion.apply(
+            scores,
+            biased_scores,
+            k,
+            False,
+            1,
+            1,
+            False,
+            True,
+        )
+        fusion_alpha_2d = fusion_alpha.unsqueeze(-1)  # [N, 1]
+
+        # Alpha must match
+        np.testing.assert_array_equal(
+            fusion_alpha_2d.numpy(),
+            eager_alpha.numpy(),
+            err_msg="Fusion alpha must be bit-exact with eager alpha",
+        )
+
+        # Now compute histograms with both alphas and compare
+        total_range = b_max - b_min
+        if total_range < 1e-8:
+            total_range = paddle.to_tensor(2.0)
+
+        def _compute_histogram(alpha_tensor):
+            required_bias = alpha_tensor - scores
+            bin_idx = ((required_bias - b_min) / total_range * B).cast(
+                paddle.int64
             )
-        self.assertIn("moe_topk_fusion", str(ctx.exception))
+            bin_idx = paddle.clip(bin_idx, min=0, max=B - 1)
+            offsets = paddle.arange(E, dtype=paddle.int64).unsqueeze(0) * B
+            flat_bins = (bin_idx + offsets).reshape([-1])
+            counts = paddle.zeros([E * B], dtype=paddle.int32)
+            weights = paddle.ones([N * E], dtype=paddle.int32)
+            counts.put_along_axis_(flat_bins, weights, axis=0, reduce="add")
+            return counts.reshape([E, B])
+
+        hist_eager = _compute_histogram(eager_alpha)
+        hist_fusion = _compute_histogram(fusion_alpha_2d)
+
+        np.testing.assert_array_equal(
+            hist_fusion.numpy(),
+            hist_eager.numpy(),
+            err_msg="Histogram from fusion alpha must be identical to eager",
+        )
+
+
+class TestAccumulateQBHistogramAlphaEquivalence(unittest.TestCase):
+    """Production `_accumulate_qb_histogram` must agree on the histogram
+    whether alpha comes from the fusion kernel or from its internal topk.
+
+    `TestMoETopkFusionAlpha.test_qb_fusion_vs_eager_histogram` only proves the
+    mathematical claim "bit-exact alpha implies bit-exact histogram" against a
+    re-implementation of the binning. These cases drive the real router method.
+    """
+
+    def setUp(self):
+        paddle.seed(11)
+        np.random.seed(11)
+
+    def _kernel_alpha(self, scores, biased, k):
+        from paddlefleet.triton_ops.moe_topk_fusion import MoETopkFusion
+
+        _, _, alpha = MoETopkFusion.apply(
+            scores,
+            biased,
+            k,
+            False,  # use_node_limit
+            1,  # n_group
+            1,  # topk_group
+            False,  # norm_gate_logits
+            True,  # return_alpha
+        )
+        return alpha
+
+    def _histogram_for(self, router, scores, biased, k, alpha, valid_mask):
+        """Run the accumulator from a zeroed histogram and return the result."""
+        router.qb_histogram = paddle.zeros_like(router.qb_histogram)
+        router._accumulate_qb_histogram(
+            scores, biased, k, valid_mask=valid_mask, alpha=alpha
+        )
+        return router.qb_histogram.numpy().copy()
+
+    def _run_equivalence(self, valid_mask):
+        router = _build_qb_router()
+        E = router.num_experts
+        k = router.num_experts_per_tok
+        N = 24
+
+        bias_np = np.linspace(-0.2, 0.2, E).astype(np.float32)
+        router.e_score_correction_bias.set_value(paddle.to_tensor(bias_np))
+
+        scores = paddle.to_tensor(np.random.rand(N, E).astype(np.float32))
+        biased = scores + paddle.to_tensor(bias_np).unsqueeze(0)
+
+        # alpha=None -> internal paddle.topk(k+1)
+        hist_internal = self._histogram_for(
+            router, scores, biased, k, None, valid_mask
+        )
+        # alpha from the fusion kernel -> internal topk skipped
+        alpha = self._kernel_alpha(scores, biased, k)
+        hist_kernel = self._histogram_for(
+            router, scores, biased, k, alpha, valid_mask
+        )
+
+        # Guard against a vacuous comparison: both paths must have counted.
+        self.assertGreater(int(hist_internal.sum()), 0)
+        np.testing.assert_array_equal(
+            hist_internal,
+            hist_kernel,
+            err_msg=(
+                "_accumulate_qb_histogram must produce a bit-identical "
+                "histogram whether alpha is supplied by the kernel or "
+                "computed internally"
+            ),
+        )
+        return N, E
+
+    def test_alpha_equivalence(self):
+        self._run_equivalence(valid_mask=None)
+
+    def test_alpha_equivalence_with_valid_mask(self):
+        # Exercises the padding-weight branch of the accumulator: masked rows
+        # must contribute zero counts on both paths.
+        N = 24
+        mask_np = np.ones((N, 1), dtype=np.int64)
+        mask_np[::3] = 0
+        valid_mask = paddle.to_tensor(mask_np)
+
+        _, E = self._run_equivalence(valid_mask=valid_mask)
+        self.assertEqual(E, 8)
+
+
+class TestQBFusionEndToEndBitExact(unittest.TestCase):
+    """Flipping `moe_topk_fusion` must not change a single bit of the QB
+    router's forward outputs or of the state it accumulates.
+
+    The other fusion cases check individual pieces (alpha, the accumulator).
+    This one drives the whole `TopKRouter.forward` both ways on one router
+    instance, so weights and inputs are guaranteed identical.
+    """
+
+    def setUp(self):
+        paddle.seed(2027)
+        np.random.seed(2027)
+
+    def _forward_once(self, router, hidden, input_ids, use_fusion):
+        # `moe_topk_fusion` is read off the config at forward time, so the same
+        # instance can serve both paths -- no weight copying needed.
+        router.config.moe_topk_fusion = use_fusion
+        router.qb_histogram = paddle.zeros_like(router.qb_histogram)
+        router.expert_usage = paddle.zeros_like(router.expert_usage)
+
+        kwargs = {} if input_ids is None else {"input_ids": input_ids}
+        cls = type(router)
+        with patch.object(
+            cls,
+            "_topk_quantile_balancing",
+            side_effect=cls._topk_quantile_balancing,
+            autospec=True,
+        ) as eager_topk:
+            _, top_gate, top_idx, probs, mask, _, _, _ = router(
+                hidden, **kwargs
+            )
+
+        # Keeps the comparison honest: fusion must really bypass the eager
+        # selection, otherwise both runs would trivially be the same code.
+        self.assertEqual(eager_topk.call_count, 0 if use_fusion else 1)
+
+        return {
+            "top_gate": top_gate.detach().numpy().copy(),
+            "top_idx": top_idx.detach().numpy().copy(),
+            "probs": probs.detach().numpy().copy(),
+            "mask": mask.detach().numpy().copy(),
+            "qb_histogram": router.qb_histogram.numpy().copy(),
+            "expert_usage": router.expert_usage.numpy().copy(),
+        }
+
+    def _run(self, input_ids):
+        router = _build_qb_router()
+        # A non-uniform, non-zero bias makes selection genuinely depend on it,
+        # which is what the kernel and the eager path must agree on.
+        bias = np.linspace(-0.15, 0.15, router.num_experts).astype(np.float32)
+        router.e_score_correction_bias.set_value(paddle.to_tensor(bias))
+        hidden = paddle.randn([4, 6, 32])
+
+        eager = self._forward_once(router, hidden, input_ids, False)
+        fused = self._forward_once(router, hidden, input_ids, True)
+
+        # Guard against a vacuous pass on all-zero state.
+        self.assertGreater(int(eager["qb_histogram"].sum()), 0)
+        self.assertGreater(int(eager["expert_usage"].sum()), 0)
+
+        for name in eager:
+            np.testing.assert_array_equal(
+                eager[name],
+                fused[name],
+                err_msg=f"{name} diverges once moe_topk_fusion is enabled",
+            )
+
+    def test_bit_exact_without_padding(self):
+        self._run(None)
+
+    def test_bit_exact_with_padding(self):
+        # Trailing padding exercises the valid_mask branches on both paths.
+        ids = np.ones((4, 6), dtype="int64")
+        ids[:, -2:] = 0
+        self._run(paddle.to_tensor(ids))
+
+
+class TestNonQBFusionForward(unittest.TestCase):
+    """Covers the non-QB branch of the fused router path.
+
+    When ``moe_topk_fusion=True`` and ``topk_method != "quantile_balancing"``
+    (e.g. ``noaux_tc``), ``TopKRouter.forward`` takes the ``else`` branch that
+    lets the Triton kernel own normalization (``norm_gate_logits`` is passed
+    through). The QB fusion tests never reach it because they always run with
+    ``topk_method == "quantile_balancing"``.
+    """
+
+    def setUp(self):
+        paddle.seed(2027)
+        np.random.seed(2027)
+
+    def test_noaux_tc_fusion_forward_runs(self):
+        router = _build_qb_router(
+            topk_method="noaux_tc",
+            moe_topk_fusion=True,
+        )
+        # A non-uniform, non-zero bias makes the selection genuinely depend on
+        # it, so the kernel path is not trivially equivalent to an unbiased one.
+        bias = np.linspace(-0.1, 0.1, router.num_experts).astype(np.float32)
+        router.e_score_correction_bias.set_value(paddle.to_tensor(bias))
+
+        hidden = paddle.randn([4, 6, 32])
+        _, top_gate, top_idx, _, _, _, _, _ = router(hidden)
+
+        # Shapes agree and select num_experts_per_tok experts per token.
+        self.assertEqual(top_gate.shape, top_idx.shape)
+        self.assertEqual(top_idx.shape[-1], router.num_experts_per_tok)
+        # Selected indices are valid experts.
+        idx_np = top_idx.numpy()
+        self.assertTrue((idx_np >= 0).all())
+        self.assertTrue((idx_np < router.num_experts).all())
+        # norm_topk_prob=True -> the kernel normalizes the selected gates to 1.
+        np.testing.assert_allclose(
+            top_gate.sum(axis=-1).numpy().reshape(-1),
+            np.ones(
+                top_idx.size // router.num_experts_per_tok, dtype=np.float32
+            ),
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 if __name__ == "__main__":

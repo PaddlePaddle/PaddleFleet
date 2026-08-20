@@ -37,12 +37,13 @@ from .utils import enable_compat_on_triton_kernel
 
 @enable_compat_on_triton_kernel
 @triton.jit
-def _fwd_kernel(
+def _fwd_kernel(  # pragma: no cover - triton kernel body compiles to PTX, not python-instrumentable
     ptr_gate,
     ptr_choice,
     ptr_out_probs,
     ptr_out_idx,
     ptr_out_sum,
+    ptr_out_alpha,
     stride_gate_s,
     stride_gate_e,
     stride_choice_s,
@@ -55,6 +56,7 @@ def _fwd_kernel(
     n_group: tl.constexpr,
     topk_group: tl.constexpr,
     norm_gate_logits: tl.constexpr,
+    return_alpha: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -157,6 +159,13 @@ def _fwd_kernel(
 
         # Mask out this index so we don't pick it again
         choice_vals = tl.where(off_e != k_idx, choice_vals, float("-inf"))
+
+    # --- Alpha (cutoff) output ---
+    # After the top-k loop, choice_vals has the top-k positions masked to -inf.
+    # The max of the remaining values is the (k+1)-th largest = cutoff alpha.
+    if return_alpha:
+        alpha_val = tl.max(choice_vals, axis=0)
+        tl.store(ptr_out_alpha + pid, alpha_val)
 
     # --- Normalization ---
     if norm_gate_logits:
@@ -263,6 +272,7 @@ class MoETopkFusion(paddle.autograd.PyLayer):
         n_group,
         topk_group,
         norm_gate_logits,
+        return_alpha=False,
     ):
         """
         Forward pass: select topk experts.
@@ -276,10 +286,14 @@ class MoETopkFusion(paddle.autograd.PyLayer):
             n_group: number of expert groups.
             topk_group: number of selected topk groups.
             norm_gate_logits: whether to normalize gate logits.
+            return_alpha: if True, additionally return the (k+1)-th largest
+                choice value per token (cutoff alpha) as a no-grad tensor.
 
         Returns:
             topk_probs: normalized topk probabilities, shape [seq_len, moe_k].
             topk_indices: topk expert indices, shape [seq_len, moe_k].
+            alpha (optional): cutoff values, shape [seq_len], only when
+                return_alpha=True.
         """
         seq_len, n_experts = gate_probs.shape
 
@@ -290,6 +304,9 @@ class MoETopkFusion(paddle.autograd.PyLayer):
             if norm_gate_logits
             else None
         )
+        alpha = (
+            paddle.empty((seq_len,), dtype="float32") if return_alpha else None
+        )
 
         # Block size must cover n_experts for the single-block reduction logic
         BLOCK_SIZE = triton.next_power_of_2(n_experts)
@@ -298,6 +315,8 @@ class MoETopkFusion(paddle.autograd.PyLayer):
 
         # Use topk_probs as dummy pointer for sum if not needed, as it is writable
         ptr_sum_arg = topk_sum if norm_gate_logits else topk_probs
+        # Use topk_probs as dummy pointer for alpha if not needed
+        ptr_alpha_arg = alpha if return_alpha else topk_probs
 
         _fwd_kernel[(seq_len,)](
             gate_probs,
@@ -305,6 +324,7 @@ class MoETopkFusion(paddle.autograd.PyLayer):
             topk_probs,
             topk_indices,
             ptr_sum_arg,
+            ptr_alpha_arg,
             int(gate_probs.stride(0)),
             int(gate_probs.stride(1)),
             int(probs_for_choice.stride(0)),
@@ -317,6 +337,7 @@ class MoETopkFusion(paddle.autograd.PyLayer):
             n_group if use_node_limit else 1,
             topk_group if use_node_limit else 1,
             norm_gate_logits,
+            return_alpha,
             BLOCK_SIZE,
         )
 
@@ -324,13 +345,19 @@ class MoETopkFusion(paddle.autograd.PyLayer):
         ctx.input_shape = gate_probs.shape
         ctx.norm_gate_logits = norm_gate_logits
         ctx.moe_k = moe_k
+        ctx.return_alpha = return_alpha
 
+        if return_alpha:
+            return topk_probs, topk_indices.to(paddle.int64), alpha
         return topk_probs, topk_indices.to(paddle.int64)
 
     @staticmethod
-    def backward(ctx, grad_output_probs, grad_output_indices):
+    def backward(ctx, grad_output_probs, grad_output_indices, grad_alpha=None):
         """
         Backward: compute the gradient with respect to gate_probs.
+
+        When return_alpha=True in forward, backward receives an extra
+        grad_alpha argument which is ignored (alpha has no gradient).
         """
         topk_indices, topk_normed_probs, topk_sum = ctx.saved_tensor()
 

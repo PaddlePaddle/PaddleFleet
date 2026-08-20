@@ -166,6 +166,57 @@ def native_proj_rms(
     return proj, r
 
 
+def native_compute_h(
+    proj: Tensor,
+    r: Tensor,
+    alpha_pre: Tensor,
+    alpha_post: Tensor,
+    alpha_res: Tensor,
+    bias: Tensor,
+    n: int,
+    eps: float,
+    *,
+    _fma_probe: bool = False,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Native mHC mapping head (Eq. 5 in the mHC paper).
+
+    Returns ``h_pre = sigma(u_pre) + eps``, ``h_post = 2 sigma(u_post)`` and the
+    unactivated ``h_res``, where ``u = r * proj * alpha + bias`` and ``alpha``
+    is the three learnable gates broadcast over their segments.
+
+    ``_fma_probe`` is for the unit tests only, and nothing in the model passes
+    it. It makes this function round once where it normally rounds twice, i.e.
+    compute what the fused kernel's FMA computes, which is what lets the tests
+    demand bitwise equality and so pin the residual difference on the
+    contraction alone. It costs an fp64 pass, so it must stay off in training.
+    """
+    alpha_ = paddle.concat(
+        [
+            alpha_pre.expand([n]),
+            alpha_post.expand([n]),
+            alpha_res.expand([n * n]),
+        ],
+        axis=-1,
+    )
+    if _fma_probe:
+        # The first multiply still rounds -- hardware contracts only one
+        # multiply-add -- then ``t1 * alpha + bias`` rounds once. fp64 holds
+        # ``t1 * alpha`` exactly: 24 + 24 mantissa bits against 53.
+        t1 = r * proj
+        h = (
+            t1.astype("float64") * alpha_.astype("float64")
+            + bias.astype("float64")
+        ).astype(proj.dtype)
+    else:
+        h = r * proj * alpha_ + bias
+    # H_pre = sigma(alpha_pre * (theta_pre @ x_tilde) + b_pre)
+    h_pre = h[..., :n].sigmoid() + eps
+    # H_post = 2 sigma(alpha_post * (theta_post @ x_tilde) + b_post)
+    h_post = h[..., n : 2 * n].sigmoid() * 2
+    h_res = h[..., 2 * n :]
+    return h_pre, h_post, h_res
+
+
 def native_h_aggregate(x_streams: Tensor, h_pre: Tensor) -> Tensor:
     """Native n-stream weighted aggregation: out = sum_j(h_pre_j * x_j)."""
     return (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
@@ -276,6 +327,7 @@ class HyperConnectionModule(nn.Layer):
         # Choose implementation: fused kernels vs native reference.
         if config.use_fused_mhc:
             from paddlefleet.fusions.fused_mhc_kernels import (
+                fused_compute_h,
                 fused_h_aggregate,
                 fused_h_post_bda,
                 fused_proj_rms,
@@ -286,11 +338,34 @@ class HyperConnectionModule(nn.Layer):
             self._h_aggregate_op = fused_h_aggregate
             self._h_post_bda_op = fused_h_post_bda
             self._proj_rms_op = fused_proj_rms
+            # Unlike the cast fusion this one trades launches, not dtypes -- the
+            # mapping head is only n*n + 2*n wide per token -- so it applies at
+            # either high_precision_mhc setting. The accuracy-compatible kernel
+            # is a separate matter: it is a Megatron-alignment contract, and the
+            # fused head's FMA contraction and staged cross-token reductions
+            # break it, so that mode keeps the reference composition, exactly as
+            # the projection / aggregate / BDA sites already do.
+            self._compute_h_op = (
+                native_compute_h
+                if _use_accuracy_compatible_kernel()
+                else fused_compute_h
+            )
+            # The mHC input, the residual and the layer output stay in their
+            # incoming dtype; the kernels widen them in-register instead of the
+            # block materializing fp32 copies. Gated on high_precision_mhc:
+            # that is the only mode with a widening to absorb -- without it the
+            # reference keeps the arithmetic in the incoming dtype and so must
+            # the kernel. The BDA site opts out again when a bias is present.
+            self._widen_in_kernel = config.high_precision_mhc
         else:
             self._sinkhorn_op = native_sinkhorn
             self._h_aggregate_op = native_h_aggregate
             self._h_post_bda_op = native_h_post_bda
             self._proj_rms_op = native_proj_rms
+            self._compute_h_op = native_compute_h
+            # The native reference is a plain op composition: it cannot absorb a
+            # widening, so its operands are still pre-widened in Python.
+            self._widen_in_kernel = False
 
         self._init_weights()
 
@@ -334,9 +409,17 @@ class HyperConnectionModule(nn.Layer):
             proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
         else:
             ori_dtype = x.dtype
-            proj, r = self._proj_rms_op(
-                x, self.mapping_proj.weight.astype(ori_dtype), self.norm_eps
-            )
+            if self._widen_in_kernel:
+                # x is still narrow here, so the weight needs no matching cast
+                # either; the kernel widens what it has to and returns proj/r
+                # in fp32.
+                proj, r = self._proj_rms_op(
+                    x, self.mapping_proj.weight, self.norm_eps, fuse_cast=True
+                )
+            else:
+                proj, r = self._proj_rms_op(
+                    x, self.mapping_proj.weight.astype(ori_dtype), self.norm_eps
+                )
             if not self.config.high_precision_mhc:
                 r = r.astype(ori_dtype)
 
@@ -357,20 +440,16 @@ class HyperConnectionModule(nn.Layer):
             h_post: [..., n] - expansion weights
             h_res: [..., n^2] - residual mixing logits
         """
-        alpha_ = paddle.concat(
-            [
-                self.alpha_pre.expand([self.n]),
-                self.alpha_post.expand([self.n]),
-                self.alpha_res.expand([self.n * self.n]),
-            ],
-            axis=-1,
+        h_pre, h_post, h_res = self._compute_h_op(
+            proj,
+            r,
+            self.alpha_pre,
+            self.alpha_post,
+            self.alpha_res,
+            self.bias,
+            self.n,
+            self.compute_h_eps,
         )
-        h = r * proj * alpha_ + self.bias
-        # H_pre = σ(α_pre * (θ_pre @ x̃) + b_pre)
-        h_pre = h[..., : self.n].sigmoid() + self.compute_h_eps  # [..., n]
-        # H_post = 2σ(α_post * (θ_post @ x̃) + b_post)
-        h_post = h[..., self.n : 2 * self.n].sigmoid() * 2  # [..., n]
-        h_res = h[..., 2 * self.n :]
         if _use_accuracy_compatible_kernel():
             h_pre = h_pre.astype(proj.dtype)
             h_post = h_post.astype(proj.dtype)
@@ -427,7 +506,12 @@ class HyperConnectionModule(nn.Layer):
                 aggregated = aggregated.astype(x.dtype)
             return aggregated
         else:
-            aggregated = self._h_aggregate_op(x_streams, h_pre)
+            if self._widen_in_kernel:
+                aggregated = self._h_aggregate_op(
+                    x_streams, h_pre, fuse_cast=True
+                )
+            else:
+                aggregated = self._h_aggregate_op(x_streams, h_pre)
             if aggregated.dtype != x.dtype:
                 aggregated = aggregated.astype(x.dtype)
             return aggregated
@@ -544,6 +628,7 @@ class HyperConnectionModule(nn.Layer):
             if (
                 not _use_accuracy_compatible_kernel()
                 and self.config.high_precision_mhc
+                and not self._widen_in_kernel
             ):
                 hidden_states = hidden_states.astype("float32")
             h_pre, h_post, h_res = self.compute_mappings(hidden_states)
@@ -726,14 +811,32 @@ class HyperConnectionModule(nn.Layer):
                 orig_reshaped = original_residual.reshape(
                     [*leading_shape, n, C]
                 )
-                if self.config.high_precision_mhc:
+                # ``fuse_cast`` hands the two large operands to the kernel in
+                # their incoming dtype instead; it widens them in-register and
+                # writes the result back in ``orig_reshaped``'s dtype.
+                # ``_widen_in_kernel`` already folds in ``high_precision_mhc``,
+                # the only mode that widens at all. A present bias opts out on
+                # top of that (the kernel declines it too): its gradient
+                # reduces over ``g_x``, which would then be narrow.
+                fuse_cast = self._widen_in_kernel and bias is None
+                if self.config.high_precision_mhc and not fuse_cast:
                     orig_reshaped = orig_reshaped.astype("float32")
                     x = x.astype("float32")
                     if bias is not None:
                         bias = bias.astype("float32")
-                output = self._h_post_bda_op(
-                    h_res, orig_reshaped, h_post, x, bias
-                )
+                if fuse_cast:
+                    output = self._h_post_bda_op(
+                        h_res,
+                        orig_reshaped,
+                        h_post,
+                        x,
+                        bias,
+                        fuse_cast=True,
+                    )
+                else:
+                    output = self._h_post_bda_op(
+                        h_res, orig_reshaped, h_post, x, bias
+                    )
                 return output.reshape([*leading_shape, n * C])
 
             # Sequential path: used when dropout required OR accuracy-compatible kernel is NOT enabled

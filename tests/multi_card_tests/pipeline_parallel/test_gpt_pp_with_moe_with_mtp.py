@@ -232,7 +232,11 @@ class TestPP(unittest.TestCase):
             bf16=True,
             gated_linear_unit=True,
             bias_activation_fusion=True,
+            moe_token_dispatcher_type="deepep",
             num_nextn_predict_layers=MTP_DEGREE,
+            mtp_loss_scaling_factor=0.3,
+            overlap_p2p_comm=False,
+            batch_p2p_comm=True,
         )
 
         overlap_loss, overlap_gpt_model = run_pp(

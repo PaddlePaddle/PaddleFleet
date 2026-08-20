@@ -452,13 +452,6 @@ class StandardMoERouter(nn.Layer):
             self.expert_usage.stop_gradient = True
 
         if self.topk_method == "quantile_balancing":
-            if getattr(self.config, "moe_topk_fusion", False):
-                raise ValueError(
-                    "quantile_balancing is incompatible with moe_topk_fusion. "
-                    "The MoETopkFusion kernel does not support QB's histogram-based "
-                    "bias update, and enabling both causes incorrect gate normalization. "
-                    "Please set moe_topk_fusion=False when using quantile_balancing."
-                )
             if self.routing_type != "none":
                 raise ValueError(
                     "quantile_balancing is a self-contained load balancing method, "
@@ -1197,6 +1190,7 @@ class StandardMoERouter(nn.Layer):
         biased_scores: paddle.Tensor,
         k: int,
         valid_mask: paddle.Tensor | None = None,
+        alpha: paddle.Tensor | None = None,
     ):
         """Accumulate required_bias into the QB histogram.
 
@@ -1219,17 +1213,25 @@ class StandardMoERouter(nn.Layer):
             k: top-k value
             valid_mask: [N, 1] mask marking non-padding tokens, or None when no
                 padding information is available (all rows count).
+            alpha: [N] or [N, 1] pre-computed cutoff values from MoETopkFusion
+                kernel (optional). When provided, skips the internal topk
+                computation for cutoff.
         """
         N, E = raw_scores.shape
         B = self.qb_n_bins
 
         # Compute alpha: the (k+1)-th largest biased score per token
         # This is the "cutoff" -- the highest biased score NOT selected
-        # Clamp k+1 to at most E (in case of degenerate config)
-        topk_val = min(k + 1, int(E))
-        alpha = paddle.topk(biased_scores, k=topk_val, axis=-1, sorted=True)[0][
-            :, -1:
-        ]  # [N, 1] -- the smallest of top-(k+1), i.e., cutoff
+        if alpha is not None:
+            # Alpha provided externally (e.g., from MoETopkFusion kernel)
+            if alpha.ndim == 1:
+                alpha = alpha.unsqueeze(-1)  # [N] -> [N, 1]
+        else:
+            # Clamp k+1 to at most E (in case of degenerate config)
+            topk_val = min(k + 1, int(E))
+            alpha = paddle.topk(
+                biased_scores, k=topk_val, axis=-1, sorted=True
+            )[0][:, -1:]  # [N, 1] -- the smallest of top-(k+1), i.e., cutoff
 
         # required_bias[t, e] = alpha[t] - raw_scores[t, e]
         required_bias = alpha - raw_scores  # [N, E]
@@ -1710,14 +1712,8 @@ class TopKRouter(StandardMoERouter):
                     gates_ori.sum(-1, keepdim=True), min=1e-12
                 )
 
-        if (
-            getattr(self.config, "moe_topk_fusion", False)
-            and self.topk_method != "quantile_balancing"
-        ):
-            # Use MoETopkFusion Triton kernel for bit-exact alignment.
-            # This ensures the topk selection + normalization uses the exact same
-            # GPU kernel, avoiding FP32 rounding differences between
-            # Triton's scalar loop and Paddle's tensor ops.
+        if getattr(self.config, "moe_topk_fusion", False):
+            # Use MoETopkFusion Triton kernel for fused topk selection.
             MoETopkFusion = _get_moe_topk_fusion()
             use_node_limit = self.n_group > 1
             if not self.config.gpt_model_use_experimental_version:
@@ -1735,16 +1731,42 @@ class TopKRouter(StandardMoERouter):
                 _log_moe_md5(
                     probs_for_choice, "probs_for_choice", self._layer_number
                 )
-            top_gate, top_idx = MoETopkFusion.apply(
-                gates,  # gate_probs (original sigmoid scores)
-                probs_for_choice,  # probs_for_choice (with correction bias)
-                self.num_experts_per_tok,
-                use_node_limit,
-                self.n_group,
-                self.topk_group,
-                self.norm_topk_prob,  # norm_gate_logits
-            )
-            # top_gate is already normalized by the Triton kernel when norm_topk_prob=True
+
+            if self.topk_method == "quantile_balancing":
+                # QB path: kernel does NOT normalize (normalization stays eager
+                # for bit-exact alignment with original QB). Additionally returns
+                # alpha (the k+1-th largest choice value) for histogram accumulation.
+                top_gate, top_idx, alpha = MoETopkFusion.apply(
+                    gates,  # gate_probs (original sigmoid scores)
+                    probs_for_choice,  # probs_for_choice (with correction bias)
+                    self.num_experts_per_tok,
+                    use_node_limit,
+                    self.n_group,
+                    self.topk_group,
+                    False,  # norm_gate_logits=False (normalization stays eager)
+                    True,  # return_alpha=True
+                )
+                # Accumulate QB histogram with pre-computed alpha (skips internal topk)
+                if framework._dygraph_tracer()._has_grad:
+                    self._accumulate_qb_histogram(
+                        gates,
+                        probs_for_choice,
+                        self.num_experts_per_tok,
+                        valid_mask=input_ids_none_zero_mask,
+                        alpha=alpha,
+                    )
+            else:
+                # noaux_tc / other paths: kernel handles normalization
+                top_gate, top_idx = MoETopkFusion.apply(
+                    gates,  # gate_probs (original sigmoid scores)
+                    probs_for_choice,  # probs_for_choice (with correction bias)
+                    self.num_experts_per_tok,
+                    use_node_limit,
+                    self.n_group,
+                    self.topk_group,
+                    self.norm_topk_prob,  # norm_gate_logits
+                )
+            # top_gate is already normalized by the Triton kernel when norm_topk_prob=True (non-QB)
 
             _log_moe_md5(
                 top_idx.cast("float32"), "topk_indices", self._layer_number
@@ -1812,7 +1834,13 @@ class TopKRouter(StandardMoERouter):
 
         # norm
         if self.norm_topk_prob:
-            if not getattr(self.config, "moe_topk_fusion", False):
+            if (
+                not getattr(self.config, "moe_topk_fusion", False)
+                or self.topk_method == "quantile_balancing"
+            ):
+                # QB fusion path passes norm_gate_logits=False to the kernel,
+                # so normalization must happen here in eager (for bit-exact alignment).
+                # Non-fusion paths also normalize here.
                 if self.use_accuracy_compatible:
                     _sum_f64 = top_gate.cast(paddle.float64).sum(
                         axis=-1, keepdim=True
@@ -1821,7 +1849,7 @@ class TopKRouter(StandardMoERouter):
                 else:
                     denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-            # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
+            # When moe_topk_fusion=True and not QB, top_gate is already normalized by MoETopkFusion
 
         if self.routed_scaling_factor_learnable:
             top_gate = apply_learnable_routed_scaling(
