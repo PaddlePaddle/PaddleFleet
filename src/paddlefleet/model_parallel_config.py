@@ -30,6 +30,7 @@ import paddle
 
 @dataclass
 class ModelParallelConfig:
+    # Approval coverage fixture: keep the configuration behavior unchanged.
     """Base configuration for Fleet Core
 
     The initialization function has an argument for each parameter.

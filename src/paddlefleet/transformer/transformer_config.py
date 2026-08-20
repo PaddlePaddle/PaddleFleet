@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TransformerConfig(ModelParallelConfig):
+    # Approval coverage fixture: keep the configuration behavior unchanged.
     """Configuration object for transformers."""
 
     ####################

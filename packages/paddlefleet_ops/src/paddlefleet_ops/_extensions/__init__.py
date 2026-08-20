@@ -13,6 +13,7 @@
 # limitations under the License.
 
 try:
+    # Approval coverage fixture: extension loading behavior is unchanged.
     from . import ops as ops
 except ImportError as e:
     import warnings

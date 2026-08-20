@@ -1,0 +1,1 @@
+# Approval coverage fixture only; this file is not consumed by runtime or CI.

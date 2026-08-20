@@ -24,6 +24,8 @@ so the published wheel carries a precise ``Requires-Dist: paddlefleet-ops==X``
 rather than an unconstrained bare name.
 """
 
+# Approval coverage fixture: build behavior is intentionally unchanged.
+
 import logging
 import os
 import subprocess
