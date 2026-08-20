@@ -176,7 +176,12 @@ class TestContextParallelUtils(unittest.TestCase):
         group.rank = 0
         x = paddle.randn([4, 8], dtype="float32")
 
-        with mock.patch("paddle.distributed.stream.all_gather"):
+        with (
+            mock.patch("paddle.distributed.stream.all_gather"),
+            mock.patch(
+                "paddlefleet.triton_ops.balanced_reorder.balanced_gather_reorder_kernel"
+            ),
+        ):
             result = all_gather_balance(x, group=group, axis=0)
             # Should call all_gather twice (start and end chunks)
 
@@ -191,7 +196,12 @@ class TestContextParallelUtils(unittest.TestCase):
         group.rank = 0
         x = paddle.randn([4, 4], dtype="float32")
 
-        with mock.patch("paddle.distributed.stream.all_gather"):
+        with (
+            mock.patch("paddle.distributed.stream.all_gather"),
+            mock.patch(
+                "paddlefleet.triton_ops.balanced_reorder.balanced_gather_reorder_kernel"
+            ),
+        ):
             result = all_gather_balance(x, group=group, axis=1)
 
     def test_reduce_scatter_any_axis_single_rank(self):
@@ -261,7 +271,12 @@ class TestContextParallelUtils(unittest.TestCase):
         group.nranks = 2
         x = paddle.randn([8, 4], dtype="float32")
 
-        with mock.patch("paddle.distributed.stream.alltoall"):
+        with (
+            mock.patch("paddle.distributed.stream.alltoall_single"),
+            mock.patch(
+                "paddlefleet.triton_ops.balanced_reorder.balanced_scatter_reorder_kernel"
+            ),
+        ):
             result = reduce_scatter_any_axis_balance(x, axis=0, group=group)
 
     def test_reduce_scatter_any_axis_balance_invalid(self):

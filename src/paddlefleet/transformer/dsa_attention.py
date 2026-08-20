@@ -48,8 +48,16 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
 )
+from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+
+try:
+    from paddlefleet_ops.fast_hadamard_transform import (
+        hadamard_transform as _fast_hadamard_transform,
+    )
+except (ImportError, RuntimeError):
+    _fast_hadamard_transform = None
 
 if TYPE_CHECKING:
     from paddlefleet.packed_seq_params import PackedSeqParams
@@ -175,7 +183,11 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     return (x.reshape(original_shape) * scale).cast(output_dtype)
 
 
-def rotate_activation(x: Tensor) -> Tensor:
+def rotate_activation(
+    x: Tensor,
+    use_fast_hadamard: bool = False,
+    high_precision_hadamard: bool = False,
+) -> Tensor:
     """Apply Hadamard rotation activation.
 
     Reference:
@@ -183,15 +195,24 @@ def rotate_activation(x: Tensor) -> Tensor:
 
     Args:
         x: Input tensor (must be bfloat16).
+        high_precision_hadamard: if True, means type of input x is float32.
 
     Returns:
         Rotated tensor.
     """
-    assert x.dtype == paddle.bfloat16, (
-        f"rotate_activation only support bf16 input, but got {x.dtype}"
-    )
+    if not high_precision_hadamard:
+        assert x.dtype == paddle.bfloat16, (
+            f"rotate_activation only support bf16 input, but got {x.dtype}"
+        )
     hidden_size = x.shape[-1]
-    return hadamard_transform(x, scale=hidden_size**-0.5)
+    scale = hidden_size**-0.5
+
+    if use_fast_hadamard:
+        if _fast_hadamard_transform is None:
+            raise RuntimeError("fast_hadamard_transform is not available")
+        return _fast_hadamard_transform(x, scale)
+
+    return hadamard_transform(x, scale)
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +379,7 @@ class DSAIndexer(paddle.nn.Layer):
         sublayers_spec: DSAIndexerSublayersSpec,
         layer_number: int,
         pg_collection: ProcessGroupCollection | None = None,
+        is_hybrid_mla_indexer: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -367,17 +389,40 @@ class DSAIndexer(paddle.nn.Layer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
+        # Index dims are model-wide (``index_n_heads`` / ``index_head_dim`` /
+        # ``index_topk``); only the q-LoRA rank and rope split differ between
+        # the CSA layers and the hybrid MLA layers.
         self.n_heads = config.dsa_index_n_heads
         self.head_dim = config.dsa_index_head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
-        self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.index_topk = config.dsa_index_topk
+        if is_hybrid_mla_indexer:
+            required_fields = (
+                "hybrid_mla_q_lora_rank",
+                "hybrid_mla_qk_rope_head_dim",
+            )
+            missing = [
+                name
+                for name in required_fields
+                if getattr(config, name, None) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "hybrid MLA DSA indexer requires explicit hybrid config fields; "
+                    f"missing fields: {', '.join(missing)}"
+                )
+            q_lora_rank = config.hybrid_mla_q_lora_rank
+            self.rope_head_dim = config.hybrid_mla_qk_rope_head_dim
+        else:
+            q_lora_rank = config.q_lora_rank
+            self.rope_head_dim = config.qk_rope_head_dim
+        self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.softmax_scale = self.head_dim**-0.5
+        self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
 
         # wq_b: q_lora_rank -> n_heads * head_dim (duplicated)
         self.wq_b = build_spec_layer(
             sublayers_spec.linear_wq_b,
-            config.q_lora_rank,
+            q_lora_rank,
             self.n_heads * self.head_dim,
             config=self.config,
             init_method=self.config.init_method,
@@ -386,6 +431,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wq_b",
+            disable_fp8=True,
         )
 
         # wk: hidden_size -> head_dim (single shared K, duplicated)
@@ -400,6 +446,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_wk",
+            disable_fp8=True,
         )
 
         # k_norm: LayerNorm (NOT RMSNorm) per reference
@@ -421,6 +468,7 @@ class DSAIndexer(paddle.nn.Layer):
             is_expert=False,
             tp_group=pg_collection.tp,
             tp_comm_buffer_name="dsa_indexer_weights_proj",
+            disable_fp8=True,
         )
 
         # Initialize Position Embedding.
@@ -455,6 +503,36 @@ class DSAIndexer(paddle.nn.Layer):
                 "supported types are 'rope' and 'yarn'"
             )
 
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the indexer q-up projection.
+
+        Same treatment as ``CSAIndexer.muon_slice_specs``
+        (``csa_attention.py:1823``): ``wq_b`` packs ``n_heads`` independent heads
+        along the output axis, so Muon must orthogonalise each head's block
+        rather than the concatenated matrix. ``wk`` (a single shared head) and
+        ``weights_proj`` (whose output dim *is* the head count) are whole
+        matrices and need no spec; ``k_norm`` is 1-D and never reaches Muon.
+
+        Consumed only by the per-module mechanism in
+        ``PaddleFormers/paddleformers/trainer/trainer.py:3427-3446``. ErnieBot
+        supplies its own ``build_muon_param_info_map``
+        (``fleet_model/ernie5_v2/modeling.py:2041``) and never walks that path,
+        so this exists to keep PaddleFleet correct standalone: without it,
+        latent MQA + DSA would silently lose per-head slicing there while the
+        CSA indexer kept it.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        if (
+            muon_configs.get("muon_qkv_update_mode", "split_head")
+            != "split_head"
+        ):
+            return {}
+
+        return {
+            "wq_b.weight": (ortho_per_head, {"heads": self.n_heads}),
+        }
+
     def _apply_rope(
         self, x: Tensor, freqs: Tensor, mscale: float = 1.0
     ) -> Tensor:
@@ -471,6 +549,35 @@ class DSAIndexer(paddle.nn.Layer):
             freqs: RoPE frequencies
             mscale: YaRN concentration factor (1.0 for plain RoPE, ~1.37 for YaRN)
         """
+        # Fused path: one triton kernel replaces the slice + rotate_half +
+        # concat below.  It rotates ``x[..., :rope_head_dim]`` and copies the
+        # nope tail across in the same pass, writing the result once instead of
+        # rotating into a temporary and then rebuilding the whole tensor (128
+        # MiB for q at s=8192) to update 64 of 128 channels.  ``x`` itself is
+        # left alone -- out of place, so nothing here depends on whether the
+        # caller's tensor may be replayed.  Bit-exact with the eager branch, and
+        # CP-agnostic: freqs is matched to x on the
+        # sequence axis only, so the local q and the all-gathered k of the same
+        # layer can each pass their own freqs.
+        #
+        # Gated on its own ``dsa_indexer_rope_fusion``, not the model-wide
+        # ``apply_rope_fusion``: the indexer's layout ([pe | nope] +
+        # rotate_half) is a third convention that neither MLA fused kernel
+        # covers, so the two switches select unrelated kernels.
+        #
+        # Only config-level conditions gate here; the kernel's own input
+        # requirements (bf16 activations, and fp32 freqs when mscale != 1) are
+        # asserted inside ``fused_apply_rope_half``, matching how
+        # ``fused_apply_mla_rope_inplace`` handles them for the HCA layers.
+        if (
+            getattr(self.config, "dsa_indexer_rope_fusion", False)
+            and not self.config.dsa_indexer_rotary_interleaved
+            and not getattr(self.config, "high_precision_rope", False)
+        ):
+            from paddlefleet.triton_ops import fused_apply_rope_half
+
+            return fused_apply_rope_half(x, freqs, self.rope_head_dim, mscale)
+
         x_pe = x[..., : self.rope_head_dim]
         x_nope = x[..., self.rope_head_dim :]
         x_pe = _apply_rotary_pos_emb_bshd(
@@ -486,6 +593,8 @@ class DSAIndexer(paddle.nn.Layer):
         self,
         hidden_states: Tensor,  # [b, s, hidden_size] or [s/TP, b, hidden_size] (SP mode)
         q_latent: Tensor,  # [b, s, q_lora_rank] or [s/TP, b, q_lora_rank] (SP mode)
+        position_offset: int = 0,
+        cp_group=None,
     ):
         """Compute q, k, weights before top-k selection.
 
@@ -494,6 +603,21 @@ class DSAIndexer(paddle.nn.Layer):
         When sequence_parallel is enabled, inputs are seq-first sharded
         [s/TP, b, h]. This method gathers them internally (like Megatron DSA)
         and transposes to batch-first [b, s, h] before processing.
+
+        Context parallel (``cp_group`` with ``nranks > 1``, contiguous layout):
+        ``hidden_states`` / ``q_latent`` hold this rank's query slice
+        ``[position_offset, position_offset + s)`` of the global sequence, so
+
+        * RoPE frequencies are built at the **global** length and Q takes the
+          rows of its own slice while K takes all of them;
+        * K is all-gathered to the global length right after ``wk``, i.e. at
+          ``head_dim`` (128) instead of ``hidden_size`` -- 32x less traffic --
+          and before ``k_norm`` / RoPE / ``rotate_activation``, all three of
+          which act per token and therefore commute with a seq-dim gather;
+        * ``weights`` is a per-query row quantity and stays sharded.
+
+        Returns ``q [b, s_local, n_heads, head_dim]``, ``k [b, s_global,
+        head_dim]``, ``weights [b, s_local, n_heads]``.
         """
         # Gather from sequence parallel region if needed
         if self.config.sequence_parallel and self.pg_collection.tp.nranks > 1:
@@ -508,9 +632,14 @@ class DSAIndexer(paddle.nn.Layer):
             q_latent = q_latent.transpose([1, 0, 2])
 
         bsz, seqlen, _ = hidden_states.shape
+        cp_size = (
+            cp_group.nranks
+            if cp_group is not None and cp_group.nranks > 1
+            else 1
+        )
 
-        # Compute RoPE internally
-        rotary_seq_len = seqlen
+        # Compute RoPE internally, at the global sequence length under CP.
+        rotary_seq_len = seqlen * cp_size
         if self.config.rope_type == "rope":
             freqs = self.rotary_pos_emb(rotary_seq_len, packed_seq=False)
             mscale = 1.0
@@ -518,18 +647,26 @@ class DSAIndexer(paddle.nn.Layer):
             freqs, mscale = self.rotary_pos_emb(
                 rotary_seq_len, packed_seq=False
             )
+        # freqs is [1, rotary_seq_len, 1, dim]; Q only needs its own slice.
+        freqs_q = (
+            freqs[:, position_offset : position_offset + seqlen]
+            if cp_size > 1
+            else freqs
+        )
 
         q, _ = self.wq_b(q_latent)  # [b, s, n_heads * head_dim]
         q = q.reshape([bsz, seqlen, self.n_heads, self.head_dim])
-        q = self._apply_rope(q, freqs, mscale)
+        q = self._apply_rope(q, freqs_q, mscale)
 
         k, _ = self.wk(hidden_states)  # [b, s, head_dim]
+        if cp_size > 1:
+            k = all_gather_cp(k, dim=1, group=cp_group)  # [b, s_global, hd]
         k = self.k_norm(k)
         k = self._apply_rope(k.unsqueeze(2), freqs, mscale).squeeze(2)
 
         # Rotate activation (Hadamard transform)
-        q = rotate_activation(q)
-        k = rotate_activation(k)
+        q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
+        k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
         weights, _ = self.weights_proj(hidden_states)
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale
@@ -580,29 +717,63 @@ class DSAIndexer(paddle.nn.Layer):
 def _compute_index_scores_fused(
     q: Tensor, weights: Tensor, k: Tensor
 ) -> Tensor:
-    """Compute index scores from Indexer outputs.
+    """Compute index scores from batch-first Indexer outputs.
 
     Args:
-        q:       [sq, b, h, d]  (Indexer query, after RoPE + Hadamard)
-        weights: [sq, b, h]     (per-head importance weights)
-        k:       [sk, b, d]     (Indexer key, after RoPE + Hadamard)
+        q:       [b, sq, h, d]  (Indexer query, after RoPE + Hadamard)
+        weights: [b, sq, h]     (per-head importance weights)
+        k:       [b, sk, d]     (Indexer key, after RoPE + Hadamard)
 
     Returns:
         index_scores: [b, sq, sk]
     """
-    # q @ k^T -> [sq, b, h, sk]
-    index_scores = paddle.einsum(
-        "sbhd,tbd->sbht", q.cast("float32"), k.cast("float32")
-    )
+    # q @ k^T -> [b, sq, h, sk]
+
+    with paddle.amp.auto_cast(False):
+        # 对齐 recompute fwd和 fwd情况下的amp一致性
+        index_scores = paddle.einsum(
+            "bshd,btd->bsht", q.cast("float32"), k.cast("float32")
+        )
     # ReLU activation
     index_scores = F.relu(index_scores)
-    # Weight each head: [sq, b, h, sk] * [sq, b, h, 1] -> [sq, b, h, sk]
+    # Weight each head: [b, sq, h, sk] * [b, sq, h, 1] -> [b, sq, h, sk]
     index_scores = index_scores * weights.unsqueeze(-1)
-    # Sum across heads: [sq, b, h, sk] -> [sq, b, sk]
+    # Sum across heads: [b, sq, h, sk] -> [b, sq, sk]
     index_scores = index_scores.sum(axis=2)
-    # Transpose to [b, sq, sk]
-    index_scores = index_scores.transpose([1, 0, 2])
     return index_scores
+
+
+def _compute_index_scores_and_topk(
+    q: Tensor,
+    k: Tensor,
+    weights: Tensor,
+    index_topk: int,
+    mask: Tensor | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Compute masked index scores and top-k indices in batch-first layout."""
+    index_scores = _compute_index_scores_fused(q, weights, k)
+
+    mask = _normalize_dsa_mask(mask)
+    if mask is not None:
+        index_scores = index_scores + mask
+
+    topk_k = min(index_topk, index_scores.shape[-1])
+    topk_values, topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)
+    topk_indices = paddle.clip(
+        topk_indices, min=0, max=index_scores.shape[-1] - 1
+    )
+    # Mark indices whose scores are -inf as invalid (-1). This happens when
+    # a document-aware mask blocks cross-document compressed positions.
+    # The tilelang kernel handles this internally, but the naive path needs
+    # explicit invalidation so downstream sparse attention ignores them.
+    invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
+    topk_indices = paddle.where(
+        invalid_topk,
+        paddle.full_like(topk_indices, -1),
+        topk_indices,
+    )
+
+    return index_scores, topk_indices
 
 
 def fused_qk_topk_naive(
@@ -628,36 +799,7 @@ def fused_qk_topk_naive(
         index_scores: [b, sq, sk]
         topk_indices: [b, sq, topk]
     """
-    q_fp32 = q.cast("float32")
-    k_fp32 = k.cast("float32")
-
-    # q @ k^T: [b, sq, n_heads, head_dim] x [b, sk, head_dim] -> [b, sq, n_heads, sk]
-    scores = paddle.einsum("bshd,btd->bsht", q_fp32, k_fp32)
-    # ReLU activation
-    scores = F.relu(scores)
-    # Weight each head and sum: [b, sq, n_heads, sk] * [b, sq, n_heads, 1] -> sum -> [b, sq, sk]
-    index_scores = (scores * weights.unsqueeze(-1)).sum(axis=2)
-
-    if mask is not None:
-        index_scores = index_scores + mask
-
-    topk_k = min(index_topk, index_scores.shape[-1])
-    topk_values, topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)
-    topk_indices = paddle.clip(
-        topk_indices, min=0, max=index_scores.shape[-1] - 1
-    )
-    # Mark indices whose scores are -inf as invalid (-1). This happens when
-    # a document-aware mask blocks cross-document compressed positions.
-    # The tilelang kernel handles this internally, but the naive path needs
-    # explicit invalidation so downstream sparse attention ignores them.
-    invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
-    topk_indices = paddle.where(
-        invalid_topk,
-        paddle.full_like(topk_indices, -1),
-        topk_indices,
-    )
-
-    return index_scores, topk_indices
+    return _compute_index_scores_and_topk(q, k, weights, index_topk, mask)
 
 
 def _compute_dsa_indexer_loss(
@@ -670,14 +812,16 @@ def _compute_dsa_indexer_loss(
     sparse_loss: bool,
     tp_group,
     causal_mask_override: Tensor | None = None,
+    loss_mask: Tensor | None = None,
+    global_valid_count: float | None = None,
 ) -> Tensor:
     """Compute KL divergence loss between index_scores and true attention_scores.
 
     Args:
         index_scores: [b, sq, sk]
         topk_indices: [b, sq, topk]
-        query: [sq, b, np, hn]  (MLA query, DETACHED)
-        key:   [sk, b, np, hn]  (MLA key, DETACHED)
+        query: [b, sq, np, hn]  (MLA query, DETACHED)
+        key:   [b, sk, np, hn]  (MLA key, DETACHED)
         softmax_scale: Scale coefficient after q @ k^T
         loss_coeff: Coefficient for the indexer KL divergence loss
         sparse_loss: Whether to apply sparse index mask
@@ -689,13 +833,13 @@ def _compute_dsa_indexer_loss(
     Returns:
         indexer_loss: scalar
     """
-    sq, b, np, hn = query.shape
-    sk = key.shape[0]
+    b, sq, np, hn = query.shape
+    sk = key.shape[1]
 
-    # [sq, b, np, hn] -> [b, np, sq, hn] -> [b * np, sq, hn]
-    query_reshaped = query.transpose([1, 2, 0, 3]).reshape([b * np, sq, hn])
-    # [sk, b, np, hn] -> [b, np, hn, sk] -> [b * np, hn, sk]
-    key_reshaped = key.transpose([1, 2, 3, 0]).reshape([b * np, hn, sk])
+    # [b, sq, np, hn] -> [b, np, sq, hn] -> [b * np, sq, hn]
+    query_reshaped = query.transpose([0, 2, 1, 3]).reshape([b * np, sq, hn])
+    # [b, sk, np, hn] -> [b, np, hn, sk] -> [b * np, hn, sk]
+    key_reshaped = key.transpose([0, 2, 3, 1]).reshape([b * np, hn, sk])
     # Compute attention scores [b * np, sq, sk]
     attention_scores = (
         paddle.bmm(query_reshaped.cast("float32"), key_reshaped.cast("float32"))
@@ -777,7 +921,13 @@ def _compute_dsa_indexer_loss(
     )
 
     # [b, sq, sk] -> [b, sq] -> [1]
-    kl_div = kl_per_element.sum(axis=-1).mean()
+    kl_per_pos = kl_per_element.sum(axis=-1)
+    if loss_mask is not None:
+        # loss_mask: [b, sq] — mask out padding positions
+        lm = loss_mask.reshape(kl_per_pos.shape).astype(kl_per_pos.dtype)
+        kl_div = (kl_per_pos * lm).sum() / global_valid_count
+    else:
+        kl_div = kl_per_pos.mean()
     indexer_loss = kl_div * loss_coeff
 
     return indexer_loss
@@ -799,28 +949,28 @@ def _bwd_fused_indexer_loss(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Manual backward for fused indexer loss.
 
-    All tensor layouts (sequence-first):
-        q:       [sq, b, h, d]
-        weights: [sq, b, h]
-        k:       [sk, b, d]
-        query:   [sq, b, np, hn]  (MLA query)
-        key:     [sk, b, np, hn]  (MLA key)
+    All tensor layouts (batch-first):
+        q:       [b, sq, h, d]
+        weights: [b, sq, h]
+        k:       [b, sk, d]
+        query:   [b, sq, np, hn]  (MLA query)
+        key:     [b, sk, np, hn]  (MLA key)
 
     Returns:
-        grad_q:       [sq, b, h, d]
-        grad_weights: [sq, b, h]
-        grad_k:       [sk, b, d]
+        grad_q:       [b, sq, h, d]
+        grad_weights: [b, sq, h]
+        grad_k:       [b, sk, d]
     """
     # Recompute index_scores from (q, weights, k)
     index_scores = _compute_index_scores_fused(q, weights, k)  # [b, sq, sk]
 
-    sq, b, np, hn = query.shape
-    sk = key.shape[0]
+    b, sq, np, hn = query.shape
+    sk = key.shape[1]
 
-    # [sq, b, np, hn] -> [b, np, sq, hn] -> [b * np, sq, hn]
-    query_reshaped = query.transpose([1, 2, 0, 3]).reshape([b * np, sq, hn])
-    # [sk, b, np, hn] -> [b, np, hn, sk] -> [b * np, hn, sk]
-    key_reshaped = key.transpose([1, 2, 3, 0]).reshape([b * np, hn, sk])
+    # [b, sq, np, hn] -> [b, np, sq, hn] -> [b * np, sq, hn]
+    query_reshaped = query.transpose([0, 2, 1, 3]).reshape([b * np, sq, hn])
+    # [b, sk, np, hn] -> [b, np, hn, sk] -> [b * np, hn, sk]
+    key_reshaped = key.transpose([0, 2, 3, 1]).reshape([b * np, hn, sk])
     # Compute attention scores [b * np, sq, sk]
     attention_scores = (
         paddle.bmm(query_reshaped.cast("float32"), key_reshaped.cast("float32"))
@@ -973,20 +1123,16 @@ def _bwd_fused_indexer_loss(
     )
     del valid_mask
 
-    # Transpose from [b, sq, sk] to [sq, b, sk]
-    grad_index_scores = grad_index_scores_logits.transpose(
-        [1, 0, 2]
-    )  # [sq, b, sk]
-    del grad_index_scores_logits
-
     # Backward through sum over heads: expand gradient
-    grad_weighted_scores = grad_index_scores.unsqueeze(2)  # [sq, b, 1, sk]
-    del grad_index_scores
+    grad_weighted_scores = grad_index_scores_logits.unsqueeze(
+        2
+    )  # [b, sq, 1, sk]
+    del grad_index_scores_logits
 
     # Compute forward values needed for backward (recomputation)
     scores = paddle.einsum(
-        "sbhd,tbd->sbht", q.cast("float32"), k.cast("float32")
-    )  # [sq, b, h, sk]
+        "bshd,btd->bsht", q.cast("float32"), k.cast("float32")
+    )  # [b, sq, h, sk]
     relu_mask = scores > 0
     scores_after_relu = F.relu(scores)
     del scores
@@ -995,29 +1141,29 @@ def _bwd_fused_indexer_loss(
     # dL/d_weights = grad * relu_scores (sum over sk)
     grad_weights = (grad_weighted_scores * scores_after_relu).sum(
         axis=-1
-    )  # [sq, b, h]
+    )  # [b, sq, h]
 
     # dL/d_relu_scores = grad * weights
     grad_scores_after_relu = grad_weighted_scores * weights.unsqueeze(
         -1
-    )  # [sq, b, h, sk]
+    )  # [b, sq, h, sk]
     del grad_weighted_scores, scores_after_relu
 
     # Backward through ReLU
     grad_scores = grad_scores_after_relu * relu_mask.cast(
         "float32"
-    )  # [sq, b, h, sk]
+    )  # [b, sq, h, sk]
     del grad_scores_after_relu, relu_mask
 
-    # Backward through einsum 'sbhd,tbd->sbht'
-    # ∂L/∂q = einsum('sbht,tbd->sbhd', grad_scores, k)
+    # Backward through einsum 'bshd,btd->bsht'
+    # ∂L/∂q = einsum('bsht,btd->bshd', grad_scores, k)
     grad_q = paddle.einsum(
-        "sbht,tbd->sbhd", grad_scores, k.cast("float32")
-    )  # [sq, b, h, d]
-    # ∂L/∂k = einsum('sbht,sbhd->tbd', grad_scores, q)
+        "bsht,btd->bshd", grad_scores, k.cast("float32")
+    )  # [b, sq, h, d]
+    # ∂L/∂k = einsum('bsht,bshd->btd', grad_scores, q)
     grad_k = paddle.einsum(
-        "sbht,sbhd->tbd", grad_scores, q.cast("float32")
-    )  # [sk, b, d]
+        "bsht,bshd->btd", grad_scores, q.cast("float32")
+    )  # [b, sk, d]
     del grad_scores
 
     return (
@@ -1035,11 +1181,11 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
     @staticmethod
     def forward(
         ctx,
-        q: Tensor,  # [sq, b, h, d]  — Indexer query output
-        weights: Tensor,  # [sq, b, h]     — Indexer per-head weights
-        k: Tensor,  # [sk, b, d]     — Indexer key output
-        query: Tensor,  # [sq, b, np, hn] — MLA query (DETACHED)
-        key: Tensor,  # [sk, b, np, hn] — MLA key (DETACHED)
+        q: Tensor,  # [b, sq, h, d]  — Indexer query output
+        weights: Tensor,  # [b, sq, h]     — Indexer per-head weights
+        k: Tensor,  # [b, sk, d]     — Indexer key output
+        query: Tensor,  # [b, sq, np, hn] — MLA query (DETACHED)
+        key: Tensor,  # [b, sk, np, hn] — MLA key (DETACHED)
         # Non-tensor params follow (stored on ctx, not in backward returns)
         softmax_scale: float = 1.0,
         topk: int = 64,
@@ -1047,15 +1193,17 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         mask: Tensor | None = None,
         sparse_loss: bool = True,
         tp_group=None,
+        loss_mask: Tensor | None = None,
+        global_valid_count: float | None = None,
     ) -> Tensor:
         """Fused forward: compute index_scores, topk, and KL loss.
 
         Args:
-            q:       Indexer query after RoPE+Hadamard [sq, b, h, d]
-            weights: Per-head importance weights [sq, b, h]
-            k:       Indexer key after RoPE+Hadamard [sk, b, d]
-            query:   MLA query (detached) [sq, b, np, hn]
-            key:     MLA key (detached) [sk, b, np, hn]
+            q:       Indexer query after RoPE+Hadamard [b, sq, h, d]
+            weights: Per-head importance weights [b, sq, h]
+            k:       Indexer key after RoPE+Hadamard [b, sk, d]
+            query:   MLA query (detached) [b, sq, np, hn]
+            key:     MLA key (detached) [b, sk, np, hn]
             softmax_scale: MLA attention softmax scale
             topk:    Number of top-k indices to select
             loss_coeff: Coefficient for KL loss
@@ -1067,39 +1215,15 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
             indexer_loss: scalar KL divergence loss
         """
         with paddle.amp.auto_cast(False):
-            # Step 1: Compute index_scores from (q, weights, k)
-            index_scores = _compute_index_scores_fused(
-                q, weights, k
-            )  # [b, sq, sk]
-
-            # Step 2: Apply mask and select topk
+            # Share the exact indexer forward with fused_qk_topk_naive so the
+            # normal forward and PyLayer recompute path cannot drift.
+            masked_scores, topk_indices = _compute_index_scores_and_topk(
+                q, k, weights, topk, mask
+            )
             mask = _normalize_dsa_mask(mask)
-            if mask is not None:
-                masked_scores = index_scores + mask
-            else:
-                masked_scores = index_scores
-            topk_k = min(topk, masked_scores.shape[-1])
-            topk_values, topk_indices = paddle.topk(
-                masked_scores, k=topk_k, axis=-1
-            )
-            # Clamp indices to valid range: paddle.topk may return garbage indices
-            # for -inf input values
-            topk_indices = paddle.clip(
-                topk_indices, min=0, max=masked_scores.shape[-1] - 1
-            )
-            # Mark indices whose scores are -inf as invalid (-1). This happens
-            # when a document-aware mask blocks cross-document compressed
-            # positions.
-            invalid_topk = paddle.isinf(topk_values) & (topk_values < 0)
-            topk_indices = paddle.where(
-                invalid_topk,
-                paddle.full_like(topk_indices, -1),
-                topk_indices,
-            )
 
             FusedDSAIndexerLoss._last_topk_indices = topk_indices.detach()
 
-            # Step 3: Compute KL loss (use masked_scores)
             indexer_loss = _compute_dsa_indexer_loss(
                 masked_scores,
                 topk_indices,
@@ -1110,6 +1234,8 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
                 sparse_loss,
                 tp_group,
                 causal_mask_override=mask,
+                loss_mask=loss_mask,
+                global_valid_count=global_valid_count,
             )
 
         ctx.save_for_backward(q, weights, k, query, key, topk_indices)
@@ -1158,7 +1284,11 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, output: Tensor, indexer_loss: Tensor) -> Tensor:
         ctx.save_for_backward(indexer_loss)
-        return output
+        # Frozen backbone (phase 2): ``output`` is a leaf with
+        # ``stop_gradient=True``; returning it unchanged is treated as an inplace
+        # alias and rejected, so hand back a fresh tensor and skip its gradient.
+        ctx.output_needs_grad = not output.stop_gradient
+        return output if ctx.output_needs_grad else output.clone()
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
@@ -1167,6 +1297,8 @@ class DSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
         if scale is None:
             scale = paddle.ones([1], dtype=indexer_loss.dtype)
         scaled_grad = paddle.ones_like(indexer_loss) * scale
+        if not ctx.output_needs_grad:
+            return None, scaled_grad
         return grad_output, scaled_grad
 
     @staticmethod
@@ -1188,9 +1320,10 @@ class DSAIndexerLossLoggingHelper:
 
     @staticmethod
     def register_total_num_layers(config):
-        DSAIndexerLossLoggingHelper.num_layers = (
-            DSAIndexerLossLoggingHelper.get_total_num_layers(config)
-        )
+        num_layers = DSAIndexerLossLoggingHelper.get_total_num_layers(config)
+        if DSAIndexerLossLoggingHelper.num_layers != num_layers:
+            DSAIndexerLossLoggingHelper.tracker.clear()
+        DSAIndexerLossLoggingHelper.num_layers = num_layers
 
     @staticmethod
     def save_loss_to_tracker(
@@ -1273,7 +1406,9 @@ class DSAIndexerLossLoggingHelper:
 
         # DP avg
         dp_group = parallel_state.get_data_parallel_group(
-            check_initialized=False
+            check_initialized=False,
+            with_context_parallel=parallel_state.get_context_parallel_world_size()
+            > 1,
         )
         if dp_group is not None and dp_group.nranks > 1:
             paddle.distributed.all_reduce(values, group=dp_group)
@@ -1287,6 +1422,7 @@ class DSAIndexerLossLoggingHelper:
         total_loss_dict: dict | None = None,
         num_layers: int | None = None,
         csa_compress_ratios: list[int] | None = None,
+        hybrid_mla_attention: str = "mha",
     ):
         """Track the sparse attention indexer metrics for logging.
 
@@ -1297,6 +1433,11 @@ class DSAIndexerLossLoggingHelper:
             total_loss_dict: Dictionary to accumulate total losses (optional).
             num_layers: Total number of layers with indexer metrics.
             csa_compress_ratios: Per-layer CSA compress ratios.
+            hybrid_mla_attention: ``hybrid_mla_attention`` of a DSv4 hybrid
+                model. Only ``'mqa_dsa'`` gives the ``-2`` (MLA) entries a DSA
+                indexer, so only then are they counted here. The mapping from
+                mode to "has an indexer" lives here rather than in the caller so
+                there is one place that knows it.
         """
         num_layers = DSAIndexerLossLoggingHelper._infer_num_layers(num_layers)
         DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(
@@ -1308,9 +1449,16 @@ class DSAIndexerLossLoggingHelper:
 
         indexer_loss_values = tracker["values"] * loss_scale
         if csa_compress_ratios is not None:
+            # CSA layers (1 < ratio < 128) run the Lightning Indexer; keep this in
+            # sync with CompressedSparseAttention.__init__ in csa_attention.py.
             num_indexer_layers = sum(
-                1 for ratio in csa_compress_ratios if ratio == 4
+                1 for ratio in csa_compress_ratios if 1 < ratio < 128
             )
+            if hybrid_mla_attention == "mqa_dsa":
+                # Hybrid MLA entries (-2) carry their own token-level indexer.
+                num_indexer_layers += sum(
+                    1 for ratio in csa_compress_ratios if ratio == -2
+                )
         else:
             num_indexer_layers = indexer_loss_values.shape[0]
         if num_indexer_layers == 0:
@@ -1394,7 +1542,7 @@ class DSAttention(FleetLayer):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
-        softmax_scale: float,
+        softmax_scale: float | None = None,
         k_channels: int | None = None,
         v_channels: int | None = None,
         is_mtp_layer: bool = False,
@@ -1462,7 +1610,12 @@ class DSAttention(FleetLayer):
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
 
-        self.softmax_scale = softmax_scale
+        if softmax_scale is None:
+            # Default to 1/sqrt(k_channels) consistent with DotProductAttention
+            k_ch = k_channels if k_channels is not None else config.head_dim
+            self.softmax_scale = k_ch**-0.5
+        else:
+            self.softmax_scale = softmax_scale
 
         # DSA Indexer - shared layers reuse top-k computed by a preceding layer.
         self.indexer = None
@@ -1609,23 +1762,12 @@ class DSAttention(FleetLayer):
             # RoPE is computed internally by the indexer
             q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(x, qr)
 
-            # Convert to seq-first for FusedDSAIndexerLoss
-            q_idx_sf = q_idx.transpose([1, 0, 2, 3])  # [b,s,h,d] -> [s,b,h,d]
-            k_idx_sf = k_idx.transpose([1, 0, 2])  # [b,s,d] -> [s,b,d]
-            weights_idx_sf = weights_idx.transpose(
-                [1, 0, 2]
-            )  # [b,s,h] -> [s,b,h]
-
-            # Convert query/key to seq-first for loss computation
-            query_sf = query.transpose([1, 0, 2, 3])
-            key_sf = key.transpose([1, 0, 2, 3])
-
             indexer_loss = FusedDSAIndexerLoss.apply(
-                q_idx_sf,
-                weights_idx_sf,
-                k_idx_sf,
-                query_sf.detach(),
-                key_sf.detach(),
+                q_idx,
+                weights_idx,
+                k_idx,
+                query.detach(),
+                key.detach(),
                 self.softmax_scale,
                 self.indexer.index_topk,
                 float(self.dsa_indexer_loss_coeff),

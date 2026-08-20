@@ -865,6 +865,231 @@ class TestHyperConnectionTransformerLayerForward(unittest.TestCase):
         )
 
 
+class _RecordingSelfAttn(paddle.nn.Layer):
+    """Self-attention stub that records the cache-related kwargs it receives
+    and mutates the provided KV cache.
+
+    Lets tests assert that the mHC layer forwards past_key_values / layer_idx /
+    use_cache into self-attention and drives one cache update per step. Returns
+    an (output, bias) tuple matching the real attention contract consumed by
+    fused_h_res_h_post_bda.
+    """
+
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.calls = []
+
+    def forward(self, hidden_states, **kwargs):
+        seq_len = hidden_states.shape[0]  # seq-first: [S, B, C]
+        self.calls.append(
+            {
+                "layer_idx": kwargs.get("layer_idx"),
+                "use_cache": kwargs.get("use_cache"),
+                "past_key_values": kwargs.get("past_key_values"),
+                "rope_freqs_cis": kwargs.get("rope_freqs_cis"),
+                "rotary_pos_emb": kwargs.get("rotary_pos_emb"),
+                "swa_rotary_pos_emb": kwargs.get("swa_rotary_pos_emb"),
+                "swa_rotary_pos_cos": kwargs.get("swa_rotary_pos_cos"),
+                "swa_rotary_pos_sin": kwargs.get("swa_rotary_pos_sin"),
+                "seq_len": seq_len,
+            }
+        )
+        past_key_values = kwargs.get("past_key_values")
+        if kwargs.get("use_cache", False) and past_key_values is not None:
+            past_key_values.update(kwargs.get("layer_idx"), seq_len)
+        return paddle.zeros_like(hidden_states), None
+
+
+class _FakeKVCache:
+    """Minimal KV-cache double recording per-layer update calls."""
+
+    def __init__(self):
+        self.updates = []  # (layer_idx, seq_len) in call order
+        self.seen_lengths = {}  # layer_idx -> accumulated cached length
+
+    def update(self, layer_idx, seq_len):
+        self.updates.append((layer_idx, seq_len))
+        self.seen_lengths[layer_idx] = (
+            self.seen_lengths.get(layer_idx, 0) + seq_len
+        )
+
+
+class TestHyperConnectionTransformerLayerCacheDecode(unittest.TestCase):
+    """Two-step (prefill -> decode) regression for KV-cache propagation.
+
+    Covers both the plain-RoPE branch and the rope_freqs_cis branch of
+    HyperConnectionTransformerLayer._forward_attention, asserting that
+    past_key_values / layer_idx / use_cache reach self-attention and that the
+    cache is updated exactly once per step with the correct layer number.
+    """
+
+    def _build_layer(self, layer_number):
+        config = _make_hc_config()
+        layer = _make_hc_layer(config, layer_number=layer_number)
+        layer.eval()
+        stub = _RecordingSelfAttn(config.hidden_size)
+        layer.self_attn = stub
+        return config, layer, stub
+
+    def _assert_cache_flow(self, stub, cache, layer_number, seq_lens):
+        # One self-attention invocation per step (prefill, then decode).
+        self.assertEqual(len(stub.calls), len(seq_lens))
+        for call in stub.calls:
+            self.assertTrue(call["use_cache"])
+            self.assertEqual(call["layer_idx"], layer_number)
+            self.assertIs(call["past_key_values"], cache)
+        # Cache updated once per step with the right layer number and lengths.
+        self.assertEqual(cache.updates, [(layer_number, s) for s in seq_lens])
+        self.assertEqual(cache.seen_lengths[layer_number], sum(seq_lens))
+
+    def test_prefill_then_decode_plain_rope(self):
+        """Plain-RoPE branch: rotary_pos_emb forwarded, cache updated per step."""
+        layer_number = 2
+        config, layer, stub = self._build_layer(layer_number)
+        n, C, head_dim = (
+            config.num_residual_streams,
+            config.hidden_size,
+            config.head_dim,
+        )
+        B, S_prefill, S_decode = 2, 4, 1
+        cache = _FakeKVCache()
+
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([S_prefill, B, n * C]),
+                "attention_mask": None,
+                "rotary_pos_emb": paddle.randn([B, S_prefill, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([S_decode, B, n * C]),
+                "attention_mask": None,
+                "rotary_pos_emb": paddle.randn([B, S_decode, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+
+        self._assert_cache_flow(
+            stub, cache, layer_number, [S_prefill, S_decode]
+        )
+        # Plain-RoPE branch must take the else-branch: rotary_pos_emb is
+        # forwarded and rope_freqs_cis is not.
+        for call in stub.calls:
+            self.assertIsNotNone(call["rotary_pos_emb"])
+            self.assertIsNone(call["rope_freqs_cis"])
+
+    def test_prefill_then_decode_rope_freqs_cis(self):
+        """rope_freqs_cis branch: rope_freqs_cis forwarded, cache updated per step."""
+        layer_number = 3
+        config, layer, stub = self._build_layer(layer_number)
+        n, C, head_dim = (
+            config.num_residual_streams,
+            config.hidden_size,
+            config.head_dim,
+        )
+        B, S_prefill, S_decode = 2, 4, 1
+        cache = _FakeKVCache()
+
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([S_prefill, B, n * C]),
+                "attention_mask": None,
+                "rope_freqs_cis": paddle.randn([B, S_prefill, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([S_decode, B, n * C]),
+                "attention_mask": None,
+                "rope_freqs_cis": paddle.randn([B, S_decode, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+
+        self._assert_cache_flow(
+            stub, cache, layer_number, [S_prefill, S_decode]
+        )
+        # rope_freqs_cis branch must take the elif-branch: rope_freqs_cis is
+        # forwarded and rotary_pos_emb is not.
+        for call in stub.calls:
+            self.assertIsNotNone(call["rope_freqs_cis"])
+            self.assertIsNone(call["rotary_pos_emb"])
+
+
+class TestHyperConnectionTransformerLayerSWARoPE(unittest.TestCase):
+    """SWA + mHC regression for sliding-window RoPE propagation.
+
+    The plain-RoPE branch of HyperConnectionTransformerLayer._forward_attention
+    must forward swa_rotary_pos_emb / swa_rotary_pos_cos / swa_rotary_pos_sin to
+    self-attention, mirroring the base TransformerLayer. When self.is_swa is
+    set, Attention.forward overrides the plain rotary tensors with these SWA
+    ones; if they arrive as None, RoPE is skipped entirely and both prefill and
+    KV-cache decode produce wrong attention outputs. This guards the plumbing:
+    without the fix the stub would receive None for all three.
+    """
+
+    def _build_layer(self, layer_number):
+        # sliding_window set so this exercises the SWA-enabled configuration
+        # path alongside hyper-connections.
+        config = _make_hc_config(sliding_window=2)
+        layer = _make_hc_layer(config, layer_number=layer_number)
+        layer.eval()
+        stub = _RecordingSelfAttn(config.hidden_size)
+        layer.self_attn = stub
+        return config, layer, stub
+
+    def _step(self, layer, config, cache, seq_len, batch):
+        n, C, head_dim = (
+            config.num_residual_streams,
+            config.hidden_size,
+            config.head_dim,
+        )
+        layer.forward(
+            {
+                "hidden_states": paddle.randn([seq_len, batch, n * C]),
+                "attention_mask": None,
+                "rotary_pos_emb": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_emb": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_cos": paddle.randn([batch, seq_len, head_dim]),
+                "swa_rotary_pos_sin": paddle.randn([batch, seq_len, head_dim]),
+                "past_key_values": cache,
+                "use_cache": True,
+            }
+        )
+
+    def test_prefill_then_decode_forwards_swa_rope(self):
+        """Both prefill and decode must forward all three SWA RoPE tensors."""
+        layer_number = 2
+        config, layer, stub = self._build_layer(layer_number)
+        B, S_prefill, S_decode = 2, 4, 1
+        cache = _FakeKVCache()
+
+        self._step(layer, config, cache, S_prefill, B)
+        self._step(layer, config, cache, S_decode, B)
+
+        # One self-attention call per step, and every step forwarded the SWA
+        # RoPE trio (None here is the exact regression this guards).
+        self.assertEqual(len(stub.calls), 2)
+        for call in stub.calls:
+            self.assertIsNotNone(call["swa_rotary_pos_emb"])
+            self.assertIsNotNone(call["swa_rotary_pos_cos"])
+            self.assertIsNotNone(call["swa_rotary_pos_sin"])
+            # Plain rotary_pos_emb still forwarded alongside the SWA tensors.
+            self.assertIsNotNone(call["rotary_pos_emb"])
+        # Cache still driven once per step with the correct layer number.
+        self.assertEqual(
+            cache.updates, [(layer_number, S_prefill), (layer_number, S_decode)]
+        )
+
+
 class TestHyperConnectionTransformerLayerRecompute(unittest.TestCase):
     """Tests for HyperConnectionTransformerLayer with selective recompute."""
 
@@ -918,6 +1143,210 @@ class TestHyperConnectionTransformerLayerRecompute(unittest.TestCase):
         result = layer.forward(dict_args)
         self.assertEqual(list(result["hidden_states"].shape), [S, B, n * C])
         self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+
+    def test_selective_recompute_mhc_forward_flag(self):
+        """recompute_mhc_forward flag should be set correctly."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+        )
+        layer = _make_hc_layer(config)
+        self.assertTrue(layer.recompute_mhc_forward)
+
+    def test_selective_recompute_mhc_forward_disabled(self):
+        """recompute_mhc_forward should be False when not in modules list."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mlp"],
+        )
+        layer = _make_hc_layer(config)
+        self.assertFalse(layer.recompute_mhc_forward)
+
+    def test_selective_recompute_mhc_forward_eval(self):
+        """Forward with recompute_mhc_forward in eval mode should skip recompute."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+        )
+        layer = _make_hc_layer(config)
+        layer.eval()
+        B, S = 2, 4
+        n = config.num_residual_streams
+        C = config.hidden_size
+        hidden_states = paddle.randn([S, B, n * C])
+        dict_args = {"hidden_states": hidden_states, "attention_mask": None}
+        result = layer.forward(dict_args)
+        self.assertEqual(list(result["hidden_states"].shape), [S, B, n * C])
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+
+    def test_selective_recompute_mhc_forward_train(self):
+        """Forward with recompute_mhc_forward in train mode should use RecomputeWithoutOutput."""
+        config = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+        )
+        layer = _make_hc_layer(config)
+        layer.train()
+        B, S = 2, 4
+        n = config.num_residual_streams
+        C = config.hidden_size
+        hidden_states = paddle.randn([S, B, n * C])
+        hidden_states.stop_gradient = False
+        dict_args = {"hidden_states": hidden_states, "attention_mask": None}
+        result = layer.forward(dict_args)
+        self.assertEqual(list(result["hidden_states"].shape), [S, B, n * C])
+        self.assertFalse(paddle.isnan(result["hidden_states"]).any().item())
+        # Verify recompute objects were cleaned up
+        self.assertFalse(
+            hasattr(layer, "_attn_mhc_recompute")
+            and layer._attn_mhc_recompute is not None
+        )
+        self.assertFalse(
+            hasattr(layer, "_mlp_mhc_recompute")
+            and layer._mlp_mhc_recompute is not None
+        )
+
+    def test_selective_recompute_mhc_forward_dict_mode(self):
+        """Dict mode: mhc_forward with per-module recompute_num_layers."""
+        config = _make_hc_config(
+            num_hidden_layers=4,
+            recompute_granularity="selective",
+            recompute_modules={"mhc_forward": 2},
+            recompute_method="block",
+            pipeline_model_parallel_size=1,
+        )
+        # Layer 1 should be in recompute range, layer 4 should not
+        layer1 = _make_hc_layer(config, layer_number=1)
+        layer4 = _make_hc_layer(config, layer_number=4)
+        self.assertTrue(layer1.recompute_mhc_forward)
+        self.assertFalse(layer4.recompute_mhc_forward)
+
+    def test_selective_recompute_mhc_forward_list_with_num_layers(self):
+        """List mode + recompute_num_layers: only first N layers get mhc_forward."""
+        config = _make_hc_config(
+            num_hidden_layers=4,
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+            recompute_num_layers=2,
+            recompute_method="block",
+            pipeline_model_parallel_size=1,
+        )
+        layer1 = _make_hc_layer(config, layer_number=1)
+        layer4 = _make_hc_layer(config, layer_number=4)
+        self.assertTrue(layer1.recompute_mhc_forward)
+        self.assertFalse(layer4.recompute_mhc_forward)
+
+    def test_selective_recompute_mhc_forward_backward_correctness(self):
+        """Backward with mhc_forward recompute produces same grads as without."""
+        paddle.seed(42)
+        # Create two layers with identical weights — one with mhc_forward, one without
+        config_recompute = _make_hc_config(
+            recompute_granularity="selective",
+            recompute_modules=["mhc_forward"],
+        )
+        config_no_recompute = _make_hc_config(
+            recompute_granularity=None,
+            recompute_modules=None,
+        )
+        layer_rc = _make_hc_layer(config_recompute)
+        layer_no = _make_hc_layer(config_no_recompute)
+
+        # Copy weights from layer_rc to layer_no
+        state = layer_rc.state_dict()
+        layer_no.set_state_dict(state)
+
+        layer_rc.train()
+        layer_no.train()
+
+        B, S = 2, 4
+        n = config_recompute.num_residual_streams
+        C = config_recompute.hidden_size
+
+        # Same input
+        x_data = paddle.randn([S, B, n * C])
+        x_rc = x_data.clone()
+        x_rc.stop_gradient = False
+        x_no = x_data.clone()
+        x_no.stop_gradient = False
+
+        # Forward
+        dict_rc = {"hidden_states": x_rc, "attention_mask": None}
+        dict_no = {"hidden_states": x_no, "attention_mask": None}
+        out_rc = layer_rc.forward(dict_rc)["hidden_states"]
+        out_no = layer_no.forward(dict_no)["hidden_states"]
+
+        # Check forward outputs match
+        self.assertTrue(
+            paddle.allclose(out_rc, out_no, atol=1e-5, rtol=1e-4).item(),
+            "Forward outputs differ between recompute and no-recompute",
+        )
+
+        # Backward
+        loss_rc = out_rc.sum()
+        loss_no = out_no.sum()
+        loss_rc.backward()
+        loss_no.backward()
+
+        # Check input grads match
+        self.assertTrue(
+            paddle.allclose(x_rc.grad, x_no.grad, atol=1e-5, rtol=1e-4).item(),
+            "Input gradients differ between recompute and no-recompute",
+        )
+
+        # Check mHC parameter grads match — specifically verify hyper-connection
+        # critical params have non-None grads on both sides before comparing.
+        mhc_critical_patterns = [
+            "self_attention_hyper_connection.mapping_proj.weight",
+            "self_attention_hyper_connection.alpha_pre",
+            "self_attention_hyper_connection.alpha_post",
+            "self_attention_hyper_connection.alpha_res",
+            "self_attention_hyper_connection.bias",
+            "mlp_hyper_connection.mapping_proj.weight",
+            "mlp_hyper_connection.alpha_pre",
+            "mlp_hyper_connection.alpha_post",
+            "mlp_hyper_connection.alpha_res",
+            "mlp_hyper_connection.bias",
+        ]
+        rc_params = dict(layer_rc.named_parameters())
+        no_params = dict(layer_no.named_parameters())
+
+        # First, assert all critical mHC params have non-None grads on BOTH sides
+        for pattern in mhc_critical_patterns:
+            matched = [n for n in rc_params if pattern in n]
+            self.assertTrue(
+                len(matched) > 0,
+                f"No parameter matching '{pattern}' found in layer",
+            )
+            for name in matched:
+                self.assertIsNotNone(
+                    rc_params[name].grad,
+                    f"Recompute side grad is None for {name}",
+                )
+                self.assertIsNotNone(
+                    no_params[name].grad,
+                    f"No-recompute side grad is None for {name}",
+                )
+                self.assertTrue(
+                    paddle.allclose(
+                        rc_params[name].grad,
+                        no_params[name].grad,
+                        atol=1e-5,
+                        rtol=1e-4,
+                    ).item(),
+                    f"Grad mismatch for mHC param {name}",
+                )
+
+        # Also check remaining params (non-critical) where both have grads
+        for (name_rc, param_rc), (name_no, param_no) in zip(
+            layer_rc.named_parameters(), layer_no.named_parameters()
+        ):
+            if param_rc.grad is not None and param_no.grad is not None:
+                self.assertTrue(
+                    paddle.allclose(
+                        param_rc.grad, param_no.grad, atol=1e-5, rtol=1e-4
+                    ).item(),
+                    f"Grad mismatch for param {name_rc}",
+                )
 
 
 # ==============================================================================
@@ -1313,6 +1742,29 @@ class TestGetMTPLayerSpecWithHC(unittest.TestCase):
         specs = get_gpt_mtp_layers_spec(config, decoder_specs)
         self.assertEqual(len(specs), 2)
         self.assertEqual(specs[0].layer, MultiTokenPredictionLayer)
+
+
+class TestUseFusedMhcValidation(unittest.TestCase):
+    """Tests for use_fused_mhc validation in TransformerConfig."""
+
+    def test_use_fused_mhc_without_hyper_connections_raises(self):
+        """use_fused_mhc=True without enable_hyper_connections should raise ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            _make_config(use_fused_mhc=True, enable_hyper_connections=False)
+        self.assertIn(
+            "use_fused_mhc requires enable_hyper_connections=True",
+            str(ctx.exception),
+        )
+
+    def test_use_fused_mhc_with_hyper_connections_ok(self):
+        """use_fused_mhc=True with enable_hyper_connections=True should not raise."""
+        config = _make_config(
+            use_fused_mhc=True,
+            enable_hyper_connections=True,
+            num_residual_streams=4,
+        )
+        self.assertTrue(config.use_fused_mhc)
+        self.assertTrue(config.enable_hyper_connections)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,70 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from itertools import chain
+
+import paddle
+
+logger = logging.getLogger(__name__)
+
+g_has_print_recovery_log = False
+
+
+def keep_indexer_grad_path(hidden_states, config):
+    """Keep a recompute segment differentiable when only the CSA Indexer trains.
+
+    Every recompute wrapper in this repo is a PyLayer, so whether its output is
+    differentiable depends only on its input tensors, not on the parameters used
+    inside. With every backbone parameter frozen (``train_indexer_only``) the
+    segment input has ``stop_gradient=True``, the segment output inherits it, and
+    the indexer loss attached inside the segment silently never gets a backward
+    pass. ``RecomputeWithoutOutput`` is worse than ``recompute``: it skips
+    registering its recompute hook entirely when the hook tensor is detached
+    (``tensor_parallel/random.py:590``), so there is not even a warning.
+
+    Re-entering the autograd graph through a scalar anchor restores that path
+    without changing any activation value. Only the first segment whose input is
+    still detached pays for it: once a segment output is differentiable, the
+    following ones short-circuit here.
+
+    Call this on the input of every recompute segment that can contain a CSA
+    Indexer: the base ``TransformerLayer`` layer-level segment, and
+    ``DSv4HybridAttention``'s inner ``full_attn`` segment.
+    """
+    if not getattr(config, "train_indexer_only", False):
+        return hidden_states
+    if not isinstance(hidden_states, paddle.Tensor):
+        return hidden_states
+    if not hidden_states.stop_gradient or not paddle.is_grad_enabled():
+        return hidden_states
+    anchor = paddle.zeros([1], dtype=hidden_states.dtype)
+    anchor.stop_gradient = False
+    return hidden_states + anchor
+
+
+def has_recovered():
+    """has recovered"""
+    recover_step = os.getenv("RECOVER_STEP")
+    if recover_step is None:
+        return True
+    recover_step = int(recover_step)
+    current_step = os.getenv("TRAINER_GLOBAL_STEP")
+    if current_step is None:
+        current_step = os.getenv("PDC_INIT_STEP")
+        assert current_step is not None, (
+            "TRAINER_GLOBAL_STEP or PDC_INIT_STEP should be specified"
+        )
+    current_step = int(current_step)
+    if current_step > recover_step:
+        global g_has_print_recovery_log
+        if not g_has_print_recovery_log:
+            logger.info(f"Recovery would be enabled in the step {current_step}")
+            g_has_print_recovery_log = True
+        return True
+    else:
+        return False
 
 
 def need_recompute_in_block(layer_number, config, recompute_num_layers):

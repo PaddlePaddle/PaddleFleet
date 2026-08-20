@@ -32,7 +32,11 @@ from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
-from paddlefleet.models.gpt.lm_head import GPTLMHead
+from paddlefleet.models.gpt.lm_head import (
+    GPTLMHead,
+    GPTMainLMHead,
+    GPTMTPLMHead,
+)
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
 )
@@ -43,6 +47,35 @@ from paddlefleet.transformer.transformer_layer import (
 )
 
 logger = logging.getLogger(__name__)
+
+_VISION_MERGE_PREFIX = "vision_merge."
+_VISION_MODEL_PREFIX = "vision_merge.vision_model."
+
+
+def is_vision_merge_key(key: str) -> bool:
+    """Whether ``key`` belongs to the vision encoder held by ``vision_merge``.
+
+    ``vision_merge`` (qwen3_5 PP mode) is a thin wrapper whose only parameters
+    live under ``vision_model``; those keys are dropped from the pipeline name
+    mapping and re-added from the vision model's own state dict. A parameter
+    placed directly on the wrapper would be dropped without being re-added,
+    i.e. silently missing from every checkpoint, so reject it loudly.
+
+    Raises ``ValueError`` (not ``assert``) on purpose: with ``python -O`` an
+    assertion would vanish, this function would answer ``True`` and the
+    parameter would be silently lost from the checkpoint.
+    """
+    if not key.startswith(_VISION_MERGE_PREFIX):
+        return False
+    if not key.startswith(_VISION_MODEL_PREFIX):
+        raise ValueError(
+            f"Unexpected parameter {key!r} directly on vision_merge. Only "
+            f"{_VISION_MODEL_PREFIX}* is re-exported through the vision "
+            "model's own state dict; anything else would be silently dropped "
+            "from the checkpoint. Move the parameter under vision_model or "
+            "extend the state-dict plumbing in GPTModel."
+        )
+    return True
 
 
 def build_overlapped_nodes(forward_chunk, backward_chunk):
@@ -139,7 +172,7 @@ class GPTSublayersSpec:
     mhc_contract: LayerSpec | None = None
     tail_empty_layers: list[LayerSpec] | None = None
     mtp: list[LayerSpec] | None = None
-    mtp_embedding: LayerSpec | None = None
+    output_block_attn_res: LayerSpec | None = None
     layer_norm: LayerSpec | None = None
     lm_head: LayerSpec | None = None
     mtp_lm_head: LayerDesc | None = None
@@ -198,6 +231,25 @@ class GPTModel(PipelineLayer):
                 if isinstance(layer, GPTLMHead):
                     layer.weight = shared_embed_weight
 
+        # MTP embedding weight management
+        if (
+            self.config.enable_mtp_magic_send
+            and self.config.num_nextn_predict_layers > 0
+        ):
+            # Make all MTP layers on this rank share one physical embedding Parameter.
+            self._tie_mtp_embed_weights_intra_rank()
+            # Create a cross-PP-stage comm group containing only ranks that hold mtp_embed.
+            self._create_mtp_embed_global_group()
+            # Broadcast embedding weight from stage 0 to MTP stages so they start identical.
+            self._synchronize_mtp_embed_weight()
+            # Mark which rank is the "primary" for gradient-clipping dedup.
+            self._mark_mtp_embed_shared_flags()
+            # Sanity check: MTP layer depths across all PP ranks form 0..N-1.
+            self._assert_mtp_depth_contiguous()
+
+        # Tie GPTMTPLMHead weight to GPTMainLMHead weight on the same stage.
+        self._tie_mtp_lm_head_weight()
+
     def _get_weight_only_params(self):
         """Get all parameters marked with is_weight_only_mtp flag."""
         return [
@@ -205,6 +257,32 @@ class GPTModel(PipelineLayer):
             for param in self.state_dict().values()
             if getattr(param, "is_weight_only_mtp", False)
         ]
+
+    def _tie_mtp_lm_head_weight(self):
+        """Tie GPTMTPLMHead.weight to GPTMainLMHead.weight on the same rank."""
+        main_head = None
+        mtp_head = None
+        if (
+            self._num_virtual_pipeline_stages > 1
+            and hasattr(self, "_model_chunks")
+            and self._model_chunks
+        ):
+            for chunk in self._model_chunks:
+                for layer in chunk.run_function:
+                    if isinstance(layer, GPTMainLMHead):
+                        main_head = layer
+                    elif isinstance(layer, GPTMTPLMHead):
+                        mtp_head = layer
+        else:
+            for layer in self.run_function:
+                if isinstance(layer, GPTMainLMHead):
+                    main_head = layer
+                elif isinstance(layer, GPTMTPLMHead):
+                    mtp_head = layer
+        if main_head is None or mtp_head is None:
+            return
+        if mtp_head.weight is not main_head.weight:
+            mtp_head._parameters["weight"] = main_head.weight
 
     # ========================================
     def offload_weight_only_params(self):
@@ -239,8 +317,6 @@ class GPTModel(PipelineLayer):
                 name_prefix,
             )
         elif self.config.enable_mtp_magic_send:
-            # MTP magic send: share embedding weight between GPTEmbedding (first stage)
-            # and MTPEmbeddingLayer (last stage) via SharedLayerDesc broadcast mechanism.
             self.add_sequential_layer(
                 layers,
                 SharedLayerDesc(
@@ -266,10 +342,23 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(spec.mhc_expand), f"{name_prefix}.mhc_expand"
             )
 
-        for transformer_layer_spec in spec.transformer_layers:
+        for idx, transformer_layer_spec in enumerate(spec.transformer_layers):
+            is_last = idx == len(spec.transformer_layers) - 1
+            if (
+                is_last
+                and getattr(self.config, "mtp_shared_last_layer", False)
+                and spec.mtp
+            ):
+                desc = SharedLayerDesc(
+                    "mtp_reuse_transformer",
+                    transformer_layer_spec,
+                    shared_weight_attr="transformer_layer_weights",
+                )
+            else:
+                desc = LayerDesc(transformer_layer_spec)
             self.add_sequential_layer(
                 layers,
-                LayerDesc(transformer_layer_spec),
+                desc,
                 f"{name_prefix}.layers.{i}",
             )
             i += 1
@@ -287,28 +376,47 @@ class GPTModel(PipelineLayer):
             self.config.gpt_model_use_experimental_version
             and self.config.num_nextn_predict_layers >= 1
         ):
+            if spec.output_block_attn_res is not None:
+                self.add_sequential_layer(
+                    layers,
+                    LayerDesc(spec.output_block_attn_res),
+                    f"{name_prefix}.output_attn_res",
+                )
             self.add_sequential_layer(
                 layers, LayerDesc(spec.layer_norm), name_prefix
             )
 
         if spec.mtp:
-            # MTP magic send: MTPEmbeddingLayer shares weight with GPTEmbedding
-            # via SharedLayerDesc("mtp_embed") broadcast mechanism.
-            if spec.mtp_embedding:
-                self.add_sequential_layer(
-                    layers,
-                    SharedLayerDesc(
-                        "mtp_embed",
-                        spec.mtp_embedding,
-                        shared_weight_attr="embedding_weight",
-                    ),
-                    f"{name_prefix}.mtp_embedding",
-                )
             for mtp_spec in spec.mtp:
+                if self.config.enable_mtp_magic_send:
+                    desc = LayerDesc(mtp_spec)
+                elif getattr(self.config, "mtp_shared_last_layer", False):
+                    desc = SharedLayerDesc(
+                        "mtp_reuse_transformer",
+                        mtp_spec,
+                        shared_submodule_weight_only=True,
+                        shared_weight_attr="transformer_layer_weights",
+                    )
+                else:
+                    desc = LayerDesc(mtp_spec)
                 self.add_sequential_layer(
-                    layers, LayerDesc(mtp_spec), f"{name_prefix}.layers.{i}"
+                    layers, desc, f"{name_prefix}.layers.{i}"
                 )
                 i += 1
+
+        # multimax
+        multimax_mode = getattr(self.config, "multimax_modules", None) or []
+        use_multimax_lmhead = "lm_head" in multimax_mode
+        if use_multimax_lmhead and getattr(
+            self.config, "separate_mtp_headloss", False
+        ):
+            lmhead_shared_weights = [
+                "embedding_weight",
+                "multimax_ranges",
+                "multimax_ts",
+            ]
+        else:
+            lmhead_shared_weights = ["embedding_weight"]
 
         if spec.mtp_lm_head:
             self.add_sequential_layer(
@@ -316,7 +424,7 @@ class GPTModel(PipelineLayer):
                 SharedLayerDesc(
                     "embed",
                     spec.mtp_lm_head,
-                    shared_weight_attr="embedding_weight",
+                    shared_weight_attr=lmhead_shared_weights,
                 ),
                 f"{name_prefix}.shared_mtp_lm_head",
             )
@@ -335,6 +443,12 @@ class GPTModel(PipelineLayer):
             self.config.gpt_model_use_experimental_version
             and self.config.num_nextn_predict_layers >= 1
         ):
+            if spec.output_block_attn_res is not None:
+                self.add_sequential_layer(
+                    layers,
+                    LayerDesc(spec.output_block_attn_res),
+                    f"{name_prefix}.output_attn_res",
+                )
             self.add_sequential_layer(
                 layers, LayerDesc(spec.layer_norm), name_prefix
             )
@@ -344,7 +458,7 @@ class GPTModel(PipelineLayer):
                 SharedLayerDesc(
                     "embed",
                     spec.lm_head,
-                    shared_weight_attr="embedding_weight",
+                    shared_weight_attr=lmhead_shared_weights,
                 ),
                 f"{name_prefix}.shared_head",
             )
@@ -533,20 +647,29 @@ class GPTModel(PipelineLayer):
             pp_to_single_mapping = {}
 
             state_dict_keys = list(super().state_dict().keys())
-            first_key = ""
-            for k in state_dict_keys:
-                if "shared_layers" not in k:
-                    first_key = k
-                    break
-            first_key = first_key.split(".")
-            # if use virtual pp_degree, the prefix is like 0.0.xxx
-            # else it will be like 0.xxx
+
+            # Whether the layers are chunked is a property of the model, not
+            # something the key shapes can tell: a chunk key is
+            # `{chunk_start}.{local_idx}.xxx`, but an ordinary PP
+            # `LayerDesc(nn.Sequential, ...)` also yields
+            # `{global_idx}.{sublayer_idx}.xxx`, and conversely the first key of
+            # a chunked stage may be a shared layer alias or a directly added
+            # layer, both of which keep a non digit second segment. Ask the
+            # pipeline layer itself; dualpipev chunks the layers as well.
             use_virtual_pp_degree = (
-                first_key[0].isdigit() and first_key[1].isdigit()
+                self._num_virtual_pipeline_stages > 1 or self._use_dualpipev
             )
 
             prefixes = self.get_sequential_name_prefixes()
+            shared_layer_names = {
+                layer.layer_name
+                for layer in self.layers
+                if isinstance(layer, SharedLayerDesc)
+            }
             for k in state_dict_keys:
+                # Skip vision_merge.* keys - they are handled separately
+                if is_vision_merge_key(k):
+                    continue
                 name_splited = k.split(".")
                 if use_virtual_pp_degree:
                     if name_splited[0].isdigit():
@@ -556,13 +679,31 @@ class GPTModel(PipelineLayer):
                             )
                             single_name = [prefixes[idx]]
                             single_name.extend(name_splited[2:])
-                        else:
-                            single_name = [prefixes[str(len(prefixes) - 1)]]
+                        elif name_splited[1] in shared_layer_names:
+                            # A SharedLayerDesc with `forward_func` is
+                            # registered on the chunk itself under VPP, so its
+                            # key is `{chunk_start}.{shared_name}.rest`. It
+                            # aliases the same parameter as
+                            # `shared_layers.{shared_name}.rest` and must
+                            # resolve to the same single card name.
+                            single_name = [
+                                self.get_shardlayer_prefix(name_splited)
+                            ]
                             single_name.extend(name_splited[2:])
-                            logger.warning(
-                                f"Please check! we treat this key as last layer, get {k}, \
-                                        set origin name as {'.'.join(single_name)}"
+                        else:
+                            # Layers directly added to the PipelineLayer under
+                            # VPP (e.g. lm_head) are named `{global_idx}.rest`
+                            # instead of `{chunk_start}.{local_idx}.rest`, so
+                            # the first segment is already the global index.
+                            # Resolve them per layer like the non-VPP branch,
+                            # otherwise every such key collapses onto the last
+                            # layer prefix, drops its submodule name and
+                            # collides with its siblings.
+                            idx = name_splited[0]
+                            single_name = (
+                                [] if prefixes[idx] == "" else [prefixes[idx]]
                             )
+                            single_name.extend(name_splited[1:])
                     elif name_splited[0] == "shared_layers":
                         single_name = [self.get_shardlayer_prefix(name_splited)]
                         single_name.extend(name_splited[2:])
@@ -613,6 +754,16 @@ class GPTModel(PipelineLayer):
             name_prefix = ""
         if self._pipeline_name_mapping is None:
             self._set_pipeline_name_mapping()
+
+        # Remove the vision encoder's keys; they are re-added with the proper
+        # mapping below. ``is_vision_merge_key`` also rejects parameters placed
+        # directly on the wrapper, which would otherwise vanish silently.
+        vision_merge_keys = [
+            k for k in state_dict.keys() if is_vision_merge_key(k)
+        ]
+        for k in vision_merge_keys:
+            state_dict.pop(k)
+
         # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
         for k in list(state_dict.keys()):
             v = state_dict.pop(k)
@@ -623,6 +774,14 @@ class GPTModel(PipelineLayer):
                 continue
             v.key = self._pp_to_single_mapping[k]
             state_dict[self._pp_to_single_mapping[k]] = v
+
+        # Re-add vision model keys with proper mapping
+        if hasattr(self, "vision_merge") and self.vision_merge is not None:
+            vision_model = self.vision_merge.vision_model
+            if hasattr(vision_model, "state_dict"):
+                vm_state = vision_model.state_dict()
+                state_dict.update(vm_state)
+
         return state_dict
 
     def set_state_dict(self, state_dict, *args, **kwargs):
@@ -632,11 +791,35 @@ class GPTModel(PipelineLayer):
             "The pipeline stage must have parameters!"
         )
 
+        # Separate vision model keys for vision_merge sublayer
+        vision_state = {}
+        if hasattr(self, "vision_merge") and self.vision_merge is not None:
+            for k in list(state_dict.keys()):
+                if k.startswith("model.vision_model."):
+                    vision_state[k] = state_dict.pop(k)
+            if not vision_state:
+                logger.warning(
+                    "This stage owns a vision_merge sublayer but the state dict "
+                    "has no 'model.vision_model.*' keys, so the vision encoder "
+                    "keeps its initial weights. Check that the checkpoint is a "
+                    "multimodal one."
+                )
+
         for k in list(state_dict.keys()):
             v = state_dict.pop(k)
             if k not in self._pipeline_name_mapping:
                 continue
             state_dict[self._pipeline_name_mapping[k]] = v
+
+        # Load vision model state into vision_merge.vision_model
+        if (
+            vision_state
+            and hasattr(self, "vision_merge")
+            and self.vision_merge is not None
+        ):
+            vision_model = self.vision_merge.vision_model
+            if hasattr(vision_model, "set_state_dict"):
+                vision_model.set_state_dict(vision_state)
 
         ret = super().set_state_dict(state_dict, *args, **kwargs)
         return ret
@@ -648,6 +831,9 @@ class GPTModel(PipelineLayer):
         super_state_dict = super().state_dict()
         structure_name_to_tensor = {}
         for k, v in super_state_dict.items():
+            # Skip vision_merge.* keys - handled separately
+            if is_vision_merge_key(k):
+                continue
             k = self._pp_to_single_mapping[k]
             if k not in structure_name_to_tensor:
                 structure_name_to_tensor[k] = v
@@ -680,6 +866,16 @@ class GPTModel(PipelineLayer):
         else:
             name_prefix = ""
 
+        # For qwen3_5 PP mode: vision_merge is added as sublayer of GPTModel,
+        # so its keys appear as "vision_merge.*" in super().sharded_state_dict().
+        # Remove them here; we'll re-add properly remapped keys from
+        # vision_model.sharded_state_dict() below.
+        vision_merge_keys = [
+            k for k in sharded_state_dict.keys() if is_vision_merge_key(k)
+        ]
+        for k in vision_merge_keys:
+            sharded_state_dict.pop(k)
+
         for k in list(sharded_state_dict.keys()):
             v = sharded_state_dict.pop(k)
             # remove name_prefix
@@ -690,6 +886,17 @@ class GPTModel(PipelineLayer):
                 continue
             v.key = self._pp_to_single_mapping[k]
             sharded_state_dict[self._pp_to_single_mapping[k]] = v
+
+        # For qwen3_5 PP mode: get properly remapped vision model keys
+        # from the VisionModel's own sharded_state_dict (which uses
+        # _pp_to_single_mapping to produce "model.vision_model.*" keys).
+        if hasattr(self, "vision_merge") and self.vision_merge is not None:
+            vision_model = self.vision_merge.vision_model
+            if hasattr(vision_model, "sharded_state_dict"):
+                vm_sharded = vision_model.sharded_state_dict(
+                    structured_name_prefix=""
+                )
+                sharded_state_dict.update(vm_sharded)
 
         def increment_expert_number(s, increment):
             import re
@@ -747,6 +954,21 @@ class GPTModel(PipelineLayer):
                         batch_mode=batch_mode, quant_transpose=quant_transpose
                     )
 
+    def clear_fp8_quant_weight(self):
+        if self._num_virtual_pipeline_stages > 1:
+            for idx, chunk in enumerate(self._model_chunks):
+                for idx, layer in enumerate(chunk):
+                    if isinstance(layer, TransformerLayer):
+                        layer.clear_fp8_quant_weight()
+                    elif isinstance(layer, MultiTokenPredictionLayer):
+                        layer.transformer_layer.clear_fp8_quant_weight()
+        else:
+            for idx, layer in enumerate(self.run_function):
+                if isinstance(layer, TransformerLayer):
+                    layer.clear_fp8_quant_weight()
+                elif isinstance(layer, MultiTokenPredictionLayer):
+                    layer.transformer_layer.clear_fp8_quant_weight()
+
     def use_fp8(self):
         if self._num_virtual_pipeline_stages > 1:
             for idx, chunk in enumerate(self._model_chunks):
@@ -758,3 +980,239 @@ class GPTModel(PipelineLayer):
                 if isinstance(layer, TransformerLayer) and layer.use_fp8():
                     return True
             return False
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # MTP Magic Send: embedding weight management
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _get_all_mtp_layers(self):
+        """Traverse all virtual chunks and collect MultiTokenPredictionLayer instances."""
+        layers = []
+        if (
+            self._num_virtual_pipeline_stages > 1
+            and hasattr(self, "_model_chunks")
+            and self._model_chunks
+        ):
+            for chunk in self._model_chunks:
+                for layer in chunk.run_function:
+                    if isinstance(layer, MultiTokenPredictionLayer):
+                        layers.append(layer)
+        else:
+            for layer in self.run_function:
+                if isinstance(layer, MultiTokenPredictionLayer):
+                    layers.append(layer)
+        return layers
+
+    def _get_mtp_embed_primary_weight(self):
+        """Get the primary (shared) Parameter for mtp_embed weight on this rank."""
+        if "mtp_embed" in self.shared_layers:
+            return self.shared_layers["mtp_embed"].embedding_weight
+        mtp_layers = self._get_all_mtp_layers()
+        if mtp_layers:
+            return mtp_layers[0].mtp_embed.weight
+        return None
+
+    def _tie_mtp_embed_weights_intra_rank(self):
+        """Tie all MTP layers' mtp_embed.weight to the same primary Parameter on this rank."""
+        mtp_layers = self._get_all_mtp_layers()
+        if not mtp_layers:
+            return
+        if "mtp_embed" in self.shared_layers:
+            primary_weight = self.shared_layers["mtp_embed"].embedding_weight
+        else:
+            primary_weight = mtp_layers[0].mtp_embed.weight
+        for layer in mtp_layers:
+            if (
+                layer.mtp_embed is not None
+                and layer.mtp_embed.weight is not primary_weight
+            ):
+                layer.mtp_embed._parameters["weight"] = primary_weight
+
+        # Verify weight tie
+        primary = self._get_mtp_embed_primary_weight()
+        for layer in mtp_layers:
+            if layer.mtp_embed is not None:
+                assert layer.mtp_embed.weight is primary, (
+                    f"MTP embed weight tie failed for layer_number={layer.layer_number}: "
+                    f"weight id {id(layer.mtp_embed.weight)} != primary {id(primary)}"
+                )
+        if "mtp_embed" in self.shared_layers:
+            assert primary is self.shared_layers["mtp_embed"].embedding_weight
+
+    def _create_mtp_embed_global_group(self):
+        """Create a communication group containing only PP ranks that hold mtp_embed weight.
+
+        All ranks in the world must call new_group in the same order to keep
+        gid counters synchronized.
+        """
+        import paddle.distributed
+
+        hcg = fleet.get_hybrid_communicate_group()
+        pipe_group = hcg.get_pipe_parallel_group()
+        global_rank = paddle.distributed.get_rank()
+
+        has_weight = self._get_mtp_embed_primary_weight() is not None
+        gathered = []
+        paddle.distributed.all_gather_object(
+            gathered, has_weight, group=pipe_group
+        )
+
+        pipe_ranks = list(pipe_group.ranks)
+        mtp_ranks = [r for r, has in zip(pipe_ranks, gathered) if has]
+
+        # Gather globally to ensure all ranks call new_group in the same order
+        world_size = paddle.distributed.get_world_size()
+        all_mtp_ranks_lists = []
+        paddle.distributed.all_gather_object(all_mtp_ranks_lists, mtp_ranks)
+
+        # Deduplicate
+        seen = set()
+        unique_mtp_groups = []
+        for ranks_list in all_mtp_ranks_lists:
+            key = tuple(sorted(ranks_list))
+            if key not in seen and len(key) > 1:
+                seen.add(key)
+                unique_mtp_groups.append(sorted(ranks_list))
+
+        unique_mtp_groups.sort()
+
+        self._mtp_embed_global_group = None
+        for ranks_list in unique_mtp_groups:
+            group = paddle.distributed.new_group(ranks=ranks_list)
+            if global_rank in ranks_list:
+                self._mtp_embed_global_group = group
+
+        self._has_mtp_embed_weight = has_weight
+
+    def _synchronize_mtp_embed_weight(self):
+        """Broadcast embedding weight from stage 0 to all PP ranks that hold MTP layers."""
+        import paddle
+        import paddle.distributed
+
+        hcg = fleet.get_hybrid_communicate_group()
+        pipe_group = hcg.get_pipe_parallel_group()
+        src_rank = hcg.get_rank_from_stage(0)
+        primary_weight = self._get_mtp_embed_primary_weight()
+        if primary_weight is not None:
+            with paddle.no_grad():
+                paddle.distributed.broadcast(
+                    primary_weight, src=src_rank, group=pipe_group
+                )
+        else:
+            # Intermediate stage: participate in broadcast with a dummy buffer
+            divisor = (
+                getattr(self.config, "make_vocab_size_divisible_by", 1) or 1
+            )
+            tp = self.config.tensor_model_parallel_size
+            padded_vocab = int(
+                (
+                    (self.config.vocab_size + (divisor * tp) - 1)
+                    // (divisor * tp)
+                )
+                * (divisor * tp)
+            )
+            local_vocab = padded_vocab // tp
+            dtype = (
+                self.config.params_dtype
+                if hasattr(self.config, "params_dtype")
+                else paddle.float32
+            )
+            if isinstance(dtype, str):
+                dtype = getattr(paddle, dtype, paddle.float32)
+            recv_buf = paddle.zeros(
+                [local_vocab, self.config.hidden_size], dtype=dtype
+            )
+            with paddle.no_grad():
+                paddle.distributed.broadcast(
+                    recv_buf, src=src_rank, group=pipe_group
+                )
+
+    def _mark_mtp_embed_shared_flags(self):
+        """Set is_firstly_shared flag for gradient clipping deduplication."""
+        primary_weight = self._get_mtp_embed_primary_weight()
+        if primary_weight is None:
+            return
+        is_pivot = "mtp_embed" in self.shared_layers
+        primary_weight.is_firstly_shared = is_pivot
+
+    def _assert_mtp_depth_contiguous(self):
+        """Assert that MTP layer depths are contiguous 0..N-1 across all PP ranks."""
+        import paddle.distributed
+
+        mtp_layers = self._get_all_mtp_layers()
+        local_depths = sorted(layer.layer_number for layer in mtp_layers)
+        assert len(local_depths) == len(set(local_depths)), (
+            f"duplicate MTP layer_number on this rank: {local_depths}"
+        )
+        hcg = fleet.get_hybrid_communicate_group()
+        pipe_group = hcg.get_pipe_parallel_group()
+        gathered = []
+        paddle.distributed.all_gather_object(
+            gathered, local_depths, group=pipe_group
+        )
+        all_depths = sorted(d for sub in gathered for d in sub)
+        N = self.config.num_nextn_predict_layers
+        assert all_depths == list(range(N)), (
+            f"MTP depths not contiguous 0..{N - 1}: got {all_depths}"
+        )
+
+    def allreduce_shared_weight_gradients(self):
+        """Override: mtp_embed uses a dedicated sub-group allreduce;
+        other shared layers keep the framework's original pairwise logic.
+        """
+        import paddle
+        import paddle.distributed
+
+        # Get mtp_embed grad id to skip it in the pairwise loop below
+        mtp_embed_weight = None
+        if hasattr(self, "_mtp_embed_global_group"):
+            mtp_embed_weight = self._get_mtp_embed_primary_weight()
+        mtp_embed_grad_id = None
+        if mtp_embed_weight is not None:
+            g = (
+                mtp_embed_weight.main_grad
+                if hasattr(mtp_embed_weight, "main_grad")
+                else mtp_embed_weight.grad
+            )
+            if g is not None:
+                mtp_embed_grad_id = id(g)
+
+        # Pairwise allreduce for other shared layers (skip mtp_embed)
+        for key, comm in self.shared_comm.items():
+            for weight_attr in comm["weight_attr"]:
+                obj = getattr(comm["layer"], weight_attr)
+                params = (
+                    [("", obj)] if isinstance(obj, paddle.Tensor) else list(obj)
+                )
+                for _, param in params:
+                    grad = (
+                        param.main_grad
+                        if hasattr(param, "main_grad")
+                        else param.grad
+                    )
+                    if grad is None:
+                        continue
+                    if (
+                        mtp_embed_grad_id is not None
+                        and id(grad) == mtp_embed_grad_id
+                    ):
+                        continue
+                    paddle.distributed.all_reduce(
+                        grad.contiguous(), group=comm["group"]
+                    )
+
+        # mtp_embed: allreduce within dedicated sub-group
+        if (
+            mtp_embed_weight is not None
+            and hasattr(self, "_mtp_embed_global_group")
+            and self._mtp_embed_global_group is not None
+        ):
+            grad = (
+                mtp_embed_weight.main_grad
+                if hasattr(mtp_embed_weight, "main_grad")
+                else mtp_embed_weight.grad
+            )
+            if grad is not None:
+                paddle.distributed.all_reduce(
+                    grad.contiguous(), group=self._mtp_embed_global_group
+                )

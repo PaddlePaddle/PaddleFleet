@@ -105,5 +105,47 @@ class TestDeepEPImport(unittest.TestCase):
             from paddlefleet_ops.deep_ep import xxxx  # noqa: F401
 
 
+class TestFastHadamardTransformImport(unittest.TestCase):
+    def test_fast_hadamard_transform_import(self):
+        import paddlefleet_ops
+        from paddlefleet_ops.fast_hadamard_transform import (
+            hadamard_transform,
+        )
+
+        self.assertTrue(callable(hadamard_transform))
+        print(paddlefleet_ops.fast_hadamard_transform)
+
+    def test_error_import(self):
+        with self.assertRaises(ImportError):
+            from paddlefleet_ops.fast_hadamard_transform import (
+                xxxx,  # noqa: F401
+            )
+
+
+class TestFLAImport(unittest.TestCase):
+    def test_fla_import(self):
+        from paddlefleet_ops import fla
+
+        FusedRMSNormGated = fla.modules.FusedRMSNormGated
+        ShortConvolution = fla.modules.ShortConvolution
+        chunk_kda = fla.ops.kda.chunk_kda
+        prepare_cu_seqlens_from_mask = (
+            fla.ops.utils.index.prepare_cu_seqlens_from_mask
+        )
+        prepare_lens_from_mask = fla.ops.utils.index.prepare_lens_from_mask
+        tensor_cache = fla.utils.tensor_cache
+
+        self.assertTrue(callable(FusedRMSNormGated))
+        self.assertTrue(callable(ShortConvolution))
+        self.assertTrue(callable(chunk_kda))
+        self.assertTrue(callable(prepare_cu_seqlens_from_mask))
+        self.assertTrue(callable(prepare_lens_from_mask))
+        self.assertTrue(callable(tensor_cache))
+
+    def test_error_import(self):
+        with self.assertRaises(ImportError):
+            from paddlefleet_ops.fla import xxxx  # noqa: F401
+
+
 if __name__ == "__main__":
     unittest.main()

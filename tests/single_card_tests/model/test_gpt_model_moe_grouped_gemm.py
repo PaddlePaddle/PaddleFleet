@@ -21,6 +21,7 @@ import unittest
 
 import numpy as np
 import paddle
+import paddle.nn.functional as F
 from paddle.distributed import fleet
 
 # from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -125,6 +126,7 @@ class TestGPTModel(unittest.TestCase):
             output_layer_init_method=functools.partial(
                 paddle.nn.init.xavier_uniform_, gain=1.0
             ),
+            hidden_act=F.silu,
             use_qk_norm=True,
             moe_expert_fusion=True,
             moe_deep_gemm=False,
@@ -189,8 +191,8 @@ class TestGPTModel(unittest.TestCase):
         repo_name = os.environ.get("repo_flag")
         if judge_machine_type() == "H":
             if version == 13:
-                assert loss.item() == 5.239129066467285, (
-                    f"loss not equal ({loss.item()} != 5.239129066467285), please check your modify"
+                assert loss.item() == 5.239296913146973, (
+                    f"loss not equal ({loss.item()} != 5.239296913146973), please check your modify"
                 )
                 assert embed_tokens_grad_norm == 2.796875, (
                     f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
@@ -204,8 +206,8 @@ class TestGPTModel(unittest.TestCase):
                         f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"
                     )
                 else:  # 12.9
-                    assert loss.item() == 5.239129066467285, (
-                        f"loss not equal ({loss.item()} != 5.239129066467285), please check your modify"
+                    assert loss.item() == 5.239296913146973, (
+                        f"loss not equal ({loss.item()} != 5.239296913146973), please check your modify"
                     )
                     assert embed_tokens_grad_norm == 2.796875, (
                         f"grad norm of embed_tokens not equal ({embed_tokens_grad_norm} != 2.796875), please check your modify"

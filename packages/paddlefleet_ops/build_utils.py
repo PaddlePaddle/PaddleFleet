@@ -201,7 +201,9 @@ def check_submodule_updated():
             "quack",
             "sonic-moe",
             "flash-attention",
+            "flash-linear-attention",
             "FlashMLA",
+            "fast-hadamard-transform",
         ]
         if not all(
             (PKG_ROOT / "third_party" / third_party / ".git").exists()
@@ -407,7 +409,7 @@ def get_libs():
             artifacts=[
                 Artifact("flash_mask", "flash_mask"),
             ],
-            extra_env={"FLASHMASK_BUILD": "fa4"},
+            extra_env={"FLASHMASK_BUILD": "fa4+utils"},
             include_dirs=[
                 "flash_mask/flashmask_attention_v3/csrc",
                 "flash_mask/flashmask_attention_v3",
@@ -427,6 +429,25 @@ def get_libs():
                     (cuda_major, cuda_minor) <= (12, 8)
                 ),
             },
+        ),
+        EcosystemLibrary(
+            name="flash-linear-attention",
+            source_rel_path="third_party/flash-linear-attention",
+            artifacts=[
+                Artifact("fla", "fla"),
+            ],
+        ),
+        EcosystemLibrary(
+            name="fast-hadamard-transform",
+            source_rel_path="third_party/fast-hadamard-transform",
+            artifacts=[
+                Artifact("fast_hadamard_transform", "fast_hadamard_transform"),
+                Artifact(
+                    "fast_hadamard_transform_cuda",
+                    "fast_hadamard_transform_cuda",
+                ),
+            ],
+            include_dirs=["csrc"],
         ),
     ]
     if (cuda_major, cuda_minor) >= (12, 9):

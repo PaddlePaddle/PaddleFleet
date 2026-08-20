@@ -60,6 +60,78 @@ def use_accuracy_compatible_kernel() -> bool:
     return _USE_ACCURACY_COMPATIBLE_KERNEL
 
 
+class AutoSBHistoryTracker:
+    """只统计 warmup 阶段连续 MoE auto-subbatch forward 起点的显存下降。"""
+
+    def __init__(self):
+        self.step_idx = 0
+        self.forward_count = 0
+        self.backward_count = 0
+        self._last_forward_free = None
+        self.max_delta = 0
+        self.prev_total_steps = 0
+        self.prev_max_delta = 0
+
+    def in_warmup(self) -> bool:
+        return self.backward_count == 0
+
+    def record_forward(self, available_free: int):
+        if self.in_warmup():
+            if self._last_forward_free is not None:
+                self.max_delta = max(
+                    self.max_delta,
+                    self._last_forward_free - available_free,
+                    0,
+                )
+            self._last_forward_free = available_free
+            self.step_idx += 1
+        self.forward_count += 1
+
+    def record_backward(self) -> bool:
+        self.backward_count += 1
+        if self.forward_count > 0 and self.backward_count == self.forward_count:
+            self._new_iteration()
+            return True
+        return False
+
+    def _new_iteration(self):
+        if self.step_idx > 0:
+            self.prev_total_steps = self.step_idx
+            self.prev_max_delta = max(self.prev_max_delta, self.max_delta)
+        self.step_idx = 0
+        self.forward_count = 0
+        self.backward_count = 0
+        self._last_forward_free = None
+        self.max_delta = 0
+
+    def should_degrade(self, available_free: int) -> bool:
+        predicted_need = self.predicted_need_for_remaining()
+        return (
+            self.in_warmup()
+            and predicted_need > 0
+            and available_free < predicted_need
+        )
+
+    def predicted_need_for_remaining(self) -> int:
+        """预测当前 warmup 从当前 forward 起还需要的显存。返回 0 表示无法预测（冷启动）。"""
+        if self.prev_total_steps == 0 or self.prev_max_delta == 0:
+            return 0
+        remaining = self.prev_total_steps - self.step_idx + 1
+        if remaining <= 0:
+            return 0
+        predicted = self.prev_max_delta * remaining
+        # 安全系数 1.2x + 128MB 余量
+        predicted = int(predicted * 1.2) + 128 * 1024 * 1024
+        return predicted
+
+
+_AutoSBHistory = AutoSBHistoryTracker()
+
+
+def get_auto_sb_history():
+    return _AutoSBHistory
+
+
 def _unpermute_scatter(
     permuted_tokens: paddle.Tensor, sorted_indices: paddle.Tensor, restore_shape
 ) -> paddle.Tensor:
@@ -80,6 +152,156 @@ def _unpermute_fp32_accum(
         overwrite=False,
     )
     return output_tokens.cast(permuted_tokens.dtype)
+
+
+class _UnpermuteGatherSumAlignedPyLayer(PyLayer):
+    @staticmethod
+    def forward(
+        ctx,
+        permuted_tokens,
+        gather_index_flat,
+        valid_rows,
+        num_total_tokens,
+        num_tokens,
+        topk,
+        hidden,
+        has_padding,
+    ):
+        ctx.input_dtype = permuted_tokens.dtype
+        ctx.num_total_tokens = num_total_tokens
+        ctx.num_tokens = num_tokens
+        ctx.topk = topk
+        ctx.hidden = hidden
+        ctx.has_padding = has_padding
+        ctx.save_for_backward(gather_index_flat, valid_rows)
+        gathered = permuted_tokens.index_select(axis=0, index=gather_index_flat)
+        gathered = gathered.reshape([num_tokens, topk, hidden])
+        if has_padding:
+            # Padding rows point at slot 0; force their output to zero.
+            gathered = gathered * valid_rows.cast(gathered.dtype).reshape(
+                [num_tokens, 1, 1]
+            )
+        output_tokens = gathered.sum(axis=1)
+        return output_tokens.cast(ctx.input_dtype)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        gather_index_flat, valid_rows = ctx.saved_tensor()
+        # Broadcast in fp32: [N, H] → [N, topk, H] → [N*topk, H]
+        grad_expand = (
+            grad_out.cast("float32")
+            .unsqueeze(1)
+            .expand([ctx.num_tokens, ctx.topk, ctx.hidden])
+            .reshape([ctx.num_tokens * ctx.topk, ctx.hidden])
+        )
+        N_total = ctx.num_total_tokens
+        inverse_perm = paddle.zeros([N_total], dtype="int64")
+        slot_idx = paddle.arange(ctx.num_tokens * ctx.topk, dtype="int64")
+        if ctx.has_padding:
+            # Only slots of valid rows map to real permuted rows.
+            slot_valid = (
+                valid_rows.cast(paddle.bool)
+                .unsqueeze(1)
+                .expand([ctx.num_tokens, ctx.topk])
+                .reshape([-1])
+            )
+            src_idx = slot_idx.masked_select(slot_valid)
+            dst_idx = gather_index_flat.masked_select(slot_valid)
+        else:
+            src_idx = slot_idx
+            dst_idx = gather_index_flat
+        inverse_perm = paddle.scatter(
+            inverse_perm,
+            dst_idx,
+            src_idx,
+            overwrite=True,  # UNIQUE indices → deterministic
+        )
+        grad_permuted = grad_expand.index_select(axis=0, index=inverse_perm)
+        return grad_permuted.cast(ctx.input_dtype)
+
+
+def _build_aligned_gather_index(routing_map: paddle.Tensor):
+    """Build the (token, k) → permuted-row index map for aligned permute.
+
+    Router zeroes the routing row of padding tokens, so a routing map may mix
+    valid rows (exactly ``topk`` experts) with all-zero rows. Returns:
+
+    - ``gather_index_flat``: [num_tokens * topk] int64. Slots of padding rows
+      are filled with 0 and must be masked out by ``valid_rows``.
+    - ``valid_rows``: [num_tokens] bool, False for all-zero (padding) rows.
+    - ``topk``: routed experts per valid row (0 when every row is padding).
+    """
+    routing_map_bool = routing_map.cast(paddle.bool)
+    num_tokens, num_experts = routing_map_bool.shape
+
+    rm_int_T = routing_map_bool.T.contiguous().cast("int64")  # [E, N]
+    tokens_per_expert = rm_int_T.sum(axis=-1)
+    expert_offsets = paddle.zeros([num_experts + 1], dtype="int64")
+    expert_offsets[1:] = paddle.cumsum(tokens_per_expert, axis=0)
+    global_position_per_token = (
+        rm_int_T.cumsum(axis=-1) - 1 + expert_offsets[:-1].unsqueeze(1)
+    ).T  # [N, E]
+
+    per_token_k = routing_map_bool.cast("int64").sum(axis=-1)
+    valid_rows = per_token_k > 0
+    valid_ks = per_token_k.masked_select(valid_rows)
+    num_valid = int(valid_rows.cast("int64").sum().item())
+    if num_valid == 0:
+        topk = 0
+    else:
+        topk = int(valid_ks.max().item())
+        if int(valid_ks.min().item()) != topk:
+            raise ValueError(
+                "use_accuracy_compatible requires a fixed top-k for all "
+                "valid (non-padding) tokens."
+            )
+
+    gather_index = paddle.zeros([num_tokens, topk], dtype="int64")
+    if topk > 0:
+        flat_valid = paddle.masked_select(
+            global_position_per_token * routing_map_bool.cast("int64"),
+            routing_map_bool,
+        ).reshape([num_valid, topk])
+        if num_valid == num_tokens:
+            gather_index = flat_valid
+        else:
+            gather_index = paddle.scatter(
+                gather_index,
+                paddle.nonzero(valid_rows).reshape([-1]),
+                flat_valid,
+                overwrite=True,
+            )
+    gather_index_flat = gather_index.reshape([num_tokens * topk])
+    gather_index_flat.stop_gradient = True
+    valid_rows.stop_gradient = True
+    return gather_index_flat, valid_rows, topk, num_valid < num_tokens
+
+
+def _unpermute_gather_sum_aligned(
+    permuted_tokens: paddle.Tensor,
+    sorted_indices: paddle.Tensor,
+    restore_shape,
+    routing_map: paddle.Tensor,
+) -> paddle.Tensor:
+    num_tokens, hidden = restore_shape[0], restore_shape[-1]
+    num_total_tokens = permuted_tokens.shape[0]
+
+    gather_index_flat, valid_rows, topk, has_padding = (
+        _build_aligned_gather_index(routing_map)
+    )
+    if topk == 0:
+        return paddle.zeros(restore_shape, dtype=permuted_tokens.dtype)
+
+    return _UnpermuteGatherSumAlignedPyLayer.apply(
+        permuted_tokens,
+        gather_index_flat,
+        valid_rows,
+        num_total_tokens,
+        num_tokens,
+        topk,
+        hidden,
+        has_padding,
+    )
 
 
 class ApplyPermutedProbs(PyLayer):
@@ -108,11 +330,55 @@ def barrier_ep(ep_group):
     paddle.distributed.barrier(ep_group)
 
 
+class _PermuteAlignedPyLayer(PyLayer):
+    @staticmethod
+    def forward(
+        ctx,
+        tokens,
+        sorted_indices,
+        gather_index_flat,
+        valid_rows,
+        num_tokens,
+        topk,
+        hidden,
+        has_padding,
+    ):
+        ctx.input_dtype = tokens.dtype
+        ctx.num_tokens = num_tokens
+        ctx.topk = topk
+        ctx.hidden = hidden
+        ctx.has_padding = has_padding
+        ctx.save_for_backward(gather_index_flat, valid_rows)
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+        return permuted_input
+
+    @staticmethod
+    def backward(ctx, grad_permuted):
+        gather_index_flat, valid_rows = ctx.saved_tensor()
+        if ctx.topk == 0:
+            return paddle.zeros(
+                [ctx.num_tokens, ctx.hidden], dtype=ctx.input_dtype
+            )
+        # gather → [N*topk, H] in fp32 → reshape [N, topk, H] → sum(axis=1)
+        gathered = grad_permuted.cast("float32").index_select(
+            axis=0, index=gather_index_flat
+        )
+        gathered = gathered.reshape([ctx.num_tokens, ctx.topk, ctx.hidden])
+        if ctx.has_padding:
+            # Padding rows point at slot 0; their gradient must stay zero.
+            gathered = gathered * valid_rows.cast("float32").reshape(
+                [ctx.num_tokens, 1, 1]
+            )
+        grad_tokens = gathered.sum(axis=1)
+        return grad_tokens.cast(ctx.input_dtype)
+
+
 def permute(
     tokens,
     routing_map,
     num_out_tokens: int | None = None,
     drop_and_pad: bool = False,
+    use_accuracy_compatible: bool = False,
 ):
     """Permute the tokens and probs based on the mask.
     Tokens with the same designated expert will be grouped together.
@@ -132,16 +398,33 @@ def permute(
     num_experts = routing_map.shape[1]
 
     # mask [num_tokens, num_experts] -> [num_experts, num_tokens]
-    routing_map = routing_map.cast(paddle.bool).T.contiguous()
+    routing_map_bool_T = routing_map.cast(paddle.bool).T.contiguous()
 
     # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
     token_indices = (
         paddle.arange(num_tokens).unsqueeze(0).expand([num_experts, -1])
     )
-    sorted_indices = token_indices.masked_select(routing_map)
+    sorted_indices = token_indices.masked_select(routing_map_bool_T)
 
-    # use the mapping to permute the tokens
-    permuted_input = tokens.index_select(axis=0, index=sorted_indices)
+    if use_accuracy_compatible:
+        sorted_indices.stop_gradient = True
+        gather_index_flat, valid_rows, topk_val, has_padding = (
+            _build_aligned_gather_index(routing_map)
+        )
+
+        permuted_input = _PermuteAlignedPyLayer.apply(
+            tokens,
+            sorted_indices,
+            gather_index_flat,
+            valid_rows,
+            num_tokens,
+            topk_val,
+            hidden,
+            has_padding,
+        )
+    else:
+        # use the mapping to permute the tokens
+        permuted_input = tokens.index_select(axis=0, index=sorted_indices)
 
     return permuted_input, sorted_indices
 
@@ -153,6 +436,7 @@ def unpermute(
     probs: paddle.Tensor = None,
     routing_map: paddle.Tensor = None,
     drop_and_pad: bool = False,
+    use_accuracy_compatible: bool = False,
 ):
     """
     Restore the original order of tokens after permutation. If probs are provided, it
@@ -186,6 +470,11 @@ def unpermute(
             )
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
+
+    if use_accuracy_compatible and routing_map is not None:
+        return _unpermute_gather_sum_aligned(
+            permuted_tokens, sorted_indices, restore_shape, routing_map
+        )
 
     if use_accuracy_compatible_kernel():
         output_tokens = _unpermute_fp32_accum(
@@ -376,7 +665,7 @@ def _all_gather_local_tokens(local_tokens_per_expert, group):
     return output.reshape([get_pg_size(group), -1])
 
 
-def _log_summary(key, layer_number, summary_data):
+def _log_summary(key, layer_number, summary_data, is_mtp_layer=False):
     logs = get_global_training_logs()
     if logs is None or not hasattr(logs, "update"):
         return
@@ -394,7 +683,8 @@ def _log_summary(key, layer_number, summary_data):
     max_mean_ratio = max_value / mean_value if mean_value != 0 else 1.0
     min_mean_ratio = min_value / mean_value if mean_value != 0 else 1.0
 
-    prefix = f"{key}_layer_{layer_number}"
+    layer_prefix = "mtp_layer" if is_mtp_layer else "layer"
+    prefix = f"{key}_{layer_prefix}_{layer_number}"
     logs.update(
         **{
             f"{prefix}_max": max_value,
@@ -408,21 +698,42 @@ def _log_summary(key, layer_number, summary_data):
     )
 
 
-def _log_tokens_per_expert(layer_number, key, summary_data, count):
+def _log_tokens_per_expert(
+    layer_number,
+    key,
+    summary_data,
+    count,
+    is_mtp_layer=False,
+):
     count = count.reshape([1]).astype("float32")
     count = paddle.ones_like(count) if count.item() == 0 else count
     avg_data = summary_data.astype("float32") / count
 
-    _log_summary(f"{key}_avg", layer_number, avg_data)
-    _log_summary(key, layer_number, summary_data)
+    _log_summary(
+        f"{key}_avg",
+        layer_number,
+        avg_data,
+        is_mtp_layer=is_mtp_layer,
+    )
+    _log_summary(
+        key,
+        layer_number,
+        summary_data,
+        is_mtp_layer=is_mtp_layer,
+    )
 
 
-def _log_local_tokens_per_card(layer_number, local_tokens_by_rank):
+def _log_local_tokens_per_card(
+    layer_number,
+    local_tokens_by_rank,
+    is_mtp_layer=False,
+):
     card_totals = local_tokens_by_rank.sum(axis=1)
     _log_summary(
         "local_tokens_per_card",
         layer_number,
         card_totals,
+        is_mtp_layer=is_mtp_layer,
     )
 
 
@@ -431,6 +742,7 @@ def log_moe_balance(
     moe_group,
     num_experts_per_tok,
     tokens_per_expert,
+    is_mtp_layer=False,
 ):
     """Log fixed-topk MoE balance summaries from dispatched expert counts."""
     if tokens_per_expert is None:
@@ -464,8 +776,13 @@ def log_moe_balance(
             "tokens_per_expert",
             summary.clone() if isinstance(summary, paddle.Tensor) else summary,
             count,
+            is_mtp_layer=is_mtp_layer,
         )
-        _log_local_tokens_per_card(layer_number, local_tokens_by_rank)
+        _log_local_tokens_per_card(
+            layer_number,
+            local_tokens_by_rank,
+            is_mtp_layer=is_mtp_layer,
+        )
 
 
 def is_tensor(data):
@@ -671,12 +988,12 @@ def k_grouped_bf16_gemm_tn_contiguous_aligned(a, b, d, ks, ks_tensor, c):
     b_padded = pad_grouped_tensor(b, ks_tensor, padded_ks_tensor)
 
     paddlefleet_deep_gemm.k_grouped_bf16_gemm_tn_contiguous(
-        a=a_padded,
-        b=b_padded,
-        d=d,
-        ks=padded_sizes_list,
-        ks_tensor=padded_ks_tensor,
-        c=c,
+        a_padded,
+        b_padded,
+        d,
+        padded_sizes_list,
+        padded_ks_tensor,
+        c,
     )
 
     del a_padded, b_padded
@@ -789,3 +1106,24 @@ class AllGatherGroupOp(paddle.autograd.PyLayer):
         """
         paddle.distributed.barrier(ctx.group)
         return reduce_scatter_group(grad, group=ctx.group)
+
+
+class ReduceScatterGroupOp(paddle.autograd.PyLayer):
+    """
+    Perform group reduce-scatter (sum). Backward pass is an all-gather.
+
+    This is the dual of :class:`AllGatherGroupOp` and is used by the
+    'allgather' MoE token dispatcher to combine partial expert outputs along
+    the EP group: forward sums across EP ranks while scattering along the
+    leading (token) dimension; backward replicates the gradient via
+    all-gather.
+    """
+
+    @staticmethod
+    def forward(ctx, input, group=None):
+        ctx.group = group
+        return reduce_scatter_group(input, group=group)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return all_gather_group(grad, group=ctx.group)

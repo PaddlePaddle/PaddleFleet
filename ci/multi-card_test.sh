@@ -73,6 +73,11 @@ gen_gpus_arg() {
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 export FLAGS_tcp_store_using_libuv=0
+# Tests are launched by path, so ``sys.path[0]`` is the test file's own
+# directory and ``tests`` is not importable as a package. Put the repository
+# root on the path so a test can import a helper that lives in another test
+# directory (e.g. ``tests.single_card_tests.transformer.hybrid_mla_utils``).
+export PYTHONPATH="$work_dir${PYTHONPATH:+:$PYTHONPATH}"
 
 run_count=0
 failed_tests=()

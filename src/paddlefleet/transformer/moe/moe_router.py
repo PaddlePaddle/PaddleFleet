@@ -24,10 +24,14 @@ from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
-from paddle import nn
+from paddle import framework, nn
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     AllGatherOp,
     mark_as_sequence_parallel_parameter,
+)
+
+from paddlefleet.tensor_parallel.sequence_parallel_utils_legacy import (
+    GatherOpLegacy,
 )
 
 if TYPE_CHECKING:
@@ -37,13 +41,17 @@ from paddle._C_ops import matmul_grad
 from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
 )
+from paddle.distributed.fleet.utils.sequence_parallel_utils import ScatterOp
 
 from paddlefleet.context_parallel_utils import (
     ContextParallelAllGatherOp,
     ContextParallelGatherOp,
     ContextParallelScatterOp,
 )
-from paddlefleet.parallel_state import get_context_parallel_world_size
+from paddlefleet.parallel_state import (
+    get_context_parallel_world_size,
+    get_tensor_model_parallel_group,
+)
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 
 # MD5 logging for MoE router precision debugging
@@ -86,17 +94,82 @@ def _log_moe_md5(tensor, name, layer_idx=None):
         )
 
 
+_ROUTER_SCALE_FAST = None
+
+
+def _router_scale_fast_enabled():
+    """Opt-in switch for the atomic-free routed-scaling-factor gather backward.
+
+    Default OFF keeps the original ``F.embedding`` path bit-for-bit.
+    """
+    global _ROUTER_SCALE_FAST
+    if _ROUTER_SCALE_FAST is None:
+        _ROUTER_SCALE_FAST = (
+            os.environ.get("FLEET_MOE_ROUTER_SCALE_FAST", "0") == "1"
+        )
+    return _ROUTER_SCALE_FAST
+
+
+class GatherExpertScale(paddle.autograd.PyLayer):
+    """Gather per-expert scales for the selected experts.
+
+    Forward is identical to ``F.embedding(idx, param.unsqueeze(1)).squeeze(-1)``
+    (both are a plain gather). The backward differs: instead of atomically
+    accumulating num_tokens*topk gradients into only num_experts addresses, it
+    scatters them into a dense [num_tokens, num_experts] fp32 buffer and does a
+    column sum. The atomic version is both slow (a few hundred addresses take
+    ~1e3 atomics each) and, in bf16, badly inaccurate (the accumulator saturates
+    once it grows past 2**8 times the increment).
+    """
+
+    @staticmethod
+    def forward(ctx, param, idx):
+        """forward"""
+        ctx.save_for_backward(idx)
+        ctx.num_experts = param.shape[0]
+        return paddle.gather(param, idx.reshape([-1])).reshape(idx.shape)
+
+    @staticmethod
+    def backward(ctx, grad):
+        """backward"""
+        (idx,) = ctx.saved_tensor()
+        dense = paddle.zeros(
+            [idx.shape[0], ctx.num_experts], dtype=paddle.float32
+        )
+        dense = paddle.put_along_axis(
+            dense, idx, grad.astype(paddle.float32), axis=1, reduce="add"
+        )
+        return dense.sum(axis=0).astype(grad.dtype), None
+
+
+def apply_learnable_routed_scaling(top_gate, top_idx, param):
+    """Scale top_gate by the learnable per-expert routed scaling factor.
+
+    top_idx may contain -1 for padded tokens; those are clipped to 0 exactly as
+    before (their top_gate is already 0).
+    """
+    safe_topk_indices = paddle.clip(top_idx, min=0)
+    if _router_scale_fast_enabled():
+        gathered_scales = GatherExpertScale.apply(param, safe_topk_indices)
+    else:
+        gathered_scales = F.embedding(
+            safe_topk_indices, param.unsqueeze(1)
+        ).squeeze(-1)
+    return top_gate * gathered_scales
+
+
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
     FusedGateDetachMatmul
     """
 
     @staticmethod
-    def forward(ctx, x, w, dw_p2p_overlap=False):
+    def forward(ctx, x, w, dw_p2p_overlap=False, use_accuracy_compatible=False):
         """
         forward
         """
         ctx.dw_p2p_overlap = dw_p2p_overlap
+        ctx.use_accuracy_compatible = use_accuracy_compatible
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
@@ -118,6 +191,12 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 w_grad = paddle.matmul(
                     x_cast, y_grad, transpose_x=True
                 ).T  # 始终先算梯度
+
+            # MG returns `grad_weight.to(weight_dtype)` and only then accumulates
+            # it into the fp32 main_grad, so the wgrad passes through the weight
+            # storage dtype first.
+            if ctx.use_accuracy_compatible:
+                w_grad = w_grad.cast(weight.dtype).cast(paddle.float32)
 
             if hasattr(weight, "main_grad"):
                 if weight.main_grad is None:
@@ -156,21 +235,33 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 WeightGradStore.enabled = False
                 return x_grad, None
         else:
-            w = w.T
-            x_g, w_g = matmul_grad(
-                x.cast(ctx.dtype),
-                w.cast(ctx.dtype),
-                y_grad,
-                False,
-                False,
-            )
+            if ctx.use_accuracy_compatible:
+                # Mirror MG `RouterGatingLinearFunction.backward`:
+                #   grad_input  = torch.mm(grad_output, weight.to(router_dtype))
+                #   grad_weight = torch.mm(grad_output.t(), inp.to(router_dtype))
+                # i.e. two separate GEMMs (not a fused matmul_grad), then each
+                # gradient cast back to its own storage dtype.
+                x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
+                w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                return x_grad, w_grad
+            else:
+                w = w.T
+                x_g, w_g = matmul_grad(
+                    x.cast(ctx.dtype),
+                    w.cast(ctx.dtype),
+                    y_grad,
+                    False,
+                    False,
+                )
 
-            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
-            w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
-            if w_grad is not None:
-                w_grad = w_grad.T
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                if w_grad is not None:
+                    w_grad = w_grad.T
 
-            return x_grad, w_grad
+                return x_grad, w_grad
 
 
 def gate_detach_matmul(
@@ -179,9 +270,12 @@ def gate_detach_matmul(
     use_fuse,
     moe_router_force_load_balancing=False,
     dw_p2p_overlap=False,
+    use_accuracy_compatible=False,
 ):
     if use_fuse:
-        score = FusedGateDetachMatmul.apply(x, weight, dw_p2p_overlap)
+        score = FusedGateDetachMatmul.apply(
+            x, weight, dw_p2p_overlap, use_accuracy_compatible
+        )
     else:
         x = x.cast(paddle.float32)
         score = F.linear(x, weight)
@@ -192,7 +286,7 @@ def gate_detach_matmul(
 
 
 def _apply_routing_map_fusion(
-    gates, top_idx, input_ids_none_zero_mask, input_ids=None
+    gates, top_idx, input_ids_none_zero_mask, input_ids=None, pad_token_id=0
 ):
     from paddlefleet.triton_ops import routing_map_fusion_forward
 
@@ -205,6 +299,7 @@ def _apply_routing_map_fusion(
         top_idx,
         input_ids=fused_input_ids,
         is_pure_text_line=None,
+        pad_token_id=pad_token_id,
     )
     mask = fused_mask.cast(gates.dtype)
     return mask, top_idx, exp_counts
@@ -218,6 +313,9 @@ class StandardMoERouter(nn.Layer):
     ):
         super().__init__()
         self.config = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
 
         self.hidden_size = config.hidden_size
         self.num_experts = config.n_routed_experts
@@ -250,12 +348,31 @@ class StandardMoERouter(nn.Layer):
                 f"seq_aux is True but routing_type is {self.routing_type}. Please check."
             )
 
+        if self.routing_type == "seq_aux_loss" and self.scoring_func not in (
+            "softmax",
+            "sigmoid",
+            "relu",
+            "sftplus",
+            "sqrtsoftplus",
+        ):
+            raise ValueError(
+                "seq_aux_loss requires a non-negative MoE scoring_func, "
+                f"but got {self.scoring_func!r}. "
+            )
+
         # Initialize gate weight with Normal distribution aligned with Megatron.
-        self.weight = paddle.create_parameter(
-            shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
-            default_initializer=paddle.nn.initializer.Constant(0.0),
-        )
+        if self.use_accuracy_compatible:
+            self.weight = paddle.create_parameter(
+                shape=[self.num_experts, self.hidden_size],
+                dtype=config.params_dtype,
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+        else:
+            self.weight = paddle.create_parameter(
+                shape=[self.num_experts, self.hidden_size],
+                dtype="float32",
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
         config.init_method(self.weight)
 
         if (
@@ -263,6 +380,42 @@ class StandardMoERouter(nn.Layer):
             and self.config.expert_model_parallel_size > 1
         ):
             mark_as_sequence_parallel_parameter(self.weight)
+
+        # Multi-view (split-feature) routing: instead of a single gate
+        # projection, score each expert with the SUM of two independent views.
+        # The routing score is score_func(logits_0) + score_func(logits_1),
+        # where logits_0 reuses the existing ``self.weight`` gate and logits_1
+        # comes from a new projection ``self.weight_1``. This gives the router
+        # two independent "views" of each token while adding only one extra
+        # projection and keeping the expert FFN compute unchanged.
+        #
+        # Disabled by default so that existing configs / checkpoints keep using
+        # the single ``self.weight`` gate unchanged; enable via the
+        # ``moe_split_feature_routing`` config flag. Hash-routing layers keep
+        # using ``self.weight`` as the single gate regardless of this flag.
+        self.moe_split_feature_routing = getattr(
+            config, "moe_split_feature_routing", False
+        )
+        if self.moe_split_feature_routing:
+            # Same layout / init as ``self.weight`` ([num_experts, hidden_size])
+            # so the two views are symmetric and the projection can reuse the
+            # fused gate matmul (force-load-balancing and dw_p2p_overlap paths
+            # included). ``self.weight`` is reused as the first view, so no
+            # extra gate is wasted. The scoring_func == "sigmoid" contract is
+            # checked later in set_layer_number(), once we know whether this is
+            # a hash-routing layer (hash layers bypass split routing and may use
+            # a non-sigmoid scoring_func).
+            self.weight_1 = paddle.create_parameter(
+                shape=[self.num_experts, self.hidden_size],
+                dtype="float32",
+                default_initializer=paddle.nn.initializer.Constant(0.0),
+            )
+            config.init_method(self.weight_1)
+            if (
+                self.sequence_parallel
+                and self.config.expert_model_parallel_size > 1
+            ):
+                mark_as_sequence_parallel_parameter(self.weight_1)
 
         if self.routed_scaling_factor_learnable:
             self.routed_scaling_factor_param = self.create_parameter(
@@ -297,6 +450,68 @@ class StandardMoERouter(nn.Layer):
                 dtype=paddle.int64,
             )  # Used in MoECorrectionBiasAdjustCallback
             self.expert_usage.stop_gradient = True
+
+        if self.topk_method == "quantile_balancing":
+            if self.routing_type != "none":
+                raise ValueError(
+                    "quantile_balancing is a self-contained load balancing method, "
+                    "so the auxiliary-loss based balancing must be turned off "
+                    "explicitly. Please set moe_router_load_balancing_type='none', "
+                    f"but got {self.routing_type!r}."
+                )
+            if self.config.router_aux_loss_coef:
+                raise ValueError(
+                    "quantile_balancing is a self-contained load balancing method. "
+                    "A non-zero router_aux_loss_coef keeps the auxiliary load "
+                    "balancing loss active and optimizes a second, competing "
+                    "balancing objective. Please set router_aux_loss_coef=0 when "
+                    "using quantile_balancing, but got "
+                    f"{self.config.router_aux_loss_coef!r}."
+                )
+            if self.n_group != 1:
+                raise ValueError(
+                    "Quantile Balancing currently only supports n_group=1. "
+                    "Multi-group routing (n_group>1) is not compatible with QB because "
+                    "the group pre-selection changes the effective cutoff in a way that "
+                    "cannot be captured by a single per-expert histogram. "
+                    f"Got n_group={self.n_group}."
+                )
+            # Bias vector -- same name as noaux_tc for checkpoint compatibility
+            if not self.config.gpt_model_use_experimental_version:
+                self.register_buffer(
+                    "e_score_correction_bias",
+                    paddle.zeros((self.num_experts,), dtype=paddle.float32),
+                )
+            else:
+                self.register_buffer(
+                    "e_score_correction_bias",
+                    paddle.zeros((1, self.num_experts), dtype=paddle.float32),
+                )
+            self._cast_to_low_precision = False
+
+            # Histogram accumulator: [n_experts, B]
+            self.qb_n_bins = getattr(config, "qb_n_bins", 1000)
+            self.qb_histogram = paddle.zeros(
+                shape=[self.num_experts, self.qb_n_bins],
+                dtype=paddle.int32,
+            )
+            self.qb_histogram.stop_gradient = True
+
+            # Expert usage for logging/diagnostics
+            self.expert_usage = paddle.zeros(
+                shape=[self.num_experts],
+                dtype=paddle.int64,
+            )
+            self.expert_usage.stop_gradient = True
+
+            # QB Binning range -- persisted because it affects the next step's
+            # histogram and therefore must survive checkpoint resumption.
+            self.register_buffer(
+                "qb_bin_min", paddle.to_tensor(-1.0, dtype=paddle.float32)
+            )
+            self.register_buffer(
+                "qb_bin_max", paddle.to_tensor(1.0, dtype=paddle.float32)
+            )
 
         # Hash-routing state. Activated lazily via set_layer_number() so that the
         # router knows its layer index.
@@ -386,8 +601,38 @@ class StandardMoERouter(nn.Layer):
         return aux_loss
 
     def _cal_seq_aux_loss(
-        self, probs, top_k, routing_map, seq_len, batch_size, input_ids=None
+        self,
+        probs,
+        top_k,
+        routing_map,
+        seq_len,
+        batch_size,
+        input_ids=None,
+        origin_input_ids=None,
     ):
+        if self.use_accuracy_compatible:
+            _probs_2d_pf = (
+                probs
+                if probs.dim() == 2
+                else probs.reshape([-1, probs.shape[-1]])
+            )
+            _aux_top_idx_pf = paddle.topk(
+                _probs_2d_pf, k=top_k, axis=-1
+            ).indices.cast("int64")
+            _aux_routing_map_pf = paddle.zeros_like(
+                _probs_2d_pf
+            ).put_along_axis_(
+                _aux_top_idx_pf,
+                paddle.to_tensor(1.0, dtype=_probs_2d_pf.dtype),
+                axis=-1,
+            )
+            _aux_routing_map_pf = _aux_routing_map_pf.reshape(routing_map.shape)
+            # Mask out padding/invalid tokens (rows where original routing_map is all-zero)
+            row_mask = (
+                routing_map.cast("int64").sum(axis=-1, keepdim=True) > 0
+            ).cast(_aux_routing_map_pf.dtype)
+            routing_map = _aux_routing_map_pf * row_mask
+
         # all_probs and routing_map should be computed using the runtime local sequence length on each worker.
         if (
             self.tensor_model_parallel_size > 1
@@ -420,8 +665,25 @@ class StandardMoERouter(nn.Layer):
                     [-1, local_seq_len, self.num_experts]
                 )
             batch_size = all_probs.shape[0]
-            # [B, S, E]
-            routing_map = routing_map.reshape([batch_size, seq_len, -1])
+            # [B, S, E]: align with EC by GatherOp + split on routing_map
+            if self.sequence_parallel and self.tensor_model_parallel_size > 1:
+                tp_group = get_tensor_model_parallel_group()
+                routing_map_gathered = GatherOpLegacy.apply(
+                    routing_map, 0, tp_group
+                ).reshape(
+                    [
+                        -1,
+                        seq_len * self.tensor_model_parallel_size,
+                        routing_map.shape[-1],
+                    ]
+                )
+                routing_map = paddle.split(
+                    routing_map_gathered,
+                    num_or_sections=self.tensor_model_parallel_size,
+                    axis=1,
+                )[tp_group.rank]
+            else:
+                routing_map = routing_map.reshape([batch_size, seq_len, -1])
             max_seq_len = local_seq_len
         else:
             # [B, S, E]
@@ -438,6 +700,15 @@ class StandardMoERouter(nn.Layer):
         # [B, 1]
         if input_ids is not None:
             if (
+                self.config.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
+                b, s = input_ids.shape
+                input_ids = AllGatherOp.apply(input_ids.reshape([-1])).reshape(
+                    [b, -1]
+                )
+            if (
                 get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
             ):
@@ -448,14 +719,28 @@ class StandardMoERouter(nn.Layer):
             _ids = input_ids
             if _ids.ndim == 1:
                 _ids = _ids.unsqueeze(axis=0)
-            origin_valid_mask = (_ids != 0).astype(paddle.float32)
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+            origin_valid_mask = (_ids != pad_token_id).astype(paddle.float32)
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
-                token_count_per_line = (
-                    origin_valid_mask.sum(axis=-1, keepdim=True)
-                    + self.config.num_nextn_predict_layers
-                )
+                if origin_input_ids is not None:
+                    # origin_input_ids is the full un-scattered ids (already
+                    # includes MTP-shifted tokens); no AllGather/CP gather and
+                    # no additional num_nextn_predict_layers offset.
+                    _origin_ids = origin_input_ids
+                    if _origin_ids.ndim == 1:
+                        _origin_ids = _origin_ids.unsqueeze(axis=0)
+                    origin_valid_mask_for_count = (
+                        _origin_ids != pad_token_id
+                    ).astype(paddle.float32)
+                    token_count_per_line = origin_valid_mask_for_count.sum(
+                        axis=-1, keepdim=True
+                    )
+                else:
+                    token_count_per_line = origin_valid_mask.sum()
             else:
                 token_count_per_line = origin_valid_mask.sum(
                     axis=-1, keepdim=True
@@ -484,19 +769,52 @@ class StandardMoERouter(nn.Layer):
             )
         else:
             # [B, E]
-            cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
-                denom
-                * paddle.to_tensor(top_k / self.num_experts, dtype="float32")
-            )
-            # [B, E] -> [B] -> []
-            seq_aux_loss = (
-                (cost_coeff * all_probs.sum(axis=seq_axis) / denom)
-                .sum(axis=1)
-                .mean()
-            )
+            if self.use_accuracy_compatible:
+                tokens_per_expert = routing_map.sum(
+                    axis=seq_axis, dtype="float32"
+                )  # [B, E]
+                _aggregated = all_probs.sum(axis=seq_axis)  # [B, E]
+                _per_expert = _aggregated * tokens_per_expert  # [B, E]
+                _bsz = _per_expert.shape[0]
+                # MG get_tokens_per_expert_and_token_count():
+                #   total_num_tokens = tokens_per_expert.sum() / (topk * bsz)
+                # i.e. the number of *valid routing* tokens per line (padding
+                # rows contribute no routing entry). Without padding this is
+                # exactly max_seq_len, so the no-padding path stays bit-exact.
+                # Kept as a Python scalar (single division) to match MG's
+                # scalar arithmetic instead of a multi-kernel tensor path.
+                _total_num_tokens = float(
+                    tokens_per_expert.sum().item()
+                ) / float(top_k * _bsz)
+                if _total_num_tokens <= 0.0:
+                    # Every line is padding: no routed token, no loss.
+                    return _per_expert.sum() * 0.0
+                _scalar = float(self.num_experts) / (
+                    float(top_k) * _total_num_tokens * _total_num_tokens
+                )
+                seq_aux_loss = _per_expert.sum() * _scalar
+                # MG divides the sequence-level loss by bsz; keep the
+                # single-line case free of the extra op (bit-exact).
+                if _bsz > 1:
+                    seq_aux_loss = seq_aux_loss / float(_bsz)
+            else:
+                cost_coeff = routing_map.sum(axis=seq_axis, dtype="float32") / (
+                    denom
+                    * paddle.to_tensor(
+                        top_k / self.num_experts, dtype="float32"
+                    )
+                )
+                # [B, E] -> [B] -> []
+                seq_aux_loss = (
+                    (cost_coeff * all_probs.sum(axis=seq_axis) / denom)
+                    .sum(axis=1)
+                    .mean()
+                )
         return seq_aux_loss
 
-    def _cal_z_loss(self, logits, input_ids=None) -> paddle.Tensor:
+    def _cal_z_loss(
+        self, logits, input_ids=None, origin_input_ids=None
+    ) -> paddle.Tensor:
         """
         Calculate the z loss.
 
@@ -508,30 +826,42 @@ class StandardMoERouter(nn.Layer):
             paddle.Tensor: The z loss value.
         """
         if input_ids is not None:
+            gathered_input_ids = input_ids
+            if (
+                self.config.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # input_ids [b, s/(cp*tp)] -> gather seq dim -> [b, s/cp]
+                b, s = input_ids.shape
+                gathered_input_ids = AllGatherOp.apply(
+                    gathered_input_ids.reshape([-1])
+                ).reshape([b, -1])
             if (
                 get_context_parallel_world_size() > 1
                 and self.config.experimental_dataflow
             ):
                 # In EB data flow, we need to gather input_ids here to get right denom.
-                origin_input_ids = ContextParallelGatherOp.apply(
-                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                gathered_input_ids = ContextParallelGatherOp.apply(
+                    gathered_input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
-            else:
-                origin_input_ids = input_ids
-            origin_loss_mask = (origin_input_ids != 0).astype(paddle.float32)
-            loss_mask = (input_ids != 0).astype(paddle.float32)
-            loss_mask = loss_mask.reshape([-1])
+
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
+
             if getattr(
                 self.config, "gpt_model_use_experimental_version", False
-            ):
-                # Align to EC, which also consider mtp token
-                denom = (
-                    origin_loss_mask.sum()
-                    + origin_loss_mask.shape[0]
-                    * self.config.num_nextn_predict_layers
+            ) and (origin_input_ids is not None):
+                origin_loss_mask = (origin_input_ids != pad_token_id).astype(
+                    paddle.float32
                 )
             else:
-                denom = origin_loss_mask.sum()
+                origin_loss_mask = (gathered_input_ids != pad_token_id).astype(
+                    paddle.float32
+                )
+            loss_mask = (input_ids != pad_token_id).astype(paddle.float32)
+            loss_mask = loss_mask.reshape([-1])
+            denom = origin_loss_mask.sum()
 
             l_zloss = (
                 logits.logsumexp(1).square() * loss_mask
@@ -769,9 +1099,180 @@ class StandardMoERouter(nn.Layer):
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        topk_weight = scores.take_along_axis(topk_idx, axis=1)
+        if self.use_accuracy_compatible:
+            row_idx = paddle.arange(
+                bsz_seq_len, dtype=topk_idx.dtype
+            ).unsqueeze(-1)
+            row_idx = row_idx.expand(topk_idx.shape)
+            gather_idx = paddle.stack([row_idx, topk_idx], axis=-1)
+            topk_weight = paddle.gather_nd(scores, gather_idx)
+        else:
+            topk_weight = scores.take_along_axis(topk_idx, axis=1)
 
         return topk_weight, topk_idx
+
+    def _topk_quantile_balancing(
+        self,
+        scores: paddle.Tensor,
+        k: int,
+        n_group: int,
+        topk_group: int,
+        valid_mask: paddle.Tensor | None = None,
+    ) -> tuple[paddle.Tensor, paddle.Tensor]:
+        """Quantile Balancing top-k selection.
+
+        Same routing logic as noaux_tc: bias affects only expert selection,
+        not gate weights. Additionally accumulates per-expert required_bias
+        into a histogram for the QB callback to recover quantile-based bias.
+
+        Args:
+            scores (paddle.Tensor): [bsz*seq_len, n_experts] raw gating scores
+            k (int): number of experts to select per token
+            n_group (int): number of expert groups
+            topk_group (int): number of groups selected
+            valid_mask (paddle.Tensor | None): [bsz*seq_len, 1] mask marking
+                non-padding tokens. Padding rows must not enter the histogram:
+                their scores have been zeroed out by the caller, so they would
+                all collapse into a single bin and skew the recovered quantile.
+                None means no padding information is available and every row is
+                treated as a valid token.
+
+        Returns:
+            tuple[paddle.Tensor, paddle.Tensor]: topk_weight, topk_idx
+            topk_weight: [bsz*seq_len, k] -- gate weights from ORIGINAL scores
+            topk_idx: [bsz*seq_len, k] -- selected expert indices
+        """
+        bsz_seq_len, n_experts = scores.shape
+        if n_group != 1:
+            raise ValueError(
+                "Quantile Balancing currently only supports n_group=1. "
+                "Multi-group routing (n_group>1) is not compatible with QB because "
+                "the group pre-selection changes the effective cutoff in a way that "
+                "cannot be captured by a single per-expert histogram. "
+                f"Got n_group={n_group}."
+            )
+
+        assert self.e_score_correction_bias is not None, (
+            "e_score_correction_bias is None for quantile_balancing"
+        )
+
+        # Step 1: Add bias for selection (detached, no gradient)
+        if not self.config.gpt_model_use_experimental_version:
+            scores_for_choice = scores.reshape(
+                [bsz_seq_len, -1]
+            ) + self.e_score_correction_bias.detach().unsqueeze(0)
+        else:
+            scores_for_choice = (
+                scores.reshape([bsz_seq_len, -1])
+                + self.e_score_correction_bias.detach()
+            )
+
+        # Step 2: Top-k selection (n_group=1, straightforward topk)
+        topk_weight, topk_idx = paddle.topk(
+            scores_for_choice, k=k, axis=-1, sorted=True
+        )
+
+        # Step 3: Gate weight from ORIGINAL scores (bias not in gate)
+        topk_weight = scores.take_along_axis(topk_idx, axis=1)
+
+        # Step 4: Accumulate histogram for QB (only during training)
+        if framework._dygraph_tracer()._has_grad:
+            self._accumulate_qb_histogram(
+                scores, scores_for_choice, k, valid_mask
+            )
+
+        return topk_weight, topk_idx
+
+    @paddle.no_grad()
+    def _accumulate_qb_histogram(
+        self,
+        raw_scores: paddle.Tensor,
+        biased_scores: paddle.Tensor,
+        k: int,
+        valid_mask: paddle.Tensor | None = None,
+        alpha: paddle.Tensor | None = None,
+    ):
+        """Accumulate required_bias into the QB histogram.
+
+        For each token t and expert e:
+            alpha_t = (k+1)-th largest biased score for token t (the cutoff)
+            required_bias[t, e] = alpha_t - raw_scores[t, e]
+
+        We bin required_bias into self.qb_histogram[e, bin_idx].
+
+        Padding tokens must be excluded. The caller zeroes out the gating
+        scores of padding rows, so for such a row alpha is the (k+1)-th largest
+        bias and required_bias equals that same constant for *every* expert:
+        each padding token would add one count to one identical bin of all
+        experts, inflating the per-expert total (and therefore the target
+        quantile) and spiking the CDF exactly where it is read out.
+
+        Args:
+            raw_scores: [N, E] original gating scores (without bias)
+            biased_scores: [N, E] scores with bias added (used for cutoff)
+            k: top-k value
+            valid_mask: [N, 1] mask marking non-padding tokens, or None when no
+                padding information is available (all rows count).
+            alpha: [N] or [N, 1] pre-computed cutoff values from MoETopkFusion
+                kernel (optional). When provided, skips the internal topk
+                computation for cutoff.
+        """
+        N, E = raw_scores.shape
+        B = self.qb_n_bins
+
+        # Compute alpha: the (k+1)-th largest biased score per token
+        # This is the "cutoff" -- the highest biased score NOT selected
+        if alpha is not None:
+            # Alpha provided externally (e.g., from MoETopkFusion kernel)
+            if alpha.ndim == 1:
+                alpha = alpha.unsqueeze(-1)  # [N] -> [N, 1]
+        else:
+            # Clamp k+1 to at most E (in case of degenerate config)
+            topk_val = min(k + 1, int(E))
+            alpha = paddle.topk(
+                biased_scores, k=topk_val, axis=-1, sorted=True
+            )[0][:, -1:]  # [N, 1] -- the smallest of top-(k+1), i.e., cutoff
+
+        # required_bias[t, e] = alpha[t] - raw_scores[t, e]
+        required_bias = alpha - raw_scores  # [N, E]
+
+        # Bin into histogram
+        b_min = self.qb_bin_min
+        b_max = self.qb_bin_max
+        total_range = b_max - b_min
+        if total_range < 1e-8:
+            total_range = 2.0  # fallback for first step when bias is all-zero
+
+        # Quantize to bin index: [0, B-1]
+        # bin_idx = floor((required_bias - b_min) / total_range * B)
+        bin_idx = ((required_bias - b_min) / total_range * B).cast(paddle.int64)
+        bin_idx = paddle.clip(bin_idx, min=0, max=B - 1)
+
+        # Vectorized histogram accumulation:
+        # Offset each expert's bins by e*B, then do a single flat bincount
+        offsets = (
+            paddle.arange(E, dtype=paddle.int64).unsqueeze(0) * B
+        )  # [1, E]
+        flat_bins = (bin_idx + offsets).reshape([-1])  # [N*E]
+        counts = paddle.zeros([E * B], dtype=paddle.int32)
+        if valid_mask is None:
+            weights = paddle.ones([N * E], dtype=paddle.int32)
+        else:
+            # [N,1] -> [N,E] -> [N*E]: padding rows carry weight 0, so their
+            # bins receive += 0. Keeping the shape static (instead of selecting
+            # valid rows) avoids a data-dependent N and an empty-tensor case.
+            weights = (
+                valid_mask.reshape([N, 1])
+                .cast(paddle.int32)
+                .expand([N, E])
+                .reshape([-1])
+            )
+        counts.put_along_axis_(flat_bins, weights, axis=0, reduce="add")
+        self.qb_histogram += counts.reshape([E, B])
+
+        # Also accumulate expert_usage for diagnostics
+        # Count how many tokens selected each expert (from topk_idx)
+        # This is done separately in forward via exp_counts, so skip here
 
     def _hash_routing(
         self,
@@ -827,19 +1328,22 @@ class StandardMoERouter(nn.Layer):
         # Mirrors the non-hash path (see forward(): routed_scaling_factor[_learnable]
         # is multiplied onto top_gate after normalization).
         if self.routed_scaling_factor_learnable:
-            safe_topk_indices = paddle.clip(top_idx, min=0)
-            gathered_scales = F.embedding(
-                safe_topk_indices,
-                self.routed_scaling_factor_param.unsqueeze(1),
-            ).squeeze(-1)
-            top_gate = top_gate * gathered_scales
+            top_gate = apply_learnable_routed_scaling(
+                top_gate, top_idx, self.routed_scaling_factor_param
+            )
         elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
             top_gate = top_gate * self.routed_scaling_factor
 
         return top_gate, top_idx
 
     def _call_topk_method(
-        self, topk_method, gates, k, n_group=None, topk_group=None
+        self,
+        topk_method,
+        gates,
+        k,
+        n_group=None,
+        topk_group=None,
+        valid_mask=None,
     ):
         if topk_method == "greedy":
             top_gate, top_idx = self._topk_greedy(gates, k=k)
@@ -856,6 +1360,14 @@ class StandardMoERouter(nn.Layer):
                 k,
                 n_group,
                 topk_group,
+            )
+        elif topk_method == "quantile_balancing":
+            top_gate, top_idx = self._topk_quantile_balancing(
+                gates,
+                k,
+                n_group,
+                topk_group,
+                valid_mask=valid_mask,
             )
         else:
             raise NotImplementedError(f"Invalid topk_method: {topk_method}")
@@ -884,12 +1396,29 @@ class StandardMoERouter(nn.Layer):
           on hash layers.
         """
         n_hash = getattr(self.config, "moe_n_hash_layers", 0)
+        head_empty_layers = getattr(
+            self.config, "num_empty_layers_add_in_head", 0
+        )
+        logical_layer_number = (
+            None if layer_number is None else layer_number - head_empty_layers
+        )
         self.is_hash_layer = (
             not is_mtp_layer
             and n_hash > 0
-            and layer_number is not None
-            and layer_number < n_hash
+            and logical_layer_number is not None
+            and 0 <= logical_layer_number < n_hash
         )
+        # Enforce the split-feature routing contract now that is_hash_layer is
+        # known. Split routing only applies to non-hash layers (hash layers
+        # bypass it and may legitimately use a non-sigmoid scoring_func), so
+        # validate scoring_func only on layers that will run the two-view
+        # sigmoid path.
+        if self.moe_split_feature_routing and not self.is_hash_layer:
+            if self.scoring_func != "sigmoid":
+                raise ValueError(
+                    "moe_split_feature_routing requires scoring_func "
+                    f"== 'sigmoid', but got {self.scoring_func!r}."
+                )
         if not self.is_hash_layer:
             return
 
@@ -933,6 +1462,12 @@ class StandardMoERouter(nn.Layer):
         if hasattr(self, "expert_usage"):
             del self.expert_usage
 
+        # Hash layers bypass split-feature routing (see forward's ``use_split``
+        # guard), so the second-view gate created in __init__ is never used
+        # here. Drop it to avoid registering an unused parameter.
+        if hasattr(self, "weight_1"):
+            del self.weight_1
+
 
 class TopKRouter(StandardMoERouter):
     def __init__(self, *args, **kwargs):
@@ -944,7 +1479,7 @@ class TopKRouter(StandardMoERouter):
         self.layer_number = layer_number
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
-    def forward(self, input, input_ids=None):
+    def forward(self, input, input_ids=None, origin_input_ids=None):
         if len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
@@ -962,12 +1497,19 @@ class TopKRouter(StandardMoERouter):
                     input_ids, axis=1, mode=self.config.cp_balance_mode
                 )
             if input_ids is not None:
+                pad_token_id = getattr(self.config, "pad_token_id", 0)
+                if pad_token_id is None:
+                    pad_token_id = 0
                 if self.sequence_parallel:
                     input_ids_none_zero_mask = (
-                        (input_ids != 0).transpose([1, 0]).reshape([-1, 1])
+                        (input_ids != pad_token_id)
+                        .transpose([1, 0])
+                        .reshape([-1, 1])
                     )
                 else:
-                    input_ids_none_zero_mask = (input_ids != 0).reshape([-1, 1])
+                    input_ids_none_zero_mask = (
+                        input_ids != pad_token_id
+                    ).reshape([-1, 1])
                 batch_size_, seq_len_ = input_ids.shape
                 assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
                     f"input_ids shape mismatch with input: "
@@ -977,9 +1519,57 @@ class TopKRouter(StandardMoERouter):
             else:
                 input_ids_none_zero_mask = None
         elif len(input.shape) == 2:
-            raise ValueError(
-                "The input tensor should have shape [batch_size, sequence_length, hidden_size]"
+            if not self.config.gpt_model_use_experimental_version:
+                raise ValueError(
+                    "input must be a 3D tensor when "
+                    "gpt_model_use_experimental_version=True."
+                )
+            cp_size = (
+                max(get_context_parallel_world_size(), 1)
+                if getattr(self.config, "experimental_dataflow", False)
+                else 1
             )
+            tp_size = (
+                self.tensor_model_parallel_size if self.sequence_parallel else 1
+            )
+            seq_len = self.config.max_sequence_length // (cp_size * tp_size)
+            batch_size = input.shape[0] // seq_len
+            if (
+                max(get_context_parallel_world_size(), 1) > 1
+                and self.config.experimental_dataflow
+                and input_ids is not None
+            ):
+                # In EB dataflow, shape of input_ids [b, s],
+                # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
+                # so we need to scatter input_ids here to avid the assertion below
+                input_ids = ContextParallelScatterOp.apply(
+                    input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
+            if (
+                input_ids is not None
+                and self.sequence_parallel
+                and self.config.experimental_dataflow
+            ):
+                # SP: input_ids [b, s/cp] -> [b, s/(cp*tp)]
+                b, s = input_ids.shape
+                input_ids = ScatterOp.apply(input_ids.reshape([-1])).reshape(
+                    [b, -1]
+                )
+            if input_ids is not None:
+                pad_token_id = getattr(self.config, "pad_token_id", 0)
+                if pad_token_id is None:
+                    pad_token_id = 0
+                input_ids_none_zero_mask = (input_ids != pad_token_id).reshape(
+                    [-1, 1]
+                )
+                batch_size_, seq_len_ = input_ids.shape
+                assert (batch_size_ == batch_size) and (seq_len_ == seq_len), (
+                    f"input_ids shape mismatch with input: "
+                    f"input_ids=[{batch_size_}, {seq_len_}], "
+                    f"expected [batch_size={batch_size}, seq_len={seq_len}]"
+                )
+            else:
+                input_ids_none_zero_mask = None
 
         # Hash routing requires input_ids; verify early.
         if self.is_hash_layer and input_ids is None:
@@ -989,14 +1579,61 @@ class TopKRouter(StandardMoERouter):
                 "to the MoE layer."
             )
 
+        # Split-feature routing applies to non-hash layers only; hash-routing
+        # layers keep using the original single gate projection.
+        use_split = self.moe_split_feature_routing and not self.is_hash_layer
+
         with paddle.amp.auto_cast(False):
-            logits = gate_detach_matmul(
-                input,
-                self.weight,
-                True,
-                self.config.moe_router_force_load_balancing,
-                getattr(self.config, "dw_p2p_overlap", False),
-            )
+            if use_split:
+                # The two-view contract is sigmoid + sigmoid. Re-assert it here
+                # at the point of use: set_layer_number() validates scoring_func
+                # early, but if the router is invoked before set_layer_number()
+                # (is_hash_layer still at its __init__ default of False), this
+                # guard prevents the split branch from running under a
+                # non-sigmoid scoring_func.
+                if self.scoring_func != "sigmoid":
+                    raise ValueError(
+                        "moe_split_feature_routing requires scoring_func "
+                        f"== 'sigmoid', but got {self.scoring_func!r}."
+                    )
+                # Two independent views; the routing score is the SUM of their
+                # per-expert scores. View 0 reuses the existing self.weight
+                # gate, view 1 uses the new self.weight_1 projection. Both
+                # reuse the fused gate matmul so they share the
+                # force-load-balancing and dw_p2p_overlap paths.
+                logits_0 = gate_detach_matmul(
+                    input,
+                    self.weight,
+                    True,
+                    self.config.moe_router_force_load_balancing,
+                    getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
+                )
+                logits_1 = gate_detach_matmul(
+                    input,
+                    self.weight_1,
+                    True,
+                    self.config.moe_router_force_load_balancing,
+                    getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
+                )
+                # The two-view contract is sigmoid + sigmoid. scoring_func is
+                # guaranteed to be "sigmoid" here (validated above and in
+                # set_layer_number), so route both views through the shared
+                # gate_score_func instead of hardcoding F.sigmoid.
+                gates = self.gate_score_func(logits_0) + self.gate_score_func(
+                    logits_1
+                )
+                logits = logits_0 + logits_1  # used by z-loss
+            else:
+                logits = gate_detach_matmul(
+                    input,
+                    self.weight,
+                    True,
+                    self.config.moe_router_force_load_balancing,
+                    getattr(self.config, "dw_p2p_overlap", False),
+                    self.use_accuracy_compatible,
+                )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
 
@@ -1036,7 +1673,13 @@ class TopKRouter(StandardMoERouter):
             return (None, top_gate, top_idx, probs, mask, None, None, None)
         # ---- end hash routing ----
 
-        gates = self.gate_score_func(logits)
+        # Split-feature routing already produced `gates` (sum of the two
+        # score_func views) inside the auto_cast block above; only the
+        # single-gate path needs the scoring function applied here. (Hash
+        # layers have already returned above, so `use_split` here is equivalent
+        # to `self.moe_split_feature_routing`.)
+        if not use_split:
+            gates = self.gate_score_func(logits)
 
         if input_ids_none_zero_mask is not None:
             # input_ids_none_zero_mask shape: [b*s,1]
@@ -1050,8 +1693,13 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
-        gates_ori = gates.clone()
-        if self.scoring_func == "sigmoid":
+        if self.use_accuracy_compatible and not use_split:
+            gates_ori = self.gate_score_func(logits).cast(logits.dtype)
+            if input_ids_none_zero_mask is not None:
+                gates_ori = gates_ori * valid_mask
+        else:
+            gates_ori = gates.clone()
+        if self.config.router_aux_loss_coef and self.scoring_func != "softmax":
             if not getattr(
                 self.config, "gpt_model_use_experimental_version", False
             ):
@@ -1065,10 +1713,7 @@ class TopKRouter(StandardMoERouter):
                 )
 
         if getattr(self.config, "moe_topk_fusion", False):
-            # Use MoETopkFusion Triton kernel for bit-exact alignment.
-            # This ensures the topk selection + normalization uses the exact same
-            # GPU kernel, avoiding FP32 rounding differences between
-            # Triton's scalar loop and Paddle's tensor ops.
+            # Use MoETopkFusion Triton kernel for fused topk selection.
             MoETopkFusion = _get_moe_topk_fusion()
             use_node_limit = self.n_group > 1
             if not self.config.gpt_model_use_experimental_version:
@@ -1086,16 +1731,42 @@ class TopKRouter(StandardMoERouter):
                 _log_moe_md5(
                     probs_for_choice, "probs_for_choice", self._layer_number
                 )
-            top_gate, top_idx = MoETopkFusion.apply(
-                gates,  # gate_probs (original sigmoid scores)
-                probs_for_choice,  # probs_for_choice (with correction bias)
-                self.num_experts_per_tok,
-                use_node_limit,
-                self.n_group,
-                self.topk_group,
-                self.norm_topk_prob,  # norm_gate_logits
-            )
-            # top_gate is already normalized by the Triton kernel when norm_topk_prob=True
+
+            if self.topk_method == "quantile_balancing":
+                # QB path: kernel does NOT normalize (normalization stays eager
+                # for bit-exact alignment with original QB). Additionally returns
+                # alpha (the k+1-th largest choice value) for histogram accumulation.
+                top_gate, top_idx, alpha = MoETopkFusion.apply(
+                    gates,  # gate_probs (original sigmoid scores)
+                    probs_for_choice,  # probs_for_choice (with correction bias)
+                    self.num_experts_per_tok,
+                    use_node_limit,
+                    self.n_group,
+                    self.topk_group,
+                    False,  # norm_gate_logits=False (normalization stays eager)
+                    True,  # return_alpha=True
+                )
+                # Accumulate QB histogram with pre-computed alpha (skips internal topk)
+                if framework._dygraph_tracer()._has_grad:
+                    self._accumulate_qb_histogram(
+                        gates,
+                        probs_for_choice,
+                        self.num_experts_per_tok,
+                        valid_mask=input_ids_none_zero_mask,
+                        alpha=alpha,
+                    )
+            else:
+                # noaux_tc / other paths: kernel handles normalization
+                top_gate, top_idx = MoETopkFusion.apply(
+                    gates,  # gate_probs (original sigmoid scores)
+                    probs_for_choice,  # probs_for_choice (with correction bias)
+                    self.num_experts_per_tok,
+                    use_node_limit,
+                    self.n_group,
+                    self.topk_group,
+                    self.norm_topk_prob,  # norm_gate_logits
+                )
+            # top_gate is already normalized by the Triton kernel when norm_topk_prob=True (non-QB)
 
             _log_moe_md5(
                 top_idx.cast("float32"), "topk_indices", self._layer_number
@@ -1118,6 +1789,10 @@ class TopKRouter(StandardMoERouter):
                 k=self.num_experts_per_tok,
                 n_group=self.n_group,
                 topk_group=self.topk_group,
+                # Only quantile_balancing consumes this: padding rows have
+                # already been zeroed out above and must stay out of the QB
+                # histogram.
+                valid_mask=input_ids_none_zero_mask,
             )
 
             _log_moe_md5(
@@ -1128,15 +1803,22 @@ class TopKRouter(StandardMoERouter):
         # z-loss
         if self.config.router_z_loss_coef:
             l_zloss = (
-                self._cal_z_loss(logits, input_ids)
+                self._cal_z_loss(logits, input_ids, origin_input_ids)
                 * self.config.router_z_loss_coef
             )
         else:
             l_zloss = None
 
         if getattr(self.config, "routing_map_fusion", False):
+            pad_token_id = getattr(self.config, "pad_token_id", 0)
+            if pad_token_id is None:
+                pad_token_id = 0
             mask, top_idx, exp_counts = _apply_routing_map_fusion(
-                gates, top_idx, input_ids_none_zero_mask, input_ids
+                gates,
+                top_idx,
+                input_ids_none_zero_mask,
+                input_ids,
+                pad_token_id=pad_token_id,
             )
         else:
             with paddle.amp.auto_cast(enable=False):
@@ -1152,20 +1834,27 @@ class TopKRouter(StandardMoERouter):
 
         # norm
         if self.norm_topk_prob:
-            if not getattr(
-                self.config, "gpt_model_use_experimental_version", False
+            if (
+                not getattr(self.config, "moe_topk_fusion", False)
+                or self.topk_method == "quantile_balancing"
             ):
-                denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+                # QB fusion path passes norm_gate_logits=False to the kernel,
+                # so normalization must happen here in eager (for bit-exact alignment).
+                # Non-fusion paths also normalize here.
+                if self.use_accuracy_compatible:
+                    _sum_f64 = top_gate.cast(paddle.float64).sum(
+                        axis=-1, keepdim=True
+                    )
+                    denominator = _sum_f64.cast(paddle.float32) + 1e-20
+                else:
+                    denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
                 top_gate = top_gate / denominator
-            # When gpt_model_use_experimental_version is True, top_gate is already normalized by MoETopkFusion
+            # When moe_topk_fusion=True and not QB, top_gate is already normalized by MoETopkFusion
 
         if self.routed_scaling_factor_learnable:
-            safe_topk_indices = paddle.clip(top_idx, min=0)
-            gathered_scales = F.embedding(
-                safe_topk_indices,
-                self.routed_scaling_factor_param.unsqueeze(1),
-            ).squeeze(-1)
-            top_gate = top_gate * gathered_scales
+            top_gate = apply_learnable_routed_scaling(
+                top_gate, top_idx, self.routed_scaling_factor_param
+            )
         elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
             top_gate = top_gate * self.routed_scaling_factor
 
@@ -1177,7 +1866,10 @@ class TopKRouter(StandardMoERouter):
         _log_moe_md5(probs, "probs", self._layer_number)
         _log_moe_md5(top_gate, "topk_weights_normed", self._layer_number)
 
-        if self.topk_method == "noaux_tc":
+        if (
+            self.topk_method in ("noaux_tc", "quantile_balancing")
+            and framework._dygraph_tracer()._has_grad
+        ):
             with paddle.no_grad():
                 self.expert_usage += exp_counts
 
@@ -1191,6 +1883,7 @@ class TopKRouter(StandardMoERouter):
                     seq_len,
                     batch_size,
                     input_ids=input_ids,
+                    origin_input_ids=origin_input_ids,
                 )
 
             else:

@@ -43,6 +43,7 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
+from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -174,10 +175,14 @@ class MLP(FleetLayer):
         intermediate_size: int | None = None,
         hidden_size: int | None = None,
         tp_group=None,
+        disable_fp8: bool = False,
     ):
         super().__init__(config=config)
 
         self.config: TransformerConfig = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
 
         self.input_size = (
             input_size if input_size is not None else self.config.hidden_size
@@ -207,6 +212,11 @@ class MLP(FleetLayer):
         self.hidden_size = (
             hidden_size if hidden_size is not None else self.config.hidden_size
         )
+        skip_bias_add = (
+            True
+            if not self.config.gpt_model_use_experimental_version
+            else False
+        )
 
         # If this is a gated linear unit we double the output width
         # see https://arxiv.org/pdf/2002.05202.pdf
@@ -220,13 +230,22 @@ class MLP(FleetLayer):
             init_method=self.config.init_method,
             gather_output=False,
             bias=self.config.use_bias,
-            skip_bias_add=True,
+            skip_bias_add=skip_bias_add,
             is_expert=is_expert,
             tp_group=tp_group,
+            disable_fp8=disable_fp8,
         )
 
-        # Ensure hidden_act is a callable function, not a bound method
-        hidden_act_value = self.config.hidden_act
+        # Ensure hidden_act is a callable function, not a bound method.
+        # A spec-level ``hidden_act`` wins over ``config.hidden_act``: modules
+        # such as the Qwen3-VL / Qwen3.5 patch merger and the Kimi-K2.5 tpool
+        # merge declare their own activation in ``MLPSublayersSpec`` because it
+        # differs from the model-wide ``config.hidden_act``.
+        hidden_act_value = (
+            sublayers_spec.hidden_act
+            if sublayers_spec.hidden_act is not None
+            else self.config.hidden_act
+        )
         if hasattr(hidden_act_value, "__self__") and hasattr(
             hidden_act_value, "__func__"
         ):
@@ -246,10 +265,26 @@ class MLP(FleetLayer):
             init_method=self.config.output_layer_init_method,
             bias=self.config.use_bias,
             input_is_parallel=True,
-            skip_bias_add=True,
+            skip_bias_add=skip_bias_add,
             is_expert=is_expert,
             tp_group=tp_group,
+            disable_fp8=disable_fp8,
         )
+
+    def muon_slice_specs(self, muon_configs):
+        """Muon orthogonal-slice spec for the fused gate/up projection.
+
+        Inherited by StandardMLPExpert / StandardMLPSharedExpert, so each expert
+        (auto-prefixed by the module tree) gets its own spec. The gate/up split
+        point is derived from the weight shape inside ``ortho_gate_up``.
+        """
+        from paddlefleet.transformer.muon_utils import ortho_gate_up
+
+        if not self.config.gated_linear_unit or not muon_configs.get(
+            "muon_ffn_split", False
+        ):
+            return {}
+        return {"up_gate_proj.weight": (ortho_gate_up, {})}
 
     def forward(
         self,
@@ -302,6 +337,7 @@ class MLP(FleetLayer):
             self.config.use_bias
             and self.config.gpt_model_use_experimental_version
             and self.config.tensor_model_parallel_size == 1
+            and self.hidden_act != situ
         ):
             hidden_states = paddle.incubate.nn.functional.fused_linear(
                 hidden_states, self.up_gate_proj.weight, self.up_gate_proj.bias
@@ -312,6 +348,24 @@ class MLP(FleetLayer):
             )
             return output, None
 
+        # Upstream adds this as a fresh ``if`` because the branch above it ends
+        # in ``return``. Here it must stay ``elif``: this branch's chain starts
+        # at the accuracy-compatible swiglu branch, and a new ``if`` would let
+        # that branch fall through and apply an activation twice.
+        elif self.hidden_act == situ and self.config.gated_linear_unit:
+            if bias_parallel is not None:
+                intermediate_parallel = intermediate_parallel + bias_parallel
+            intermediate_parallel = situ_glu(
+                intermediate_parallel,
+                beta=self.config.activation_situ_beta,
+                linear_beta=self.config.activation_situ_linear_beta,
+            )
+            if per_token_scale is not None:
+                original_dtype = intermediate_parallel.dtype
+                intermediate_parallel = (
+                    intermediate_parallel * per_token_scale.unsqueeze(-1)
+                )
+                intermediate_parallel = intermediate_parallel.to(original_dtype)
         elif (
             _use_paddle_swiglu
             and self.hidden_act == F.silu
@@ -334,6 +388,7 @@ class MLP(FleetLayer):
                             False,
                         ),
                         self.config.activation_func_clamp_value,
+                        use_accuracy_compatible=self.use_accuracy_compatible,
                     )
                 elif (
                     self.hidden_act == quick_gelu
@@ -379,6 +434,7 @@ class MLP(FleetLayer):
                         ),
                         cpu_offload_input=False,
                         clamp_value=self.config.activation_func_clamp_value,
+                        use_accuracy_compatible=self.use_accuracy_compatible,
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")

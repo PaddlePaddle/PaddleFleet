@@ -239,6 +239,7 @@ class TestMoETopkFusionKernelDefinitionsNoMock(unittest.TestCase):
             FakePtr(),
             FakePtr(),
             FakePtr(),
+            FakePtr(),
             4,
             1,
             4,
@@ -250,6 +251,7 @@ class TestMoETopkFusionKernelDefinitionsNoMock(unittest.TestCase):
             True,
             2,
             2,
+            True,
             True,
             4,
         )
@@ -300,6 +302,7 @@ class TestMoETopkFusionKernelDefinitionsNoMock(unittest.TestCase):
             4,
             2,
             2,
+            0,  # pad_token_id
             True,
             True,
             2,

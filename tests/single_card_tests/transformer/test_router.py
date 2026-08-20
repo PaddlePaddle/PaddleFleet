@@ -166,6 +166,23 @@ class TestTopKRouter(unittest.TestCase):
         self.assertFalse(hasattr(router_greedy, "e_score_correction_bias"))
         self.assertFalse(hasattr(router_greedy, "expert_usage"))
 
+    def test_hash_layer_respects_head_empty_layer_offset(self):
+        self.config.topk_method = "noaux_tc"
+        self.config.moe_n_hash_layers = 1
+        self.config.num_empty_layers_add_in_head = 2
+        self.config.actual_vocab_size = 16
+
+        router = TopKRouter(self.config)
+        router.set_layer_number(2)
+        self.assertTrue(router.is_hash_layer)
+        self.assertIsNotNone(router.tid2eid)
+        self.assertFalse(hasattr(router, "e_score_correction_bias"))
+
+        router = TopKRouter(self.config)
+        router.set_layer_number(1)
+        self.assertFalse(router.is_hash_layer)
+        self.assertIsNone(router.tid2eid)
+
     def test_call_topk_method_directly(self):
         """
         Directly test `_call_topk_method` to ensure it returns a tuple (gate, idx).
@@ -703,7 +720,7 @@ class TestCalZLoss(unittest.TestCase):
         self.assertAlmostEqual(loss_ids.item(), expected.item(), places=5)
 
     def test_experimental_version_adds_mtp_denom(self):
-        """gpt_model_use_experimental_version=True uses denom + num_nextn_predict_layers * batch."""
+        """gpt_model_use_experimental_version=True with origin_input_ids uses full origin denom."""
         self.config.gpt_model_use_experimental_version = True
         self.config.num_nextn_predict_layers = 2
         router = TopKRouter(self.config)
@@ -714,14 +731,21 @@ class TestCalZLoss(unittest.TestCase):
             [batch_size * seq_len, self.config.n_routed_experts]
         )
         input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+        # origin_input_ids is the full un-scattered ids that already includes
+        # the mtp-shifted tokens (seq_len + num_nextn_predict_layers per row).
+        origin_input_ids = paddle.to_tensor(
+            [[1, 2, 0, 0, 6, 7], [3, 4, 5, 0, 8, 9]]
+        )
 
-        loss = router._cal_z_loss(logits, input_ids)
+        loss = router._cal_z_loss(
+            logits, input_ids, origin_input_ids=origin_input_ids
+        )
         self.assertEqual(loss.shape, [])
 
-        # Manually compute expected
-        origin_mask = (input_ids != 0).astype(paddle.float32)
-        loss_mask = origin_mask.reshape([-1])
-        denom = origin_mask.sum() + origin_mask.shape[0] * 2
+        # Manually compute expected: denom uses origin_input_ids valid count only.
+        origin_mask = (origin_input_ids != 0).astype(paddle.float32)
+        loss_mask = (input_ids != 0).astype(paddle.float32).reshape([-1])
+        denom = origin_mask.sum()
         expected = (
             logits.logsumexp(1).square() * loss_mask
         ).sum() / paddle.clip(denom, min=1e-6)
@@ -765,6 +789,152 @@ class TestCalZLoss(unittest.TestCase):
         self.assertIsNotNone(l_zloss)
         self.assertEqual(l_zloss.shape, [])
         self.assertGreater(l_zloss.item(), 0.0)
+
+
+class TestPadTokenId(unittest.TestCase):
+    """Tests covering config.pad_token_id usage in TopKRouter / loss helpers."""
+
+    def setUp(self):
+        self.config = MockTransformerConfig()
+        self.config.topk_method = "noaux_tc"
+        patcher = patch(
+            "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size",
+            return_value=1,
+        )
+        self.mock_cp = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _make_router(self):
+        return TopKRouter(self.config)
+
+    def test_default_pad_token_id_zero_masks_zero_ids(self):
+        """When pad_token_id defaults to 0, input_ids==0 are treated as padding."""
+        self.config.pad_token_id = 0
+        router = self._make_router()
+        paddle.seed(7)
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+
+        _, _, top_idx, probs, mask, _, _, _ = router(
+            hidden, input_ids=input_ids
+        )
+        for p in [2, 3, 7]:
+            self.assertTrue((top_idx[p] == -1).all().item())
+            self.assertAlmostEqual(mask[p].sum().item(), 0.0)
+            self.assertAlmostEqual(probs[p].sum().item(), 0.0)
+        for p in [0, 1, 4, 5, 6]:
+            self.assertGreater(probs[p].sum().item(), 0.0)
+
+    def test_custom_pad_token_id_masks_only_that_id(self):
+        """Setting pad_token_id=99 masks tokens with id 99, not id 0."""
+        self.config.pad_token_id = 99
+        router = self._make_router()
+        paddle.seed(7)
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        # Token id 0 must NOT be masked; id 99 must be masked.
+        input_ids = paddle.to_tensor([[1, 0, 99, 99], [2, 99, 3, 0]])
+
+        _, _, top_idx, probs, mask, _, _, _ = router(
+            hidden, input_ids=input_ids
+        )
+        # Padding flat positions where id == 99: 2, 3, 5
+        for p in [2, 3, 5]:
+            self.assertTrue((top_idx[p] == -1).all().item())
+            self.assertAlmostEqual(probs[p].sum().item(), 0.0)
+        # id == 0 positions (1, 7) are valid now.
+        for p in [0, 1, 4, 6, 7]:
+            self.assertGreater(probs[p].sum().item(), 0.0)
+
+    def test_missing_pad_token_id_attr_falls_back_to_zero(self):
+        """If config has no pad_token_id attribute, getattr fallback uses 0."""
+        # MockTransformerConfig defines no pad_token_id by default.
+        self.assertFalse(hasattr(self.config, "pad_token_id"))
+        router = self._make_router()
+        paddle.seed(7)
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+
+        # Should not raise, and id==0 should still be masked.
+        _, _, top_idx, _, mask, _, _, _ = router(hidden, input_ids=input_ids)
+        for p in [2, 3, 7]:
+            self.assertTrue((top_idx[p] == -1).all().item())
+            self.assertAlmostEqual(mask[p].sum().item(), 0.0)
+
+    def test_none_pad_token_id_falls_back_to_zero(self):
+        """If config.pad_token_id is None at runtime, fallback uses 0 instead of erroring."""
+        self.config.pad_token_id = None
+        router = self._make_router()
+        paddle.seed(7)
+        hidden = paddle.randn([2, 4, self.config.hidden_size])
+        input_ids = paddle.to_tensor([[1, 2, 0, 0], [3, 4, 5, 0]])
+
+        # `input_ids == None` would otherwise return Python bool and crash;
+        # the defensive fallback must convert None to 0.
+        _, _, top_idx, _, mask, _, _, _ = router(hidden, input_ids=input_ids)
+        for p in [2, 3, 7]:
+            self.assertTrue((top_idx[p] == -1).all().item())
+            self.assertAlmostEqual(mask[p].sum().item(), 0.0)
+
+    def test_cal_seq_aux_loss_uses_pad_token_id(self):
+        """_cal_seq_aux_loss masks tokens equal to config.pad_token_id."""
+        self.config.pad_token_id = 7
+        self.config.topk_method = "greedy"
+        router = self._make_router()
+
+        seq_len = 4
+        n_e = self.config.n_routed_experts
+        k = self.config.num_experts_per_tok
+        probs = paddle.rand([seq_len, n_e])
+        routing_map = paddle.zeros([seq_len, n_e])
+        for i in range(seq_len):
+            for j in range(k):
+                routing_map[i, j] = 1.0
+
+        # All tokens valid (none equal to 7) → loss should be finite and > 0.
+        loss_no_pad = router._cal_seq_aux_loss(
+            probs,
+            k,
+            routing_map,
+            seq_len,
+            batch_size=1,
+            input_ids=paddle.to_tensor([1, 2, 3, 4]),
+        )
+        # With token id 7 marked as padding, denom shrinks.
+        loss_with_pad = router._cal_seq_aux_loss(
+            probs,
+            k,
+            routing_map,
+            seq_len,
+            batch_size=1,
+            input_ids=paddle.to_tensor([1, 2, 7, 7]),
+        )
+        self.assertEqual(loss_no_pad.shape, [])
+        self.assertEqual(loss_with_pad.shape, [])
+        # The two losses must differ (different effective denominator).
+        self.assertNotAlmostEqual(
+            loss_no_pad.item(), loss_with_pad.item(), places=4
+        )
+
+    def test_cal_z_loss_uses_pad_token_id(self):
+        """_cal_z_loss masks tokens equal to config.pad_token_id."""
+        self.config.pad_token_id = 9
+        self.config.topk_method = "greedy"
+        self.config.router_aux_loss_coef = 0.0
+        self.config.router_z_loss_coef = 0.01
+        router = self._make_router()
+
+        paddle.seed(11)
+        logits = paddle.randn([4, self.config.n_routed_experts])
+        # 2 tokens valid, 2 tokens are padding (id == 9).
+        input_ids = paddle.to_tensor([[1, 2, 9, 9]])
+        loss = router._cal_z_loss(logits, input_ids)
+
+        loss_mask = (input_ids != 9).astype(paddle.float32).reshape([-1])
+        denom = (input_ids != 9).astype(paddle.float32).sum()
+        expected = (
+            logits.logsumexp(1).square() * loss_mask
+        ).sum() / paddle.clip(denom, min=1e-6)
+        self.assertAlmostEqual(loss.item(), expected.item(), places=5)
 
 
 if __name__ == "__main__":

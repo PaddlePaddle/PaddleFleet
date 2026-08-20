@@ -73,6 +73,7 @@ class RotaryEmbedding(nn.Layer):
         rope_scaling: bool = False,
         rope_scaling_factor: float = 8.0,
         cp_group: paddle.distributed.communication.group.Group | None = None,
+        use_accuracy_compatible: bool = False,
     ) -> None:
         super().__init__()
 
@@ -82,14 +83,23 @@ class RotaryEmbedding(nn.Layer):
         self.rotary_interleaved = rotary_interleaved
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        if _ACCURACY_COMPATIBLE_KERNEL:
-            with paddle.device.device_guard("cpu"):
-                exponent = paddle.arange(0, dim, 2, dtype=paddle.float32) / dim
-                self.inv_freq = paddle.reciprocal(
-                    paddle.pow(paddle.to_tensor(rotary_base, dtype=paddle.float32), exponent)
-                )
-            if paddle.device.get_device().split(":")[0].lower() == "gpu":
-                self.inv_freq = self.inv_freq.cuda()
+        # Upstream develop turned this into an explicit constructor flag; this
+        # branch reached the same fp32-on-CPU path through the engine env flag.
+        # Keep both entry points so the formal entrypoint, which exports
+        # FLAGS_use_accuracy_compatible_kernel=1, still selects it.
+        if use_accuracy_compatible or _ACCURACY_COMPATIBLE_KERNEL:
+            _exp_cpu = (
+                paddle.arange(0, dim, 2, dtype=paddle.int64)
+                .cpu()
+                .astype(paddle.float32)
+                / dim
+            )
+            _inv_freq_cpu = 1.0 / (rotary_base**_exp_cpu)
+            self.inv_freq = (
+                _inv_freq_cpu.cuda()
+                if paddle.is_compiled_with_cuda()
+                else _inv_freq_cpu
+            )
         else:
             self.inv_freq = 1.0 / (
                 rotary_base
@@ -304,6 +314,7 @@ class MultimodalRotaryEmbedding(nn.Layer):
         rotary_base: int = 10000,
         rope_scaling: bool = False,
         cp_group: paddle.distributed.communication.group.Group | None = None,
+        use_accuracy_compatible: bool = False,
     ) -> None:
         super().__init__()
 

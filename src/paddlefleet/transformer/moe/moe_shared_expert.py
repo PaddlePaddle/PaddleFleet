@@ -51,6 +51,9 @@ class StandardMLPSharedExpert(MLP):
                 # tp_group=pg_collection.expt_tp,
             )
         self.use_shared_expert_gate = config.moe_shared_expert_gate
+        # Keep bf16 activation for backward; the gate already holds the
+        # high-precision copy.
+        self.up_gate_proj.save_original_input = True
         if self.use_shared_expert_gate:
             self.gate_weight = paddle.create_parameter(
                 shape=[config.hidden_size, 1],

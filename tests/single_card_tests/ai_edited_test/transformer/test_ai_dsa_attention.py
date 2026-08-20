@@ -366,7 +366,7 @@ class TestIndexer(unittest.TestCase):
 
     @patch("paddlefleet.transformer.dsa_attention.rotate_activation")
     def test_forward_before_topk_shape(self, mock_rotate):
-        mock_rotate.side_effect = lambda x: x
+        mock_rotate.side_effect = lambda x, use_fast_hadamard=False: x
         config = _make_config()
         spec = _make_indexer_sublayers_spec()
         indexer = Indexer(config, sublayers_spec=spec, layer_number=1)
@@ -376,6 +376,27 @@ class TestIndexer(unittest.TestCase):
         self.assertEqual(q.shape, [2, 4, 1, 16])
         self.assertEqual(k.shape, [2, 4, 16])
         self.assertEqual(weights.shape, [2, 4, 1])
+        # rotate_activation must be called with use_fast_hadamard following the
+        # indexer's config (defaults to False here).
+        for call in mock_rotate.call_args_list:
+            self.assertEqual(call.kwargs.get("use_fast_hadamard"), False)
+
+    @patch("paddlefleet.transformer.dsa_attention.rotate_activation")
+    def test_forward_before_topk_use_fast_hadamard(self, mock_rotate):
+        mock_rotate.side_effect = lambda x, use_fast_hadamard=False: x
+        config = _make_config(use_fast_hadamard=True)
+        spec = _make_indexer_sublayers_spec()
+        indexer = Indexer(config, sublayers_spec=spec, layer_number=1)
+        hidden = paddle.randn([2, 4, 64], dtype="float32")
+        q_latent = paddle.randn([2, 4, 16], dtype="float32")
+        q, k, weights = indexer.forward_before_topk(hidden, q_latent)
+        self.assertEqual(q.shape, [2, 4, 1, 16])
+        self.assertEqual(k.shape, [2, 4, 16])
+        self.assertEqual(weights.shape, [2, 4, 1])
+        # Both q and k rotations must go through the fast Hadamard path.
+        self.assertEqual(mock_rotate.call_count, 2)
+        for call in mock_rotate.call_args_list:
+            self.assertEqual(call.kwargs.get("use_fast_hadamard"), True)
 
 
 class TestFusedDSAIndexerLoss(unittest.TestCase):
@@ -390,11 +411,11 @@ class TestFusedDSAIndexerLoss(unittest.TestCase):
         # FusedDSAIndexerLoss is a PyLayer, use .apply() to call
         # Required args: q, weights, k, query, key
         sq, b, h, d = 2, 1, 2, 4
-        q = paddle.randn([sq, b, h, d], dtype="float32")
-        weights = paddle.randn([sq, b, h], dtype="float32")
-        k = paddle.randn([sq, b, d], dtype="float32")
-        query = paddle.randn([sq, b, h, d], dtype="float32")
-        key = paddle.randn([sq, b, h, d], dtype="float32")
+        q = paddle.randn([b, sq, h, d], dtype="float32")
+        weights = paddle.randn([b, sq, h], dtype="float32")
+        k = paddle.randn([b, sq, d], dtype="float32")
+        query = paddle.randn([b, sq, h, d], dtype="float32")
+        key = paddle.randn([b, sq, h, d], dtype="float32")
         loss = loss_fn.apply(q, weights, k, query, key)
         self.assertEqual(loss.shape, [])
 
