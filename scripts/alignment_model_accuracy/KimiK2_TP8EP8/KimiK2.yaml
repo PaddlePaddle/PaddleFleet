@@ -1,9 +1,9 @@
 ### data
 train_dataset_type: erniekit
 eval_dataset_type: erniekit
-train_dataset_path: /root/paddlejob/share-storage/gpfs/system-public/dengsiwei02/data/alignment_data/train_single.jsonl
+train_dataset_path: /root/.cache/PaddleFormers/alignment_paddle.jsonl
 train_dataset_prob: "1.0"
-eval_dataset_path: /root/paddlejob/share-storage/gpfs/system-public/dengsiwei02/data/alignment_data/train_single.jsonl
+eval_dataset_path: /root/.cache/PaddleFormers/alignment_paddle.jsonl
 max_seq_len: 8192
 packing: false
 padding_free: true
@@ -15,7 +15,7 @@ dataloader_num_workers: 1
 dataset_num_proc: 1
 
 ### model
-model_name_or_path: /root/paddlejob/share-storage/gpfs/system-public/dengsiwei02/moonshotai/kimi_sft_ckps_4_paddle
+model_name_or_path: /root/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8
 _attn_implementation: flashmask
 high_precision_rope: true
 

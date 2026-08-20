@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Kimi-K2 (PaddleFormers + PaddleFleet) 单机 8 卡精度对齐用例 —— paddle 侧
-# 对标 MinimaxV2.5_EP2/run_paddle_minimax.sh，配置沿用 kimi2_align/pf_config.yaml (TP=8/EP=8/PP=1)
+# 对标 MinimaxV2.5_EP2/run_paddle_minimax.sh（TP=8/EP=8/PP=1）
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"

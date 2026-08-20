@@ -2,19 +2,21 @@
 set -euo pipefail
 
 # Kimi-K2 (ms-swift + Megatron-LM) 单机 8 卡精度对齐用例 —— torch 侧
-# 对标 MinimaxV2.5_EP2/run_torch_minimax.sh，参数沿用 kimi2_align/run_mg_sft.sh (TP=8/EP=8/PP=1)
+# 对标 MinimaxV2.5_EP2/run_torch_minimax.sh（TP=8/EP=8/PP=1）
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-DSW=/root/paddlejob/share-storage/gpfs/system-public/dengsiwei02
+# 资产路径（可用环境变量覆盖；默认放在 torch 侧缓存目录）
+KIMIK2_MODEL="${KIMIK2_MODEL:-/home/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8}"
+KIMIK2_DATASET="${KIMIK2_DATASET:-/home/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8/alignment_torch.jsonl}"
 
 # ---- 环境 ----
 # shellcheck disable=SC1091
 source "${WORKSPACE_DIR}/venv/torch/bin/activate"
 cd "${WORKSPACE_DIR}"
 
-export KIMIK2_MEGATRON_LM_PATH="${KIMIK2_MEGATRON_LM_PATH:-${DSW}/Megatron-LM}"
+export KIMIK2_MEGATRON_LM_PATH="${KIMIK2_MEGATRON_LM_PATH:-${WORKSPACE_DIR}/Megatron-LM}"
 export MEGATRON_LM_PATH="${KIMIK2_MEGATRON_LM_PATH}"
 
 # 单机 8 卡：TP=8 / EP=8 / PP=1
@@ -31,7 +33,7 @@ export TORCHDYNAMO_DISABLE=1
 export TORCH_USE_CUDA_DSA=1
 export PYTORCH_ALLOC_CONF='expandable_segments:True'
 
-# unfused attention 路径（与 kimi2_align/run_mg_sft.sh 对齐）
+# unfused attention 路径（与 paddle 侧对齐）
 export NVTE_FLASH_ATTN=0
 export NVTE_FUSED_ATTN=0
 
@@ -48,14 +50,14 @@ TORCH_LOG_DIR="${WORKSPACE_DIR}/logs/torch/${RUN_TS}"
 rm -rf "${MG_TENSOR_DEBUG_DIR}"
 mkdir -p "${TORCH_LOG_DIR}" "${MG_TENSOR_DEBUG_DIR}"
 
-# ------- 训练参数（对齐 kimi2_align/run_mg_sft.sh）-----
+# ------- 训练参数（与 paddle 侧 KimiK2.yaml 对齐）-----
 ARGS=(
     ### model
     --model_type deepseek_v3
-    --model "${DSW}/moonshotai/kimi_sft_ckps_4_swift"
+    --model "${KIMIK2_MODEL}"
 
     ### data
-    --dataset "${DSW}/data/alignment_data/train_single.jsonl"
+    --dataset "${KIMIK2_DATASET}"
     --columns '{"src": "query", "tgt": "response"}'
     --max_length 8192
     --packing False

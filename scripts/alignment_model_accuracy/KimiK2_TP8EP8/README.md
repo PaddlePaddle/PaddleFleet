@@ -29,19 +29,23 @@ CASES=(
   源于两套 grouped-GEMM 内核的 bf16 权重梯度累加舍入差异）。严格 md5 会把 step2+ 判为不一致，
   故本用例固定 `max_steps=1`/`train_iters=1`，只监控已对齐的 step1。
 
-## 依赖资产（CI 落地需 stage）
+## 依赖资产（运行前需 stage 到缓存目录，可用环境变量覆盖）
 
-| 资产 | 路径 |
-|---|---|
-| PF ckpt（2 层缩层，flex_checkpoint）| `dengsiwei02/moonshotai/kimi_sft_ckps_4_paddle` |
-| MG ckpt（2 层缩层，mcore）| `dengsiwei02/moonshotai/kimi_sft_ckps_4_swift` |
-| 对齐数据（单样本）| `dengsiwei02/data/alignment_data/train_single.jsonl` |
-| Megatron-LM | `dengsiwei02/Megatron-LM`（可用 `KIMIK2_MEGATRON_LM_PATH` 覆盖）|
+| 资产 | 默认路径 | 覆盖方式 |
+|---|---|---|
+| PF ckpt（flex_checkpoint）| `/root/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8` | 改 `KimiK2.yaml` 的 `model_name_or_path` |
+| PF 对齐数据 | `/root/.cache/PaddleFormers/alignment_paddle.jsonl` | 改 `KimiK2.yaml` 的 `train/eval_dataset_path` |
+| MG ckpt（mcore）| `/home/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8` | 环境变量 `KIMIK2_MODEL` |
+| MG 对齐数据 | `/home/.cache/PaddleFormers/Kimi-K2-bf16_TP8EP8/alignment_torch.jsonl` | 环境变量 `KIMIK2_DATASET` |
+| Megatron-LM | `${WORKSPACE_DIR}/Megatron-LM` | 环境变量 `KIMIK2_MEGATRON_LM_PATH` |
+
+> 说明：路径沿用框架内 MiniMax 用例的 `~/.cache/PaddleFormers/` 约定，不写死任何个人共享盘路径；
+> 运行方按上表把 Kimi-K2 权重/数据 stage 到对应缓存目录，或用环境变量指向实际位置。
 
 ## 已知前置 / 未验证项
 
 - 需单机 8 卡全空闲；框架 venv（`venv/paddle`、`venv/torch`）由上级 `setup_venvs.sh` 构建。
-- 本用例脚本/配置由已对齐的 `liyamei/kimi2_align/{pf_config.yaml,run_mg_sft.sh}` 改造而来，
-  但**尚未在本框架 venv 下端到端跑通验证**（GPU 阻塞）；落地时需先 smoke 一次确认 md5 锚点正常打印。
+- 本用例的训练配置基于已完成的 Kimi-K2 PF↔MG 精度对齐（TP=8/EP=8/PP=1 SFT）整理而来，
+  但**尚未在本框架 venv 下端到端跑通验证**；落地时需先 smoke 一次确认 md5 锚点正常打印。
 - 若两侧日志未出现 `per_token_loss:`/`final_loss:` 锚点，检查 paddle 侧
   `use_accuracy_compatible`/`FLAGS_use_accuracy_compatible_kernel` 与 torch 侧 `--use_accuracy_compatible`。
