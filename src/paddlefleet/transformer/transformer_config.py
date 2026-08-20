@@ -386,6 +386,12 @@ class TransformerConfig(ModelParallelConfig):
     accumulate standard residuals before applying the learned
     attention-weighted combination across blocks."""
 
+    attn_res_fusion: bool = True
+    """If True, use the FLA fused Triton kernel for Block Attention Residuals.
+    Fuses RMSNorm + projection + softmax + weighted sum into a single
+    kernel launch. Requires paddlefleet_ops with fla.ops.attnres.
+    Falls back to PyLayer when unavailable or deterministic_mode=True."""
+
     ####################
     # mixed-precision
     ####################

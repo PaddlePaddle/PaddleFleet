@@ -39,7 +39,7 @@ jobs:
     name: Clone Paddle
     if: ${{ github.repository_owner == 'PaddlePaddle' }}
     runs-on:
-      group: HK-Clone
+      group: HongKong-Clone
     steps:
       - name: Clone paddle
         uses: actions/checkout@v6
