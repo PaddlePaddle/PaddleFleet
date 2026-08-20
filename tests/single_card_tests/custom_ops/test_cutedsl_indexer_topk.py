@@ -59,6 +59,7 @@ class TestIndexerTopKCoverage(unittest.TestCase):
 
     def test_cutedsl_backend_dispatch(self):
         input_values = MagicMock()
+        input_values.shape = (1, 128)
         contiguous_values = input_values.contiguous.return_value
         seq_lens = MagicMock()
         int32_lengths = seq_lens.cast.return_value
@@ -77,6 +78,7 @@ class TestIndexerTopKCoverage(unittest.TestCase):
                 64,
                 return_val=False,
                 topk_backend="cutedsl",
+                cutedsl_min_cols=64,
             )
 
         self.assertEqual(result, {"indices": indices, "values": values})
@@ -86,7 +88,65 @@ class TestIndexerTopKCoverage(unittest.TestCase):
             contiguous_lengths,
             64,
             return_val=False,
+            sort_mode="score",
         )
+
+    def test_cutedsl_index_backend_selects_index_kernel(self):
+        input_values = MagicMock()
+        input_values.shape = (1, 4096)
+        seq_lens = MagicMock()
+        with patch.object(
+            topk_mod,
+            "indexer_topk_prefill",
+            return_value=(object(), None),
+        ) as topk:
+            _indexer_top_k_unfused(
+                input_values,
+                seq_lens,
+                2048,
+                return_val=False,
+                topk_backend="cutedsl_index",
+            )
+        self.assertEqual(topk.call_args.kwargs["sort_mode"], "index")
+
+    def test_cutedsl_backend_falls_back_for_short_scores(self):
+        input_values = paddle.to_tensor([[1.0, 3.0, 2.0, 4.0]])
+        seq_lens = paddle.to_tensor([4], dtype="int32")
+        with patch.object(topk_mod, "indexer_topk_prefill") as topk:
+            result = _indexer_top_k_unfused(
+                input_values,
+                seq_lens,
+                2,
+                return_val=True,
+                topk_backend="cutedsl",
+                cutedsl_min_cols=5,
+            )
+
+        topk.assert_not_called()
+        self.assertEqual(result["indices"].tolist(), [[3, 1]])
+        self.assertEqual(result["values"].tolist(), [[4.0, 3.0]])
+
+    def test_cutedsl_backend_uses_inclusive_column_threshold(self):
+        input_values = MagicMock()
+        input_values.shape = (1, 5)
+        seq_lens = MagicMock()
+        indices = object()
+        values = object()
+        with patch.object(
+            topk_mod,
+            "indexer_topk_prefill",
+            return_value=(indices, values),
+        ) as topk:
+            result = _indexer_top_k_unfused(
+                input_values,
+                seq_lens,
+                64,
+                topk_backend="cutedsl",
+                cutedsl_min_cols=5,
+            )
+
+        self.assertEqual(result, {"indices": indices, "values": values})
+        topk.assert_called_once()
 
     def test_invalid_topk_backend_raises(self):
         with self.assertRaisesRegex(
@@ -97,6 +157,18 @@ class TestIndexerTopKCoverage(unittest.TestCase):
                 MagicMock(),
                 64,
                 topk_backend="invalid_backend",
+            )
+
+    def test_cutedsl_index_backend_rejects_nonpositive_topk(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"topk_backend='cutedsl_index' requires top_k >= 1",
+        ):
+            _indexer_top_k_unfused(
+                MagicMock(),
+                MagicMock(),
+                0,
+                topk_backend="cutedsl_index",
             )
 
     def test_lazy_public_wrappers(self):
@@ -274,11 +346,15 @@ class TestIndexerTopKCoverage(unittest.TestCase):
             ),
             (
                 {"max_num_cols": 16, "top_k": 0},
-                r"top_k must be in \[1, 2048\]",
+                r"top_k must be in \[1, 32768\]",
             ),
             (
                 {"max_num_cols": 16, "top_k": 32},
                 "max_num_cols must be >= top_k",
+            ),
+            (
+                {"max_num_cols": 32768, "top_k": 16385},
+                r"top_k must be in \[1, 16384\] for float32",
             ),
             (
                 {
@@ -306,6 +382,41 @@ class TestIndexerTopKCoverage(unittest.TestCase):
                     self.assertRaisesRegex(ValueError, message),
                 ):
                     topk_mod.precompile_indexer_topk_clc(**kwargs)
+
+    def test_index_sort_mode_has_explicit_topk_boundary(self):
+        self.assertEqual(
+            topk_mod._validate_sort_mode("score", 64),
+            "score",
+        )
+        self.assertEqual(
+            topk_mod._validate_sort_mode("index", 1),
+            "index",
+        )
+        self.assertEqual(
+            topk_mod._validate_sort_mode("index", 64),
+            "index",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"sort_mode='index' requires top_k >= 1",
+        ):
+            topk_mod._validate_sort_mode("index", 0)
+
+    def test_precompile_index_sort_mode_accepts_small_topk(self):
+        with (
+            patch(
+                "paddle.device.cuda.get_device_capability",
+                return_value=(10, 3),
+            ),
+            patch.object(topk_mod, "_compile_kernel"),
+        ):
+            buckets = topk_mod.precompile_indexer_topk_clc(
+                max_num_cols=4096,
+                top_k=64,
+                sort_mode="index",
+            )
+            self.assertEqual(buckets, (64, 128, 256, 512, 1024, 2048, 4096))
+        topk_mod._CLC_PRECOMPILE_CACHE.clear()
 
     def test_dlpack_adapter_forwards_consumer_stream(self):
         sentinel = object()
@@ -424,7 +535,14 @@ class TestIndexerTopKUnfusedRegression(unittest.TestCase):
         base = -paddle.arange(cols, dtype=paddle.float32).reshape([1, cols])
         return paddle.tile(base, [rows, 1]).cast(dtype).contiguous()
 
-    def _compare_backends(self, scores, lengths, top_k, return_val):
+    def _compare_backends(
+        self,
+        scores,
+        lengths,
+        top_k,
+        return_val,
+        topk_backend="cutedsl",
+    ):
         reference = _indexer_top_k_unfused(
             scores,
             lengths,
@@ -437,15 +555,89 @@ class TestIndexerTopKUnfusedRegression(unittest.TestCase):
             lengths,
             top_k,
             return_val=return_val,
-            topk_backend="cutedsl",
+            topk_backend=topk_backend,
         )
         paddle.device.synchronize()
+        actual_indices = actual["indices"]
+        reference_indices = reference["indices"]
+        valid_counts = paddle.minimum(
+            lengths.reshape([-1, 1]),
+            paddle.full(
+                [lengths.shape[0], 1],
+                top_k,
+                dtype=lengths.dtype,
+            ),
+        )
+        valid_slots = (
+            paddle.arange(top_k, dtype=lengths.dtype).reshape([1, -1])
+            < valid_counts
+        )
+        adjacent_valid = valid_slots[:, 1:] & valid_slots[:, :-1]
         self.assertTrue(
-            bool(paddle.all(actual["indices"] == reference["indices"]).item())
+            bool(
+                paddle.all(
+                    (~adjacent_valid)
+                    | (actual_indices[:, 1:] > actual_indices[:, :-1])
+                ).item()
+            )
+        )
+        self.assertTrue(
+            bool(
+                paddle.all(
+                    paddle.where(
+                        valid_slots,
+                        (actual_indices >= 0)
+                        & (actual_indices < lengths.reshape([-1, 1])),
+                        actual_indices == -1,
+                    )
+                ).item()
+            )
+        )
+        normalized_indices = paddle.where(
+            valid_slots,
+            actual_indices,
+            paddle.full_like(actual_indices, scores.shape[1]),
+        )
+        sorted_indices = paddle.sort(normalized_indices, axis=1)
+        duplicate_indices = (
+            sorted_indices[:, 1:] == sorted_indices[:, :-1]
+        ) & (sorted_indices[:, 1:] != scores.shape[1])
+        self.assertTrue(bool(paddle.all(~duplicate_indices).item()))
+
+        safe_actual = paddle.clip(
+            actual_indices, min=0, max=scores.shape[1] - 1
+        )
+        safe_reference = paddle.clip(
+            reference_indices, min=0, max=scores.shape[1] - 1
+        )
+        actual_scores = paddle.take_along_axis(
+            scores, safe_actual, axis=1
+        ).cast("float32")
+        reference_scores = paddle.take_along_axis(
+            scores, safe_reference, axis=1
+        ).cast("float32")
+        neg_inf = paddle.full_like(actual_scores, float("-inf"))
+        actual_scores = paddle.where(valid_slots, actual_scores, neg_inf)
+        reference_scores = paddle.where(valid_slots, reference_scores, neg_inf)
+        self.assertTrue(
+            bool(
+                paddle.all(
+                    paddle.sort(actual_scores, axis=1)
+                    == paddle.sort(reference_scores, axis=1)
+                ).item()
+            )
         )
         if return_val:
             self.assertTrue(
-                bool(paddle.all(actual["values"] == reference["values"]).item())
+                bool(
+                    paddle.all(
+                        paddle.where(
+                            valid_slots,
+                            actual["values"].cast("float32") == actual_scores,
+                            actual["values"] == actual["values"],
+                        )
+                    ).item()
+                )
             )
         else:
             self.assertIsNone(actual["values"])
@@ -494,8 +686,15 @@ class TestIndexerTopKUnfusedRegression(unittest.TestCase):
                 TypeError,
                 "dtype paddle.int32",
             ),
-            (gpu_input, gpu_lengths, 0, ValueError, r"\[1, 2048\]"),
-            (gpu_input, gpu_lengths, 2049, ValueError, r"\[1, 2048\]"),
+            (gpu_input, gpu_lengths, 0, ValueError, r"\[1, 32768\]"),
+            (
+                gpu_input,
+                gpu_lengths,
+                16385,
+                ValueError,
+                r"\[1, 16384\] for float32",
+            ),
+            (gpu_input, gpu_lengths, 32769, ValueError, r"\[1, 32768\]"),
             (
                 paddle.empty([2, 0], dtype=paddle.float32),
                 paddle.zeros([2], dtype=paddle.int32),
@@ -580,7 +779,21 @@ class TestIndexerTopKUnfusedRegression(unittest.TestCase):
         values = paddle.empty([rows, top_k], dtype=paddle.float32)
         scheduler_state = paddle.ones([1], dtype=paddle.int32)
         num_ctas, _ = topk_mod._persistent_launch_config(rows)
-        slots = topk_mod._workspace_slot_count(rows, num_ctas, 256, True, "clc")
+        smem_bytes = topk_mod._estimate_smem_bytes_per_cta(
+            256,
+            top_k,
+            2,
+            min(16384, cols),
+            "clc",
+        )
+        slots = topk_mod._workspace_slot_count(
+            rows,
+            num_ctas,
+            256,
+            True,
+            "clc",
+            smem_bytes_per_cta=smem_bytes,
+        )
         workspace = paddle.empty([slots, 2, 1], dtype=paddle.int32)
         compiled = MagicMock()
         cute_tensor = object()
@@ -654,6 +867,64 @@ class TestIndexerTopKUnfusedRegression(unittest.TestCase):
                 return_val=True,
             )
             self.assertEqual(len(topk_mod._COMPILE_CACHE), 1)
+
+    def test_index_kernel_matches_candidate_set_at_boundary(self):
+        rows, cols, top_k = 2, 4096, 2048
+        lengths = paddle.to_tensor([cols, 3073], dtype=paddle.int32)
+        self._compare_backends(
+            self._scores(rows, cols, paddle.float16),
+            lengths,
+            top_k,
+            return_val=True,
+            topk_backend="cutedsl_index",
+        )
+
+    def test_short_rows_write_prefix_directly_for_static_and_clc(self):
+        rows, cols, top_k = 3, 4096, 64
+        scores = paddle.tile(
+            -paddle.arange(cols, dtype=paddle.float32).reshape([1, -1]),
+            [rows, 1],
+        ).cast(paddle.float16)
+        lengths = paddle.to_tensor([0, 31, cols], dtype=paddle.int32)
+
+        for persistent, schedule_mode in ((False, "static"), (True, "clc")):
+            with self.subTest(schedule_mode=schedule_mode):
+                indices, values = topk_mod.indexer_topk_prefill(
+                    scores,
+                    lengths,
+                    top_k,
+                    return_val=True,
+                    persistent=persistent,
+                    schedule_mode=schedule_mode,
+                    sort_mode="index",
+                )
+                paddle.device.synchronize()
+
+                self.assertTrue(bool(paddle.all(indices[0] == -1).item()))
+                self.assertTrue(
+                    bool(
+                        paddle.all(
+                            paddle.isinf(values[0]) & (values[0] < 0)
+                        ).item()
+                    )
+                )
+                self.assertEqual(indices[1, :31].tolist(), list(range(31)))
+                self.assertEqual(
+                    values[1, :31].cast("float32").tolist(),
+                    [-float(i) for i in range(31)],
+                )
+                self.assertTrue(bool(paddle.all(indices[1, 31:] == -1).item()))
+                self.assertTrue(
+                    bool(
+                        paddle.all(
+                            paddle.isinf(values[1, 31:]) & (values[1, 31:] < 0)
+                        ).item()
+                    )
+                )
+                self.assertEqual(
+                    indices[2].tolist(),
+                    list(range(top_k)),
+                )
 
 
 if __name__ == "__main__":

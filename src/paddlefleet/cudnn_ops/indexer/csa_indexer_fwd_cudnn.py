@@ -128,6 +128,7 @@ def _indexer_top_k_unfused(
     top_k: int,
     return_val: bool = True,
     topk_backend: str = "unfused",
+    cutedsl_min_cols: int = 0,
 ):
     """
     Deterministic topk in replacement of cudnn indexer_top_k_wrapper.
@@ -142,12 +143,23 @@ def _indexer_top_k_unfused(
     output slots past ``seq_lens`` does not remove them. Mask the columns first.
     For the pure-causal callers this is a no-op (already ``-inf`` there).
     """
-    if topk_backend not in {"unfused", "cutedsl"}:
+    if topk_backend not in {"unfused", "cutedsl", "cutedsl_index"}:
         raise ValueError(
             f"topk_backend={topk_backend!r} is invalid. "
-            "Must be one of {'unfused', 'cutedsl'}."
+            "Must be one of {'unfused', 'cutedsl', 'cutedsl_index'}."
         )
-    if topk_backend == "cutedsl":
+    if topk_backend == "cutedsl_index" and top_k < 1:
+        raise ValueError(
+            f"topk_backend='cutedsl_index' requires top_k >= 1, got {top_k}"
+        )
+    if cutedsl_min_cols < 0:
+        raise ValueError(
+            f"cutedsl_min_cols must be non-negative, got {cutedsl_min_cols}"
+        )
+    use_cutedsl = topk_backend in {"cutedsl", "cutedsl_index"} and (
+        input_values.shape[-1] >= cutedsl_min_cols
+    )
+    if use_cutedsl:
         from paddlefleet.cutedsl_ops.indexer_topk_prefill import (
             indexer_topk_prefill,
         )
@@ -157,6 +169,7 @@ def _indexer_top_k_unfused(
             seq_lens.cast("int32").contiguous(),
             int(top_k),
             return_val=return_val,
+            sort_mode="index" if topk_backend == "cutedsl_index" else "score",
         )
         return {"indices": indices, "values": values}
 
@@ -249,6 +262,7 @@ def cudnn_indexer_topk(
     valid_range=None,
     seq_offset=0,
     topk_backend="unfused",
+    cutedsl_min_cols=0,
 ):
     """Select top-K indices using cuDNN TRT-LLM radix kernel (SM100).
 
@@ -310,6 +324,7 @@ def cudnn_indexer_topk(
         top_k=topk_k,
         return_val=False,
         topk_backend=topk_backend,
+        cutedsl_min_cols=cutedsl_min_cols,
     )
     topk_indices = result["indices"].reshape([batch, sq, topk_k]).cast("int32")
 
@@ -338,6 +353,7 @@ def cudnn_indexer_topk_fwd(
     seq_offset=0,
     return_topk_scores=False,
     topk_backend="unfused",
+    cutedsl_min_cols=0,
 ):
     """Run cuDNN-frontend DSA indexer forward on Paddle tensors.
 
@@ -383,6 +399,7 @@ def cudnn_indexer_topk_fwd(
         seq_offset=seq_offset,
         return_topk_scores=return_topk_scores,
         topk_backend=topk_backend,
+        cutedsl_min_cols=cutedsl_min_cols,
     )
 
 
@@ -399,6 +416,7 @@ def _cudnn_indexer_topk_fwd_impl(
     seq_offset=0,
     return_topk_scores=False,
     topk_backend="unfused",
+    cutedsl_min_cols=0,
 ):
     _validate_indexer_inputs(index_q, index_k_comp, weights)
     if int(topk_effective) <= 0:
@@ -427,6 +445,7 @@ def _cudnn_indexer_topk_fwd_impl(
             doc_lens=doc_lens,
             return_topk_scores=return_topk_scores,
             topk_backend=topk_backend,
+            cutedsl_min_cols=cutedsl_min_cols,
         )
         if thd_result is not None:
             return thd_result
@@ -447,6 +466,7 @@ def _cudnn_indexer_topk_fwd_impl(
             seq_offset,
             return_topk_scores,
             topk_backend,
+            cutedsl_min_cols,
         )
 
     # Tile the query dimension: each tile's forward + top-k is independent of
@@ -469,6 +489,7 @@ def _cudnn_indexer_topk_fwd_impl(
             seq_offset + start,
             return_topk_scores,
             topk_backend,
+            cutedsl_min_cols,
         )
         if return_topk_scores:
             idx_chunk, len_chunk, score_chunk = chunk
@@ -559,6 +580,7 @@ def _cudnn_indexer_topk_fwd_docmask_thd(
     doc_lens: list[int],
     return_topk_scores: bool = False,
     topk_backend: str = "unfused",
+    cutedsl_min_cols: int = 0,
 ):
     batch, seq_len, _, _ = index_q.shape
     if batch != 1:
@@ -612,6 +634,7 @@ def _cudnn_indexer_topk_fwd_docmask_thd(
         top_k=topk_effective,
         return_val=return_topk_scores,
         topk_backend=topk_backend,
+        cutedsl_min_cols=cutedsl_min_cols,
     )
 
     topk_global = topk_local_to_global(
@@ -636,6 +659,7 @@ def _dense_indexer_topk_single(
     seq_offset,
     return_topk_scores,
     topk_backend="unfused",
+    cutedsl_min_cols=0,
 ):
     """Single-shot packed-global forward + top-k over the full query slice."""
     scores = cudnn_indexer_forward(
@@ -654,6 +678,7 @@ def _dense_indexer_topk_single(
         valid_range=valid_range,
         seq_offset=seq_offset,
         topk_backend=topk_backend,
+        cutedsl_min_cols=cutedsl_min_cols,
     )
     if not return_topk_scores:
         return topk_indices, topk_length

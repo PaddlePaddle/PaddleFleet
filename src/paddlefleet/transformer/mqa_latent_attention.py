@@ -718,21 +718,25 @@ class MQALatentAttention(FleetLayer):
             if sublayers_spec.indexer is not None
             else None
         )
-        if (
-            self.indexer is not None
-            and getattr(config, "dsa_indexer_topk_backend", "unfused")
-            == "cutedsl"
-        ):
+        if self.indexer is not None and getattr(
+            config, "dsa_indexer_topk_backend", "unfused"
+        ) in {"cutedsl", "cutedsl_index"}:
             import paddle
 
             if "gpu" in paddle.get_device().lower():
                 from paddlefleet.cutedsl_ops import precompile_indexer_topk_clc
 
-                precompile_indexer_topk_clc(
+                precompile_kwargs = {
                     # All larger runtime lengths share this saturated bucket.
-                    max_num_cols=16 * 1024,
-                    top_k=int(self.indexer.index_topk),
-                )
+                    "max_num_cols": 16 * 1024,
+                    "top_k": int(self.indexer.index_topk),
+                }
+                if (
+                    getattr(config, "dsa_indexer_topk_backend", "unfused")
+                    == "cutedsl_index"
+                ):
+                    precompile_kwargs["sort_mode"] = "index"
+                precompile_indexer_topk_clc(**precompile_kwargs)
         self.indexer_loss_coeff = float(
             getattr(config, "dsa_indexer_loss_coeff", 0.0) or 0.0
         )

@@ -1366,13 +1366,28 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_topk_backend: str = "unfused"
     """Top-k implementation used after production DSA indexer scores.
 
-    One of {"unfused", "cutedsl"}:
+    One of {"unfused", "cutedsl", "cutedsl_index"}:
       * "unfused" (default): Paddle ``topk`` reference implementation.
-      * "cutedsl": standalone Paddle CuTe DSL prefill top-k implementation.
+      * "cutedsl": standalone Paddle CuTe DSL prefill top-k implementation
+        with the original score-descending output kernel.
+      * "cutedsl_index": CuTe DSL index-ascending output kernel. The standalone
+        kernel supports larger dtype-dependent limits, while this production
+        transformer config remains capped at 2048 for cuDNN-path compatibility.
 
     This switch only changes the top-k stage after the indexer score forward.
     It does not change warmup/full-candidate selection, TileLang score paths,
     sparse attention backends, or indexer-loss autograd.
+    """
+
+    dsa_indexer_topk_min_cols: int = 65536
+    """Minimum score width required to use the CuTe DSL top-k backend.
+
+    CuTe DSL is selected only when
+    ``dsa_indexer_topk_backend`` is ``"cutedsl"`` or ``"cutedsl_index"``
+    and the real score width is strictly greater than this threshold.
+    Smaller score matrices use the Paddle top-k fallback. This is useful for
+    packed-document and dual-chunk paths, where each score matrix may have a
+    different compact column width.
     """
 
     csa_sparse_attn_backend: str = "tilelang"
@@ -1932,10 +1947,25 @@ class TransformerConfig(ModelParallelConfig):
                     "dsa_indexer_use_sparse_loss=True with a trainable backbone."
                 )
 
-        if self.dsa_indexer_topk_backend not in {"unfused", "cutedsl"}:
+        if self.dsa_indexer_topk_backend not in {
+            "unfused",
+            "cutedsl",
+            "cutedsl_index",
+        }:
             raise ValueError(
                 f"dsa_indexer_topk_backend={self.dsa_indexer_topk_backend!r} "
-                "is invalid. Must be one of {'unfused', 'cutedsl'}."
+                "is invalid. Must be one of "
+                "{'unfused', 'cutedsl', 'cutedsl_index'}."
+            )
+        if not isinstance(self.dsa_indexer_topk_min_cols, int):
+            raise ValueError(
+                "dsa_indexer_topk_min_cols must be an integer, got "
+                f"{self.dsa_indexer_topk_min_cols!r}"
+            )
+        if self.dsa_indexer_topk_min_cols < 0:
+            raise ValueError(
+                "dsa_indexer_topk_min_cols must be non-negative, got "
+                f"{self.dsa_indexer_topk_min_cols}"
             )
 
         # Hyper-connection (mHC) validation

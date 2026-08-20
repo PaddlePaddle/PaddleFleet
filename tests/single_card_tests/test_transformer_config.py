@@ -201,12 +201,35 @@ class TestDsaIndexerTopKBackendConfig(unittest.TestCase):
         config = TransformerConfig(dsa_indexer_topk_backend="cutedsl")
         self.assertEqual(config.dsa_indexer_topk_backend, "cutedsl")
 
+    def test_valid_cutedsl_index_value(self):
+        config = TransformerConfig(dsa_indexer_topk_backend="cutedsl_index")
+        self.assertEqual(config.dsa_indexer_topk_backend, "cutedsl_index")
+
     def test_invalid_value_raises(self):
         with self.assertRaisesRegex(
             ValueError,
             "dsa_indexer_topk_backend='invalid_backend' is invalid",
         ):
             TransformerConfig(dsa_indexer_topk_backend="invalid_backend")
+
+    def test_min_cols_default_and_override(self):
+        self.assertEqual(TransformerConfig().dsa_indexer_topk_min_cols, 16384)
+        self.assertEqual(
+            TransformerConfig(
+                dsa_indexer_topk_min_cols=131072
+            ).dsa_indexer_topk_min_cols,
+            131072,
+        )
+
+    def test_min_cols_rejects_invalid_values(self):
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_topk_min_cols must be non-negative"
+        ):
+            TransformerConfig(dsa_indexer_topk_min_cols=-1)
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_topk_min_cols must be an integer"
+        ):
+            TransformerConfig(dsa_indexer_topk_min_cols=1.5)
 
 
 class TestRoutedScalingFactorConfig(unittest.TestCase):

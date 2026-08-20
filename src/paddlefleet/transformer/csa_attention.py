@@ -2313,6 +2313,9 @@ class CompressedSparseAttention(FleetLayer):
                     topk_backend=getattr(
                         self.config, "dsa_indexer_topk_backend", "unfused"
                     ),
+                    cutedsl_min_cols=getattr(
+                        self.config, "dsa_indexer_topk_min_cols", 65536
+                    ),
                 )
 
             topk_indices_compressed = topk_indices
@@ -3150,6 +3153,11 @@ class CompressedSparseAttention(FleetLayer):
                                         self.config,
                                         "dsa_indexer_topk_backend",
                                         "unfused",
+                                    ),
+                                    cutedsl_min_cols=getattr(
+                                        self.config,
+                                        "dsa_indexer_topk_min_cols",
+                                        65536,
                                     ),
                                 )
                             )
