@@ -85,10 +85,6 @@ ps.initialize_model_parallel(_hcg)
 # ═══════════════════════════════════════════════════════════════════════
 
 
-@unittest.skipUnless(
-    paddlefleet_ops.is_teramoe_available(),
-    "TeraMoE not available",
-)
 class TestTeraMoEConfig(unittest.TestCase):
     """TransformerConfig correctly stores TeraMoE parameters."""
 

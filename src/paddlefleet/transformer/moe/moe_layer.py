@@ -436,9 +436,11 @@ class MoELayer(nn.Layer):
                 "for sonic moe, expert weight must be fused."
             )
         if self.using_teramoe:
-            assert use_fused_weight is True, (
-                "for teramoe, expert weight must be fused."
-            )
+            if use_fused_weight is not True:
+                raise ValueError(
+                    "TeraMoE requires fused expert weights "
+                    "(moe_expert_fusion must resolve to fused weights)."
+                )
 
         if self.fp8 and self.using_sonic_moe is False:
             logger.warning(
