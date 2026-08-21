@@ -493,6 +493,12 @@ class LanguageLoss(FleetLayer):
                     lm_loss = self._forward(logits[0], lm_labels)
 
                 for depth in range(self.config.num_nextn_predict_layers):
+                    # MTP depth sampling: the LM head emits None for depths not
+                    # computed this step; skip them so mtp_loss holds only the K
+                    # computed depths (loss averages over K). No effect when
+                    # sampling is off (logits are never None).
+                    if mtp_logits[depth] is None:
+                        continue
                     logits_cur_depth = mtp_logits[depth]
                     labels_cur_depth = labels_ori[
                         :, (depth + 1) : (depth + 1 + seq_length)
@@ -681,6 +687,16 @@ class LanguageLoss(FleetLayer):
                     f"mtp{i + 1}.final_loss",
                     loss_val,
                 )
+
+            # MTP depth sampling: mtp_loss holds only the computed prefix
+            # (depths 0..len-1). Drop stale tracker entries for the skipped deeper
+            # depths so the trainer does not re-log a stale value on steps where
+            # those depths were sampled out (per-depth curves stay
+            # sparse-but-correct instead of flat).
+            for _d in range(
+                len(mtp_loss), self.config.num_nextn_predict_layers
+            ):
+                LanguageLoss.mtp_loss_tracker.pop(f"mtp_{_d + 1}_loss", None)
 
             logs = get_global_training_logs()
             if logs is not None and hasattr(logs, "update"):

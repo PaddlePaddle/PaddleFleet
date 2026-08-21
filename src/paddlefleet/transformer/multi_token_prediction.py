@@ -795,6 +795,41 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         return outputs
 
+    def _sample_mtp_depth(self):
+        """Sample how many MTP depths K to actually run this step (prefix 1..K).
+
+        Driven by config.mtp_depth_sampling, a list P(K=k) of length
+        D=num_nextn_predict_layers. Returns D when sampling is disabled.
+
+        The draw is DETERMINISTIC and collective-free: a private RNG is seeded
+        by a per-call counter, so every rank that runs this MTP layer draws the
+        SAME K without any communication. This is required for the MTP layer's
+        MoE expert-parallel all-to-all to stay consistent (all participating
+        ranks must agree whether a depth is skipped). A world-group
+        broadcast(src=0) — the previous mechanism — deadlocks under pp>1, since
+        only the last pipeline stage runs the MTP layer while src=0 sits on the
+        first stage and never joins the collective. A private Generator is used
+        (not np.random.*) so the global RNG stream used elsewhere is untouched.
+        """
+        import numpy as np
+
+        D = self.config.num_nextn_predict_layers
+        ratio = getattr(self.config, "mtp_depth_sampling", None)
+        if not ratio:
+            return D
+        probs = np.asarray(ratio, dtype="float64")
+        probs = probs / probs.sum()
+        # Per-call counter -> identical sequence of seeds on every rank running
+        # this layer (all ranks execute the same pipeline schedule in lockstep).
+        if not hasattr(self, "_mtp_sampling_counter"):
+            self._mtp_sampling_counter = 0
+        base = int(getattr(self.config, "seed", 0) or 0)
+        seed = base * 1_000_003 + self._mtp_sampling_counter
+        self._mtp_sampling_counter += 1
+        rng = np.random.default_rng(seed)
+        k = int(rng.choice(len(probs), p=probs)) + 1
+        return max(1, min(k, D))
+
     def forward(self, dict_args: dict):
         if "context" in dict_args:
             assert dict_args["context"] is None, (
@@ -804,6 +839,32 @@ class MultiTokenPredictionLayer(FleetLayer):
             assert dict_args["packed_seq_params"] is None, (
                 "multi token prediction + sequence packing is not yet supported."
             )
+
+        # === MTP depth sampling (prefix-length sampling) ===
+        # Sample K once per micro-batch in the depth-0 layer and carry it in
+        # dict_args so it flows WITH the data (robust to grad-accum, pipeline,
+        # recompute — no shared/config state an interleaved micro-batch could
+        # overwrite). Depths >= K skip their transformer_layer forward.
+        if (
+            getattr(self.config, "mtp_depth_sampling", None)
+            and not self.config.enable_mtp_magic_send
+        ):
+            D = self.config.num_nextn_predict_layers
+            if self.layer_number == 0 and "mtp_sampled_depth" not in dict_args:
+                # Draw once per micro-batch. The `not in dict_args` guard makes
+                # this idempotent: if a recompute pass re-enters this layer with
+                # the same dict_args, K is reused (not re-drawn), so the skip
+                # decision matches the original forward.
+                k = self._sample_mtp_depth()
+                dict_args["mtp_sampled_depth"] = k
+                self._last_sampled_depth = (
+                    k  # observability only, not used in logic
+                )
+            K = dict_args.get("mtp_sampled_depth", D)
+            if self.layer_number >= K:
+                # Skip this depth entirely: leave hidden_states unchanged (K stays
+                # in dict_args for downstream MTP layers + the LM head).
+                return dict_args
 
         # === Magic Send branch ===
         if self.config.enable_mtp_magic_send:
