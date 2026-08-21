@@ -119,7 +119,10 @@ def plan_sharding_shrink_switches(
     if assumed:
         base_ways = base_ways or new_ways
         orig_ways = base_ways * DEFAULT_SHRINK_FACTOR
-    elif orig_ways <= new_ways:
+    # Nothing to compensate for unless the target is actually narrower, and an
+    # assumed source width is no exception: a target wide enough to reach the
+    # estimate needs neither a pinned data-split width nor offload.
+    if orig_ways <= new_ways:
         return []
 
     factor = _format_factor(orig_ways, new_ways)

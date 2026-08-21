@@ -286,6 +286,23 @@ class TestShardingShrinkSwitches(unittest.TestCase):
     def test_no_switches_when_a_scale_is_unknown(self):
         self.assertEqual(plan_sharding_shrink_switches({}, 96, None), [])
 
+    def test_an_assumed_source_width_still_needs_a_real_shrink(self):
+        # The estimate is only a stand-in for the source width, so it obeys
+        # the same "target must be narrower" guard: a target that already
+        # reaches the estimate needs no compensation.
+        self.assertEqual(
+            plan_sharding_shrink_switches(
+                {}, None, 2 * DEFAULT_SHRINK_FACTOR, base_ways=2
+            ),
+            [],
+        )
+        self.assertEqual(
+            plan_sharding_shrink_switches(
+                {}, None, 4 * DEFAULT_SHRINK_FACTOR, base_ways=2
+            ),
+            [],
+        )
+
     def test_unknown_source_scale_multiplies_the_source_data_width(self):
         # The base is the source's own dense_sharding, not the width the
         # target actually runs at after EP/PP shrinking.
