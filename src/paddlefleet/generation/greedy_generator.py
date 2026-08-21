@@ -587,11 +587,7 @@ class GreedyGenerator:
                 next_tok = _sample_next_token(
                     last_logits, temperature, top_k, top_p
                 )
-                if (
-                    return_log_probs
-                    and log_probs_per_batch is not None
-                    and True
-                ):
+                if return_log_probs and log_probs_per_batch is not None:
                     step_log_probs = paddle.nn.functional.log_softmax(
                         last_logits.cast("float32"), axis=-1
                     )  # [B, vocab]
@@ -799,7 +795,7 @@ class GreedyGenerator:
             next_tok = _sample_next_token(
                 last_logits, temperature, top_k, top_p
             )
-            if return_log_probs and log_probs_per_batch is not None and True:
+            if return_log_probs and log_probs_per_batch is not None:
                 step_log_probs = paddle.nn.functional.log_softmax(
                     last_logits.cast("float32"), axis=-1
                 )  # [B, vocab]
@@ -848,11 +844,7 @@ class GreedyGenerator:
                 next_tok = _sample_next_token(
                     last_logits, temperature, top_k, top_p
                 )
-                if (
-                    return_log_probs
-                    and log_probs_per_batch is not None
-                    and True
-                ):
+                if return_log_probs and log_probs_per_batch is not None:
                     step_log_probs = paddle.nn.functional.log_softmax(
                         last_logits.cast("float32"), axis=-1
                     )  # [B, vocab]
