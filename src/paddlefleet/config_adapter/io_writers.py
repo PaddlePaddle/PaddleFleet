@@ -32,6 +32,10 @@ import os
 from pathlib import Path
 
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap, CommentedSeq
+
+#: Fallback nested-mapping indent, and ruamel's own default.
+DEFAULT_MAP_INDENT = 2
 
 
 def make_yaml():
@@ -40,6 +44,39 @@ def make_yaml():
     yaml.preserve_quotes = True
     yaml.width = 4096
     return yaml
+
+
+def detect_map_indent(document, default=DEFAULT_MAP_INDENT):
+    """Nested-mapping indent step ``document`` uses most, ``default`` if none.
+
+    ruamel indents on dump from one global setting, not per node, so a
+    round-trip rewrites every nested block to whatever width we pick -- a
+    4-space ``muon_configs`` block comes back as 2 and shows up as a dozen
+    spurious lines in the diff.  Reading the width back off the parsed source
+    (``lc.col`` is the column each collection started at) keeps the rewritten
+    file's diff limited to the fields that actually changed.  Steps are
+    weighted by how many keys they cover, so the dominant style wins when a
+    file mixes them.
+    """
+    steps = {}
+
+    def visit(node):
+        if isinstance(node, CommentedMap):
+            for value in node.values():
+                if isinstance(value, CommentedMap) and len(value):
+                    step = value.lc.col - node.lc.col
+                    if step > 0:
+                        steps[step] = steps.get(step, 0) + len(value)
+                visit(value)
+        elif isinstance(node, CommentedSeq):
+            for item in node:
+                visit(item)
+
+    visit(document)
+    if not steps:
+        return default
+    # Most keys first, then the narrower step, so ties stay deterministic.
+    return max(steps, key=lambda step: (steps[step], -step))
 
 
 def _apply(document, config_map, protected=None):
@@ -83,9 +120,14 @@ class YamlWriter:
         self.yaml = yaml or make_yaml()
 
     def load(self, path):
-        """Load the YAML document (``None`` for an empty file)."""
+        """Load the YAML document (``None`` for an empty file).
+
+        Also aligns the dump indentation with the source's own style.
+        """
         with open(path, encoding="utf-8") as f:
-            return self.yaml.load(f)
+            document = self.yaml.load(f)
+        self.yaml.indent(mapping=detect_map_indent(document))
+        return document
 
     def apply_config_map(self, config, config_map, protected=None):
         """Merge a flat map into ``config``; see the module docstring."""

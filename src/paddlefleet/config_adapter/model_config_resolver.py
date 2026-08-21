@@ -48,7 +48,7 @@ def resolve_model_config(model_name_or_path, yaml_dir):
     if not model_name_or_path:
         raise ModelConfigResolveError(
             "YAML 里没有 model_name_or_path，无法定位 model_config.json；"
-            "精度模式需要它来缩减模型结构"
+            "缩减模型结构（专家数 / 层数）需要它"
         )
 
     yaml_dir = Path(yaml_dir)
