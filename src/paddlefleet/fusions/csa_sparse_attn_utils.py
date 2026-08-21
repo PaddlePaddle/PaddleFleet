@@ -68,3 +68,18 @@ def _local_to_global_flat(local_idxs, seqlen_kv: int):
     return paddle.where(valid, idxs_flat + batch_offsets, idxs_flat).cast(
         "int32"
     )
+
+
+def local_to_global_flat(local_idxs, seqlen_kv: int, *, fused: bool = False):
+    """Dispatch ``_local_to_global_flat`` between eager and fused Triton.
+
+    ``fused`` comes from the ``sparse_attn_global_kv_idx_remap_fusion`` config
+    field, threaded down through the sparse-attn PyLayers. It is bit-identical
+    to the eager reference (one kernel instead of seven), so this switch only
+    trades kernel count for a Triton dependency -- it never changes values.
+    """
+    if fused:
+        from paddlefleet.triton_ops import local_to_global_flat_triton
+
+        return local_to_global_flat_triton(local_idxs, seqlen_kv)
+    return _local_to_global_flat(local_idxs, seqlen_kv)
