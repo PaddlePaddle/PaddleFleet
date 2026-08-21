@@ -519,11 +519,12 @@ def compressed_topk_idxs_kernel(
     CompDocStart_ptr,  # compressed_doc_start_per_pos [seqlen]
     PosInDoc_ptr,  # pos_in_doc [seqlen]
     DocLen_ptr,  # doc_len_per_pos [seqlen]
-    Out_ptr,  # output [seqlen, n_groups]
+    Out_ptr,  # output [row_count, n_groups]
     seqlen,
     n_groups,
     ratio,  # compression ratio (runtime scalar, need NOT be power of 2)
     offset,  # constant added to every accessible slot index (-1 kept as -1)
+    row_start,  # first query position to emit; output row 0 maps to it
     BLOCK_G: tl.constexpr,  # power of 2 block along the compressed-kv axis
 ):
     """
@@ -548,10 +549,11 @@ def compressed_topk_idxs_kernel(
     ``[compressed_doc_start[i], compressed_doc_start[i] + (pos_in_doc[i]+1)//ratio)``.
     One program per position, streaming the compressed axis in BLOCK_G chunks.
     """
-    pid = tl.program_id(0)  # query position i
-    cds = tl.load(CompDocStart_ptr + pid).to(tl.int32)
-    pos = tl.load(PosInDoc_ptr + pid).to(tl.int32)
-    dlen = tl.load(DocLen_ptr + pid).to(tl.int32)
+    pid = tl.program_id(0)  # output row
+    q = row_start + pid  # query position i
+    cds = tl.load(CompDocStart_ptr + q).to(tl.int32)
+    pos = tl.load(PosInDoc_ptr + q).to(tl.int32)
+    dlen = tl.load(DocLen_ptr + q).to(tl.int32)
 
     # padding query (pos_in_doc >= doc_len) sees nothing.
     valid_q = pos < dlen
@@ -580,6 +582,8 @@ def compressed_topk_idxs_triton(
     doc_len_per_pos: Tensor,
     ratio: int,
     offset: int = 0,
+    row_start: int = 0,
+    row_count: int | None = None,
 ) -> Tensor:
     """Build ``compressed_topk_ids`` for KV-compressed sparse attention.
 
@@ -596,12 +600,17 @@ def compressed_topk_idxs_triton(
         offset: int constant added to every accessible compressed-kv id; ``-1``
             padding is preserved. Use this when the compressed kv are appended
             after the uncompressed kv (offset == number of uncompressed kv).
+        row_start, row_count: emit only query rows
+            ``[row_start, row_start + row_count)``. Rows are independent, so the
+            result equals the full table sliced to that range -- under CP each
+            rank only owns ``seqlen // cp_size`` rows and materialising the
+            other ``cp_size - 1`` shards costs the same table again.
 
     Returns:
-        int32 tensor [1, seqlen, seqlen // ratio]; entry ``[0, i, g]`` is
-        ``g + offset`` if query ``i`` may attend to compressed slot ``g`` (valid
-        query, same doc, causally complete), else ``-1``. The last axis aligns
-        with ``compressed_is_first``.
+        int32 tensor [1, row_count, seqlen // ratio]; entry ``[0, i, g]`` is
+        ``g + offset`` if query ``row_start + i`` may attend to compressed slot
+        ``g`` (valid query, same doc, causally complete), else ``-1``. The last
+        axis aligns with ``compressed_is_first``.
     """
     assert (
         compressed_doc_start_per_pos.ndim == 1
@@ -622,12 +631,19 @@ def compressed_topk_idxs_triton(
     (seqlen,) = cds.shape
     ratio = int(ratio)
     offset = int(offset)
+    row_start = int(row_start)
+    row_count = seqlen if row_count is None else int(row_count)
+    if row_start < 0 or row_count < 1 or row_start + row_count > seqlen:
+        raise ValueError(
+            f"row range [{row_start}, {row_start + row_count}) is not a "
+            f"non-empty sub-range of [0, {seqlen})"
+        )
     n_groups = seqlen // ratio
 
-    out = paddle.empty([seqlen, n_groups], dtype="int32")
+    out = paddle.empty([row_count, n_groups], dtype="int32")
 
     BLOCK_G = min(triton.next_power_of_2(max(n_groups, 1)), 2048)
-    grid = (seqlen,)
+    grid = (row_count,)
     compressed_topk_idxs_kernel[grid](
         cds,
         pos,
@@ -637,6 +653,7 @@ def compressed_topk_idxs_triton(
         n_groups,
         ratio,
         offset,
+        row_start,
         BLOCK_G=BLOCK_G,
         num_warps=4,
     )

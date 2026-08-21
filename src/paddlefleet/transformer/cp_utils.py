@@ -27,6 +27,7 @@ from __future__ import annotations
 import paddle
 import paddle.distributed as dist
 from paddle import Tensor
+from paddle.autograd.py_layer import PyLayer
 
 # ===========================================================================
 # Differentiable all-gather — delegates to ContextParallelAllGatherOp
@@ -43,6 +44,76 @@ def all_gather_cp(x: Tensor, dim: int, group) -> Tensor:
     if group is None or group.nranks <= 1:
         return x
     return ContextParallelAllGatherOp.apply(x, dim, "contiguous_allgather")
+
+
+# ===========================================================================
+# One-hop window exchange with the previous CP rank
+# ===========================================================================
+
+
+def wait(ops):
+    """Post a batch of P2P ops and wait for them."""
+    for task in dist.batch_isend_irecv(ops):
+        task.wait()
+
+
+class PrependPrevWindow(PyLayer):
+    """Prepend the previous CP rank's last ``window`` rows; rank 0 gets zeros.
+
+    Only ``window`` rows cross the wire, versus ``s_local`` for an all-gather.
+    Backward is the mirror: the prefix gradient goes back to ``rank - 1`` and
+    the one arriving from ``rank + 1`` is added to this rank's tail.
+    """
+
+    @staticmethod
+    def forward(ctx, x, window, group):
+        ctx.window, ctx.group = window, group
+        r, peers = group.rank, group.ranks
+        prefix = paddle.zeros([x.shape[0], window, x.shape[2]], dtype=x.dtype)
+        ops = []
+        if r > 0:
+            ops.append(dist.P2POp(dist.irecv, prefix, peers[r - 1], group))
+        if r < group.nranks - 1:
+            tail = x[:, -window:, :].contiguous()
+            ops.append(dist.P2POp(dist.isend, tail, peers[r + 1], group))
+        wait(ops)
+        return paddle.concat([prefix, x], axis=1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        window, group = ctx.window, ctx.group
+        r, peers = group.rank, group.ranks
+        grad_x = grad[:, window:, :].clone()  # clone: grad must stay untouched
+        tail_grad = paddle.zeros_like(grad[:, :window, :])
+        ops = []
+        if r < group.nranks - 1:
+            ops.append(dist.P2POp(dist.irecv, tail_grad, peers[r + 1], group))
+        if r > 0:
+            prefix_grad = grad[:, :window, :].contiguous()
+            ops.append(dist.P2POp(dist.isend, prefix_grad, peers[r - 1], group))
+        wait(ops)
+        grad_x[:, -window:, :] += tail_grad
+        return grad_x
+
+
+def prepend_prev_window(x: Tensor, window: int, group) -> Tensor:
+    """``[b, s, d]`` -> ``[b, window + s, d]``, prefixed by the previous rank.
+
+    Row 0 of the result has global position ``rank * s - window``. A single hop
+    only reaches ``rank - 1``, so ``window`` must not exceed ``s``.
+    """
+    if window <= 0:
+        return x
+    if window > x.shape[1]:
+        raise ValueError(
+            f"prepend_prev_window window ({window}) exceeds the local sequence "
+            f"length ({x.shape[1]}): a single hop only reaches rank - 1, so the "
+            "window may not span more than one CP shard"
+        )
+    if group is None or group.nranks <= 1:
+        prefix = paddle.zeros([x.shape[0], window, x.shape[2]], dtype=x.dtype)
+        return paddle.concat([prefix, x], axis=1)
+    return PrependPrevWindow.apply(x, window, group)
 
 
 # ===========================================================================

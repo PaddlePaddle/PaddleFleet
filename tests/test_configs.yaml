@@ -158,6 +158,10 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_csa_attention_cp.py]
     products:
       - num_gpus: 2
+  # transformer: HCA context-parallel optimizations (CP=2)
+  - test_case: [tests/multi_card_tests/transformer/test_hca_cp_optim.py]
+    products:
+      - num_gpus: 2
   # transformer: latent MQA (+DSA) context-parallel core attention (CP=2)
   - test_case: [tests/multi_card_tests/transformer/test_mqa_dsa_cp.py]
     products:
