@@ -172,24 +172,22 @@ def _csa_compact_topk_idxs(topk_idxs_flat: Tensor) -> tuple[Tensor, Tensor]:
 
 @functools.cache
 def _csa_bwd_honours_topk_length_holes() -> bool:
-    """Whether it is safe to pass a trailing-bound ``topk_length`` to the cuDNN
-    DSA backward for a CSA/HCA layer on this arch.
+    """Whether it is safe to hand the cuDNN DSA backward a *compacted*
+    ``topk_length`` (dense prefix, possibly ``0`` for all-invalid rows) on this
+    arch.
 
-    The kernel's compact (``topk_length`` given) KV-load path does NOT guard
-    interior ``-1`` holes on either SM90 or SM100 (verified against v1.27.0 and
-    origin/develop @ 25b3d51: only the non-compact path and the dKV-reduce paths
-    keep the ``topk_idx >= 0`` guard). CSA/HCA layers, however, feed a *dense*
-    full-causal layout (``_build_mqa_causal_topk_idxs_from_doc_bounds``): valid
-    keys are contiguous in ``[0, topk_length)`` with ``-1`` only trailing, so
-    there are no interior holes to gather -- the compact path is safe *and* a real
-    early-stop (``topk_length`` = per-row causal length, ~half width on average).
-    Forcing ``None`` here would ~2x the HCA backward for no benefit.
+    Compaction can yield ``topk_length == 0`` for a fully-``-1`` padding row, and
+    only the SM100 kernel early-exits (zeros dQ) on ``topk <= 0``
+    (``dsa_bwd_sm100.py``). The SM90 kernel has no such guard: for ``topK == 0``
+    it computes ``n_block = n_block_max - 1 = -1`` and still runs the first-block
+    load, reading top-k/KV from a negative row -> OOB/NaN
+    (``dsa_bwd_sm90.py``). (Interior ``-1`` inside ``[0, topk_length)`` is a
+    non-issue after our order-preserving compaction, which removes them on both
+    archs; the empty-row exit is the remaining arch difference.)
 
-    SM90 had a distinct negative-offset dKV issue, so keep it on the guarded
-    full-width path there. NOTE: the DSA/MLA path (``mqa_sparse_attn``), whose
-    ``[top-k | window]`` layout *does* carry interior holes, does NOT use this
-    gate -- it falls back to ``topk_length=None`` itself (cheap there, since the
-    trailing window keeps its bound near full width).
+    So a compacted ``topk_length`` is only safe on SM100. SM90 callers must keep
+    ``topk_length=None`` (the guarded full-width path, which masks ``-1`` and
+    zeroes empty rows). Return ``major >= 10``.
     """
     major, _ = paddle.device.cuda.get_device_capability()
     return major >= 10
@@ -245,7 +243,14 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         # lse_indexer column alignment to keep. When indexer_topk > 0 the holey
         # layout is preserved so the fused lse_indexer over the first
         # indexer_topk columns stays valid.
-        ctx.compacted_idxs = backend == "cudnn" and indexer_topk == 0
+        # Compaction can produce topk_length == 0 for all-invalid rows, which only
+        # SM100 early-exits safely (SM90 would gather from a negative KV row); so
+        # only compact on SM100. SM90 keeps topk_length=None (guarded full-width).
+        ctx.compacted_idxs = (
+            backend == "cudnn"
+            and indexer_topk == 0
+            and _csa_bwd_honours_topk_length_holes()
+        )
         if ctx.compacted_idxs and topk_length is None:
             # Fallback densify: the caller (HCA) normally pre-compacts once per
             # batch and passes topk_length, in which case topk_idxs is already

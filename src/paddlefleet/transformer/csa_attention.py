@@ -3014,7 +3014,10 @@ class CompressedSparseAttention(FleetLayer):
         indexer_topk: int = 0,
         docmask_meta: CSADocMaskMetadata | None = None,
     ):
-        from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
+        from paddlefleet.fusions.csa_sparse_attn import (
+            _csa_bwd_honours_topk_length_holes,
+            csa_sparse_attn,
+        )
 
         attn_sink_fp32 = (
             attn_sink.cast("bfloat16").cast("float32")
@@ -3042,6 +3045,7 @@ class CompressedSparseAttention(FleetLayer):
             and topk_length is None
             and docmask_meta is not None
             and sparse_attn_backend == "cudnn"
+            and _csa_bwd_honours_topk_length_holes()
         ):
             topk_idxs, topk_length = docmask_meta.compact_attn_topk_idxs(
                 topk_idxs
