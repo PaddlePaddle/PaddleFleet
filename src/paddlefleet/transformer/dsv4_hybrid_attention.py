@@ -1077,6 +1077,7 @@ class DSv4HybridAttention(Attention):
         b, sq, _ = core_attn_out.shape
         pos_dim = self.qk_pos_emb_head_dim
         nope_dim = self.v_head_dim - pos_dim
+        postmix_done = False
 
         if pos_dim > 0:
             core_attn_out = core_attn_out.reshape(
@@ -1091,7 +1092,16 @@ class DSv4HybridAttention(Attention):
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
 
-            if (
+            if self._can_fuse_inv_rope_postmix(_in_full_recompute):
+                # Fused inverse RoPE + ungrouped VHA postmix. Bitwise identical
+                # to running the two separately, but never materialises the
+                # full-width rotated output. It consumes the postmix, so the
+                # standalone postmix block below must be skipped.
+                core_attn_out = self._apply_inv_rope_vha_postmix(
+                    core_attn_out, freqs, nope_dim, pos_dim, mscale
+                )
+                postmix_done = True
+            elif (
                 self.config.apply_rope_fusion
                 and not self.config.high_precision_rope
             ):
@@ -1127,7 +1137,7 @@ class DSv4HybridAttention(Attention):
         # output projection. When the whole block is already wrapped in a
         # full_attn RecomputeWithoutOutput, skip the nested selective recompute
         # (the full block recompute already frees these activations).
-        if self.use_vha_postmix:
+        if self.use_vha_postmix and not postmix_done:
             if (
                 self.recompute_vha_postmix
                 and self.training
@@ -1196,6 +1206,59 @@ class DSv4HybridAttention(Attention):
         else:
             core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
         return core_attn_out
+
+    def _can_fuse_inv_rope_postmix(self, in_full_recompute: bool) -> bool:
+        """Whether the inverse RoPE can be folded into the postmix GEMM.
+
+        Every rejected case falls back to the unfused pair, so this is a pure
+        performance switch: the eager RoPE path, high_precision_rope, the
+        grouped postmix topology (einsum, no [nh,nh] GEMM to split) and the
+        postmix's own selective recompute wrapper all keep working unchanged.
+        """
+        if not getattr(self.config, "fuse_inv_rope_into_vha_postmix", False):
+            return False
+        if not self.use_vha_postmix or self.vha_postmix_grouped:
+            return False
+        if not self.config.apply_rope_fusion:
+            return False
+        if self.config.high_precision_rope:
+            return False
+        # Re-entering the fused PyLayer from a nested recompute wrapper buys
+        # nothing (the fusion already avoids the intermediate it would free).
+        if (
+            self.recompute_vha_postmix
+            and self.training
+            and not in_full_recompute
+        ):
+            return False
+        return True
+
+    def _apply_inv_rope_vha_postmix(
+        self,
+        attn_out: Tensor,
+        freqs: Tensor,
+        nope_dim: int,
+        pe_dim: int,
+        mscale: float,
+    ) -> Tensor:
+        """Inverse RoPE + ungrouped VHA postmix in one pass.
+
+        attn_out: [b, sq, nh, v_head_dim]. Returns [b, sq, nh * v_head_dim],
+        matching what the unfused RoPE followed by ``_apply_vha_postmix`` would
+        return, bit for bit. The postmix matrix is rebuilt inside the fused op
+        exactly as ``_apply_vha_postmix``'s ungrouped branch builds it.
+        """
+        from paddlefleet.triton_ops import fused_inv_rope_vha_postmix
+
+        return fused_inv_rope_vha_postmix(
+            attn_out,
+            freqs,
+            self.vha_postmix_U,
+            self.vha_postmix_V,
+            nope_dim,
+            pe_dim,
+            mscale,
+        )
 
     def _apply_vha_postmix(self, attn_out: Tensor) -> Tensor:
         """Low-rank cross-head mixing of the attention output.

@@ -173,6 +173,10 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_csa_attention_cp.py]
     products:
       - num_gpus: 2
+  # transformer: HCA context-parallel optimizations (CP=2)
+  - test_case: [tests/multi_card_tests/transformer/test_hca_cp_optim.py]
+    products:
+      - num_gpus: 2
   # transformer: KDA context-parallel (packed varlen split across CP=4 ranks)
   - test_case: [tests/multi_card_tests/transformer/test_kimi_delta_attention_cp.py]
     products:

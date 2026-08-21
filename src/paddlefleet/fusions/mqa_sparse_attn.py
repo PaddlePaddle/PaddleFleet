@@ -92,6 +92,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         attn_sink=None,
         indexer_topk=0,
         sink_grad_fusion=False,
+        global_kv_idx_remap_fusion=False,
         backward_backend="cudnn",
     ):
         from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
@@ -138,6 +139,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         # output / gradient). The sink gradient is routed back to the parameter.
         ctx.learnable_sink = attn_sink is not None
         ctx.sink_grad_fusion = sink_grad_fusion
+        ctx.global_kv_idx_remap_fusion = global_kv_idx_remap_fusion
         if attn_sink is None:
             sink = paddle.full([_DSA_HEADS], _NEG_SINK, dtype="float32")
         else:
@@ -179,6 +181,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             d_v=d_v,
             topk_length=topk_len_flat.reshape([b, s]),
             indexer_topk=int(indexer_topk),
+            global_kv_idx_remap_fusion=global_kv_idx_remap_fusion,
         )  # out [b, s, 64, d_v], lse [b, s, 64]
         _MQASparseAttention._lse_indexer = lse_indexer
 
@@ -261,14 +264,19 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         else:
             from paddlefleet.cudnn_ops import csa_sparse_attn_bwd_cudnn
             from paddlefleet.fusions.csa_sparse_attn_utils import (
-                _local_to_global_flat,
+                local_to_global_flat,
             )
 
             q_flat = q_pad.reshape([b * s, hpad, dk])
             o_flat = out.reshape([b * s, hpad, d_v])
             do_flat = do.reshape([b * s, hpad, d_v])
             kv_flat = kv.reshape([b * skv, dk])
-            gidx_flat = _local_to_global_flat(token_indices, skv)
+            # Only the cuDNN backward needs the flat-global column ids; the
+            # tilelang kernel above indexes ``token_indices`` per batch itself,
+            # so the remap -- fused or eager -- has no place on that branch.
+            gidx_flat = local_to_global_flat(
+                token_indices, skv, fused=ctx.global_kv_idx_remap_fusion
+            )
 
             # dq/dkv softmax normalization for the finite-sink absorbed-MQA path.
             #
@@ -400,9 +408,10 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
                     d_attn_sink = d_attn_sink.cast(ctx.attn_sink_dtype)
 
         # One returned grad per **tensor** input, in order. Non-tensor inputs
-        # (sm_scale, d_v, backward_backend) occupy no slot. ``attn_sink``
-        # occupies a slot only when it was passed as a tensor (sinkless -> None
-        # -> no slot), so the returned count is 3 (sinkless) or 4 (learnable sink).
+        # (sm_scale, d_v, global_kv_idx_remap_fusion, backward_backend) occupy
+        # no slot. ``attn_sink`` occupies a slot only when it was passed as a
+        # tensor (sinkless -> None -> no slot), so the returned count is 3
+        # (sinkless) or 4 (learnable sink).
         grads = [dq, dkv, None]  # query, kv, token_indices
         if ctx.learnable_sink:
             grads.append(d_attn_sink)
@@ -418,6 +427,7 @@ def mqa_sparse_attn(
     attn_sink=None,
     indexer_topk=0,
     sink_grad_fusion=False,
+    global_kv_idx_remap_fusion=False,
     backward_backend="cudnn",
 ):
     """Absorbed-MQA sparse attention (FlashMLA sparse fwd + selectable bwd).
@@ -446,6 +456,11 @@ def mqa_sparse_attn(
                        from the ``dsa_sink_grad_fusion`` config field; HySparse's
                        ``block_sparse_mqa_attention_dsa`` leaves it at the default
                        and keeps the eager epilogue by design.
+        global_kv_idx_remap_fusion: use the fused Triton local->global KV
+                       column index remap in the forward and in the ``"cudnn"``
+                       backward instead of the eager elementwise chain.
+                       Bit-identical either way; wired from the
+                       ``sparse_attn_global_kv_idx_remap_fusion`` config field.
         backward_backend: ``"cudnn"`` (default, fast, non-deterministic dkv) or
                        ``"tilelang"`` (deterministic, ~14x slower on SM100).
 
@@ -462,6 +477,7 @@ def mqa_sparse_attn(
         attn_sink,
         int(indexer_topk),
         sink_grad_fusion,
+        global_kv_idx_remap_fusion,
         str(backward_backend),
     )
     lse_indexer = _MQASparseAttention._lse_indexer

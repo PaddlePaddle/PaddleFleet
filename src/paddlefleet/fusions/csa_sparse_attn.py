@@ -160,6 +160,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         backend,
         topk_length=None,
         indexer_topk=0,
+        global_kv_idx_remap_fusion=False,
     ):
         from paddlefleet.fusions.csa_sparse_attn_utils import prepare_inputs
 
@@ -168,6 +169,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         ctx.softmax_scale = float(softmax_scale)
         ctx.attn_sink_dtype = attn_sink.dtype
         ctx.backend = backend
+        ctx.global_kv_idx_remap_fusion = global_kv_idx_remap_fusion
         # ``topk_length`` is a forward-only early-stop hint: correctness comes
         # from the ``-1`` padding in ``topk_idxs``, which backward already turns
         # into its own bound via ``_csa_compute_topk_length``. Only remember
@@ -200,6 +202,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 sm_scale=ctx.softmax_scale,
                 topk_length=topk_length,
                 indexer_topk=indexer_topk,
+                global_kv_idx_remap_fusion=global_kv_idx_remap_fusion,
             )
             CSASparseAttention._lse_indexer = lse_indexer
         else:
@@ -228,7 +231,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         if ctx.backend == "cudnn":
             from paddlefleet.cudnn_ops import csa_sparse_attn_bwd_cudnn
             from paddlefleet.fusions.csa_sparse_attn_utils import (
-                _local_to_global_flat,
+                local_to_global_flat,
             )
 
             _, s_kv, dkv_dim = kv_full.shape
@@ -238,7 +241,9 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             do_flat = grad_output.reshape([b * sq, np_heads, hn])
             kv_flat = kv_full.reshape([b * s_kv, dkv_dim])
             lse_flat = lse.reshape([b * sq, np_heads])
-            topk_idxs_flat = _local_to_global_flat(topk_idxs, s_kv)
+            topk_idxs_flat = local_to_global_flat(
+                topk_idxs, s_kv, fused=ctx.global_kv_idx_remap_fusion
+            )
 
             # SM90's backward kernel is unsafe with a trailing topk_length bound
             # (see _csa_bwd_honours_topk_length_holes), so fall back to None there.
@@ -306,6 +311,7 @@ def csa_sparse_attn(
     backend="tilelang",
     topk_length=None,
     indexer_topk=0,
+    global_kv_idx_remap_fusion=False,
 ):
     """Unified CSA sparse attention entry point.
 
@@ -315,6 +321,11 @@ def csa_sparse_attn(
             row. Only the "cudnn" and "unfused" backends support it; it lets
             the kernel stop early instead of walking all ``topk`` slots, which
             is what makes the full-causal MQA layers affordable.
+        global_kv_idx_remap_fusion: use the fused Triton local->global KV
+            column index remap instead of the eager elementwise chain.
+            Bit-identical either way; wired from the
+            ``sparse_attn_global_kv_idx_remap_fusion`` config field. Only the
+            "cudnn" backend builds that table, so it is ignored otherwise.
     """
     if backend == "unfused":
         return unfused_compressed_sparse_attn(
@@ -339,6 +350,7 @@ def csa_sparse_attn(
         backend,
         topk_length,
         indexer_topk,
+        global_kv_idx_remap_fusion,
     )
     if CSASparseAttention._lse_indexer is not None:
         lse_indexer = CSASparseAttention._lse_indexer
