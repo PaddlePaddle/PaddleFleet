@@ -87,13 +87,18 @@ SUPPORTED_ATTN_MASK = [
 # ============================================================================
 
 
-def _roll_tensor_packed_seq(tensor, shifts, dims, cu_seqlens_q, cp_group=None):
+def _roll_tensor_packed_seq(
+    tensor, shifts, dims, cu_seqlens_q, cp_group=None, pad_value=0
+):
     """Per-doc left-shift using cu_seqlens_q.
 
     Only supports ``shifts=-1``. ``dims`` may be any single axis of ``tensor``
     (the seq axis — dim=1 for a [B, L, H] embedding, dim=-1 for a [B, L]
     tokens tensor, etc.). The boundary position of each packed document is
-    filled with 0 to prevent cross-doc leakage.
+    filled with ``pad_value`` to prevent cross-doc leakage. Use ``pad_value=0``
+    for embeddings / input_ids (default) and ``pad_value=ignored_index`` for
+    labels so the boundary token is masked out of the loss instead of being
+    trained as a real target.
 
     CP support is intentionally omitted here; see the outer `roll_tensor`
     guard which routes CP-enabled calls to `_roll_tensor_packed_seq_cp`.
@@ -139,7 +144,11 @@ def _roll_tensor_packed_seq(tensor, shifts, dims, cu_seqlens_q, cp_group=None):
             continue
         seg = _select(tensor, s, e)
         rolled_seg = paddle.roll(seg, shifts=shifts, axis=dim)
-        # Zero out the last position that would otherwise cross the doc boundary.
+        # Overwrite the last position that would otherwise cross the doc
+        # boundary. ``pad_value=0`` reproduces the original multiplicative
+        # zero-fill (autograd-safe for float embeddings); a non-zero
+        # ``pad_value`` (e.g. ignored_index for labels) fills the boundary via
+        # ``keep + pad*(1-keep)`` so it stays a functional (non-in-place) op.
         seg_len = e - s
         if seg_len >= 1:
             keep_shape = [1] * ndim
@@ -148,7 +157,12 @@ def _roll_tensor_packed_seq(tensor, shifts, dims, cu_seqlens_q, cp_group=None):
             last_idx = [slice(None)] * ndim
             last_idx[dim] = slice(seg_len - 1, seg_len)
             keep_mask[tuple(last_idx)] = 0
-            rolled_seg = rolled_seg * keep_mask
+            if pad_value == 0:
+                rolled_seg = rolled_seg * keep_mask
+            else:
+                rolled_seg = rolled_seg * keep_mask + pad_value * (
+                    1 - keep_mask
+                )
         # Assign back along the seq dim.
         target_idx = [slice(None)] * ndim
         target_idx[dim] = slice(s, e)
@@ -163,6 +177,7 @@ def roll_tensor(
     dims=-1,
     cp_group=None,
     cu_seqlens_q=None,
+    pad_value=0,
 ):
     """Roll the tensor input along the given dimension(s).
 
@@ -192,6 +207,11 @@ def roll_tensor(
         cu_seqlens_q: int32 tensor of shape ``[num_docs + 1]`` describing
             packed-document boundaries. If provided, per-doc shift is
             applied. If ``None``, a single-sequence roll is done.
+        pad_value: value written into the new-in position(s) created by the
+            left shift — at each packed-doc boundary when ``cu_seqlens_q`` is
+            given, otherwise at the last sequence position. Defaults to 0
+            (embeddings / input_ids); pass ``ignored_index`` for labels so the
+            boundary token is excluded from the loss.
 
     Returns:
         (rolled_tensor, rolled_tensor.sum()). The second value mirrors MCore's
@@ -201,16 +221,21 @@ def roll_tensor(
     # linters quiet without altering behavior.
     del cp_group
 
-    # Packed sequence path — per-doc roll, boundary zero-filled by
-    # `_roll_tensor_packed_seq`. Correct on full-length tensors regardless
+    # Packed sequence path — per-doc roll, boundary filled with ``pad_value``
+    # by `_roll_tensor_packed_seq`. Correct on full-length tensors regardless
     # of CP size because doc boundaries are described globally.
     if cu_seqlens_q is not None:
         return _roll_tensor_packed_seq(
-            tensor, shifts, dims, cu_seqlens_q, cp_group=None
+            tensor,
+            shifts,
+            dims,
+            cu_seqlens_q,
+            cp_group=None,
+            pad_value=pad_value,
         )
 
-    # Standard (non-packed) path — matches paddle.roll semantics plus zero-fill
-    # at the new-in position.
+    # Standard (non-packed) path — matches paddle.roll semantics plus a
+    # ``pad_value`` fill at the new-in position.
     if shifts != -1:
         raise ValueError(
             f"roll_tensor currently only supports shifts=-1, got shifts={shifts}."
@@ -226,7 +251,10 @@ def roll_tensor(
         idx = [slice(None)] * ndim
         idx[dim] = slice(seq_len - 1, seq_len)
         keep_mask[tuple(idx)] = 0
-        rolled = rolled * keep_mask
+        if pad_value == 0:
+            rolled = rolled * keep_mask
+        else:
+            rolled = rolled * keep_mask + pad_value * (1 - keep_mask)
     return rolled, rolled.sum()
 
 

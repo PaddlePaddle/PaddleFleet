@@ -1709,14 +1709,15 @@ class TransformerConfig(ModelParallelConfig):
                         f"requires cp_balance_mode='dualchunk_allgather', got "
                         f"{self.cp_balance_mode!r}."
                     )
-            # PP>1 is supported: cu_seqlens_q is threaded through
-            # all three `broadcast_data_obj` tuples in
-            # ernie5/src/datasets/dist_data_loader.py (shuffle / main / pp_data)
-            # and the dataloader stashes it onto
-            # `LanguageLoss._cu_seqlens_q_stash` on every rank after broadcast
-            # completes, so the loss stage on the last PP rank drives strict
-            # per-doc rolls with the same cu_seqlens_q as the embedding stage.
-            # No further guard needed here.
+            # PP>1 requirement (enforced at runtime, not here): the data
+            # pipeline MUST stash this micro-batch's cu_seqlens_q onto
+            # `LanguageLoss._cu_seqlens_q_stash` on EVERY rank — including the
+            # last PP stage, which never runs GPTEmbedding.forward. The
+            # reference PaddleFleet dataloader does this by threading
+            # cu_seqlens_q through every `broadcast_data_obj` tuple and writing
+            # the stash on each rank after broadcast. If the stash is missing
+            # on the loss rank, LanguageLoss.forward raises rather than
+            # silently rolling labels across packed-doc boundaries.
 
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size

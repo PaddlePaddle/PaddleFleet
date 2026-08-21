@@ -553,18 +553,16 @@ class LanguageLoss(FleetLayer):
                         # Under mtp_data_style="megatron" labels_ori is [B, L]
                         # (no L+K padding). MTP depth k predicts x[i+k+2],
                         # i.e. labels rolled left (k+1) times with per-doc
-                        # boundary zero-fill via cu_seqlens_q.
+                        # boundary fill via cu_seqlens_q. For labels the
+                        # boundary MUST be filled with ignored_index (not 0),
+                        # otherwise the cross-doc position would train token 0.
                         #
                         # Strict per-doc parity: when cu_seqlens_q is
-                        # available (stashed by gpt_embedding.forward under
-                        # PP=1), use `_roll_tensor_packed_seq` — same helper
-                        # the embedding side uses, so EOS boundaries match
-                        # bit-exactly. Under PP>1 (currently hard-blocked)
-                        # the stash is stale and we fall back to plain
-                        # `paddle.roll` + `ignored_index` tail (the loss at
-                        # EOS positions is nearly always masked out
-                        # downstream, so the simplified path is
-                        # loss-equivalent in practice).
+                        # available, use `_roll_tensor_packed_seq` with
+                        # pad_value=ignored_index — same helper the embedding
+                        # side uses (pad_value=0 there), so the EOS boundaries
+                        # line up bit-exactly. When unavailable, fall back to
+                        # plain `paddle.roll` + ignored_index tail.
                         _cu = LanguageLoss._cu_seqlens_q_stash
                         if _cu is not None:
                             from paddlefleet.transformer.multi_token_prediction import (
@@ -578,14 +576,27 @@ class LanguageLoss(FleetLayer):
                                     shifts=-1,
                                     dims=1,
                                     cu_seqlens_q=_cu,
+                                    pad_value=self.ignored_index,
                                 )
                         else:
-                            _lbl = labels_ori
-                            for _ in range(depth + 1):
-                                _lbl = paddle.roll(_lbl, shifts=-1, axis=1)
-                            # Zero-fill the wrapped positions with ignored_index
-                            _lbl = _lbl.clone()
-                            _lbl[:, -(depth + 1) :] = self.ignored_index
+                            # No cu_seqlens_q on this rank. A plain
+                            # paddle.roll cannot respect packed-doc
+                            # boundaries, so it would leak labels across
+                            # documents (train the first token of doc N+1 as
+                            # the target at the last position of doc N). Fail
+                            # loudly instead of silently corrupting: the data
+                            # pipeline must stash cu_seqlens_q on EVERY rank
+                            # (including the last PP stage, which never runs
+                            # GPTEmbedding.forward) via the broadcast receive
+                            # path before the loss stage runs.
+                            raise RuntimeError(
+                                "mtp_data_style='megatron' requires cu_seqlens_q "
+                                "to be stashed on LanguageLoss._cu_seqlens_q_stash "
+                                "before the loss stage, but it is None on this "
+                                "rank. Ensure the dataloader broadcasts and "
+                                "stashes cu_seqlens_q on every (incl. last-PP) "
+                                "rank."
+                            )
                         if _cp_size_for_extract > 1:
                             # Match local logits shape by extracting this
                             # rank's zigzag chunks.
@@ -722,12 +733,12 @@ class LanguageLoss(FleetLayer):
                         prediction_scores_cur_depth = mtp_logits[depth]
                         if _mtp_is_megatron:
                             # Strict per-doc parity (mirror of the
-                            # mtp_distillation_loss=False path above): prefer
-                            # _roll_tensor_packed_seq using cu_seqlens_q
-                            # stashed by gpt_embedding.forward. Fall back to
-                            # plain paddle.roll + ignored_index tail when
-                            # unavailable (e.g. under future PP>1 support
-                            # before the broadcast is wired).
+                            # mtp_distillation_loss=False path above): use
+                            # _roll_tensor_packed_seq with the cu_seqlens_q
+                            # stashed by the dataloader / GPTEmbedding.forward,
+                            # filling doc boundaries with ignored_index. If the
+                            # stash is missing, raise instead of silently
+                            # leaking labels across packed docs.
                             _cu = LanguageLoss._cu_seqlens_q_stash
                             if _cu is not None:
                                 from paddlefleet.transformer.multi_token_prediction import (
@@ -741,13 +752,21 @@ class LanguageLoss(FleetLayer):
                                         shifts=-1,
                                         dims=1,
                                         cu_seqlens_q=_cu,
+                                        pad_value=self.ignored_index,
                                     )
                             else:
-                                _lbl = labels_ori
-                                for _ in range(depth + 1):
-                                    _lbl = paddle.roll(_lbl, shifts=-1, axis=1)
-                                _lbl = _lbl.clone()
-                                _lbl[:, -(depth + 1) :] = self.ignored_index
+                                # See the mtp_distillation_loss=False branch:
+                                # without cu_seqlens_q a plain roll leaks
+                                # labels across packed docs, so fail loudly
+                                # rather than corrupt the loss silently.
+                                raise RuntimeError(
+                                    "mtp_data_style='megatron' requires "
+                                    "cu_seqlens_q to be stashed on "
+                                    "LanguageLoss._cu_seqlens_q_stash before the "
+                                    "loss stage, but it is None on this rank. "
+                                    "Ensure the dataloader broadcasts and stashes "
+                                    "cu_seqlens_q on every (incl. last-PP) rank."
+                                )
                             if _cp_size_for_extract > 1:
                                 _lbl = _extract_cp(
                                     _lbl,

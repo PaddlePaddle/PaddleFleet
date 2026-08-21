@@ -147,3 +147,58 @@ def test_differs_from_plain_roll_at_internal_eos():
     assert per_doc_l[9] == 0
     assert plain_l[3] != 0  # crosses doc boundary
     assert plain_l[9] != 0
+
+
+def test_label_roll_fills_ignored_index_at_boundaries():
+    """Labels must roll with pad_value=ignored_index (NOT 0). With the
+    default pad_value=0 the doc-boundary position becomes token id 0, which
+    the loss mask (labels != ignored_index) would treat as a real target and
+    train the model to predict token 0 across doc boundaries. pad_value=-100
+    makes those positions ignored instead.
+    """
+    paddle.set_device("cpu")
+    ignored_index = -100
+    labels_np = np.arange(1, 17, dtype=np.int64).reshape([1, 16])
+    labels = paddle.to_tensor(labels_np)
+    cu = paddle.to_tensor([0, 4, 10, 16], dtype="int32")
+
+    rolled_lbl, _ = _roll_tensor_packed_seq(
+        labels, shifts=-1, dims=1, cu_seqlens_q=cu, pad_value=ignored_index
+    )
+    rolled_emb, _ = _roll_tensor_packed_seq(
+        labels, shifts=-1, dims=1, cu_seqlens_q=cu, pad_value=0
+    )
+    lbl = rolled_lbl.numpy().flatten().tolist()
+    emb = rolled_emb.numpy().flatten().tolist()
+
+    # Boundary positions (last index of each doc): 3, 9, 15.
+    for b in (3, 9, 15):
+        assert lbl[b] == ignored_index, f"label boundary {b} must be ignored"
+        assert emb[b] == 0, f"embedding boundary {b} must be zero-filled"
+    # Non-boundary positions are identical between the two fills.
+    for i in range(16):
+        if i not in (3, 9, 15):
+            assert lbl[i] == emb[i]
+
+
+def test_loss_mask_excludes_every_doc_boundary():
+    """The loss mask ``labels != ignored_index`` must drop exactly one
+    position per (non-empty) document after a single roll — i.e. the boundary
+    tokens do NOT count toward the loss.
+    """
+    paddle.set_device("cpu")
+    ignored_index = -100
+    labels_np = np.arange(1, 25, dtype=np.int64).reshape([1, 24])
+    labels = paddle.to_tensor(labels_np)
+    cu_list = [0, 6, 12, 24]  # 3 non-empty docs
+    cu = paddle.to_tensor(cu_list, dtype="int32")
+
+    rolled, _ = _roll_tensor_packed_seq(
+        labels, shifts=-1, dims=1, cu_seqlens_q=cu, pad_value=ignored_index
+    )
+    mask = (rolled != ignored_index).numpy().flatten().tolist()
+    # Boundaries 5, 11, 23 must be excluded; everything else kept.
+    boundaries = {5, 11, 23}
+    for i in range(24):
+        assert mask[i] == (i not in boundaries), f"pos {i}"
+    assert sum(mask) == 24 - len(boundaries)
