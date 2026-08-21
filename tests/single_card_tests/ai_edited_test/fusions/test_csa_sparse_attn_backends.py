@@ -590,6 +590,9 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
             global_kv_idx_remap_fusion=False,
             compacted_idxs=compacted,
             has_topk_length=False,
+            # Head count the saved tensors are in; equal to np_heads unless the
+            # forward padded them up to a kernel head tile.
+            bwd_heads=np_heads,
             query_needs_grad=not query.stop_gradient,
             kv_full_needs_grad=not kv_full.stop_gradient,
             attn_sink_needs_grad=not attn_sink.stop_gradient,

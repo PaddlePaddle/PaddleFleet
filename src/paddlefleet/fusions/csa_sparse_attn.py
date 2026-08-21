@@ -19,12 +19,125 @@ final sparse MQA attention:
   - "unfused": pure-Paddle einsum forward + Paddle autograd backward
   - "tilelang": TileLang sparse MQA forward + TileLang backward
   - "cudnn": FlashMLA sparse forward + cuDNN DSA backward
+
+Head counts below a kernel tile are supported by zero-padding, see
+``_pad_query_heads``.
 """
 
 import functools
 
 import paddle
 from paddle import Tensor
+
+# Query-head counts the "cudnn" backend can run natively. FlashMLA's sparse
+# prefill only instantiates these two tiles (``csrc/api/sparse_fwd.h`` raises
+# "Unsupported h_q" for anything else), and the tile width is the M extent of
+# the tcgen05 / wgmma instruction behind it (``B_H`` in
+# ``sm100/prefill/sparse/fwd/head64/config.h``), so a layer with fewer heads
+# cannot be given a narrower tile without a new kernel.
+_DSA_HEAD_TILES = (64, 128)
+# Sink logit that makes ``exp(sink - m) -> 0``, i.e. plain softmax. Used for the
+# padded heads so they cannot perturb the real ones.
+_NEG_SINK = -1e30
+
+
+def _dsa_head_tile(num_heads: int) -> int:
+    """Smallest cuDNN/FlashMLA query-head tile that fits ``num_heads``."""
+    for tile in _DSA_HEAD_TILES:
+        if num_heads <= tile:
+            return tile
+    raise ValueError(
+        f"csa_sparse_attn 'cudnn' backend supports at most "
+        f"{_DSA_HEAD_TILES[-1]} query heads per rank, got {num_heads}. "
+        "Reduce num_attention_heads (per-rank after TP)."
+    )
+
+
+@functools.lru_cache(maxsize=16)
+def _real_head_rows(num_tokens: int, num_heads: int, head_tile: int) -> Tensor:
+    """Row ids of the real heads in a ``[num_tokens * head_tile, hn]`` view.
+
+    Cached because it only depends on the shape. One entry is
+    ``num_tokens * num_heads`` int32 (1 MiB at 8k tokens x 32 heads), and a
+    process only ever sees one device, so a plain shape-keyed cache is enough.
+    """
+    return (
+        (paddle.arange(num_tokens, dtype="int32") * head_tile).unsqueeze(1)
+        + paddle.arange(num_heads, dtype="int32").unsqueeze(0)
+    ).flatten()
+
+
+def _drop_padded_head_rows(x: Tensor, num_heads: int, head_tile: int) -> Tensor:
+    """Keep the first ``num_heads`` of every ``head_tile`` head-rows of ``x``.
+
+    ``x`` is any tensor whose last axis is the head dim and whose remaining
+    axes flatten to ``num_tokens * head_tile`` rows.
+
+    Implemented as a row ``gather`` rather than a slice: both move the same
+    bytes, but Paddle's strided-slice copy runs at roughly a quarter of the
+    achievable bandwidth here while ``gather`` saturates it (measured on B30Z at
+    8192 tokens x 64->32 heads x 512: 0.53 ms for ``x[:, :h*hn]``, 0.11 ms for
+    the gather).
+    """
+    hn = x.shape[-1]
+    rows = x.reshape([-1, hn])
+    num_tokens = rows.shape[0] // head_tile
+    idx = _real_head_rows(num_tokens, num_heads, head_tile)
+    return paddle.gather(rows, idx, axis=0)
+
+
+@functools.cache
+def _dsa_bwd_runs_sub_tile_heads(num_heads: int) -> bool:
+    """Whether the cuDNN DSA backward accepts this head count below its tile.
+
+    ``flash_attn_bwd_sm100`` derives ``num_head_blocks = ceil(num_head / 64)``
+    and predicates the partial tile, so SM100 returns exactly the same ``dq`` /
+    ``d_sink`` for ``h`` real heads as for the zero-padded problem (verified
+    bit-identical for h=24/32/40/96; ``dkv`` matches to the usual atomic noise).
+    That lets the backward -- the expensive half -- skip the padding entirely,
+    which also keeps the saved ``q``/``out`` at the real head count.
+
+    Two exclusions fall back to the padded (always even, tile-wide) path:
+
+    * **odd head counts**: the kernel reads the ``[N, H]`` fp32 LSE / sum(OdO)
+      rows with a 2-float vector access, so an odd ``H`` leaves every other row
+      only 4-byte aligned and the kernel dies with CUDA 716 (misaligned
+      address). Measured: 31/33/35/63/65 crash, 34/62/66/96/126 are fine.
+    * **SM90**: its kernel packs heads differently
+      (``qhead_per_kvhead`` tiling) and is not validated here.
+    """
+    major, _ = paddle.device.cuda.get_device_capability()
+    return major >= 10 and num_heads % 2 == 0
+
+
+def _pad_query_heads(query: Tensor, attn_sink: Tensor, head_tile: int):
+    """Widen ``query``/``attn_sink`` from ``h`` to ``head_tile`` heads.
+
+    The padded query rows are zeros and their sink logit is ``-1e30``, so they
+    run a plain softmax over the same columns and cannot change the real heads'
+    result; their output rows are dropped by the caller. Hence they receive a
+    zero output gradient, which makes their contribution to ``dkv`` and
+    ``d_sink`` exactly zero (both are ``dO``-weighted sums) and their ``dq``
+    rows unused. So this is numerically exact, not an approximation, and the
+    ``h == head_tile`` path stays bit-for-bit unchanged.
+
+    Padding is used instead of a narrower kernel because the tile width is the
+    MMA M extent (see ``_DSA_HEAD_TILES``): the cost is that the forward keeps
+    doing ``head_tile`` rows of work for ``h`` real heads.
+    """
+    b, sq, h, hn = query.shape
+    query = paddle.concat(
+        [query, paddle.zeros([b, sq, head_tile - h, hn], dtype=query.dtype)],
+        axis=2,
+    )
+    attn_sink = paddle.concat(
+        [
+            attn_sink.cast("float32"),
+            paddle.full([head_tile - h], _NEG_SINK, dtype="float32"),
+        ],
+        axis=0,
+    )
+    return query, attn_sink
 
 
 def unfused_compressed_sparse_attn(
@@ -258,20 +371,52 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             # pre-compact (e.g. CP without cached docmask metadata).
             topk_idxs, topk_length = _csa_compact_topk_idxs(topk_idxs)
 
+        # Heads the kernels are driven with. The FlashMLA forward only has 64-
+        # and 128-head tiles, so a smaller layer is zero-padded up to one; the
+        # cuDNN backward takes the real count on SM100 and only needs the same
+        # padding on SM90. ``ctx.bwd_heads`` records which width the tensors
+        # saved below are in.
+        head_tile = _dsa_head_tile(np_heads) if backend == "cudnn" else np_heads
+        ctx.bwd_heads = (
+            np_heads
+            if head_tile == np_heads or _dsa_bwd_runs_sub_tile_heads(np_heads)
+            else head_tile
+        )
         if backend == "cudnn":
             from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
                 flash_mla_sparse_attn,
             )
 
+            q_in, sink_in = query, attn_sink
+            if head_tile != np_heads:
+                q_in, sink_in = _pad_query_heads(query, attn_sink, head_tile)
+
             output, lse, lse_indexer = flash_mla_sparse_attn(
-                query,
+                q_in,
                 kv_full,
-                attn_sink,
+                sink_in,
                 topk_idxs,
                 sm_scale=ctx.softmax_scale,
                 topk_length=topk_length,
                 indexer_topk=indexer_topk,
             )
+            output_real, lse_real = output, lse
+            if head_tile != np_heads:
+                output_real = _drop_padded_head_rows(
+                    output, np_heads, head_tile
+                ).reshape([b, sq, np_heads, hn])
+                lse_real = lse[:, :, :np_heads].contiguous()
+                if lse_indexer is not None:
+                    lse_indexer = lse_indexer[:, :, :np_heads].contiguous()
+            if ctx.bwd_heads == np_heads:
+                # The backward runs on the real heads, so the padded forward
+                # tensors are dropped here instead of being kept alive until
+                # backward.
+                save_q, save_sink = query, attn_sink
+                save_out, save_lse = output_real, lse_real
+            else:
+                save_q, save_sink = q_in, sink_in
+                save_out, save_lse = output, lse
             CSASparseAttention._lse_indexer = lse_indexer
         else:
             if topk_length is not None:
@@ -288,13 +433,25 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 topk_idxs,
                 sm_scale=ctx.softmax_scale,
             )
-        ctx.save_for_backward(query, kv_full, attn_sink, topk_idxs, output, lse)
-        return output.reshape([b, sq, np_heads * hn])
+            output_real = output
+            save_q, save_sink, save_out, save_lse = (
+                query,
+                attn_sink,
+                output,
+                lse,
+            )
+        ctx.save_for_backward(
+            save_q, kv_full, save_sink, topk_idxs, save_out, save_lse
+        )
+        return output_real.reshape([b, sq, np_heads * hn])
 
     @staticmethod
     def backward(ctx, grad_output):
         query, kv_full, attn_sink, topk_idxs, output, lse = ctx.saved_tensor()
         b, sq, np_heads, hn = ctx.query_shape
+        # Kernel-side head count: equal to ``np_heads`` except on the SM90
+        # padded path, where the saved tensors are one head tile wide.
+        kh = ctx.bwd_heads
 
         if ctx.backend == "cudnn":
             from paddlefleet.cudnn_ops import csa_sparse_attn_bwd_cudnn
@@ -304,11 +461,25 @@ class CSASparseAttention(paddle.autograd.PyLayer):
 
             _, s_kv, dkv_dim = kv_full.shape
 
-            q_flat = query.reshape([b * sq, np_heads, hn])
-            o_flat = output.reshape([b * sq, np_heads, hn])
-            do_flat = grad_output.reshape([b * sq, np_heads, hn])
+            if kh != np_heads:
+                # SM90 padded path: widen the incoming gradient to the saved
+                # tensors' head tile. The padded rows get a zero gradient, so
+                # they add nothing to ``dkv`` / ``d_sink``.
+                grad_output = paddle.concat(
+                    [
+                        grad_output.reshape([b, sq, np_heads, hn]),
+                        paddle.zeros(
+                            [b, sq, kh - np_heads, hn], dtype=grad_output.dtype
+                        ),
+                    ],
+                    axis=2,
+                )
+
+            q_flat = query.reshape([b * sq, kh, hn])
+            o_flat = output.reshape([b * sq, kh, hn])
+            do_flat = grad_output.reshape([b * sq, kh, hn])
             kv_flat = kv_full.reshape([b * s_kv, dkv_dim])
-            lse_flat = lse.reshape([b * sq, np_heads])
+            lse_flat = lse.reshape([b * sq, kh])
             topk_idxs_flat = _local_to_global_flat(topk_idxs, s_kv)
 
             # ``topk_idxs`` was already densified in the forward for the compacted
@@ -339,11 +510,15 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 softmax_scale=ctx.softmax_scale,
                 topk_length=topk_length,
             )
-            dq = dq_flat.reshape(query.shape)
             dkv = dkv_flat.reshape(kv_full.shape)
-            d_attn_sink = d_sink.reshape(attn_sink.shape).cast(
-                ctx.attn_sink_dtype
-            )
+            if kh != np_heads:
+                dq = _drop_padded_head_rows(dq_flat, np_heads, kh).reshape(
+                    [b, sq, np_heads, hn]
+                )
+                d_sink = d_sink[:np_heads]
+            else:
+                dq = dq_flat.reshape([b, sq, np_heads, hn])
+            d_attn_sink = d_sink.reshape([np_heads]).cast(ctx.attn_sink_dtype)
         else:
             from paddlefleet.tilelang_ops.attn import sparse_mqa_bwd
 
@@ -395,6 +570,11 @@ def csa_sparse_attn(
             row. Only the "cudnn" and "unfused" backends support it; it lets
             the kernel stop early instead of walking all ``topk`` slots, which
             is what makes the full-causal MQA layers affordable.
+
+    ``query`` may carry any head count up to 128 on the "cudnn" backend; counts
+    that are not one of the kernel's head tiles (e.g. 32 or 24) are handled
+    inside ``CSASparseAttention`` by padding the forward, which is exact but
+    keeps the forward cost of the tile.
     """
     if backend == "unfused":
         return unfused_compressed_sparse_attn(
