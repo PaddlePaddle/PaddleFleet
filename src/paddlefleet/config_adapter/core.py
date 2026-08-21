@@ -28,7 +28,8 @@
       -> write model_config.json when it changed, and point
          model_name_or_path at it
       -> apply the plan's YAML writes and re-validate C1..C4
-      -> scale the batch settings, sharding and data_parallel_size
+      -> scale the batch settings, sharding and data_parallel_size, and add
+         the switches that compensate for a smaller sharding degree
       -> write the YAML and render the report
 
 Every write goes through the change log, so the report can attribute each
@@ -49,6 +50,7 @@ from .model_config_resolver import (
 from .planner import plan_parallelism
 from .precision import plan_precision_switches
 from .report import ChangeLog, format_header, format_report
+from .sharding_shrink import plan_sharding_shrink_switches
 from .strategies import BATCH_STRATEGIES
 from .topology import TopologyValidator
 from .utils import PARALLEL_FIELDS, extract_parallel_params
@@ -234,7 +236,7 @@ class ConfigAdapter:
             plan.warnings.append(scale_warning)
 
         err = self._scale_batch_and_sharding(
-            config, log, scale_source, orig_cards, dims_after
+            config, log, scale_source, orig_cards, dims_before, dims_after
         )
         if err:
             return False, f"{input_path.name}: {err}"
@@ -489,7 +491,7 @@ class ConfigAdapter:
         return None, None, None
 
     def _scale_batch_and_sharding(
-        self, config, log, scale_source, orig_cards, dims_after
+        self, config, log, scale_source, orig_cards, dims_before, dims_after
     ):
         """Rewrite batch / sharding / data_parallel_size. Returns an error."""
         gbs = scale_source["global_batch_size"]
@@ -548,7 +550,53 @@ class ConfigAdapter:
                 "Fleet 要求纯 sharding 数据并行：data_parallel_size 固定为 1，"
                 "数据并行度由 sharding 承担",
             )
+
+        # C4 was validated above, so both divisions are exact.
+        switches = plan_sharding_shrink_switches(
+            config,
+            self._dataset_ways(orig_cards, dims_before),
+            new_sharding // cp,
+            overrides=self.yaml_overrides,
+            base_ways=self._dense_sharding_ways(dims_before),
+        )
+        for key, value, reason in switches:
+            log.record(
+                "yaml",
+                self.yaml_writer.apply_config_map(
+                    config, {key: value}, protected=self.yaml_overrides
+                ),
+                reason,
+            )
         return None
+
+    @staticmethod
+    def _dataset_ways(cards, dims):
+        """``dataset_world_size`` for a scale: ``cards / (TP*SEP*PP*CP)``.
+
+        ``None`` when the card count is unknown or does not divide evenly (a
+        source YAML whose declared degrees and batch fields disagree).
+        """
+        if not cards:
+            return None
+        tp, pp, _ep, cp, sep = dims
+        divisor = tp * sep * pp * cp
+        if divisor <= 0 or cards % divisor != 0:
+            return None
+        return cards // divisor
+
+    @staticmethod
+    def _dense_sharding_ways(dims):
+        """``dense_sharding`` for a set of degrees: ``EP / (TP * SEP)``.
+
+        C3 makes that ratio exact, and it depends on the degrees alone, so it
+        survives degrees the target card count could not actually run.  Without
+        expert parallel there is no such ratio and ``None`` is returned.
+        """
+        tp, _pp, ep, _cp, sep = dims
+        divisor = tp * sep
+        if ep <= 1 or divisor <= 0 or ep % divisor != 0:
+            return None
+        return ep // divisor
 
     # ---------------------------------------------------------------- report
     def _build_info(

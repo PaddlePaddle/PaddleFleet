@@ -17,7 +17,9 @@
 Without any switch the adapter simply makes the config fit the target scale:
 it recomputes ``sharding`` / batch and, when the target is incompatible with
 the source parallelism, shrinks EP / PP (never below 2) and rewrites a copy of
-``model_config.json`` accordingly.
+``model_config.json`` accordingly.  A smaller ``sharding`` also gets the
+compensations in :mod:`paddlefleet.config_adapter.sharding_shrink` (data-stream
+width, optimizer offload).
 
 Two orthogonal, optional test dimensions refine that:
 
@@ -42,9 +44,16 @@ from .options import AdaptOptions
 from .plan import ParallelismPlan
 from .planner import ShrinkPlanner, plan_frozen, plan_parallelism
 from .precision import PRECISION_SWITCHES, plan_precision_switches
+from .sharding_shrink import (
+    DEFAULT_SHRINK_FACTOR,
+    OFFLOAD_PREREQUISITES,
+    plan_sharding_shrink_switches,
+)
 from .topology import TopologyValidator
 
 __all__ = [
+    "DEFAULT_SHRINK_FACTOR",
+    "OFFLOAD_PREREQUISITES",
     "PRECISION_SWITCHES",
     "AdaptOptions",
     "ConfigAdapter",
@@ -58,4 +67,5 @@ __all__ = [
     "plan_frozen",
     "plan_parallelism",
     "plan_precision_switches",
+    "plan_sharding_shrink_switches",
 ]
