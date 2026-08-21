@@ -584,18 +584,17 @@ class LanguageLoss(FleetLayer):
                             # boundaries, so it would leak labels across
                             # documents (train the first token of doc N+1 as
                             # the target at the last position of doc N). Fail
-                            # loudly instead of silently corrupting: the data
-                            # pipeline must stash cu_seqlens_q on EVERY rank
-                            # (including the last PP stage, which never runs
-                            # GPTEmbedding.forward) via the broadcast receive
-                            # path before the loss stage runs.
+                            # loudly instead of silently corrupting.
+                            # cu_seqlens_q is normally stashed by
+                            # GPTEmbedding.forward (PP=1 / first stage) and by
+                            # GPTLMHead.forward on the last PP stage; reaching
+                            # here means neither ran on this rank.
                             raise RuntimeError(
                                 "mtp_data_style='megatron' requires cu_seqlens_q "
                                 "to be stashed on LanguageLoss._cu_seqlens_q_stash "
                                 "before the loss stage, but it is None on this "
-                                "rank. Ensure the dataloader broadcasts and "
-                                "stashes cu_seqlens_q on every (incl. last-PP) "
-                                "rank."
+                                "rank. It should be set by GPTEmbedding.forward "
+                                "(PP=1) or GPTLMHead.forward (last PP stage)."
                             )
                         if _cp_size_for_extract > 1:
                             # Match local logits shape by extracting this
@@ -764,8 +763,8 @@ class LanguageLoss(FleetLayer):
                                     "cu_seqlens_q to be stashed on "
                                     "LanguageLoss._cu_seqlens_q_stash before the "
                                     "loss stage, but it is None on this rank. "
-                                    "Ensure the dataloader broadcasts and stashes "
-                                    "cu_seqlens_q on every (incl. last-PP) rank."
+                                    "It should be set by GPTEmbedding.forward "
+                                    "(PP=1) or GPTLMHead.forward (last PP stage)."
                                 )
                             if _cp_size_for_extract > 1:
                                 _lbl = _extract_cp(

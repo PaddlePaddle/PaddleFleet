@@ -28,6 +28,11 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp.py]
     products:
       - num_gpus: 8
+  # PP>1 + mtp_data_style="megatron": exercises GPTLMHead._stash_cu_seqlens_q
+  # delivering cu_seqlens_q to the loss stage under PP (PP=2, TP=1, dense).
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_megatron.py]
+    products:
+      - num_gpus: 2
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp_with_overlap.py]
     products:
       - num_gpus: 8
