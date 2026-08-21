@@ -577,6 +577,7 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
             softmax_scale=0.125,
             attn_sink_dtype=attn_sink.dtype,
             backend="cudnn",
+            global_kv_idx_remap_fusion=False,
             has_topk_length=False,
             query_needs_grad=True,
             kv_full_needs_grad=True,
