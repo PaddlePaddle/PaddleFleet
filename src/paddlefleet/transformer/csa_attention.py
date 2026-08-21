@@ -3485,16 +3485,21 @@ class CompressedSparseAttention(FleetLayer):
         sparse_attn_backend = getattr(
             self.config, "csa_sparse_attn_backend", "tilelang"
         )
-        # HCA (no indexer loss -> indexer_topk == 0) densifies its indices once
-        # per batch via the shared docmask metadata cache, so the compact-path
-        # early-stop is free across all layers instead of paying a sort per
-        # layer in the sparse-attention PyLayer. Only when a caller has not
-        # already supplied a topk_length (the MQA path does) and the metadata is
-        # available (non-CP / cached CP). The cuDNN backend is the only one that
-        # consumes topk_length; the PyLayer still self-compacts as a fallback if
-        # this is skipped.
+        # Compact once per batch via the shared docmask-metadata cache -- but
+        # ONLY for layers with no indexer (``self.indexer is None``: HCA /
+        # attend-to-all). Their ``topk_idxs = concat([window, compressed])`` is
+        # derived purely from document bounds, so it is identical across all
+        # same-ratio layers and safe to reuse by width. A layer WITH an indexer
+        # must NOT use this cache even when ``indexer_topk == 0`` (eval / tilelang
+        # / non-cuDNN indexer path): its ``compress_topk_idxs`` is the indexer's
+        # per-layer dynamic selection, so reusing the first same-ratio layer's
+        # compacted result by width would feed later layers the wrong KV set.
+        # Those layers fall back to the sparse-attn PyLayer's own per-layer
+        # compaction. Skip when a caller already supplied ``topk_length`` (the MQA
+        # path) or metadata is unavailable; cuDNN is the only backend that
+        # consumes ``topk_length``.
         if (
-            indexer_topk == 0
+            self.indexer is None
             and topk_length is None
             and docmask_meta is not None
             and sparse_attn_backend == "cudnn"
