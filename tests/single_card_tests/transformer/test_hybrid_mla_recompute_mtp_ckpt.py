@@ -436,7 +436,7 @@ class TestCheckpointKeySets(unittest.TestCase):
     indexer keys. Since ``"mqa_dsa"`` always wires the indexer, the old DSA-less
     ``mqa`` surface no longer exists, so the tests that purely contrasted
     mqa-vs-mqa_dsa were dropped as redundant; the second ``"mqa_dsa"`` config is
-    the phase-3/4 sparse-loss one, which must have the identical key set.
+    the phase-3 sparse-loss one, which must have the identical key set.
 
     SINK: the learnable sink used to be introduced *by* the absorbed phase, so it
     showed up as "one extra key per -2 layer". The baseline
@@ -582,13 +582,6 @@ class TestRecomputeEquivalence(unittest.TestCase):
     ``TestRecomputeIndicesReplay``.
     """
 
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
-
     def _run(self, module, query, key, w_v, x, qr, row_end, use_recompute):
         from paddle.distributed.fleet.utils import recompute
 
@@ -620,21 +613,29 @@ class TestRecomputeEquivalence(unittest.TestCase):
         row_end = _row_end(layout, seqlen)
         module = _build_module(
             _create_mqa_config(mode, loss_coeff=0.0),
-            bf16=(mode == "mqa_dsa"),
+            # bf16 for both modes: ``"mqa"`` is the full-causal phase, which
+            # hands the sink to dense FA4 as ``learnable_sink`` and asserts that
+            # dtype on it (``flash_mask/cute/interface.py:598``), matching
+            # production's ``params_dtype``.
+            bf16=True,
             sink=sink,
         )
 
-        _CAPTURED.clear()
-        out_off, g_off = self._run(
-            module, query, key, w_v, x, qr, row_end, use_recompute=False
-        )
-        n_off = len(_CAPTURED)
-        idx_off = _CAPTURED[-1]
+        # Pinned per call site rather than per module: the full-causal phase has
+        # exactly one backend and ``_assert_dense_fa4`` raises otherwise, but
+        # ``test_production_dims_are_not_fa4`` in this same file asserts on the
+        # *unpinned* resolution, so a module-wide pin would falsify it.
+        with _flash_attn_version(4):
+            _CAPTURED.clear()
+            out_off, g_off = self._run(
+                module, query, key, w_v, x, qr, row_end, use_recompute=False
+            )
+            idx_off = _CAPTURED[-1]
 
-        _CAPTURED.clear()
-        out_on, g_on = self._run(
-            module, query, key, w_v, x, qr, row_end, use_recompute=True
-        )
+            _CAPTURED.clear()
+            out_on, g_on = self._run(
+                module, query, key, w_v, x, qr, row_end, use_recompute=True
+            )
         # Recompute re-runs the forward during backward: the sparse kernel is
         # therefore called twice, and BOTH calls must select identical columns.
         self.assertGreaterEqual(
@@ -683,13 +684,6 @@ class TestRecomputeIndicesReplay(unittest.TestCase):
     runs pass 1 under ``no_grad`` (indices only) and pass 2 with grad (loss
     attached). The top-k must be deterministic across the two passes, and the
     indexer parameters must receive finite gradients through the recompute."""
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     def test_dsa_recompute_indices_and_indexer_grads(self):
         from paddle.distributed.fleet.utils import recompute

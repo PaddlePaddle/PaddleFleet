@@ -25,6 +25,12 @@ from .indexer.csa_indexer_fwd_cudnn import (
     cudnn_indexer_topk,
     cudnn_indexer_topk_fwd,
 )
+from .indexer.dense_indexer_kl_cudnn import (
+    dense_attn_kl_scores,
+    dense_indexer_kl_bwd,
+    dense_indexer_kl_scores,
+    dense_kl_cu_seqlens,
+)
 
 __all__ = [
     "block_sparse_mqa_attention_dsa",
@@ -33,5 +39,9 @@ __all__ = [
     "cudnn_indexer_forward",
     "cudnn_indexer_topk",
     "cudnn_indexer_topk_fwd",
+    "dense_attn_kl_scores",
+    "dense_indexer_kl_bwd",
+    "dense_indexer_kl_scores",
+    "dense_kl_cu_seqlens",
     "is_dsa_available",
 ]

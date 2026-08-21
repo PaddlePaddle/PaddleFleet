@@ -624,6 +624,16 @@ class DSv4HybridAttention(Attention):
                 f"DSv4 hybrid attention requires HCA/CSA/window ratio, got {compress_ratio}"
             )
 
+        # Which logical document mask this layer reads, used as part of the
+        # shared-metadata cache key (config.csa_share_docmask_meta). Main layers
+        # all read the same decoder mask and therefore share a group; every MTP
+        # depth is fed its own slice of ``mtp_startend_row_indices_all``, which
+        # has the same shape as the main mask but different contents, so each
+        # gets its own group. Deliberately independent of compress_ratio.
+        self.csa_mask_group = (
+            ("mtp", int(layer_number)) if is_mtp_layer else ("main",)
+        )
+
         # Resolve the per-attention-type RoPE variant override.
         # HCA layers: compress_ratio == 128; CSA layers: 2 <= compress_ratio < 128.
         # When the per-type field is unset (None), the historical default below
@@ -915,13 +925,40 @@ class DSv4HybridAttention(Attention):
         ratio = int(getattr(self.core_attention, "compress_ratio", 0))
         if startend_row_indices is not None:
             docmask_seqlen = sq * cp_size if cp_size > 1 else sq
-            docmask_meta = CSADocMaskMetadata.build(
-                max(1, ratio),
-                b,
-                docmask_seqlen,
-                startend_row_indices,
-                dense_mode=self.config.csa_dense_mode,
-            )
+            # csa_share_docmask_meta: the trainer built this step's metadata
+            # before the forward started. The micro-batch slot was picked in
+            # TransformerLayer.forward, i.e. outside any recompute wrapper, and
+            # handed down as docmask_mb_idx; the lookup is a pure read, so it is safe
+            # here even when this forward is being replayed by recompute.
+            docmask_mb_idx = kwargs.get("docmask_mb_idx", -1)
+            if (
+                getattr(self.config, "csa_share_docmask_meta", False)
+                and docmask_mb_idx >= 0
+            ):
+                from paddlefleet.transformer.doc_mask_meta_registry import (
+                    doc_mask_meta_registry,
+                )
+
+                # The trainer prebuilds only the main group: the MTP depths are
+                # fed a slice of their own mtp_startend_row_indices_all, absent
+                # from the store by design, so the lookup returns None there and
+                # the layer builds its own metadata below, mirroring
+                # MQALatentAttention. A main-group miss keeps raising.
+                docmask_meta = doc_mask_meta_registry.get(
+                    docmask_mb_idx,
+                    max(1, ratio),
+                    b,
+                    docmask_seqlen,
+                    self.csa_mask_group,
+                )
+            if docmask_meta is None:
+                docmask_meta = CSADocMaskMetadata.build(
+                    max(1, ratio),
+                    b,
+                    docmask_seqlen,
+                    startend_row_indices,
+                    dense_mode=self.config.csa_dense_mode,
+                )
 
         # Full attention recompute: wrap qkv + core_attn + inv_rope + o_group_proj + gated_attn
         # into one RecomputeWithoutOutput block. All intermediates (query, key, value, etc.)
@@ -1040,6 +1077,7 @@ class DSv4HybridAttention(Attention):
         b, sq, _ = core_attn_out.shape
         pos_dim = self.qk_pos_emb_head_dim
         nope_dim = self.v_head_dim - pos_dim
+        postmix_done = False
 
         if pos_dim > 0:
             core_attn_out = core_attn_out.reshape(
@@ -1054,7 +1092,16 @@ class DSv4HybridAttention(Attention):
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
 
-            if (
+            if self._can_fuse_inv_rope_postmix(_in_full_recompute):
+                # Fused inverse RoPE + ungrouped VHA postmix. Bitwise identical
+                # to running the two separately, but never materialises the
+                # full-width rotated output. It consumes the postmix, so the
+                # standalone postmix block below must be skipped.
+                core_attn_out = self._apply_inv_rope_vha_postmix(
+                    core_attn_out, freqs, nope_dim, pos_dim, mscale
+                )
+                postmix_done = True
+            elif (
                 self.config.apply_rope_fusion
                 and not self.config.high_precision_rope
             ):
@@ -1090,7 +1137,7 @@ class DSv4HybridAttention(Attention):
         # output projection. When the whole block is already wrapped in a
         # full_attn RecomputeWithoutOutput, skip the nested selective recompute
         # (the full block recompute already frees these activations).
-        if self.use_vha_postmix:
+        if self.use_vha_postmix and not postmix_done:
             if (
                 self.recompute_vha_postmix
                 and self.training
@@ -1159,6 +1206,59 @@ class DSv4HybridAttention(Attention):
         else:
             core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
         return core_attn_out
+
+    def _can_fuse_inv_rope_postmix(self, in_full_recompute: bool) -> bool:
+        """Whether the inverse RoPE can be folded into the postmix GEMM.
+
+        Every rejected case falls back to the unfused pair, so this is a pure
+        performance switch: the eager RoPE path, high_precision_rope, the
+        grouped postmix topology (einsum, no [nh,nh] GEMM to split) and the
+        postmix's own selective recompute wrapper all keep working unchanged.
+        """
+        if not getattr(self.config, "fuse_inv_rope_into_vha_postmix", False):
+            return False
+        if not self.use_vha_postmix or self.vha_postmix_grouped:
+            return False
+        if not self.config.apply_rope_fusion:
+            return False
+        if self.config.high_precision_rope:
+            return False
+        # Re-entering the fused PyLayer from a nested recompute wrapper buys
+        # nothing (the fusion already avoids the intermediate it would free).
+        if (
+            self.recompute_vha_postmix
+            and self.training
+            and not in_full_recompute
+        ):
+            return False
+        return True
+
+    def _apply_inv_rope_vha_postmix(
+        self,
+        attn_out: Tensor,
+        freqs: Tensor,
+        nope_dim: int,
+        pe_dim: int,
+        mscale: float,
+    ) -> Tensor:
+        """Inverse RoPE + ungrouped VHA postmix in one pass.
+
+        attn_out: [b, sq, nh, v_head_dim]. Returns [b, sq, nh * v_head_dim],
+        matching what the unfused RoPE followed by ``_apply_vha_postmix`` would
+        return, bit for bit. The postmix matrix is rebuilt inside the fused op
+        exactly as ``_apply_vha_postmix``'s ungrouped branch builds it.
+        """
+        from paddlefleet.triton_ops import fused_inv_rope_vha_postmix
+
+        return fused_inv_rope_vha_postmix(
+            attn_out,
+            freqs,
+            self.vha_postmix_U,
+            self.vha_postmix_V,
+            nope_dim,
+            pe_dim,
+            mscale,
+        )
 
     def _apply_vha_postmix(self, attn_out: Tensor) -> Tensor:
         """Low-rank cross-head mixing of the attention output.

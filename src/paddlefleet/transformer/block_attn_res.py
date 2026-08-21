@@ -28,6 +28,7 @@ block-level representations across blocks.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -53,6 +54,45 @@ except ImportError:
 
     def mark_as_sequence_parallel_parameter(parameter):
         return parameter
+
+
+try:
+    from paddlefleet_ops.fla.ops.attnres.fused import (
+        _build_ptr_table,
+        fused_attnres_bwd,
+        fused_attnres_fwd,
+    )
+
+    HAVE_FUSED_ATTNRES = True
+except (ImportError, AttributeError):
+    _build_ptr_table = fused_attnres_fwd = fused_attnres_bwd = None
+    HAVE_FUSED_ATTNRES = False
+
+
+@contextlib.contextmanager
+def _numel_returns_int():
+    """Scope Tensor.numel() to return a Python int for the duration of a block.
+
+    FLA's fused attnres kernels compute ``N = residuals[0].numel() // D`` and
+    pass it as a Triton scalar/grid argument, which requires a Python int.
+    Paddle's numel() returns a 0-d Tensor, so we temporarily override it only
+    around the kernel calls instead of patching it process-wide.
+
+    Note: this overrides the class-level ``paddle.Tensor.numel`` for the whole
+    process during the window, so a concurrent thread calling ``.numel()`` would
+    also see an int. In practice this cannot race: dygraph forward/backward runs
+    on a single thread and the window only wraps the FLA kernel call.
+    """
+    original_numel = paddle.Tensor.numel
+
+    def _as_int(self):
+        return int(original_numel(self))
+
+    paddle.Tensor.numel = _as_int
+    try:
+        yield
+    finally:
+        paddle.Tensor.numel = original_numel
 
 
 if TYPE_CHECKING:
@@ -202,6 +242,81 @@ class BlockAttnResFunc(paddle.autograd.PyLayer):
         return tuple(result)
 
 
+class FusedAttnResTritonFunc(paddle.autograd.PyLayer):
+    """Native Paddle PyLayer wrapping FLA's fused attnres Triton kernels.
+
+    Avoids the Paddle compat PyLayer mapping issue where backward return
+    count must exactly match forward tensor input count.
+
+    Forward tensor args: proj_weight, norm_weight, *residuals
+    Backward returns:    d_proj_weight, d_norm_weight, *d_residuals
+    """
+
+    @staticmethod
+    def forward(ctx, proj_weight, norm_weight, norm_eps, *residuals):
+        D = residuals[0].shape[-1]
+        flat_residuals = tuple(
+            r.reshape([-1, D]).contiguous() for r in residuals
+        )
+        res = _build_ptr_table(flat_residuals)
+
+        with _numel_returns_int():
+            o, o_pre, rstd, logit, lse = fused_attnres_fwd(
+                q=proj_weight,
+                residuals=flat_residuals,
+                res=res,
+                w=norm_weight,
+                ow=None,
+                eps=norm_eps,
+                scale=1.0,
+                checkpoint_level=1,
+            )
+
+        ctx.save_for_backward(
+            proj_weight, norm_weight, o_pre, rstd, logit, lse, *flat_residuals
+        )
+        ctx.norm_eps = norm_eps
+        ctx.res = res
+        ctx.output_shape = residuals[0].shape
+        return o.reshape(residuals[0].shape)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        saved = ctx.saved_tensor()
+        proj_weight = saved[0]
+        norm_weight = saved[1]
+        o_pre = saved[2]
+        rstd = saved[3]
+        logit = saved[4]
+        lse = saved[5]
+        flat_residuals = list(saved[6:])
+
+        D = flat_residuals[0].shape[-1]
+        do = grad_output.reshape([-1, D]).contiguous()
+
+        with _numel_returns_int():
+            dvs, dq, dw, dow = fused_attnres_bwd(
+                do=do,
+                q=proj_weight,
+                residuals=flat_residuals,
+                res=ctx.res,
+                w=norm_weight,
+                ow=None,
+                o_pre=o_pre,
+                rstd=rstd,
+                logit=logit,
+                lse=lse,
+                eps=ctx.norm_eps,
+                scale=1.0,
+                checkpoint_level=1,
+            )
+
+        # Return order: d_proj_weight, d_norm_weight, *d_residuals
+        # (norm_eps is non-tensor, no gradient)
+        d_residuals = [dv.reshape(ctx.output_shape) for dv in dvs]
+        return (dq, dw, *d_residuals)
+
+
 class BlockAttnRes(FleetLayer):
     """Per-layer module for Block Attention Residuals."""
 
@@ -246,6 +361,15 @@ class BlockAttnRes(FleetLayer):
         # fall back to the standard autograd path for other norms.
         self._use_pylayer = isinstance(self.norm, RMSNorm)
 
+        # Fused Triton kernel (FLA fused_attnres) has highest priority:
+        # single kernel for RMSNorm + projection + softmax + weighted sum.
+        self._use_fused = (
+            HAVE_FUSED_ATTNRES
+            and self._use_pylayer
+            and getattr(config, "attn_res_fusion", True)
+            and not getattr(config, "deterministic_mode", False)
+        )
+
     def forward(self, partial_block: Tensor, blocks: list[Tensor]) -> Tensor:
         """Compute Block Attention Residual.
 
@@ -262,7 +386,17 @@ class BlockAttnRes(FleetLayer):
             Tensor of shape [B, S, H] — the attention-weighted
             combination of all block representations.
         """
-        if self.training and self._use_pylayer:
+        if self.training and self._use_fused:
+            # FLA fused_attnres: single Triton kernel for the full
+            # RMSNorm + projection + softmax + weighted-sum pipeline.
+            h = FusedAttnResTritonFunc.apply(
+                self.proj_weight,
+                self.norm.weight,
+                self.norm.variance_epsilon,
+                *blocks,
+                partial_block,
+            )
+        elif self.training and self._use_pylayer:
             h = BlockAttnResFunc.apply(
                 partial_block,
                 self.proj_weight,
