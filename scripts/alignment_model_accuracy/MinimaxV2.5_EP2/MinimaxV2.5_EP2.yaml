@@ -126,3 +126,8 @@ moe_token_dispatcher_type: alltoall
 adam_beta2: 0.95
 
 use_accuracy_compatible: true
+
+moe_router_bias_update_rate: 0.0
+save_safetensors: false
+batch_p2p_comm: true
+dsa_indexer_loss_coeff: 0.01
