@@ -425,6 +425,10 @@ class GPTMTPLMHead(GPTLMHead):
         return ScheduleNode(self.forward, name="GPTMTPLMHead")
 
     def forward(self, dict_args: dict):
+        # Under separate_mtp_headloss this head runs on the last stage BEFORE
+        # MTPLanguageLoss, which needs cu_seqlens_q to roll per-depth labels
+        # under mtp_data_style="megatron"; stash it here on the loss rank.
+        self._stash_cu_seqlens_q(dict_args)
         hidden_states = dict_args["hidden_states"]
         num_mtp = self.config.num_nextn_predict_layers
         tensor_list = paddle.split(hidden_states, num_mtp + 1)
