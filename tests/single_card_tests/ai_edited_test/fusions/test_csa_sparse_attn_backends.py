@@ -546,20 +546,30 @@ class TestCsaBwdTopkLengthArchGate(unittest.TestCase):
 class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
     """What ``backward`` actually forwards to the cuDNN kernel per architecture.
 
-    The gate is only useful if the call site honours it, so drive
+    The arch-gated decision is made in the forward (recorded on
+    ``ctx.compacted_idxs``): on SM100 the forward order-preserving-densifies
+    ``topk_idxs`` (interior ``-1`` removed) and the backward recounts the valid
+    prefix, feeding the kernel's compact KV-load path an exact per-row count;
+    on SM90 it stays ``compacted_idxs == False`` so the backward passes
+    ``topk_length=None`` (the guarded, ``-1``-safe full-width path). This drives
     ``CSASparseAttention.backward`` end to end with a shape-faithful mock kernel
-    and record the ``topk_length`` it receives.
+    and records the ``topk_length`` it receives, mirroring what the forward
+    would have saved for the mocked arch.
     """
 
     B, SQ, NP, HN, S_KV, TOPK = 1, 4, 2, 8, 16, 6
 
-    def _fake_ctx(self):
+    def _fake_ctx(self, *, compacted):
         b, sq, np_heads, hn = self.B, self.SQ, self.NP, self.HN
         query = paddle.randn([b, sq, np_heads, hn])
         kv_full = paddle.randn([b, self.S_KV, hn])
         attn_sink = paddle.randn([np_heads])
-        # Interior -1 holes: precisely the layout the SM90 kernel mishandles.
-        row = [0, -1, 2, -1, 5, -1]
+        # 3 valid entries {0, 2, 5}. When the forward compacted (SM100) it saved
+        # the densified prefix with -1 only trailing; otherwise (SM90) it saved
+        # the raw holey layout. Either way the backward's recount is the valid
+        # count (3) -- only the compacted layout is -1-hole-free (safe for the
+        # kernel's unguarded compact KV-load).
+        row = [0, 2, 5, -1, -1, -1] if compacted else [0, -1, 2, -1, 5, -1]
         topk_idxs = paddle.to_tensor([[row] * sq], dtype="int32")
         output = paddle.randn([b, sq, np_heads, hn])
         lse = paddle.randn([b, sq, np_heads])
@@ -577,6 +587,8 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
             softmax_scale=0.125,
             attn_sink_dtype=attn_sink.dtype,
             backend="cudnn",
+            global_kv_idx_remap_fusion=False,
+            compacted_idxs=compacted,
             has_topk_length=False,
             query_needs_grad=not query.stop_gradient,
             kv_full_needs_grad=not kv_full.stop_gradient,
@@ -588,7 +600,6 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
     def _topk_length_passed_to_kernel(self, capability):
         from paddlefleet.fusions import csa_sparse_attn as mod
 
-        ctx, grad_output = self._fake_ctx()
         seen = {}
 
         def fake_bwd(
@@ -615,6 +626,10 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
                     fake_bwd,
                 ),
             ):
+                # Mirror the forward's arch-gated decision (indexer_topk == 0):
+                # SM100 densifies + sets compacted_idxs, SM90 does not.
+                compacted = mod._csa_bwd_honours_topk_length_holes()
+                ctx, grad_output = self._fake_ctx(compacted=compacted)
                 mod.CSASparseAttention.backward(ctx, grad_output)
         finally:
             gate.cache_clear()
@@ -625,10 +640,11 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
     def test_sm90_receives_none(self):
         self.assertIsNone(self._topk_length_passed_to_kernel((9, 0)))
 
-    def test_sm100_receives_int32_bound(self):
+    def test_sm100_receives_int32_count(self):
         topk_length = self._topk_length_passed_to_kernel((10, 0))
         self.assertIsNotNone(topk_length)
         self.assertEqual(topk_length.dtype, paddle.int32)
         self.assertEqual(list(topk_length.shape), [self.B * self.SQ])
-        # Trailing bound of [0, -1, 2, -1, 5, -1] is 5 (last valid index 4 + 1).
-        self.assertEqual(topk_length.tolist(), [5] * (self.B * self.SQ))
+        # Compacted valid count of the densified {0, 2, 5} prefix is 3 -- the
+        # exact per-row early-stop bound, with interior -1 holes removed.
+        self.assertEqual(topk_length.tolist(), [3] * (self.B * self.SQ))
