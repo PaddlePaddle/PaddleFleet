@@ -19,21 +19,38 @@ import paddle
 from . import is_flash_mask_available
 
 if is_flash_mask_available():
+    # ``_safe_load_ecosystem_lib`` already re-raises when ``flash_mask`` itself
+    # cannot be loaded, so only its submodules can still fail here. Swallowing
+    # that would leave ``get_fa_version()`` free to pick FA3/FA4 while
+    # ``_flash_attn_fwd`` is undefined -- fail loudly instead.
     try:
         from .flash_mask import (
             flash_attention as _flash_attention,
             flashmask_attention as _flashmask_attention,
         )
-    except (ImportError, ModuleNotFoundError):
+        from .flash_mask.cute.flashmask_utils import FlashMaskInfoPaddle
         from .flash_mask.cute.interface import (
-            flash_attention as _flash_attention,
-            flashmask_attention as _flashmask_attention,
+            _flash_attn_bwd,
+            _flash_attn_fwd,
         )
+        from .flash_mask.utils import bshd_slice_contiguous_kv
+    except (ImportError, AttributeError, RuntimeError) as exc:
+        raise ImportError(
+            "paddlefleet_ops reports flash_mask as available, but its cutedsl "
+            "interface failed to import, so FA3/FA4 dispatch would reference "
+            "undefined kernels. Install a paddlefleet_ops whose flash_mask "
+            "extension matches this paddlefleet."
+        ) from exc
 else:
     from paddle.nn.functional.flash_attention import (
         flash_attention as _flash_attention,
         flashmask_attention as _flashmask_attention,
     )
+
+    # ``get_fa_version()`` always returns 2 here, so these names exist only to
+    # keep the FA3/FA4 call sites' imports unconditional.
+    FlashMaskInfoPaddle = _flash_attn_fwd = _flash_attn_bwd = None
+    bshd_slice_contiguous_kv = None
 
 
 def get_fa_version(
@@ -299,4 +316,9 @@ __all__ = [
     "flash_attention",
     "get_fa_version",
     "is_value_padding_needed",
+    # cutedsl symbols re-exported for the FA3/FA4 call sites
+    "FlashMaskInfoPaddle",
+    "_flash_attn_fwd",
+    "_flash_attn_bwd",
+    "bshd_slice_contiguous_kv",
 ]

@@ -20,6 +20,7 @@ import unittest
 from unittest.mock import patch
 
 import paddle
+import paddlefleet_ops
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -81,74 +82,128 @@ def assert_tensor_equal(testcase, actual, expected):
     testcase.assertTrue(bool((actual == expected).all().item()))
 
 
-class TestFlashMaskImportPath(unittest.TestCase):
-    def test_sm100_imports_vendored_flashmask_utils(self):
-        def fake_flash_attn_fwd(*args, **kwargs):
-            return None
+def fake_kernel(*args, **kwargs):
+    return None
 
-        def fake_flash_attn_bwd(*args, **kwargs):
-            return None
 
-        def fake_slice(*args, **kwargs):
-            return None
+def fake_module(name, is_package=False):
+    module = types.ModuleType(name)
+    if is_package:
+        module.__path__ = []
+    return module
 
-        def fake_module(name, is_package=False):
-            module = types.ModuleType(name)
-            if is_package:
-                module.__path__ = []
-            return module
 
-        fake_modules = {
-            "paddlefleet_ops.flash_mask": fake_module(
-                "paddlefleet_ops.flash_mask", is_package=True
-            ),
-            "paddlefleet_ops.flash_mask.cute": fake_module(
-                "paddlefleet_ops.flash_mask.cute", is_package=True
-            ),
-            "paddlefleet_ops.flash_mask.cute.flashmask_utils": fake_module(
-                "paddlefleet_ops.flash_mask.cute.flashmask_utils"
-            ),
-            "paddlefleet_ops.flash_mask.cute.interface": fake_module(
-                "paddlefleet_ops.flash_mask.cute.interface"
-            ),
-            "paddlefleet_ops.flash_mask.utils": fake_module(
-                "paddlefleet_ops.flash_mask.utils", is_package=True
-            ),
-        }
-        fake_modules[
-            "paddlefleet_ops.flash_mask.cute.flashmask_utils"
-        ].FlashMaskInfoPaddle = FakeFlashMaskInfoPaddle
-        fake_modules[
-            "paddlefleet_ops.flash_mask.cute.interface"
-        ]._flash_attn_fwd = fake_flash_attn_fwd
-        fake_modules[
-            "paddlefleet_ops.flash_mask.cute.interface"
-        ]._flash_attn_bwd = fake_flash_attn_bwd
-        fake_modules[
+def fake_flash_mask_modules(with_kernels=True):
+    """Stub out the ``paddlefleet_ops.flash_mask`` ecosystem library tree."""
+    modules = {
+        name: fake_module(name, is_package)
+        for name, is_package in (
+            ("paddlefleet_ops.flash_mask", True),
+            ("paddlefleet_ops.flash_mask.cute", True),
+            ("paddlefleet_ops.flash_mask.cute.flashmask_utils", False),
+            ("paddlefleet_ops.flash_mask.cute.interface", False),
+            ("paddlefleet_ops.flash_mask.utils", True),
+        )
+    }
+    # The two public entry points come from the top-level package and the
+    # cutedsl kernels from the cute submodules -- same split as the facade.
+    flash_mask = modules["paddlefleet_ops.flash_mask"]
+    flash_mask.flash_attention = fake_kernel
+    flash_mask.flashmask_attention = fake_kernel
+    modules[
+        "paddlefleet_ops.flash_mask.cute.flashmask_utils"
+    ].FlashMaskInfoPaddle = FakeFlashMaskInfoPaddle
+    if with_kernels:
+        interface = modules["paddlefleet_ops.flash_mask.cute.interface"]
+        interface._flash_attn_fwd = fake_kernel
+        interface._flash_attn_bwd = fake_kernel
+        modules[
             "paddlefleet_ops.flash_mask.utils"
-        ].bshd_slice_contiguous_kv = fake_slice
+        ].bshd_slice_contiguous_kv = fake_bshd_slice_contiguous_kv
+    return modules
 
-        module_path = os.path.join(
-            REPO_ROOT, "src", "paddlefleet", "context_parallel_utils.py"
-        )
+
+class TestFlashMaskImportPath(unittest.TestCase):
+    """The cutedsl import guard lives in ``flash_mask_facade`` only.
+
+    ``context_parallel_utils`` and ``refined_recompute.flash_attn`` re-import
+    the kernels from the facade instead of repeating the guard, so exercising
+    the facade covers every FA3/FA4 dispatch site.
+    """
+
+    FACADE_PATH = os.path.join(
+        REPO_ROOT,
+        "packages",
+        "paddlefleet_ops",
+        "src",
+        "paddlefleet_ops",
+        "flash_mask_facade.py",
+    )
+
+    def _load_facade(self, name):
+        # The facade uses relative imports, so it has to be loaded as a
+        # ``paddlefleet_ops`` submodule for ``from .flash_mask`` to resolve.
         spec = importlib.util.spec_from_file_location(
-            "_test_context_parallel_utils_sm100", module_path
+            f"paddlefleet_ops.{name}", self.FACADE_PATH
         )
-        module = importlib.util.module_from_spec(spec)
+        return spec, importlib.util.module_from_spec(spec)
+
+    def test_sm100_imports_vendored_flashmask_utils(self):
+        spec, module = self._load_facade("_test_facade_sm100")
         with (
-            patch.dict(sys.modules, fake_modules),
-            patch.object(paddle.cuda, "is_available", return_value=True),
+            patch.dict(sys.modules, fake_flash_mask_modules()),
             patch.object(
-                paddle.cuda, "get_device_capability", return_value=(10, 0)
+                paddlefleet_ops, "is_flash_mask_available", lambda: True
             ),
         ):
             spec.loader.exec_module(module)
 
-        self.assertTrue(module._flash_mask_available)
         self.assertIs(module.FlashMaskInfoPaddle, FakeFlashMaskInfoPaddle)
-        self.assertIs(module._flash_attn_fwd, fake_flash_attn_fwd)
-        self.assertIs(module._flash_attn_bwd, fake_flash_attn_bwd)
-        self.assertIs(module.bshd_slice_contiguous_kv, fake_slice)
+        self.assertIs(module._flash_attn_fwd, fake_kernel)
+        self.assertIs(module._flash_attn_bwd, fake_kernel)
+        self.assertIs(
+            module.bshd_slice_contiguous_kv, fake_bshd_slice_contiguous_kv
+        )
+
+    def test_cute_interface_import_failure_raises(self):
+        """A broken cute interface must fail the import, not degrade silently.
+
+        Swallowing it would leave ``get_fa_version()`` free to pick FA3/FA4 --
+        it only knows about CUDA and compute capability -- while the FA3/FA4
+        call sites never bound ``_flash_attn_fwd``.
+        """
+        # The package and both cute modules import fine; the interface simply
+        # does not export the kernels (a mismatched paddlefleet_ops build).
+        spec, module = self._load_facade("_test_facade_broken_cute")
+        with (
+            patch.dict(
+                sys.modules, fake_flash_mask_modules(with_kernels=False)
+            ),
+            patch.object(
+                paddlefleet_ops, "is_flash_mask_available", lambda: True
+            ),
+            self.assertRaises(ImportError) as ctx,
+        ):
+            spec.loader.exec_module(module)
+
+        self.assertIn("cutedsl interface failed to import", str(ctx.exception))
+
+    def test_fa2_only_device_binds_none_kernels(self):
+        """Without flashmask the cutedsl names exist but are ``None``.
+
+        They only keep the consumers' imports unconditional; ``get_fa_version``
+        degrades to FA2 here, so no call site ever reaches them.
+        """
+        spec, module = self._load_facade("_test_facade_fa2_only")
+        with patch.object(
+            paddlefleet_ops, "is_flash_mask_available", lambda: False
+        ):
+            spec.loader.exec_module(module)
+
+        self.assertIsNone(module.FlashMaskInfoPaddle)
+        self.assertIsNone(module._flash_attn_fwd)
+        self.assertIsNone(module._flash_attn_bwd)
+        self.assertIsNone(module.bshd_slice_contiguous_kv)
 
 
 class TestFlashMaskAllGatherModes(unittest.TestCase):
@@ -1057,7 +1112,7 @@ class TestFlashMaskSwaP2PPath(unittest.TestCase):
 
     def test_flashmask_attention_cp_requires_flashmask_for_p2p_mode(self):
         with (
-            patch.object(cp_utils, "_flash_mask_available", False),
+            patch.object(cp_utils, "is_flash_mask_available", lambda: False),
             patch.object(
                 cp_utils.fleet,
                 "get_hybrid_communicate_group",
@@ -1083,7 +1138,7 @@ class TestFlashMaskSwaP2PPath(unittest.TestCase):
             return result
 
         with (
-            patch.object(cp_utils, "_flash_mask_available", True),
+            patch.object(cp_utils, "is_flash_mask_available", lambda: True),
             patch.object(
                 cp_utils.fleet,
                 "get_hybrid_communicate_group",

@@ -19,28 +19,13 @@ from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
-from paddlefleet_ops import is_flash_mask_available
-from paddlefleet_ops.flash_mask_facade import get_fa_version
-
-_flash_mask_available = False
-try:
-    # Ask paddlefleet_ops rather than re-deriving the capability threshold: the
-    # blocker installed for an unavailable flash_mask raises RuntimeError (not
-    # ImportError) from its meta-path finder, so guessing wrong here takes the
-    # whole module import down instead of degrading to FA2.
-    if is_flash_mask_available():
-        from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
-            FlashMaskInfoPaddle,
-        )
-        from paddlefleet_ops.flash_mask.cute.interface import (
-            _flash_attn_bwd,
-            _flash_attn_fwd,
-        )
-        from paddlefleet_ops.flash_mask.utils import bshd_slice_contiguous_kv
-
-        _flash_mask_available = True
-except (ImportError, AttributeError, RuntimeError):
-    _flash_mask_available = False
+from paddlefleet_ops.flash_mask_facade import (
+    FlashMaskInfoPaddle,
+    _flash_attn_bwd,
+    _flash_attn_fwd,
+    bshd_slice_contiguous_kv,
+    get_fa_version,
+)
 
 
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
@@ -1924,8 +1909,14 @@ def flashmask_attention_cp(
         hcg = fleet.get_hybrid_communicate_group()
         cp_group = hcg.get_context_parallel_group()
 
-        assert _flash_mask_available, (
-            "P2P SWA fast path requires flashmask installed. Please check."
+        q_head_dim = query.shape[-1]
+        v_head_dim = value.shape[-1]
+        fa_version = get_fa_version(
+            q_head_dim, v_head_dim, startend_row_indices
+        )
+
+        assert fa_version == 4, (
+            f"current fa version is {fa_version}, but P2P SWA fast path requires flashmask 4.0 installed. Please check."
         )
 
         return FlashMaskSwaP2P.apply(

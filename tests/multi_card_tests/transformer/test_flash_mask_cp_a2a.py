@@ -312,8 +312,9 @@ def _mocked_kernel():
             ("_flash_attn_bwd", _mock_flash_attn_bwd),
             ("FlashMaskInfoPaddle", _FakeFlashMaskInfo),
         ):
-            # create=True: these names only exist when the cute backend does.
-            stack.enter_context(patch.object(rr_fa, name, impl, create=True))
+            # These come from ``flash_mask_facade``; on FA2-only devices they
+            # are bound to ``None`` rather than to the cute kernels.
+            stack.enter_context(patch.object(rr_fa, name, impl))
         yield
 
 

@@ -551,20 +551,25 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     """
     Tests that context_parallel_utils.py correctly handles softmax_scale
     for different fa_version values in the forward path:
-    - The else branch (fa_version 2/3) passes softmax_scale unconditionally
+    - The else branch (fa_version 2) passes softmax_scale unconditionally
       to flashmask_attention (the kernel itself may ignore unsupported values).
+      FLAGS=3 reaches this branch only when flashmask is unavailable and
+      ``get_fa_version`` degrades to 2.
     - The backward path for fa_version==2 raises NotImplementedError
       when softmax_scale is not None.
     - fa_version==4: passes softmax_scale to _flash_attn_fwd (covered elsewhere)
     """
 
     @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        lambda: False,
+    )
+    @patch(
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
         return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -589,7 +594,11 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         mock_fm,
         mock_preprocess,
     ):
-        """fa_version==3 (else branch): softmax_scale is always passed to flashmask_attention."""
+        """FLAGS=3 without flashmask: softmax_scale always reaches flashmask_attention.
+
+        FA3 now runs on the cutedsl backend, so the paddle ``flashmask_attention``
+        branch is only taken once ``get_fa_version`` degrades the flag to 2.
+        """
         from paddlefleet.context_parallel_utils import (
             cp_flashmask_allgatherkv_balance_forward,
         )
@@ -634,7 +643,6 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -700,12 +708,15 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
             )
 
     @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        lambda: False,
+    )
+    @patch(
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
         return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -730,7 +741,10 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         mock_fm,
         mock_preprocess,
     ):
-        """fa_version==3: softmax_scale passed to flashmask_attention unconditionally."""
+        """FLAGS=3 without flashmask: softmax_scale passed on unconditionally.
+
+        Degrading to FA2 is what routes this to paddle's ``flashmask_attention``.
+        """
         from paddlefleet.context_parallel_utils import (
             cp_flashmask_allgatherkv_balance_forward,
         )
@@ -776,7 +790,6 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -851,7 +864,6 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -917,12 +929,15 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
             )
 
     @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        lambda: False,
+    )
+    @patch(
         "paddlefleet.context_parallel_utils.preprocess_index_dual_chunks",
         return_value=paddle.zeros([1, 1, 4, 2], dtype="int32"),
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -947,7 +962,10 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
         mock_fm,
         mock_preprocess,
     ):
-        """fa_version==3: when softmax_scale is None, softmax_scale=None is passed through."""
+        """FLAGS=3 without flashmask: softmax_scale=None is passed through as None.
+
+        Degrading to FA2 is what routes this to paddle's ``flashmask_attention``.
+        """
         from paddlefleet.context_parallel_utils import (
             cp_flashmask_allgatherkv_balance_forward,
         )

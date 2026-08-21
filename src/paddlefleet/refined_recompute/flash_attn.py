@@ -20,7 +20,12 @@ from paddle import _C_ops, framework
 from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddlefleet_ops import is_flash_mask_available
-from paddlefleet_ops.flash_mask_facade import get_fa_version
+from paddlefleet_ops.flash_mask_facade import (
+    FlashMaskInfoPaddle,
+    _flash_attn_bwd,
+    _flash_attn_fwd,
+    get_fa_version,
+)
 
 from paddlefleet.context_parallel_utils import (
     UlyssesAlltoAll,
@@ -33,15 +38,6 @@ from paddlefleet.context_parallel_utils import (
     cp_flashmask_swa_p2p_forward,
 )
 from paddlefleet.refined_recompute.queue_check import global_rr_queue_log
-
-if is_flash_mask_available():
-    from paddlefleet_ops.flash_mask.cute.flashmask_utils import (
-        FlashMaskInfoPaddle,
-    )
-    from paddlefleet_ops.flash_mask.cute.interface import (
-        _flash_attn_bwd,
-        _flash_attn_fwd,
-    )
 
 logger = logging.getLogger(__name__)
 

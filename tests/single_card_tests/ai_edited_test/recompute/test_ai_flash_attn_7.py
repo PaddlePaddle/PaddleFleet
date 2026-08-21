@@ -192,8 +192,8 @@ class TestGetFAVersionDeterministic(unittest.TestCase):
     ):
         """Without the cutedsl backend, FA3/FA4 must degrade to FA2.
 
-        Otherwise the CP / refined-recompute call sites would reference an
-        undefined ``_flash_attn_fwd`` -- the kernels are never imported when
+        Otherwise the CP / refined-recompute call sites would call the FA3/FA4
+        kernels, which ``flash_mask_facade`` binds to ``None`` when
         ``paddlefleet_ops.flash_mask`` is unavailable.
         """
         for flag_version in (3, 4):

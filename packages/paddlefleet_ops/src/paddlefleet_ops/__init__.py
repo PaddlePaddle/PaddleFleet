@@ -176,7 +176,7 @@ else:
 
 FLASH_MASK_HINT = (
     "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet_ops.flash_mask` when flag branch enabled.\n"
-    "For users: use a GPU with compute capability >= 10.0 (Blackwell) to enable."
+    "For users: use a GPU with compute capability >= 9.0 (Hopper or Blackwell) to enable."
 )
 
 
@@ -438,7 +438,7 @@ if paddle.is_compiled_with_cuda():
     if is_flash_mask_available():
         _safe_load_ecosystem_lib("flash_mask", ops_dir, globals())
     else:
-        warning, error = _blackwell_requirement(
+        warning, error = _hopper_requirement(
             "paddlefleet_ops.flash_mask", hint=FLASH_MASK_HINT
         )
         logger.warning(warning)

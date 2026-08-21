@@ -141,20 +141,18 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV4(unittest.TestCase):
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
     def test_first_fwd_v4(self, mock_tracer, mock_version):
         """Test _first_fwd with version 4."""
-        # _flash_attn_fwd is conditionally imported (sm_10x only).
-        # Create it on the module if it doesn't exist so the test can run.
+        # ``_flash_attn_fwd`` is always bound as a module global (it comes from
+        # ``flash_mask_facade``, which binds ``None`` on FA2-only devices), so a
+        # plain ``patch.object`` restores it correctly either way.
         import paddlefleet.refined_recompute.flash_attn as fa_mod
-
-        _orig_flash_fwd = getattr(fa_mod, "_flash_attn_fwd", None)
 
         mock_flash_fwd = MagicMock()
         mock_flash_fwd.return_value = (
             paddle.randn([2, 4, 8], dtype=paddle.bfloat16),
             paddle.randn([2, 4], dtype=paddle.float32),
         )
-        fa_mod._flash_attn_fwd = mock_flash_fwd
 
-        try:
+        with patch.object(fa_mod, "_flash_attn_fwd", mock_flash_fwd):
             mock_tracer_obj = MagicMock()
             mock_tracer_obj._has_grad = False
             mock_tracer.return_value = mock_tracer_obj
@@ -170,12 +168,6 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV4(unittest.TestCase):
             hold_tensors = attn._hold_tensors_queue.get()
             self.assertIn("result_attention", hold_tensors)
             self.assertIn("softmax_lse", hold_tensors)
-        finally:
-            # Restore original state
-            if _orig_flash_fwd is not None:
-                fa_mod._flash_attn_fwd = _orig_flash_fwd
-            elif hasattr(fa_mod, "_flash_attn_fwd"):
-                delattr(fa_mod, "_flash_attn_fwd")
 
 
 class TestFlashMaskAttnFunctorCpForward(unittest.TestCase):
