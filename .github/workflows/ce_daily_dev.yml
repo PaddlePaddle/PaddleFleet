@@ -1,9 +1,6 @@
 name: CE Daily Dev
 
 on:
-  pull_request:
-    branches:
-      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -836,7 +833,6 @@ jobs:
           else
             echo -e "\033[32mIntegration test succeeded: Gemma4 pre-train.\033[0m"
           fi
-          '
           '
       - name: GLM4.5 pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
