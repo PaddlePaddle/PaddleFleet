@@ -208,6 +208,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         topk_length=None,
         indexer_topk=0,
         global_kv_idx_remap_fusion=False,
+        is_mqa_layer=False,
     ):
         from paddlefleet.fusions.csa_sparse_attn_utils import prepare_inputs
 
@@ -248,9 +249,18 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         # Compaction can produce topk_length == 0 for all-invalid rows, which only
         # SM100 early-exits safely (SM90 would gather from a negative KV row); so
         # only compact on SM100. SM90 keeps topk_length=None (guarded full-width).
+        # Exclude MQA layers: the full-causal MQA path supplies its OWN bespoke
+        # ``topk_length`` (built from the causal diagonal) that was never run
+        # through ``_csa_compact_topk_idxs``, so its padding rows keep a ``-1`` at
+        # column 0. The FlashMLA forward masks that ``-1`` even under a length, but
+        # the cuDNN backward's compact KV-load is unguarded (``mKV[-1]`` -> NaN).
+        # Marking MQA ``compacted`` would send that holey length into the backward;
+        # instead keep ``compacted_idxs=False`` so MQA's backward takes the guarded
+        # full-width path (which masks ``-1``) while its forward still early-stops.
         ctx.compacted_idxs = (
             backend == "cudnn"
             and indexer_topk == 0
+            and not is_mqa_layer
             and _csa_bwd_honours_topk_length_holes()
         )
         if ctx.compacted_idxs and topk_length is None:
@@ -392,6 +402,7 @@ def csa_sparse_attn(
     topk_length=None,
     indexer_topk=0,
     global_kv_idx_remap_fusion=False,
+    is_mqa_layer=False,
 ):
     """Unified CSA sparse attention entry point.
 
@@ -406,6 +417,13 @@ def csa_sparse_attn(
             Bit-identical either way; wired from the
             ``sparse_attn_global_kv_idx_remap_fusion`` config field. Only the
             "cudnn" backend builds that table, so it is ignored otherwise.
+        is_mqa_layer: set by the full-causal MQA caller. Such calls pass their
+            own bespoke ``topk_length`` (causal diagonal) that was never run
+            through the hole-removing densify, so their padding rows keep a
+            ``-1`` at column 0. This flag keeps them out of the ``compacted``
+            backward (whose compact KV-load is unguarded against ``mKV[-1]``);
+            they take the guarded full-width backward instead. Ignored unless
+            backend == "cudnn".
     """
     if backend == "unfused":
         return unfused_compressed_sparse_attn(
@@ -431,6 +449,7 @@ def csa_sparse_attn(
         topk_length,
         indexer_topk,
         global_kv_idx_remap_fusion,
+        is_mqa_layer,
     )
     if CSASparseAttention._lse_indexer is not None:
         lse_indexer = CSASparseAttention._lse_indexer

@@ -94,6 +94,7 @@ class TestCompressedSparseAttnGate(unittest.TestCase):
             config=types.SimpleNamespace(csa_sparse_attn_backend=backend),
             indexer=indexer,
             global_kv_idx_remap_fusion=False,
+            is_mqa_layer=False,
         )
         with (
             patch(

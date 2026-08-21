@@ -648,3 +648,96 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
         # Compacted valid count of the densified {0, 2, 5} prefix is 3 -- the
         # exact per-row early-stop bound, with interior -1 holes removed.
         self.assertEqual(topk_length.tolist(), [3] * (self.B * self.SQ))
+
+
+class TestCsaFwdCompactedIdxsMqaGate(unittest.TestCase):
+    """The forward's ``ctx.compacted_idxs`` gate (csa_sparse_attn.py:260).
+
+    ``compacted_idxs`` promises the backward that the saved ``topk_idxs`` are a
+    hole-free dense prefix -- safe for the cuDNN backward's UNGUARDED compact
+    KV-load. It may be True only for a non-MQA (HCA) cuDNN / SM100 no-indexer
+    layer. The full-causal MQA path (``_forward_mqa``) supplies its OWN bespoke
+    ``topk_length`` over a layout that still carries ``-1`` (padding rows keep a
+    ``-1`` at column 0), so ``is_mqa_layer=True`` must force the gate False even
+    on SM100 -- otherwise that holey length reaches the backward's ``mKV[-1]``
+    and NaNs. This drives ``CSASparseAttention.forward`` under a mocked arch +
+    mocked FlashMLA kernel and reads back the ``ctx.compacted_idxs`` it recorded.
+    """
+
+    B, SQ, NP, HN, S_KV, TOPK = 1, 4, 2, 8, 16, 6
+
+    def _compacted_idxs_for(self, *, capability, is_mqa_layer):
+        from paddlefleet.fusions import csa_sparse_attn as mod
+
+        b, sq, np_heads, hn = self.B, self.SQ, self.NP, self.HN
+        query = paddle.randn([b, sq, np_heads, hn])
+        kv_full = paddle.randn([b, self.S_KV, hn])
+        attn_sink = paddle.randn([np_heads])
+        topk_idxs = paddle.to_tensor(
+            [[[0, 2, 5, -1, -1, -1]] * sq], dtype="int32"
+        )
+        # Pass topk_length so the gate is exercised in isolation: the fallback
+        # densify (only taken when compacted and topk_length is None) is skipped,
+        # so the assertion is purely about what compacted_idxs is set to.
+        topk_length = paddle.full([b * sq], self.TOPK, dtype="int32")
+
+        # Fake ctx: forward only needs save_for_backward to exist; every gate
+        # input is a plain attribute it writes.
+        ctx = types.SimpleNamespace(save_for_backward=lambda *a, **k: None)
+
+        def fake_fwd(*args, **kwargs):
+            out = paddle.zeros([b, sq, np_heads, hn], dtype=query.dtype)
+            lse = paddle.zeros([b, sq, np_heads], dtype="float32")
+            return out, lse, None
+
+        gate = mod._csa_bwd_honours_topk_length_holes
+        gate.cache_clear()
+        try:
+            with (
+                patch.object(
+                    paddle.device.cuda,
+                    "get_device_capability",
+                    return_value=capability,
+                ),
+                patch(
+                    "paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn."
+                    "flash_mla_sparse_attn",
+                    fake_fwd,
+                ),
+            ):
+                mod.CSASparseAttention.forward(
+                    ctx,
+                    query,
+                    kv_full,
+                    attn_sink,
+                    topk_idxs,
+                    0.125,
+                    "cudnn",
+                    topk_length=topk_length,
+                    indexer_topk=0,
+                    is_mqa_layer=is_mqa_layer,
+                )
+        finally:
+            gate.cache_clear()
+        return ctx.compacted_idxs
+
+    def test_sm100_hca_compacts(self):
+        # Non-MQA (HCA) cuDNN / SM100 no-indexer layer still compacts.
+        self.assertTrue(
+            self._compacted_idxs_for(capability=(10, 0), is_mqa_layer=False)
+        )
+
+    def test_sm100_mqa_is_not_compacted(self):
+        # The fix: MQA stays full-width (guarded) even on SM100.
+        self.assertFalse(
+            self._compacted_idxs_for(capability=(10, 0), is_mqa_layer=True)
+        )
+
+    def test_sm90_never_compacts(self):
+        # SM90 keeps the guarded full-width path regardless of is_mqa_layer.
+        self.assertFalse(
+            self._compacted_idxs_for(capability=(9, 0), is_mqa_layer=False)
+        )
+        self.assertFalse(
+            self._compacted_idxs_for(capability=(9, 0), is_mqa_layer=True)
+        )

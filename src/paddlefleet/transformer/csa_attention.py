@@ -3521,4 +3521,5 @@ class CompressedSparseAttention(FleetLayer):
             topk_length=topk_length,
             indexer_topk=indexer_topk,
             global_kv_idx_remap_fusion=self.global_kv_idx_remap_fusion,
+            is_mqa_layer=self.is_mqa_layer,
         )
