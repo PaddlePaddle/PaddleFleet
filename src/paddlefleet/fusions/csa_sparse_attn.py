@@ -26,6 +26,7 @@ Head counts below a kernel tile are supported by zero-padding, see
 """
 
 import functools
+import math
 
 import paddle
 from paddle import Tensor
@@ -59,36 +60,65 @@ def _dsa_head_tile(num_heads: int) -> int:
 
 
 @functools.lru_cache(maxsize=16)
-def _real_head_rows(num_tokens: int, num_heads: int, head_tile: int) -> Tensor:
-    """Row ids of the real heads in a ``[num_tokens * head_tile, hn]`` view.
+def _real_rows(
+    num_tokens: int, num_heads: int, head_tile: int, keep: int, total: int
+) -> Tensor:
+    """Row ids of the real data in a ``[num_tokens * head_tile * total, g]`` view.
+
+    Of every ``head_tile`` head rows the first ``num_heads`` are real, and of
+    every ``total`` latent chunks the first ``keep`` are real; the rest is the
+    zero padding added on the way into the kernel.
 
     Cached because it only depends on the shape. One entry is
-    ``num_tokens * num_heads`` int32 (1 MiB at 8k tokens x 32 heads), and a
-    process only ever sees one device, so a plain shape-keyed cache is enough.
+    ``num_tokens * num_heads * keep`` int32 (0.75 MiB at 8k tokens x 24 heads
+    x 1 chunk), and a process only ever sees one device, so a plain shape-keyed
+    cache is enough.
     """
+    head_rows = (
+        paddle.arange(num_tokens, dtype="int32") * (head_tile * total)
+    ).unsqueeze(1) + (
+        paddle.arange(num_heads, dtype="int32") * total
+    ).unsqueeze(0)
     return (
-        (paddle.arange(num_tokens, dtype="int32") * head_tile).unsqueeze(1)
-        + paddle.arange(num_heads, dtype="int32").unsqueeze(0)
+        head_rows.reshape([-1, 1])
+        + paddle.arange(keep, dtype="int32").unsqueeze(0)
     ).flatten()
 
 
-def _drop_padded_head_rows(x: Tensor, num_heads: int, head_tile: int) -> Tensor:
-    """Keep the first ``num_heads`` of every ``head_tile`` head-rows of ``x``.
+def _drop_padded_rows(
+    x: Tensor, num_heads: int, head_tile: int, hn: int
+) -> Tensor:
+    """Undo ``_pad_query_heads`` / ``_pad_latent_dim`` on a kernel output.
 
-    ``x`` is any tensor whose last axis is the head dim and whose remaining
-    axes flatten to ``num_tokens * head_tile`` rows.
+    ``x`` is ``[..., head_tile, x.shape[-1]]``; the result is
+    ``[..., num_heads, hn]``, i.e. the padded head rows *and* the padded latent
+    columns are dropped. Returns ``x`` untouched when there is no padding.
 
-    Implemented as a row ``gather`` rather than a slice: both move the same
-    bytes, but Paddle's strided-slice copy runs at roughly a quarter of the
-    achievable bandwidth here while ``gather`` saturates it (measured on B30Z at
-    8192 tokens x 64->32 heads x 512: 0.53 ms for ``x[:, :h*hn]``, 0.11 ms for
-    the gather).
+    Both drops are done by a *single* row ``gather`` rather than by a strided
+    slice per axis. The slice moves the same bytes but Paddle's strided-slice
+    copy runs at roughly a quarter of the achievable bandwidth, and doing the
+    latent axis first also materialises a full-head-tile intermediate. Measured
+    on B30Z at the HCA shape (8192 tokens, 64->24 heads, 512->256 latent, so a
+    512 MiB kernel output): 0.803 ms for ``x[..., :hn].contiguous()`` followed
+    by a head-row gather (704 MiB moved), 0.045 ms for the fused gather
+    (192 MiB moved) -- a 17x saving on what is otherwise ~half of the forward.
+
+    Chunking is by ``gcd(hn, kernel_hn)`` so that keeping the first ``hn``
+    columns is expressible as keeping whole rows, which holds for any width the
+    kernel is padded from (512/256 -> one 256-wide row of two, 512/384 -> three
+    128-wide rows of four).
     """
-    hn = x.shape[-1]
-    rows = x.reshape([-1, hn])
-    num_tokens = rows.shape[0] // head_tile
-    idx = _real_head_rows(num_tokens, num_heads, head_tile)
-    return paddle.gather(rows, idx, axis=0)
+    kernel_hn = x.shape[-1]
+    if num_heads == head_tile and hn == kernel_hn:
+        return x
+    g = math.gcd(hn, kernel_hn)
+    total = kernel_hn // g
+    rows = x.reshape([-1, g])
+    num_tokens = rows.shape[0] // (head_tile * total)
+    idx = _real_rows(num_tokens, num_heads, head_tile, hn // g, total)
+    return paddle.gather(rows, idx, axis=0).reshape(
+        [*x.shape[:-2], num_heads, hn]
+    )
 
 
 @functools.cache
@@ -436,9 +466,10 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         )
         # Latent width the kernels are driven with. Both the FlashMLA forward
         # and the cuDNN backward only exist at 512, so a narrower layer is
-        # zero-padded up to it on the way in and sliced back on the way out.
-        # Unlike the head padding above this never changes what is saved for
-        # backward, so it costs no activation memory.
+        # zero-padded up to it on the way in and dropped again on the way out
+        # (fused with the head-row drop, see ``_drop_padded_rows``). Unlike the
+        # head padding above this never changes what is saved for backward, so
+        # it costs no activation memory.
         ctx.kernel_hn = _dsa_latent_dim(hn) if backend == "cudnn" else hn
         if backend == "cudnn":
             from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
@@ -458,24 +489,29 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 topk_length=topk_length,
                 indexer_topk=indexer_topk,
             )
-            if ctx.kernel_hn != hn:
-                # The padded latent columns of the output are exactly zero.
-                output = output[..., :hn].contiguous()
-            output_real, lse_real = output, lse
             if head_tile != np_heads:
-                output_real = _drop_padded_head_rows(
-                    output, np_heads, head_tile
-                ).reshape([b, sq, np_heads, hn])
                 lse_real = lse[:, :, :np_heads].contiguous()
                 if lse_indexer is not None:
                     lse_indexer = lse_indexer[:, :, :np_heads].contiguous()
+            else:
+                lse_real = lse
             if ctx.bwd_heads == np_heads:
-                # The backward runs on the real heads, so the padded forward
-                # tensors are dropped here instead of being kept alive until
-                # backward.
+                # The backward runs on the real heads, so nothing padded has to
+                # stay alive: one gather takes the kernel output straight to the
+                # real shape (see ``_drop_padded_rows``).
+                output_real = _drop_padded_rows(
+                    output, np_heads, head_tile, hn
+                ).reshape([b, sq, np_heads, hn])
                 save_q, save_sink = query, attn_sink
                 save_out, save_lse = output_real, lse_real
             else:
+                # SM90 padded backward: the saved ``out`` must stay one head
+                # tile wide, so only the padded latent columns come off it, and
+                # the head rows are dropped from that narrower copy.
+                output = _drop_padded_rows(output, head_tile, head_tile, hn)
+                output_real = _drop_padded_rows(
+                    output, np_heads, head_tile, hn
+                ).reshape([b, sq, np_heads, hn])
                 save_q, save_sink = q_in, sink_in
                 save_out, save_lse = output, lse
             CSASparseAttention._lse_indexer = lse_indexer
@@ -581,17 +617,18 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 topk_length=topk_length,
             )
             if ctx.kernel_hn != hn:
-                # ``dq`` / ``dkv`` are exactly zero over the padded columns.
-                dq_flat = dq_flat[..., :hn].contiguous()
+                # ``dkv`` is exactly zero over the padded columns. It is one
+                # latent head (no head padding to undo) and ~8 MiB, so a slice
+                # is fine here.
                 dkv_flat = dkv_flat[..., :hn].contiguous()
             dkv = dkv_flat.reshape(kv_full.shape)
+            # ``dq`` is exactly zero over the padded latent columns and its
+            # padded head rows are unused, so one gather drops both.
+            dq = _drop_padded_rows(dq_flat, np_heads, kh, hn).reshape(
+                [b, sq, np_heads, hn]
+            )
             if kh != np_heads:
-                dq = _drop_padded_head_rows(dq_flat, np_heads, kh).reshape(
-                    [b, sq, np_heads, hn]
-                )
                 d_sink = d_sink[:np_heads]
-            else:
-                dq = dq_flat.reshape([b, sq, np_heads, hn])
             d_attn_sink = d_sink.reshape([np_heads]).cast(ctx.attn_sink_dtype)
         else:
             from paddlefleet.tilelang_ops.attn import sparse_mqa_bwd
