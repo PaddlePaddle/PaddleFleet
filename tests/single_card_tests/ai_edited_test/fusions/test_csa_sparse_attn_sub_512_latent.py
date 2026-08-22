@@ -520,5 +520,72 @@ class TestSubLatentWithSubTileHeads(unittest.TestCase):
                     )
 
 
+class TestFusedUnpad(unittest.TestCase):
+    """``_drop_padded_rows`` must equal the per-axis slice + head gather.
+
+    The un-pad is a single row ``gather`` instead of a strided latent slice
+    followed by a head-row gather, because Paddle's strided-slice copy runs at
+    roughly a quarter of the achievable bandwidth and doing the latent axis
+    first also materialises a full-head-tile intermediate (measured on B30Z at
+    the HCA shape -- 8192 tokens, 64->24 heads, 512->256 latent: 0.803 ms and
+    704 MiB moved for the two-step form, 0.045 ms and 192 MiB for the fused
+    gather). It is a pure data movement, so it must agree bit-for-bit.
+    """
+
+    @staticmethod
+    def _per_axis(x, num_heads, head_tile, hn):
+        """The straightforward form: slice the latent axis, gather head rows."""
+        if hn != x.shape[-1]:
+            x = x[..., :hn].contiguous()
+        if num_heads == head_tile:
+            return x
+        rows = x.reshape([-1, hn])
+        idx = (
+            (
+                paddle.arange(rows.shape[0] // head_tile, dtype="int32")
+                * head_tile
+            ).unsqueeze(1)
+            + paddle.arange(num_heads, dtype="int32").unsqueeze(0)
+        ).flatten()
+        return paddle.gather(rows, idx, axis=0).reshape(
+            [*x.shape[:-2], num_heads, hn]
+        )
+
+    def test_matches_the_per_axis_form(self):
+        from paddlefleet.fusions.csa_sparse_attn import _drop_padded_rows
+
+        paddle.seed(3)
+        # (num_heads, head_tile): both kernel tiles, padded and exact; latents:
+        # the divisible widths, a non-divisible one (384, which chunks by
+        # gcd(384, 512) = 128) and the native 512.
+        for num_heads, head_tile in ((24, 64), (32, 64), (64, 64), (96, 128)):
+            for hn in (*_LATENTS, _KERNEL_LATENT):
+                # 4-D as the forward sees it, 3-D as the backward's dq is.
+                for shape in (
+                    [2, 37, head_tile, _KERNEL_LATENT],
+                    [61, head_tile, _KERNEL_LATENT],
+                ):
+                    with self.subTest(heads=num_heads, hn=hn, ndim=len(shape)):
+                        x = paddle.randn(shape).cast("bfloat16")
+                        got = _drop_padded_rows(x, num_heads, head_tile, hn)
+                        ref = self._per_axis(x, num_heads, head_tile, hn)
+                        self.assertEqual(tuple(got.shape), tuple(ref.shape))
+                        self.assertEqual(
+                            float(
+                                (got.cast("float32") - ref.cast("float32"))
+                                .abs()
+                                .max()
+                            ),
+                            0.0,
+                        )
+
+    def test_unpadded_is_copy_free(self):
+        """No padding on either axis must return the input untouched."""
+        from paddlefleet.fusions.csa_sparse_attn import _drop_padded_rows
+
+        x = paddle.randn([2, 4, 64, _KERNEL_LATENT]).cast("bfloat16")
+        self.assertIs(_drop_padded_rows(x, 64, 64, _KERNEL_LATENT), x)
+
+
 if __name__ == "__main__":
     unittest.main()
