@@ -593,6 +593,9 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
             # Head count the saved tensors are in; equal to np_heads unless the
             # forward padded them up to a kernel head tile.
             bwd_heads=np_heads,
+            # Latent width the kernels run at; equal to hn unless the forward
+            # zero-padded a narrower latent up to 512.
+            kernel_hn=hn,
             query_needs_grad=not query.stop_gradient,
             kv_full_needs_grad=not kv_full.stop_gradient,
             attn_sink_needs_grad=not attn_sink.stop_gradient,

@@ -21,7 +21,8 @@ final sparse MQA attention:
   - "cudnn": FlashMLA sparse forward + cuDNN DSA backward
 
 Head counts below a kernel tile are supported by zero-padding, see
-``_pad_query_heads``.
+``_pad_query_heads``. Latent widths below 512 likewise, see
+``_pad_latent_dim``.
 """
 
 import functools
@@ -36,6 +37,10 @@ from paddle import Tensor
 # ``sm100/prefill/sparse/fwd/head64/config.h``), so a layer with fewer heads
 # cannot be given a narrower tile without a new kernel.
 _DSA_HEAD_TILES = (64, 128)
+# The only latent width the FlashMLA sparse prefill and the cuDNN DSA backward
+# accept on this symmetric path; narrower layers are zero-padded up to it, see
+# ``_pad_latent_dim``.
+_DSA_LATENT_DIM = 512
 # Sink logit that makes ``exp(sink - m) -> 0``, i.e. plain softmax. Used for the
 # padded heads so they cannot perturb the real ones.
 _NEG_SINK = -1e30
@@ -138,6 +143,53 @@ def _pad_query_heads(query: Tensor, attn_sink: Tensor, head_tile: int):
         axis=0,
     )
     return query, attn_sink
+
+
+def _dsa_latent_dim(hn: int) -> int:
+    """Latent width the "cudnn" backend must be driven at for a ``hn`` layer.
+
+    Always ``_DSA_LATENT_DIM``: the FlashMLA sparse prefill accepts
+    ``d_qk in {512, 576}`` and requires ``d_v == 512``
+    (``csrc/api/sparse_fwd.h``), and this CSA path calls it symmetrically
+    (``d_v`` defaults to the query's last dim), so 512 is the only width that
+    passes. The cuDNN DSA backward is equally 512-shaped: its SM100 kernel
+    unrolls ``dQ`` / ``dKV`` into exactly four 128-column sub-tiles.
+    """
+    if hn > _DSA_LATENT_DIM:
+        raise ValueError(
+            f"csa_sparse_attn 'cudnn' backend supports at most "
+            f"{_DSA_LATENT_DIM} latent dims, got {hn}. "
+            "Reduce v_head_dim."
+        )
+    return _DSA_LATENT_DIM
+
+
+def _pad_latent_dim(x: Tensor, latent_dim: int) -> Tensor:
+    """Zero-pad the last (latent) axis of ``x`` up to ``latent_dim``.
+
+    Applied to ``q`` and ``kv`` together, so it is numerically exact rather
+    than an approximation. ``kv`` is a single latent head shared as both key
+    and value, so with both sides zero in the padded columns:
+
+    * ``scores = q . k`` is unchanged bit-for-bit (the added terms are 0 * 0),
+      hence so are the softmax, the ``lse`` and the sink.
+    * ``out = sum_j p_j * kv_j`` has the true result in ``[:hn]`` and exactly
+      zero in the padded columns, so the caller just slices them off.
+    * backward likewise: ``dq = sum_j dp_j * kv_j`` and
+      ``dkv = sum_j p_j * dout_j`` are zero over the padded columns (``dout``
+      is padded with zeros too), and ``d_sink`` is untouched.
+
+    The cost is that both GEMMs run at ``latent_dim`` for ``hn`` real columns.
+    The ``hn == latent_dim`` path is unchanged, and no tensor is saved for
+    backward in padded form -- backward re-pads instead, so activation memory
+    stays at the real width.
+    """
+    pad = latent_dim - x.shape[-1]
+    if pad == 0:
+        return x
+    zeros_shape = list(x.shape)
+    zeros_shape[-1] = pad
+    return paddle.concat([x, paddle.zeros(zeros_shape, dtype=x.dtype)], axis=-1)
 
 
 def unfused_compressed_sparse_attn(
@@ -382,6 +434,12 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             if head_tile == np_heads or _dsa_bwd_runs_sub_tile_heads(np_heads)
             else head_tile
         )
+        # Latent width the kernels are driven with. Both the FlashMLA forward
+        # and the cuDNN backward only exist at 512, so a narrower layer is
+        # zero-padded up to it on the way in and sliced back on the way out.
+        # Unlike the head padding above this never changes what is saved for
+        # backward, so it costs no activation memory.
+        ctx.kernel_hn = _dsa_latent_dim(hn) if backend == "cudnn" else hn
         if backend == "cudnn":
             from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
                 flash_mla_sparse_attn,
@@ -392,14 +450,17 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 q_in, sink_in = _pad_query_heads(query, attn_sink, head_tile)
 
             output, lse, lse_indexer = flash_mla_sparse_attn(
-                q_in,
-                kv_full,
+                _pad_latent_dim(q_in, ctx.kernel_hn),
+                _pad_latent_dim(kv_full, ctx.kernel_hn),
                 sink_in,
                 topk_idxs,
                 sm_scale=ctx.softmax_scale,
                 topk_length=topk_length,
                 indexer_topk=indexer_topk,
             )
+            if ctx.kernel_hn != hn:
+                # The padded latent columns of the output are exactly zero.
+                output = output[..., :hn].contiguous()
             output_real, lse_real = output, lse
             if head_tile != np_heads:
                 output_real = _drop_padded_head_rows(
@@ -482,6 +543,15 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             lse_flat = lse.reshape([b * sq, kh])
             topk_idxs_flat = _local_to_global_flat(topk_idxs, s_kv)
 
+            if ctx.kernel_hn != hn:
+                # Same exact zero-padding the forward used (see
+                # ``_pad_latent_dim``); ``out`` is zero over the padded columns
+                # there, so re-padding the saved narrow copy reproduces it.
+                q_flat = _pad_latent_dim(q_flat, ctx.kernel_hn)
+                o_flat = _pad_latent_dim(o_flat, ctx.kernel_hn)
+                do_flat = _pad_latent_dim(do_flat, ctx.kernel_hn)
+                kv_flat = _pad_latent_dim(kv_flat, ctx.kernel_hn)
+
             # ``topk_idxs`` was already densified in the forward for the compacted
             # path (HCA, no indexer loss), so the saved indices have a dense valid
             # prefix with -1 only trailing. Recover the per-row count cheaply (a
@@ -510,6 +580,10 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 softmax_scale=ctx.softmax_scale,
                 topk_length=topk_length,
             )
+            if ctx.kernel_hn != hn:
+                # ``dq`` / ``dkv`` are exactly zero over the padded columns.
+                dq_flat = dq_flat[..., :hn].contiguous()
+                dkv_flat = dkv_flat[..., :hn].contiguous()
             dkv = dkv_flat.reshape(kv_full.shape)
             if kh != np_heads:
                 dq = _drop_padded_head_rows(dq_flat, np_heads, kh).reshape(
@@ -574,7 +648,9 @@ def csa_sparse_attn(
     ``query`` may carry any head count up to 128 on the "cudnn" backend; counts
     that are not one of the kernel's head tiles (e.g. 32 or 24) are handled
     inside ``CSASparseAttention`` by padding the forward, which is exact but
-    keeps the forward cost of the tile.
+    keeps the forward cost of the tile. The same holds for the latent width:
+    any ``v_head_dim`` up to 512 is accepted and zero-padded to 512, which is
+    the only width both the FlashMLA forward and the cuDNN backward exist at.
     """
     if backend == "unfused":
         return unfused_compressed_sparse_attn(
