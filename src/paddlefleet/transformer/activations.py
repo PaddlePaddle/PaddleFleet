@@ -75,7 +75,7 @@ def situ_glu_scale_forward(
     probs: paddle.Tensor,
     beta: float = 1.0,
     linear_beta: float | None = None,
-    situ_glu_fusion: bool = True,
+    situ_glu_fusion: bool = False,
 ) -> paddle.Tensor:
     """Apply SiTU-GLU and router scaling with float32 intermediates."""
 
@@ -105,7 +105,7 @@ def situ_glu_scale_backward(
     out_grad: paddle.Tensor,
     beta: float = 1.0,
     linear_beta: float | None = None,
-    situ_glu_fusion: bool = True,
+    situ_glu_fusion: bool = False,
 ) -> tuple[paddle.Tensor, paddle.Tensor, paddle.Tensor]:
     """Backward for :func:`situ_glu_scale_forward`."""
 

@@ -186,10 +186,16 @@ class MoELayer(nn.Layer):
         )
         self.moe_expert_fusion = config.moe_expert_fusion
         self._activation_type = "situ" if self.hidden_act == situ else "swiglu"
-        if self.hidden_act == situ and self.fp8:
+        if self.hidden_act == situ and self.fp8 and self.using_sonic_moe:
             raise ValueError(
-                "SiTU-GLU MoE fusion currently supports BF16 expert compute "
-                "only; please disable fp8."
+                "SiTU-GLU + fp8 is only supported on the DeepGEMM fp8 expert "
+                "path, not on SonicMoE; please disable fp8 or switch backend."
+            )
+        if self.hidden_act == situ and self.fp8 and self.fp8_wgrad:
+            raise ValueError(
+                "SiTU-GLU + fp8 does not support fp8 expert weight gradients "
+                "yet; please set fp8_wgrad=False so that dw1/dw2 are computed "
+                "in bf16."
             )
         self.moe_subbatch_token_num_after_dispatch = (
             config.moe_subbatch_token_num_after_dispatch

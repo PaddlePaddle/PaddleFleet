@@ -113,7 +113,7 @@ for function, args in entries:
 
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
-    def test_default_fused_matches_disabled_reference(self):
+    def test_fused_matches_disabled_reference(self):
         paddle.seed(20260812)
         x = paddle.randn([17, 6144], dtype="bfloat16")
         probs = paddle.rand([17], dtype="float32")
@@ -131,8 +131,12 @@ for function, args in entries:
             situ_glu_fusion=False,
         )
 
-        actual_forward = situ_glu_scale_forward(x, probs, 4.0, 25.0)
-        actual_backward = situ_glu_scale_backward(x, probs, out_grad, 4.0, 25.0)
+        actual_forward = situ_glu_scale_forward(
+            x, probs, 4.0, 25.0, situ_glu_fusion=True
+        )
+        actual_backward = situ_glu_scale_backward(
+            x, probs, out_grad, 4.0, 25.0, situ_glu_fusion=True
+        )
         self.assertTrue(
             paddle.equal_all(
                 actual_forward.astype("float32"),
@@ -183,6 +187,7 @@ for function, args in entries:
                     out_grad,
                     4.0,
                     linear_beta,
+                    situ_glu_fusion=True,
                 )
 
                 self.assertTrue(
@@ -207,12 +212,12 @@ for function, args in entries:
                     )
                 )
 
-    def test_default_fused_forward_supports_more_than_65535_rows(self):
+    def test_fused_forward_supports_more_than_65535_rows(self):
         rows = 65536
         x = paddle.ones([rows, 8], dtype="bfloat16")
         probs = paddle.ones([rows], dtype="float32")
         expected = situ_glu_scale_forward(x, probs, situ_glu_fusion=False)
-        actual = situ_glu_scale_forward(x, probs)
+        actual = situ_glu_scale_forward(x, probs, situ_glu_fusion=True)
         self.assertTrue(
             paddle.equal_all(
                 actual.astype("float32"), expected.astype("float32")

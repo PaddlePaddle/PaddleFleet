@@ -575,7 +575,7 @@ class ExpertsGroupGemmContiguousNode:
         self.activation_situ_linear_beta = getattr(
             config, "activation_situ_linear_beta", None
         )
-        self.situ_glu_fusion = getattr(config, "situ_glu_fusion", True)
+        self.situ_glu_fusion = getattr(config, "situ_glu_fusion", False)
         self.use_accuracy_compatible = use_accuracy_compatible
 
     def cached_tensors(self):
@@ -884,12 +884,12 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
-            if self.activation_type in ("geglu", "situ"):
+            if self.activation_type == "geglu":
                 raise ValueError(
                     "FP8 MoE path only supports activation_type='swiglu' "
-                    f"yet, but got {self.activation_type!r}. Please disable "
-                    "fp8 or implement the corresponding FP8 activation "
-                    "kernel."
+                    f"or 'situ' yet, but got {self.activation_type!r}. Please "
+                    "disable fp8 or implement the corresponding FP8 "
+                    "activation kernel."
                 )
             return self.fwd_down_fp8(
                 o1, unzipped_probs, expert_w2, num_expert, o3, clear_o1
@@ -931,7 +931,31 @@ class ExpertsGroupGemmContiguousNode:
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
-        if self.clamp_value is not None and self.clamp_value > 0:
+        if self.activation_type == "situ":
+            # SiTU-GLU 没有 activation+scale+quant 的融合算子，拆成两步：
+            # 先在 bf16 上算 SiTU-GLU×probs，再走通用 blockwise 量化。量化参数与
+            # 下面的 SwiGLU 融合算子对齐（pow2 scale + 可选 ue8m0），产出的
+            # o2_fp8 / o2_scale 与融合算子同形同 dtype，后续 layout 处理可直接复用。
+            # clamp_value 在这条路径上不生效，与 fwd_down_bf16 的 situ 分支一致。
+            o2 = situ_glu_scale_forward(
+                o1,
+                unzipped_probs,
+                self.activation_situ_beta,
+                self.activation_situ_linear_beta,
+                situ_glu_fusion=self.situ_glu_fusion,
+            )
+            o2_fp8, o2_scale = (
+                paddle.incubate.nn.functional.fp8_quant_blockwise(
+                    o2,
+                    output_scale_transpose=False,
+                    quant_method="1x128",
+                    input_transpose=False,
+                    using_pow2_scale=True,
+                    using_ue8m0_scale=self.use_ue8m0,
+                )
+            )
+            del o2
+        elif self.clamp_value is not None and self.clamp_value > 0:
             o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant_clamp(
                 o1,
                 unzipped_probs,
@@ -1212,6 +1236,21 @@ class ExpertsGroupGemmContiguousNode:
                     do2_s,
                     m_indices=self.m_indices,
                 )
+
+        if self.activation_type == "situ":
+            # SiTU-GLU 的反向在 bf16 上复用 situ_glu_scale_backward，返回
+            # (do1, 重算的 o2_s, probs_grad)，与下面 SwiGLU 各分支同型。o2_s 之后由
+            # bwd_down_weight 重新量化，与激活类型无关。
+            # 注意：这条路径不复用 o1 的 inplace buffer，do1 / o2_s 都是新分配的，
+            # 所以 backward_impl_fp8 里的 inplace 释放时序判断必须排除 situ。
+            return situ_glu_scale_backward(
+                o1,
+                unzipped_probs,
+                do2_s,
+                self.activation_situ_beta,
+                self.activation_situ_linear_beta,
+                situ_glu_fusion=self.situ_glu_fusion,
+            )
 
         with paddle.amp.auto_cast(False):
             if self.clamp_value is not None and self.clamp_value > 0:
@@ -1980,8 +2019,11 @@ class ExpertsGroupGemmContiguousNode:
         #   out-of-place（USE_INPLACE_SWIGLU_BWD=False 或 clamp_value 已设置）：
         #     do1 是独立 buffer，GPU 异步 kernel 仍在读 o1，
         #     必须等 bwd_gate_up_input_fp8 的 synchronize 后再 del。
+        #   SiTU：走 situ_glu_scale_backward，do1 恒为新分配的 buffer，同 out-of-place。
         used_inplace_swiglu = (
-            USE_INPLACE_SWIGLU_BWD and self.clamp_value is None
+            USE_INPLACE_SWIGLU_BWD
+            and self.clamp_value is None
+            and self.activation_type != "situ"
         )
         if used_inplace_swiglu:
             del o1
