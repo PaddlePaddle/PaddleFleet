@@ -456,25 +456,13 @@ class HyperConnectionModule(nn.Layer):
             h_post: [..., n] - expansion weights
             h_res: [..., n^2] - residual mixing logits
         """
-        alpha_pre = self.alpha_pre
-        alpha_post = self.alpha_post
-        alpha_res = self.alpha_res
-        bias = self.bias
-        # The gating params are stored in fp32 (see __init__); the mapping head
-        # follows the activation dtype so the low-precision path keeps its
-        # original compute dtype.
-        if alpha_pre.dtype != proj.dtype:
-            alpha_pre = alpha_pre.astype(proj.dtype)
-            alpha_post = alpha_post.astype(proj.dtype)
-            alpha_res = alpha_res.astype(proj.dtype)
-            bias = bias.astype(proj.dtype)
         h_pre, h_post, h_res = self._compute_h_op(
             proj,
             r,
-            alpha_pre,
-            alpha_post,
-            alpha_res,
-            bias,
+            self.alpha_pre,
+            self.alpha_post,
+            self.alpha_res,
+            self.bias,
             self.n,
             self.compute_h_eps,
         )

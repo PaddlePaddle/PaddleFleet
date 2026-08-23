@@ -290,35 +290,23 @@ if _CUTILE_AVAILABLE:
         into the exp2 form the softmax above uses.
         """
         pid = ct.bid(0)
-        # The mHC mapping runs in fp32 regardless of the activation dtype: the
-        # parameters are fp32-stored and a bf16 mapping is far less accurate than
-        # the native reference. Stores below cast back to the output dtype, so
-        # downstream dtypes are unchanged. Anchor: Megatron
-        # _cutile_proj_rms_compute_h_fwd acc_dtype = torch.float32 and the fp32
-        # pre_accum / post_accum / r_accum / res_accum in its reduce kernel.
         r_tile = ct.load(
             r, index=(pid, 0), shape=(TILE_M, 1), padding_mode=PAD_ZERO
-        ).astype(ct.float32)
-        ap = ct.reshape(ct.load(a_pre, index=(0,), shape=(1,)), (1, 1)).astype(
-            ct.float32
         )
-        aq = ct.reshape(ct.load(a_post, index=(0,), shape=(1,)), (1, 1)).astype(
-            ct.float32
-        )
-        ar = ct.reshape(ct.load(a_res, index=(0,), shape=(1,)), (1, 1)).astype(
-            ct.float32
-        )
+        ap = ct.reshape(ct.load(a_pre, index=(0,), shape=(1,)), (1, 1))
+        aq = ct.reshape(ct.load(a_post, index=(0,), shape=(1,)), (1, 1))
+        ar = ct.reshape(ct.load(a_res, index=(0,), shape=(1,)), (1, 1))
 
         u_pre = r_tile * ct.load(
             proj, index=(pid, 0), shape=(TILE_M, N), padding_mode=PAD_ZERO
-        ).astype(ct.float32) * ap + ct.reshape(
+        ) * ap + ct.reshape(
             ct.load(bias, index=(0,), shape=(N,), padding_mode=PAD_ZERO), (1, N)
-        ).astype(ct.float32)
+        )
         u_post = r_tile * ct.load(
             proj, index=(pid, 1), shape=(TILE_M, N), padding_mode=PAD_ZERO
-        ).astype(ct.float32) * aq + ct.reshape(
+        ) * aq + ct.reshape(
             ct.load(bias, index=(1,), shape=(N,), padding_mode=PAD_ZERO), (1, N)
-        ).astype(ct.float32)
+        )
 
         s_pre = 1.0 / (1.0 + ct.exp(-u_pre))
         s_post = 1.0 / (1.0 + ct.exp(-u_post))
@@ -333,12 +321,12 @@ if _CUTILE_AVAILABLE:
                 index=(pid, 2 + k),
                 shape=(TILE_M, N),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32) * ar + ct.reshape(
+            ) * ar + ct.reshape(
                 ct.load(
                     bias, index=(2 + k,), shape=(N,), padding_mode=PAD_ZERO
                 ),
                 (1, N),
-            ).astype(ct.float32)
+            )
             ct.store(h_res, index=(pid, k), tile=u_k.astype(h_res.dtype))
 
     @ct.kernel
@@ -380,28 +368,18 @@ if _CUTILE_AVAILABLE:
         associative, and the wrong grouping costs a ULP for no reason.
         """
         pid = ct.bid(0)
-        # Mirror the fwd kernel: the mapping backward runs in fp32 regardless of
-        # the activation dtype; every store below casts back. Anchor: Megatron's
-        # fused compute_h backward keeps gy_pre / gy_post / grad_h_res /
-        # grad_r_from_h in ct.float32 and casts its loads to fp32.
         r_tile = ct.load(
             r, index=(pid, 0), shape=(TILE_M, 1), padding_mode=PAD_ZERO
-        ).astype(ct.float32)
-        ap = ct.reshape(ct.load(a_pre, index=(0,), shape=(1,)), (1, 1)).astype(
-            ct.float32
         )
-        aq = ct.reshape(ct.load(a_post, index=(0,), shape=(1,)), (1, 1)).astype(
-            ct.float32
-        )
-        ar = ct.reshape(ct.load(a_res, index=(0,), shape=(1,)), (1, 1)).astype(
-            ct.float32
-        )
+        ap = ct.reshape(ct.load(a_pre, index=(0,), shape=(1,)), (1, 1))
+        aq = ct.reshape(ct.load(a_post, index=(0,), shape=(1,)), (1, 1))
+        ar = ct.reshape(ct.load(a_res, index=(0,), shape=(1,)), (1, 1))
 
         # du = dL/d(r * proj * alpha + bias), one segment at a time
         s_pre = (
             ct.load(
                 h_pre, index=(pid, 0), shape=(TILE_M, N), padding_mode=PAD_ZERO
-            ).astype(ct.float32)
+            )
             - eps
         )
         du_pre = (
@@ -410,14 +388,14 @@ if _CUTILE_AVAILABLE:
                 index=(pid, 0),
                 shape=(TILE_M, N),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             * s_pre
             * (1.0 - s_pre)
         )
         s_post = (
             ct.load(
                 h_post, index=(pid, 0), shape=(TILE_M, N), padding_mode=PAD_ZERO
-            ).astype(ct.float32)
+            )
             / 2.0
         )
         du_post = (
@@ -426,7 +404,7 @@ if _CUTILE_AVAILABLE:
                 index=(pid, 0),
                 shape=(TILE_M, N),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             * 2.0
             * s_post
             * (1.0 - s_post)
@@ -434,10 +412,10 @@ if _CUTILE_AVAILABLE:
 
         p_pre = ct.load(
             proj, index=(pid, 0), shape=(TILE_M, N), padding_mode=PAD_ZERO
-        ).astype(ct.float32)
+        )
         p_post = ct.load(
             proj, index=(pid, 1), shape=(TILE_M, N), padding_mode=PAD_ZERO
-        ).astype(ct.float32)
+        )
 
         # d(proj) = du * r * alpha ; d(bias) = du summed over tokens
         ct.store(
@@ -482,13 +460,13 @@ if _CUTILE_AVAILABLE:
                 index=(pid, k),
                 shape=(TILE_M, N),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             p_k = ct.load(
                 proj,
                 index=(pid, 2 + k),
                 shape=(TILE_M, N),
                 padding_mode=PAD_ZERO,
-            ).astype(ct.float32)
+            )
             ct.store(
                 g_proj,
                 index=(pid, 2 + k),
@@ -594,13 +572,7 @@ if _CUTILE_AVAILABLE:
                 x_tile = x_tile.astype(ct.float32)
             gx_tile = go_expanded * h_expanded
             ct.store(gx, index=(pid, 0, ct_idx), tile=gx_tile.astype(gx.dtype))
-            # Reduce in fp32 regardless of the input dtype: the native reference
-            # evaluates this product in fp32, and a bf16 product makes grad_h
-            # ~3x noisier. Anchor: Megatron _ct_h_agg_bwd_kernel.
-            gh_acc += ct.sum(
-                go_expanded.astype(ct.float32) * x_tile.astype(ct.float32),
-                axis=2,
-            )
+            gh_acc += ct.sum(go_expanded * x_tile, axis=2)
         ct.store(gh, index=(pid, 0), tile=gh_acc.astype(gh.dtype))
 
     def _cutile_compute_h_fwd(
@@ -958,11 +930,8 @@ if _CUTILE_AVAILABLE:
             if UPCAST_INPUTS:
                 orig_tile = orig_tile.astype(ct.float32)
             orig_2d = ct.reshape(orig_tile, (N, TILE_C))
-            # Accumulate the elementwise grads in fp32 regardless of the input
-            # dtype (store below casts back). Anchor: Megatron
-            # _ct_hpb_bwd_g_x_orig_kernel uses dtype=ct.float32 for both.
-            g_x_2d = ct.full((1, TILE_C), 0, dtype=ct.float32)
-            g_orig_2d = ct.full((N, TILE_C), 0, dtype=ct.float32)
+            g_x_2d = ct.full((1, TILE_C), 0, dtype=hp.dtype)
+            g_orig_2d = ct.full((N, TILE_C), 0, dtype=hp.dtype)
             for j in range(N):
                 g_x_2d += ct.extract(
                     hp_2d, (0, j), shape=(1, 1)
@@ -1058,11 +1027,8 @@ if _CUTILE_AVAILABLE:
                 padding_mode=PAD_ZERO,
             )
             orig_2d = ct.reshape(orig_tile, (N, TILE_C))
-            # Accumulate the elementwise grads in fp32 regardless of the input
-            # dtype (store below casts back). Anchor: Megatron
-            # _ct_hpb_bwd_g_x_orig_kernel uses dtype=ct.float32 for both.
-            g_x_2d = ct.full((1, TILE_C), 0, dtype=ct.float32)
-            g_orig_2d = ct.full((N, TILE_C), 0, dtype=ct.float32)
+            g_x_2d = ct.full((1, TILE_C), 0, dtype=hp.dtype)
+            g_orig_2d = ct.full((N, TILE_C), 0, dtype=hp.dtype)
             for j in range(N):
                 g_x_2d += ct.extract(
                     hp_2d, (0, j), shape=(1, 1)
@@ -1311,12 +1277,7 @@ if _CUTILE_AVAILABLE:
                 b_tile.transpose().astype(ct.tfloat32),
                 acc=acc,
             )
-            # Square in fp32 regardless of the input dtype: a bf16
-            # square/reduction loses ~2e-3 relative on the RMS scale, which the
-            # native (fp32) reference does not. Anchor: Megatron
-            # _ct_proj_rms_fwd_kernel a_tile_f32 = a_tile.astype(ct.float32).
-            a_tile_f32 = a_tile.astype(ct.float32)
-            sum_sq += ct.sum(a_tile_f32 * a_tile_f32, axis=1, keepdims=True)
+            sum_sq += ct.sum(a_tile * a_tile, axis=1, keepdims=True)
         norm_tile = ct.sqrt(sum_sq)
         v = norm_tile / ct.sqrt(K) + eps
         r_tile = 1.0 / v
@@ -1378,13 +1339,8 @@ if _CUTILE_AVAILABLE:
             )
             if UPCAST_INPUTS:
                 a_tile = a_tile.astype(ct.float32)
-            # Evaluate the RMS-norm derivative in fp32 regardless of the input
-            # dtype: a narrow a_tile makes grad_x (the dnorm term) noisier than
-            # the native fp32 reference. Anchor: Megatron
-            # _ct_fused_compute_h_proj_rms_bwd grad_x path uses
-            # ct.astype(x_tile, ct.float32) (and an fp32 r_tile) in the same term.
             accumulator_da = accumulator_da + _ct_rms_dnorm(
-                a_tile.astype(ct.float32), norm_tile, dr_tile, K, eps
+                a_tile, norm_tile, dr_tile, K, eps
             )
             b_tile = ct.load(
                 B,
