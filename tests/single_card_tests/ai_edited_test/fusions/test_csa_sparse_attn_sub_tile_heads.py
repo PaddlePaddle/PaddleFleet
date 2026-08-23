@@ -378,10 +378,17 @@ class TestBackwardHeadWidth(unittest.TestCase):
         _skip_without_cudnn_sparse_bwd()
 
     def _bwd(self, q, kv, out, dout, lse, sink, gidx, scale, num_heads):
-        from paddlefleet.fusions.csa_sparse_attn import _csa_compute_topk_length
+        from paddlefleet.fusions.csa_sparse_attn import _csa_compact_topk_idxs
 
         b, sq = q.shape[0], q.shape[1]
         s_kv = kv.shape[1]
+        # The backward's compact KV-load path is unguarded against interior -1,
+        # so ``topk_length`` must come from compacted indices (production does
+        # the same in ``csa_attention.py``). Passing the trailing bound of
+        # ``_csa_compute_topk_length`` together with holey indices corrupts
+        # dq/dkv by ~50%, or raises CUDA 700 / yields nan. Compacting is
+        # order-preserving, so the bit-exact assertions below still hold.
+        gidx, topk_length = _csa_compact_topk_idxs(gidx)
         return csa_sparse_attn_bwd_cudnn(
             q.reshape([b * sq, num_heads, _D]),
             kv.reshape([b * s_kv, _D]),
@@ -391,7 +398,7 @@ class TestBackwardHeadWidth(unittest.TestCase):
             sink,
             gidx,
             softmax_scale=scale,
-            topk_length=_csa_compute_topk_length(gidx),
+            topk_length=topk_length,
         )
 
     def test_real_head_count_matches_the_padded_backward(self):

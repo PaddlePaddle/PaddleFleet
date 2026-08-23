@@ -125,24 +125,47 @@ def _drop_padded_rows(
 def _dsa_bwd_runs_sub_tile_heads(num_heads: int) -> bool:
     """Whether the cuDNN DSA backward accepts this head count below its tile.
 
-    ``flash_attn_bwd_sm100`` derives ``num_head_blocks = ceil(num_head / 64)``
-    and predicates the partial tile, so SM100 returns exactly the same ``dq`` /
-    ``d_sink`` for ``h`` real heads as for the zero-padded problem (verified
-    bit-identical for h=24/32/40/96; ``dkv`` matches to the usual atomic noise).
-    That lets the backward -- the expensive half -- skip the padding entirely,
-    which also keeps the saved ``q``/``out`` at the real head count.
+    Running the backward -- the expensive half -- on the real head count skips
+    the padding entirely and keeps the saved ``q``/``out`` at the real width.
+    That is only safe when ``num_heads`` is a multiple of the kernel's 64-head
+    tile, so in practice it never fires below a tile and the caller pads.
 
-    Two exclusions fall back to the padded (always even, tile-wide) path:
+    ``dsa_bwd_sm100.py`` requires ``num_head % 64 == 0`` and does not check it:
 
-    * **odd head counts**: the kernel reads the ``[N, H]`` fp32 LSE / sum(OdO)
-      rows with a 2-float vector access, so an odd ``H`` leaves every other row
-      only 4-byte aligned and the kernel dies with CUDA 716 (misaligned
-      address). Measured: 31/33/35/63/65 crash, 34/62/66/96/126 are fine.
-    * **SM90**: its kernel packs heads differently
-      (``qhead_per_kvhead`` tiling) and is not validated here.
+    * ``_get_workspace_size_LSE_OdO`` (``:175-183``) sizes ``workspace_LSE_OdO``
+      as ``(b, h, round_up(q, 8), 8)`` and splits it into back-to-back
+      ``sum_OdO`` / ``scaled_lse`` views of ``H * Q * 4`` bytes each -- **zero
+      slack**, with ``scaled_lse`` ending at the allocation end.
+    * Both views declare ``cute.assume(H, divby=64)`` (``:229``/``:233``).
+      Violating a ``cute.assume`` is UB, not an error: a dynamic ``Integer``
+      goes to ``ConstrainedIntType`` unchecked, so the kernel compiles happily.
+    * ``:1176-1207`` tiles the **head** mode by 64 (``cute.flat_divide``, see
+      the ``# (64, 1, M, B)`` comment) and issues an **unpredicated**
+      32-thread x 2-value ``cp.async``, i.e. 64 fp32 / 256 B. With ``H = 24``
+      only 96 B of each tile is in bounds, so the last query token reads 160 B
+      and the second-to-last 64 B past the end of the allocation.
+
+    It is an out-of-bounds **read**, so results stay correct (shape-preserving
+    canaries on both workspaces come back untouched and ``dq`` is
+    bit-identical); the failure mode is ``CUDA error(700)`` whenever those
+    160 B happen to land on an unmapped page. That depends only on the
+    allocator layout -- deterministic per layout, a lottery across layouts --
+    which is why short runs can look clean while the access is always OOB.
+    Measured on B30Z / SM100 at ``total_S_q=32768``: ``H`` 16 / 24 / 32 / 48
+    fault, ``H`` 64 / 128 pass even with zero mapped headroom.
+    Odd ``H`` is the same access failing earlier, at 8-byte alignment
+    (``CUDA 716``), and is covered by the same condition.
+
+    Revert to ``num_heads % 2 == 0`` once the kernel either predicates those
+    two tile loads or over-allocates ``workspace_LSE_OdO`` (bumping its ``q``
+    extent by 64 -- 12 KiB at ``H=24`` -- is enough; both fixes were verified
+    to leave ``dq`` bit-identical).
+
+    SM90 is excluded separately: its kernel packs heads differently
+    (``qhead_per_kvhead`` tiling) and is not validated here.
     """
     major, _ = paddle.device.cuda.get_device_capability()
-    return major >= 10 and num_heads % 2 == 0
+    return major >= 10 and num_heads % 64 == 0
 
 
 def _pad_query_heads(query: Tensor, attn_sink: Tensor, head_tile: int):
@@ -307,9 +330,18 @@ def _csa_compute_topk_length(topk_idxs_flat: Tensor) -> Tensor:
 
     Returns ``[N]`` int32 = (index of last valid entry + 1) per row, i.e. a SAFE
     upper bound: all valid entries lie in ``[0, topk_length)``. Uses the trailing
-    bound (NOT ``sum(valid)``) so it stays correct when ``-1`` entries are
+    bound (NOT ``sum(valid)``) so the bound stays valid when ``-1`` entries are
     interleaved (multi-doc leading/interior holes). Clamped to >=1 so the kernel
     writes every dq row (dq is allocated uninitialized in the backend).
+
+    WARNING: this bound is only safe for the FORWARD kernel, which predicates
+    ``-1`` slots. Feeding it to ``csa_sparse_attn_bwd_cudnn`` together with a
+    holey ``topk_idxs`` selects the backward's compact KV-load path, which is
+    unguarded against interior ``-1`` (see ``_csa_compact_topk_idxs``) and
+    gathers ``mKV[-1]``. Observed consequences: ``CUDA error(700)``, nan/inf, or
+    a silent ~50% error in dq/dkv while the forward output stays correct. For the
+    backward, either compact the indices with ``_csa_compact_topk_idxs`` and pass
+    the exact count it returns, or pass ``topk_length=None``.
 
     Args:
         topk_idxs_flat: ``[N, W]`` int32 global indices, -1 == invalid.
@@ -455,9 +487,10 @@ class CSASparseAttention(paddle.autograd.PyLayer):
 
         # Heads the kernels are driven with. The FlashMLA forward only has 64-
         # and 128-head tiles, so a smaller layer is zero-padded up to one; the
-        # cuDNN backward takes the real count on SM100 and only needs the same
-        # padding on SM90. ``ctx.bwd_heads`` records which width the tensors
-        # saved below are in.
+        # backward needs the same padding unless the head count already is a
+        # multiple of the kernel's 64-head tile (see
+        # ``_dsa_bwd_runs_sub_tile_heads``). ``ctx.bwd_heads`` records which
+        # width the tensors saved below are in.
         head_tile = _dsa_head_tile(np_heads) if backend == "cudnn" else np_heads
         ctx.bwd_heads = (
             np_heads
@@ -505,8 +538,8 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 save_q, save_sink = query, attn_sink
                 save_out, save_lse = output_real, lse_real
             else:
-                # SM90 padded backward: the saved ``out`` must stay one head
-                # tile wide, so only the padded latent columns come off it, and
+                # Padded backward: the saved ``out`` must stay one head tile
+                # wide, so only the padded latent columns come off it, and
                 # the head rows are dropped from that narrower copy.
                 output = _drop_padded_rows(output, head_tile, head_tile, hn)
                 output_real = _drop_padded_rows(
@@ -546,8 +579,8 @@ class CSASparseAttention(paddle.autograd.PyLayer):
     def backward(ctx, grad_output):
         query, kv_full, attn_sink, topk_idxs, output, lse = ctx.saved_tensor()
         b, sq, np_heads, hn = ctx.query_shape
-        # Kernel-side head count: equal to ``np_heads`` except on the SM90
-        # padded path, where the saved tensors are one head tile wide.
+        # Kernel-side head count: equal to ``np_heads`` except on the padded
+        # path, where the saved tensors are one head tile wide.
         kh = ctx.bwd_heads
 
         if ctx.backend == "cudnn":
@@ -559,7 +592,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             _, s_kv, dkv_dim = kv_full.shape
 
             if kh != np_heads:
-                # SM90 padded path: widen the incoming gradient to the saved
+                # Padded path: widen the incoming gradient to the saved
                 # tensors' head tile. The padded rows get a zero gradient, so
                 # they add nothing to ``dkv`` / ``d_sink``.
                 grad_output = paddle.concat(
