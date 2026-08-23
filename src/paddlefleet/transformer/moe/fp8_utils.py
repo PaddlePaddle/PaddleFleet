@@ -506,18 +506,21 @@ def fuse_weighted_swiglu_fp8_quant_clamp_python(
 
 
 def _weighted_situ_fp32(o1, probs, beta, linear_beta):
-    """fp32 全程计算 situ_glu(o1) * probs。
+    """Compute ``situ_glu(o1) * probs`` entirely in fp32.
 
-    复用 activations.situ_glu（与 triton fwd/bwd kernel 同一公式），入参先转
-    fp32，故 situ_glu 内部 ``.astype(input_dtype)`` 不会下采回 bf16，全程保持
-    fp32 直到量化——对齐 SwiGLU 的 _weighted_swiglu_fp32 精度纪律。
+    Reuses ``activations.situ_glu`` (same formula as the triton fwd/bwd
+    kernels). The input is cast to fp32 first, so ``situ_glu``'s internal
+    ``.astype(input_dtype)`` does not round back down to bf16 and everything
+    stays fp32 until quantization -- matching the precision discipline of
+    SwiGLU's ``_weighted_swiglu_fp32``.
 
-    返回: o2 [M, I] fp32
+    Returns: o2 [M, I] fp32
     """
     o2 = situ_glu(o1.astype("float32"), beta=beta, linear_beta=linear_beta)
     p = probs.astype("float32")
     if p.ndim == 1:
-        # 端到端 forward 传入的 unzipped_probs 是 1-D [M]，显式广播为 [M, 1]。
+        # The end-to-end forward passes unzipped_probs as 1-D [M]; broadcast
+        # it explicitly to [M, 1].
         p = p.reshape([-1, 1])
     return o2 * p
 
@@ -531,15 +534,31 @@ def fuse_weighted_situ_fp8_quant_python(
     quant_method="1x128",
     using_ue8m0_scale=True,
 ):
-    """SiTU-GLU 版 fuse_weighted_swiglu_fp8_quant_python：激活(fp32) → blockwise fp8。
+    """SiTU-GLU counterpart of fuse_weighted_swiglu_fp8_quant_python.
 
-    o2 = situ_glu(o1) * probs（fp32 中间计算），再做 blockwise fp8 量化。
-    返回: (o2_fp8 [M, I] float8_e4m3fn, sf [M, I/gran_k] fp32)
+    o2 = situ_glu(o1) * probs (fp32 intermediates), then blockwise fp8 quant.
+    Returns: (o2_fp8 [M, I] float8_e4m3fn, sf [M, I/gran_k] fp32)
 
-    clamp_value: 仅为与 SwiGLU 接口对齐而保留的占位形参。SiTU-GLU 的 gate/up 分支
-        经 tanh 已天然有界（|φ|<beta、|ψ|≤linear_beta），无需 clamp；且 SiTU 的
-        反向 situ_glu_scale_backward 没有 clamp-aware 版本，前向单独 clamp 会导致
-        饱和位置梯度不一致。故首版禁止启用，真正支持 clamp 需前反向成对实现。
+    clamp_value: placeholder parameter kept only for interface parity with
+        SwiGLU. SiTU-GLU's gate/up branches are already bounded by tanh
+        (|phi| < beta, |psi| <= linear_beta), so clamping is unnecessary; and
+        SiTU's backward ``situ_glu_scale_backward`` has no clamp-aware variant,
+        so clamping in the forward alone would make gradients inconsistent at
+        saturated positions. Rejected in this first version; real clamp support
+        requires implementing it in forward and backward together.
+
+    using_ue8m0_scale: must stay True on the DeepGEMM path. The SM100 grouped
+        GEMM reinterprets the fp32 scale tensor as packed UE8M0, so scales that
+        are not rounded up to a power of two come back as NaN. The CUDA SwiGLU
+        op has the same constraint and hardcodes ``using_pow2_scaling=True``.
+
+    TODO: emit packed UE8M0 (int32) scales instead of always fp32.
+        ``quant_blockwize`` only does the pow2 rounding, never the packed
+        layout, so ``config.use_ue8m0`` is silently ignored here while the
+        SwiGLU CUDA op honours it. Correct but slower: a packed scale tensor
+        is 4x smaller and every grouped GEMM reads it. Fix by adding a
+        packed-int32 mode to ``quant_blockwize``, or by writing a fused SiTU
+        CUDA op and dropping this python path.
     """
     assert clamp_value is None or clamp_value <= 0, (
         "SiTU-GLU fp8 path does not support clamp yet: SiTU is bounded by "
@@ -1573,8 +1592,13 @@ class ExpertsGroupGemmContiguousNode:
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
         if self.activation_type == "situ":
-            # SiTU-GLU fp8：python 散算子（fp32 激活 → blockwise fp8）。
-            # clamp 与 SwiGLU 接口对齐但首版不启用（见 fuse_weighted_situ_fp8_quant_python）。
+            # SiTU-GLU fp8: python scattered ops (fp32 activation -> blockwise
+            # fp8). clamp is rejected here, see the callee's docstring.
+            # using_ue8m0_scale is pinned True like the SwiGLU op's
+            # using_pow2_scaling: the SM100 grouped GEMM reads these scales as
+            # UE8M0, so passing self.use_ue8m0 (default False) makes every
+            # output NaN. Regression: test_situ_fp8.py ::
+            # TestSituFp8EndToEnd :: test_forward_is_finite_for_both_ue8m0*
             o2_fp8, o2_scale = fuse_weighted_situ_fp8_quant_python(
                 o1,
                 unzipped_probs,
@@ -1582,7 +1606,7 @@ class ExpertsGroupGemmContiguousNode:
                 self.activation_situ_linear_beta,
                 clamp_value=self.clamp_value,
                 quant_method="1x128",
-                using_ue8m0_scale=self.use_ue8m0,
+                using_ue8m0_scale=True,
             )
         elif self.clamp_value is not None and self.clamp_value > 0:
             o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant_clamp(
@@ -1943,9 +1967,11 @@ class ExpertsGroupGemmContiguousNode:
                 )
 
         if self.activation_type == "situ":
-            # SiTU-GLU 反向复用现成算子（bf16）：返回 (do1, 重算的 o2_s, probs_grad)，
-            # 与 SwiGLU 分支同型。o2_s 之后由 bwd_down_weight 重量化，激活无关。
-            # 注意：不走 SwiGLU 的 inplace buffer 复用，o2_s/do1 为独立 buffer。
+            # SiTU-GLU backward reuses the existing bf16 op: returns
+            # (do1, recomputed o2_s, probs_grad), same shape contract as the
+            # SwiGLU branch. o2_s is re-quantized later by bwd_down_weight, so
+            # it is activation-agnostic. Note: this does not take SwiGLU's
+            # in-place buffer reuse -- o2_s / do1 are independent buffers.
             do1, o2_s, probs_grad = situ_glu_scale_backward(
                 o1,
                 unzipped_probs,
