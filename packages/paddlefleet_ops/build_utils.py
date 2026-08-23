@@ -204,7 +204,6 @@ def check_submodule_updated():
             "flash-linear-attention",
             "FlashMLA",
             "fast-hadamard-transform",
-            "MoonEP",
         ]
         if not all(
             (PKG_ROOT / "third_party" / third_party / ".git").exists()
@@ -449,14 +448,6 @@ def get_libs():
                 ),
             ],
             include_dirs=["csrc"],
-        ),
-        EcosystemLibrary(
-            name="MoonEP",
-            source_rel_path="third_party/MoonEP",
-            artifacts=[
-                Artifact("moonep", "moonep"),
-            ],
-            extra_env={"PADDLE_CUDA_ARCH_LIST": _deep_ep_arch},
         ),
     ]
     if (cuda_major, cuda_minor) >= (12, 9):

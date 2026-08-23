@@ -56,9 +56,6 @@ tests:
   - test_case: [tests/multi_card_tests/moe/test_allgather_dispatcher_ep.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/moe/test_moonep.py]
-    products:
-      - num_gpus: 2
   # moe: QB callback histogram all-reduce. The topology (mp=2 sharding=4 cp=2
   # ep=8) requires exactly 8 GPUs, so pin it rather than rely on the default.
   - test_case: [tests/multi_card_tests/moe/test_qb_callback_cp_sharding.py]
