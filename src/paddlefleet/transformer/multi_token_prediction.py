@@ -359,15 +359,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             hc_dim = config.hidden_size * n
             # learned_output_contract() computes in fp32; store the parameters
             # in fp32 too (Megatron marks hc_head_* keep_in_fp32).
-            from paddlefleet.transformer.hyper_connection import (
-                _use_accuracy_compatible_kernel,
-            )
 
-            hc_param_dtype = (
-                self.config.params_dtype
-                if _use_accuracy_compatible_kernel()
-                else "float32"
-            )
+            hc_param_dtype = "float32"
             self.hc_head_fn = self.create_parameter(
                 shape=[hc_dim, n],
                 dtype=hc_param_dtype,

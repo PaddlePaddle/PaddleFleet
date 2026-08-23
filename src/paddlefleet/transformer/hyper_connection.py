@@ -297,11 +297,7 @@ class HyperConnectionModule(nn.Layer):
         # alpha_* / bias, and the MoE gate fp32 storage in moe_router.py):
         # they are tiny, and keeping them out of BF16 removes the parameter
         # rounding error from the mHC gating computation.
-        param_dtype = (
-            self.config.params_dtype
-            if _use_accuracy_compatible_kernel()
-            else "float32"
-        )
+        param_dtype = "float32"
         default_dtype = paddle.get_default_dtype()
         try:
             paddle.set_default_dtype(param_dtype)
@@ -921,11 +917,7 @@ class HyperConnectionContractLayer(FleetLayer):
         hc_dim = config.hidden_size * n
         # learned_output_contract() computes in fp32; store the parameters in
         # fp32 as well (Megatron transformer_block.py marks hc_head_* keep_in_fp32).
-        hc_param_dtype = (
-            self.config.params_dtype
-            if _use_accuracy_compatible_kernel()
-            else "float32"
-        )
+        hc_param_dtype = "float32"
         self.hc_head_fn = self.create_parameter(
             shape=[hc_dim, n],
             dtype=hc_param_dtype,
