@@ -1882,6 +1882,11 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "use_fused_mhc requires enable_hyper_connections=True."
                 )
+        if self.enable_hyper_connections:
+            if not self.high_precision_mhc:
+                raise ValueError(
+                    "enable_hyper_connections not support high_precision_mhc=False yet."
+                )
 
         # ``hybrid_mla_attention`` is validated unconditionally, i.e. outside the
         # ``dsv4_hybrid`` / ``-2 in csa_compress_ratios`` guards below. A mode that
