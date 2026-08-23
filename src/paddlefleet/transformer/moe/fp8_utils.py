@@ -110,6 +110,7 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
 )
 
 from paddlefleet.transformer.activations import (
+    situ_glu,
     situ_glu_scale_backward,
     situ_glu_scale_forward,
 )
@@ -496,6 +497,56 @@ def fuse_weighted_swiglu_fp8_quant_clamp_python(
     quant_method="1x128" 且 using_ue8m0_scale=True 时与 CUDA 融合算子逐位一致。
     """
     o2 = _weighted_swiglu_fp32(o1, probs, clamp_value)
+    return quant_blockwize(
+        o2,
+        quant_method=quant_method,
+        quant_dtype="fp8",
+        using_ue8m0_scale=using_ue8m0_scale,
+    )
+
+
+def _weighted_situ_fp32(o1, probs, beta, linear_beta):
+    """fp32 全程计算 situ_glu(o1) * probs。
+
+    复用 activations.situ_glu（与 triton fwd/bwd kernel 同一公式），入参先转
+    fp32，故 situ_glu 内部 ``.astype(input_dtype)`` 不会下采回 bf16，全程保持
+    fp32 直到量化——对齐 SwiGLU 的 _weighted_swiglu_fp32 精度纪律。
+
+    返回: o2 [M, I] fp32
+    """
+    o2 = situ_glu(o1.astype("float32"), beta=beta, linear_beta=linear_beta)
+    p = probs.astype("float32")
+    if p.ndim == 1:
+        # 端到端 forward 传入的 unzipped_probs 是 1-D [M]，显式广播为 [M, 1]。
+        p = p.reshape([-1, 1])
+    return o2 * p
+
+
+def fuse_weighted_situ_fp8_quant_python(
+    o1,
+    probs,
+    beta,
+    linear_beta,
+    clamp_value=None,
+    quant_method="1x128",
+    using_ue8m0_scale=True,
+):
+    """SiTU-GLU 版 fuse_weighted_swiglu_fp8_quant_python：激活(fp32) → blockwise fp8。
+
+    o2 = situ_glu(o1) * probs（fp32 中间计算），再做 blockwise fp8 量化。
+    返回: (o2_fp8 [M, I] float8_e4m3fn, sf [M, I/gran_k] fp32)
+
+    clamp_value: 仅为与 SwiGLU 接口对齐而保留的占位形参。SiTU-GLU 的 gate/up 分支
+        经 tanh 已天然有界（|φ|<beta、|ψ|≤linear_beta），无需 clamp；且 SiTU 的
+        反向 situ_glu_scale_backward 没有 clamp-aware 版本，前向单独 clamp 会导致
+        饱和位置梯度不一致。故首版禁止启用，真正支持 clamp 需前反向成对实现。
+    """
+    assert clamp_value is None or clamp_value <= 0, (
+        "SiTU-GLU fp8 path does not support clamp yet: SiTU is bounded by "
+        "tanh and situ_glu_scale_backward has no clamp-aware variant. Enabling "
+        "clamp only in forward would corrupt gradients at saturated positions."
+    )
+    o2 = _weighted_situ_fp32(o1, probs, beta, linear_beta)
     return quant_blockwize(
         o2,
         quant_method=quant_method,
@@ -1470,11 +1521,11 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
-            if self.activation_type in ("geglu", "situ"):
+            if self.activation_type == "geglu":
                 raise ValueError(
-                    "FP8 MoE path only supports activation_type='swiglu' "
-                    f"yet, but got {self.activation_type!r}. Please disable "
-                    "fp8 or implement the corresponding FP8 activation "
+                    "FP8 MoE path only supports activation_type='swiglu' or "
+                    f"'situ' yet, but got {self.activation_type!r}. Please "
+                    "disable fp8 or implement the corresponding FP8 activation "
                     "kernel."
                 )
             return self.fwd_down_fp8(
@@ -1521,7 +1572,19 @@ class ExpertsGroupGemmContiguousNode:
         w2_quant = w2_quant.reshape([num_expert, -1, w2_quant.shape[-1]])
         w2_scale = w2_scale.reshape([num_expert, -1, w2_scale.shape[-1]])
 
-        if self.clamp_value is not None and self.clamp_value > 0:
+        if self.activation_type == "situ":
+            # SiTU-GLU fp8：python 散算子（fp32 激活 → blockwise fp8）。
+            # clamp 与 SwiGLU 接口对齐但首版不启用（见 fuse_weighted_situ_fp8_quant_python）。
+            o2_fp8, o2_scale = fuse_weighted_situ_fp8_quant_python(
+                o1,
+                unzipped_probs,
+                self.activation_situ_beta,
+                self.activation_situ_linear_beta,
+                clamp_value=self.clamp_value,
+                quant_method="1x128",
+                using_ue8m0_scale=self.use_ue8m0,
+            )
+        elif self.clamp_value is not None and self.clamp_value > 0:
             o2_fp8, o2_scale = fuse_weighted_swiglu_fp8_quant_clamp(
                 o1,
                 unzipped_probs,
@@ -1878,6 +1941,20 @@ class ExpertsGroupGemmContiguousNode:
                     do2_s,
                     self.m_indices,
                 )
+
+        if self.activation_type == "situ":
+            # SiTU-GLU 反向复用现成算子（bf16）：返回 (do1, 重算的 o2_s, probs_grad)，
+            # 与 SwiGLU 分支同型。o2_s 之后由 bwd_down_weight 重量化，激活无关。
+            # 注意：不走 SwiGLU 的 inplace buffer 复用，o2_s/do1 为独立 buffer。
+            do1, o2_s, probs_grad = situ_glu_scale_backward(
+                o1,
+                unzipped_probs,
+                do2_s,
+                self.activation_situ_beta,
+                self.activation_situ_linear_beta,
+                situ_glu_fusion=self.situ_glu_fusion,
+            )
+            return do1, o2_s, probs_grad
 
         with paddle.amp.auto_cast(False):
             if self.clamp_value is not None and self.clamp_value > 0:
@@ -2649,7 +2726,9 @@ class ExpertsGroupGemmContiguousNode:
         #     do1 是独立 buffer，GPU 异步 kernel 仍在读 o1，
         #     必须等 bwd_gate_up_input_fp8 的 synchronize 后再 del。
         used_inplace_swiglu = (
-            USE_INPLACE_SWIGLU_BWD and self.clamp_value is None
+            USE_INPLACE_SWIGLU_BWD
+            and self.clamp_value is None
+            and self.activation_type != "situ"
         )
         if used_inplace_swiglu:
             del o1
