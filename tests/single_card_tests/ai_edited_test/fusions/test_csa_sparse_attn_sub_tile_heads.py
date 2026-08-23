@@ -365,12 +365,20 @@ class TestSubTileHeadsForward(unittest.TestCase):
     paddle.is_compiled_with_cuda(), "sub-tile head tests require CUDA"
 )
 class TestBackwardHeadWidth(unittest.TestCase):
-    """The backward is driven at the real head count, not the forward's tile.
+    """Direct ``csa_sparse_attn_bwd_cudnn`` calls, at both head widths.
 
-    That is the whole reason a 32-head layer costs about what a 64-head one does
-    instead of ~1.6x: only the forward pays for the padded tile. If the cuDNN
-    kernel ever stops predicating its partial head tile this test fails, and
-    ``_dsa_bwd_runs_sub_tile_heads`` has to be switched off for the arch.
+    ``_bwd`` below is the contract this class pins: the kernel's compact
+    KV-load path (selected by passing ``topk_length``) is unguarded against
+    interior ``-1``, so the length must come from *compacted* indices.
+    ``test_compacted_topk_length_matches_the_reference`` checks that at the
+    kernel's own head tile, so it runs on every arch where the backward runs at
+    all.
+
+    ``test_real_head_count_matches_the_padded_backward`` additionally pins the
+    sub-tile backward, i.e. that a 32-head layer costs about what a 64-head one
+    does instead of ~1.6x because only the forward pays for the padded tile.
+    That one is gated on ``_dsa_bwd_runs_sub_tile_heads``, which is currently
+    off below a full head tile (see its docstring).
     """
 
     @classmethod
@@ -401,6 +409,65 @@ class TestBackwardHeadWidth(unittest.TestCase):
             topk_length=topk_length,
         )
 
+    def test_compacted_topk_length_matches_the_reference(self):
+        """``topk_length`` must be paired with compacted indices.
+
+        Regression cover for ``_bwd``'s compaction, independent of
+        ``_dsa_bwd_runs_sub_tile_heads``: it runs at the kernel's own head tile,
+        so no head padding is involved and it executes wherever the cuDNN
+        backward executes. Feeding the same holey indices with the trailing
+        bound of ``_csa_compute_topk_length`` instead measures dq at 4.6e-01 and
+        dkv at 5.0e-01 (or non-finite / ``CUDA error(700)``, since the gather
+        reads uninitialised memory), i.e. about 75x the ceiling below, so
+        dropping the compaction fails here.
+        """
+        from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
+            flash_mla_sparse_attn,
+        )
+        from paddlefleet.fusions.csa_sparse_attn_utils import (
+            _local_to_global_flat,
+        )
+
+        for b, sq, skv, topk, inv, name in _SHAPES:
+            if inv == 0.0:
+                continue  # no holes: compaction is a no-op, nothing to pin
+            with self.subTest(shape=name):
+                args = _make_inputs(b, sq, skv, _HEAD_TILE, topk, inv)
+                q, kv, sink, idxs, scale = args
+                # ``_run`` backpropagates ``out.sum()``, so match its dout.
+                ref = _run(*args, backend="unfused")
+                dout = paddle.ones([b, sq, _HEAD_TILE, _D], dtype="bfloat16")
+                out, lse, _ = flash_mla_sparse_attn(
+                    q, kv, sink, idxs, sm_scale=scale
+                )
+                dq, dkv, d_sink = self._bwd(
+                    q,
+                    kv,
+                    out,
+                    dout,
+                    lse,
+                    sink,
+                    _local_to_global_flat(idxs, skv),
+                    scale,
+                    _HEAD_TILE,
+                )
+                got = {
+                    "dq": dq.reshape([b, sq, _HEAD_TILE, _D]),
+                    "dkv": dkv.reshape(kv.shape),
+                    "d_sink": d_sink,
+                }
+                for key, value in got.items():
+                    self.assertEqual(
+                        int(paddle.isfinite(value.cast("float32")).all()),
+                        1,
+                        f"{key} is not finite",
+                    )
+                    self.assertLess(
+                        _rel_l2(value, ref[key]),
+                        _REL_L2_CEILING[key],
+                        f"{key} diverges from the fp32 reference",
+                    )
+
     def test_real_head_count_matches_the_padded_backward(self):
         from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
             flash_mla_sparse_attn,
@@ -413,9 +480,10 @@ class TestBackwardHeadWidth(unittest.TestCase):
             _local_to_global_flat,
         )
 
-        for num_heads in (32, 24):
-            if not _dsa_bwd_runs_sub_tile_heads(num_heads):
-                self.skipTest("this arch keeps the fully padded backward")
+        widths = [h for h in (32, 24) if _dsa_bwd_runs_sub_tile_heads(h)]
+        if not widths:
+            self.skipTest("this arch keeps the fully padded backward")
+        for num_heads in widths:
             for b, sq, skv, topk, inv, name in _SHAPES:
                 with self.subTest(heads=num_heads, shape=name):
                     q, kv, sink, idxs, scale = _make_inputs(

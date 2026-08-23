@@ -654,3 +654,108 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
         # Compacted valid count of the densified {0, 2, 5} prefix is 3 -- the
         # exact per-row early-stop bound, with interior -1 holes removed.
         self.assertEqual(topk_length.tolist(), [3] * (self.B * self.SQ))
+
+
+@unittest.skipUnless(
+    paddle.is_compiled_with_cuda(),
+    "the topk_length compaction promise test requires CUDA",
+)
+class TestTopkLengthCompactionPromise(unittest.TestCase):
+    """A caller-supplied ``topk_length`` must not enable the compact backward.
+
+    The kernel's compact KV-load path (taken for any non-None ``topk_length``)
+    gathers ``mKV[-1]`` on an interior ``-1``, so it is only valid over
+    compacted indices. ``topk_length`` on its own does not imply that: it is
+    documented as a forward-only early-stop hint and the forward predicates
+    ``-1``. So the backward may keep that path only when the caller also passes
+    ``topk_idxs_compacted=True``, which ``csa_attention.py`` does right after
+    ``compact_attn_topk_idxs``.
+
+    Here the unsafe combination is passed on purpose -- holey indices plus the
+    trailing bound of ``_csa_compute_topk_length`` -- and the backward must fall
+    back to the guarded full-width path and stay correct. Inferring the promise
+    from ``topk_length`` instead measures dq and dkv at ~5e-01, or yields nan /
+    ``CUDA error(700)``, since the gather reads uninitialised device memory.
+    """
+
+    # Against the fp32 ``unfused`` reference, so ~2x the bf16 noise floor
+    # (measured out 2.3e-3, dq 2.6e-3, dkv 3.2e-3) rather than the much tighter
+    # tilelang-vs-cuDNN ceilings above.
+    CEILING = {"out": 6e-3, "dq": 6e-3, "dkv": 6e-3, "d_sink": 8e-3}
+
+    @classmethod
+    def setUpClass(cls):
+        """Probe the real cuDNN backward instead of trusting a feature flag.
+
+        ``_HAS_CUDNN_SPARSE_BWD`` above is gated on a top-level ``import
+        cudnn``, which the ops loader has already renamed to
+        ``paddlefleet_ops.cudnn``, so it reads False even where the kernel runs
+        fine. One tiny backward settles it; anything other than a missing module
+        is re-raised so a real regression still fails loudly.
+        """
+        if not _HAS_FLASH_MLA:
+            raise unittest.SkipTest("this test requires FlashMLA")
+        try:
+            run_forward_backward(
+                *make_inputs(1, 8, 64, 64, 512, 64), backend="cudnn"
+            )
+        except Exception as exc:
+            if isinstance(exc, ImportError) or "No module named" in str(exc):
+                raise unittest.SkipTest(
+                    "the cuDNN sparse backward does not run here"
+                ) from exc
+            raise
+
+    def test_holey_idxs_with_a_bound_stay_correct(self):
+        from paddlefleet.fusions.csa_sparse_attn import (
+            _csa_compute_topk_length,
+            csa_sparse_attn,
+        )
+
+        batch, sq, s_kv, num_heads, hn, topk = 1, 128, 256, 64, 512, 64
+        paddle.seed(0)
+        q, kv, attn_sink, topk_idxs, scale = make_inputs(
+            batch, sq, s_kv, num_heads, hn, topk
+        )
+        holes = paddle.rand([batch, sq, topk]) < 0.3
+        topk_idxs = paddle.where(
+            holes, paddle.full_like(topk_idxs, -1), topk_idxs
+        )
+        # Keep column 0 valid: an all-invalid row has no reference output.
+        topk_idxs[:, :, 0] = paddle.randint(0, s_kv, [batch, sq]).cast("int32")
+        topk_length = _csa_compute_topk_length(
+            topk_idxs.reshape([batch * sq, topk])
+        ).reshape([batch, sq])
+
+        ref = run_forward_backward(
+            q, kv, attn_sink, topk_idxs, scale, backend="unfused"
+        )
+        tensors = [t.detach().clone() for t in (q, kv, attn_sink)]
+        for t in tensors:
+            t.stop_gradient = False
+        q_c, kv_c, sink_c = tensors
+        out = csa_sparse_attn(
+            q_c,
+            kv_c,
+            sink_c,
+            topk_idxs,
+            scale,
+            backend="cudnn",
+            topk_length=topk_length,
+        )
+        out.sum().backward()
+
+        got = (out, q_c.grad, kv_c.grad, sink_c.grad)
+        for name, actual, expected in zip(
+            ("out", "dq", "dkv", "d_sink"), got, ref
+        ):
+            self.assertEqual(
+                int(paddle.isfinite(actual.cast("float32")).all()),
+                1,
+                f"{name} is not finite",
+            )
+            self.assertLess(
+                rel_l2(actual, expected),
+                self.CEILING[name],
+                f"{name} diverges from the fp32 reference",
+            )

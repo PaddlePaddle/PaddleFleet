@@ -435,6 +435,7 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         topk_length=None,
         indexer_topk=0,
         global_kv_idx_remap_fusion=False,
+        topk_idxs_compacted=False,
     ):
         from paddlefleet.fusions.csa_sparse_attn_utils import prepare_inputs
 
@@ -475,10 +476,20 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         # Compaction can produce topk_length == 0 for all-invalid rows, which only
         # SM100 early-exits safely (SM90 would gather from a negative KV row); so
         # only compact on SM100. SM90 keeps topk_length=None (guarded full-width).
+        #
+        # ``ctx.compacted_idxs`` is what lets the BACKWARD take the compact
+        # KV-load path, which is unguarded against interior ``-1``. So it may
+        # only be set when the indices are KNOWN hole-free: either this forward
+        # compacted them, or the caller stated it already did
+        # (``topk_idxs_compacted``). A caller that supplies ``topk_length``
+        # without that promise keeps its own (possibly holey) layout, so the
+        # backward falls back to the guarded full-width path instead of
+        # gathering ``mKV[-1]`` -- correct, just without the early-stop.
         ctx.compacted_idxs = (
             backend == "cudnn"
             and indexer_topk == 0
             and _csa_bwd_honours_topk_length_holes()
+            and (topk_length is None or topk_idxs_compacted)
         )
         if ctx.compacted_idxs and topk_length is None:
             # Fallback densify: the caller (HCA) normally pre-compacts once per
@@ -711,6 +722,7 @@ def csa_sparse_attn(
     topk_length=None,
     indexer_topk=0,
     global_kv_idx_remap_fusion=False,
+    topk_idxs_compacted=False,
 ):
     """Unified CSA sparse attention entry point.
 
@@ -720,6 +732,14 @@ def csa_sparse_attn(
             row. Only the "cudnn" and "unfused" backends support it; it lets
             the kernel stop early instead of walking all ``topk`` slots, which
             is what makes the full-causal MQA layers affordable.
+        topk_idxs_compacted: assert that ``topk_idxs`` has its valid entries in
+            a contiguous prefix with no interior ``-1`` (what
+            ``_csa_compact_topk_idxs`` produces). Only consulted together with
+            ``topk_length`` on the "cudnn" backend, where it lets the backward
+            keep the compact KV-load path; that path gathers ``mKV[-1]`` on an
+            interior hole, so it defaults to False and the backward then takes
+            the guarded full-width path instead. When ``topk_length`` is None
+            this layer compacts on its own and the flag is irrelevant.
         global_kv_idx_remap_fusion: use the fused Triton local->global KV
             column index remap instead of the eager elementwise chain.
             Bit-identical either way; wired from the
@@ -757,6 +777,7 @@ def csa_sparse_attn(
         topk_length,
         indexer_topk,
         global_kv_idx_remap_fusion,
+        topk_idxs_compacted,
     )
     if CSASparseAttention._lse_indexer is not None:
         lse_indexer = CSASparseAttention._lse_indexer

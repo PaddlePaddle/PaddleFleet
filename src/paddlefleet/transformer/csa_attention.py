@@ -3059,6 +3059,13 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs,
             self.softmax_scale,
             topk_length=topk_length,
+            # Row ``i`` is ``[doc_start[i] .. i]`` followed by ``-1`` (see
+            # ``_build_mqa_causal_topk_idxs_from_doc_bounds``), so the valid
+            # entries already are a hole-free prefix -- the backward may keep
+            # the compact KV-load path without re-sorting. A padding row is all
+            # ``-1`` and the backward recounts it to length 0, hitting the
+            # kernel's empty-row fast path rather than gathering ``mKV[-1]``.
+            topk_idxs_compacted=True,
         )
 
     def _forward_cp(
@@ -3474,6 +3481,7 @@ class CompressedSparseAttention(FleetLayer):
         topk_length: Tensor | None = None,
         indexer_topk: int = 0,
         docmask_meta: CSADocMaskMetadata | None = None,
+        topk_idxs_compacted: bool = False,
     ):
         from paddlefleet.fusions.csa_sparse_attn import (
             _csa_bwd_honours_topk_length_holes,
@@ -3511,6 +3519,7 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs, topk_length = docmask_meta.compact_attn_topk_idxs(
                 topk_idxs
             )
+            topk_idxs_compacted = True
         return csa_sparse_attn(
             query,
             kv_full,
@@ -3521,4 +3530,5 @@ class CompressedSparseAttention(FleetLayer):
             topk_length=topk_length,
             indexer_topk=indexer_topk,
             global_kv_idx_remap_fusion=self.global_kv_idx_remap_fusion,
+            topk_idxs_compacted=topk_idxs_compacted,
         )
