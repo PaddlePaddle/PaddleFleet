@@ -31,6 +31,7 @@ from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
 )
+from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -177,7 +178,6 @@ class GroupedMLPExpert(FleetLayer):
     ):
         super().__init__(config=config)
         self.config: TransformerConfig = config
-        self.config.hidden_act = F.silu
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
         # Intermediate size for the local shard of every expert. When using the
@@ -199,14 +199,26 @@ class GroupedMLPExpert(FleetLayer):
         )
 
         if self.config.gated_linear_unit:
-            if self.config.hidden_act not in [F.silu, F.gelu]:
-                raise ValueError(
-                    "Activation function must be silu or gelu when using GroupedMLP."
-                )
+            if self.config.hidden_act in [F.silu, F.gelu]:
 
-            def glu(x):
-                x = paddle.chunk(x, 2, dim=-1)
-                return self.config.hidden_act(x[0]) * x[1]
+                def glu(x):
+                    x = paddle.chunk(x, 2, dim=-1)
+                    return self.config.hidden_act(x[0]) * x[1]
+
+            elif self.config.hidden_act == situ:
+
+                def glu(x):
+                    return situ_glu(
+                        x,
+                        beta=self.config.activation_situ_beta,
+                        linear_beta=self.config.activation_situ_linear_beta,
+                    )
+
+            else:
+                raise ValueError(
+                    "Activation function must be silu, gelu, or situ when "
+                    "using GroupedMLP."
+                )
 
             self.activation_func = glu
         else:
@@ -605,9 +617,13 @@ class SonicMoEExpert(GroupedMLPExpert):
         pg_collection: ProcessGroupCollection | None = None,
         intermediate_size_per_partition: int | None = None,
     ):
-        assert config.gated_linear_unit is True, (
-            "Sonic MoE must use SwiGLU, i.e. set gated_linear_unit=True."
-        )
+        if config.hidden_act != F.silu or not config.gated_linear_unit:
+            raise ValueError(
+                "SonicMoE only supports SwiGLU (hidden_act=F.silu and "
+                "gated_linear_unit=True), but got "
+                f"hidden_act={config.hidden_act} and "
+                f"gated_linear_unit={config.gated_linear_unit}."
+            )
         super().__init__(
             num_local_experts=num_local_experts,
             config=config,
