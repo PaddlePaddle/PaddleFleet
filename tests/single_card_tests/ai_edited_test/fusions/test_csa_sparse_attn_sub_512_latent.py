@@ -433,10 +433,7 @@ class TestPaddedLatentColumnsAreZero(unittest.TestCase):
         from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
             flash_mla_sparse_attn,
         )
-        from paddlefleet.fusions.csa_sparse_attn import (
-            _csa_compute_topk_length,
-            _pad_latent_dim,
-        )
+        from paddlefleet.fusions.csa_sparse_attn import _pad_latent_dim
         from paddlefleet.fusions.csa_sparse_attn_utils import (
             _local_to_global_flat,
         )
@@ -470,7 +467,13 @@ class TestPaddedLatentColumnsAreZero(unittest.TestCase):
                     sink,
                     idxs_flat,
                     softmax_scale=scale,
-                    topk_length=_csa_compute_topk_length(idxs_flat),
+                    # Holey indices plus the trailing bound of
+                    # ``_csa_compute_topk_length`` would take the backward's
+                    # unguarded compact KV-load path; ``None`` keeps the guarded
+                    # full-width path. This case only asserts that the padded
+                    # latent columns stay zero, so the early-stop is not needed
+                    # -- use ``_csa_compact_topk_idxs`` where it is.
+                    topk_length=None,
                 )
                 self.assertEqual(
                     float(dq[:, :, hn:].abs().max()), 0.0, "bwd dq"
